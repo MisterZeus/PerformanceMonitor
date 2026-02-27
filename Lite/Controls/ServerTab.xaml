@@ -656,15 +656,38 @@
 
             <!-- Plan Viewer Tab -->
             <TabItem Header="Plan Viewer" x:Name="PlanViewerTabItem">
-                <Grid>
-                    <StackPanel x:Name="PlanEmptyState" HorizontalAlignment="Center"
-                                VerticalAlignment="Center">
-                        <TextBlock Text="No Plan Loaded" FontSize="20" FontWeight="Light"
-                                   Foreground="{DynamicResource ForegroundMutedBrush}" HorizontalAlignment="Center"/>
-                        <TextBlock Text="Right-click a query row and choose 'View Plan' or 'Get Actual Plan'"
-                                   FontSize="13" Foreground="{DynamicResource ForegroundMutedBrush}"
-                                   HorizontalAlignment="Center" Margin="0,8,0,0"/>
-                    </StackPanel>
+                <Grid AllowDrop="True" PreviewDrop="PlanViewer_Drop" PreviewDragOver="PlanViewer_DragOver" Background="Transparent">
+                    <Grid x:Name="PlanEmptyState">
+                        <!-- Dashed drop-zone border fills the whole tab -->
+                        <Rectangle Margin="24"
+                                   Stroke="{DynamicResource ForegroundMutedBrush}"
+                                   StrokeThickness="1.5"
+                                   StrokeDashArray="6,4"
+                                   RadiusX="10" RadiusY="10"
+                                   Opacity="0.25"/>
+                        <!-- Centered content -->
+                        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <TextBlock Text="&#xE896;" FontFamily="Segoe MDL2 Assets" FontSize="52"
+                                       HorizontalAlignment="Center"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}" Opacity="0.45"
+                                       Margin="0,0,0,12"/>
+                            <TextBlock Text="No Plan Loaded" FontSize="20" FontWeight="Light"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}" HorizontalAlignment="Center"/>
+                            <TextBlock Text="Right-click a query row and choose 'View Plan' or 'Get Actual Plan'"
+                                       FontSize="13" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                       HorizontalAlignment="Center" Margin="0,8,0,0"/>
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,20,0,0">
+                                <Button Content="Open .sqlplan File" Click="OpenPlanFile_Click"
+                                        Height="28" Padding="12,0" ToolTip="Open a .sqlplan or .xml file from disk"/>
+                                <Button Content="Paste XML" Click="PastePlanXml_Click"
+                                        Height="28" Padding="12,0" Margin="8,0,0,0"
+                                        ToolTip="Paste execution plan XML to render it"/>
+                            </StackPanel>
+                            <TextBlock Text="or drag &amp; drop a .sqlplan file anywhere in this area"
+                                       FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                       HorizontalAlignment="Center" Margin="0,12,0,0"/>
+                        </StackPanel>
+                    </Grid>
                     <StackPanel x:Name="PlanLoadingState" HorizontalAlignment="Center"
                                 VerticalAlignment="Center" Visibility="Collapsed">
                         <ProgressBar IsIndeterminate="True" Width="200" Height="4" Margin="0,0,0,12"/>
