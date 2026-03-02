@@ -202,26 +202,40 @@ LIMIT 3";
 
         var thresholdMs = (long)thresholdMinutes * 60 * 1000;
 
-        command.CommandText = @"
-SELECT
-    session_id,
-    database_name,
-    SUBSTRING(query_text, 1, 300) AS query_text,
-    total_elapsed_time_ms / 1000 AS elapsed_seconds,
-    cpu_time_ms,
-    reads,
-    writes,
-    wait_type,
-    blocking_session_id
-FROM v_query_snapshots
-WHERE server_id = $1
-AND collection_time = (SELECT MAX(collection_time) FROM v_query_snapshots WHERE server_id = $1)
-AND session_id > 50
-AND total_elapsed_time_ms >= $2
-AND query_text NOT LIKE '%waitfor delay%'
-AND query_text NOT LIKE '%waitfor receive%'
-ORDER BY total_elapsed_time_ms DESC
-LIMIT 5";
+        // Exclude internal SP_SERVER_DIAGNOSTICS queries by default, as they often run long and aren't actionable.
+        string spServerDiagnosticsFilter = "AND r.wait_type NOT LIKE N'%SP_SERVER_DIAGNOSTICS%'";
+
+        // Exclude WAITFOR queries by default, as they can run indefinitely and may not indicate a problem.
+        string waitForFilter = "AND r.wait_type NOT IN (N'WAITFOR', N'BROKER_RECEIVE_WAITFOR')";
+
+        // Exclude backup waits if specified, as they can run long and aren't typically actionable in this context.
+        string backupsFilter = "AND r.wait_type NOT IN (N'BACKUPTHREAD', N'BACKUPIO')";
+
+        // Exclude miscellaneous wait type that aren't typically actionable
+        string miscWaitsFilter = "AND r.wait_type NOT IN (N'XE_LIVE_TARGET_TVF')";
+
+        command.CommandText = @$"
+                SELECT
+                    r.session_id,
+                    r.database_name,
+                    SUBSTRING(r.query_text, 1, 300) AS query_text,
+                    r.total_elapsed_time_ms / 1000 AS elapsed_seconds,
+                    r.cpu_time_ms,
+                    r.reads,
+                    r.writes,
+                    r.wait_type,
+                    r.blocking_session_id
+                FROM v_query_snapshots AS r
+                WHERE r.server_id = $1
+                    AND r.collection_time = (SELECT MAX(vqs.collection_time) FROM v_query_snapshots AS vqs WHERE vqs.server_id = $1)
+                    AND r.session_id > 50
+                    {spServerDiagnosticsFilter}
+                    {waitForFilter}
+                    {backupsFilter}
+                    {miscWaitsFilter}
+                    AND r.total_elapsed_time_ms >= $2
+                ORDER BY r.total_elapsed_time_ms DESC
+                LIMIT 5;";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = thresholdMs });
