@@ -964,36 +964,101 @@ public static class PlanAnalyzer
 
     /// <summary>
     /// Calculates an operator's own elapsed time by subtracting child time.
-    /// In batch mode, operator times are self-contained. In row mode, times are
-    /// cumulative (include children), so we subtract the dominant child's time.
-    /// Parallelism (exchange) operators are skipped because they have timing bugs.
+    /// In batch mode, operator times are self-contained (exclusive).
+    /// In row mode, times are cumulative (include all children below).
+    /// For parallel plans, we calculate self-time per-thread then take the max,
+    /// avoiding cross-thread subtraction errors.
+    /// Exchange operators accumulate downstream wait time (e.g. from spilling
+    /// children) so their self-time is unreliable — see sql.kiwi/2021/03.
     /// </summary>
     private static long GetOperatorOwnElapsedMs(PlanNode node)
     {
         if (node.ActualExecutionMode == "Batch")
             return node.ActualElapsedMs;
 
-        // Row mode: subtract the dominant child's elapsed time
-        var maxChildElapsed = 0L;
+        // Parallel plan with per-thread data: calculate self-time per thread
+        if (node.PerThreadStats.Count > 1)
+            return GetPerThreadOwnElapsed(node);
+
+        // Serial row mode: subtract all direct children's elapsed time
+        return GetSerialOwnElapsed(node);
+    }
+
+    /// <summary>
+    /// Per-thread self-time calculation for parallel row mode operators.
+    /// For each thread: self = parent_elapsed[t] - sum(children_elapsed[t]).
+    /// Returns max across threads.
+    /// </summary>
+    private static long GetPerThreadOwnElapsed(PlanNode node)
+    {
+        // Build lookup: threadId -> parent elapsed for this node
+        var parentByThread = new Dictionary<int, long>();
+        foreach (var ts in node.PerThreadStats)
+            parentByThread[ts.ThreadId] = ts.ActualElapsedMs;
+
+        // Build lookup: threadId -> sum of all direct children's elapsed
+        var childSumByThread = new Dictionary<int, long>();
+        foreach (var child in node.Children)
+        {
+            var childNode = child;
+
+            // Exchange operators have unreliable times — look through to their child
+            if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
+                childNode = child.Children.OrderByDescending(c => c.ActualElapsedMs).First();
+
+            foreach (var ts in childNode.PerThreadStats)
+            {
+                childSumByThread.TryGetValue(ts.ThreadId, out var existing);
+                childSumByThread[ts.ThreadId] = existing + ts.ActualElapsedMs;
+            }
+        }
+
+        // Self-time per thread = parent - children, take max across threads
+        var maxSelf = 0L;
+        foreach (var (threadId, parentMs) in parentByThread)
+        {
+            childSumByThread.TryGetValue(threadId, out var childMs);
+            var self = Math.Max(0, parentMs - childMs);
+            if (self > maxSelf) maxSelf = self;
+        }
+
+        return maxSelf;
+    }
+
+    /// <summary>
+    /// Serial row mode self-time: subtract all direct children's elapsed.
+    /// Exchange children are skipped through to their real child.
+    /// </summary>
+    private static long GetSerialOwnElapsed(PlanNode node)
+    {
+        var totalChildElapsed = 0L;
         foreach (var child in node.Children)
         {
             var childElapsed = child.ActualElapsedMs;
 
-            // Exchange operators have timing bugs — skip to their child
+            // Exchange operators have unreliable times — skip to their child
             if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
                 childElapsed = child.Children.Max(c => c.ActualElapsedMs);
 
-            if (childElapsed > maxChildElapsed)
-                maxChildElapsed = childElapsed;
+            totalChildElapsed += childElapsed;
         }
 
-        return Math.Max(0, node.ActualElapsedMs - maxChildElapsed);
+        return Math.Max(0, node.ActualElapsedMs - totalChildElapsed);
     }
 
+    /// <summary>
+    /// Calculates a Parallelism (exchange) operator's own elapsed time.
+    /// Exchange times are unreliable — they accumulate wait time caused by
+    /// downstream operators (e.g. spilling sorts). This returns a best-effort
+    /// value but callers should treat it with caution.
+    /// </summary>
     private static long GetParallelismOperatorElapsedMs(PlanNode node)
     {
         if (node.Children.Count == 0)
             return node.ActualElapsedMs;
+
+        if (node.PerThreadStats.Count > 1)
+            return GetPerThreadOwnElapsed(node);
 
         var maxChildElapsed = node.Children.Max(c => c.ActualElapsedMs);
         return Math.Max(0, node.ActualElapsedMs - maxChildElapsed);
