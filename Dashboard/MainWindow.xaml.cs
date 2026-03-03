@@ -1669,7 +1669,7 @@ namespace PerformanceMonitorDashboard
         private const string PlanAddTabId = "__PLAN_ADD_TAB__";
         private TabControl? _mainPlanTabControl;
 
-        private void OpenExternalPlan_Click(object sender, RoutedEventArgs e)
+        private void OpenPlanViewer_Click(object sender, RoutedEventArgs e)
         {
             if (_planViewerTab != null && ServerTabControl.Items.Contains(_planViewerTab))
             {
@@ -1677,10 +1677,10 @@ namespace PerformanceMonitorDashboard
                 ServerTabControl.SelectedItem = _planViewerTab;
                 return;
             }
-            OpenExternalPlanTab();
+            OpenPlanViewerTab();
         }
 
-        private void OpenExternalPlanTab()
+        private void OpenPlanViewerTab()
         {
             if (_planViewerTab != null && ServerTabControl.Items.Contains(_planViewerTab))
             {
@@ -1689,6 +1689,7 @@ namespace PerformanceMonitorDashboard
             }
 
             _mainPlanTabControl = new TabControl
+
             {
                 Background = System.Windows.Media.Brushes.Transparent,
                 BorderThickness = new Thickness(0)
@@ -1982,7 +1983,7 @@ namespace PerformanceMonitorDashboard
         public void OpenMainWindowPlanTab(string planXml, string label, string? queryText = null)
         {
             if (_planViewerTab == null || !ServerTabControl.Items.Contains(_planViewerTab))
-                OpenExternalPlanTab();
+                OpenPlanViewerTab();
 
             var activeSubTab = GetActivePlanSubTab();
             if (activeSubTab?.Content is Grid g &&

@@ -1450,7 +1450,7 @@ public partial class MainWindow : Window
             return $"{seconds / 3600}h {(seconds % 3600) / 60}m";
         }
 
-        private void OpenExternalPlanButton_Click(object sender, RoutedEventArgs e)
+        private void OpenPlanViewerButton_Click(object sender, RoutedEventArgs e)
         {
             EnsurePlanTabControlInitialized();
             EmptyStatePanel.Visibility = Visibility.Collapsed;
