@@ -99,8 +99,8 @@
         <!-- Buttons -->
         <StackPanel Grid.Row="11" Orientation="Horizontal" HorizontalAlignment="Right">
             <Button x:Name="TestButton" Content="Test Connection" Click="TestButton_Click" Margin="0,0,8,0"/>
-            <Button x:Name="SaveButton" Content="Save" Click="SaveButton_Click" Style="{StaticResource AccentButton}" Margin="0,0,8,0"/>
-            <Button Content="Cancel" Click="CancelButton_Click"/>
+            <Button x:Name="SaveButton" Content="Save" Width="80" Height="30" Click="SaveButton_Click" Style="{StaticResource AccentButton}" Margin="0,0,8,0"/>
+            <Button Content="Cancel" Width="80" Height="30" Click="CancelButton_Click"/>
         </StackPanel>
     </Grid>
 </Window>
