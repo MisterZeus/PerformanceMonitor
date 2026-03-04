@@ -77,10 +77,12 @@ public static class PlanAnalyzer
                 var wasteRatio = (double)grant.GrantedMemoryKB / grant.MaxUsedMemoryKB;
                 if (wasteRatio >= 10 && grant.GrantedMemoryKB >= 1048576)
                 {
+                    var grantMB = grant.GrantedMemoryKB / 1024.0;
+                    var usedMB = grant.MaxUsedMemoryKB / 1024.0;
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
                         WarningType = "Excessive Memory Grant",
-                        Message = $"Granted {grant.GrantedMemoryKB:N0} KB but only used {grant.MaxUsedMemoryKB:N0} KB ({wasteRatio:F0}x overestimate). The unused memory is reserved and unavailable to other queries.",
+                        Message = $"Granted {grantMB:N0} MB but only used {usedMB:N0} MB ({wasteRatio:F0}x overestimate). The unused memory is reserved and unavailable to other queries.",
                         Severity = PlanWarningSeverity.Warning
                     });
                 }
@@ -217,31 +219,64 @@ public static class PlanAnalyzer
             }
         }
 
-        // Rule 30: Overly wide missing index suggestions
-        // Flag when SQL Server suggests an index with too many include columns (> 5)
-        // or too many key columns (> 4) — these "kitchen sink" indexes are rarely practical.
-        foreach (var mi in stmt.MissingIndexes)
+        // Rule 30: Missing index quality evaluation
         {
-            var keyCount = mi.EqualityColumns.Count + mi.InequalityColumns.Count;
-            var includeCount = mi.IncludeColumns.Count;
+            // Detect duplicate suggestions for the same table
+            var tableSuggestionCount = stmt.MissingIndexes
+                .GroupBy(mi => $"{mi.Schema}.{mi.Table}", StringComparer.OrdinalIgnoreCase)
+                .Where(g => g.Count() > 1)
+                .ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
 
-            if (includeCount > 5)
+            foreach (var mi in stmt.MissingIndexes)
             {
-                stmt.PlanWarnings.Add(new PlanWarning
+                var keyCount = mi.EqualityColumns.Count + mi.InequalityColumns.Count;
+                var includeCount = mi.IncludeColumns.Count;
+                var tableKey = $"{mi.Schema}.{mi.Table}";
+
+                // Low-impact suggestion (< 25% improvement)
+                if (mi.Impact < 25)
                 {
-                    WarningType = "Wide Index Suggestion",
-                    Message = $"Missing index suggestion for {mi.Table} has {includeCount} INCLUDE columns. This is a \"kitchen sink\" index — SQL Server suggests covering every column the query touches, but the resulting index would be very wide and expensive to maintain. Evaluate which columns are actually needed, or consider a narrower index with fewer includes.",
-                    Severity = PlanWarningSeverity.Warning
-                });
-            }
-            else if (keyCount > 4)
-            {
-                stmt.PlanWarnings.Add(new PlanWarning
+                    stmt.PlanWarnings.Add(new PlanWarning
+                    {
+                        WarningType = "Low Impact Index",
+                        Message = $"Missing index suggestion for {mi.Table} has only {mi.Impact:F0}% estimated impact. Low-impact indexes add maintenance overhead (insert/update/delete cost) that may not justify the modest query improvement.",
+                        Severity = PlanWarningSeverity.Info
+                    });
+                }
+
+                // Wide INCLUDE columns (> 5)
+                if (includeCount > 5)
                 {
-                    WarningType = "Wide Index Suggestion",
-                    Message = $"Missing index suggestion for {mi.Table} has {keyCount} key columns ({mi.EqualityColumns.Count} equality + {mi.InequalityColumns.Count} inequality). Wide key columns increase index size and maintenance cost. Evaluate whether all key columns are needed for seek predicates.",
-                    Severity = PlanWarningSeverity.Warning
-                });
+                    stmt.PlanWarnings.Add(new PlanWarning
+                    {
+                        WarningType = "Wide Index Suggestion",
+                        Message = $"Missing index suggestion for {mi.Table} has {includeCount} INCLUDE columns. This is a \"kitchen sink\" index — SQL Server suggests covering every column the query touches, but the resulting index would be very wide and expensive to maintain. Evaluate which columns are actually needed, or consider a narrower index with fewer includes.",
+                        Severity = PlanWarningSeverity.Warning
+                    });
+                }
+                // Wide key columns (> 4)
+                else if (keyCount > 4)
+                {
+                    stmt.PlanWarnings.Add(new PlanWarning
+                    {
+                        WarningType = "Wide Index Suggestion",
+                        Message = $"Missing index suggestion for {mi.Table} has {keyCount} key columns ({mi.EqualityColumns.Count} equality + {mi.InequalityColumns.Count} inequality). Wide key columns increase index size and maintenance cost. Evaluate whether all key columns are needed for seek predicates.",
+                        Severity = PlanWarningSeverity.Warning
+                    });
+                }
+
+                // Multiple suggestions for same table
+                if (tableSuggestionCount.TryGetValue(tableKey, out var count))
+                {
+                    stmt.PlanWarnings.Add(new PlanWarning
+                    {
+                        WarningType = "Duplicate Index Suggestions",
+                        Message = $"{count} missing index suggestions target {mi.Table}. Multiple suggestions for the same table often overlap — consolidate into fewer, broader indexes rather than creating all of them.",
+                        Severity = PlanWarningSeverity.Warning
+                    });
+                    // Only warn once per table
+                    tableSuggestionCount.Remove(tableKey);
+                }
             }
         }
     }
@@ -466,7 +501,7 @@ public static class PlanAnalyzer
                 "ISNULL/COALESCE wrapping column" =>
                     "ISNULL/COALESCE wrapping a column prevents an index seek. Rewrite the predicate to avoid wrapping the column, e.g. use \"WHERE col = @val OR col IS NULL\" instead of \"WHERE ISNULL(col, '') = @val\".",
                 "Leading wildcard LIKE pattern" =>
-                    "Leading wildcard LIKE (e.g. LIKE '%text') prevents an index seek — SQL Server must scan every row. If possible, use full-text indexing or reverse the search pattern.",
+                    "Leading wildcard LIKE prevents an index seek — SQL Server must scan every row. If substring search performance is critical, consider a full-text index or a trigram-based approach.",
                 "CASE expression in predicate" =>
                     "CASE expression in a predicate prevents an index seek. Rewrite using separate WHERE clauses combined with OR, or split into multiple queries.",
                 _ when nonSargableReason.StartsWith("Function call") =>
@@ -964,36 +999,101 @@ public static class PlanAnalyzer
 
     /// <summary>
     /// Calculates an operator's own elapsed time by subtracting child time.
-    /// In batch mode, operator times are self-contained. In row mode, times are
-    /// cumulative (include children), so we subtract the dominant child's time.
-    /// Parallelism (exchange) operators are skipped because they have timing bugs.
+    /// In batch mode, operator times are self-contained (exclusive).
+    /// In row mode, times are cumulative (include all children below).
+    /// For parallel plans, we calculate self-time per-thread then take the max,
+    /// avoiding cross-thread subtraction errors.
+    /// Exchange operators accumulate downstream wait time (e.g. from spilling
+    /// children) so their self-time is unreliable — see sql.kiwi/2021/03.
     /// </summary>
     private static long GetOperatorOwnElapsedMs(PlanNode node)
     {
         if (node.ActualExecutionMode == "Batch")
             return node.ActualElapsedMs;
 
-        // Row mode: subtract the dominant child's elapsed time
-        var maxChildElapsed = 0L;
+        // Parallel plan with per-thread data: calculate self-time per thread
+        if (node.PerThreadStats.Count > 1)
+            return GetPerThreadOwnElapsed(node);
+
+        // Serial row mode: subtract all direct children's elapsed time
+        return GetSerialOwnElapsed(node);
+    }
+
+    /// <summary>
+    /// Per-thread self-time calculation for parallel row mode operators.
+    /// For each thread: self = parent_elapsed[t] - sum(children_elapsed[t]).
+    /// Returns max across threads.
+    /// </summary>
+    private static long GetPerThreadOwnElapsed(PlanNode node)
+    {
+        // Build lookup: threadId -> parent elapsed for this node
+        var parentByThread = new Dictionary<int, long>();
+        foreach (var ts in node.PerThreadStats)
+            parentByThread[ts.ThreadId] = ts.ActualElapsedMs;
+
+        // Build lookup: threadId -> sum of all direct children's elapsed
+        var childSumByThread = new Dictionary<int, long>();
+        foreach (var child in node.Children)
+        {
+            var childNode = child;
+
+            // Exchange operators have unreliable times — look through to their child
+            if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
+                childNode = child.Children.OrderByDescending(c => c.ActualElapsedMs).First();
+
+            foreach (var ts in childNode.PerThreadStats)
+            {
+                childSumByThread.TryGetValue(ts.ThreadId, out var existing);
+                childSumByThread[ts.ThreadId] = existing + ts.ActualElapsedMs;
+            }
+        }
+
+        // Self-time per thread = parent - children, take max across threads
+        var maxSelf = 0L;
+        foreach (var (threadId, parentMs) in parentByThread)
+        {
+            childSumByThread.TryGetValue(threadId, out var childMs);
+            var self = Math.Max(0, parentMs - childMs);
+            if (self > maxSelf) maxSelf = self;
+        }
+
+        return maxSelf;
+    }
+
+    /// <summary>
+    /// Serial row mode self-time: subtract all direct children's elapsed.
+    /// Exchange children are skipped through to their real child.
+    /// </summary>
+    private static long GetSerialOwnElapsed(PlanNode node)
+    {
+        var totalChildElapsed = 0L;
         foreach (var child in node.Children)
         {
             var childElapsed = child.ActualElapsedMs;
 
-            // Exchange operators have timing bugs — skip to their child
+            // Exchange operators have unreliable times — skip to their child
             if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
                 childElapsed = child.Children.Max(c => c.ActualElapsedMs);
 
-            if (childElapsed > maxChildElapsed)
-                maxChildElapsed = childElapsed;
+            totalChildElapsed += childElapsed;
         }
 
-        return Math.Max(0, node.ActualElapsedMs - maxChildElapsed);
+        return Math.Max(0, node.ActualElapsedMs - totalChildElapsed);
     }
 
+    /// <summary>
+    /// Calculates a Parallelism (exchange) operator's own elapsed time.
+    /// Exchange times are unreliable — they accumulate wait time caused by
+    /// downstream operators (e.g. spilling sorts). This returns a best-effort
+    /// value but callers should treat it with caution.
+    /// </summary>
     private static long GetParallelismOperatorElapsedMs(PlanNode node)
     {
         if (node.Children.Count == 0)
             return node.ActualElapsedMs;
+
+        if (node.PerThreadStats.Count > 1)
+            return GetPerThreadOwnElapsed(node);
 
         var maxChildElapsed = node.Children.Max(c => c.ActualElapsedMs);
         return Math.Max(0, node.ActualElapsedMs - maxChildElapsed);

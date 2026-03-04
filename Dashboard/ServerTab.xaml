@@ -273,7 +273,7 @@
                                                     </StackPanel>
                                                 </DataGridTextColumn.Header>
                                             </DataGridTextColumn>
-                                            <DataGridTextColumn Binding="{Binding LastSuccessTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                                            <DataGridTextColumn Binding="{Binding LastSuccessTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
                                                 <DataGridTextColumn.Header>
                                                     <StackPanel Orientation="Horizontal">
                                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastSuccessTime" Click="CollectionHealthFilter_Click" Margin="0,0,4,0"/>
@@ -354,7 +354,7 @@
                                             <TextBlock Text="Job Name" FontWeight="Bold"/>
                                         </DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding StartTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                                    <DataGridTextColumn Binding="{Binding StartTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
                                         <DataGridTextColumn.Header>
                                             <TextBlock Text="Start Time" FontWeight="Bold"/>
                                         </DataGridTextColumn.Header>
@@ -409,15 +409,28 @@
 
             <!-- Plan Viewer Tab -->
             <TabItem Header="Plan Viewer" x:Name="PlanViewerTabItem">
-                <Grid>
-                    <StackPanel x:Name="PlanEmptyState" HorizontalAlignment="Center"
-                                VerticalAlignment="Center">
-                        <TextBlock Text="No Plan Loaded" FontSize="20" FontWeight="Light"
-                                   Foreground="{DynamicResource ForegroundMutedBrush}" HorizontalAlignment="Center"/>
-                        <TextBlock Text="Right-click a query row and choose 'View Plan' or 'Get Actual Plan'"
-                                   FontSize="13" Foreground="{DynamicResource ForegroundMutedBrush}"
-                                   HorizontalAlignment="Center" Margin="0,8,0,0"/>
-                    </StackPanel>
+                <Grid Background="Transparent">
+                    <Grid x:Name="PlanEmptyState">
+                        <!-- Dashed drop-zone border fills the whole tab -->
+                        <Rectangle Margin="24"
+                                   Stroke="{DynamicResource ForegroundMutedBrush}"
+                                   StrokeThickness="1.5"
+                                   StrokeDashArray="6,4"
+                                   RadiusX="10" RadiusY="10"
+                                   Opacity="0.25"/>
+                        <!-- Centered content -->
+                        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <TextBlock Text="&#xE896;" FontFamily="Segoe MDL2 Assets" FontSize="52"
+                                       HorizontalAlignment="Center"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}" Opacity="0.45"
+                                       Margin="0,0,0,12"/>
+                            <TextBlock Text="No Plan Loaded" FontSize="20" FontWeight="Light"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}" HorizontalAlignment="Center"/>
+                            <TextBlock Text="Right-click a query row and choose 'View Plan' or 'Get Actual Plan'"
+                                       FontSize="13" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                       HorizontalAlignment="Center" Margin="0,8,0,0"/>
+                        </StackPanel>
+                    </Grid>
                     <StackPanel x:Name="PlanLoadingState" HorizontalAlignment="Center"
                                 VerticalAlignment="Center" Visibility="Collapsed">
                         <ProgressBar IsIndeterminate="True" Width="200" Height="4" Margin="0,0,0,12"/>
@@ -587,7 +600,7 @@
                                       RowStyle="{StaticResource DefaultRowStyle}"
                                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Binding="{Binding EventTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                                    <DataGridTextColumn Binding="{Binding EventTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
                                         <DataGridTextColumn.Header>
                                             <StackPanel Orientation="Horizontal">
                                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EventTime" Click="BlockingEventsFilter_Click" Margin="0,0,4,0"/>
@@ -744,7 +757,7 @@
                                             </StackPanel>
                                         </DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding CollectionTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                                    <DataGridTextColumn Binding="{Binding CollectionTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
                                         <DataGridTextColumn.Header>
                                             <StackPanel Orientation="Horizontal">
                                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTime" Click="BlockingEventsFilter_Click" Margin="0,0,4,0"/>
@@ -776,7 +789,7 @@
                                       RowStyle="{StaticResource DefaultRowStyle}"
                                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Binding="{Binding EventDate, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                                    <DataGridTextColumn Binding="{Binding EventDate, Converter={StaticResource ServerTimeConverter}}" Width="150">
                                         <DataGridTextColumn.Header>
                                             <StackPanel Orientation="Horizontal">
                                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EventDate" Click="DeadlocksFilter_Click" Margin="0,0,4,0"/>
@@ -944,7 +957,7 @@
                                             </StackPanel>
                                         </DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding CollectionTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                                    <DataGridTextColumn Binding="{Binding CollectionTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
                                         <DataGridTextColumn.Header>
                                             <StackPanel Orientation="Horizontal">
                                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTime" Click="DeadlocksFilter_Click" Margin="0,0,4,0"/>

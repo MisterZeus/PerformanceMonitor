@@ -43,7 +43,7 @@ public partial class AddServerDialog : Window
     /// </summary>
     public AddServerDialog(ServerManager serverManager, ServerConnection existing) : this(serverManager)
     {
-        Title = "Edit Server";
+        Title = "Edit SQL Server";
         ServerNameBox.Text = existing.ServerName;
         DisplayNameBox.Text = existing.DisplayName;
         EnabledCheckBox.IsChecked = existing.IsEnabled;
@@ -330,7 +330,7 @@ public partial class AddServerDialog : Window
 
         try
         {
-            if (AddedServer != null && Title == "Edit Server")
+            if (AddedServer != null && Title == "Edit SQL Server")
             {
                 /* Editing existing server */
                 AddedServer.ServerName = serverName;

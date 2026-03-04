@@ -1,7 +1,7 @@
 <Window x:Class="PerformanceMonitorLite.Windows.AddServerDialog"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Add Server"
+        Title="Add SQL Server"
         SizeToContent="Height" Width="450"
         WindowStartupLocation="CenterOwner"
         ResizeMode="NoResize"
@@ -20,19 +20,24 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
+        <!-- Header -->
+        <TextBlock Grid.Row="0" Text="Add SQL Server Connection" FontSize="18" FontWeight="Bold" Margin="0,0,0,15"
+                   Foreground="{DynamicResource ForegroundBrush}"/>
+
         <!-- Server Name -->
-        <TextBlock Grid.Row="0" Text="Server Name / Address" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
-        <TextBox Grid.Row="1" x:Name="ServerNameBox" Margin="0,0,0,12"/>
+        <TextBlock Grid.Row="1" Text="Server Name / Address" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+        <TextBox Grid.Row="2" x:Name="ServerNameBox" Margin="0,0,0,12"/>
 
         <!-- Display Name -->
-        <TextBlock Grid.Row="2" Text="Display Name (optional)" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
-        <TextBox Grid.Row="3" x:Name="DisplayNameBox" Margin="0,0,0,12"/>
+        <TextBlock Grid.Row="3" Text="Display Name (optional)" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+        <TextBox Grid.Row="4" x:Name="DisplayNameBox" Margin="0,0,0,12"/>
 
         <!-- Authentication -->
-        <TextBlock Grid.Row="4" Text="Authentication" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
-        <StackPanel Grid.Row="5" Margin="0,0,0,12">
+        <TextBlock Grid.Row="5" Text="Authentication" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+        <StackPanel Grid.Row="6" Margin="0,0,0,12">
             <RadioButton x:Name="WindowsAuthRadio" Content="Windows Authentication" Foreground="{DynamicResource ForegroundBrush}"
                          IsChecked="True" Checked="AuthMode_Changed" Margin="0,0,0,4"/>
             <RadioButton x:Name="SqlAuthRadio" Content="SQL Server Authentication" Foreground="{DynamicResource ForegroundBrush}"
@@ -43,25 +48,23 @@
         </StackPanel>
 
         <!-- SQL Auth Credentials -->
-        <StackPanel Grid.Row="6" x:Name="SqlCredentialsPanel" Visibility="Collapsed" Margin="0,0,0,12">
+        <StackPanel Grid.Row="7" x:Name="SqlCredentialsPanel" Visibility="Collapsed" Margin="0,0,0,12">
             <TextBlock Text="Username" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
             <TextBox x:Name="UsernameBox" Margin="0,0,0,8"/>
             <TextBlock Text="Password" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
-            <PasswordBox x:Name="PasswordBox" Background="{DynamicResource BackgroundLightBrush}"
-                         Foreground="{DynamicResource ForegroundBrush}" BorderBrush="{DynamicResource BorderBrush}"
-                         Padding="6,4"/>
+            <PasswordBox x:Name="PasswordBox"/>
         </StackPanel>
 
         <!-- Entra MFA Credentials -->
-        <StackPanel Grid.Row="6" x:Name="EntraMfaPanel" Visibility="Collapsed" Margin="0,0,0,12">
+        <StackPanel Grid.Row="7" x:Name="EntraMfaPanel" Visibility="Collapsed" Margin="0,0,0,12">
             <TextBlock Text="Username (optional)" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
             <TextBox x:Name="EntraMfaUsernameBox" Margin="0,0,0,8"
                      ToolTip="Optional: Pre-populate the authentication dialog with this email"/>
         </StackPanel>
 
         <!-- Connection Options -->
-        <TextBlock Grid.Row="7" Text="Connection Options" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
-        <StackPanel Grid.Row="8" Margin="0,0,0,12">
+        <TextBlock Grid.Row="8" Text="Connection Options" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+        <StackPanel Grid.Row="9" Margin="0,0,0,12">
             <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
                 <TextBlock Text="Encryption:" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Width="80"/>
                 <ComboBox x:Name="EncryptModeComboBox" Width="150" SelectedIndex="1">
@@ -70,11 +73,11 @@
                     <ComboBoxItem Content="Strict"/>
                 </ComboBox>
             </StackPanel>
-            <CheckBox x:Name="TrustCertCheckBox" Content="Trust server certificate"
+            <CheckBox x:Name="TrustCertCheckBox" Content="Trust server certificate (skip certificate validation)"
                       Foreground="{DynamicResource ForegroundBrush}" IsChecked="False"/>
             <CheckBox x:Name="EnabledCheckBox" Content="Enable data collection for this server"
                       Foreground="{DynamicResource ForegroundBrush}" IsChecked="True" Margin="0,6,0,0"/>
-            <CheckBox x:Name="FavoriteCheckBox" Content="Mark as favorite"
+            <CheckBox x:Name="FavoriteCheckBox" Content="Mark as favorite (appears at top of list)"
                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,6,0,0"/>
             <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
                 <TextBlock Text="Description:" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Width="80"/>
@@ -88,14 +91,14 @@
         </StackPanel>
 
         <!-- Status -->
-        <TextBlock Grid.Row="9" x:Name="StatusText" Foreground="{DynamicResource ForegroundMutedBrush}"
+        <TextBlock Grid.Row="10" x:Name="StatusText" Foreground="{DynamicResource ForegroundMutedBrush}"
                    TextWrapping="Wrap" VerticalAlignment="Bottom" Margin="0,0,0,8"/>
 
         <!-- Buttons -->
-        <StackPanel Grid.Row="10" Orientation="Horizontal" HorizontalAlignment="Right">
+        <StackPanel Grid.Row="11" Orientation="Horizontal" HorizontalAlignment="Right">
             <Button x:Name="TestButton" Content="Test Connection" Click="TestButton_Click" Margin="0,0,8,0"/>
-            <Button x:Name="SaveButton" Content="Save" Click="SaveButton_Click" Style="{StaticResource AccentButton}" Margin="0,0,8,0"/>
-            <Button Content="Cancel" Click="CancelButton_Click"/>
+            <Button x:Name="SaveButton" Content="Save" Width="80" Height="30" Click="SaveButton_Click" Style="{StaticResource AccentButton}" Margin="0,0,8,0"/>
+            <Button Content="Cancel" Width="80" Height="30" Click="CancelButton_Click"/>
         </StackPanel>
     </Grid>
 </Window>

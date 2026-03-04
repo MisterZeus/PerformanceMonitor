@@ -180,6 +180,20 @@ namespace PerformanceMonitorDashboard
 
         private void OpenPlanTab(string planXml, string label, string? queryText = null)
         {
+            try
+            {
+                System.Xml.Linq.XDocument.Parse(planXml);
+            }
+            catch (System.Xml.XmlException ex)
+            {
+                MessageBox.Show(
+                    $"The plan XML is not valid:\n\n{ex.Message}",
+                    "Invalid Plan XML",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+                return;
+            }
+
             HidePlanLoading();
             var viewer = new Controls.PlanViewerControl();
             viewer.LoadPlan(planXml, label, queryText);
@@ -467,6 +481,19 @@ namespace PerformanceMonitorDashboard
                     e.Handled = true;
                     await LoadDataAsync();
                 }
+                else if (e.Key == System.Windows.Input.Key.V &&
+                         System.Windows.Input.Keyboard.Modifiers == System.Windows.Input.ModifierKeys.Control &&
+                         e.OriginalSource is not System.Windows.Controls.TextBox &&
+                         PlanViewerTabItem.IsSelected)
+                {
+                    var xml = System.Windows.Clipboard.GetText();
+                    if (!string.IsNullOrWhiteSpace(xml))
+                    {
+                        e.Handled = true;
+                        OpenPlanTab(xml, "Pasted Plan");
+                        PlanViewerTabItem.IsSelected = true;
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -743,20 +770,24 @@ namespace PerformanceMonitorDashboard
 
         private static string FormatDateRange(string prefix, DateTime from, DateTime to)
         {
-            // Same day: "Feb 7, 2:15 PM – 3:15 PM"
-            if (from.Date == to.Date)
+            var tz = Helpers.ServerTimeHelper.GetTimezoneLabel(Helpers.ServerTimeHelper.CurrentDisplayMode);
+            var displayFrom = Helpers.ServerTimeHelper.ConvertForDisplay(from, Helpers.ServerTimeHelper.CurrentDisplayMode);
+            var displayTo = Helpers.ServerTimeHelper.ConvertForDisplay(to, Helpers.ServerTimeHelper.CurrentDisplayMode);
+
+            // Same day: "Feb 7, 2:15 PM – 3:15 PM (PST)"
+            if (displayFrom.Date == displayTo.Date)
             {
-                return $"{prefix}: {from:MMM d, h:mm tt} – {to:h:mm tt}";
+                return $"{prefix}: {displayFrom:MMM d, h:mm tt} – {displayTo:h:mm tt} ({tz})";
             }
 
-            // Same year, different days: "Feb 6, 3:15 PM – Feb 7, 3:15 PM"
-            if (from.Year == to.Year)
+            // Same year, different days: "Feb 6, 3:15 PM – Feb 7, 3:15 PM (PST)"
+            if (displayFrom.Year == displayTo.Year)
             {
-                return $"{prefix}: {from:MMM d, h:mm tt} – {to:MMM d, h:mm tt}";
+                return $"{prefix}: {displayFrom:MMM d, h:mm tt} – {displayTo:MMM d, h:mm tt} ({tz})";
             }
 
-            // Different years: "Dec 31, 2025, 11:00 PM – Jan 1, 2026, 11:00 PM"
-            return $"{prefix}: {from:MMM d, yyyy, h:mm tt} – {to:MMM d, yyyy, h:mm tt}";
+            // Different years: "Dec 31, 2025, 11:00 PM – Jan 1, 2026, 11:00 PM (PST)"
+            return $"{prefix}: {displayFrom:MMM d, yyyy, h:mm tt} – {displayTo:MMM d, yyyy, h:mm tt} ({tz})";
         }
 
         private void StoreOriginalRangeIfNeeded()

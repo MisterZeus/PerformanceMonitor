@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
+using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Helpers;
 
@@ -68,10 +69,9 @@ internal sealed class ChartHoverHelper
         _lastUpdate = now;
 
         var pos = e.GetPosition(_chart);
-        var dpi = VisualTreeHelper.GetDpi(_chart);
         var pixel = new ScottPlot.Pixel(
-            (float)(pos.X * dpi.DpiScaleX),
-            (float)(pos.Y * dpi.DpiScaleY));
+            (float)(pos.X * _chart.DisplayScale),
+            (float)(pos.Y * _chart.DisplayScale));
         var mouseCoords = _chart.Plot.GetCoordinates(pixel);
 
         double bestDistance = double.MaxValue;
@@ -99,7 +99,7 @@ internal sealed class ChartHoverHelper
 
         if (bestPoint.IsReal && bestDistance < 2500) // ~50px radius
         {
-            var time = DateTime.FromOADate(bestPoint.X);
+            var time = ServerTimeHelper.ConvertForDisplay(DateTime.FromOADate(bestPoint.X), ServerTimeHelper.CurrentDisplayMode);
             _text.Text = $"{bestLabel}\n{bestPoint.Y:N1} {_unit}\n{time:HH:mm:ss}";
             _popup.HorizontalOffset = pos.X + 15;
             _popup.VerticalOffset = pos.Y + 15;

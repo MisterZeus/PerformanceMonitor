@@ -238,6 +238,26 @@ public partial class ServerTab : UserControl
 
         /* Initial load is triggered by MainWindow.ConnectToServer calling RefreshData()
            after collectors finish - no Loaded handler needed */
+
+        KeyDown += ServerTab_KeyDown;
+        Focusable = true;
+    }
+
+    private void ServerTab_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == System.Windows.Input.Key.V &&
+            System.Windows.Input.Keyboard.Modifiers == System.Windows.Input.ModifierKeys.Control &&
+            e.OriginalSource is not System.Windows.Controls.TextBox &&
+            PlanViewerTabItem.IsSelected)
+        {
+            var xml = System.Windows.Clipboard.GetText();
+            if (!string.IsNullOrWhiteSpace(xml))
+            {
+                e.Handled = true;
+                OpenPlanTab(xml, "Pasted Plan");
+                PlanViewerTabItem.IsSelected = true;
+            }
+        }
     }
 
     private void InitializeTimeComboBoxes()
@@ -662,7 +682,8 @@ public partial class ServerTab : UserControl
             await UpdateMemoryClerksChartFromPickerAsync();
             await UpdatePerfmonChartFromPickerAsync();
 
-            ConnectionStatusText.Text = $"{_server.ServerName} - Last refresh: {DateTime.Now:HH:mm:ss}";
+            var tz = ServerTimeHelper.GetTimezoneLabel(ServerTimeHelper.CurrentDisplayMode);
+            ConnectionStatusText.Text = $"{_server.ServerName} - Last refresh: {DateTime.Now:HH:mm:ss} ({tz})";
 
             /* Notify parent of alert counts for tab badge.
                Include the latest event timestamp so acknowledgement is only
@@ -2815,6 +2836,20 @@ public partial class ServerTab : UserControl
 
     private void OpenPlanTab(string planXml, string label, string? queryText = null)
     {
+        try
+        {
+            System.Xml.Linq.XDocument.Parse(planXml);
+        }
+        catch (System.Xml.XmlException ex)
+        {
+            MessageBox.Show(
+                $"The plan XML is not valid:\n\n{ex.Message}",
+                "Invalid Plan XML",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            return;
+        }
+
         HidePlanLoading();
         var viewer = new PlanViewerControl();
         viewer.LoadPlan(planXml, label, queryText);
