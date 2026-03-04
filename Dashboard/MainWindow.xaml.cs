@@ -1444,7 +1444,7 @@ namespace PerformanceMonitorDashboard
             }
         }
 
-        private static async Task<AlertContext?> BuildDeadlockContextAsync(DatabaseService databaseService, IReadOnlyList<string>? excludedDatabases = null)
+        private static async Task<AlertContext?> BuildDeadlockContextAsync(DatabaseService databaseService, List<string>? excludedDatabases = null)
         {
             try
             {
