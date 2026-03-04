@@ -242,7 +242,7 @@ LIMIT 3";
                     {miscWaitsFilter}
                     AND r.total_elapsed_time_ms >= $2
                 ORDER BY r.total_elapsed_time_ms DESC
-                LIMIT {maxResults}";
+                LIMIT {maxResults};";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = thresholdMs });
