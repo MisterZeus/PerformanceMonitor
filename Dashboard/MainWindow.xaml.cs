@@ -1125,7 +1125,7 @@ namespace PerformanceMonitorDashboard
                         $"{(int)health.TotalBlocked} session(s), longest {(int)health.LongestBlockedSeconds}s",
                         $"{prefs.BlockingThresholdSeconds}s", true, "tray");
 
-                    var blockingContext = await BuildBlockingContextAsync(databaseService);
+                    var blockingContext = await BuildBlockingContextAsync(databaseService, prefs.AlertExcludedDatabases);
 
                     await _emailAlertService.TrySendAlertEmailAsync(
                         "Blocking Detected",
@@ -1402,12 +1402,22 @@ namespace PerformanceMonitorDashboard
             return text.Length <= maxLength ? text : text.Substring(0, maxLength) + "...";
         }
 
-        private static async Task<AlertContext?> BuildBlockingContextAsync(DatabaseService databaseService)
+        private static async Task<AlertContext?> BuildBlockingContextAsync(DatabaseService databaseService, List<string>? excludedDatabases = null)
         {
             try
             {
                 var events = await databaseService.GetBlockingEventsAsync(hoursBack: 1);
                 if (events == null || events.Count == 0) return null;
+
+                if (excludedDatabases != null && excludedDatabases.Count > 0)
+                {
+                    events = events
+                        .Where(e => string.IsNullOrEmpty(e.DatabaseName) ||
+                            !excludedDatabases.Any(ex =>
+                                string.Equals(ex, e.DatabaseName, StringComparison.OrdinalIgnoreCase)))
+                        .ToList();
+                    if (events.Count == 0) return null;
+                }
 
                 var context = new AlertContext();
                 var firstXml = (string?)null;
