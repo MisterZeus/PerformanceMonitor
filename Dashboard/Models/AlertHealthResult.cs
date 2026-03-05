@@ -22,6 +22,15 @@ namespace PerformanceMonitorDashboard.Models
         public long TotalBlocked { get; set; }
         public decimal LongestBlockedSeconds { get; set; }
         public long DeadlockCount { get; set; }
+
+        /// <summary>
+        /// Deadlock count for the alert window filtered by excluded databases.
+        /// Sourced from collect.blocking_deadlock_stats when excluded databases are configured.
+        /// When set, EvaluateAlertConditionsAsync uses this instead of the raw delta
+        /// from the server-wide performance counter, matching how blocking alerts filter.
+        /// Null when no databases are excluded (fall back to raw delta).
+        /// </summary>
+        public long? FilteredDeadlockCount { get; set; }
         public List<PoisonWaitDelta> PoisonWaits { get; set; } = new();
         public List<LongRunningQueryInfo> LongRunningQueries { get; set; } = new();
         public TempDbSpaceInfo? TempDbSpace { get; set; }

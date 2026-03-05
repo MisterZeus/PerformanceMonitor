@@ -145,12 +145,18 @@ namespace PerformanceMonitorDashboard.Services
                 var cpuTask = GetCpuPercentAsync(connection, engineEdition);
                 var blockingTask = GetBlockingValuesAsync(connection, excludedDatabases ?? Array.Empty<string>());
                 var deadlockTask = GetDeadlockCountAsync(connection);
+                var filteredDeadlockTask = excludedDatabases?.Count > 0
+                    ? GetFilteredDeadlockCountAsync(connection, excludedDatabases)
+                    : null;
                 var poisonWaitTask = GetPoisonWaitDeltasAsync(connection);
                 var longRunningTask = GetLongRunningQueriesAsync(connection, longRunningQueryThresholdMinutes, longRunningQueryMaxResults, excludeSpServerDiagnostics, excludeWaitFor, excludeBackups, excludeMiscWaits);
                 var tempDbTask = GetTempDbSpaceAsync(connection);
                 var anomalousJobTask = GetAnomalousJobsAsync(connection, longRunningJobMultiplier);
 
-                await Task.WhenAll(cpuTask, blockingTask, deadlockTask, poisonWaitTask, longRunningTask, tempDbTask, anomalousJobTask);
+                var allTasks = filteredDeadlockTask != null
+                    ? new Task[] { cpuTask, blockingTask, deadlockTask, filteredDeadlockTask, poisonWaitTask, longRunningTask, tempDbTask, anomalousJobTask }
+                    : new Task[] { cpuTask, blockingTask, deadlockTask, poisonWaitTask, longRunningTask, tempDbTask, anomalousJobTask };
+                await Task.WhenAll(allTasks);
 
                 var cpuResult = await cpuTask;
                 result.CpuPercent = cpuResult.SqlCpu;
@@ -161,6 +167,8 @@ namespace PerformanceMonitorDashboard.Services
                 result.LongestBlockedSeconds = blockingResult.LongestBlockedSeconds;
 
                 result.DeadlockCount = await deadlockTask;
+                if (filteredDeadlockTask != null)
+                    result.FilteredDeadlockCount = await filteredDeadlockTask;
                 result.PoisonWaits = await poisonWaitTask;
                 result.LongRunningQueries = await longRunningTask;
                 result.TempDbSpace = await tempDbTask;
@@ -433,6 +441,41 @@ namespace PerformanceMonitorDashboard.Services
             catch (Exception ex)
             {
                 Logger.Warning($"Failed to get deadlock count: {ex.Message}");
+                return 0;
+            }
+        }
+
+        /// <summary>
+        /// Counts recent deadlocks from collect.blocking_deadlock_stats, excluding the specified databases.
+        /// Uses a 5-minute window matching the alert cooldown so each cooldown period
+        /// reflects only deadlocks from non-excluded databases.
+        /// This is the filtered equivalent of GetDeadlockCountAsync, which reads from
+        /// sys.dm_os_performance_counters and cannot be filtered by database.
+        /// </summary>
+        private async Task<long> GetFilteredDeadlockCountAsync(SqlConnection connection, IReadOnlyList<string> excludedDatabases)
+        {
+            var dbFilter = string.Join(", ", excludedDatabases.Select(db => $"N'{db.Replace("'", "''")}'"));
+            var query = $@"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+                SELECT
+                    filtered_deadlock_count =
+                        COALESCE(SUM(bds.deadlock_count_delta), 0)
+                FROM collect.blocking_deadlock_stats AS bds
+                WHERE bds.collection_time >= DATEADD(MINUTE, -5, SYSUTCDATETIME())
+                AND   bds.database_name NOT IN ({dbFilter})
+                AND   bds.deadlock_count_delta IS NOT NULL
+                OPTION(MAXDOP 1, RECOMPILE);";
+
+            try
+            {
+                using var cmd = new SqlCommand(query, connection);
+                cmd.CommandTimeout = 10;
+                var result = await cmd.ExecuteScalarAsync();
+                return result is long l ? l : (result is int i ? (long)i : 0);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning($"Failed to get filtered deadlock count: {ex.Message}");
                 return 0;
             }
         }

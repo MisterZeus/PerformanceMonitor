@@ -1152,8 +1152,13 @@ namespace PerformanceMonitorDashboard
             }
             _previousDeadlockCounts[serverId] = health.DeadlockCount;
 
+            /* Use the database-filtered count when excluded databases are configured,
+               matching how blocking alerts filter before the threshold check.
+               Falls back to the raw delta when no databases are excluded. */
+            var effectiveDeadlockDelta = health.FilteredDeadlockCount ?? deadlockDelta;
+
             bool deadlocksExceeded = prefs.NotifyOnDeadlock
-                && deadlockDelta >= prefs.DeadlockThreshold;
+                && effectiveDeadlockDelta >= prefs.DeadlockThreshold;
 
             if (deadlocksExceeded)
             {
@@ -1162,11 +1167,11 @@ namespace PerformanceMonitorDashboard
                 {
                     _notificationService?.ShowDeadlockNotification(
                         serverName,
-                        (int)deadlockDelta);
+                        (int)effectiveDeadlockDelta);
                     _lastDeadlockAlert[serverId] = now;
 
                     _emailAlertService.RecordAlert(serverId, serverName, "Deadlocks Detected",
-                        deadlockDelta.ToString(),
+                        effectiveDeadlockDelta.ToString(),
                         prefs.DeadlockThreshold.ToString(), true, "tray");
 
                     var deadlockContext = await BuildDeadlockContextAsync(databaseService, prefs.AlertExcludedDatabases);
@@ -1174,7 +1179,7 @@ namespace PerformanceMonitorDashboard
                     await _emailAlertService.TrySendAlertEmailAsync(
                         "Deadlocks Detected",
                         serverName,
-                        deadlockDelta.ToString(),
+                        effectiveDeadlockDelta.ToString(),
                         prefs.DeadlockThreshold.ToString(),
                         serverId,
                         deadlockContext);
@@ -1452,11 +1457,13 @@ namespace PerformanceMonitorDashboard
                 if (deadlocks == null || deadlocks.Count == 0) return null;
 
                 if (excludedDatabases != null && excludedDatabases.Count > 0)
+                {
                     deadlocks = deadlocks
                         .Where(d => string.IsNullOrEmpty(d.DatabaseName) ||
                             !excludedDatabases.Any(e =>
                                 string.Equals(e, d.DatabaseName, StringComparison.OrdinalIgnoreCase)))
                         .ToList();
+                }
 
                 var context = new AlertContext();
                 var firstGraph = (string?)null;
