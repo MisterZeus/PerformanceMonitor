@@ -690,6 +690,163 @@ namespace PerformanceMonitorDashboard.Services
                     return result == DBNull.Value ? null : result as string;
                 }
 
+                /// <summary>
+                /// Gets query snapshots filtered by wait type for the wait drill-down feature.
+                /// Uses LIKE on wait_info to match sp_WhoIsActive's formatted wait string.
+                /// </summary>
+                public async Task<List<QuerySnapshotItem>> GetQuerySnapshotsByWaitTypeAsync(
+                    string waitType, int hoursBack = 1,
+                    DateTime? fromDate = null, DateTime? toDate = null)
+                {
+                    var items = new List<QuerySnapshotItem>();
+
+                    await using var tc = await OpenThrottledConnectionAsync();
+                    var connection = tc.Connection;
+
+                    // Check if the view exists
+                    string checkViewQuery = @"
+                        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+                        SELECT 1 FROM sys.views
+                        WHERE name = 'query_snapshots'
+                        AND schema_id = SCHEMA_ID('report')";
+
+                    using var checkCommand = new SqlCommand(checkViewQuery, connection);
+                    var viewExists = await checkCommand.ExecuteScalarAsync();
+
+                    if (viewExists == null)
+                        return items;
+
+                    bool useCustomDates = fromDate.HasValue && toDate.HasValue;
+
+                    // sp_WhoIsActive formats wait_info as "(1x: 349ms)LCK_M_X, (1x: 12ms)..."
+                    // The ')' always precedes the wait type name, so we use '%)WAIT_TYPE%'
+                    // to avoid false positives (e.g., LCK_M_X matching LCK_M_IX)
+                    string query = useCustomDates
+                        ? @"
+                            SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+                            SELECT TOP (500)
+                                qs.collection_time,
+                                qs.[dd hh:mm:ss.mss],
+                                qs.session_id,
+                                qs.status,
+                                qs.wait_info,
+                                qs.blocking_session_id,
+                                qs.blocked_session_count,
+                                qs.database_name,
+                                qs.login_name,
+                                qs.host_name,
+                                qs.program_name,
+                                sql_text = CONVERT(nvarchar(max), qs.sql_text),
+                                sql_command = CONVERT(nvarchar(max), qs.sql_command),
+                                qs.CPU,
+                                qs.reads,
+                                qs.writes,
+                                qs.physical_reads,
+                                qs.context_switches,
+                                qs.used_memory,
+                                qs.tempdb_current,
+                                qs.tempdb_allocations,
+                                qs.tran_log_writes,
+                                qs.open_tran_count,
+                                qs.percent_complete,
+                                qs.start_time,
+                                qs.tran_start_time,
+                                qs.request_id,
+                                additional_info = CONVERT(nvarchar(max), qs.additional_info)
+                            FROM report.query_snapshots AS qs
+                            WHERE qs.collection_time >= @from_date
+                            AND   qs.collection_time <= @to_date
+                            AND   CONVERT(nvarchar(max), qs.wait_info) LIKE N'%)' + @wait_type + N'%'
+                            ORDER BY
+                                qs.collection_time DESC,
+                                qs.session_id;"
+                        : @"
+                            SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+                            SELECT TOP (500)
+                                qs.collection_time,
+                                qs.[dd hh:mm:ss.mss],
+                                qs.session_id,
+                                qs.status,
+                                qs.wait_info,
+                                qs.blocking_session_id,
+                                qs.blocked_session_count,
+                                qs.database_name,
+                                qs.login_name,
+                                qs.host_name,
+                                qs.program_name,
+                                sql_text = CONVERT(nvarchar(max), qs.sql_text),
+                                sql_command = CONVERT(nvarchar(max), qs.sql_command),
+                                qs.CPU,
+                                qs.reads,
+                                qs.writes,
+                                qs.physical_reads,
+                                qs.context_switches,
+                                qs.used_memory,
+                                qs.tempdb_current,
+                                qs.tempdb_allocations,
+                                qs.tran_log_writes,
+                                qs.open_tran_count,
+                                qs.percent_complete,
+                                qs.start_time,
+                                qs.tran_start_time,
+                                qs.request_id,
+                                additional_info = CONVERT(nvarchar(max), qs.additional_info)
+                            FROM report.query_snapshots AS qs
+                            WHERE qs.collection_time >= DATEADD(HOUR, @hours_back, SYSDATETIME())
+                            AND   CONVERT(nvarchar(max), qs.wait_info) LIKE N'%)' + @wait_type + N'%'
+                            ORDER BY
+                                qs.collection_time DESC,
+                                qs.session_id;";
+
+                    using var command = new SqlCommand(query, connection);
+                    command.CommandTimeout = 120;
+                    command.Parameters.Add(new SqlParameter("@wait_type", SqlDbType.NVarChar, 200) { Value = waitType });
+                    command.Parameters.Add(new SqlParameter("@hours_back", SqlDbType.Int) { Value = -hoursBack });
+                    if (fromDate.HasValue) command.Parameters.Add(new SqlParameter("@from_date", SqlDbType.DateTime2) { Value = fromDate.Value });
+                    if (toDate.HasValue) command.Parameters.Add(new SqlParameter("@to_date", SqlDbType.DateTime2) { Value = toDate.Value });
+
+                    using var reader = await command.ExecuteReaderAsync();
+                    while (await reader.ReadAsync())
+                    {
+                        items.Add(new QuerySnapshotItem
+                        {
+                            CollectionTime = reader.GetDateTime(0),
+                            Duration = reader.IsDBNull(1) ? string.Empty : reader.GetValue(1)?.ToString() ?? string.Empty,
+                            SessionId = SafeToInt16(reader.GetValue(2), "session_id") ?? 0,
+                            Status = reader.IsDBNull(3) ? null : reader.GetValue(3)?.ToString(),
+                            WaitInfo = reader.IsDBNull(4) ? null : reader.GetValue(4)?.ToString(),
+                            BlockingSessionId = SafeToInt16(reader.GetValue(5), "blocking_session_id"),
+                            BlockedSessionCount = SafeToInt16(reader.GetValue(6), "blocked_session_count"),
+                            DatabaseName = reader.IsDBNull(7) ? null : reader.GetValue(7)?.ToString(),
+                            LoginName = reader.IsDBNull(8) ? null : reader.GetValue(8)?.ToString(),
+                            HostName = reader.IsDBNull(9) ? null : reader.GetValue(9)?.ToString(),
+                            ProgramName = reader.IsDBNull(10) ? null : reader.GetValue(10)?.ToString(),
+                            SqlText = reader.IsDBNull(11) ? null : reader.GetValue(11)?.ToString(),
+                            SqlCommand = reader.IsDBNull(12) ? null : reader.GetValue(12)?.ToString(),
+                            Cpu = SafeToInt64(reader.GetValue(13), "CPU"),
+                            Reads = SafeToInt64(reader.GetValue(14), "reads"),
+                            Writes = SafeToInt64(reader.GetValue(15), "writes"),
+                            PhysicalReads = SafeToInt64(reader.GetValue(16), "physical_reads"),
+                            ContextSwitches = SafeToInt64(reader.GetValue(17), "context_switches"),
+                            UsedMemoryMb = SafeToDecimal(reader.GetValue(18), "used_memory"),
+                            TempdbCurrentMb = SafeToDecimal(reader.GetValue(19), "tempdb_current"),
+                            TempdbAllocations = SafeToDecimal(reader.GetValue(20), "tempdb_allocations"),
+                            TranLogWrites = reader.IsDBNull(21) ? null : reader.GetValue(21)?.ToString(),
+                            OpenTranCount = SafeToInt16(reader.GetValue(22), "open_tran_count"),
+                            PercentComplete = SafeToDecimal(reader.GetValue(23), "percent_complete"),
+                            StartTime = reader.IsDBNull(24) ? null : reader.GetDateTime(24),
+                            TranStartTime = reader.IsDBNull(25) ? null : reader.GetDateTime(25),
+                            RequestId = SafeToInt16(reader.GetValue(26), "request_id"),
+                            AdditionalInfo = reader.IsDBNull(27) ? null : reader.GetValue(27)?.ToString()
+                        });
+                    }
+
+                    return items;
+                }
+
                 public async Task<List<QueryStatsItem>> GetQueryStatsAsync(int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
                 {
                     var items = new List<QueryStatsItem>();
