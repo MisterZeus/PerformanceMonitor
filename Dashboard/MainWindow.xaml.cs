@@ -1472,6 +1472,7 @@ namespace PerformanceMonitorDashboard
                     deadlocks = deadlocks
                         .Where(d => !IsDeadlockExcluded(d, excludedDatabases))
                         .ToList();
+                    if (deadlocks.Count == 0) return null;
                 }
 
                 var context = new AlertContext();
