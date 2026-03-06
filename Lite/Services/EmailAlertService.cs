@@ -25,7 +25,6 @@ namespace PerformanceMonitorLite.Services;
 public class EmailAlertService
 {
     private readonly ConcurrentDictionary<string, DateTime> _cooldowns = new();
-    private static readonly TimeSpan CooldownPeriod = TimeSpan.FromMinutes(15);
     private readonly DuckDbInitializer? _duckDb;
 
     /* Failure tracking for louder logging */
@@ -48,7 +47,9 @@ public class EmailAlertService
         string currentValue,
         string thresholdValue,
         int serverId = 0,
-        AlertContext? context = null)
+        AlertContext? context = null,
+        double? numericCurrentValue = null,
+        double? numericThresholdValue = null)
     {
         try
         {
@@ -64,7 +65,7 @@ public class EmailAlertService
             {
                 var cooldownKey = $"{serverId}:{metricName}";
                 var withinCooldown = _cooldowns.TryGetValue(cooldownKey, out var lastSent) &&
-                    DateTime.UtcNow - lastSent < CooldownPeriod;
+                    DateTime.UtcNow - lastSent < TimeSpan.FromMinutes(App.EmailCooldownMinutes);
 
                 if (!withinCooldown)
                 {
@@ -72,7 +73,7 @@ public class EmailAlertService
 
                     var subject = $"[SQL Monitor Alert] {metricName} on {serverName}";
                     var (htmlBody, plainTextBody) = EmailTemplateBuilder.BuildAlertEmail(
-                        metricName, serverName, currentValue, thresholdValue, context);
+                        metricName, serverName, currentValue, thresholdValue, App.EmailCooldownMinutes, context);
 
                     try
                     {
@@ -108,10 +109,12 @@ public class EmailAlertService
             }
 
             /* Always log the alert to DuckDB, regardless of email status */
+            var logCurrent = numericCurrentValue
+                ?? (double.TryParse(currentValue.TrimEnd('%'), out var cv) ? cv : 0);
+            var logThreshold = numericThresholdValue
+                ?? (double.TryParse(thresholdValue.TrimEnd('%'), out var tv) ? tv : 0);
             await LogAlertAsync(serverId, serverName, metricName,
-                double.TryParse(currentValue.TrimEnd('%'), out var cv) ? cv : 0,
-                double.TryParse(thresholdValue.TrimEnd('%'), out var tv) ? tv : 0,
-                sent, notificationType, sendError);
+                logCurrent, logThreshold, sent, notificationType, sendError);
         }
         catch (Exception ex)
         {

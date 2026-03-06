@@ -267,6 +267,16 @@
                             </StackPanel>
                             <TextBlock x:Name="AlertPreviewText" FontSize="11" FontStyle="Italic" Foreground="Gray"
                                        TextWrapping="Wrap" Margin="0,12,0,0"/>
+                            <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                <TextBlock Text="Tray notification cooldown:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <TextBox x:Name="AlertCooldownTextBox" Width="50" TextAlignment="Center" VerticalAlignment="Center"/>
+                                <TextBlock Text="minutes" VerticalAlignment="Center" Margin="4,0,0,0"/>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                <TextBlock Text="Email alert cooldown:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <TextBox x:Name="EmailCooldownTextBox" Width="50" TextAlignment="Center" VerticalAlignment="Center"/>
+                                <TextBlock Text="minutes" VerticalAlignment="Center" Margin="4,0,0,0"/>
+                            </StackPanel>
                             <!-- Global Alert Filters -->
                             <TextBlock Text="Global Alert Filters" FontWeight="Bold" FontSize="12" Margin="0,16,0,6"/>
                             <TextBlock Text="Exclude databases from alerts (comma-separated):" Margin="0,0,0,4"/>

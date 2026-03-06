@@ -282,22 +282,41 @@ namespace PerformanceMonitorInstallerGui.Services
             }
 
             /*
-            Remove Agent jobs and database
+            Remove Agent jobs, XE sessions, and database
             */
             string cleanupSql = @"
 USE msdb;
 
 IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'PerformanceMonitor - Collection')
 BEGIN
-    EXECUTE msdb.dbo.sp_delete_job @job_name = N'PerformanceMonitor - Collection';
+    EXECUTE msdb.dbo.sp_delete_job @job_name = N'PerformanceMonitor - Collection', @delete_unused_schedule = 1;
 END;
 
 IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'PerformanceMonitor - Data Retention')
 BEGIN
-    EXECUTE msdb.dbo.sp_delete_job @job_name = N'PerformanceMonitor - Data Retention';
+    EXECUTE msdb.dbo.sp_delete_job @job_name = N'PerformanceMonitor - Data Retention', @delete_unused_schedule = 1;
+END;
+
+IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'PerformanceMonitor - Hung Job Monitor')
+BEGIN
+    EXECUTE msdb.dbo.sp_delete_job @job_name = N'PerformanceMonitor - Hung Job Monitor', @delete_unused_schedule = 1;
 END;
 
 USE master;
+
+IF EXISTS (SELECT 1 FROM sys.server_event_sessions WHERE name = N'PerformanceMonitor_BlockedProcess')
+BEGIN
+    IF EXISTS (SELECT 1 FROM sys.dm_xe_sessions WHERE name = N'PerformanceMonitor_BlockedProcess')
+        ALTER EVENT SESSION [PerformanceMonitor_BlockedProcess] ON SERVER STATE = STOP;
+    DROP EVENT SESSION [PerformanceMonitor_BlockedProcess] ON SERVER;
+END;
+
+IF EXISTS (SELECT 1 FROM sys.server_event_sessions WHERE name = N'PerformanceMonitor_Deadlock')
+BEGIN
+    IF EXISTS (SELECT 1 FROM sys.dm_xe_sessions WHERE name = N'PerformanceMonitor_Deadlock')
+        ALTER EVENT SESSION [PerformanceMonitor_Deadlock] ON SERVER STATE = STOP;
+    DROP EVENT SESSION [PerformanceMonitor_Deadlock] ON SERVER;
+END;
 
 IF EXISTS (SELECT 1 FROM sys.databases WHERE name = N'PerformanceMonitor')
 BEGIN
@@ -311,9 +330,68 @@ END;";
 
             progress?.Report(new InstallationProgress
             {
-                Message = "Clean install completed (jobs and database removed)",
+                Message = "Clean install completed (jobs, XE sessions, and database removed)",
                 Status = "Success"
             });
+        }
+
+        /// <summary>
+        /// Perform complete uninstall (remove database, jobs, XE sessions, and traces)
+        /// </summary>
+        public static async Task<bool> ExecuteUninstallAsync(
+            string connectionString,
+            IProgress<InstallationProgress>? progress = null,
+            CancellationToken cancellationToken = default)
+        {
+            progress?.Report(new InstallationProgress
+            {
+                Message = "Uninstalling Performance Monitor...",
+                Status = "Info"
+            });
+
+            using var connection = new SqlConnection(connectionString);
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+            /*
+            Stop existing traces before dropping database
+            */
+            try
+            {
+                using var traceCmd = new SqlCommand(
+                    "EXECUTE PerformanceMonitor.collect.trace_management_collector @action = 'STOP';",
+                    connection);
+                traceCmd.CommandTimeout = 60;
+                await traceCmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+                progress?.Report(new InstallationProgress
+                {
+                    Message = "Stopped server-side traces",
+                    Status = "Success"
+                });
+            }
+            catch (SqlException)
+            {
+                progress?.Report(new InstallationProgress
+                {
+                    Message = "No traces to stop (database or procedure not found)",
+                    Status = "Info"
+                });
+            }
+
+            /*
+            Remove Agent jobs, XE sessions, and database
+            */
+            await CleanInstallAsync(connectionString, progress, cancellationToken)
+                .ConfigureAwait(false);
+
+            progress?.Report(new InstallationProgress
+            {
+                Message = "Uninstall completed successfully",
+                Status = "Success",
+                ProgressPercent = 100
+            });
+
+            return true;
         }
 
         /// <summary>

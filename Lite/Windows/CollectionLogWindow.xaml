@@ -65,17 +65,17 @@
                         <TextBlock Text="Rows" FontWeight="Bold"/>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding DurationFormatted}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                <DataGridTextColumn Binding="{Binding DurationFormatted}" ElementStyle="{StaticResource NumericCell}" Width="100" SortMemberPath="DurationMs">
                     <DataGridTextColumn.Header>
                         <TextBlock Text="Duration" FontWeight="Bold"/>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding SqlDurationFormatted}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                <DataGridTextColumn Binding="{Binding SqlDurationFormatted}" ElementStyle="{StaticResource NumericCell}" Width="100" SortMemberPath="SqlDurationMs">
                     <DataGridTextColumn.Header>
                         <TextBlock Text="SQL Duration" FontWeight="Bold"/>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding DuckDbDurationFormatted}" ElementStyle="{StaticResource NumericCell}" Width="110">
+                <DataGridTextColumn Binding="{Binding DuckDbDurationFormatted}" ElementStyle="{StaticResource NumericCell}" Width="120" SortMemberPath="DuckDbDurationMs">
                     <DataGridTextColumn.Header>
                         <TextBlock Text="DuckDB Duration" FontWeight="Bold"/>
                     </DataGridTextColumn.Header>

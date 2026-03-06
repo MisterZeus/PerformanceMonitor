@@ -44,7 +44,6 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, DateTime> _lastLongRunningQueryAlert = new();
     private readonly Dictionary<string, DateTime> _lastTempDbSpaceAlert = new();
     private readonly Dictionary<string, DateTime> _lastLongRunningJobAlert = new();
-    private static readonly TimeSpan AlertCooldown = TimeSpan.FromMinutes(5);
     private readonly DispatcherTimer _statusTimer;
     private LocalDataService? _dataService;
     private McpHostService? _mcpService;
@@ -964,6 +963,7 @@ public partial class MainWindow : Window
 
         var key = summary.ServerId.ToString();
         var now = DateTime.UtcNow;
+        var alertCooldown = TimeSpan.FromMinutes(App.AlertCooldownMinutes);
 
         /* Skip popup/email alerts if user has acknowledged or silenced this server */
         bool suppressPopups = !_alertStateService.ShouldShowAlerts(key);
@@ -976,7 +976,7 @@ public partial class MainWindow : Window
         if (cpuExceeded)
         {
             _activeCpuAlert[key] = true;
-            if (!suppressPopups && (!_lastCpuAlert.TryGetValue(key, out var lastCpu) || now - lastCpu >= AlertCooldown))
+            if (!suppressPopups && (!_lastCpuAlert.TryGetValue(key, out var lastCpu) || now - lastCpu >= alertCooldown))
             {
                 _trayService.ShowNotification(
                     "High CPU",
@@ -1026,7 +1026,7 @@ public partial class MainWindow : Window
         if (blockingExceeded)
         {
             _activeBlockingAlert[key] = true;
-            if (!suppressPopups && (!_lastBlockingAlert.TryGetValue(key, out var lastBlocking) || now - lastBlocking >= AlertCooldown))
+            if (!suppressPopups && (!_lastBlockingAlert.TryGetValue(key, out var lastBlocking) || now - lastBlocking >= alertCooldown))
             {
                 _trayService.ShowNotification(
                     "Blocking Detected",
@@ -1077,7 +1077,7 @@ public partial class MainWindow : Window
         if (deadlocksExceeded)
         {
             _activeDeadlockAlert[key] = true;
-            if (!suppressPopups && (!_lastDeadlockAlert.TryGetValue(key, out var lastDeadlock) || now - lastDeadlock >= AlertCooldown))
+            if (!suppressPopups && (!_lastDeadlockAlert.TryGetValue(key, out var lastDeadlock) || now - lastDeadlock >= alertCooldown))
             {
                 _trayService.ShowNotification(
                     "Deadlocks Detected",
@@ -1116,7 +1116,7 @@ public partial class MainWindow : Window
                 if (triggered.Count > 0)
                 {
                     _activePoisonWaitAlert[key] = true;
-                    if (!suppressPopups && (!_lastPoisonWaitAlert.TryGetValue(key, out var lastPoisonWait) || now - lastPoisonWait >= AlertCooldown))
+                    if (!suppressPopups && (!_lastPoisonWaitAlert.TryGetValue(key, out var lastPoisonWait) || now - lastPoisonWait >= alertCooldown))
                     {
                         var worst = triggered[0];
                         var allWaitNames = string.Join(", ", triggered.ConvertAll(w => $"{w.WaitType} ({w.AvgMsPerWait:F0}ms)"));
@@ -1134,7 +1134,9 @@ public partial class MainWindow : Window
                             allWaitNames,
                             $"{App.AlertPoisonWaitThresholdMs}ms avg",
                             summary.ServerId,
-                            poisonContext);
+                            poisonContext,
+                            numericCurrentValue: worst.AvgMsPerWait,
+                            numericThresholdValue: App.AlertPoisonWaitThresholdMs);
                     }
                 }
                 else if (_activePoisonWaitAlert.TryGetValue(key, out var wasPoisonWait) && wasPoisonWait)
@@ -1171,7 +1173,7 @@ public partial class MainWindow : Window
                 if (longRunning.Count > 0)
                 {
                     _activeLongRunningQueryAlert[key] = true;
-                    if (!suppressPopups && (!_lastLongRunningQueryAlert.TryGetValue(key, out var lastLrq) || now - lastLrq >= AlertCooldown))
+                    if (!suppressPopups && (!_lastLongRunningQueryAlert.TryGetValue(key, out var lastLrq) || now - lastLrq >= alertCooldown))
                     {
                         var worst = longRunning[0];
                         var elapsedMinutes = worst.ElapsedSeconds / 60;
@@ -1191,7 +1193,9 @@ public partial class MainWindow : Window
                             $"{longRunning.Count} query(s), longest {elapsedMinutes}m",
                             $"{App.AlertLongRunningQueryThresholdMinutes}m",
                             summary.ServerId,
-                            lrqContext);
+                            lrqContext,
+                            numericCurrentValue: elapsedMinutes,
+                            numericThresholdValue: App.AlertLongRunningQueryThresholdMinutes);
                     }
                 }
                 else if (_activeLongRunningQueryAlert.TryGetValue(key, out var wasLongRunning) && wasLongRunning)
@@ -1219,7 +1223,7 @@ public partial class MainWindow : Window
                 if (tempDb != null && tempDb.UsedPercent >= App.AlertTempDbSpaceThresholdPercent)
                 {
                     _activeTempDbSpaceAlert[key] = true;
-                    if (!suppressPopups && (!_lastTempDbSpaceAlert.TryGetValue(key, out var lastTempDb) || now - lastTempDb >= AlertCooldown))
+                    if (!suppressPopups && (!_lastTempDbSpaceAlert.TryGetValue(key, out var lastTempDb) || now - lastTempDb >= alertCooldown))
                     {
                         _trayService.ShowNotification(
                             "TempDB Space",
@@ -1235,7 +1239,9 @@ public partial class MainWindow : Window
                             $"{tempDb.UsedPercent:F0}% used ({tempDb.TotalReservedMb:F0} MB)",
                             $"{App.AlertTempDbSpaceThresholdPercent}%",
                             summary.ServerId,
-                            tempDbContext);
+                            tempDbContext,
+                            numericCurrentValue: tempDb.UsedPercent,
+                            numericThresholdValue: App.AlertTempDbSpaceThresholdPercent);
                     }
                 }
                 else if (_activeTempDbSpaceAlert.TryGetValue(key, out var wasTempDb) && wasTempDb)
@@ -1267,7 +1273,7 @@ public partial class MainWindow : Window
                     var worst = anomalousJobs[0];
                     var jobKey = $"{key}:{worst.JobId}:{worst.StartTime:O}";
 
-                    if (!suppressPopups && (!_lastLongRunningJobAlert.TryGetValue(jobKey, out var lastJob) || now - lastJob >= AlertCooldown))
+                    if (!suppressPopups && (!_lastLongRunningJobAlert.TryGetValue(jobKey, out var lastJob) || now - lastJob >= alertCooldown))
                     {
                         var currentMinutes = worst.CurrentDurationSeconds / 60;
                         _trayService.ShowNotification(
@@ -1284,7 +1290,9 @@ public partial class MainWindow : Window
                             $"{anomalousJobs.Count} job(s) exceeding {App.AlertLongRunningJobMultiplier}x average",
                             $"{App.AlertLongRunningJobMultiplier}x historical avg",
                             summary.ServerId,
-                            jobContext);
+                            jobContext,
+                            numericCurrentValue: (double)worst.PercentOfAverage,
+                            numericThresholdValue: App.AlertLongRunningJobMultiplier * 100);
                     }
                 }
                 else if (_activeLongRunningJobAlert.TryGetValue(key, out var wasJob) && wasJob)

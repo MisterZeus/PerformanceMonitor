@@ -112,16 +112,18 @@ public partial class SettingsWindow : Window
     private void SaveButton_Click(object sender, RoutedEventArgs e)
     {
         _scheduleManager.SaveSchedules();
-        bool mcpChanged = SaveMcpSettings();
+        var (mcpChanged, mcpValid) = SaveMcpSettings();
         SaveDefaultTimeRange();
         SaveConnectionTimeout();
         SaveCsvSeparator();
         SaveColorTheme();
         SaveTimeDisplayMode();
-        SaveAlertSettings();
+        bool alertsValid = SaveAlertSettings();
         SaveSmtpSettings();
 
         _saved = true;
+
+        if (!alertsValid || !mcpValid) return;
 
         var message = mcpChanged
             ? "Settings saved. MCP changes take effect after restarting the application."
@@ -129,7 +131,7 @@ public partial class SettingsWindow : Window
         MessageBox.Show(message, "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
-    private bool SaveMcpSettings()
+    private (bool Changed, bool Valid) SaveMcpSettings()
     {
         var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
 
@@ -153,20 +155,32 @@ public partial class SettingsWindow : Window
 
             root["mcp_enabled"] = newEnabled;
 
+            bool portValid = true;
             if (newPort > 0 && newPort < 65536)
             {
                 root["mcp_port"] = newPort;
+            }
+            else
+            {
+                portValid = false;
             }
 
             var options = new JsonSerializerOptions { WriteIndented = true };
             File.WriteAllText(settingsPath, root.ToJsonString(options));
 
-            return oldEnabled != newEnabled || oldPort != newPort;
+            if (!portValid)
+            {
+                MessageBox.Show(
+                    "MCP port failed validation - must be a valid TCP port number.\nOther MCP settings were saved.",
+                    "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+
+            return (oldEnabled != newEnabled || oldPort != newPort, portValid);
         }
         catch (Exception ex)
         {
             AppLogger.Error("Settings", $"Failed to save MCP settings: {ex.Message}");
-            return false;
+            return (false, true);
         }
     }
 
@@ -447,10 +461,12 @@ public partial class SettingsWindow : Window
         AlertTempDbSpaceThresholdBox.Text = App.AlertTempDbSpaceThresholdPercent.ToString();
         AlertLongRunningJobCheckBox.IsChecked = App.AlertLongRunningJobEnabled;
         AlertLongRunningJobMultiplierBox.Text = App.AlertLongRunningJobMultiplier.ToString();
+        AlertCooldownBox.Text = App.AlertCooldownMinutes.ToString();
+        EmailCooldownBox.Text = App.EmailCooldownMinutes.ToString();
         UpdateAlertControlStates();
     }
 
-    private void SaveAlertSettings()
+    private bool SaveAlertSettings()
     {
         App.MinimizeToTray = MinimizeToTrayCheckBox.IsChecked == true;
         App.AlertsEnabled = AlertsEnabledCheckBox.IsChecked == true;
@@ -487,6 +503,15 @@ public partial class SettingsWindow : Window
         App.AlertLongRunningJobEnabled = AlertLongRunningJobCheckBox.IsChecked == true;
         if (int.TryParse(AlertLongRunningJobMultiplierBox.Text, out var jobMult) && jobMult >= 2 && jobMult <= 20)
             App.AlertLongRunningJobMultiplier = jobMult;
+        var validationErrors = new List<string>();
+        if (int.TryParse(AlertCooldownBox.Text, out var alertCooldown) && alertCooldown >= 1 && alertCooldown <= 120)
+            App.AlertCooldownMinutes = alertCooldown;
+        else
+            validationErrors.Add("Tray notification cooldown must be between 1 and 120 minutes.");
+        if (int.TryParse(EmailCooldownBox.Text, out var emailCooldown) && emailCooldown >= 1 && emailCooldown <= 120)
+            App.EmailCooldownMinutes = emailCooldown;
+        else
+            validationErrors.Add("Email alert cooldown must be between 1 and 120 minutes.");
 
         var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
         try
@@ -527,6 +552,8 @@ public partial class SettingsWindow : Window
             root["alert_tempdb_space_threshold_percent"] = App.AlertTempDbSpaceThresholdPercent;
             root["alert_long_running_job_enabled"] = App.AlertLongRunningJobEnabled;
             root["alert_long_running_job_multiplier"] = App.AlertLongRunningJobMultiplier;
+            root["alert_cooldown_minutes"] = App.AlertCooldownMinutes;
+            root["email_cooldown_minutes"] = App.EmailCooldownMinutes;
 
             var options = new JsonSerializerOptions { WriteIndented = true };
             File.WriteAllText(settingsPath, root.ToJsonString(options));
@@ -535,6 +562,17 @@ public partial class SettingsWindow : Window
         {
             AppLogger.Error("Settings", $"Failed to save alert settings: {ex.Message}");
         }
+
+        if (validationErrors.Count > 0)
+        {
+            MessageBox.Show(
+                "Some alert settings have invalid values and were not changed:\n\n" +
+                string.Join("\n", validationErrors),
+                "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
+
+        return true;
     }
 
     private void AlertsEnabledCheckBox_Changed(object sender, RoutedEventArgs e)
@@ -551,6 +589,8 @@ public partial class SettingsWindow : Window
         AlertLongRunningQueryThresholdBox.Text = "30";
         AlertTempDbSpaceThresholdBox.Text = "80";
         AlertLongRunningJobMultiplierBox.Text = "3";
+        AlertCooldownBox.Text = "5";
+        EmailCooldownBox.Text = "15";
         AlertExcludedDatabasesBox.Text = "";
         UpdateAlertPreviewText();
     }

@@ -27,10 +27,22 @@ public class DuckDbInitializer
     /// <summary>
     /// Acquires a read lock on the database. Multiple readers can hold this concurrently.
     /// Dispose the returned object to release the lock.
+    /// If the current thread already owns a read lock (e.g., leaked by an unhandled exception),
+    /// returns a no-op disposable to allow the operation to proceed.
     /// </summary>
     public IDisposable AcquireReadLock()
     {
-        s_dbLock.EnterReadLock();
+        try
+        {
+            s_dbLock.EnterReadLock();
+        }
+        catch (LockRecursionException)
+        {
+            /* The current thread already owns a read lock — likely leaked by an unhandled
+               exception that prevented Dispose(). Since we're already protected by a read lock,
+               return a no-op disposable so the caller can proceed normally. */
+            return NoOpDisposable.Instance;
+        }
         return new LockReleaser(s_dbLock, write: false);
     }
 
@@ -42,6 +54,12 @@ public class DuckDbInitializer
     {
         s_dbLock.EnterWriteLock();
         return new LockReleaser(s_dbLock, write: true);
+    }
+
+    private sealed class NoOpDisposable : IDisposable
+    {
+        public static readonly NoOpDisposable Instance = new();
+        public void Dispose() { }
     }
 
     private sealed class LockReleaser : IDisposable

@@ -218,6 +218,20 @@
                     <TextBlock Text="x historical average" VerticalAlignment="Center" Margin="2,0,0,0"
                                Foreground="{DynamicResource ForegroundBrush}"/>
                 </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="20,10,0,0">
+                    <TextBlock Text="Tray notification cooldown:" VerticalAlignment="Center" Margin="0,0,8,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertCooldownBox" Width="40" TextAlignment="Center" VerticalAlignment="Center"/>
+                    <TextBlock Text="minutes" VerticalAlignment="Center" Margin="4,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <TextBlock Text="Email alert cooldown:" VerticalAlignment="Center" Margin="0,0,8,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="EmailCooldownBox" Width="40" TextAlignment="Center" VerticalAlignment="Center"/>
+                    <TextBlock Text="minutes" VerticalAlignment="Center" Margin="4,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                </StackPanel>
                 <TextBlock x:Name="AlertPreviewText" FontSize="11" FontStyle="Italic"
                            Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap" Margin="20,10,0,0"/>
                 <!-- Global Alert Filters -->

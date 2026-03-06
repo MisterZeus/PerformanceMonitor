@@ -61,6 +61,50 @@ internal sealed class ChartHoverHelper
     public void Add(ScottPlot.Plottables.Scatter scatter, string label) =>
         _scatters.Add((scatter, label));
 
+    /// <summary>
+    /// Returns the nearest series label and data-point time for the given mouse position,
+    /// or null if no series is close enough.
+    /// </summary>
+    public (string Label, DateTime Time)? GetNearestSeries(Point mousePos)
+    {
+        if (_scatters.Count == 0) return null;
+        try
+        {
+            var dpi = VisualTreeHelper.GetDpi(_chart);
+            var pixel = new ScottPlot.Pixel(
+                (float)(mousePos.X * dpi.DpiScaleX),
+                (float)(mousePos.Y * dpi.DpiScaleY));
+            var mouseCoords = _chart.Plot.GetCoordinates(pixel);
+
+            double bestYDistance = double.MaxValue;
+            ScottPlot.DataPoint bestPoint = default;
+            string bestLabel = "";
+            bool found = false;
+
+            foreach (var (scatter, label) in _scatters)
+            {
+                var nearest = scatter.Data.GetNearest(mouseCoords, _chart.Plot.LastRender);
+                if (!nearest.IsReal) continue;
+                var nearestPixel = _chart.Plot.GetPixel(
+                    new ScottPlot.Coordinates(nearest.X, nearest.Y));
+                double dx = Math.Abs(nearestPixel.X - pixel.X);
+                double dy = Math.Abs(nearestPixel.Y - pixel.Y);
+                if (dx < 80 && dy < bestYDistance)
+                {
+                    bestYDistance = dy;
+                    bestPoint = nearest;
+                    bestLabel = label;
+                    found = true;
+                }
+            }
+
+            if (found)
+                return (bestLabel, DateTime.FromOADate(bestPoint.X));
+        }
+        catch { }
+        return null;
+    }
+
     private void OnMouseMove(object sender, MouseEventArgs e)
     {
         if (_scatters.Count == 0) return;

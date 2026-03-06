@@ -29,6 +29,7 @@ internal static class EmailTemplateBuilder
         string serverName,
         string currentValue,
         string thresholdValue,
+        int emailCooldownMinutes,
         AlertContext? context = null)
     {
         var utcNow = DateTime.UtcNow;
@@ -36,7 +37,7 @@ internal static class EmailTemplateBuilder
         var (accentColor, badgeText) = GetSeverity(metricName);
 
         var html = BuildHtmlBody(metricName, serverName, currentValue,
-            thresholdValue, utcNow, localNow, accentColor, badgeText, context: context);
+            thresholdValue, utcNow, localNow, accentColor, badgeText, context: context, emailCooldownMinutes: emailCooldownMinutes);
 
         var plain = BuildPlainTextBody(metricName, serverName, currentValue,
             thresholdValue, utcNow, localNow, context);
@@ -89,7 +90,8 @@ internal static class EmailTemplateBuilder
         string accentColor,
         string badgeText,
         bool isTest = false,
-        AlertContext? context = null)
+        AlertContext? context = null,
+        int emailCooldownMinutes = 15)
     {
         var sb = new StringBuilder(2048);
 
@@ -169,7 +171,7 @@ internal static class EmailTemplateBuilder
         sb.Append($"Sent by {WebUtility.HtmlEncode(EditionName)}");
         if (!isTest)
         {
-            sb.Append(" &middot; 15-minute cooldown between repeat alerts");
+            sb.Append($" &middot; {emailCooldownMinutes}-minute cooldown between repeat alerts");
         }
         sb.Append("</span>");
         sb.Append("</td></tr>");

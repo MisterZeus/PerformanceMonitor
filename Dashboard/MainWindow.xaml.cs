@@ -61,7 +61,6 @@ namespace PerformanceMonitorDashboard
         private readonly ConcurrentDictionary<string, DateTime> _lastBlockingAlert = new();
         private readonly ConcurrentDictionary<string, DateTime> _lastDeadlockAlert = new();
         private readonly ConcurrentDictionary<string, DateTime> _lastHighCpuAlert = new();
-        private static readonly TimeSpan AlertCooldown = TimeSpan.FromMinutes(5);
         private readonly ConcurrentDictionary<string, bool> _activeBlockingAlert = new();
         private readonly ConcurrentDictionary<string, bool> _activeDeadlockAlert = new();
         private readonly ConcurrentDictionary<string, bool> _activeHighCpuAlert = new();
@@ -1098,6 +1097,7 @@ namespace PerformanceMonitorDashboard
             string serverId, string serverName, AlertHealthResult health, DatabaseService databaseService)
         {
             var prefs = _preferencesService.GetPreferences();
+            var alertCooldown = TimeSpan.FromMinutes(prefs.AlertCooldownMinutes);
 
             if (_alertStateService.IsAnySilencingActive(serverId))
             {
@@ -1113,7 +1113,7 @@ namespace PerformanceMonitorDashboard
             if (blockingExceeded)
             {
                 _activeBlockingAlert[serverId] = true;
-                if (!_lastBlockingAlert.TryGetValue(serverId, out var lastAlert) || (now - lastAlert) >= AlertCooldown)
+                if (!_lastBlockingAlert.TryGetValue(serverId, out var lastAlert) || (now - lastAlert) >= alertCooldown)
                 {
                     _notificationService?.ShowBlockingNotification(
                         serverName,
@@ -1164,7 +1164,7 @@ namespace PerformanceMonitorDashboard
             if (deadlocksExceeded)
             {
                 _activeDeadlockAlert[serverId] = true;
-                if (!_lastDeadlockAlert.TryGetValue(serverId, out var lastAlert) || (now - lastAlert) >= AlertCooldown)
+                if (!_lastDeadlockAlert.TryGetValue(serverId, out var lastAlert) || (now - lastAlert) >= alertCooldown)
                 {
                     _notificationService?.ShowDeadlockNotification(
                         serverName,
@@ -1203,7 +1203,7 @@ namespace PerformanceMonitorDashboard
             {
                 var totalCpu = health.TotalCpuPercent!.Value;
                 _activeHighCpuAlert[serverId] = true;
-                if (!_lastHighCpuAlert.TryGetValue(serverId, out var lastAlert) || (now - lastAlert) >= AlertCooldown)
+                if (!_lastHighCpuAlert.TryGetValue(serverId, out var lastAlert) || (now - lastAlert) >= alertCooldown)
                 {
                     _notificationService?.ShowHighCpuNotification(
                         serverName,
@@ -1239,7 +1239,7 @@ namespace PerformanceMonitorDashboard
             if (triggeredWaits.Count > 0)
             {
                 _activePoisonWaitAlert[serverId] = true;
-                if (!_lastPoisonWaitAlert.TryGetValue(serverId, out var lastAlert) || (now - lastAlert) >= AlertCooldown)
+                if (!_lastPoisonWaitAlert.TryGetValue(serverId, out var lastAlert) || (now - lastAlert) >= alertCooldown)
                 {
                     var worst = triggeredWaits[0];
                     _notificationService?.ShowPoisonWaitNotification(serverName, worst.WaitType, worst.AvgMsPerWait);
@@ -1284,7 +1284,7 @@ namespace PerformanceMonitorDashboard
             if (longRunningTriggered)
             {
                 _activeLongRunningQueryAlert[serverId] = true;
-                if (!_lastLongRunningQueryAlert.TryGetValue(serverId, out var lastAlert) || (now - lastAlert) >= AlertCooldown)
+                if (!_lastLongRunningQueryAlert.TryGetValue(serverId, out var lastAlert) || (now - lastAlert) >= alertCooldown)
                 {
                     var worst = lrqList[0];
                     var elapsedMinutes = worst.ElapsedSeconds / 60;
@@ -1325,7 +1325,7 @@ namespace PerformanceMonitorDashboard
             {
                 var tempDb = health.TempDbSpace!;
                 _activeTempDbSpaceAlert[serverId] = true;
-                if (!_lastTempDbSpaceAlert.TryGetValue(serverId, out var lastAlert) || (now - lastAlert) >= AlertCooldown)
+                if (!_lastTempDbSpaceAlert.TryGetValue(serverId, out var lastAlert) || (now - lastAlert) >= alertCooldown)
                 {
                     _notificationService?.ShowTempDbSpaceNotification(serverName, tempDb.UsedPercent);
                     _lastTempDbSpaceAlert[serverId] = now;
@@ -1364,7 +1364,7 @@ namespace PerformanceMonitorDashboard
                 var worst = health.AnomalousJobs[0];
                 var jobKey = $"{serverId}:{worst.JobId}:{worst.StartTime:O}";
 
-                if (!_lastLongRunningJobAlert.TryGetValue(jobKey, out var lastAlert) || (now - lastAlert) >= AlertCooldown)
+                if (!_lastLongRunningJobAlert.TryGetValue(jobKey, out var lastAlert) || (now - lastAlert) >= alertCooldown)
                 {
                     var currentMinutes = worst.CurrentDurationSeconds / 60;
                     _notificationService?.ShowLongRunningJobNotification(
