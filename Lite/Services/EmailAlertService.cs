@@ -71,7 +71,7 @@ public class EmailAlertService
 
                     var subject = $"[SQL Monitor Alert] {metricName} on {serverName}";
                     var (htmlBody, plainTextBody) = EmailTemplateBuilder.BuildAlertEmail(
-                        metricName, serverName, currentValue, thresholdValue, context);
+                        metricName, serverName, currentValue, thresholdValue, App.EmailCooldownMinutes, context);
 
                     try
                     {

@@ -111,7 +111,7 @@ public partial class SettingsWindow : Window
     private void SaveButton_Click(object sender, RoutedEventArgs e)
     {
         _scheduleManager.SaveSchedules();
-        bool mcpChanged = SaveMcpSettings();
+        var (mcpChanged, mcpValid) = SaveMcpSettings();
         SaveDefaultTimeRange();
         SaveConnectionTimeout();
         SaveCsvSeparator();
@@ -122,7 +122,7 @@ public partial class SettingsWindow : Window
 
         _saved = true;
 
-        if (!alertsValid) return;
+        if (!alertsValid || !mcpValid) return;
 
         var message = mcpChanged
             ? "Settings saved. MCP changes take effect after restarting the application."
@@ -130,7 +130,7 @@ public partial class SettingsWindow : Window
         MessageBox.Show(message, "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
-    private bool SaveMcpSettings()
+    private (bool Changed, bool Valid) SaveMcpSettings()
     {
         var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
 
@@ -154,20 +154,32 @@ public partial class SettingsWindow : Window
 
             root["mcp_enabled"] = newEnabled;
 
+            bool portValid = true;
             if (newPort > 0 && newPort < 65536)
             {
                 root["mcp_port"] = newPort;
+            }
+            else
+            {
+                portValid = false;
             }
 
             var options = new JsonSerializerOptions { WriteIndented = true };
             File.WriteAllText(settingsPath, root.ToJsonString(options));
 
-            return oldEnabled != newEnabled || oldPort != newPort;
+            if (!portValid)
+            {
+                MessageBox.Show(
+                    "MCP port failed validation - must be a valid TCP port number.\nOther MCP settings were saved.",
+                    "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+
+            return (oldEnabled != newEnabled || oldPort != newPort, portValid);
         }
         catch (Exception ex)
         {
             AppLogger.Error("Settings", $"Failed to save MCP settings: {ex.Message}");
-            return false;
+            return (false, true);
         }
     }
 
@@ -493,14 +505,6 @@ public partial class SettingsWindow : Window
             App.EmailCooldownMinutes = emailCooldown;
         else
             validationErrors.Add("Email alert cooldown must be between 1 and 120 minutes.");
-        if (validationErrors.Count > 0)
-        {
-            MessageBox.Show(
-                "Some alert settings have invalid values and were not changed:\n\n" +
-                string.Join("\n", validationErrors),
-                "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
-            return false;
-        }
 
         var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
         try
@@ -548,6 +552,16 @@ public partial class SettingsWindow : Window
         {
             AppLogger.Error("Settings", $"Failed to save alert settings: {ex.Message}");
         }
+
+        if (validationErrors.Count > 0)
+        {
+            MessageBox.Show(
+                "Some alert settings have invalid values and were not changed:\n\n" +
+                string.Join("\n", validationErrors),
+                "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
+
         return true;
     }
 
