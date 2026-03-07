@@ -157,15 +157,11 @@ CREATE OR ALTER VIEW
 AS
 WITH
     /*
-    CPU utilization over last 24 hours
+    CPU p95 via window function (must be separate from aggregates)
     */
-    cpu_stats AS
+    cpu_p95 AS
     (
         SELECT
-            avg_cpu_pct =
-                AVG(CONVERT(decimal(5,2), cus.sqlserver_cpu_utilization)),
-            max_cpu_pct =
-                MAX(cus.sqlserver_cpu_utilization),
             p95_cpu_pct =
                 CONVERT
                 (
@@ -175,23 +171,37 @@ WITH
                         ORDER BY
                             cus.sqlserver_cpu_utilization
                     ) OVER ()
-                ),
+                )
+        FROM collect.cpu_utilization_stats AS cus
+        WHERE cus.collection_time >= DATEADD(HOUR, -24, SYSDATETIME())
+    ),
+    /*
+    CPU aggregates
+    */
+    cpu_agg AS
+    (
+        SELECT
+            avg_cpu_pct =
+                AVG(CONVERT(decimal(5,2), cus.sqlserver_cpu_utilization)),
+            max_cpu_pct =
+                MAX(cus.sqlserver_cpu_utilization),
             sample_count =
                 COUNT_BIG(*)
         FROM collect.cpu_utilization_stats AS cus
         WHERE cus.collection_time >= DATEADD(HOUR, -24, SYSDATETIME())
     ),
     /*
-    Deduplicate CPU stats (PERCENTILE_CONT is a window function)
+    Combine CPU stats
     */
     cpu_dedup AS
     (
-        SELECT TOP (1)
-            cs.avg_cpu_pct,
-            cs.max_cpu_pct,
-            cs.p95_cpu_pct,
-            cs.sample_count
-        FROM cpu_stats AS cs
+        SELECT
+            ca.avg_cpu_pct,
+            ca.max_cpu_pct,
+            p95_cpu_pct =
+                (SELECT TOP (1) cp.p95_cpu_pct FROM cpu_p95 AS cp),
+            ca.sample_count
+        FROM cpu_agg AS ca
     ),
     /*
     Latest memory stats
