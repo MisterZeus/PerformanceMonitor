@@ -47,9 +47,62 @@ public partial class SettingsWindow : Window
         LoadSmtpSettings();
     }
 
+    private bool _suppressPresetChange;
+
     private void LoadSchedules()
     {
         ScheduleGrid.ItemsSource = _scheduleManager.GetAllSchedules();
+        DetectActivePreset();
+    }
+
+    private void DetectActivePreset()
+    {
+        _suppressPresetChange = true;
+        try
+        {
+            string active = _scheduleManager.GetActivePreset();
+            for (int i = 0; i < PresetComboBox.Items.Count; i++)
+            {
+                if (PresetComboBox.Items[i] is ComboBoxItem item &&
+                    string.Equals(item.Content?.ToString(), active, StringComparison.OrdinalIgnoreCase))
+                {
+                    PresetComboBox.SelectedIndex = i;
+                    return;
+                }
+            }
+            PresetComboBox.SelectedIndex = 0;
+        }
+        finally
+        {
+            _suppressPresetChange = false;
+        }
+    }
+
+    private void PresetComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressPresetChange) return;
+        if (PresetComboBox.SelectedItem is not ComboBoxItem selected) return;
+
+        string presetName = selected.Content?.ToString() ?? "";
+        if (presetName == "Custom") return;
+
+        var result = MessageBox.Show(
+            $"Apply the \"{presetName}\" preset?\n\nThis will change all collector frequencies. Enabled/disabled state and retention settings are not affected.",
+            "Apply Collection Preset",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question
+        );
+
+        if (result != MessageBoxResult.Yes)
+        {
+            DetectActivePreset();
+            return;
+        }
+
+        _scheduleManager.ApplyPreset(presetName);
+        ScheduleGrid.ItemsSource = null;
+        ScheduleGrid.ItemsSource = _scheduleManager.GetAllSchedules();
+        DetectActivePreset();
     }
 
     private void UpdateCollectionStatus()

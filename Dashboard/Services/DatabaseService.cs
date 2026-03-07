@@ -357,5 +357,18 @@ namespace PerformanceMonitorDashboard.Services
 
             await command.ExecuteNonQueryAsync();
         }
+
+        public async Task ApplyCollectionPresetAsync(string presetName)
+        {
+            await using var tc = await OpenThrottledConnectionAsync();
+            var connection = tc.Connection;
+
+            using var command = new SqlCommand("config.apply_collection_preset", connection);
+            command.CommandType = System.Data.CommandType.StoredProcedure;
+            command.CommandTimeout = 120;
+            command.Parameters.Add(new SqlParameter("@preset_name", SqlDbType.NVarChar, 128) { Value = presetName });
+
+            await command.ExecuteNonQueryAsync();
+        }
     }
 }

@@ -34,8 +34,24 @@
         <!-- Header -->
         <TextBlock Grid.Row="0" Text="Collector Schedules" FontWeight="Bold" FontSize="16"
                    Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
-        <TextBlock Grid.Row="1" Text="Configure collection frequency and data retention for each collector."
-                   Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="12" Margin="0,0,0,12"/>
+        <Grid Grid.Row="1" Margin="0,0,0,12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0" Text="Configure collection frequency and data retention for each collector."
+                       Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="12" VerticalAlignment="Center"/>
+            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                <TextBlock Text="Preset:" Foreground="{DynamicResource ForegroundBrush}" FontSize="12"
+                           VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <ComboBox x:Name="PresetComboBox" Width="140" SelectionChanged="PresetComboBox_SelectionChanged">
+                    <ComboBoxItem Content="Custom" IsEnabled="False"/>
+                    <ComboBoxItem Content="Low-Impact"/>
+                    <ComboBoxItem Content="Balanced"/>
+                    <ComboBoxItem Content="Aggressive"/>
+                </ComboBox>
+            </StackPanel>
+        </Grid>
 
         <!-- Schedule Grid -->
         <Border Grid.Row="2" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="4">
