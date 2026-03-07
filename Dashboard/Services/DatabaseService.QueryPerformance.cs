@@ -2409,7 +2409,7 @@ namespace PerformanceMonitorDashboard.Services
         SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
         SELECT
-            ps.query_plan
+            CAST(DECOMPRESS(ps.query_plan_text) AS nvarchar(max)) AS query_plan_text
         FROM collect.procedure_stats AS ps
         WHERE ps.collection_id = @collection_id;";
 
