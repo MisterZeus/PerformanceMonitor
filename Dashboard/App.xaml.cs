@@ -11,6 +11,7 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Markup;
 using System.Windows.Threading;
 using PerformanceMonitorDashboard.Helpers;
 
@@ -38,6 +39,11 @@ namespace PerformanceMonitorDashboard
             }
 
             base.OnStartup(e);
+
+            // Use the user's locale for date/time formatting in WPF bindings (issue #459)
+            FrameworkElement.LanguageProperty.OverrideMetadata(
+                typeof(FrameworkElement),
+                new FrameworkPropertyMetadata(XmlLanguage.GetLanguage(Thread.CurrentThread.CurrentCulture.IetfLanguageTag)));
 
             // Apply saved color theme before the main window is shown
             var prefs = new Services.UserPreferencesService().GetPreferences();
