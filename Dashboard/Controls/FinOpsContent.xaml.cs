@@ -43,6 +43,13 @@ namespace PerformanceMonitorDashboard.Controls
             TabHelpers.AutoSizeColumnMinWidths(ServerInventoryDataGrid);
             TabHelpers.AutoSizeColumnMinWidths(TopTotalGrid);
             TabHelpers.AutoSizeColumnMinWidths(TopAvgGrid);
+            TabHelpers.AutoSizeColumnMinWidths(StorageGrowthDataGrid);
+            TabHelpers.AutoSizeColumnMinWidths(IdleDatabasesDataGrid);
+            TabHelpers.AutoSizeColumnMinWidths(TempdbPressureDataGrid);
+            TabHelpers.AutoSizeColumnMinWidths(WaitCategorySummaryDataGrid);
+            TabHelpers.AutoSizeColumnMinWidths(ExpensiveQueriesDataGrid);
+            TabHelpers.AutoSizeColumnMinWidths(IndexAnalysisSummaryGrid);
+            TabHelpers.AutoSizeColumnMinWidths(IndexAnalysisDetailGrid);
 
             TabHelpers.FreezeColumns(DatabaseResourcesDataGrid, 1);
             TabHelpers.FreezeColumns(DatabaseSizesDataGrid, 1);
@@ -50,6 +57,11 @@ namespace PerformanceMonitorDashboard.Controls
             TabHelpers.FreezeColumns(ServerInventoryDataGrid, 1);
             TabHelpers.FreezeColumns(TopTotalGrid, 1);
             TabHelpers.FreezeColumns(TopAvgGrid, 1);
+            TabHelpers.FreezeColumns(StorageGrowthDataGrid, 1);
+            TabHelpers.FreezeColumns(IdleDatabasesDataGrid, 1);
+            TabHelpers.FreezeColumns(WaitCategorySummaryDataGrid, 1);
+            TabHelpers.FreezeColumns(ExpensiveQueriesDataGrid, 1);
+            TabHelpers.FreezeColumns(IndexAnalysisDetailGrid, 1);
         }
 
         /// <summary>
@@ -279,6 +291,162 @@ namespace PerformanceMonitorDashboard.Controls
         }
 
         // ============================================
+        // Storage Growth Tab
+        // ============================================
+
+        private async Task LoadStorageGrowthAsync()
+        {
+            if (_databaseService == null) return;
+
+            try
+            {
+                var data = await _databaseService.GetFinOpsStorageGrowthAsync();
+                StorageGrowthDataGrid.ItemsSource = data;
+                StorageGrowthNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+                StorageGrowthCountIndicator.Text = data.Count > 0 ? $"{data.Count} database(s)" : "";
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Error loading storage growth: {ex.Message}", ex);
+            }
+        }
+
+        // ============================================
+        // Optimization Tab — Idle Databases
+        // ============================================
+
+        private async Task LoadIdleDatabasesAsync()
+        {
+            if (_databaseService == null) return;
+
+            try
+            {
+                var data = await _databaseService.GetFinOpsIdleDatabasesAsync();
+                IdleDatabasesDataGrid.ItemsSource = data;
+                IdleDatabasesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+                IdleDatabasesCountIndicator.Text = data.Count > 0 ? $"{data.Count} idle database(s)" : "";
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Error loading idle databases: {ex.Message}", ex);
+            }
+        }
+
+        // ============================================
+        // Optimization Tab — Tempdb Pressure
+        // ============================================
+
+        private async Task LoadTempdbSummaryAsync()
+        {
+            if (_databaseService == null) return;
+
+            try
+            {
+                var data = await _databaseService.GetFinOpsTempdbSummaryAsync();
+                TempdbPressureDataGrid.ItemsSource = data;
+                TempdbPressureNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Error loading tempdb summary: {ex.Message}", ex);
+            }
+        }
+
+        // ============================================
+        // Optimization Tab — Wait Stats Summary
+        // ============================================
+
+        private async Task LoadWaitCategorySummaryAsync()
+        {
+            if (_databaseService == null) return;
+
+            try
+            {
+                var data = await _databaseService.GetFinOpsWaitCategorySummaryAsync();
+                WaitCategorySummaryDataGrid.ItemsSource = data;
+                WaitCategorySummaryNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Error loading wait category summary: {ex.Message}", ex);
+            }
+        }
+
+        // ============================================
+        // Optimization Tab — Expensive Queries
+        // ============================================
+
+        private async Task LoadExpensiveQueriesAsync()
+        {
+            if (_databaseService == null) return;
+
+            try
+            {
+                var data = await _databaseService.GetFinOpsExpensiveQueriesAsync();
+                ExpensiveQueriesDataGrid.ItemsSource = data;
+                ExpensiveQueriesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+                ExpensiveQueriesCountIndicator.Text = data.Count > 0 ? $"{data.Count} query(s)" : "";
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Error loading expensive queries: {ex.Message}", ex);
+            }
+        }
+
+        // ============================================
+        // Index Analysis Tab
+        // ============================================
+
+        private async void RunIndexAnalysis_Click(object sender, RoutedEventArgs e)
+        {
+            if (_databaseService == null) return;
+
+            try
+            {
+                // Check if sp_IndexCleanup exists
+                var exists = await _databaseService.CheckSpIndexCleanupExistsAsync();
+                if (!exists)
+                {
+                    IndexAnalysisNotInstalledMessage.Visibility = Visibility.Visible;
+                    IndexAnalysisNoDataMessage.Visibility = Visibility.Collapsed;
+                    IndexAnalysisSummaryGrid.ItemsSource = null;
+                    IndexAnalysisDetailGrid.ItemsSource = null;
+                    return;
+                }
+
+                IndexAnalysisNotInstalledMessage.Visibility = Visibility.Collapsed;
+
+                // Show busy state
+                RunIndexAnalysisButton.IsEnabled = false;
+                IndexAnalysisStatusText.Text = "Running analysis...";
+
+                var databaseName = IndexAnalysisDatabaseInput.Text?.Trim();
+                var getAllDatabases = IndexAnalysisAllDatabases.IsChecked == true;
+
+                var (details, summaries) = await _databaseService.RunIndexAnalysisAsync(
+                    string.IsNullOrWhiteSpace(databaseName) ? null : databaseName,
+                    getAllDatabases);
+
+                IndexAnalysisSummaryGrid.ItemsSource = summaries;
+                IndexAnalysisDetailGrid.ItemsSource = details;
+                IndexAnalysisNoDataMessage.Visibility = details.Count == 0 && summaries.Count == 0
+                    ? Visibility.Visible : Visibility.Collapsed;
+                IndexAnalysisStatusText.Text = details.Count > 0
+                    ? $"{details.Count} index(es) found"
+                    : "Analysis complete — no index issues found";
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Error running index analysis: {ex.Message}", ex);
+                IndexAnalysisStatusText.Text = $"Error: {ex.Message}";
+            }
+            finally
+            {
+                RunIndexAnalysisButton.IsEnabled = true;
+            }
+        }
+
+        // ============================================
         // Database Sizes Tab
         // ============================================
 
@@ -353,6 +521,21 @@ namespace PerformanceMonitorDashboard.Controls
         private async void DatabaseResourcesRefresh_Click(object sender, RoutedEventArgs e)
         {
             await LoadDatabaseResourcesAsync();
+        }
+
+        private async void StorageGrowthRefresh_Click(object sender, RoutedEventArgs e)
+        {
+            await LoadStorageGrowthAsync();
+        }
+
+        private async void OptimizationRefresh_Click(object sender, RoutedEventArgs e)
+        {
+            await Task.WhenAll(
+                LoadIdleDatabasesAsync(),
+                LoadTempdbSummaryAsync(),
+                LoadWaitCategorySummaryAsync(),
+                LoadExpensiveQueriesAsync()
+            );
         }
 
         private async void DatabaseSizesRefresh_Click(object sender, RoutedEventArgs e)

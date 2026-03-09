@@ -517,29 +517,27 @@
             </Grid>
         </TabItem>
 
-        <!-- Application Connections Sub-Tab -->
-        <TabItem Header="Application Connections">
+        <!-- Storage Growth Sub-Tab -->
+        <TabItem Header="Storage Growth">
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
 
-                <!-- Header Controls -->
                 <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
-                    <TextBlock Text="Application Connections (24h)" VerticalAlignment="Center" Margin="0,0,10,0"
+                    <TextBlock Text="Storage Growth" VerticalAlignment="Center" Margin="0,0,10,0"
                                FontWeight="Bold" FontSize="14"
                                Foreground="{DynamicResource ForegroundBrush}"/>
-                    <Button Content="Refresh" Click="ApplicationConnectionsRefresh_Click"
-                            Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
-                    <TextBlock x:Name="AppConnectionsCountIndicator" Text="" Margin="12,0,0,0"
+                    <Button Content="Refresh" Click="StorageGrowthRefresh_Click"
+                            Margin="4,0,0,0" Padding="10,4" MinWidth="70"/>
+                    <TextBlock x:Name="StorageGrowthCountIndicator" Text="" Margin="12,0,0,0"
                                VerticalAlignment="Center" FontStyle="Italic"
                                Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
                 </StackPanel>
 
-                <!-- DataGrid -->
                 <Grid Grid.Row="1" Margin="10,0,10,10">
-                    <DataGrid x:Name="ApplicationConnectionsDataGrid"
+                    <DataGrid x:Name="StorageGrowthDataGrid"
                               AutoGenerateColumns="False"
                               IsReadOnly="True"
                               CanUserSortColumns="True"
@@ -549,36 +547,61 @@
                               SelectionMode="Extended"
                               RowStyle="{StaticResource DefaultRowStyle}">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="Application" Binding="{Binding ApplicationName}" Width="300"/>
-                            <DataGridTextColumn Header="Avg Connections" Binding="{Binding AvgConnections, StringFormat='{}{0:N0}'}" Width="120">
+                            <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="180"/>
+                            <DataGridTextColumn Header="Current Size (MB)" Binding="{Binding CurrentSizeMb, StringFormat='{}{0:N2}'}" Width="130">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
                                         <Setter Property="HorizontalAlignment" Value="Right"/>
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="Max Connections" Binding="{Binding MaxConnections, StringFormat='{}{0:N0}'}" Width="120">
+                            <DataGridTextColumn Header="7d Ago (MB)" Binding="{Binding Size7dAgoMb, StringFormat='{}{0:N2}'}" Width="110">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
                                         <Setter Property="HorizontalAlignment" Value="Right"/>
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="Samples" Binding="{Binding SampleCount, StringFormat='{}{0:N0}'}" Width="100">
+                            <DataGridTextColumn Header="30d Ago (MB)" Binding="{Binding Size30dAgoMb, StringFormat='{}{0:N2}'}" Width="110">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
                                         <Setter Property="HorizontalAlignment" Value="Right"/>
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="First Seen" Binding="{Binding FirstSeen, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Width="150"/>
-                            <DataGridTextColumn Header="Last Seen" Binding="{Binding LastSeen, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Width="150"/>
+                            <DataGridTextColumn Header="Growth 7d (MB)" Binding="{Binding Growth7dMb, StringFormat='{}{0:N2}'}" Width="120">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Growth 30d (MB)" Binding="{Binding Growth30dMb, StringFormat='{}{0:N2}'}" Width="130">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Daily Rate (MB)" Binding="{Binding DailyGrowthRateMb, StringFormat='{}{0:N2}'}" Width="120">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Growth % (30d)" Binding="{Binding GrowthPct30d, StringFormat='{}{0:N1}%'}" Width="120">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
                         </DataGrid.Columns>
                     </DataGrid>
 
-                    <!-- Empty State -->
-                    <TextBlock x:Name="ApplicationConnectionsNoDataMessage"
-                               Text="No application connection data collected yet. Select a server above."
+                    <TextBlock x:Name="StorageGrowthNoDataMessage"
+                               Text="No storage growth data available. Size stats must be collected for at least 7 days."
                                FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
                                HorizontalAlignment="Center" VerticalAlignment="Center"
                                Visibility="Collapsed"/>
@@ -671,6 +694,436 @@
                     <!-- Empty State -->
                     <TextBlock x:Name="DatabaseSizesNoDataMessage"
                                Text="No database size data collected yet"
+                               FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
+                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                               Visibility="Collapsed"/>
+                </Grid>
+            </Grid>
+        </TabItem>
+
+        <!-- Index Analysis Sub-Tab -->
+        <TabItem Header="Index Analysis">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
+                    <TextBlock Text="Index Analysis" VerticalAlignment="Center" Margin="0,0,10,0"
+                               FontWeight="Bold" FontSize="14"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="IndexAnalysisDatabaseInput" Width="180" Margin="0,0,8,0"
+                             VerticalContentAlignment="Center"/>
+                    <CheckBox x:Name="IndexAnalysisAllDatabases" Content="All Databases"
+                              VerticalAlignment="Center" Margin="0,0,8,0"
+                              Foreground="{DynamicResource ForegroundBrush}"/>
+                    <Button x:Name="RunIndexAnalysisButton" Content="Run Analysis" Click="RunIndexAnalysis_Click"
+                            Margin="4,0,0,0" Padding="10,4" MinWidth="100"/>
+                    <TextBlock x:Name="IndexAnalysisStatusText" Text="" Margin="12,0,0,0"
+                               VerticalAlignment="Center" FontStyle="Italic"
+                               Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                </StackPanel>
+
+                <Grid Grid.Row="1" Margin="10,0,10,10">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- Summary Grid -->
+                    <DataGrid x:Name="IndexAnalysisSummaryGrid" Grid.Row="0"
+                              AutoGenerateColumns="False"
+                              IsReadOnly="True"
+                              CanUserSortColumns="True"
+                              GridLinesVisibility="Horizontal"
+                              CanUserResizeColumns="True"
+                              HeadersVisibility="Column"
+                              SelectionMode="Extended"
+                              MaxHeight="200"
+                              RowStyle="{StaticResource DefaultRowStyle}">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="180"/>
+                            <DataGridTextColumn Header="Total Indexes" Binding="{Binding TotalIndexes, StringFormat='{}{0:N0}'}" Width="110">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Unused" Binding="{Binding UnusedIndexes, StringFormat='{}{0:N0}'}" Width="80">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Duplicate" Binding="{Binding DuplicateIndexes, StringFormat='{}{0:N0}'}" Width="90">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Compressible" Binding="{Binding CompressibleIndexes, StringFormat='{}{0:N0}'}" Width="110">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Total Size (GB)" Binding="{Binding TotalSizeGb}" Width="120">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <!-- Detail Grid -->
+                    <DataGrid x:Name="IndexAnalysisDetailGrid" Grid.Row="1" Margin="0,8,0,0"
+                              AutoGenerateColumns="False"
+                              IsReadOnly="True"
+                              CanUserSortColumns="True"
+                              GridLinesVisibility="Horizontal"
+                              CanUserResizeColumns="True"
+                              HeadersVisibility="Column"
+                              SelectionMode="Extended"
+                              RowStyle="{StaticResource DefaultRowStyle}">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Action" Binding="{Binding ScriptType}" Width="100"/>
+                            <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="140"/>
+                            <DataGridTextColumn Header="Schema" Binding="{Binding SchemaName}" Width="80"/>
+                            <DataGridTextColumn Header="Table" Binding="{Binding TableName}" Width="160"/>
+                            <DataGridTextColumn Header="Index" Binding="{Binding IndexName}" Width="200"/>
+                            <DataGridTextColumn Header="Rule" Binding="{Binding ConsolidationRule}" Width="160"/>
+                            <DataGridTextColumn Header="Target Index" Binding="{Binding TargetIndexName}" Width="160"/>
+                            <DataGridTextColumn Header="Size (GB)" Binding="{Binding IndexSizeGb}" Width="90">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Reads" Binding="{Binding IndexReads}" Width="100">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Writes" Binding="{Binding IndexWrites}" Width="100">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <!-- Not Installed Message -->
+                    <TextBlock x:Name="IndexAnalysisNotInstalledMessage"
+                               Text="sp_IndexCleanup is not installed on this server. Download it from github.com/erikdarlingdata/DarlingData"
+                               FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
+                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                               Visibility="Collapsed"/>
+
+                    <!-- No Results Message -->
+                    <TextBlock x:Name="IndexAnalysisNoDataMessage"
+                               Text="Click 'Run Analysis' to analyze indexes. Enter a database name or check 'All Databases'."
+                               FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
+                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                               Visibility="Visible"/>
+                </Grid>
+            </Grid>
+        </TabItem>
+
+        <!-- Optimization Sub-Tab -->
+        <TabItem Header="Optimization">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
+                    <TextBlock Text="Optimization" VerticalAlignment="Center" Margin="0,0,10,0"
+                               FontWeight="Bold" FontSize="14"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <Button Content="Refresh" Click="OptimizationRefresh_Click"
+                            Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
+                </StackPanel>
+
+            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="10,0,10,10">
+                <StackPanel>
+                    <!-- Idle Databases -->
+                    <Expander Header="Idle Databases" IsExpanded="True" Margin="0,0,0,8">
+                        <StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,4,0,4">
+                                <TextBlock x:Name="IdleDatabasesCountIndicator" Text=""
+                                           FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                            </StackPanel>
+                            <DataGrid x:Name="IdleDatabasesDataGrid"
+                                      AutoGenerateColumns="False"
+                                      IsReadOnly="True"
+                                      CanUserSortColumns="True"
+                                      GridLinesVisibility="Horizontal"
+                                      CanUserResizeColumns="True"
+                                      HeadersVisibility="Column"
+                                      SelectionMode="Extended"
+                                      MaxHeight="250"
+                                      RowStyle="{StaticResource DefaultRowStyle}">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="180"/>
+                                    <DataGridTextColumn Header="Total Size (MB)" Binding="{Binding TotalSizeMb, StringFormat='{}{0:N2}'}" Width="120">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="HorizontalAlignment" Value="Right"/>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="Files" Binding="{Binding FileCount}" Width="60">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="HorizontalAlignment" Value="Right"/>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="Last Execution" Binding="{Binding LastExecutionTime, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Width="160"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <TextBlock x:Name="IdleDatabasesNoDataMessage"
+                                       Text="No idle databases detected in the last 7 days."
+                                       FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                       Margin="0,4,0,0" Visibility="Collapsed"/>
+                        </StackPanel>
+                    </Expander>
+
+                    <!-- Tempdb Pressure -->
+                    <Expander Header="Tempdb Pressure" IsExpanded="True" Margin="0,0,0,8">
+                        <StackPanel>
+                            <DataGrid x:Name="TempdbPressureDataGrid"
+                                      AutoGenerateColumns="False"
+                                      IsReadOnly="True"
+                                      CanUserSortColumns="True"
+                                      GridLinesVisibility="Horizontal"
+                                      CanUserResizeColumns="True"
+                                      HeadersVisibility="Column"
+                                      SelectionMode="Extended"
+                                      MaxHeight="200"
+                                      RowStyle="{StaticResource DefaultRowStyle}">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Metric" Binding="{Binding Metric}" Width="200"/>
+                                    <DataGridTextColumn Header="Current (MB)" Binding="{Binding CurrentMb, StringFormat='{}{0:N2}'}" Width="120">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="HorizontalAlignment" Value="Right"/>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="Peak 24h (MB)" Binding="{Binding Peak24hMb, StringFormat='{}{0:N2}'}" Width="120">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="HorizontalAlignment" Value="Right"/>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="Warning" Binding="{Binding Warning}" Width="200"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <TextBlock x:Name="TempdbPressureNoDataMessage"
+                                       Text="No tempdb data collected yet."
+                                       FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                       Margin="0,4,0,0" Visibility="Collapsed"/>
+                        </StackPanel>
+                    </Expander>
+
+                    <!-- Wait Stats Summary -->
+                    <Expander Header="Wait Stats Summary" IsExpanded="True" Margin="0,0,0,8">
+                        <StackPanel>
+                            <DataGrid x:Name="WaitCategorySummaryDataGrid"
+                                      AutoGenerateColumns="False"
+                                      IsReadOnly="True"
+                                      CanUserSortColumns="True"
+                                      GridLinesVisibility="Horizontal"
+                                      CanUserResizeColumns="True"
+                                      HeadersVisibility="Column"
+                                      SelectionMode="Extended"
+                                      MaxHeight="250"
+                                      RowStyle="{StaticResource DefaultRowStyle}">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="120"/>
+                                    <DataGridTextColumn Header="Total Wait (ms)" Binding="{Binding TotalWaitTimeMs, StringFormat='{}{0:N0}'}" Width="130">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="HorizontalAlignment" Value="Right"/>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="Waiting Tasks" Binding="{Binding WaitingTasks, StringFormat='{}{0:N0}'}" Width="120">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="HorizontalAlignment" Value="Right"/>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="% of Total" Binding="{Binding PctOfTotal, StringFormat='{}{0:N1}%'}" Width="100">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="HorizontalAlignment" Value="Right"/>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="Top Wait Type" Binding="{Binding TopWaitType}" Width="200"/>
+                                    <DataGridTextColumn Header="Top Wait (ms)" Binding="{Binding TopWaitTimeMs, StringFormat='{}{0:N0}'}" Width="120">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="HorizontalAlignment" Value="Right"/>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <TextBlock x:Name="WaitCategorySummaryNoDataMessage"
+                                       Text="No wait stats data collected yet."
+                                       FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                       Margin="0,4,0,0" Visibility="Collapsed"/>
+                        </StackPanel>
+                    </Expander>
+
+                    <!-- Expensive Queries -->
+                    <Expander Header="Expensive Queries" IsExpanded="True" Margin="0,0,0,8">
+                        <StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,4,0,4">
+                                <TextBlock x:Name="ExpensiveQueriesCountIndicator" Text=""
+                                           FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                            </StackPanel>
+                            <DataGrid x:Name="ExpensiveQueriesDataGrid"
+                                      AutoGenerateColumns="False"
+                                      IsReadOnly="True"
+                                      CanUserSortColumns="True"
+                                      GridLinesVisibility="Horizontal"
+                                      CanUserResizeColumns="True"
+                                      HeadersVisibility="Column"
+                                      SelectionMode="Extended"
+                                      MaxHeight="350"
+                                      RowStyle="{StaticResource DefaultRowStyle}">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="140"/>
+                                    <DataGridTextColumn Header="Total CPU (ms)" Binding="{Binding TotalCpuMs, StringFormat='{}{0:N0}'}" Width="120">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="HorizontalAlignment" Value="Right"/>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="Avg CPU/Exec" Binding="{Binding AvgCpuMsPerExec, StringFormat='{}{0:N2}'}" Width="120">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="HorizontalAlignment" Value="Right"/>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="Total Reads" Binding="{Binding TotalReads, StringFormat='{}{0:N0}'}" Width="120">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="HorizontalAlignment" Value="Right"/>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="Avg Reads/Exec" Binding="{Binding AvgReadsPerExec, StringFormat='{}{0:N0}'}" Width="120">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="HorizontalAlignment" Value="Right"/>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="Executions" Binding="{Binding Executions, StringFormat='{}{0:N0}'}" Width="100">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="HorizontalAlignment" Value="Right"/>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="Query Preview" Binding="{Binding QueryPreview}" Width="400"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <TextBlock x:Name="ExpensiveQueriesNoDataMessage"
+                                       Text="No query stats data collected yet."
+                                       FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                       Margin="0,4,0,0" Visibility="Collapsed"/>
+                        </StackPanel>
+                    </Expander>
+                </StackPanel>
+            </ScrollViewer>
+            </Grid>
+        </TabItem>
+
+        <!-- Application Connections Sub-Tab -->
+        <TabItem Header="Application Connections">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <!-- Header Controls -->
+                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
+                    <TextBlock Text="Application Connections (24h)" VerticalAlignment="Center" Margin="0,0,10,0"
+                               FontWeight="Bold" FontSize="14"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <Button Content="Refresh" Click="ApplicationConnectionsRefresh_Click"
+                            Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
+                    <TextBlock x:Name="AppConnectionsCountIndicator" Text="" Margin="12,0,0,0"
+                               VerticalAlignment="Center" FontStyle="Italic"
+                               Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                </StackPanel>
+
+                <!-- DataGrid -->
+                <Grid Grid.Row="1" Margin="10,0,10,10">
+                    <DataGrid x:Name="ApplicationConnectionsDataGrid"
+                              AutoGenerateColumns="False"
+                              IsReadOnly="True"
+                              CanUserSortColumns="True"
+                              GridLinesVisibility="Horizontal"
+                              CanUserResizeColumns="True"
+                              HeadersVisibility="Column"
+                              SelectionMode="Extended"
+                              RowStyle="{StaticResource DefaultRowStyle}">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Application" Binding="{Binding ApplicationName}" Width="300"/>
+                            <DataGridTextColumn Header="Avg Connections" Binding="{Binding AvgConnections, StringFormat='{}{0:N0}'}" Width="120">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Max Connections" Binding="{Binding MaxConnections, StringFormat='{}{0:N0}'}" Width="120">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Samples" Binding="{Binding SampleCount, StringFormat='{}{0:N0}'}" Width="100">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="First Seen" Binding="{Binding FirstSeen, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Width="150"/>
+                            <DataGridTextColumn Header="Last Seen" Binding="{Binding LastSeen, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Width="150"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <!-- Empty State -->
+                    <TextBlock x:Name="ApplicationConnectionsNoDataMessage"
+                               Text="No application connection data collected yet. Select a server above."
                                FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
                                HorizontalAlignment="Center" VerticalAlignment="Center"
                                Visibility="Collapsed"/>

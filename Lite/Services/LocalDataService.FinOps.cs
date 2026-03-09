@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using Microsoft.Data.SqlClient;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -582,6 +583,466 @@ LIMIT $2";
         }
         return items;
     }
+
+    /// <summary>
+    /// Gets per-database storage growth trends comparing current size to 7d and 30d ago.
+    /// </summary>
+    public async Task<List<StorageGrowthRow>> GetStorageGrowthAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var now = DateTime.UtcNow;
+        var cutoff7d = now.AddDays(-7);
+        var cutoff30d = now.AddDays(-30);
+
+        command.CommandText = @"
+WITH latest AS (
+    SELECT
+        database_name,
+        SUM(total_size_mb) AS current_size_mb
+    FROM v_database_size_stats
+    WHERE server_id = $1
+    AND   collection_time = (
+        SELECT MAX(collection_time)
+        FROM v_database_size_stats
+        WHERE server_id = $1
+    )
+    GROUP BY database_name
+),
+past_7d AS (
+    SELECT
+        database_name,
+        SUM(total_size_mb) AS size_mb
+    FROM v_database_size_stats
+    WHERE server_id = $1
+    AND   collection_time = (
+        SELECT MAX(collection_time)
+        FROM v_database_size_stats
+        WHERE server_id = $1
+        AND   collection_time <= $2
+    )
+    GROUP BY database_name
+),
+past_30d AS (
+    SELECT
+        database_name,
+        SUM(total_size_mb) AS size_mb
+    FROM v_database_size_stats
+    WHERE server_id = $1
+    AND   collection_time = (
+        SELECT MAX(collection_time)
+        FROM v_database_size_stats
+        WHERE server_id = $1
+        AND   collection_time <= $3
+    )
+    GROUP BY database_name
+)
+SELECT
+    l.database_name,
+    l.current_size_mb,
+    p7.size_mb,
+    p30.size_mb,
+    l.current_size_mb - COALESCE(p7.size_mb, l.current_size_mb) AS growth_7d_mb,
+    l.current_size_mb - COALESCE(p30.size_mb, l.current_size_mb) AS growth_30d_mb,
+    CASE
+        WHEN p30.size_mb IS NOT NULL
+        THEN (l.current_size_mb - p30.size_mb) / 30.0
+        WHEN p7.size_mb IS NOT NULL
+        THEN (l.current_size_mb - p7.size_mb) / 7.0
+        ELSE 0
+    END AS daily_growth_rate_mb,
+    CASE
+        WHEN p30.size_mb IS NOT NULL AND p30.size_mb > 0
+        THEN (l.current_size_mb - p30.size_mb) * 100.0 / p30.size_mb
+        ELSE 0
+    END AS growth_pct_30d
+FROM latest l
+LEFT JOIN past_7d p7 ON p7.database_name = l.database_name
+LEFT JOIN past_30d p30 ON p30.database_name = l.database_name
+ORDER BY growth_30d_mb DESC";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = cutoff7d });
+        command.Parameters.Add(new DuckDBParameter { Value = cutoff30d });
+
+        var items = new List<StorageGrowthRow>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new StorageGrowthRow
+            {
+                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                CurrentSizeMb = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1)),
+                Size7dAgoMb = reader.IsDBNull(2) ? null : Convert.ToDecimal(reader.GetValue(2)),
+                Size30dAgoMb = reader.IsDBNull(3) ? null : Convert.ToDecimal(reader.GetValue(3)),
+                Growth7dMb = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
+                Growth30dMb = reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5)),
+                DailyGrowthRateMb = reader.IsDBNull(6) ? 0m : Convert.ToDecimal(reader.GetValue(6)),
+                GrowthPct30d = reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7))
+            });
+        }
+        return items;
+    }
+
+    /// <summary>
+    /// Detects databases with zero query executions over the last N days.
+    /// </summary>
+    public async Task<List<IdleDatabaseRow>> GetIdleDatabasesAsync(int serverId, int daysBack = 7)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var cutoff = DateTime.UtcNow.AddDays(-daysBack);
+
+        command.CommandText = @"
+WITH db_sizes AS (
+    SELECT
+        database_name,
+        SUM(total_size_mb) AS total_size_mb,
+        COUNT(*) AS file_count
+    FROM v_database_size_stats
+    WHERE server_id = $1
+    AND   collection_time = (
+        SELECT MAX(collection_time)
+        FROM v_database_size_stats
+        WHERE server_id = $1
+    )
+    GROUP BY database_name
+),
+db_activity AS (
+    SELECT
+        database_name,
+        SUM(delta_execution_count) AS total_executions,
+        MAX(last_execution_time) AS last_execution
+    FROM v_query_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   delta_execution_count IS NOT NULL
+    GROUP BY database_name
+)
+SELECT
+    ds.database_name,
+    ds.total_size_mb,
+    ds.file_count,
+    a.last_execution
+FROM db_sizes ds
+LEFT JOIN db_activity a ON a.database_name = ds.database_name
+WHERE COALESCE(a.total_executions, 0) = 0
+AND   ds.database_name NOT IN ('master', 'model', 'msdb', 'tempdb')
+ORDER BY ds.total_size_mb DESC";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = cutoff });
+
+        var items = new List<IdleDatabaseRow>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new IdleDatabaseRow
+            {
+                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                TotalSizeMb = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1)),
+                FileCount = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2)),
+                LastExecutionTime = reader.IsDBNull(3) ? null : reader.GetDateTime(3)
+            });
+        }
+        return items;
+    }
+
+    /// <summary>
+    /// Gets tempdb pressure summary: latest and 24h peak values.
+    /// </summary>
+    public async Task<List<TempdbSummaryRow>> GetTempdbSummaryAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var cutoff = DateTime.UtcNow.AddHours(-24);
+
+        command.CommandText = @"
+WITH latest AS (
+    SELECT
+        user_object_reserved_mb,
+        internal_object_reserved_mb,
+        version_store_reserved_mb,
+        total_reserved_mb
+    FROM v_tempdb_stats
+    WHERE server_id = $1
+    ORDER BY collection_time DESC
+    LIMIT 1
+),
+peak AS (
+    SELECT
+        MAX(user_object_reserved_mb) AS max_user_mb,
+        MAX(internal_object_reserved_mb) AS max_internal_mb,
+        MAX(version_store_reserved_mb) AS max_version_store_mb,
+        MAX(total_reserved_mb) AS max_total_mb
+    FROM v_tempdb_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+)
+SELECT 'User Objects', l.user_object_reserved_mb, p.max_user_mb,
+    CASE WHEN p.max_user_mb > 1024 THEN 'High user object usage' ELSE '' END
+FROM latest l CROSS JOIN peak p
+UNION ALL
+SELECT 'Internal Objects', l.internal_object_reserved_mb, p.max_internal_mb,
+    CASE WHEN p.max_internal_mb > 1024 THEN 'High internal object usage (sorts/hashes)' ELSE '' END
+FROM latest l CROSS JOIN peak p
+UNION ALL
+SELECT 'Version Store', l.version_store_reserved_mb, p.max_version_store_mb,
+    CASE WHEN p.max_version_store_mb > 2048 THEN 'Version store pressure — check long-running transactions' ELSE '' END
+FROM latest l CROSS JOIN peak p
+UNION ALL
+SELECT 'Total Reserved', l.total_reserved_mb, p.max_total_mb, ''
+FROM latest l CROSS JOIN peak p";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = cutoff });
+
+        var items = new List<TempdbSummaryRow>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new TempdbSummaryRow
+            {
+                Metric = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                CurrentMb = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1)),
+                Peak24hMb = reader.IsDBNull(2) ? 0m : Convert.ToDecimal(reader.GetValue(2)),
+                Warning = reader.IsDBNull(3) ? "" : reader.GetString(3)
+            });
+        }
+        return items;
+    }
+
+    /// <summary>
+    /// Gets wait stats grouped by cost category over the last 24 hours.
+    /// </summary>
+    public async Task<List<WaitCategorySummaryRow>> GetWaitCategorySummaryAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var cutoff = DateTime.UtcNow.AddHours(-24);
+
+        command.CommandText = @"
+WITH categorized AS (
+    SELECT
+        CASE
+            WHEN wait_type IN ('SOS_SCHEDULER_YIELD', 'CXPACKET', 'CXCONSUMER', 'CXSYNC_PORT', 'CXSYNC_CONSUMER') THEN 'CPU'
+            WHEN wait_type ILIKE 'PAGEIOLATCH%'
+            OR   wait_type IN ('WRITELOG', 'IO_COMPLETION', 'ASYNC_IO_COMPLETION') THEN 'Storage'
+            WHEN wait_type IN ('RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE', 'CMEMTHREAD') THEN 'Memory'
+            WHEN wait_type = 'ASYNC_NETWORK_IO' THEN 'Network'
+            WHEN wait_type ILIKE 'LCK_M_%' THEN 'Locks'
+            ELSE 'Other'
+        END AS category,
+        wait_type,
+        SUM(delta_wait_time_ms) AS wait_time_ms,
+        SUM(delta_waiting_tasks_count) AS waiting_tasks
+    FROM v_wait_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   delta_wait_time_ms IS NOT NULL
+    AND   delta_wait_time_ms > 0
+    GROUP BY
+        CASE
+            WHEN wait_type IN ('SOS_SCHEDULER_YIELD', 'CXPACKET', 'CXCONSUMER', 'CXSYNC_PORT', 'CXSYNC_CONSUMER') THEN 'CPU'
+            WHEN wait_type ILIKE 'PAGEIOLATCH%'
+            OR   wait_type IN ('WRITELOG', 'IO_COMPLETION', 'ASYNC_IO_COMPLETION') THEN 'Storage'
+            WHEN wait_type IN ('RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE', 'CMEMTHREAD') THEN 'Memory'
+            WHEN wait_type = 'ASYNC_NETWORK_IO' THEN 'Network'
+            WHEN wait_type ILIKE 'LCK_M_%' THEN 'Locks'
+            ELSE 'Other'
+        END,
+        wait_type
+),
+ranked AS (
+    SELECT
+        *,
+        ROW_NUMBER() OVER (PARTITION BY category ORDER BY wait_time_ms DESC) AS rn
+    FROM categorized
+),
+by_category AS (
+    SELECT
+        category,
+        SUM(wait_time_ms) AS total_wait_time_ms,
+        SUM(waiting_tasks) AS total_waiting_tasks,
+        MAX(CASE WHEN rn = 1 THEN wait_type END) AS top_wait_type,
+        MAX(CASE WHEN rn = 1 THEN wait_time_ms END) AS top_wait_time_ms
+    FROM ranked
+    GROUP BY category
+),
+grand_total AS (
+    SELECT NULLIF(SUM(total_wait_time_ms), 0) AS total
+    FROM by_category
+)
+SELECT
+    bc.category,
+    bc.total_wait_time_ms,
+    bc.total_waiting_tasks,
+    CAST(bc.total_wait_time_ms * 100.0 / gt.total AS DECIMAL(5,1)),
+    bc.top_wait_type,
+    bc.top_wait_time_ms
+FROM by_category bc
+CROSS JOIN grand_total gt
+ORDER BY bc.total_wait_time_ms DESC";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = cutoff });
+
+        var items = new List<WaitCategorySummaryRow>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new WaitCategorySummaryRow
+            {
+                Category = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                TotalWaitTimeMs = reader.IsDBNull(1) ? 0 : ToInt64(reader.GetValue(1)),
+                WaitingTasks = reader.IsDBNull(2) ? 0 : ToInt64(reader.GetValue(2)),
+                PctOfTotal = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3)),
+                TopWaitType = reader.IsDBNull(4) ? "" : reader.GetString(4),
+                TopWaitTimeMs = reader.IsDBNull(5) ? 0 : ToInt64(reader.GetValue(5))
+            });
+        }
+        return items;
+    }
+
+    /// <summary>
+    /// Gets top 20 most expensive queries by total CPU over the last 24 hours.
+    /// </summary>
+    public async Task<List<ExpensiveQueryRow>> GetExpensiveQueriesAsync(int serverId, int hoursBack = 24, int topN = 20)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
+
+        command.CommandText = @"
+SELECT
+    database_name,
+    SUM(delta_worker_time) / 1000 AS total_cpu_ms,
+    CAST(SUM(delta_worker_time) / 1000.0 / NULLIF(SUM(delta_execution_count), 0) AS DECIMAL(19,2)) AS avg_cpu_ms,
+    SUM(delta_logical_reads) AS total_reads,
+    CAST(SUM(delta_logical_reads) * 1.0 / NULLIF(SUM(delta_execution_count), 0) AS DECIMAL(19,0)) AS avg_reads,
+    SUM(delta_execution_count) AS executions,
+    LEFT(query_text, 200) AS query_preview
+FROM v_query_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   delta_worker_time IS NOT NULL
+AND   delta_worker_time > 0
+GROUP BY
+    database_name,
+    sql_handle,
+    statement_start_offset,
+    statement_end_offset,
+    query_text
+ORDER BY SUM(delta_worker_time) DESC
+LIMIT $3";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = cutoff });
+        command.Parameters.Add(new DuckDBParameter { Value = topN });
+
+        var items = new List<ExpensiveQueryRow>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new ExpensiveQueryRow
+            {
+                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                TotalCpuMs = reader.IsDBNull(1) ? 0 : ToInt64(reader.GetValue(1)),
+                AvgCpuMsPerExec = reader.IsDBNull(2) ? 0m : Convert.ToDecimal(reader.GetValue(2)),
+                TotalReads = reader.IsDBNull(3) ? 0 : ToInt64(reader.GetValue(3)),
+                AvgReadsPerExec = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
+                Executions = reader.IsDBNull(5) ? 0 : ToInt64(reader.GetValue(5)),
+                QueryPreview = reader.IsDBNull(6) ? "" : reader.GetString(6)
+            });
+        }
+        return items;
+    }
+
+    /// <summary>
+    /// Checks if sp_IndexCleanup is installed on the target SQL Server.
+    /// </summary>
+    public static async Task<bool> CheckSpIndexCleanupExistsAsync(string connectionString)
+    {
+        using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync();
+        using var command = new SqlCommand("SELECT OBJECT_ID('dbo.sp_IndexCleanup', 'P')", connection) { CommandTimeout = 30 };
+        var result = await command.ExecuteScalarAsync();
+        return result != null && result != DBNull.Value;
+    }
+
+    /// <summary>
+    /// Runs sp_IndexCleanup on the remote SQL Server and returns detail + summary result sets.
+    /// </summary>
+    public static async Task<(List<IndexCleanupResultRow> Details, List<IndexCleanupSummaryRow> Summaries)> RunIndexAnalysisAsync(
+        string connectionString, string? databaseName, bool getAllDatabases)
+    {
+        var details = new List<IndexCleanupResultRow>();
+        var summaries = new List<IndexCleanupSummaryRow>();
+
+        using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync();
+
+        using var command = new SqlCommand("dbo.sp_IndexCleanup", connection);
+        command.CommandType = System.Data.CommandType.StoredProcedure;
+        command.CommandTimeout = 300;
+
+        if (getAllDatabases)
+        {
+            command.Parameters.AddWithValue("@get_all_databases", 1);
+        }
+        else if (!string.IsNullOrWhiteSpace(databaseName))
+        {
+            command.Parameters.AddWithValue("@database_name", databaseName);
+        }
+
+        using var reader = await command.ExecuteReaderAsync();
+
+        while (await reader.ReadAsync())
+        {
+            details.Add(new IndexCleanupResultRow
+            {
+                ScriptType = reader.IsDBNull(0) ? "" : reader.GetValue(0).ToString() ?? "",
+                AdditionalInfo = reader.IsDBNull(1) ? "" : reader.GetValue(1).ToString() ?? "",
+                DatabaseName = reader.IsDBNull(2) ? "" : reader.GetValue(2).ToString() ?? "",
+                SchemaName = reader.IsDBNull(3) ? "" : reader.GetValue(3).ToString() ?? "",
+                TableName = reader.IsDBNull(4) ? "" : reader.GetValue(4).ToString() ?? "",
+                IndexName = reader.IsDBNull(5) ? "" : reader.GetValue(5).ToString() ?? "",
+                ConsolidationRule = reader.IsDBNull(6) ? "" : reader.GetValue(6).ToString() ?? "",
+                TargetIndexName = reader.IsDBNull(7) ? "" : reader.GetValue(7).ToString() ?? "",
+                SupersededInfo = reader.IsDBNull(8) ? "" : reader.GetValue(8).ToString() ?? "",
+                IndexSizeGb = reader.IsDBNull(9) ? "" : reader.GetValue(9).ToString() ?? "",
+                IndexRows = reader.IsDBNull(10) ? "" : reader.GetValue(10).ToString() ?? "",
+                IndexReads = reader.IsDBNull(11) ? "" : reader.GetValue(11).ToString() ?? "",
+                IndexWrites = reader.IsDBNull(12) ? "" : reader.GetValue(12).ToString() ?? "",
+                OriginalIndexDefinition = reader.IsDBNull(13) ? "" : reader.GetValue(13).ToString() ?? "",
+                Script = reader.IsDBNull(14) ? "" : reader.GetValue(14).ToString() ?? ""
+            });
+        }
+
+        if (await reader.NextResultAsync())
+        {
+            while (await reader.ReadAsync())
+            {
+                var fieldCount = reader.FieldCount;
+                summaries.Add(new IndexCleanupSummaryRow
+                {
+                    DatabaseName = fieldCount > 1 && !reader.IsDBNull(1) ? reader.GetValue(1).ToString() ?? "" : "",
+                    TotalIndexes = fieldCount > 4 && !reader.IsDBNull(4) ? reader.GetValue(4).ToString() ?? "" : "",
+                    UnusedIndexes = fieldCount > 5 && !reader.IsDBNull(5) ? reader.GetValue(5).ToString() ?? "" : "",
+                    DuplicateIndexes = fieldCount > 6 && !reader.IsDBNull(6) ? reader.GetValue(6).ToString() ?? "" : "",
+                    CompressibleIndexes = fieldCount > 7 && !reader.IsDBNull(7) ? reader.GetValue(7).ToString() ?? "" : "",
+                    TotalSizeGb = fieldCount > 8 && !reader.IsDBNull(8) ? reader.GetValue(8).ToString() ?? "" : ""
+                });
+            }
+        }
+
+        return (details, summaries);
+    }
 }
 
 public class TopResourceConsumerRow
@@ -694,4 +1155,82 @@ public class DatabaseSizeTrendPoint
     public DateTime CollectionTime { get; set; }
     public string DatabaseName { get; set; } = "";
     public decimal TotalSizeMb { get; set; }
+}
+
+public class StorageGrowthRow
+{
+    public string DatabaseName { get; set; } = "";
+    public decimal CurrentSizeMb { get; set; }
+    public decimal? Size7dAgoMb { get; set; }
+    public decimal? Size30dAgoMb { get; set; }
+    public decimal Growth7dMb { get; set; }
+    public decimal Growth30dMb { get; set; }
+    public decimal DailyGrowthRateMb { get; set; }
+    public decimal GrowthPct30d { get; set; }
+}
+
+public class IdleDatabaseRow
+{
+    public string DatabaseName { get; set; } = "";
+    public decimal TotalSizeMb { get; set; }
+    public int FileCount { get; set; }
+    public DateTime? LastExecutionTime { get; set; }
+}
+
+public class TempdbSummaryRow
+{
+    public string Metric { get; set; } = "";
+    public decimal CurrentMb { get; set; }
+    public decimal Peak24hMb { get; set; }
+    public string Warning { get; set; } = "";
+}
+
+public class WaitCategorySummaryRow
+{
+    public string Category { get; set; } = "";
+    public long TotalWaitTimeMs { get; set; }
+    public long WaitingTasks { get; set; }
+    public decimal PctOfTotal { get; set; }
+    public string TopWaitType { get; set; } = "";
+    public long TopWaitTimeMs { get; set; }
+}
+
+public class ExpensiveQueryRow
+{
+    public string DatabaseName { get; set; } = "";
+    public long TotalCpuMs { get; set; }
+    public decimal AvgCpuMsPerExec { get; set; }
+    public long TotalReads { get; set; }
+    public decimal AvgReadsPerExec { get; set; }
+    public long Executions { get; set; }
+    public string QueryPreview { get; set; } = "";
+}
+
+public class IndexCleanupResultRow
+{
+    public string ScriptType { get; set; } = "";
+    public string AdditionalInfo { get; set; } = "";
+    public string DatabaseName { get; set; } = "";
+    public string SchemaName { get; set; } = "";
+    public string TableName { get; set; } = "";
+    public string IndexName { get; set; } = "";
+    public string ConsolidationRule { get; set; } = "";
+    public string TargetIndexName { get; set; } = "";
+    public string SupersededInfo { get; set; } = "";
+    public string IndexSizeGb { get; set; } = "";
+    public string IndexRows { get; set; } = "";
+    public string IndexReads { get; set; } = "";
+    public string IndexWrites { get; set; } = "";
+    public string OriginalIndexDefinition { get; set; } = "";
+    public string Script { get; set; } = "";
+}
+
+public class IndexCleanupSummaryRow
+{
+    public string DatabaseName { get; set; } = "";
+    public string TotalIndexes { get; set; } = "";
+    public string UnusedIndexes { get; set; } = "";
+    public string DuplicateIndexes { get; set; } = "";
+    public string CompressibleIndexes { get; set; } = "";
+    public string TotalSizeGb { get; set; } = "";
 }

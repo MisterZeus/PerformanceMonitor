@@ -665,6 +665,612 @@ OPTION(MAXDOP 1, RECOMPILE);";
 
             return items;
         }
+
+        /// <summary>
+        /// Gets per-database storage growth trends comparing current size to 7d and 30d ago.
+        /// </summary>
+        public async Task<List<FinOpsStorageGrowthRow>> GetFinOpsStorageGrowthAsync()
+        {
+            var items = new List<FinOpsStorageGrowthRow>();
+
+            await using var tc = await OpenThrottledConnectionAsync();
+            var connection = tc.Connection;
+
+            const string query = @"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+WITH
+    latest AS
+    (
+        SELECT
+            database_name,
+            current_size_mb =
+                SUM(total_size_mb)
+        FROM collect.database_size_stats
+        WHERE collection_time =
+        (
+            SELECT MAX(collection_time)
+            FROM collect.database_size_stats
+        )
+        GROUP BY
+            database_name
+    ),
+    past_7d AS
+    (
+        SELECT
+            database_name,
+            size_mb =
+                SUM(total_size_mb)
+        FROM collect.database_size_stats
+        WHERE collection_time =
+        (
+            SELECT MAX(collection_time)
+            FROM collect.database_size_stats
+            WHERE collection_time <= DATEADD(DAY, -7, SYSDATETIME())
+        )
+        GROUP BY
+            database_name
+    ),
+    past_30d AS
+    (
+        SELECT
+            database_name,
+            size_mb =
+                SUM(total_size_mb)
+        FROM collect.database_size_stats
+        WHERE collection_time =
+        (
+            SELECT MAX(collection_time)
+            FROM collect.database_size_stats
+            WHERE collection_time <= DATEADD(DAY, -30, SYSDATETIME())
+        )
+        GROUP BY
+            database_name
+    )
+SELECT
+    l.database_name,
+    l.current_size_mb,
+    p7.size_mb,
+    p30.size_mb,
+    growth_7d_mb =
+        l.current_size_mb - ISNULL(p7.size_mb, l.current_size_mb),
+    growth_30d_mb =
+        l.current_size_mb - ISNULL(p30.size_mb, l.current_size_mb),
+    daily_growth_rate_mb =
+        CASE
+            WHEN p30.size_mb IS NOT NULL
+            THEN (l.current_size_mb - p30.size_mb) / 30.0
+            WHEN p7.size_mb IS NOT NULL
+            THEN (l.current_size_mb - p7.size_mb) / 7.0
+            ELSE 0
+        END,
+    growth_pct_30d =
+        CASE
+            WHEN p30.size_mb IS NOT NULL
+            AND  p30.size_mb > 0
+            THEN (l.current_size_mb - p30.size_mb) * 100.0 / p30.size_mb
+            ELSE 0
+        END
+FROM latest AS l
+LEFT JOIN past_7d AS p7
+  ON p7.database_name = l.database_name
+LEFT JOIN past_30d AS p30
+  ON p30.database_name = l.database_name
+ORDER BY
+    l.current_size_mb - ISNULL(p30.size_mb, l.current_size_mb) DESC
+OPTION(MAXDOP 1, RECOMPILE);";
+
+            using var command = new SqlCommand(query, connection);
+            command.CommandTimeout = 120;
+
+            using (StartQueryTiming("FinOps_StorageGrowth", query, connection))
+            {
+                using var reader = await command.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    items.Add(new FinOpsStorageGrowthRow
+                    {
+                        DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                        CurrentSizeMb = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1)),
+                        Size7dAgoMb = reader.IsDBNull(2) ? null : Convert.ToDecimal(reader.GetValue(2)),
+                        Size30dAgoMb = reader.IsDBNull(3) ? null : Convert.ToDecimal(reader.GetValue(3)),
+                        Growth7dMb = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
+                        Growth30dMb = reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5)),
+                        DailyGrowthRateMb = reader.IsDBNull(6) ? 0m : Convert.ToDecimal(reader.GetValue(6)),
+                        GrowthPct30d = reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7))
+                    });
+                }
+            }
+
+            return items;
+        }
+
+        /// <summary>
+        /// Detects databases with zero query executions over the last N days.
+        /// </summary>
+        public async Task<List<FinOpsIdleDatabase>> GetFinOpsIdleDatabasesAsync(int daysBack = 7)
+        {
+            var items = new List<FinOpsIdleDatabase>();
+
+            await using var tc = await OpenThrottledConnectionAsync();
+            var connection = tc.Connection;
+
+            const string query = @"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+WITH
+    db_sizes AS
+    (
+        SELECT
+            database_name,
+            total_size_mb =
+                SUM(total_size_mb),
+            file_count =
+                COUNT(*)
+        FROM collect.database_size_stats
+        WHERE collection_time =
+        (
+            SELECT MAX(collection_time)
+            FROM collect.database_size_stats
+        )
+        GROUP BY
+            database_name
+    ),
+    db_activity AS
+    (
+        SELECT
+            database_name,
+            total_executions =
+                SUM(execution_count_delta),
+            last_execution =
+                MAX(last_execution_time)
+        FROM collect.query_stats
+        WHERE collection_time >= DATEADD(DAY, -@daysBack, SYSDATETIME())
+        AND   execution_count_delta IS NOT NULL
+        GROUP BY
+            database_name
+    )
+SELECT
+    ds.database_name,
+    ds.total_size_mb,
+    ds.file_count,
+    a.last_execution
+FROM db_sizes AS ds
+LEFT JOIN db_activity AS a
+  ON a.database_name = ds.database_name
+WHERE ISNULL(a.total_executions, 0) = 0
+AND   ds.database_name NOT IN (N'master', N'model', N'msdb', N'tempdb')
+ORDER BY
+    ds.total_size_mb DESC
+OPTION(MAXDOP 1, RECOMPILE);";
+
+            using var command = new SqlCommand(query, connection);
+            command.Parameters.AddWithValue("@daysBack", daysBack);
+            command.CommandTimeout = 120;
+
+            using (StartQueryTiming("FinOps_IdleDatabases", query, connection))
+            {
+                using var reader = await command.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    items.Add(new FinOpsIdleDatabase
+                    {
+                        DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                        TotalSizeMb = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1)),
+                        FileCount = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2)),
+                        LastExecutionTime = reader.IsDBNull(3) ? null : reader.GetDateTime(3)
+                    });
+                }
+            }
+
+            return items;
+        }
+
+        /// <summary>
+        /// Gets tempdb pressure summary: latest and 24h peak values.
+        /// </summary>
+        public async Task<List<FinOpsTempdbSummary>> GetFinOpsTempdbSummaryAsync()
+        {
+            var items = new List<FinOpsTempdbSummary>();
+
+            await using var tc = await OpenThrottledConnectionAsync();
+            var connection = tc.Connection;
+
+            const string query = @"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+WITH
+    latest AS
+    (
+        SELECT TOP (1)
+            user_object_reserved_mb,
+            internal_object_reserved_mb,
+            version_store_reserved_mb,
+            total_reserved_mb
+        FROM collect.tempdb_stats
+        ORDER BY
+            collection_time DESC
+    ),
+    peak AS
+    (
+        SELECT
+            max_user_mb =
+                MAX(user_object_reserved_mb),
+            max_internal_mb =
+                MAX(internal_object_reserved_mb),
+            max_version_store_mb =
+                MAX(version_store_reserved_mb),
+            max_total_mb =
+                MAX(total_reserved_mb)
+        FROM collect.tempdb_stats
+        WHERE collection_time >= DATEADD(HOUR, -24, SYSDATETIME())
+    )
+SELECT
+    metric = N'User Objects',
+    current_mb = l.user_object_reserved_mb,
+    peak_24h_mb = p.max_user_mb,
+    warning =
+        CASE
+            WHEN p.max_user_mb > 1024
+            THEN N'High user object usage'
+            ELSE N''
+        END
+FROM latest AS l
+CROSS JOIN peak AS p
+UNION ALL
+SELECT
+    N'Internal Objects',
+    l.internal_object_reserved_mb,
+    p.max_internal_mb,
+    CASE
+        WHEN p.max_internal_mb > 1024
+        THEN N'High internal object usage (sorts/hashes)'
+        ELSE N''
+    END
+FROM latest AS l
+CROSS JOIN peak AS p
+UNION ALL
+SELECT
+    N'Version Store',
+    l.version_store_reserved_mb,
+    p.max_version_store_mb,
+    CASE
+        WHEN p.max_version_store_mb > 2048
+        THEN N'Version store pressure — check long-running transactions'
+        ELSE N''
+    END
+FROM latest AS l
+CROSS JOIN peak AS p
+UNION ALL
+SELECT
+    N'Total Reserved',
+    l.total_reserved_mb,
+    p.max_total_mb,
+    N''
+FROM latest AS l
+CROSS JOIN peak AS p
+OPTION(MAXDOP 1, RECOMPILE);";
+
+            using var command = new SqlCommand(query, connection);
+            command.CommandTimeout = 120;
+
+            using (StartQueryTiming("FinOps_TempdbSummary", query, connection))
+            {
+                using var reader = await command.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    items.Add(new FinOpsTempdbSummary
+                    {
+                        Metric = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                        CurrentMb = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1)),
+                        Peak24hMb = reader.IsDBNull(2) ? 0m : Convert.ToDecimal(reader.GetValue(2)),
+                        Warning = reader.IsDBNull(3) ? "" : reader.GetString(3)
+                    });
+                }
+            }
+
+            return items;
+        }
+
+        /// <summary>
+        /// Gets wait stats grouped by cost category over the last 24 hours.
+        /// </summary>
+        public async Task<List<FinOpsWaitCategorySummary>> GetFinOpsWaitCategorySummaryAsync()
+        {
+            var items = new List<FinOpsWaitCategorySummary>();
+
+            await using var tc = await OpenThrottledConnectionAsync();
+            var connection = tc.Connection;
+
+            const string query = @"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+WITH
+    categorized AS
+    (
+        SELECT
+            category =
+                CASE
+                    WHEN wait_type IN (N'SOS_SCHEDULER_YIELD', N'CXPACKET', N'CXCONSUMER', N'CXSYNC_PORT', N'CXSYNC_CONSUMER')
+                    THEN N'CPU'
+                    WHEN wait_type LIKE N'PAGEIOLATCH%'
+                    OR   wait_type IN (N'WRITELOG', N'IO_COMPLETION', N'ASYNC_IO_COMPLETION')
+                    THEN N'Storage'
+                    WHEN wait_type IN (N'RESOURCE_SEMAPHORE', N'RESOURCE_SEMAPHORE_QUERY_COMPILE', N'CMEMTHREAD')
+                    THEN N'Memory'
+                    WHEN wait_type = N'ASYNC_NETWORK_IO'
+                    THEN N'Network'
+                    WHEN wait_type LIKE N'LCK_M_%'
+                    THEN N'Locks'
+                    ELSE N'Other'
+                END,
+            wait_type,
+            wait_time_ms =
+                SUM(wait_time_ms_delta),
+            waiting_tasks =
+                SUM(waiting_tasks_count_delta)
+        FROM collect.wait_stats
+        WHERE collection_time >= DATEADD(HOUR, -24, SYSDATETIME())
+        AND   wait_time_ms_delta IS NOT NULL
+        AND   wait_time_ms_delta > 0
+        GROUP BY
+            CASE
+                WHEN wait_type IN (N'SOS_SCHEDULER_YIELD', N'CXPACKET', N'CXCONSUMER', N'CXSYNC_PORT', N'CXSYNC_CONSUMER')
+                THEN N'CPU'
+                WHEN wait_type LIKE N'PAGEIOLATCH%'
+                OR   wait_type IN (N'WRITELOG', N'IO_COMPLETION', N'ASYNC_IO_COMPLETION')
+                THEN N'Storage'
+                WHEN wait_type IN (N'RESOURCE_SEMAPHORE', N'RESOURCE_SEMAPHORE_QUERY_COMPILE', N'CMEMTHREAD')
+                THEN N'Memory'
+                WHEN wait_type = N'ASYNC_NETWORK_IO'
+                THEN N'Network'
+                WHEN wait_type LIKE N'LCK_M_%'
+                THEN N'Locks'
+                ELSE N'Other'
+            END,
+            wait_type
+    ),
+    by_category AS
+    (
+        SELECT
+            category,
+            total_wait_time_ms =
+                SUM(wait_time_ms),
+            total_waiting_tasks =
+                SUM(waiting_tasks),
+            top_wait_type =
+                MAX(CASE WHEN rn = 1 THEN wait_type END),
+            top_wait_time_ms =
+                MAX(CASE WHEN rn = 1 THEN wait_time_ms END)
+        FROM
+        (
+            SELECT
+                *,
+                rn = ROW_NUMBER() OVER
+                (
+                    PARTITION BY category
+                    ORDER BY wait_time_ms DESC
+                )
+            FROM categorized
+        ) AS ranked
+        GROUP BY
+            category
+    ),
+    grand_total AS
+    (
+        SELECT
+            total = NULLIF(SUM(total_wait_time_ms), 0)
+        FROM by_category
+    )
+SELECT
+    bc.category,
+    bc.total_wait_time_ms,
+    bc.total_waiting_tasks,
+    pct_of_total =
+        CONVERT
+        (
+            decimal(5,1),
+            bc.total_wait_time_ms * 100.0 / gt.total
+        ),
+    bc.top_wait_type,
+    bc.top_wait_time_ms
+FROM by_category AS bc
+CROSS JOIN grand_total AS gt
+ORDER BY
+    bc.total_wait_time_ms DESC
+OPTION(MAXDOP 1, RECOMPILE);";
+
+            using var command = new SqlCommand(query, connection);
+            command.CommandTimeout = 120;
+
+            using (StartQueryTiming("FinOps_WaitCategorySummary", query, connection))
+            {
+                using var reader = await command.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    items.Add(new FinOpsWaitCategorySummary
+                    {
+                        Category = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                        TotalWaitTimeMs = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
+                        WaitingTasks = reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2)),
+                        PctOfTotal = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3)),
+                        TopWaitType = reader.IsDBNull(4) ? "" : reader.GetString(4),
+                        TopWaitTimeMs = reader.IsDBNull(5) ? 0 : Convert.ToInt64(reader.GetValue(5))
+                    });
+                }
+            }
+
+            return items;
+        }
+
+        /// <summary>
+        /// Gets top 20 most expensive queries by total CPU over the last 24 hours.
+        /// </summary>
+        public async Task<List<FinOpsExpensiveQuery>> GetFinOpsExpensiveQueriesAsync(int hoursBack = 24, int topN = 20)
+        {
+            var items = new List<FinOpsExpensiveQuery>();
+
+            await using var tc = await OpenThrottledConnectionAsync();
+            var connection = tc.Connection;
+
+            const string query = @"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT TOP(@topN)
+    qs.database_name,
+    total_cpu_ms =
+        SUM(qs.total_worker_time_delta) / 1000,
+    avg_cpu_ms_per_exec =
+        CONVERT
+        (
+            decimal(19,2),
+            SUM(qs.total_worker_time_delta) / 1000.0 /
+              NULLIF(SUM(qs.execution_count_delta), 0)
+        ),
+    total_reads =
+        SUM(qs.total_logical_reads_delta),
+    avg_reads_per_exec =
+        CONVERT
+        (
+            decimal(19,0),
+            SUM(qs.total_logical_reads_delta) * 1.0 /
+              NULLIF(SUM(qs.execution_count_delta), 0)
+        ),
+    executions =
+        SUM(qs.execution_count_delta),
+    query_preview =
+        LEFT
+        (
+            CONVERT
+            (
+                nvarchar(max),
+                DECOMPRESS(qs.query_text)
+            ),
+            200
+        )
+FROM collect.query_stats AS qs
+WHERE qs.collection_time >= DATEADD(HOUR, -@hoursBack, SYSDATETIME())
+AND   qs.total_worker_time_delta IS NOT NULL
+AND   qs.total_worker_time_delta > 0
+GROUP BY
+    qs.database_name,
+    qs.sql_handle,
+    qs.statement_start_offset,
+    qs.statement_end_offset,
+    qs.query_text
+ORDER BY
+    SUM(qs.total_worker_time_delta) DESC
+OPTION(MAXDOP 1, RECOMPILE);";
+
+            using var command = new SqlCommand(query, connection);
+            command.Parameters.AddWithValue("@hoursBack", hoursBack);
+            command.Parameters.AddWithValue("@topN", topN);
+            command.CommandTimeout = 120;
+
+            using (StartQueryTiming("FinOps_ExpensiveQueries", query, connection))
+            {
+                using var reader = await command.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    items.Add(new FinOpsExpensiveQuery
+                    {
+                        DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                        TotalCpuMs = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
+                        AvgCpuMsPerExec = reader.IsDBNull(2) ? 0m : Convert.ToDecimal(reader.GetValue(2)),
+                        TotalReads = reader.IsDBNull(3) ? 0 : Convert.ToInt64(reader.GetValue(3)),
+                        AvgReadsPerExec = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
+                        Executions = reader.IsDBNull(5) ? 0 : Convert.ToInt64(reader.GetValue(5)),
+                        QueryPreview = reader.IsDBNull(6) ? "" : reader.GetString(6)
+                    });
+                }
+            }
+
+            return items;
+        }
+
+        /// <summary>
+        /// Checks if sp_IndexCleanup is installed on the target server.
+        /// </summary>
+        public async Task<bool> CheckSpIndexCleanupExistsAsync()
+        {
+            await using var tc = await OpenThrottledConnectionAsync();
+            var connection = tc.Connection;
+
+            using var command = new SqlCommand("SELECT OBJECT_ID('dbo.sp_IndexCleanup', 'P')", connection);
+            command.CommandTimeout = 30;
+            var result = await command.ExecuteScalarAsync();
+            return result != null && result != DBNull.Value;
+        }
+
+        /// <summary>
+        /// Runs sp_IndexCleanup and returns both detail and summary result sets.
+        /// </summary>
+        public async Task<(List<IndexCleanupResult> Details, List<IndexCleanupSummary> Summaries)> RunIndexAnalysisAsync(string? databaseName, bool getAllDatabases)
+        {
+            var details = new List<IndexCleanupResult>();
+            var summaries = new List<IndexCleanupSummary>();
+
+            await using var tc = await OpenThrottledConnectionAsync();
+            var connection = tc.Connection;
+
+            using var command = new SqlCommand("dbo.sp_IndexCleanup", connection);
+            command.CommandType = System.Data.CommandType.StoredProcedure;
+            command.CommandTimeout = 300;
+
+            if (getAllDatabases)
+            {
+                command.Parameters.AddWithValue("@get_all_databases", 1);
+            }
+            else if (!string.IsNullOrWhiteSpace(databaseName))
+            {
+                command.Parameters.AddWithValue("@database_name", databaseName);
+            }
+
+            using var reader = await command.ExecuteReaderAsync();
+
+            // Result set 1: Detail rows
+            while (await reader.ReadAsync())
+            {
+                details.Add(new IndexCleanupResult
+                {
+                    ScriptType = reader.IsDBNull(0) ? "" : reader.GetValue(0).ToString() ?? "",
+                    AdditionalInfo = reader.IsDBNull(1) ? "" : reader.GetValue(1).ToString() ?? "",
+                    DatabaseName = reader.IsDBNull(2) ? "" : reader.GetValue(2).ToString() ?? "",
+                    SchemaName = reader.IsDBNull(3) ? "" : reader.GetValue(3).ToString() ?? "",
+                    TableName = reader.IsDBNull(4) ? "" : reader.GetValue(4).ToString() ?? "",
+                    IndexName = reader.IsDBNull(5) ? "" : reader.GetValue(5).ToString() ?? "",
+                    ConsolidationRule = reader.IsDBNull(6) ? "" : reader.GetValue(6).ToString() ?? "",
+                    TargetIndexName = reader.IsDBNull(7) ? "" : reader.GetValue(7).ToString() ?? "",
+                    SupersededInfo = reader.IsDBNull(8) ? "" : reader.GetValue(8).ToString() ?? "",
+                    IndexSizeGb = reader.IsDBNull(9) ? "" : reader.GetValue(9).ToString() ?? "",
+                    IndexRows = reader.IsDBNull(10) ? "" : reader.GetValue(10).ToString() ?? "",
+                    IndexReads = reader.IsDBNull(11) ? "" : reader.GetValue(11).ToString() ?? "",
+                    IndexWrites = reader.IsDBNull(12) ? "" : reader.GetValue(12).ToString() ?? "",
+                    OriginalIndexDefinition = reader.IsDBNull(13) ? "" : reader.GetValue(13).ToString() ?? "",
+                    Script = reader.IsDBNull(14) ? "" : reader.GetValue(14).ToString() ?? ""
+                });
+            }
+
+            // Result set 2: Summary rows (if present)
+            if (await reader.NextResultAsync())
+            {
+                while (await reader.ReadAsync())
+                {
+                    var fieldCount = reader.FieldCount;
+                    summaries.Add(new IndexCleanupSummary
+                    {
+                        DatabaseName = fieldCount > 1 && !reader.IsDBNull(1) ? reader.GetValue(1).ToString() ?? "" : "",
+                        TotalIndexes = fieldCount > 4 && !reader.IsDBNull(4) ? reader.GetValue(4).ToString() ?? "" : "",
+                        UnusedIndexes = fieldCount > 5 && !reader.IsDBNull(5) ? reader.GetValue(5).ToString() ?? "" : "",
+                        DuplicateIndexes = fieldCount > 6 && !reader.IsDBNull(6) ? reader.GetValue(6).ToString() ?? "" : "",
+                        CompressibleIndexes = fieldCount > 7 && !reader.IsDBNull(7) ? reader.GetValue(7).ToString() ?? "" : "",
+                        TotalSizeGb = fieldCount > 8 && !reader.IsDBNull(8) ? reader.GetValue(8).ToString() ?? "" : ""
+                    });
+                }
+            }
+
+            return (details, summaries);
+        }
     }
 
     // ============================================
@@ -779,5 +1385,83 @@ OPTION(MAXDOP 1, RECOMPILE);";
             new(Math.Max((double)(UsedMb ?? 0m), 0.1), System.Windows.GridUnitType.Star);
         public System.Windows.GridLength FreeStarWidth =>
             new(Math.Max((double)FreeMb, 0.1), System.Windows.GridUnitType.Star);
+    }
+
+    public class FinOpsStorageGrowthRow
+    {
+        public string DatabaseName { get; set; } = "";
+        public decimal CurrentSizeMb { get; set; }
+        public decimal? Size7dAgoMb { get; set; }
+        public decimal? Size30dAgoMb { get; set; }
+        public decimal Growth7dMb { get; set; }
+        public decimal Growth30dMb { get; set; }
+        public decimal DailyGrowthRateMb { get; set; }
+        public decimal GrowthPct30d { get; set; }
+    }
+
+    public class FinOpsIdleDatabase
+    {
+        public string DatabaseName { get; set; } = "";
+        public decimal TotalSizeMb { get; set; }
+        public int FileCount { get; set; }
+        public DateTime? LastExecutionTime { get; set; }
+    }
+
+    public class FinOpsTempdbSummary
+    {
+        public string Metric { get; set; } = "";
+        public decimal CurrentMb { get; set; }
+        public decimal Peak24hMb { get; set; }
+        public string Warning { get; set; } = "";
+    }
+
+    public class FinOpsWaitCategorySummary
+    {
+        public string Category { get; set; } = "";
+        public long TotalWaitTimeMs { get; set; }
+        public long WaitingTasks { get; set; }
+        public decimal PctOfTotal { get; set; }
+        public string TopWaitType { get; set; } = "";
+        public long TopWaitTimeMs { get; set; }
+    }
+
+    public class FinOpsExpensiveQuery
+    {
+        public string DatabaseName { get; set; } = "";
+        public long TotalCpuMs { get; set; }
+        public decimal AvgCpuMsPerExec { get; set; }
+        public long TotalReads { get; set; }
+        public decimal AvgReadsPerExec { get; set; }
+        public long Executions { get; set; }
+        public string QueryPreview { get; set; } = "";
+    }
+
+    public class IndexCleanupResult
+    {
+        public string ScriptType { get; set; } = "";
+        public string AdditionalInfo { get; set; } = "";
+        public string DatabaseName { get; set; } = "";
+        public string SchemaName { get; set; } = "";
+        public string TableName { get; set; } = "";
+        public string IndexName { get; set; } = "";
+        public string ConsolidationRule { get; set; } = "";
+        public string TargetIndexName { get; set; } = "";
+        public string SupersededInfo { get; set; } = "";
+        public string IndexSizeGb { get; set; } = "";
+        public string IndexRows { get; set; } = "";
+        public string IndexReads { get; set; } = "";
+        public string IndexWrites { get; set; } = "";
+        public string OriginalIndexDefinition { get; set; } = "";
+        public string Script { get; set; } = "";
+    }
+
+    public class IndexCleanupSummary
+    {
+        public string DatabaseName { get; set; } = "";
+        public string TotalIndexes { get; set; } = "";
+        public string UnusedIndexes { get; set; } = "";
+        public string DuplicateIndexes { get; set; } = "";
+        public string CompressibleIndexes { get; set; } = "";
+        public string TotalSizeGb { get; set; } = "";
     }
 }

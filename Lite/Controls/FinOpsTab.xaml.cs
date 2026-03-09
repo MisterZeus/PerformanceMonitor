@@ -25,6 +25,7 @@ public partial class FinOpsTab : UserControl
 {
     private LocalDataService? _dataService;
     private ServerManager? _serverManager;
+    private CredentialService? _credentialService;
 
     public FinOpsTab()
     {
@@ -38,6 +39,7 @@ public partial class FinOpsTab : UserControl
     {
         _dataService = dataService;
         _serverManager = serverManager;
+        _credentialService = serverManager.CredentialService;
 
         PopulateServerSelector();
         RefreshData();
@@ -305,6 +307,89 @@ public partial class FinOpsTab : UserControl
         }
     }
 
+    private async System.Threading.Tasks.Task LoadStorageGrowthAsync(int serverId)
+    {
+        if (_dataService == null) return;
+
+        try
+        {
+            var data = await _dataService.GetStorageGrowthAsync(serverId);
+            StorageGrowthDataGrid.ItemsSource = data;
+            NoStorageGrowthMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            StorageGrowthCountIndicator.Text = data.Count > 0 ? $"{data.Count} database(s)" : "";
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("FinOps", $"Failed to load storage growth: {ex.Message}");
+        }
+    }
+
+    private async System.Threading.Tasks.Task LoadIdleDatabasesAsync(int serverId)
+    {
+        if (_dataService == null) return;
+
+        try
+        {
+            var data = await _dataService.GetIdleDatabasesAsync(serverId);
+            IdleDatabasesDataGrid.ItemsSource = data;
+            IdleDatabasesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            IdleDatabasesCountIndicator.Text = data.Count > 0 ? $"{data.Count} idle database(s)" : "";
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("FinOps", $"Failed to load idle databases: {ex.Message}");
+        }
+    }
+
+    private async System.Threading.Tasks.Task LoadTempdbSummaryAsync(int serverId)
+    {
+        if (_dataService == null) return;
+
+        try
+        {
+            var data = await _dataService.GetTempdbSummaryAsync(serverId);
+            TempdbPressureDataGrid.ItemsSource = data;
+            TempdbPressureNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("FinOps", $"Failed to load tempdb summary: {ex.Message}");
+        }
+    }
+
+    private async System.Threading.Tasks.Task LoadWaitCategorySummaryAsync(int serverId)
+    {
+        if (_dataService == null) return;
+
+        try
+        {
+            var data = await _dataService.GetWaitCategorySummaryAsync(serverId);
+            WaitCategorySummaryDataGrid.ItemsSource = data;
+            WaitCategorySummaryNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("FinOps", $"Failed to load wait category summary: {ex.Message}");
+        }
+    }
+
+    private async System.Threading.Tasks.Task LoadExpensiveQueriesAsync(int serverId)
+    {
+        if (_dataService == null) return;
+
+        try
+        {
+            var data = await _dataService.GetExpensiveQueriesAsync(serverId);
+            ExpensiveQueriesDataGrid.ItemsSource = data;
+            ExpensiveQueriesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            ExpensiveQueriesCountIndicator.Text = data.Count > 0 ? $"{data.Count} query(s)" : "";
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("FinOps", $"Failed to load expensive queries: {ex.Message}");
+        }
+    }
+
     #endregion
 
     #region Event Handlers
@@ -341,6 +426,78 @@ public partial class FinOpsTab : UserControl
     private async void RefreshServerInventory_Click(object sender, RoutedEventArgs e)
     {
         await LoadServerInventoryAsync();
+    }
+
+    private async void RefreshStorageGrowth_Click(object sender, RoutedEventArgs e)
+    {
+        var serverId = GetSelectedServerId();
+        if (serverId != 0) await LoadStorageGrowthAsync(serverId);
+    }
+
+    private async void OptimizationRefresh_Click(object sender, RoutedEventArgs e)
+    {
+        var serverId = GetSelectedServerId();
+        if (serverId == 0 || _dataService == null) return;
+
+        await System.Threading.Tasks.Task.WhenAll(
+            LoadIdleDatabasesAsync(serverId),
+            LoadTempdbSummaryAsync(serverId),
+            LoadWaitCategorySummaryAsync(serverId),
+            LoadExpensiveQueriesAsync(serverId)
+        );
+    }
+
+    private async void RunIndexAnalysis_Click(object sender, RoutedEventArgs e)
+    {
+        if (_serverManager == null || _credentialService == null) return;
+
+        var server = ServerSelector.SelectedItem as ServerConnection;
+        if (server == null) return;
+
+        try
+        {
+            var connectionString = server.GetConnectionString(_credentialService);
+
+            var exists = await LocalDataService.CheckSpIndexCleanupExistsAsync(connectionString);
+            if (!exists)
+            {
+                IndexAnalysisNotInstalledMessage.Visibility = Visibility.Visible;
+                IndexAnalysisNoDataMessage.Visibility = Visibility.Collapsed;
+                IndexAnalysisSummaryGrid.ItemsSource = null;
+                IndexAnalysisDetailGrid.ItemsSource = null;
+                return;
+            }
+
+            IndexAnalysisNotInstalledMessage.Visibility = Visibility.Collapsed;
+
+            RunIndexAnalysisButton.IsEnabled = false;
+            IndexAnalysisStatusText.Text = "Running analysis...";
+
+            var databaseName = IndexAnalysisDatabaseInput.Text?.Trim();
+            var getAllDatabases = IndexAnalysisAllDatabases.IsChecked == true;
+
+            var (details, summaries) = await LocalDataService.RunIndexAnalysisAsync(
+                connectionString,
+                string.IsNullOrWhiteSpace(databaseName) ? null : databaseName,
+                getAllDatabases);
+
+            IndexAnalysisSummaryGrid.ItemsSource = summaries;
+            IndexAnalysisDetailGrid.ItemsSource = details;
+            IndexAnalysisNoDataMessage.Visibility = details.Count == 0 && summaries.Count == 0
+                ? Visibility.Visible : Visibility.Collapsed;
+            IndexAnalysisStatusText.Text = details.Count > 0
+                ? $"{details.Count} index(es) found"
+                : "Analysis complete — no index issues found";
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("FinOps", $"Failed to run index analysis: {ex.Message}");
+            IndexAnalysisStatusText.Text = $"Error: {ex.Message}";
+        }
+        finally
+        {
+            RunIndexAnalysisButton.IsEnabled = true;
+        }
     }
 
     #endregion
