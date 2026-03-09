@@ -209,7 +209,7 @@ public partial class SettingsWindow : Window
             var newEnabled = McpEnabledCheckBox.IsChecked == true;
             int.TryParse(McpPortTextBox.Text, out var newPort);
 
-            if (newEnabled && newPort != oldPort)
+            if (newEnabled && (newPort != oldPort || !oldEnabled))
             {
                 if (newPort < 1024 || newPort > IPEndPoint.MaxPort)
                 {

@@ -670,10 +670,11 @@ namespace PerformanceMonitorDashboard
             }
 
             // Save MCP server settings
+            bool mcpWasEnabled = prefs.McpEnabled;
             prefs.McpEnabled = McpEnabledCheckBox.IsChecked == true;
             if (int.TryParse(McpPortTextBox.Text, out int mcpPort) && mcpPort >= 1024 && mcpPort <= IPEndPoint.MaxPort)
             {
-                if (prefs.McpEnabled && mcpPort != prefs.McpPort)
+                if (prefs.McpEnabled && (mcpPort != prefs.McpPort || !mcpWasEnabled))
                 {
                     // CanBindTcpPortAsync attempts an actual bind, which is more reliable
                     // than checking listeners (TOCTOU is still possible but less likely)

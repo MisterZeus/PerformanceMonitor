@@ -267,7 +267,7 @@ public partial class MainWindow : Window
         {
             try
             {
-                using var shutdownCts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                using var shutdownCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
                 await _mcpService.StopAsync(shutdownCts.Token);
             }
             catch (OperationCanceledException)

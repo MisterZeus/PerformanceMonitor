@@ -281,21 +281,8 @@ namespace PerformanceMonitorDashboard
             }
 
             // Clean up MCP server
-            if (_mcpHostService != null)
-            {
-                try
-                {
-                    _mcpCts?.Cancel();
-                    Task.Run(() => _mcpHostService.StopAsync(CancellationToken.None)).Wait(TimeSpan.FromSeconds(5));
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error($"[MCP] Error stopping MCP server: {ex.Message}", ex);
-                }
-                _mcpHostService = null;
-                _mcpCts?.Dispose();
-                _mcpCts = null;
-            }
+            try { Task.Run(StopMcpServerAsync).Wait(TimeSpan.FromSeconds(10)); }
+            catch { /* shutdown best-effort */ }
 
             // Save alert history to disk
             _emailAlertService?.SaveAlertLog();
