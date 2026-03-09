@@ -110,4 +110,6 @@ public partial class ManageMuteRulesWindow : Window
         foreach (var rule in _muteRuleService.GetRules())
             _rules.Add(rule);
     }
+
+    private void Close_Click(object sender, RoutedEventArgs e) => Close();
 }
