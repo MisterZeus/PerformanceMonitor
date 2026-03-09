@@ -72,7 +72,7 @@
                 </ItemsControl.ItemsPanel>
                 <ItemsControl.ItemTemplate>
                     <DataTemplate>
-                        <local:ServerHealthCard Width="260"
+                        <local:ServerHealthCard Width="300"
                                                 Height="220"
                                                 CardClicked="ServerHealthCard_CardClicked"/>
                     </DataTemplate>
