@@ -401,6 +401,15 @@ public partial class AlertsHistoryTab : UserControl
 
     #region Mute Handlers
 
+    private void AlertsDataGrid_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (sender is not DataGrid dataGrid) return;
+        if (dataGrid.SelectedItem is not AlertHistoryRow item) return;
+
+        var detailWindow = new Windows.AlertDetailWindow(item) { Owner = Window.GetWindow(this) };
+        detailWindow.ShowDialog();
+    }
+
     private void ViewAlertDetails_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not MenuItem menuItem) return;

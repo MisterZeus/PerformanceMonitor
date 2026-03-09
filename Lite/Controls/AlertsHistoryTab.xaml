@@ -103,6 +103,7 @@
                       HeadersVisibility="Column"
                       SelectionMode="Extended"
                       SelectionChanged="AlertsDataGrid_SelectionChanged"
+                      MouseDoubleClick="AlertsDataGrid_MouseDoubleClick"
                       RowStyle="{StaticResource AlertRowStyle}">
                 <DataGrid.Columns>
                     <DataGridTextColumn Binding="{Binding TimeLocal}" Width="150">
