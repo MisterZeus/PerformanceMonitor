@@ -141,10 +141,12 @@ namespace PerformanceMonitorInstallerGui
                 return;
 
             bool useSqlAuth = SqlAuthRadio.IsChecked == true;
+            bool useEntraAuth = EntraAuthRadio.IsChecked == true;
 
-            UsernameTextBox.IsEnabled = useSqlAuth;
+            UsernameTextBox.IsEnabled = useSqlAuth || useEntraAuth;
             PasswordBox.IsEnabled = useSqlAuth;
-            UsernameLabel.Opacity = useSqlAuth ? 1.0 : 0.5;
+            UsernameLabel.Text = useEntraAuth ? "Email:" : "Username:";
+            UsernameLabel.Opacity = (useSqlAuth || useEntraAuth) ? 1.0 : 0.5;
             PasswordLabel.Opacity = useSqlAuth ? 1.0 : 0.5;
 
             InvalidateConnection();
@@ -190,10 +192,20 @@ namespace PerformanceMonitorInstallerGui
             }
 
             bool useWindowsAuth = WindowsAuthRadio.IsChecked == true;
-            string? username = useWindowsAuth ? null : UsernameTextBox.Text.Trim();
-            string? password = useWindowsAuth ? null : PasswordBox.Password;
+            bool useEntraAuth = EntraAuthRadio.IsChecked == true;
+            string? username = (useWindowsAuth) ? null : UsernameTextBox.Text.Trim();
+            string? password = (useWindowsAuth || useEntraAuth) ? null : PasswordBox.Password;
 
-            if (!useWindowsAuth)
+            if (useEntraAuth)
+            {
+                if (string.IsNullOrEmpty(username))
+                {
+                    MessageBox.Show(this, "Please enter an email address for Entra ID authentication.",
+                        "Validation Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+            }
+            else if (!useWindowsAuth)
             {
                 if (string.IsNullOrEmpty(username))
                 {
@@ -221,7 +233,7 @@ namespace PerformanceMonitorInstallerGui
 
                 Logger.LogToFile("TestConnection_Click", $"Encryption: {encryption}, TrustCert: {trustCertificate}");
 
-                _connectionString = InstallationService.BuildConnectionString(server, useWindowsAuth, username, password, encryption, trustCertificate);
+                _connectionString = InstallationService.BuildConnectionString(server, useWindowsAuth, username, password, encryption, trustCertificate, useEntraAuth);
 
                 Logger.LogToFile("TestConnection_Click", "Connection string built, clearing log");
 
@@ -803,7 +815,8 @@ namespace PerformanceMonitorInstallerGui
             ServerTextBox.IsEnabled = !installing;
             WindowsAuthRadio.IsEnabled = !installing;
             SqlAuthRadio.IsEnabled = !installing;
-            UsernameTextBox.IsEnabled = !installing && SqlAuthRadio.IsChecked == true;
+            EntraAuthRadio.IsEnabled = !installing;
+            UsernameTextBox.IsEnabled = !installing && (SqlAuthRadio.IsChecked == true || EntraAuthRadio.IsChecked == true);
             PasswordBox.IsEnabled = !installing && SqlAuthRadio.IsChecked == true;
             TestConnectionButton.IsEnabled = !installing;
             CleanInstallCheckBox.IsEnabled = !installing;

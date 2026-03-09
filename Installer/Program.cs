@@ -152,6 +152,7 @@ END;";
                 Console.WriteLine("  PerformanceMonitorInstaller.exe <server> [options]                 Windows Auth");
                 Console.WriteLine("  PerformanceMonitorInstaller.exe <server> <username> <password>     SQL Auth");
                 Console.WriteLine("  PerformanceMonitorInstaller.exe <server> <username>                SQL Auth (password via env var)");
+                Console.WriteLine("  PerformanceMonitorInstaller.exe <server> --entra <email>           Entra ID (MFA)");
                 Console.WriteLine();
                 Console.WriteLine("Options:");
                 Console.WriteLine("  -h, --help           Show this help message");
@@ -160,6 +161,7 @@ END;";
                 Console.WriteLine("  --reset-schedule     Reset collection schedule to recommended defaults");
                 Console.WriteLine("  --encrypt=<level>    Connection encryption: mandatory (default), optional, strict");
                 Console.WriteLine("  --trust-cert         Trust server certificate without validation");
+                Console.WriteLine("  --entra <email>      Use Microsoft Entra ID interactive authentication (MFA)");
                 Console.WriteLine();
                 Console.WriteLine("Environment Variables:");
                 Console.WriteLine("  PM_SQL_PASSWORD      SQL Auth password (avoids passing on command line)");
@@ -181,6 +183,18 @@ END;";
             bool uninstallMode = args.Any(a => a.Equals("--uninstall", StringComparison.OrdinalIgnoreCase));
             bool resetSchedule = args.Any(a => a.Equals("--reset-schedule", StringComparison.OrdinalIgnoreCase));
             bool trustCert = args.Any(a => a.Equals("--trust-cert", StringComparison.OrdinalIgnoreCase));
+            bool entraMode = args.Any(a => a.Equals("--entra", StringComparison.OrdinalIgnoreCase));
+
+            /*Parse --entra email (the argument following --entra)*/
+            string? entraEmail = null;
+            if (entraMode)
+            {
+                int entraIndex = Array.FindIndex(args, a => a.Equals("--entra", StringComparison.OrdinalIgnoreCase));
+                if (entraIndex >= 0 && entraIndex + 1 < args.Length && !args[entraIndex + 1].StartsWith("--", StringComparison.Ordinal))
+                {
+                    entraEmail = args[entraIndex + 1];
+                }
+            }
 
             /*Parse encryption option (default: Mandatory)*/
             var encryptArg = args.FirstOrDefault(a => a.StartsWith("--encrypt=", StringComparison.OrdinalIgnoreCase));
@@ -197,17 +211,28 @@ END;";
             }
 
             /*Filter out option flags to get positional arguments*/
-            var filteredArgs = args
+            /*Filter out option flags and --entra <email> to get positional arguments*/
+            var filteredArgsList = args
                 .Where(a => !a.Equals("--reinstall", StringComparison.OrdinalIgnoreCase))
                 .Where(a => !a.Equals("--uninstall", StringComparison.OrdinalIgnoreCase))
                 .Where(a => !a.Equals("--reset-schedule", StringComparison.OrdinalIgnoreCase))
                 .Where(a => !a.Equals("--trust-cert", StringComparison.OrdinalIgnoreCase))
                 .Where(a => !a.StartsWith("--encrypt=", StringComparison.OrdinalIgnoreCase))
-                .ToArray();
+                .Where(a => !a.Equals("--entra", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            /*Remove the entra email from positional args if present*/
+            if (entraEmail != null)
+            {
+                filteredArgsList.Remove(entraEmail);
+            }
+
+            var filteredArgs = filteredArgsList.ToArray();
             string? serverName;
             string? username = null;
             string? password = null;
             bool useWindowsAuth;
+            bool useEntraAuth = false;
 
             if (automatedMode)
             {
@@ -216,7 +241,25 @@ END;";
                 */
                 serverName = filteredArgs.Length > 0 ? filteredArgs[0] : null;
 
-                if (filteredArgs.Length >= 2)
+                if (entraMode)
+                {
+                    /*Microsoft Entra ID interactive authentication*/
+                    useWindowsAuth = false;
+                    useEntraAuth = true;
+                    username = entraEmail;
+
+                    if (string.IsNullOrWhiteSpace(username))
+                    {
+                        Console.WriteLine("Error: Email address is required for Entra ID authentication.");
+                        Console.WriteLine("Usage: PerformanceMonitorInstaller.exe <server> --entra <email>");
+                        return ExitCodes.InvalidArguments;
+                    }
+
+                    Console.WriteLine($"Server: {serverName}");
+                    Console.WriteLine($"Authentication: Microsoft Entra ID ({username})");
+                    Console.WriteLine("A browser window will open for interactive authentication...");
+                }
+                else if (filteredArgs.Length >= 2)
                 {
                     /*SQL Authentication - password from env var or command-line*/
                     useWindowsAuth = false;
@@ -285,13 +328,37 @@ END;";
                     return ExitCodes.InvalidArguments;
                 }
 
-                Console.Write("Use Windows Authentication? (Y/N, default Y): ");
-                string? authResponse = Console.ReadLine();
-                useWindowsAuth = string.IsNullOrWhiteSpace(authResponse) ||
-                                       authResponse.Trim().Equals("Y", StringComparison.OrdinalIgnoreCase);
+                Console.WriteLine("Authentication type:");
+                Console.WriteLine("  [W] Windows Authentication (default)");
+                Console.WriteLine("  [S] SQL Server Authentication");
+                Console.WriteLine("  [E] Microsoft Entra ID (interactive MFA)");
+                Console.Write("Choice (W/S/E, default W): ");
+                string? authResponse = Console.ReadLine()?.Trim();
 
-                if (!useWindowsAuth)
+                if (string.IsNullOrWhiteSpace(authResponse) || authResponse.Equals("W", StringComparison.OrdinalIgnoreCase))
                 {
+                    useWindowsAuth = true;
+                }
+                else if (authResponse.Equals("E", StringComparison.OrdinalIgnoreCase))
+                {
+                    useWindowsAuth = false;
+                    useEntraAuth = true;
+
+                    Console.Write("Email address (UPN): ");
+                    username = Console.ReadLine();
+                    if (string.IsNullOrWhiteSpace(username))
+                    {
+                        Console.WriteLine("Error: Email address is required for Entra ID authentication.");
+                        WaitForExit();
+                        return ExitCodes.InvalidArguments;
+                    }
+
+                    Console.WriteLine("A browser window will open for interactive authentication...");
+                }
+                else
+                {
+                    useWindowsAuth = false;
+
                     Console.Write("SQL Server login: ");
                     username = Console.ReadLine();
                     if (string.IsNullOrWhiteSpace(username))
@@ -322,11 +389,19 @@ END;";
                 DataSource = serverName,
                 InitialCatalog = "master",
                 Encrypt = encryptOption,
-                TrustServerCertificate = trustCert,
-                IntegratedSecurity = useWindowsAuth
+                TrustServerCertificate = trustCert
             };
 
-            if (!useWindowsAuth)
+            if (useEntraAuth)
+            {
+                builder.Authentication = SqlAuthenticationMethod.ActiveDirectoryInteractive;
+                builder.UserID = username;
+            }
+            else if (useWindowsAuth)
+            {
+                builder.IntegratedSecurity = true;
+            }
+            else
             {
                 builder.UserID = username;
                 builder.Password = password;

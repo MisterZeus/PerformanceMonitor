@@ -99,14 +99,14 @@ namespace PerformanceMonitorInstallerGui.Services
             string? username = null,
             string? password = null,
             string encryption = "Mandatory",
-            bool trustCertificate = false)
+            bool trustCertificate = false,
+            bool useEntraAuth = false)
         {
             var builder = new SqlConnectionStringBuilder
             {
                 DataSource = server,
                 InitialCatalog = "master",
-                TrustServerCertificate = trustCertificate,
-                IntegratedSecurity = useWindowsAuth
+                TrustServerCertificate = trustCertificate
             };
 
             /*Set encryption mode: Optional, Mandatory, or Strict*/
@@ -117,7 +117,16 @@ namespace PerformanceMonitorInstallerGui.Services
                 _ => SqlConnectionEncryptOption.Mandatory
             };
 
-            if (!useWindowsAuth)
+            if (useEntraAuth)
+            {
+                builder.Authentication = SqlAuthenticationMethod.ActiveDirectoryInteractive;
+                builder.UserID = username;
+            }
+            else if (useWindowsAuth)
+            {
+                builder.IntegratedSecurity = true;
+            }
+            else
             {
                 builder.UserID = username;
                 builder.Password = password;
