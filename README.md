@@ -46,7 +46,7 @@ Both editions include real-time alerts (system tray + email), charts and graphs,
 
 📋 **Graphical plan viewer** with native ShowPlan rendering, 30-rule PlanAnalyzer, operator-level cost breakdown, and a standalone mode for opening `.sqlplan` files without a server connection
 
-🤖 **Built-in MCP server** with 27-31 read-only tools for AI analysis — ask Claude Code or Cursor "what are the top wait types on my server?" and get answers from your actual monitoring data
+🤖 **Built-in MCP server** with 28-32 read-only tools for AI analysis — ask Claude Code or Cursor "what are the top wait types on my server?" and get answers from your actual monitoring data
 
 🧰 **Community tools installed automatically** — sp_WhoIsActive, sp_BlitzLock, sp_HealthParser, sp_HumanEventsBlockViewer
 
@@ -275,7 +275,7 @@ The Full Edition supports Azure SQL Managed Instance and AWS RDS for SQL Server 
 | Dashboard | Separate app | Built-in |
 | Themes | Dark and light | Dark and light |
 | Portability | Server-bound | Single executable |
-| MCP server (LLM integration) | Built into Dashboard (27 tools) | Built-in (31 tools) |
+| MCP server (LLM integration) | Built into Dashboard (28 tools) | Built-in (32 tools) |
 
 ---
 
@@ -402,13 +402,13 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 
 ### Available Tools
 
-Full Edition exposes 27 tools, Lite Edition exposes 31. Core tools are shared across both editions.
+Full Edition exposes 28 tools, Lite Edition exposes 32. Core tools are shared across both editions.
 
 | Category | Tools |
 |---|---|
 | Discovery | `list_servers` |
 | Health | `get_server_summary`\*, `get_daily_summary`\*\*, `get_collection_health` |
-| Alerts | `get_alert_history`, `get_alert_settings` |
+| Alerts | `get_alert_history`, `get_alert_settings`, `get_mute_rules` |
 | Waits | `get_wait_stats`, `get_wait_types`\*, `get_wait_trend`, `get_waiting_tasks`\* |
 | Queries | `get_top_queries_by_cpu`, `get_top_procedures_by_cpu`, `get_query_store_top`, `get_expensive_queries`\*\*, `get_query_duration_trend`\*, `get_query_trend` |
 | CPU | `get_cpu_utilization` |

@@ -439,13 +439,13 @@ public partial class AlertsHistoryTab : UserControl
         var dataGrid = FindParentDataGrid(menuItem);
         if (dataGrid?.SelectedItem is not AlertHistoryRow item) return;
 
-        var rule = new MuteRule
+        var context = new AlertMuteContext
         {
             ServerName = item.ServerName,
             MetricName = item.MetricName
         };
 
-        var dialog = new Windows.MuteRuleDialog(rule) { Owner = Window.GetWindow(this) };
+        var dialog = new Windows.MuteRuleDialog(context) { Owner = Window.GetWindow(this) };
         if (dialog.ShowDialog() == true)
         {
             await MuteRuleService.AddRuleAsync(dialog.Rule);

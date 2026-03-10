@@ -560,7 +560,8 @@ public class DuckDbInitializer
             _logger?.LogInformation("Running migration to v20: adding mute rules table and muted column to alert log");
             try
             {
-                await ExecuteNonQueryAsync(connection, "ALTER TABLE config_alert_log ADD COLUMN IF NOT EXISTS muted BOOLEAN NOT NULL DEFAULT false");
+                /* DuckDB does not support ADD COLUMN with NOT NULL — use nullable with DEFAULT */
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE config_alert_log ADD COLUMN IF NOT EXISTS muted BOOLEAN DEFAULT false");
             }
             catch (Exception ex)
             {

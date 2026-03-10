@@ -477,13 +477,13 @@ namespace PerformanceMonitorDashboard.Controls
             var dataGrid = TabHelpers.FindDataGridFromContextMenu(contextMenu!);
             if (dataGrid?.SelectedItem is not AlertHistoryDisplayItem item) return;
 
-            var rule = new MuteRule
+            var context = new AlertMuteContext
             {
                 ServerName = item.ServerName,
                 MetricName = item.MetricName
             };
 
-            var dialog = new MuteRuleDialog(rule) { Owner = Window.GetWindow(this) };
+            var dialog = new MuteRuleDialog(context) { Owner = Window.GetWindow(this) };
             if (dialog.ShowDialog() == true)
             {
                 MuteRuleService.AddRule(dialog.Rule);

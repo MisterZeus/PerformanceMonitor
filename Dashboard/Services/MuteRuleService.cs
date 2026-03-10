@@ -27,6 +27,7 @@ namespace PerformanceMonitorDashboard.Services
             Directory.CreateDirectory(appDataDir);
             _filePath = Path.Combine(appDataDir, "alert_mute_rules.json");
             Load();
+            PurgeExpiredRules();
         }
 
         public bool IsAlertMuted(AlertMuteContext context)
@@ -136,9 +137,9 @@ namespace PerformanceMonitorDashboard.Services
                 var json = JsonSerializer.Serialize(_rules, s_jsonOptions);
                 File.WriteAllText(_filePath, json);
             }
-            catch
+            catch (Exception ex)
             {
-                /* Best-effort persistence */
+                Helpers.Logger.Error("MuteRuleService: Failed to save mute rules", ex);
             }
         }
     }

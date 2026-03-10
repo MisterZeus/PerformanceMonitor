@@ -12,6 +12,7 @@ namespace PerformanceMonitorLite.Services
     /// Manages alert mute rules with DuckDB persistence.
     /// Rules are cached in memory for fast matching and synced to DuckDB on changes.
     /// Thread-safe: all operations are protected by _lock.
+    /// Database operations use the LockedConnection pattern to coordinate with CHECKPOINT.
     /// </summary>
     public class MuteRuleService
     {
@@ -53,6 +54,7 @@ namespace PerformanceMonitorLite.Services
             var rules = new List<MuteRule>();
             try
             {
+                using var readLock = _dbInitializer.AcquireReadLock();
                 using var connection = _dbInitializer.CreateConnection();
                 await connection.OpenAsync();
                 using var cmd = connection.CreateCommand();
@@ -91,27 +93,33 @@ namespace PerformanceMonitorLite.Services
             {
                 _rules = rules;
             }
+
+            /* Purge expired rules on startup */
+            await PurgeExpiredRulesAsync();
         }
 
         public async Task AddRuleAsync(MuteRule rule)
         {
+            try
+            {
+                await PersistRuleAsync(rule);
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warn("MuteRuleService", $"Failed to persist new mute rule to DuckDB — rule will be lost on restart: {ex.Message}");
+            }
+
             lock (_lock)
             {
                 _rules.Add(rule);
             }
-
-            await PersistRuleAsync(rule);
         }
 
         public async Task RemoveRuleAsync(string ruleId)
         {
-            lock (_lock)
-            {
-                _rules.RemoveAll(r => r.Id == ruleId);
-            }
-
             try
             {
+                using var writeLock = _dbInitializer.AcquireWriteLock();
                 using var connection = _dbInitializer.CreateConnection();
                 await connection.OpenAsync();
                 using var cmd = connection.CreateCommand();
@@ -119,20 +127,22 @@ namespace PerformanceMonitorLite.Services
                 cmd.Parameters.Add(new DuckDBParameter { Value = ruleId });
                 await cmd.ExecuteNonQueryAsync();
             }
-            catch { /* best-effort */ }
+            catch (Exception ex)
+            {
+                AppLogger.Warn("MuteRuleService", $"Failed to delete mute rule from DuckDB: {ex.Message}");
+            }
+
+            lock (_lock)
+            {
+                _rules.RemoveAll(r => r.Id == ruleId);
+            }
         }
 
         public async Task UpdateRuleAsync(MuteRule updated)
         {
-            lock (_lock)
-            {
-                var index = _rules.FindIndex(r => r.Id == updated.Id);
-                if (index >= 0)
-                    _rules[index] = updated;
-            }
-
             try
             {
+                using var writeLock = _dbInitializer.AcquireWriteLock();
                 using var connection = _dbInitializer.CreateConnection();
                 await connection.OpenAsync();
                 using var cmd = connection.CreateCommand();
@@ -154,19 +164,24 @@ namespace PerformanceMonitorLite.Services
                 cmd.Parameters.Add(new DuckDBParameter { Value = (object?)updated.JobNamePattern ?? DBNull.Value });
                 await cmd.ExecuteNonQueryAsync();
             }
-            catch { /* best-effort */ }
+            catch (Exception ex)
+            {
+                AppLogger.Warn("MuteRuleService", $"Failed to update mute rule in DuckDB: {ex.Message}");
+            }
+
+            lock (_lock)
+            {
+                var index = _rules.FindIndex(r => r.Id == updated.Id);
+                if (index >= 0)
+                    _rules[index] = updated;
+            }
         }
 
         public async Task SetRuleEnabledAsync(string ruleId, bool enabled)
         {
-            lock (_lock)
-            {
-                var rule = _rules.FirstOrDefault(r => r.Id == ruleId);
-                if (rule != null) rule.Enabled = enabled;
-            }
-
             try
             {
+                using var writeLock = _dbInitializer.AcquireWriteLock();
                 using var connection = _dbInitializer.CreateConnection();
                 await connection.OpenAsync();
                 using var cmd = connection.CreateCommand();
@@ -175,7 +190,16 @@ namespace PerformanceMonitorLite.Services
                 cmd.Parameters.Add(new DuckDBParameter { Value = enabled });
                 await cmd.ExecuteNonQueryAsync();
             }
-            catch { /* best-effort */ }
+            catch (Exception ex)
+            {
+                AppLogger.Warn("MuteRuleService", $"Failed to update mute rule enabled state in DuckDB: {ex.Message}");
+            }
+
+            lock (_lock)
+            {
+                var rule = _rules.FirstOrDefault(r => r.Id == ruleId);
+                if (rule != null) rule.Enabled = enabled;
+            }
         }
 
         public async Task<int> PurgeExpiredRulesAsync()
@@ -184,13 +208,13 @@ namespace PerformanceMonitorLite.Services
             lock (_lock)
             {
                 expiredIds = _rules.Where(r => r.IsExpired).Select(r => r.Id).ToList();
+                if (expiredIds.Count == 0) return 0;
                 _rules.RemoveAll(r => r.IsExpired);
             }
 
-            if (expiredIds.Count == 0) return 0;
-
             try
             {
+                using var writeLock = _dbInitializer.AcquireWriteLock();
                 using var connection = _dbInitializer.CreateConnection();
                 await connection.OpenAsync();
                 foreach (var id in expiredIds)
@@ -201,38 +225,38 @@ namespace PerformanceMonitorLite.Services
                     await cmd.ExecuteNonQueryAsync();
                 }
             }
-            catch { /* best-effort */ }
+            catch (Exception ex)
+            {
+                AppLogger.Warn("MuteRuleService", $"Failed to purge expired mute rules from DuckDB: {ex.Message}");
+            }
 
             return expiredIds.Count;
         }
 
         private async Task PersistRuleAsync(MuteRule rule)
         {
-            try
-            {
-                using var connection = _dbInitializer.CreateConnection();
-                await connection.OpenAsync();
-                using var cmd = connection.CreateCommand();
-                cmd.CommandText = @"
-                    INSERT INTO config_mute_rules
-                        (id, enabled, created_at_utc, expires_at_utc, reason,
-                         server_name, metric_name, database_pattern,
-                         query_text_pattern, wait_type_pattern, job_name_pattern)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
-                cmd.Parameters.Add(new DuckDBParameter { Value = rule.Id });
-                cmd.Parameters.Add(new DuckDBParameter { Value = rule.Enabled });
-                cmd.Parameters.Add(new DuckDBParameter { Value = rule.CreatedAtUtc });
-                cmd.Parameters.Add(new DuckDBParameter { Value = (object?)rule.ExpiresAtUtc ?? DBNull.Value });
-                cmd.Parameters.Add(new DuckDBParameter { Value = (object?)rule.Reason ?? DBNull.Value });
-                cmd.Parameters.Add(new DuckDBParameter { Value = (object?)rule.ServerName ?? DBNull.Value });
-                cmd.Parameters.Add(new DuckDBParameter { Value = (object?)rule.MetricName ?? DBNull.Value });
-                cmd.Parameters.Add(new DuckDBParameter { Value = (object?)rule.DatabasePattern ?? DBNull.Value });
-                cmd.Parameters.Add(new DuckDBParameter { Value = (object?)rule.QueryTextPattern ?? DBNull.Value });
-                cmd.Parameters.Add(new DuckDBParameter { Value = (object?)rule.WaitTypePattern ?? DBNull.Value });
-                cmd.Parameters.Add(new DuckDBParameter { Value = (object?)rule.JobNamePattern ?? DBNull.Value });
-                await cmd.ExecuteNonQueryAsync();
-            }
-            catch { /* best-effort */ }
+            using var writeLock = _dbInitializer.AcquireWriteLock();
+            using var connection = _dbInitializer.CreateConnection();
+            await connection.OpenAsync();
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
+                INSERT INTO config_mute_rules
+                    (id, enabled, created_at_utc, expires_at_utc, reason,
+                     server_name, metric_name, database_pattern,
+                     query_text_pattern, wait_type_pattern, job_name_pattern)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
+            cmd.Parameters.Add(new DuckDBParameter { Value = rule.Id });
+            cmd.Parameters.Add(new DuckDBParameter { Value = rule.Enabled });
+            cmd.Parameters.Add(new DuckDBParameter { Value = rule.CreatedAtUtc });
+            cmd.Parameters.Add(new DuckDBParameter { Value = (object?)rule.ExpiresAtUtc ?? DBNull.Value });
+            cmd.Parameters.Add(new DuckDBParameter { Value = (object?)rule.Reason ?? DBNull.Value });
+            cmd.Parameters.Add(new DuckDBParameter { Value = (object?)rule.ServerName ?? DBNull.Value });
+            cmd.Parameters.Add(new DuckDBParameter { Value = (object?)rule.MetricName ?? DBNull.Value });
+            cmd.Parameters.Add(new DuckDBParameter { Value = (object?)rule.DatabasePattern ?? DBNull.Value });
+            cmd.Parameters.Add(new DuckDBParameter { Value = (object?)rule.QueryTextPattern ?? DBNull.Value });
+            cmd.Parameters.Add(new DuckDBParameter { Value = (object?)rule.WaitTypePattern ?? DBNull.Value });
+            cmd.Parameters.Add(new DuckDBParameter { Value = (object?)rule.JobNamePattern ?? DBNull.Value });
+            await cmd.ExecuteNonQueryAsync();
         }
     }
 }

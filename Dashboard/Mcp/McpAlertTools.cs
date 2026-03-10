@@ -111,7 +111,9 @@ public sealed class McpAlertTools
                     threshold_value = a.ThresholdValue,
                     alert_sent = a.AlertSent,
                     notification_type = a.NotificationType,
-                    send_error = a.SendError
+                    send_error = a.SendError,
+                    muted = a.Muted,
+                    detail_text = a.DetailText
                 })
             };
 

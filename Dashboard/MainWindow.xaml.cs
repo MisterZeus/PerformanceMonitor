@@ -1387,6 +1387,10 @@ namespace PerformanceMonitorDashboard
                     var worst = triggeredWaits[0];
                     var allWaitNames = string.Join(", ", triggeredWaits.ConvertAll(w => $"{w.WaitType} ({w.AvgMsPerWait:F0}ms)"));
 
+                    /* Poison wait mute check uses the worst (highest avg ms/wait) triggered wait type.
+                       Limitation: if a user mutes a specific wait type that isn't the worst, the alert
+                       still fires. Conversely, muting the worst type suppresses the entire alert even
+                       if other unmuted poison waits are present. */
                     var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Poison Wait", WaitType = worst.WaitType };
                     bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
                     _lastPoisonWaitAlert[serverId] = now;

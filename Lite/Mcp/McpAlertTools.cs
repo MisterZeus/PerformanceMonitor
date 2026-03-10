@@ -36,7 +36,9 @@ SELECT
     threshold_value,
     alert_sent,
     notification_type,
-    send_error
+    send_error,
+    COALESCE(muted, false) AS muted,
+    detail_text
 FROM config_alert_log
 WHERE alert_time >= $1
 ORDER BY alert_time DESC
@@ -59,7 +61,9 @@ LIMIT $2";
                     threshold_value = reader.GetDouble(5),
                     alert_sent = reader.GetBoolean(6),
                     notification_type = reader.GetString(7),
-                    send_error = reader.IsDBNull(8) ? null : reader.GetString(8)
+                    send_error = reader.IsDBNull(8) ? null : reader.GetString(8),
+                    muted = reader.GetBoolean(9),
+                    detail_text = reader.IsDBNull(10) ? null : reader.GetString(10)
                 });
             }
 
