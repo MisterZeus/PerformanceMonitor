@@ -29,54 +29,67 @@ public class RetentionService
 
     /// <summary>
     /// Deletes Parquet files older than the specified retention period.
-    /// Supports two naming formats:
+    /// Supports naming formats:
+    ///   - Monthly compacted: "202602_wait_stats.parquet" (yyyyMM prefix)
     ///   - Timestamped: "20260221_1328_wait_stats.parquet" (yyyyMMdd prefix)
+    ///   - Consolidated daily: "20260221_wait_stats.parquet" (yyyyMMdd prefix)
     ///   - Legacy monthly: "2026-02_wait_stats.parquet" (yyyy-MM prefix)
     /// </summary>
-    public void CleanupOldArchives(int retentionDays = 90)
+    public void CleanupOldArchives(int retentionMonths = 3)
     {
         if (!Directory.Exists(_archivePath))
         {
             return;
         }
 
-        var cutoffDate = DateTime.UtcNow.AddDays(-retentionDays);
+        var cutoffDate = DateTime.UtcNow.AddMonths(-retentionMonths);
 
         foreach (var file in Directory.GetFiles(_archivePath, "*.parquet"))
         {
             try
             {
                 var fileName = Path.GetFileNameWithoutExtension(file);
+                DateTime? fileDate = null;
 
-                /* Try timestamped format first: "20260221_1328_wait_stats" -> "20260221" */
-                if (fileName.Length >= 8 &&
+                /* Monthly compacted format: "202602_wait_stats" -> "202602" */
+                if (fileName.Length >= 6 &&
+                    DateTime.TryParseExact(
+                        fileName[..6],
+                        "yyyyMM",
+                        CultureInfo.InvariantCulture,
+                        DateTimeStyles.None,
+                        out var monthDate) &&
+                    fileName.Length > 6 && fileName[6] == '_')
+                {
+                    fileDate = monthDate;
+                }
+                /* Timestamped or daily format: "20260221..." -> "20260221" */
+                else if (fileName.Length >= 8 &&
                     DateTime.TryParseExact(
                         fileName[..8],
                         "yyyyMMdd",
                         CultureInfo.InvariantCulture,
                         DateTimeStyles.None,
-                        out var fileDate))
+                        out var dayDate))
                 {
-                    if (fileDate < cutoffDate)
-                    {
-                        File.Delete(file);
-                        _logger?.LogInformation("Deleted expired archive: {File}", file);
-                    }
+                    fileDate = dayDate;
                 }
-                /* Fall back to legacy monthly format: "2026-02_wait_stats" -> "2026-02" */
+                /* Legacy monthly format: "2026-02_wait_stats" -> "2026-02" */
                 else if (fileName.Length >= 7 &&
                     DateTime.TryParseExact(
                         fileName[..7],
                         "yyyy-MM",
                         CultureInfo.InvariantCulture,
                         DateTimeStyles.None,
-                        out var fileMonth))
+                        out var legacyMonth))
                 {
-                    if (fileMonth < cutoffDate)
-                    {
-                        File.Delete(file);
-                        _logger?.LogInformation("Deleted expired archive: {File}", file);
-                    }
+                    fileDate = legacyMonth;
+                }
+
+                if (fileDate.HasValue && fileDate.Value < cutoffDate)
+                {
+                    File.Delete(file);
+                    _logger?.LogInformation("Deleted expired archive: {File}", file);
                 }
             }
             catch (Exception ex)
