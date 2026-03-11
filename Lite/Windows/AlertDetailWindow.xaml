@@ -75,7 +75,7 @@
         <Border Grid.Row="2" x:Name="MutedBanner" Visibility="Collapsed"
                 CornerRadius="4" Padding="8" Margin="0,12,0,0">
             <Border.Background>
-                <SolidColorBrush Color="{DynamicResource WarningColor}" Opacity="0.2"/>
+                <SolidColorBrush Color="{StaticResource WarningColor}" Opacity="0.2"/>
             </Border.Background>
             <TextBlock Text="🔇 This alert was muted by a mute rule"
                        Foreground="{DynamicResource ForegroundBrush}" FontStyle="Italic"/>
