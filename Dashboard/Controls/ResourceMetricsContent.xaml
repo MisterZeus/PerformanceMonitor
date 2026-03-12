@@ -119,7 +119,7 @@
                             <Button Content="Clear All" Click="WaitTypes_ClearAll_Click" Padding="6,2" FontSize="10"/>
                             <TextBlock x:Name="WaitTypeCountText" Text="0 / 30 selected" FontSize="10" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
                         </StackPanel>
-                        <TextBox Grid.Row="2" x:Name="WaitTypeSearchBox" Margin="5,2" Height="24" FontSize="11"
+                        <TextBox Grid.Row="2" x:Name="WaitTypeSearchBox" Margin="5,2" FontSize="11"
                                  TextChanged="WaitTypeSearch_TextChanged"
                                  ToolTip="Type to filter wait types"/>
                         <ListBox Grid.Row="3" x:Name="WaitTypesList" Margin="5" Background="{DynamicResource BackgroundDarkBrush}" Foreground="{DynamicResource ForegroundBrush}"

@@ -121,14 +121,14 @@
 
                                     <!-- Server Name -->
                                     <TextBlock Grid.Column="1" Grid.Row="0"
-                                               Text="{Binding DisplayName}"
+                                               Text="{Binding DisplayNameWithIntent}"
                                                FontSize="13"
                                                FontWeight="SemiBold"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
 
                                     <!-- Server Details -->
                                     <TextBlock Grid.Column="1" Grid.Row="1"
-                                               Text="{Binding ServerName}"
+                                               Text="{Binding ServerNameDisplay}"
                                                FontSize="11"
                                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
@@ -278,6 +278,9 @@
                     </TabItem>
                     <TabItem Header="Alert History" x:Name="AlertsTab">
                         <controls:AlertsHistoryTab x:Name="AlertsHistoryContent"/>
+                    </TabItem>
+                    <TabItem Header="FinOps" x:Name="FinOpsTab">
+                        <controls:FinOpsTab x:Name="FinOpsContent"/>
                     </TabItem>
                     <TabItem x:Name="MainWindowPlanViewerTab" Visibility="Collapsed">
                         <TabItem.Header>

@@ -33,7 +33,6 @@ namespace PerformanceMonitorDashboard.Services
 
         private readonly UserPreferencesService _preferencesService;
         private readonly ConcurrentDictionary<string, DateTime> _cooldowns = new();
-        private static readonly TimeSpan CooldownPeriod = TimeSpan.FromMinutes(15);
 
         /* Alert log — loaded from JSON on startup, saved on exit, new alerts added in-memory */
         private readonly List<AlertLogEntry> _alertLog = new();
@@ -90,14 +89,14 @@ namespace PerformanceMonitorDashboard.Services
 
                 var cooldownKey = $"{serverId}:{metricName}";
                 if (_cooldowns.TryGetValue(cooldownKey, out var lastSent) &&
-                    DateTime.UtcNow - lastSent < CooldownPeriod)
+                    DateTime.UtcNow - lastSent < TimeSpan.FromMinutes(prefs.EmailCooldownMinutes))
                 {
                     return;
                 }
 
                 var subject = $"[SQL Monitor Alert] {metricName} on {serverName}";
                 var (htmlBody, plainTextBody) = EmailTemplateBuilder.BuildAlertEmail(
-                    metricName, serverName, currentValue, thresholdValue, context);
+                    metricName, serverName, currentValue, thresholdValue, prefs.EmailCooldownMinutes, context);
 
                 string? sendError = null;
                 bool sent = false;
@@ -149,7 +148,7 @@ namespace PerformanceMonitorDashboard.Services
         /// </summary>
         public void RecordAlert(string serverId, string serverName, string metricName,
             string currentValue, string thresholdValue, bool alertSent,
-            string notificationType, string? sendError = null)
+            string notificationType, string? sendError = null, bool muted = false, string? detailText = null)
         {
             var entry = new AlertLogEntry
             {
@@ -161,7 +160,9 @@ namespace PerformanceMonitorDashboard.Services
                 ThresholdValue = thresholdValue,
                 AlertSent = alertSent,
                 NotificationType = notificationType,
-                SendError = sendError
+                SendError = sendError,
+                Muted = muted,
+                DetailText = detailText
             };
 
             lock (_alertLogLock)
@@ -411,5 +412,7 @@ namespace PerformanceMonitorDashboard.Services
         public string NotificationType { get; set; } = "";
         public string? SendError { get; set; }
         public bool Hidden { get; set; }
+        public bool Muted { get; set; }
+        public string? DetailText { get; set; }
     }
 }

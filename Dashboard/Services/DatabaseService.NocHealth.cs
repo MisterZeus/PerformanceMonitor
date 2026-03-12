@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitorDashboard.Helpers;
@@ -121,7 +122,16 @@ namespace PerformanceMonitorDashboard.Services
         /// Lightweight alert-only health check. Runs 3 queries instead of 9.
         /// Used by MainWindow's independent alert timer.
         /// </summary>
-        public async Task<AlertHealthResult> GetAlertHealthAsync(int engineEdition = 0, int longRunningQueryThresholdMinutes = 30, int longRunningJobMultiplier = 3)
+        public async Task<AlertHealthResult> GetAlertHealthAsync(
+            int engineEdition = 0,
+            int longRunningQueryThresholdMinutes = 30,
+            int longRunningJobMultiplier = 3,
+            int longRunningQueryMaxResults = 5,
+            bool excludeSpServerDiagnostics = true,
+            bool excludeWaitFor = true,
+            bool excludeBackups = true,
+            bool excludeMiscWaits = true,
+            IReadOnlyList<string>? excludedDatabases = null)
         {
             var result = new AlertHealthResult();
 
@@ -133,14 +143,20 @@ namespace PerformanceMonitorDashboard.Services
                 result.IsOnline = true;
 
                 var cpuTask = GetCpuPercentAsync(connection, engineEdition);
-                var blockingTask = GetBlockingValuesAsync(connection);
+                var blockingTask = GetBlockingValuesAsync(connection, excludedDatabases ?? Array.Empty<string>());
                 var deadlockTask = GetDeadlockCountAsync(connection);
+                var filteredDeadlockTask = excludedDatabases?.Count > 0
+                    ? GetFilteredDeadlockCountAsync(connection, excludedDatabases)
+                    : null;
                 var poisonWaitTask = GetPoisonWaitDeltasAsync(connection);
-                var longRunningTask = GetLongRunningQueriesAsync(connection, longRunningQueryThresholdMinutes);
+                var longRunningTask = GetLongRunningQueriesAsync(connection, longRunningQueryThresholdMinutes, longRunningQueryMaxResults, excludeSpServerDiagnostics, excludeWaitFor, excludeBackups, excludeMiscWaits);
                 var tempDbTask = GetTempDbSpaceAsync(connection);
                 var anomalousJobTask = GetAnomalousJobsAsync(connection, longRunningJobMultiplier);
 
-                await Task.WhenAll(cpuTask, blockingTask, deadlockTask, poisonWaitTask, longRunningTask, tempDbTask, anomalousJobTask);
+                var allTasks = filteredDeadlockTask != null
+                    ? new Task[] { cpuTask, blockingTask, deadlockTask, filteredDeadlockTask, poisonWaitTask, longRunningTask, tempDbTask, anomalousJobTask }
+                    : new Task[] { cpuTask, blockingTask, deadlockTask, poisonWaitTask, longRunningTask, tempDbTask, anomalousJobTask };
+                await Task.WhenAll(allTasks);
 
                 var cpuResult = await cpuTask;
                 result.CpuPercent = cpuResult.SqlCpu;
@@ -151,6 +167,8 @@ namespace PerformanceMonitorDashboard.Services
                 result.LongestBlockedSeconds = blockingResult.LongestBlockedSeconds;
 
                 result.DeadlockCount = await deadlockTask;
+                if (filteredDeadlockTask != null)
+                    result.FilteredDeadlockCount = await filteredDeadlockTask;
                 result.PoisonWaits = await poisonWaitTask;
                 result.LongRunningQueries = await longRunningTask;
                 result.TempDbSpace = await tempDbTask;
@@ -169,9 +187,16 @@ namespace PerformanceMonitorDashboard.Services
         /// Returns blocking values directly (without writing to a ServerHealthStatus).
         /// Used by GetAlertHealthAsync for lightweight alert checks.
         /// </summary>
-        private async Task<(long TotalBlocked, decimal LongestBlockedSeconds)> GetBlockingValuesAsync(SqlConnection connection)
+        private async Task<(long TotalBlocked, decimal LongestBlockedSeconds)> GetBlockingValuesAsync(SqlConnection connection, IReadOnlyList<string> excludedDatabases)
         {
-            const string query = @"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+            var dbFilter = "";
+            var dbParams = new List<string>();
+            for (int i = 0; i < excludedDatabases.Count; i++)
+                dbParams.Add($"@exdb{i}");
+            if (dbParams.Count > 0)
+                dbFilter = $"AND DB_NAME(s.dbid) NOT IN ({string.Join(", ", dbParams)})";
+
+            var query = $@"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
                 SELECT
                     total_blocked = COUNT_BIG(*),
@@ -179,12 +204,15 @@ namespace PerformanceMonitorDashboard.Services
                 FROM sys.sysprocesses AS s
                 WHERE s.blocked <> 0
                 AND   s.lastwaittype LIKE N'LCK%'
+                {dbFilter}
                 OPTION(MAXDOP 1, RECOMPILE);";
 
             try
             {
                 using var cmd = new SqlCommand(query, connection);
                 cmd.CommandTimeout = 10;
+                for (int i = 0; i < excludedDatabases.Count; i++)
+                    cmd.Parameters.AddWithValue($"@exdb{i}", excludedDatabases[i]);
                 using var reader = await cmd.ExecuteReaderAsync();
 
                 if (await reader.ReadAsync())
@@ -423,6 +451,49 @@ namespace PerformanceMonitorDashboard.Services
             }
         }
 
+        /// <summary>
+        /// Counts recent deadlocks from collect.blocking_deadlock_stats, excluding the specified databases.
+        /// Uses a 5-minute window matching the alert cooldown so each cooldown period
+        /// reflects only deadlocks from non-excluded databases.
+        /// This is the filtered equivalent of GetDeadlockCountAsync, which reads from
+        /// sys.dm_os_performance_counters and cannot be filtered by database.
+        /// </summary>
+        private async Task<long?> GetFilteredDeadlockCountAsync(SqlConnection connection, IReadOnlyList<string> excludedDatabases)
+        {
+            var dbFilter = "";
+            var dbParams = new List<string>();
+            for (int i = 0; i < excludedDatabases.Count; i++)
+                dbParams.Add($"@exdb{i}");
+            if (dbParams.Count > 0)
+                dbFilter = $"AND bds.database_name NOT IN ({string.Join(", ", dbParams)})";
+
+            var query = $@"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+                SELECT
+                    filtered_deadlock_count =
+                        COALESCE(SUM(bds.deadlock_count_delta), 0)
+                FROM collect.blocking_deadlock_stats AS bds
+                WHERE bds.collection_time >= DATEADD(MINUTE, -5, SYSUTCDATETIME())
+                AND   bds.deadlock_count_delta IS NOT NULL
+                {dbFilter}
+                OPTION(MAXDOP 1, RECOMPILE);";
+
+            try
+            {
+                using var cmd = new SqlCommand(query, connection);
+                cmd.CommandTimeout = 10;
+                for (int i = 0; i < excludedDatabases.Count; i++)
+                    cmd.Parameters.AddWithValue($"@exdb{i}", excludedDatabases[i]);
+                var result = await cmd.ExecuteScalarAsync();
+                return result is long l ? l : (result is int i2 ? (long)i2 : 0);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning($"Failed to get filtered deadlock count: {ex.Message}");
+                return null; // Fall back to raw delta
+            }
+        }
+
         private async Task GetCollectorStatusAsync(SqlConnection connection, ServerHealthStatus status)
         {
             const string query = @"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -603,24 +674,29 @@ namespace PerformanceMonitorDashboard.Services
         /// Gets currently running queries that exceed the duration threshold.
         /// Uses live DMV data (sys.dm_exec_requests) for immediate detection.
         /// </summary>
-        private async Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(SqlConnection connection, int thresholdMinutes)
+        private async Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(
+            SqlConnection connection,
+            int thresholdMinutes,
+            int maxResults = 5,
+            bool excludeSpServerDiagnostics = true,
+            bool excludeWaitFor = true,
+            bool excludeBackups = true,
+            bool excludeMiscWaits = true)
         {
+            maxResults = Math.Clamp(maxResults, 1, 1000);
 
-            // Exclude internal SP_SERVER_DIAGNOSTICS queries by default, as they often run long and aren't actionable.
-            string spServerDiagnosticsFilter = "AND r.wait_type NOT LIKE N'%SP_SERVER_DIAGNOSTICS%'";
-
-            // Exclude WAITFOR queries by default, as they can run indefinitely and may not indicate a problem.
-            string waitForFilter = "AND r.wait_type NOT IN (N'WAITFOR', N'BROKER_RECEIVE_WAITFOR')";
-
-            // Exclude backup waits if specified, as they can run long and aren't typically actionable in this context.
-            string backupsFilter = "AND r.wait_type NOT IN (N'BACKUPTHREAD', N'BACKUPIO')";
-
-            // Exclude miscellaneous wait type that aren't typically actionable
-            string miscWaitsFilter = "AND r.wait_type NOT IN (N'XE_LIVE_TARGET_TVF')";
+            string spServerDiagnosticsFilter = excludeSpServerDiagnostics
+                ? "AND r.wait_type NOT LIKE N'%SP_SERVER_DIAGNOSTICS%'" : "";
+            string waitForFilter = excludeWaitFor
+                ? "AND r.wait_type NOT IN (N'WAITFOR', N'BROKER_RECEIVE_WAITFOR')" : "";
+            string backupsFilter = excludeBackups
+                ? "AND r.wait_type NOT IN (N'BACKUPTHREAD', N'BACKUPIO')" : "";
+            string miscWaitsFilter = excludeMiscWaits
+                ? "AND r.wait_type NOT IN (N'XE_LIVE_TARGET_TVF')" : "";
 
             string query = @$"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-                SELECT TOP(5)
+                SELECT TOP(@maxResults)
                     r.session_id,
                     DB_NAME(r.database_id) AS database_name,
                     SUBSTRING(t.text, 1, 300) AS query_text,
@@ -651,6 +727,7 @@ namespace PerformanceMonitorDashboard.Services
                 using var cmd = new SqlCommand(query, connection);
                 cmd.CommandTimeout = 10;
                 cmd.Parameters.Add(new SqlParameter("@thresholdMs", SqlDbType.BigInt) { Value = (long)thresholdMinutes * 60 * 1000 });
+                cmd.Parameters.Add(new SqlParameter("@maxResults", SqlDbType.Int) { Value = maxResults});
                 using var reader = await cmd.ExecuteReaderAsync();
 
                 while (await reader.ReadAsync())

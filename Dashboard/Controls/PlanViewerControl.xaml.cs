@@ -183,11 +183,23 @@ public partial class PlanViewerControl : UserControl
             BorderThickness = new Thickness(isExpensive ? 2 : 1),
             CornerRadius = new CornerRadius(4),
             Padding = new Thickness(6, 4, 6, 4),
-            ToolTip = BuildNodeTooltip(node),
             Cursor = Cursors.Hand,
             SnapsToDevicePixels = true,
             Tag = node
         };
+
+        // Tooltip — root node includes statement-level PlanWarnings
+        if (totalWarningCount > 0 && _currentStatement != null)
+        {
+            var allWarnings = new List<PlanWarning>();
+            allWarnings.AddRange(_currentStatement.PlanWarnings);
+            CollectWarnings(node, allWarnings);
+            border.ToolTip = BuildNodeTooltip(node, allWarnings);
+        }
+        else
+        {
+            border.ToolTip = BuildNodeTooltip(node);
+        }
 
         // Click to select + show properties
         border.MouseLeftButtonUp += Node_Click;
@@ -431,19 +443,85 @@ public partial class PlanViewerControl : UserControl
         figure.Segments.Add(new LineSegment(new Point(childLeft, childCenterY), true));
         geometry.Figures.Add(figure);
 
-        var rowText = child.HasActualStats
-            ? $"Actual Rows: {child.ActualRows:N0}"
-            : $"Estimated Rows: {child.EstimateRows:N0}";
-
         return new WpfPath
         {
             Data = geometry,
             Stroke = EdgeBrush,
             StrokeThickness = thickness,
             StrokeLineJoin = PenLineJoin.Round,
-            ToolTip = rowText,
+            ToolTip = BuildEdgeTooltipContent(child),
             SnapsToDevicePixels = true
         };
+    }
+
+    private object BuildEdgeTooltipContent(PlanNode child)
+    {
+        var grid = new Grid { MinWidth = 240 };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        int row = 0;
+
+        void AddRow(string label, string value)
+        {
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            var lbl = new TextBlock
+            {
+                Text = label,
+                Foreground = new SolidColorBrush(Color.FromRgb(0xE0, 0xE0, 0xE0)),
+                FontSize = 12,
+                Margin = new Thickness(0, 1, 12, 1)
+            };
+            var val = new TextBlock
+            {
+                Text = value,
+                Foreground = new SolidColorBrush(Colors.White),
+                FontSize = 12,
+                FontWeight = FontWeights.SemiBold,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Margin = new Thickness(0, 1, 0, 1)
+            };
+            Grid.SetRow(lbl, row);
+            Grid.SetColumn(lbl, 0);
+            Grid.SetRow(val, row);
+            Grid.SetColumn(val, 1);
+            grid.Children.Add(lbl);
+            grid.Children.Add(val);
+            row++;
+        }
+
+        if (child.HasActualStats)
+            AddRow("Actual Number of Rows for All Executions", $"{child.ActualRows:N0}");
+
+        AddRow("Estimated Number of Rows Per Execution", $"{child.EstimateRows:N0}");
+
+        var executions = 1.0 + child.EstimateRebinds + child.EstimateRewinds;
+        var estimatedRowsAllExec = child.EstimateRows * executions;
+        AddRow("Estimated Number of Rows for All Executions", $"{estimatedRowsAllExec:N0}");
+
+        if (child.EstimatedRowSize > 0)
+        {
+            AddRow("Estimated Row Size", FormatBytes(child.EstimatedRowSize));
+            var dataSize = estimatedRowsAllExec * child.EstimatedRowSize;
+            AddRow("Estimated Data Size", FormatBytes(dataSize));
+        }
+
+        return new Border
+        {
+            Background = new SolidColorBrush(Color.FromRgb(0x1E, 0x1E, 0x2E)),
+            BorderBrush = new SolidColorBrush(Color.FromRgb(0x3A, 0x3A, 0x5A)),
+            BorderThickness = new Thickness(1),
+            Padding = new Thickness(10, 6, 10, 6),
+            CornerRadius = new CornerRadius(4),
+            Child = grid
+        };
+    }
+
+    private static string FormatBytes(double bytes)
+    {
+        if (bytes < 1024) return $"{bytes:N0} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024:N0} KB";
+        if (bytes < 1024L * 1024 * 1024) return $"{bytes / (1024 * 1024):N0} MB";
+        return $"{bytes / (1024L * 1024 * 1024):N1} GB";
     }
 
     #endregion
@@ -534,7 +612,8 @@ public partial class PlanViewerControl : UserControl
 
         // Header
         var headerText = node.PhysicalOp;
-        if (node.LogicalOp != node.PhysicalOp && !string.IsNullOrEmpty(node.LogicalOp))
+        if (node.LogicalOp != node.PhysicalOp && !string.IsNullOrEmpty(node.LogicalOp)
+            && !node.PhysicalOp.Contains(node.LogicalOp, StringComparison.OrdinalIgnoreCase))
             headerText += $" ({node.LogicalOp})";
         PropertiesHeader.Text = headerText;
         PropertiesSubHeader.Text = $"Node ID: {node.NodeId}";
@@ -610,7 +689,7 @@ public partial class PlanViewerControl : UserControl
             || !string.IsNullOrEmpty(node.InnerSideJoinColumns)
             || !string.IsNullOrEmpty(node.OuterSideJoinColumns)
             || !string.IsNullOrEmpty(node.ActionColumn)
-            || node.ManyToMany || node.BitmapCreator
+            || node.ManyToMany || node.PhysicalOp == "Merge Join" || node.BitmapCreator
             || node.SortDistinct || node.StartupExpression
             || node.NLOptimized || node.WithOrderedPrefetch || node.WithUnorderedPrefetch
             || node.WithTies || node.Remoting || node.LocalParallelism
@@ -675,8 +754,10 @@ public partial class PlanViewerControl : UserControl
                 AddPropertyRow("Inner Join Cols", node.InnerSideJoinColumns, isCode: true);
             if (!string.IsNullOrEmpty(node.OuterSideJoinColumns))
                 AddPropertyRow("Outer Join Cols", node.OuterSideJoinColumns, isCode: true);
-            if (node.ManyToMany)
-                AddPropertyRow("Many to Many", "True");
+            if (node.PhysicalOp == "Merge Join")
+                AddPropertyRow("Many to Many", node.ManyToMany ? "Yes" : "No");
+            else if (node.ManyToMany)
+                AddPropertyRow("Many to Many", "Yes");
             if (!string.IsNullOrEmpty(node.ConstantScanValues))
                 AddPropertyRow("Values", node.ConstantScanValues, isCode: true);
             if (!string.IsNullOrEmpty(node.UdxUsedColumns))
@@ -1466,7 +1547,7 @@ public partial class PlanViewerControl : UserControl
 
     #region Tooltips
 
-    private ToolTip BuildNodeTooltip(PlanNode node)
+    private ToolTip BuildNodeTooltip(PlanNode node, List<PlanWarning>? allWarnings = null)
     {
         var tip = new ToolTip
         {
@@ -1481,7 +1562,8 @@ public partial class PlanViewerControl : UserControl
 
         // Header
         var headerText = node.PhysicalOp;
-        if (node.LogicalOp != node.PhysicalOp && !string.IsNullOrEmpty(node.LogicalOp))
+        if (node.LogicalOp != node.PhysicalOp && !string.IsNullOrEmpty(node.LogicalOp)
+            && !node.PhysicalOp.Contains(node.LogicalOp, StringComparison.OrdinalIgnoreCase))
             headerText += $" ({node.LogicalOp})";
         stack.Children.Add(new TextBlock
         {
@@ -1605,22 +1687,51 @@ public partial class PlanViewerControl : UserControl
             AddTooltipRow(stack, "Columns", node.OutputColumns, isCode: true);
         }
 
-        // Warnings
-        if (node.HasWarnings)
+        // Warnings — use allWarnings (includes statement-level) for root, node.Warnings for others
+        var warnings = allWarnings ?? (node.HasWarnings ? node.Warnings : null);
+        if (warnings != null && warnings.Count > 0)
         {
             stack.Children.Add(new Separator { Margin = new Thickness(0, 6, 0, 6) });
-            foreach (var w in node.Warnings)
+
+            if (allWarnings != null)
             {
-                var warnColor = w.Severity == PlanWarningSeverity.Critical ? "#E57373"
-                    : w.Severity == PlanWarningSeverity.Warning ? "#FFB347" : "#6BB5FF";
-                stack.Children.Add(new TextBlock
+                // Root node: show distinct warning type names only
+                var distinct = warnings
+                    .GroupBy(w => w.WarningType)
+                    .Select(g => (Type: g.Key, MaxSeverity: g.Max(w => w.Severity), Count: g.Count()))
+                    .OrderByDescending(g => g.MaxSeverity)
+                    .ThenBy(g => g.Type);
+
+                foreach (var (type, severity, count) in distinct)
                 {
-                    Text = $"\u26A0 {w.WarningType}: {w.Message}",
-                    Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(warnColor)),
-                    FontSize = 11,
-                    TextWrapping = TextWrapping.Wrap,
-                    Margin = new Thickness(0, 2, 0, 0)
-                });
+                    var warnColor = severity == PlanWarningSeverity.Critical ? "#E57373"
+                        : severity == PlanWarningSeverity.Warning ? "#FFB347" : "#6BB5FF";
+                    var label = count > 1 ? $"\u26A0 {type} ({count})" : $"\u26A0 {type}";
+                    stack.Children.Add(new TextBlock
+                    {
+                        Text = label,
+                        Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(warnColor)),
+                        FontSize = 11,
+                        Margin = new Thickness(0, 2, 0, 0)
+                    });
+                }
+            }
+            else
+            {
+                // Individual node: show full warning messages
+                foreach (var w in warnings)
+                {
+                    var warnColor = w.Severity == PlanWarningSeverity.Critical ? "#E57373"
+                        : w.Severity == PlanWarningSeverity.Warning ? "#FFB347" : "#6BB5FF";
+                    stack.Children.Add(new TextBlock
+                    {
+                        Text = $"\u26A0 {w.WarningType}: {w.Message}",
+                        Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(warnColor)),
+                        FontSize = 11,
+                        TextWrapping = TextWrapping.Wrap,
+                        Margin = new Thickness(0, 2, 0, 0)
+                    });
+                }
             }
         }
 
@@ -1923,7 +2034,7 @@ public partial class PlanViewerControl : UserControl
         if (statement.MemoryGrant != null)
         {
             var mg = statement.MemoryGrant;
-            AddRow("Memory grant", $"{mg.GrantedMemoryKB:N0} KB granted, {mg.MaxUsedMemoryKB:N0} KB used");
+            AddRow("Memory grant", $"{FormatMemoryGrantKB(mg.GrantedMemoryKB)} granted, {FormatMemoryGrantKB(mg.MaxUsedMemoryKB)} used");
             if (mg.GrantWaitTimeMs > 0)
                 AddRow("Grant wait", $"{mg.GrantWaitTimeMs:N0}ms");
         }
@@ -1965,6 +2076,19 @@ public partial class PlanViewerControl : UserControl
             AddRow("Early abort", statement.StatementOptmEarlyAbortReason);
 
         RuntimeSummaryContent.Children.Add(grid);
+    }
+
+    /// <summary>
+    /// Formats a memory value given in KB to a human-readable string.
+    /// Under 1,024 KB: show KB. 1,024-1,048,576 KB: show MB (1 decimal). Over 1,048,576 KB: show GB (2 decimals).
+    /// </summary>
+    private static string FormatMemoryGrantKB(long kb)
+    {
+        if (kb < 1024)
+            return $"{kb:N0} KB";
+        if (kb < 1024 * 1024)
+            return $"{kb / 1024.0:N1} MB";
+        return $"{kb / (1024.0 * 1024.0):N2} GB";
     }
 
     private void UpdateInsightsHeader()
@@ -2011,7 +2135,28 @@ public partial class PlanViewerControl : UserControl
 
     private void PlanViewerControl_PreviewMouseDown(object sender, MouseButtonEventArgs e)
     {
+        // Don't steal focus from interactive controls (ComboBox, DataGrid, TextBox, etc.)
+        // ComboBox dropdown items live in a separate visual tree (Popup), so also check
+        // for ComboBoxItem to avoid stealing focus when selecting dropdown items.
+        if (e.OriginalSource is System.Windows.Controls.Primitives.TextBoxBase
+            || e.OriginalSource is ComboBox
+            || e.OriginalSource is ComboBoxItem
+            || FindVisualParent<ComboBox>(e.OriginalSource as DependencyObject) != null
+            || FindVisualParent<ComboBoxItem>(e.OriginalSource as DependencyObject) != null
+            || FindVisualParent<DataGrid>(e.OriginalSource as DependencyObject) != null)
+            return;
+
         Focus();
+    }
+
+    private static T? FindVisualParent<T>(DependencyObject? child) where T : DependencyObject
+    {
+        while (child != null)
+        {
+            if (child is T parent) return parent;
+            child = VisualTreeHelper.GetParent(child);
+        }
+        return null;
     }
 
     private void PlanViewerControl_PreviewKeyDown(object sender, KeyEventArgs e)

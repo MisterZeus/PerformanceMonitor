@@ -175,7 +175,9 @@ CREATE TABLE IF NOT EXISTS memory_stats (
     target_server_memory_mb DECIMAL(18,2),
     total_server_memory_mb DECIMAL(18,2),
     buffer_pool_mb DECIMAL(18,2),
-    plan_cache_mb DECIMAL(18,2)
+    plan_cache_mb DECIMAL(18,2),
+    max_workers_count INTEGER,
+    current_workers_count INTEGER
 )";
 
     public const string CreateMemoryClerksTable = @"
@@ -591,6 +593,78 @@ CREATE TABLE IF NOT EXISTS running_jobs (
     public const string CreateRunningJobsIndex = @"
 CREATE INDEX IF NOT EXISTS idx_running_jobs_time ON running_jobs(server_id, collection_time)";
 
+    public const string CreateDatabaseSizeStatsTable = @"
+CREATE TABLE IF NOT EXISTS database_size_stats (
+    collection_id BIGINT PRIMARY KEY,
+    collection_time TIMESTAMP NOT NULL,
+    server_id INTEGER NOT NULL,
+    server_name VARCHAR NOT NULL,
+    database_name VARCHAR NOT NULL,
+    database_id INTEGER NOT NULL,
+    file_id INTEGER NOT NULL,
+    file_type_desc VARCHAR NOT NULL,
+    file_name VARCHAR NOT NULL,
+    physical_name VARCHAR NOT NULL,
+    total_size_mb DECIMAL(19,2) NOT NULL,
+    used_size_mb DECIMAL(19,2),
+    auto_growth_mb DECIMAL(19,2),
+    max_size_mb DECIMAL(19,2),
+    recovery_model_desc VARCHAR,
+    compatibility_level INTEGER,
+    state_desc VARCHAR,
+    volume_mount_point VARCHAR,
+    volume_total_mb DECIMAL(19,2),
+    volume_free_mb DECIMAL(19,2)
+)";
+
+    public const string CreateDatabaseSizeStatsIndex = @"
+CREATE INDEX IF NOT EXISTS idx_database_size_stats_time ON database_size_stats(server_id, collection_time)";
+
+    public const string CreateServerPropertiesTable = @"
+CREATE TABLE IF NOT EXISTS server_properties (
+    collection_id BIGINT PRIMARY KEY,
+    collection_time TIMESTAMP NOT NULL,
+    server_id INTEGER NOT NULL,
+    server_name VARCHAR NOT NULL,
+    edition VARCHAR NOT NULL,
+    product_version VARCHAR NOT NULL,
+    product_level VARCHAR NOT NULL,
+    product_update_level VARCHAR,
+    engine_edition INTEGER NOT NULL,
+    cpu_count INTEGER NOT NULL,
+    hyperthread_ratio INTEGER NOT NULL,
+    physical_memory_mb BIGINT NOT NULL,
+    socket_count INTEGER,
+    cores_per_socket INTEGER,
+    is_hadr_enabled BOOLEAN,
+    is_clustered BOOLEAN,
+    enterprise_features VARCHAR,
+    service_objective VARCHAR
+)";
+
+    public const string CreateServerPropertiesIndex = @"
+CREATE INDEX IF NOT EXISTS idx_server_properties_time ON server_properties(server_id, collection_time)";
+
+    public const string CreateSessionStatsTable = @"
+CREATE TABLE IF NOT EXISTS session_stats (
+    collection_id BIGINT PRIMARY KEY,
+    collection_time TIMESTAMP NOT NULL,
+    server_id INTEGER NOT NULL,
+    server_name VARCHAR NOT NULL,
+    program_name VARCHAR NOT NULL,
+    connection_count INTEGER NOT NULL,
+    running_count INTEGER NOT NULL,
+    sleeping_count INTEGER NOT NULL,
+    dormant_count INTEGER NOT NULL,
+    total_cpu_time_ms BIGINT,
+    total_reads BIGINT,
+    total_writes BIGINT,
+    total_logical_reads BIGINT
+)";
+
+    public const string CreateSessionStatsIndex = @"
+CREATE INDEX IF NOT EXISTS idx_session_stats_time ON session_stats(server_id, collection_time)";
+
     public const string CreateAlertLogTable = @"
 CREATE TABLE IF NOT EXISTS config_alert_log (
     alert_time TIMESTAMP NOT NULL,
@@ -602,7 +676,24 @@ CREATE TABLE IF NOT EXISTS config_alert_log (
     alert_sent BOOLEAN NOT NULL DEFAULT false,
     notification_type VARCHAR NOT NULL DEFAULT 'tray',
     send_error VARCHAR,
-    dismissed BOOLEAN NOT NULL DEFAULT false
+    dismissed BOOLEAN NOT NULL DEFAULT false,
+    muted BOOLEAN NOT NULL DEFAULT false,
+    detail_text VARCHAR
+)";
+
+    public const string CreateMuteRulesTable = @"
+CREATE TABLE IF NOT EXISTS config_mute_rules (
+    id VARCHAR NOT NULL PRIMARY KEY,
+    enabled BOOLEAN NOT NULL DEFAULT true,
+    created_at_utc TIMESTAMP NOT NULL,
+    expires_at_utc TIMESTAMP,
+    reason VARCHAR,
+    server_name VARCHAR,
+    metric_name VARCHAR,
+    database_pattern VARCHAR,
+    query_text_pattern VARCHAR,
+    wait_type_pattern VARCHAR,
+    job_name_pattern VARCHAR
 )";
 
     /// <summary>
@@ -633,7 +724,11 @@ CREATE TABLE IF NOT EXISTS config_alert_log (
         yield return CreateDatabaseScopedConfigTable;
         yield return CreateTraceFlagsTable;
         yield return CreateRunningJobsTable;
+        yield return CreateDatabaseSizeStatsTable;
+        yield return CreateServerPropertiesTable;
+        yield return CreateSessionStatsTable;
         yield return CreateAlertLogTable;
+        yield return CreateMuteRulesTable;
     }
 
     /// <summary>
@@ -660,5 +755,8 @@ CREATE TABLE IF NOT EXISTS config_alert_log (
         yield return CreateDatabaseScopedConfigIndex;
         yield return CreateTraceFlagsIndex;
         yield return CreateRunningJobsIndex;
+        yield return CreateDatabaseSizeStatsIndex;
+        yield return CreateServerPropertiesIndex;
+        yield return CreateSessionStatsIndex;
     }
 }

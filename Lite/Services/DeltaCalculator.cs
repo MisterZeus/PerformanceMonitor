@@ -65,7 +65,7 @@ public class DeltaCalculator
     /// Counter reset (value decreased): returns 0 to avoid inflated deltas from plan cache churn.
     /// Thread-safe via atomic AddOrUpdate.
     /// </summary>
-    public long CalculateDelta(int serverId, string collectorName, string key, long currentValue)
+    public long CalculateDelta(int serverId, string collectorName, string key, long currentValue, bool baselineOnly = false)
     {
         var serverCache = _cache.GetOrAdd(serverId, _ => new ConcurrentDictionary<string, ConcurrentDictionary<string, long>>());
         var collectorCache = serverCache.GetOrAdd(collectorName, _ => new ConcurrentDictionary<string, long>());
@@ -74,11 +74,12 @@ public class DeltaCalculator
 
         collectorCache.AddOrUpdate(
             key,
-            /* Add: first time seeing this key — use current value as delta
-               so queries that execute once still surface in top-N views */
+            /* Add: first time seeing this key.
+               baselineOnly = true: store baseline only, return 0 (for cumulative counters like perfmon).
+               baselineOnly = false: use current value as delta so single-execution queries surface. */
             _ =>
             {
-                delta = currentValue;
+                delta = baselineOnly ? 0 : currentValue;
                 return currentValue;
             },
             /* Update: compute delta atomically */
@@ -126,13 +127,37 @@ WHERE (server_id, collection_time) IN (
         if (count > 0) _logger?.LogDebug("Seeded {Count} wait_stats baseline rows", count);
     }
 
-    private Task SeedFileIoStatsAsync(DuckDBConnection connection)
+    private async Task SeedFileIoStatsAsync(DuckDBConnection connection)
     {
-        /* File I/O collector uses "{database_id}_{file_id}" as delta key,
-           but we don't store those IDs in DuckDB. Seeding for file I/O
-           is skipped — the first collection after restart will have delta=0,
-           and the second collection will produce accurate deltas. */
-        return Task.CompletedTask;
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+SELECT server_id, database_name, file_name,
+       num_of_reads, num_of_writes, read_bytes, write_bytes,
+       io_stall_read_ms, io_stall_write_ms,
+       io_stall_queued_read_ms, io_stall_queued_write_ms
+FROM file_io_stats
+WHERE (server_id, collection_time) IN (
+    SELECT server_id, MAX(collection_time) FROM file_io_stats GROUP BY server_id
+)";
+        using var reader = await cmd.ExecuteReaderAsync();
+        var count = 0;
+        while (await reader.ReadAsync())
+        {
+            var serverId = reader.GetInt32(0);
+            var dbName = reader.IsDBNull(1) ? "" : reader.GetString(1);
+            var fileName = reader.IsDBNull(2) ? "" : reader.GetString(2);
+            var deltaKey = $"{dbName}|{fileName}";
+            Seed(serverId, "file_io_reads", deltaKey, reader.IsDBNull(3) ? 0 : reader.GetInt64(3));
+            Seed(serverId, "file_io_writes", deltaKey, reader.IsDBNull(4) ? 0 : reader.GetInt64(4));
+            Seed(serverId, "file_io_read_bytes", deltaKey, reader.IsDBNull(5) ? 0 : reader.GetInt64(5));
+            Seed(serverId, "file_io_write_bytes", deltaKey, reader.IsDBNull(6) ? 0 : reader.GetInt64(6));
+            Seed(serverId, "file_io_stall_read", deltaKey, reader.IsDBNull(7) ? 0 : reader.GetInt64(7));
+            Seed(serverId, "file_io_stall_write", deltaKey, reader.IsDBNull(8) ? 0 : reader.GetInt64(8));
+            Seed(serverId, "file_io_stall_queued_read", deltaKey, reader.IsDBNull(9) ? 0 : reader.GetInt64(9));
+            Seed(serverId, "file_io_stall_queued_write", deltaKey, reader.IsDBNull(10) ? 0 : reader.GetInt64(10));
+            count++;
+        }
+        if (count > 0) _logger?.LogDebug("Seeded {Count} file_io_stats baseline rows", count);
     }
 
     private async Task SeedPerfmonStatsAsync(DuckDBConnection connection)

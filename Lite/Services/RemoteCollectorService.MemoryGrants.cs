@@ -92,14 +92,14 @@ OPTION(RECOMPILE);";
                 foreach (var r in rows)
                 {
                     var deltaKey = $"{r.PoolId}_{r.ResourceSemaphoreId}";
-                    var deltaTimeouts = _deltaCalculator.CalculateDelta(serverId, "memory_grants_timeouts", deltaKey, r.TimeoutErrorCount);
-                    var deltaForced = _deltaCalculator.CalculateDelta(serverId, "memory_grants_forced", deltaKey, r.ForcedGrantCount);
+                    var deltaTimeouts = _deltaCalculator.CalculateDelta(serverId, "memory_grants_timeouts", deltaKey, r.TimeoutErrorCount, baselineOnly: true);
+                    var deltaForced = _deltaCalculator.CalculateDelta(serverId, "memory_grants_forced", deltaKey, r.ForcedGrantCount, baselineOnly: true);
 
                     var row = appender.CreateRow();
                     row.AppendValue(GenerateCollectionId())
                        .AppendValue(collectionTime)
                        .AppendValue(serverId)
-                       .AppendValue(server.ServerName)
+                       .AppendValue(GetServerNameForStorage(server))
                        .AppendValue(r.ResourceSemaphoreId)
                        .AppendValue(r.PoolId)
                        .AppendValue(r.TargetMb)

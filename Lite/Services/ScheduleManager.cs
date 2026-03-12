@@ -28,6 +28,39 @@ public class ScheduleManager
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
 
+    public static readonly string[] PresetNames = ["Low-Impact", "Balanced", "Aggressive"];
+
+    private static readonly Dictionary<string, Dictionary<string, int>> s_presets = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Aggressive"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["wait_stats"] = 1, ["query_stats"] = 1, ["procedure_stats"] = 1,
+            ["query_store"] = 2, ["query_snapshots"] = 1, ["cpu_utilization"] = 1,
+            ["file_io_stats"] = 1, ["memory_stats"] = 1, ["memory_clerks"] = 2,
+            ["tempdb_stats"] = 1, ["perfmon_stats"] = 1, ["deadlocks"] = 1,
+            ["memory_grant_stats"] = 1, ["waiting_tasks"] = 1,
+            ["blocked_process_report"] = 1, ["running_jobs"] = 2
+        },
+        ["Balanced"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["wait_stats"] = 1, ["query_stats"] = 1, ["procedure_stats"] = 1,
+            ["query_store"] = 5, ["query_snapshots"] = 1, ["cpu_utilization"] = 1,
+            ["file_io_stats"] = 1, ["memory_stats"] = 1, ["memory_clerks"] = 5,
+            ["tempdb_stats"] = 1, ["perfmon_stats"] = 1, ["deadlocks"] = 1,
+            ["memory_grant_stats"] = 1, ["waiting_tasks"] = 1,
+            ["blocked_process_report"] = 1, ["running_jobs"] = 5
+        },
+        ["Low-Impact"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["wait_stats"] = 5, ["query_stats"] = 10, ["procedure_stats"] = 10,
+            ["query_store"] = 30, ["query_snapshots"] = 5, ["cpu_utilization"] = 5,
+            ["file_io_stats"] = 10, ["memory_stats"] = 10, ["memory_clerks"] = 30,
+            ["tempdb_stats"] = 5, ["perfmon_stats"] = 5, ["deadlocks"] = 5,
+            ["memory_grant_stats"] = 5, ["waiting_tasks"] = 5,
+            ["blocked_process_report"] = 5, ["running_jobs"] = 30
+        }
+    };
+
     private readonly string _schedulePath;
     private readonly ILogger<ScheduleManager>? _logger;
     private List<CollectorSchedule> _schedules;
@@ -157,6 +190,61 @@ public class ScheduleManager
 
             _logger?.LogInformation("Updated schedule for collector '{Name}': Enabled={Enabled}, Frequency={Frequency}m, Retention={Retention}d",
                 collectorName, schedule.Enabled, schedule.FrequencyMinutes, schedule.RetentionDays);
+        }
+    }
+
+    /// <summary>
+    /// Detects which preset matches the current intervals, or returns "Custom".
+    /// </summary>
+    public string GetActivePreset()
+    {
+        lock (_lock)
+        {
+            foreach (var (presetName, intervals) in s_presets)
+            {
+                bool matches = true;
+                foreach (var (collector, freq) in intervals)
+                {
+                    var schedule = _schedules.FirstOrDefault(s =>
+                        s.Name.Equals(collector, StringComparison.OrdinalIgnoreCase));
+                    if (schedule != null && schedule.FrequencyMinutes != freq)
+                    {
+                        matches = false;
+                        break;
+                    }
+                }
+                if (matches) return presetName;
+            }
+            return "Custom";
+        }
+    }
+
+    /// <summary>
+    /// Applies a named preset, changing all scheduled collector frequencies.
+    /// Does not modify enabled/disabled state or on-load (frequency=0) collectors.
+    /// </summary>
+    public void ApplyPreset(string presetName)
+    {
+        if (!s_presets.TryGetValue(presetName, out var intervals))
+        {
+            throw new ArgumentException($"Unknown preset: {presetName}");
+        }
+
+        lock (_lock)
+        {
+            foreach (var (collector, freq) in intervals)
+            {
+                var schedule = _schedules.FirstOrDefault(s =>
+                    s.Name.Equals(collector, StringComparison.OrdinalIgnoreCase));
+                if (schedule != null)
+                {
+                    schedule.FrequencyMinutes = freq;
+                }
+            }
+
+            SaveSchedules();
+
+            _logger?.LogInformation("Applied collection preset '{Preset}'", presetName);
         }
     }
 
@@ -298,7 +386,10 @@ public class ScheduleManager
             new() { Name = "blocked_process_report", Enabled = true, FrequencyMinutes = 1, RetentionDays = 30, Description = "Blocked process reports from XE ring buffer session (opt-out)" },
             new() { Name = "database_scoped_config", Enabled = true, FrequencyMinutes = 0, RetentionDays = 30, Description = "Database-scoped configurations (on-load only)" },
             new() { Name = "trace_flags", Enabled = true, FrequencyMinutes = 0, RetentionDays = 30, Description = "Active trace flags via DBCC TRACESTATUS (on-load only)" },
-            new() { Name = "running_jobs", Enabled = true, FrequencyMinutes = 5, RetentionDays = 7, Description = "Currently running SQL Agent jobs with duration comparison" }
+            new() { Name = "running_jobs", Enabled = true, FrequencyMinutes = 5, RetentionDays = 7, Description = "Currently running SQL Agent jobs with duration comparison" },
+            new() { Name = "database_size_stats", Enabled = true, FrequencyMinutes = 60, RetentionDays = 90, Description = "Database file sizes for growth trending and capacity planning" },
+            new() { Name = "server_properties", Enabled = true, FrequencyMinutes = 0, RetentionDays = 365, Description = "Server edition, licensing, CPU/memory hardware metadata (on-load only)" },
+            new() { Name = "session_stats", Enabled = true, FrequencyMinutes = 5, RetentionDays = 30, Description = "Per-application session counts from sys.dm_exec_sessions" }
         };
     }
 

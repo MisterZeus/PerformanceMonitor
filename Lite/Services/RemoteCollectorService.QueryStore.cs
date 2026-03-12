@@ -29,7 +29,10 @@ public partial class RemoteCollectorService
         /* First, get databases with Query Store actually enabled.
            Uses sys.database_query_store_options.actual_state instead of
            sys.databases.is_query_store_on, which can be out of sync on Azure SQL DB. */
-        const string dbQuery = @"
+        var serverStatus = _serverManager.GetConnectionStatus(server.Id);
+        bool isAzureSqlDb = serverStatus?.SqlEngineEdition == 5;
+
+        const string onPremDbQuery = @"
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
@@ -38,7 +41,8 @@ DECLARE
 
 DECLARE
     @db sysname,
-    @sql NVARCHAR(500);
+    @sql NVARCHAR(500),
+    @exec_sp nvarchar(256);
 
 DECLARE db_check CURSOR LOCAL FAST_FORWARD FOR
     SELECT /* PerformanceMonitorLite */
@@ -67,8 +71,7 @@ INTO @db;
 WHILE @@FETCH_STATUS = 0
 BEGIN
     BEGIN TRY
-        SET @sql =
-            N'USE ' + QUOTENAME(@db) + N';
+        SET @sql = N'
             SELECT ' + QUOTENAME(@db, '''') + N'
             WHERE EXISTS
             (
@@ -78,8 +81,10 @@ BEGIN
                 WHERE actual_state > 0
             );';
 
+        SET @exec_sp = QUOTENAME(@db) + N'.sys.sp_executesql';
+
         INSERT @result (name)
-        EXEC(@sql);
+        EXECUTE @exec_sp @sql;
     END TRY
     BEGIN CATCH
     END CATCH;
@@ -97,6 +102,71 @@ SELECT
 FROM @result
 ORDER BY
     name;";
+
+        const string azureDbQuery = @"
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+DECLARE
+    @result TABLE (name sysname);
+
+DECLARE
+    @db sysname,
+    @sql NVARCHAR(500),
+    @exec_sp nvarchar(256);
+
+DECLARE db_check CURSOR LOCAL FAST_FORWARD FOR
+    SELECT /* PerformanceMonitorLite */
+        d.name
+    FROM sys.databases AS d
+    WHERE d.database_id > 4
+    AND   d.database_id < 32761
+    AND   d.state_desc = N'ONLINE'
+    AND   d.name <> N'PerformanceMonitor'
+    OPTION(RECOMPILE);
+
+OPEN db_check;
+
+FETCH NEXT
+FROM db_check
+INTO @db;
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    BEGIN TRY
+        SET @sql = N'
+            SELECT ' + QUOTENAME(@db, '''') + N'
+            WHERE EXISTS
+            (
+                SELECT
+                    1
+                FROM sys.database_query_store_options
+                WHERE actual_state > 0
+            );';
+
+        SET @exec_sp = QUOTENAME(@db) + N'.sys.sp_executesql';
+
+        INSERT @result (name)
+        EXECUTE @exec_sp @sql;
+    END TRY
+    BEGIN CATCH
+    END CATCH;
+
+    FETCH NEXT
+    FROM db_check
+    INTO @db;
+END;
+
+CLOSE db_check;
+DEALLOCATE db_check;
+
+SELECT
+    name
+FROM @result
+ORDER BY
+    name;";
+
+        string dbQuery = isAzureSqlDb ? azureDbQuery : onPremDbQuery;
 
         var serverId = GetServerId(server);
         var collectionTime = DateTime.UtcNow;
@@ -136,7 +206,6 @@ ORDER BY
            Controls: avg_num_physical_io_reads, avg_log_bytes_used, avg_tempdb_space_used, plan_forcing_type_desc.
            @hasPlanType = true for SQL Server 2022+ (product version >= 16).
            Controls: plan_type_desc. */
-        var serverStatus = _serverManager.GetConnectionStatus(server.Id);
         int productVersion = 13; /* default to SQL 2016 */
         try
         {
@@ -246,7 +315,7 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
          force_failure_count = qsp.force_failure_count,
          last_force_failure_reason = qsp.last_force_failure_reason_desc,
          compatibility_level = qsp.compatibility_level,
-         query_plan_text = CONVERT(nvarchar(max), qsp.query_plan),
+         query_plan_text = CONVERT(nvarchar(1), NULL),
          query_plan_hash = CONVERT(varchar(64), qsp.query_plan_hash, 1)
      FROM sys.query_store_runtime_stats AS qsrs
      JOIN sys.query_store_plan AS qsp
@@ -257,7 +326,7 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
        ON qst.query_text_id = qsq.query_text_id
      WHERE qsrs.last_execution_time > @cutoff_time
      AND   qst.query_sql_text NOT LIKE N''%PerformanceMonitorLite%''
-     OPTION(RECOMPILE);',
+     OPTION(RECOMPILE, LOOP JOIN);',
     N'@cutoff_time datetime2(7)',
     @cutoff_time;";
 
@@ -270,11 +339,18 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
                     sqlSw.Stop();
 
                     duckSw.Start();
+                    var flushSw = new Stopwatch();
+                    var readerSw = new Stopwatch();
+                    var appendSw = new Stopwatch();
 
                     using (var appender = duckConnection.CreateAppender("query_store_stats"))
                     {
-                        while (await reader.ReadAsync(cancellationToken))
+                        while (true)
                         {
+                            readerSw.Start();
+                            var hasRow = await reader.ReadAsync(cancellationToken);
+                            readerSw.Stop();
+                            if (!hasRow) break;
                             /* Reader ordinals match SELECT column order:
                                0=query_id, 1=plan_id, 2=execution_type_desc,
                                3=first_execution_time (dto), 4=last_execution_time (dto),
@@ -295,11 +371,12 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
                                46=is_forced_plan, 47=force_failure_count, 48=last_force_failure_reason,
                                49=compatibility_level, 50=query_plan_text, 51=query_plan_hash */
 
+                            appendSw.Start();
                             var row = appender.CreateRow();
                             row.AppendValue(GenerateCollectionId())                                                             /* collection_id */
                                .AppendValue(collectionTime)                                                                     /* collection_time */
                                .AppendValue(serverId)                                                                           /* server_id */
-                               .AppendValue(server.ServerName)                                                                  /* server_name */
+                               .AppendValue(GetServerNameForStorage(server))                                                                  /* server_name */
                                .AppendValue(dbName)                                                                             /* database_name */
                                .AppendValue(reader.GetInt64(0))                                                                 /* query_id */
                                .AppendValue(reader.GetInt64(1))                                                                 /* plan_id */
@@ -354,12 +431,28 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
                                .AppendValue(reader.IsDBNull(50) ? (string?)null : reader.GetString(50))                         /* query_plan_text */
                                .AppendValue(reader.IsDBNull(51) ? (string?)null : reader.GetString(51))                         /* query_plan_hash */
                                .EndRow();
+                            appendSw.Stop();
 
                             totalRows++;
                         }
-                    }
+
+                        flushSw.Start();
+                    } /* appender.Dispose() flushes here */
+                    flushSw.Stop();
 
                     duckSw.Stop();
+
+                    if (duckSw.ElapsedMilliseconds > 2000)
+                    {
+                        _logger?.LogWarning(
+                            "Query Store DuckDB write spike: {TotalMs}ms total (reader: {ReaderMs}ms, append: {AppendMs}ms, flush: {FlushMs}ms, rows: {Rows}, db: {Db})",
+                            duckSw.ElapsedMilliseconds,
+                            readerSw.ElapsedMilliseconds,
+                            appendSw.ElapsedMilliseconds,
+                            flushSw.ElapsedMilliseconds,
+                            totalRows,
+                            dbName);
+                    }
                 }
                 catch (SqlException ex)
                 {

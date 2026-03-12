@@ -136,6 +136,7 @@ LIMIT 50";
     /// </summary>
     public async Task<List<QuerySnapshotRow>> GetLatestQuerySnapshotsAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null)
     {
+        using var _q = TimeQuery("GetLatestQuerySnapshotsAsync", "v_query_snapshots latest");
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
@@ -216,6 +217,46 @@ ORDER BY collection_time DESC, cpu_time_ms DESC";
         }
 
         return items;
+    }
+
+    /// <summary>
+    /// Gets lightweight blocking + deadlock counts and latest event time for alert badge updates.
+    /// Much cheaper than fetching full rows with XML — just COUNT(*) and MAX(time).
+    /// </summary>
+    public async Task<(int blockingCount, int deadlockCount, DateTime? latestEventTime)> GetAlertCountsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+
+        command.CommandText = @"
+SELECT
+    (SELECT COUNT(*) FROM v_blocked_process_reports
+     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3) AS blocking_count,
+    (SELECT COUNT(*) FROM v_deadlocks
+     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3) AS deadlock_count,
+    (SELECT MAX(t) FROM (
+        SELECT MAX(event_time) AS t FROM v_blocked_process_reports
+        WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+        UNION ALL
+        SELECT MAX(deadlock_time) AS t FROM v_deadlocks
+        WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+    )) AS latest_event_time";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+
+        using var reader = await command.ExecuteReaderAsync();
+        if (!await reader.ReadAsync())
+            return (0, 0, null);
+
+        var blockingCount = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
+        var deadlockCount = reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1));
+        var latestEventTime = reader.IsDBNull(2) ? (DateTime?)null : reader.GetDateTime(2);
+
+        return (blockingCount, deadlockCount, latestEventTime);
     }
 
     /// <summary>
@@ -788,4 +829,8 @@ public class QuerySnapshotRow
     public bool HasQueryPlan => !string.IsNullOrEmpty(QueryPlan);
     public bool HasLiveQueryPlan => !string.IsNullOrEmpty(LiveQueryPlan);
     public string CollectionTimeLocal => CollectionTime == DateTime.MinValue ? "" : ServerTimeHelper.FormatServerTime(CollectionTime);
+
+    // Chain mode — set by WaitDrillDownWindow when showing head blockers
+    public int ChainBlockedCount { get; set; }
+    public string ChainBlockingPath { get; set; } = "";
 }

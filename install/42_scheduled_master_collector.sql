@@ -315,6 +315,14 @@ BEGIN
                 BEGIN
                     EXECUTE collect.running_jobs_collector @debug = @debug;
                 END;
+                ELSE IF @collector_name = N'database_size_stats_collector'
+                BEGIN
+                    EXECUTE collect.database_size_stats_collector @debug = @debug;
+                END;
+                ELSE IF @collector_name = N'server_properties_collector'
+                BEGIN
+                    EXECUTE collect.server_properties_collector @debug = @debug;
+                END;
                 ELSE
                 BEGIN
                     RAISERROR(N'Unknown collector: %s', 11, 1, @collector_name);

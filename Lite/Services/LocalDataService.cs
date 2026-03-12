@@ -107,4 +107,13 @@ public partial class LocalDataService
         return (serverNow.AddHours(-hoursBack), serverNow);
     }
 
+    /// <summary>
+    /// Starts query timing for performance logging. Use with 'using' statement.
+    /// Only logs queries that exceed the slow query threshold (default 500ms).
+    /// </summary>
+    protected static Helpers.QueryExecutionContext TimeQuery(string context, string sql)
+    {
+        return Helpers.QueryLogger.StartQuery(context, sql, source: "DuckDB");
+    }
+
 }

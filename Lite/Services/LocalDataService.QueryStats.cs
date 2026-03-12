@@ -38,6 +38,7 @@ WHERE d.name = @database_name;", connection);
     /// </summary>
     public async Task<List<QueryStatsRow>> GetTopQueriesByCpuAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, int utcOffsetMinutes = 0)
     {
+        using var _q = TimeQuery("GetTopQueriesByCpuAsync", "v_query_stats top N by CPU");
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
@@ -381,6 +382,7 @@ OPTION(RECOMPILE);',
     /// </summary>
     public async Task<List<ProcedureStatsRow>> GetTopProceduresByCpuAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, int utcOffsetMinutes = 0)
     {
+        using var _q = TimeQuery("GetTopProceduresByCpuAsync", "v_procedure_stats top N by CPU");
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 

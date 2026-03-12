@@ -180,13 +180,13 @@ OPTION(RECOMPILE);";
 
                     /* Delta for per-second counters */
                     var deltaKey = $"{objectName}|{counterName}|{instanceName}";
-                    var deltaCntrValue = _deltaCalculator.CalculateDelta(serverId, "perfmon", deltaKey, cntrValue);
+                    var deltaCntrValue = _deltaCalculator.CalculateDelta(serverId, "perfmon", deltaKey, cntrValue, baselineOnly: true);
 
                     var row = appender.CreateRow();
                     row.AppendValue(GenerateCollectionId())
                        .AppendValue(collectionTime)
                        .AppendValue(serverId)
-                       .AppendValue(server.ServerName)
+                       .AppendValue(GetServerNameForStorage(server))
                        .AppendValue(objectName)
                        .AppendValue(counterName)
                        .AppendValue(instanceName)

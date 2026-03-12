@@ -239,21 +239,21 @@ OPTION(RECOMPILE);";
                     /* Delta calculations keyed by plan_handle to prevent cross-contamination
                        when multiple plans exist for the same query_hash */
                     var deltaKey = planHandle ?? queryHash;
-                    var deltaExecCount = _deltaCalculator.CalculateDelta(serverId, "query_stats_exec", deltaKey, executionCount);
-                    var deltaWorkerTime = _deltaCalculator.CalculateDelta(serverId, "query_stats_worker", deltaKey, totalWorkerTime);
-                    var deltaElapsedTime = _deltaCalculator.CalculateDelta(serverId, "query_stats_elapsed", deltaKey, totalElapsedTime);
-                    var deltaLogicalReads = _deltaCalculator.CalculateDelta(serverId, "query_stats_reads", deltaKey, totalLogicalReads);
-                    var deltaLogicalWrites = _deltaCalculator.CalculateDelta(serverId, "query_stats_writes", deltaKey, totalLogicalWrites);
-                    var deltaPhysicalReads = _deltaCalculator.CalculateDelta(serverId, "query_stats_phys_reads", deltaKey, totalPhysicalReads);
-                    var deltaRows = _deltaCalculator.CalculateDelta(serverId, "query_stats_rows", deltaKey, totalRows);
-                    var deltaSpills = _deltaCalculator.CalculateDelta(serverId, "query_stats_spills", deltaKey, totalSpills);
+                    var deltaExecCount = _deltaCalculator.CalculateDelta(serverId, "query_stats_exec", deltaKey, executionCount, baselineOnly: true);
+                    var deltaWorkerTime = _deltaCalculator.CalculateDelta(serverId, "query_stats_worker", deltaKey, totalWorkerTime, baselineOnly: true);
+                    var deltaElapsedTime = _deltaCalculator.CalculateDelta(serverId, "query_stats_elapsed", deltaKey, totalElapsedTime, baselineOnly: true);
+                    var deltaLogicalReads = _deltaCalculator.CalculateDelta(serverId, "query_stats_reads", deltaKey, totalLogicalReads, baselineOnly: true);
+                    var deltaLogicalWrites = _deltaCalculator.CalculateDelta(serverId, "query_stats_writes", deltaKey, totalLogicalWrites, baselineOnly: true);
+                    var deltaPhysicalReads = _deltaCalculator.CalculateDelta(serverId, "query_stats_phys_reads", deltaKey, totalPhysicalReads, baselineOnly: true);
+                    var deltaRows = _deltaCalculator.CalculateDelta(serverId, "query_stats_rows", deltaKey, totalRows, baselineOnly: true);
+                    var deltaSpills = _deltaCalculator.CalculateDelta(serverId, "query_stats_spills", deltaKey, totalSpills, baselineOnly: true);
 
                     /* Appender column order must match DuckDB table definition exactly */
                     var row = appender.CreateRow();
                     row.AppendValue(GenerateCollectionId())                                                 /* collection_id */
                        .AppendValue(collectionTime)                                                         /* collection_time */
                        .AppendValue(serverId)                                                               /* server_id */
-                       .AppendValue(server.ServerName)                                                      /* server_name */
+                       .AppendValue(GetServerNameForStorage(server))                                                      /* server_name */
                        .AppendValue(reader.IsDBNull(0) ? (string?)null : reader.GetString(0))               /* database_name */
                        .AppendValue(queryHash)                                                              /* query_hash */
                        .AppendValue(reader.IsDBNull(2) ? (string?)null : reader.GetString(2))               /* query_plan_hash */

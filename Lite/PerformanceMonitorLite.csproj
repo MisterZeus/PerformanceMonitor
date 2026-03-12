@@ -7,10 +7,10 @@
     <AssemblyName>PerformanceMonitorLite</AssemblyName>
     <RootNamespace>PerformanceMonitorLite</RootNamespace>
     <Product>SQL Server Performance Monitor Lite</Product>
-    <Version>2.1.0</Version>
-    <AssemblyVersion>2.1.0.0</AssemblyVersion>
-    <FileVersion>2.1.0.0</FileVersion>
-    <InformationalVersion>2.1.0</InformationalVersion>
+    <Version>2.2.0</Version>
+    <AssemblyVersion>2.2.0.0</AssemblyVersion>
+    <FileVersion>2.2.0.0</FileVersion>
+    <InformationalVersion>2.2.0</InformationalVersion>
     <Company>Darling Data, LLC</Company>
     <Copyright>Copyright © 2026 Darling Data, LLC</Copyright>
     <Description>Lightweight SQL Server performance monitoring - no installation required on target servers</Description>
@@ -36,8 +36,8 @@
 
   <ItemGroup>
     <!-- DuckDB for local data storage -->
-    <PackageReference Include="DuckDB.NET.Data" Version="1.4.4" />
-    <PackageReference Include="DuckDB.NET.Bindings.Full" Version="1.4.4" />
+    <PackageReference Include="DuckDB.NET.Data" Version="1.5.0" />
+    <PackageReference Include="DuckDB.NET.Bindings.Full" Version="1.5.0" />
 
     <!-- SQL Server connectivity -->
     <PackageReference Include="Microsoft.Data.SqlClient" Version="6.1.4" />

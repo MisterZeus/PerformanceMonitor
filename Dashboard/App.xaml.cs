@@ -11,6 +11,7 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Markup;
 using System.Windows.Threading;
 using PerformanceMonitorDashboard.Helpers;
 
@@ -38,6 +39,11 @@ namespace PerformanceMonitorDashboard
             }
 
             base.OnStartup(e);
+
+            // Use the user's locale for date/time formatting in WPF bindings (issue #459)
+            FrameworkElement.LanguageProperty.OverrideMetadata(
+                typeof(FrameworkElement),
+                new FrameworkPropertyMetadata(XmlLanguage.GetLanguage(Thread.CurrentThread.CurrentCulture.IetfLanguageTag)));
 
             // Apply saved color theme before the main window is shown
             var prefs = new Services.UserPreferencesService().GetPreferences();
@@ -95,6 +101,16 @@ namespace PerformanceMonitorDashboard
 
         private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
         {
+            /* Silently swallow Hardcodet TrayToolTip race condition (issue #422).
+               The crash occurs in Popup.CreateWindow when showing the custom visual tooltip
+               and is harmless — the tooltip simply doesn't show that one time. */
+            if (IsTrayToolTipCrash(e.Exception))
+            {
+                Logger.Warning("Suppressed Hardcodet TrayToolTip crash (issue #422)");
+                e.Handled = true;
+                return;
+            }
+
             Logger.Error("Unhandled Dispatcher Exception", e.Exception);
 
             MessageBox.Show(
@@ -112,6 +128,16 @@ namespace PerformanceMonitorDashboard
         {
             Logger.Error("Unobserved Task Exception", e.Exception);
             e.SetObserved(); // Prevent process termination
+        }
+
+        /// <summary>
+        /// Detects the Hardcodet TrayToolTip race condition crash (issue #422).
+        /// </summary>
+        private static bool IsTrayToolTipCrash(Exception ex)
+        {
+            return ex is ArgumentException
+                && ex.Message.Contains("VisualTarget")
+                && ex.StackTrace?.Contains("TaskbarIcon") == true;
         }
 
         private void CreateCrashDump(Exception? exception)

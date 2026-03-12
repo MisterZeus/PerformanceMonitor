@@ -79,6 +79,55 @@ BEGIN
         END;
 
         /*
+        Purge processed XE staging rows early.
+        After parsers set is_processed = 1 the raw XML is never read again.
+        Keep a 1-day grace period for re-parsing failures.
+        */
+        DECLARE
+            @staging_deleted bigint = 0;
+
+        IF OBJECT_ID(N'collect.deadlock_xml', N'U') IS NOT NULL
+        AND EXISTS
+        (
+            SELECT
+                1/0
+            FROM sys.columns AS c
+            WHERE c.object_id = OBJECT_ID(N'collect.deadlock_xml')
+            AND   c.name = N'is_processed'
+        )
+        BEGIN
+            DELETE FROM collect.deadlock_xml
+            WHERE is_processed = 1
+            AND   collection_time < DATEADD(DAY, -1, SYSDATETIME());
+
+            SET @staging_deleted += ROWCOUNT_BIG();
+        END;
+
+        IF OBJECT_ID(N'collect.blocked_process_xml', N'U') IS NOT NULL
+        AND EXISTS
+        (
+            SELECT
+                1/0
+            FROM sys.columns AS c
+            WHERE c.object_id = OBJECT_ID(N'collect.blocked_process_xml')
+            AND   c.name = N'is_processed'
+        )
+        BEGIN
+            DELETE FROM collect.blocked_process_xml
+            WHERE is_processed = 1
+            AND   collection_time < DATEADD(DAY, -1, SYSDATETIME());
+
+            SET @staging_deleted += ROWCOUNT_BIG();
+        END;
+
+        IF @debug = 1 AND @staging_deleted > 0
+        BEGIN
+            RAISERROR(N'Purged %I64d processed XE staging rows (older than 1 day)', 0, 1, @staging_deleted) WITH NOWAIT;
+        END;
+
+        SET @total_deleted += @staging_deleted;
+
+        /*
         Create temp table to hold list of tables to clean
         */
         CREATE TABLE

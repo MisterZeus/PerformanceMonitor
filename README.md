@@ -19,10 +19,12 @@
 |---|---|---|
 | **What it does** | Installs a `PerformanceMonitor` database with 30 T-SQL collectors running via SQL Agent. Separate dashboard app connects to view everything. | Single desktop app that monitors remotely. Stores data locally in DuckDB + Parquet. Nothing touches your server. |
 | **Best for** | Production 24/7 monitoring, long-term baselining | Quick triage, Azure SQL DB, locked-down servers, consultants, firefighting |
-| **Requires** | sysadmin + SQL Agent running | `VIEW SERVER STATE` (that's it) |
+| **Requires** | SQL Agent running ([see permissions](#permissions)) | `VIEW SERVER STATE` ([see permissions](#permissions)) |
 | **Get started** | Run the installer, open the dashboard | Download, run, add a server, done |
 
 Both editions include real-time alerts (system tray + email), charts and graphs, dark and light themes, CSV export, and a built-in MCP server for AI-powered analysis with tools like Claude.
+
+All release binaries are digitally signed via [SignPath](https://signpath.io) — no more Windows SmartScreen warnings.
 
 ---
 
@@ -38,7 +40,7 @@ Both editions include real-time alerts (system tray + email), charts and graphs,
 
 ## What You Get
 
-🔍 **32 specialized T-SQL collectors** running on configurable schedules — wait stats, query performance, blocking chains, deadlock graphs, memory grants, file I/O, tempdb, perfmon counters, and more. Query text and execution plan collection can be disabled per-collector for sensitive environments.
+🔍 **32 specialized T-SQL collectors** running on configurable schedules with named presets (Aggressive, Balanced, Low-Impact) — wait stats, query performance, blocking chains, deadlock graphs, memory grants, file I/O, tempdb, perfmon counters, FinOps/capacity, and more. Query text and execution plan collection can be disabled per-collector for sensitive environments.
 
 🚨 **Real-time alerts** for blocking, deadlocks, and high CPU — system tray notifications plus styled HTML emails with full XML attachments for offline analysis
 
@@ -46,7 +48,7 @@ Both editions include real-time alerts (system tray + email), charts and graphs,
 
 📋 **Graphical plan viewer** with native ShowPlan rendering, 30-rule PlanAnalyzer, operator-level cost breakdown, and a standalone mode for opening `.sqlplan` files without a server connection
 
-🤖 **Built-in MCP server** with 27-31 read-only tools for AI analysis — ask Claude Code or Cursor "what are the top wait types on my server?" and get answers from your actual monitoring data
+🤖 **Built-in MCP server** with 28-32 read-only tools for AI analysis — ask Claude Code or Cursor "what are the top wait types on my server?" and get answers from your actual monitoring data
 
 🧰 **Community tools installed automatically** — sp_WhoIsActive, sp_BlitzLock, sp_HealthParser, sp_HumanEventsBlockViewer
 
@@ -79,9 +81,11 @@ Both editions include real-time alerts (system tray + email), charts and graphs,
 
 Data starts flowing within 1–5 minutes. That's it. No installation on your server, no Agent jobs, no sysadmin required.
 
+**Always On AG?** Enable **ReadOnlyIntent** in the connection settings to route Lite's monitoring queries to a readable secondary, keeping the primary clear.
+
 ### Lite Collectors
 
-20 collectors run on independent, configurable schedules:
+23 collectors run on independent, configurable schedules:
 
 | Collector | Default | Source |
 |---|---|---|
@@ -98,9 +102,12 @@ Data starts flowing within 1–5 minutes. That's it. No installation on your ser
 | tempdb_stats | 1 min | `sys.dm_db_file_space_usage` |
 | perfmon_stats | 1 min | `sys.dm_os_performance_counters` (deltas) |
 | deadlocks | 1 min | `system_health` Extended Events session |
+| session_stats | 1 min | `sys.dm_exec_sessions` active session tracking |
 | memory_clerks | 5 min | `sys.dm_os_memory_clerks` |
 | query_store | 5 min | Query Store DMVs (per database) |
 | running_jobs | 5 min | `msdb` job history with duration vs avg/p95 |
+| database_size_stats | 15 min | `sys.master_files` + `FILEPROPERTY` + `dm_os_volume_stats` |
+| server_properties | 15 min | `SERVERPROPERTY()` hardware and licensing metadata |
 | server_config | On connect | `sys.configurations` |
 | database_config | On connect | `sys.databases` |
 | database_scoped_config | On connect | Database-scoped configurations |
@@ -108,8 +115,9 @@ Data starts flowing within 1–5 minutes. That's it. No installation on your ser
 
 ### Lite Data Storage
 
-- **Hot data** in DuckDB (7–90 days, configurable)
-- **Archive** to Parquet with ZSTD compression (~10x reduction, 30–180 days configurable)
+- **Hot data** in DuckDB 1.5.0 — non-blocking checkpoints, free block reuse, stable file size without periodic resets
+- **Archive** to Parquet with ZSTD compression (~10x reduction) — automatic monthly compaction keeps file count low (~75 files vs thousands)
+- **Retention**: 3-month calendar-month rolling window
 - Typical size: ~50–200 MB per server per week
 
 ### Lite Configuration
@@ -141,11 +149,24 @@ SQL Authentication:
 PerformanceMonitorInstaller.exe YourServerName sa YourPassword
 ```
 
+Entra ID (MFA) Authentication:
+
+```
+PerformanceMonitorInstaller.exe YourServerName --entra user@domain.com
+```
+
 Clean reinstall (drops existing database and all collected data):
 
 ```
 PerformanceMonitorInstaller.exe YourServerName --reinstall
 PerformanceMonitorInstaller.exe YourServerName sa YourPassword --reinstall
+```
+
+Uninstall (removes database, Agent jobs, and XE sessions):
+
+```
+PerformanceMonitorInstaller.exe YourServerName --uninstall
+PerformanceMonitorInstaller.exe YourServerName sa YourPassword --uninstall
 ```
 
 The installer automatically tests the connection, executes SQL scripts, downloads community dependencies, creates SQL Agent jobs, and runs initial data collection. A GUI installer (`InstallerGui/`) is also available with the same functionality.
@@ -156,7 +177,10 @@ The installer automatically tests the connection, executes SQL scripts, download
 |---|---|
 | `SERVER` | SQL Server instance name (positional, required) |
 | `USERNAME PASSWORD` | SQL Authentication credentials (positional, optional) |
+| `--entra EMAIL` | Microsoft Entra ID interactive authentication (MFA) |
 | `--reinstall` | Drop existing database and perform clean install |
+| `--uninstall` | Remove database, Agent jobs, and XE sessions |
+| `--reset-schedule` | Reset collection schedule to recommended defaults |
 | `--preserve-jobs` | Keep existing SQL Agent job schedules during upgrade |
 | `--encrypt=optional\|mandatory\|strict` | Connection encryption level (default: mandatory) |
 | `--trust-cert` | Trust server certificate without validation (default: require valid cert) |
@@ -175,6 +199,7 @@ The installer automatically tests the connection, executes SQL scripts, download
 | `4` | Partial installation (non-critical failures) |
 | `5` | Version check failed |
 | `6` | SQL files not found |
+| `7` | Uninstall failed |
 
 ### Post-Installation
 
@@ -203,7 +228,7 @@ ORDER BY collection_time DESC;
 
 ### Data Retention
 
-Default: 30 days (configurable per table in `config.retention_settings`).
+Default: 30 days (configurable per collector via the `retention_days` column in `config.collection_schedule`).
 
 Storage estimates: 5–10 GB per week, 20–40 GB per month.
 
@@ -264,7 +289,7 @@ The Full Edition supports Azure SQL Managed Instance and AWS RDS for SQL Server 
 | AWS RDS for SQL Server | Supported | Supported |
 | Azure SQL Database | Not supported | Supported |
 | Multi-server from one seat | Per-server install | Built-in |
-| Collectors | 32 | 20 |
+| Collectors | 32 | 23 |
 | Agent job monitoring | Duration vs historical avg/p95 | Duration vs historical avg/p95 |
 | Data storage | SQL Server (on target) | DuckDB + Parquet (local) |
 | Execution plans | Collected and stored (can be disabled per-collector) | Download on demand |
@@ -275,7 +300,7 @@ The Full Edition supports Azure SQL Managed Instance and AWS RDS for SQL Server 
 | Dashboard | Separate app | Built-in |
 | Themes | Dark and light | Dark and light |
 | Portability | Server-bound | Single executable |
-| MCP server (LLM integration) | Built into Dashboard (27 tools) | Built-in (31 tools) |
+| MCP server (LLM integration) | Built into Dashboard (28 tools) | Built-in (32 tools) |
 
 ---
 
@@ -308,6 +333,7 @@ Plus a NOC-style landing page with server health cards (green/yellow/red severit
 | **Blocking** | Blocking/deadlock trends, blocked process reports, deadlock history |
 | **Perfmon** | Selectable SQL Server performance counters over time |
 | **Configuration** | Server configuration, database configuration, scoped configuration, trace flags |
+| **FinOps** | Utilization & provisioning analysis, database resource breakdown, storage growth (7d/30d), idle database detection, index analysis via sp_IndexCleanup, application connections, wait/query/TempDB/memory grant optimization |
 
 Both editions feature auto-refresh, configurable time ranges, right-click CSV export, system tray integration, dark and light themes, and timezone display options (server time, local time, or UTC).
 
@@ -323,15 +349,23 @@ Both editions include a real-time alert engine that monitors for performance iss
 |---|---|---|
 | **Blocking** | 30 seconds (Full), 5 seconds (Lite) | Fires when the longest blocked session exceeds the threshold |
 | **Deadlocks** | 1 | Fires when new deadlocks are detected since the last check |
+| **Poison waits** | 100 ms avg | Fires when any poison wait type exceeds the average-ms-per-wait threshold |
+| **Long-running queries** | 5 minutes | Fires when any query exceeds the elapsed-time threshold |
+| **TempDB space** | 80% | Fires when TempDB usage exceeds the percentage threshold |
+| **Long-running agent jobs** | 3× average | Fires when a job's current duration exceeds a multiple of its historical average |
 | **High CPU** | 90% (Full), 80% (Lite) | Fires when total CPU (SQL + other) exceeds the threshold |
 | **Connection changes** | N/A | Fires when a monitored server goes offline or comes back online |
 
 All thresholds are configurable in Settings.
 
+**Poison wait types** monitored: [`THREADPOOL`](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-os-wait-stats-transact-sql#threadpool) (worker thread exhaustion), [`RESOURCE_SEMAPHORE`](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-os-wait-stats-transact-sql#resource_semaphore) (memory grant pressure), and [`RESOURCE_SEMAPHORE_QUERY_COMPILE`](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-os-wait-stats-transact-sql#resource_semaphore_query_compile) (compilation memory pressure). These waits indicate severe resource starvation and should never occur under normal operation.
+
 ### Notification Channels
 
-- **System tray** — balloon notifications with 5-minute per-metric cooldown
-- **Email (SMTP)** — styled HTML emails with 15-minute per-metric cooldown, configurable SMTP settings (server, port, SSL, authentication, recipients)
+- **System tray** — balloon notifications with a configurable per-metric cooldown (default: 5 minutes)
+- **Email (SMTP)** — styled HTML emails with a configurable per-metric cooldown (default: 15 minutes), plus configurable SMTP settings (server, port, SSL, authentication, recipients)
+
+Both cooldown periods are independently configurable in Settings under the Performance Alerts section.
 
 ### Email Alerts
 
@@ -347,6 +381,8 @@ Alert emails include:
 - **Server silencing** — right-click a server tab to acknowledge alerts, silence all alerts, or unsilence
 - **Always-on** — the Dashboard alert engine runs independently of which tab is active, including when minimized to the system tray. The Lite edition's alert engine also runs regardless of tab visibility.
 - **Alert history** — Dashboard keeps an in-memory alert log (accessible via MCP). Lite logs alerts to DuckDB (`config_alert_log`).
+- **Alert muting** — create rules to suppress specific recurring alerts while still logging them. Rules match on server name, metric type, database, query text, wait type, or job name (AND logic across fields). Access via Settings → Manage Mute Rules, or right-click an alert in the Alert History tab. The context menu offers two muting options: **Mute This Alert** (pre-fills server + metric for a targeted rule) and **Mute Similar Alerts** (pre-fills metric only, matching across all servers). Muted alerts appear grayed out in alert history and are still recorded for auditability. Rules support optional expiration (1h, 24h, 7 days, or permanent).
+- **Alert details** — right-click any alert in the Alert History tab and choose **View Details** to open a detail window. The window shows core alert fields (time, server, metric, value, threshold, notification type, status) plus context-sensitive details that vary by metric: query text and session info for long-running queries, job name and duration stats for anomalous agent jobs, per-wait-type breakdowns for poison waits, space usage by category for TempDB, and blocking/deadlock session counts.
 
 ---
 
@@ -374,6 +410,9 @@ Both editions include an embedded [Model Context Protocol](https://modelcontextp
 ### Setup
 
 1. Enable the MCP server in Settings (checkbox + port, default `5151`)
+   - The port must be between **1024** and **65535**. Ports 0–1023 are well-known privileged ports reserved by the operating system.
+   - On save, the app checks whether the chosen port is already in use and warns you if there is a conflict.
+   - On startup, the app verifies the port is available before starting the MCP server.
 2. Register with Claude Code:
 
 ```
@@ -389,13 +428,13 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 
 ### Available Tools
 
-Full Edition exposes 27 tools, Lite Edition exposes 31. Core tools are shared across both editions.
+Full Edition exposes 28 tools, Lite Edition exposes 32. Core tools are shared across both editions.
 
 | Category | Tools |
 |---|---|
 | Discovery | `list_servers` |
 | Health | `get_server_summary`\*, `get_daily_summary`\*\*, `get_collection_health` |
-| Alerts | `get_alert_history`, `get_alert_settings` |
+| Alerts | `get_alert_history`, `get_alert_settings`, `get_mute_rules` |
 | Waits | `get_wait_stats`, `get_wait_types`\*, `get_wait_trend`, `get_waiting_tasks`\* |
 | Queries | `get_top_queries_by_cpu`, `get_top_procedures_by_cpu`, `get_query_store_top`, `get_expensive_queries`\*\*, `get_query_duration_trend`\*, `get_query_trend` |
 | CPU | `get_cpu_utilization` |
@@ -461,7 +500,76 @@ Common issues:
 1. **No data after connecting** — Wait for the first collection cycle (1–5 minutes). Check logs for connection errors.
 2. **Query Store tab empty** — Query Store must be enabled on the target database (`ALTER DATABASE [YourDB] SET QUERY_STORE = ON`).
 3. **Blocked process reports empty** — Both editions attempt to auto-configure the blocked process threshold to 5 seconds via `sp_configure`. On **AWS RDS**, `sp_configure` is not available — you must set `blocked process threshold (s)` through an RDS Parameter Group (see "AWS RDS Parameter Group Configuration" above). On **Azure SQL Database**, the threshold is fixed at 20 seconds and cannot be changed. If you still see no data on other platforms, verify the login has `ALTER SETTINGS` permission.
-4. **Connection failures** — Verify network connectivity, firewall rules, and that the login has `VIEW SERVER STATE`.
+4. **Connection failures** — Verify network connectivity, firewall rules, and that the login has the required [permissions](#permissions). For Azure SQL Database, use a contained database user with `VIEW DATABASE STATE`.
+
+---
+
+## Permissions
+
+### Full Edition (On-Premises)
+
+The installer needs `sysadmin` to create the database, Agent jobs, and configure `sp_configure` settings. After installation, the collection jobs can run under a **least-privilege login** with these grants:
+
+```sql
+USE [master];
+CREATE LOGIN [SQLServerPerfMon] WITH PASSWORD = N'YourStrongPassword';
+GRANT VIEW SERVER STATE TO [SQLServerPerfMon];
+
+USE [PerformanceMonitor];
+CREATE USER [SQLServerPerfMon] FOR LOGIN [SQLServerPerfMon];
+ALTER ROLE [db_owner] ADD MEMBER [SQLServerPerfMon];
+
+USE [msdb];
+CREATE USER [SQLServerPerfMon] FOR LOGIN [SQLServerPerfMon];
+ALTER ROLE [SQLAgentReaderRole] ADD MEMBER [SQLServerPerfMon];
+```
+
+| Grant | Why |
+|---|---|
+| `VIEW SERVER STATE` | All DMV access (wait stats, query stats, memory, CPU, file I/O, etc.) |
+| `db_owner` on PerformanceMonitor | Collectors insert data, create/alter tables, execute procedures. Scoped to just this database — not sysadmin. |
+| `SQLAgentReaderRole` on msdb | Read `sysjobs`, `sysjobactivity`, `sysjobhistory` for the running jobs collector |
+
+**Optional** (gracefully skipped if missing):
+- `ALTER SETTINGS` — installer sets `blocked process threshold` via `sp_configure`. Skipped with a warning if unavailable.
+- `ALTER TRACE` — default trace collector. Skipped if denied.
+- `DBCC TRACESTATUS` — server config collector skips trace flag detection if denied.
+
+Change the SQL Agent job owner to the new login after installation if you want to run under least privilege end-to-end.
+
+### Lite Edition (On-Premises)
+
+Nothing is installed on the target server. The login only needs:
+
+```sql
+USE [master];
+GRANT VIEW SERVER STATE TO [YourLogin];
+
+-- Optional: for SQL Agent job monitoring
+USE [msdb];
+CREATE USER [YourLogin] FOR LOGIN [YourLogin];
+ALTER ROLE [SQLAgentReaderRole] ADD MEMBER [YourLogin];
+```
+
+### Azure SQL Database (Lite Only)
+
+Azure SQL Database doesn't support server-level logins. Create a **contained database user** directly on the target database:
+
+```sql
+-- Connect to your target database (not master)
+CREATE USER [SQLServerPerfMon] WITH PASSWORD = 'YourStrongPassword';
+GRANT VIEW DATABASE STATE TO [SQLServerPerfMon];
+```
+
+When connecting in Lite, specify the database name in the connection. SQL Agent and msdb are not available on Azure SQL Database — those collectors are skipped automatically.
+
+### Azure SQL Managed Instance
+
+Works like on-premises. Use server-level logins with `VIEW SERVER STATE`. SQL Agent is available.
+
+### AWS RDS for SQL Server
+
+Use the RDS master user for installation. The master user has the necessary permissions. For ongoing collection, `VIEW SERVER STATE` and msdb access work the same as on-premises, but `sp_configure` is not available (use RDS Parameter Groups instead — see above).
 
 ---
 
@@ -471,7 +579,7 @@ Common issues:
 Monitor/
 │
 │   Full Edition (server-installed collectors + separate dashboard)
-├── install/          # 54 SQL installation scripts
+├── install/          # 58 SQL installation scripts
 ├── upgrades/         # Version-specific upgrade scripts
 ├── Installer/        # CLI installer for Full Edition database (C#)
 ├── InstallerGui/     # GUI installer for Full Edition database (WPF)
@@ -508,14 +616,27 @@ dotnet publish InstallerGui/InstallerGui.csproj -c Release -r win-x64 --self-con
 
 ## Support & Sponsorship
 
-**This project is free and open source.** If you find it valuable, consider supporting continued development:
+**This project is free and open source under the MIT License.** The software is fully functional with no features withheld — every user gets the same tool, same collectors, same MCP integration.
+
+However, some organizations have procurement or compliance policies that require a formal vendor relationship, a support agreement, or an invoice on file before software can be deployed to production. If that sounds familiar, two commercial support tiers are available:
+
+| Tier | Annual Cost | What You Get |
+|------|-------------|--------------|
+| **Supported** | $500/year | Email support (2-business-day response), compatibility guarantees for new SQL Server versions, vendor agreement and invoices for compliance, unlimited instances |
+| **Priority** | $2,500/year | Next-business-day email response, quarterly live Q&A sessions, early access to new features, roadmap input, unlimited instances |
+
+Both tiers cover unlimited SQL Server instances. The software itself is identical — commercial support is about the relationship, not a feature gate.
+
+**[Read more about the free tool and commercial options](https://erikdarling.com/free-sql-server-performance-monitoring/)** | **[Purchase a support subscription](https://training.erikdarling.com/sql-monitoring)**
+
+If you find the project valuable, you can also support continued development:
 
 | | |
 |---|---|
 | **Sponsor on GitHub** | [Become a sponsor](https://github.com/sponsors/erikdarlingdata) to fund new features, ongoing maintenance, and SQL Server version support. |
 | **Consulting Services** | [Hire me](https://training.erikdarling.com/sqlconsulting) for hands-on consulting if you need help analyzing the data this tool collects? Want expert assistance fixing the issues it uncovers?  |
 
-Neither is required — use the tool freely. Sponsorship and consulting keep this project alive.
+Neither sponsorship nor consulting is required — use the tool freely.
 
 ---
 

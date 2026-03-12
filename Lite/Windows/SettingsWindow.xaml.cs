@@ -8,8 +8,11 @@
 
 using System;
 using System.IO;
+using System.Linq;
+using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitorLite.Mcp;
@@ -22,16 +25,19 @@ public partial class SettingsWindow : Window
     private readonly ScheduleManager _scheduleManager;
     private readonly CollectionBackgroundService? _backgroundService;
     private readonly McpHostService? _mcpService;
+    private readonly MuteRuleService? _muteRuleService;
 
     public SettingsWindow(
         ScheduleManager scheduleManager,
         CollectionBackgroundService? backgroundService = null,
-        McpHostService? mcpService = null)
+        McpHostService? mcpService = null,
+        MuteRuleService? muteRuleService = null)
     {
         InitializeComponent();
         _scheduleManager = scheduleManager;
         _backgroundService = backgroundService;
         _mcpService = mcpService;
+        _muteRuleService = muteRuleService;
 
         LoadSchedules();
         UpdateCollectionStatus();
@@ -46,9 +52,62 @@ public partial class SettingsWindow : Window
         LoadSmtpSettings();
     }
 
+    private bool _suppressPresetChange;
+
     private void LoadSchedules()
     {
         ScheduleGrid.ItemsSource = _scheduleManager.GetAllSchedules();
+        DetectActivePreset();
+    }
+
+    private void DetectActivePreset()
+    {
+        _suppressPresetChange = true;
+        try
+        {
+            string active = _scheduleManager.GetActivePreset();
+            for (int i = 0; i < PresetComboBox.Items.Count; i++)
+            {
+                if (PresetComboBox.Items[i] is ComboBoxItem item &&
+                    string.Equals(item.Content?.ToString(), active, StringComparison.OrdinalIgnoreCase))
+                {
+                    PresetComboBox.SelectedIndex = i;
+                    return;
+                }
+            }
+            PresetComboBox.SelectedIndex = 0;
+        }
+        finally
+        {
+            _suppressPresetChange = false;
+        }
+    }
+
+    private void PresetComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressPresetChange) return;
+        if (PresetComboBox.SelectedItem is not ComboBoxItem selected) return;
+
+        string presetName = selected.Content?.ToString() ?? "";
+        if (presetName == "Custom") return;
+
+        var result = MessageBox.Show(
+            $"Apply the \"{presetName}\" preset?\n\nThis will change all collector frequencies. Enabled/disabled state and retention settings are not affected.",
+            "Apply Collection Preset",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question
+        );
+
+        if (result != MessageBoxResult.Yes)
+        {
+            DetectActivePreset();
+            return;
+        }
+
+        _scheduleManager.ApplyPreset(presetName);
+        ScheduleGrid.ItemsSource = null;
+        ScheduleGrid.ItemsSource = _scheduleManager.GetAllSchedules();
+        DetectActivePreset();
     }
 
     private void UpdateCollectionStatus()
@@ -108,19 +167,22 @@ public partial class SettingsWindow : Window
         UpdateCollectionStatus();
     }
 
-    private void SaveButton_Click(object sender, RoutedEventArgs e)
+    private async void SaveButton_Click(object sender, RoutedEventArgs e)
     {
         _scheduleManager.SaveSchedules();
-        bool mcpChanged = SaveMcpSettings();
+        var (mcpChanged, mcpValid) = await SaveMcpSettingsAsync();
         SaveDefaultTimeRange();
         SaveConnectionTimeout();
         SaveCsvSeparator();
         SaveColorTheme();
         SaveTimeDisplayMode();
-        SaveAlertSettings();
+        bool alertsValid = SaveAlertSettings();
         SaveSmtpSettings();
 
         _saved = true;
+        if (mcpChanged) McpSettingsChanged = true;
+
+        if (!alertsValid || !mcpValid) return;
 
         var message = mcpChanged
             ? "Settings saved. MCP changes take effect after restarting the application."
@@ -128,7 +190,7 @@ public partial class SettingsWindow : Window
         MessageBox.Show(message, "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
-    private bool SaveMcpSettings()
+    private async Task<(bool Changed, bool Valid)> SaveMcpSettingsAsync()
     {
         var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
 
@@ -150,22 +212,56 @@ public partial class SettingsWindow : Window
             var newEnabled = McpEnabledCheckBox.IsChecked == true;
             int.TryParse(McpPortTextBox.Text, out var newPort);
 
+            if (newEnabled && (newPort != oldPort || !oldEnabled))
+            {
+                if (newPort < 1024 || newPort > IPEndPoint.MaxPort)
+                {
+                    MessageBox.Show(
+                        $"MCP port must be between 1024 and {IPEndPoint.MaxPort}.\nPorts 0–1023 are well-known privileged ports reserved by the operating system.",
+                        "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return (true, false);
+                }
+
+                // CanBindTcpPortAsync attempts an actual bind, which is more reliable
+                // than checking listeners (TOCTOU is still possible but less likely)
+                bool canBind = await PortUtilityService.CanBindTcpPortAsync(newPort, IPAddress.Loopback);
+                if (!canBind)
+                {
+                    MessageBox.Show(
+                        $"Port {newPort} is already in use. Choose a different port for the MCP server.",
+                        "Port Conflict", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return (true, false);
+                }
+            }
+
             root["mcp_enabled"] = newEnabled;
 
-            if (newPort > 0 && newPort < 65536)
+            bool portValid = true;
+            if (newPort >= 1024 && newPort <= IPEndPoint.MaxPort)
             {
                 root["mcp_port"] = newPort;
+            }
+            else
+            {
+                portValid = false;
             }
 
             var options = new JsonSerializerOptions { WriteIndented = true };
             File.WriteAllText(settingsPath, root.ToJsonString(options));
 
-            return oldEnabled != newEnabled || oldPort != newPort;
+            if (!portValid)
+            {
+                MessageBox.Show(
+                    "MCP port failed validation - must be a valid TCP port number.\nOther MCP settings were saved.",
+                    "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+
+            return (oldEnabled != newEnabled || oldPort != newPort, portValid);
         }
         catch (Exception ex)
         {
             AppLogger.Error("Settings", $"Failed to save MCP settings: {ex.Message}");
-            return false;
+            return (false, true);
         }
     }
 
@@ -228,6 +324,20 @@ public partial class SettingsWindow : Window
         /* Use SetDataObject with copy=false to avoid WPF's problematic Clipboard.Flush() */
         Clipboard.SetDataObject(command, false);
         McpStatusText.Text = "Copied to clipboard!";
+    }
+
+    private async void AutoPortButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            int port = await PortUtilityService.GetFreeTcpPortAsync();
+            McpPortTextBox.Text = port.ToString();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Could not find an available port: {ex.Message}",
+                "Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
     }
 
     private void LoadConnectionTimeout()
@@ -316,6 +426,7 @@ public partial class SettingsWindow : Window
     private bool _isLoadingTheme;
     private readonly string _originalTheme = Helpers.ThemeManager.CurrentTheme;
     private bool _saved;
+    public bool McpSettingsChanged { get; private set; }
 
     private void ColorThemeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
@@ -436,14 +547,22 @@ public partial class SettingsWindow : Window
         AlertPoisonWaitThresholdBox.Text = App.AlertPoisonWaitThresholdMs.ToString();
         AlertLongRunningQueryCheckBox.IsChecked = App.AlertLongRunningQueryEnabled;
         AlertLongRunningQueryThresholdBox.Text = App.AlertLongRunningQueryThresholdMinutes.ToString();
+        AlertLongRunningQueryMaxResultsBox.Text = App.AlertLongRunningQueryMaxResults.ToString();
+        LrqExcludeSpServerDiagnosticsCheckBox.IsChecked = App.AlertLongRunningQueryExcludeSpServerDiagnostics;
+        LrqExcludeWaitForCheckBox.IsChecked = App.AlertLongRunningQueryExcludeWaitFor;
+        LrqExcludeBackupsCheckBox.IsChecked = App.AlertLongRunningQueryExcludeBackups;
+        LrqExcludeMiscWaitsCheckBox.IsChecked = App.AlertLongRunningQueryExcludeMiscWaits;
+        AlertExcludedDatabasesBox.Text = string.Join(", ", App.AlertExcludedDatabases);
         AlertTempDbSpaceCheckBox.IsChecked = App.AlertTempDbSpaceEnabled;
         AlertTempDbSpaceThresholdBox.Text = App.AlertTempDbSpaceThresholdPercent.ToString();
         AlertLongRunningJobCheckBox.IsChecked = App.AlertLongRunningJobEnabled;
         AlertLongRunningJobMultiplierBox.Text = App.AlertLongRunningJobMultiplier.ToString();
+        AlertCooldownBox.Text = App.AlertCooldownMinutes.ToString();
+        EmailCooldownBox.Text = App.EmailCooldownMinutes.ToString();
         UpdateAlertControlStates();
     }
 
-    private void SaveAlertSettings()
+    private bool SaveAlertSettings()
     {
         App.MinimizeToTray = MinimizeToTrayCheckBox.IsChecked == true;
         App.AlertsEnabled = AlertsEnabledCheckBox.IsChecked == true;
@@ -463,12 +582,32 @@ public partial class SettingsWindow : Window
         App.AlertLongRunningQueryEnabled = AlertLongRunningQueryCheckBox.IsChecked == true;
         if (int.TryParse(AlertLongRunningQueryThresholdBox.Text, out var lrq) && lrq > 0)
             App.AlertLongRunningQueryThresholdMinutes = lrq;
+        if (int.TryParse(AlertLongRunningQueryMaxResultsBox.Text, out var lrqMax) && lrqMax >= 1 && lrqMax <= int.MaxValue)
+            App.AlertLongRunningQueryMaxResults = lrqMax;
+        App.AlertLongRunningQueryExcludeSpServerDiagnostics = LrqExcludeSpServerDiagnosticsCheckBox.IsChecked == true;
+        App.AlertLongRunningQueryExcludeWaitFor = LrqExcludeWaitForCheckBox.IsChecked == true;
+        App.AlertLongRunningQueryExcludeBackups = LrqExcludeBackupsCheckBox.IsChecked == true;
+        App.AlertLongRunningQueryExcludeMiscWaits = LrqExcludeMiscWaitsCheckBox.IsChecked == true;
+        App.AlertExcludedDatabases = AlertExcludedDatabasesBox.Text
+            .Split(',')
+            .Select(s => s.Trim())
+            .Where(s => s.Length > 0)
+            .ToList();
         App.AlertTempDbSpaceEnabled = AlertTempDbSpaceCheckBox.IsChecked == true;
         if (int.TryParse(AlertTempDbSpaceThresholdBox.Text, out var tempDb) && tempDb > 0 && tempDb <= 100)
             App.AlertTempDbSpaceThresholdPercent = tempDb;
         App.AlertLongRunningJobEnabled = AlertLongRunningJobCheckBox.IsChecked == true;
         if (int.TryParse(AlertLongRunningJobMultiplierBox.Text, out var jobMult) && jobMult >= 2 && jobMult <= 20)
             App.AlertLongRunningJobMultiplier = jobMult;
+        var validationErrors = new List<string>();
+        if (int.TryParse(AlertCooldownBox.Text, out var alertCooldown) && alertCooldown >= 1 && alertCooldown <= 120)
+            App.AlertCooldownMinutes = alertCooldown;
+        else
+            validationErrors.Add("Tray notification cooldown must be between 1 and 120 minutes.");
+        if (int.TryParse(EmailCooldownBox.Text, out var emailCooldown) && emailCooldown >= 1 && emailCooldown <= 120)
+            App.EmailCooldownMinutes = emailCooldown;
+        else
+            validationErrors.Add("Email alert cooldown must be between 1 and 120 minutes.");
 
         var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
         try
@@ -497,10 +636,20 @@ public partial class SettingsWindow : Window
             root["alert_poison_wait_threshold_ms"] = App.AlertPoisonWaitThresholdMs;
             root["alert_long_running_query_enabled"] = App.AlertLongRunningQueryEnabled;
             root["alert_long_running_query_threshold_minutes"] = App.AlertLongRunningQueryThresholdMinutes;
+            root["alert_long_running_query_max_results"] = App.AlertLongRunningQueryMaxResults;
+            root["alert_long_running_query_exclude_sp_server_diagnostics"] = App.AlertLongRunningQueryExcludeSpServerDiagnostics;
+            root["alert_long_running_query_exclude_waitfor"] = App.AlertLongRunningQueryExcludeWaitFor;
+            root["alert_long_running_query_exclude_backups"] = App.AlertLongRunningQueryExcludeBackups;
+            root["alert_long_running_query_exclude_misc_waits"] = App.AlertLongRunningQueryExcludeMiscWaits;
+            var dbArray = new System.Text.Json.Nodes.JsonArray();
+            foreach (var db in App.AlertExcludedDatabases) dbArray.Add(db);
+            root["alert_excluded_databases"] = dbArray;
             root["alert_tempdb_space_enabled"] = App.AlertTempDbSpaceEnabled;
             root["alert_tempdb_space_threshold_percent"] = App.AlertTempDbSpaceThresholdPercent;
             root["alert_long_running_job_enabled"] = App.AlertLongRunningJobEnabled;
             root["alert_long_running_job_multiplier"] = App.AlertLongRunningJobMultiplier;
+            root["alert_cooldown_minutes"] = App.AlertCooldownMinutes;
+            root["email_cooldown_minutes"] = App.EmailCooldownMinutes;
 
             var options = new JsonSerializerOptions { WriteIndented = true };
             File.WriteAllText(settingsPath, root.ToJsonString(options));
@@ -509,6 +658,17 @@ public partial class SettingsWindow : Window
         {
             AppLogger.Error("Settings", $"Failed to save alert settings: {ex.Message}");
         }
+
+        if (validationErrors.Count > 0)
+        {
+            MessageBox.Show(
+                "Some alert settings have invalid values and were not changed:\n\n" +
+                string.Join("\n", validationErrors),
+                "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
+
+        return true;
     }
 
     private void AlertsEnabledCheckBox_Changed(object sender, RoutedEventArgs e)
@@ -525,7 +685,17 @@ public partial class SettingsWindow : Window
         AlertLongRunningQueryThresholdBox.Text = "30";
         AlertTempDbSpaceThresholdBox.Text = "80";
         AlertLongRunningJobMultiplierBox.Text = "3";
+        AlertCooldownBox.Text = "5";
+        EmailCooldownBox.Text = "15";
+        AlertExcludedDatabasesBox.Text = "";
         UpdateAlertPreviewText();
+    }
+
+    private void ManageMuteRulesButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_muteRuleService == null) return;
+        var window = new ManageMuteRulesWindow(_muteRuleService) { Owner = this };
+        window.ShowDialog();
     }
 
     private void UpdateAlertPreviewText()

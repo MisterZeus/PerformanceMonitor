@@ -141,10 +141,12 @@ namespace PerformanceMonitorInstallerGui
                 return;
 
             bool useSqlAuth = SqlAuthRadio.IsChecked == true;
+            bool useEntraAuth = EntraAuthRadio.IsChecked == true;
 
-            UsernameTextBox.IsEnabled = useSqlAuth;
+            UsernameTextBox.IsEnabled = useSqlAuth || useEntraAuth;
             PasswordBox.IsEnabled = useSqlAuth;
-            UsernameLabel.Opacity = useSqlAuth ? 1.0 : 0.5;
+            UsernameLabel.Text = useEntraAuth ? "Email:" : "Username:";
+            UsernameLabel.Opacity = (useSqlAuth || useEntraAuth) ? 1.0 : 0.5;
             PasswordLabel.Opacity = useSqlAuth ? 1.0 : 0.5;
 
             InvalidateConnection();
@@ -171,6 +173,7 @@ namespace PerformanceMonitorInstallerGui
             _serverInfo = null;
             _installedVersion = null;
             InstallButton.IsEnabled = false;
+            UninstallButton.IsEnabled = false;
         }
 
         /// <summary>
@@ -189,10 +192,20 @@ namespace PerformanceMonitorInstallerGui
             }
 
             bool useWindowsAuth = WindowsAuthRadio.IsChecked == true;
-            string? username = useWindowsAuth ? null : UsernameTextBox.Text.Trim();
-            string? password = useWindowsAuth ? null : PasswordBox.Password;
+            bool useEntraAuth = EntraAuthRadio.IsChecked == true;
+            string? username = (useWindowsAuth) ? null : UsernameTextBox.Text.Trim();
+            string? password = (useWindowsAuth || useEntraAuth) ? null : PasswordBox.Password;
 
-            if (!useWindowsAuth)
+            if (useEntraAuth)
+            {
+                if (string.IsNullOrEmpty(username))
+                {
+                    MessageBox.Show(this, "Please enter an email address for Entra ID authentication.",
+                        "Validation Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+            }
+            else if (!useWindowsAuth)
             {
                 if (string.IsNullOrEmpty(username))
                 {
@@ -220,7 +233,7 @@ namespace PerformanceMonitorInstallerGui
 
                 Logger.LogToFile("TestConnection_Click", $"Encryption: {encryption}, TrustCert: {trustCertificate}");
 
-                _connectionString = InstallationService.BuildConnectionString(server, useWindowsAuth, username, password, encryption, trustCertificate);
+                _connectionString = InstallationService.BuildConnectionString(server, useWindowsAuth, username, password, encryption, trustCertificate, useEntraAuth);
 
                 Logger.LogToFile("TestConnection_Click", "Connection string built, clearing log");
 
@@ -283,6 +296,7 @@ namespace PerformanceMonitorInstallerGui
                     }
 
                     InstallButton.IsEnabled = _sqlFiles != null && _sqlFiles.Count > 0;
+                    UninstallButton.IsEnabled = _installedVersion != null;
 
                     /*Show confirmation MessageBox*/
                     string installedVersionText = _installedVersion != null
@@ -417,6 +431,25 @@ namespace PerformanceMonitorInstallerGui
                     cancellationToken);
 
                 /*
+                Log installation history to database
+                */
+                try
+                {
+                    await InstallationService.LogInstallationHistoryAsync(
+                        _connectionString,
+                        AppAssemblyVersion,
+                        AppVersion,
+                        _installationResult.StartTime,
+                        _installationResult.FilesSucceeded,
+                        _installationResult.FilesFailed,
+                        _installationResult.Success);
+                }
+                catch (Exception ex)
+                {
+                    LogMessage($"Warning: Could not log installation history: {ex.Message}", "Warning");
+                }
+
+                /*
                 Run validation if requested
                 */
                 if (_installationResult.Success && ValidationCheckBox.IsChecked == true)
@@ -524,6 +557,98 @@ namespace PerformanceMonitorInstallerGui
                         MessageBoxButton.OK,
                         MessageBoxImage.Warning);
                 }
+            }
+        }
+
+        /// <summary>
+        /// Uninstall button click
+        /// </summary>
+        private async void Uninstall_Click(object sender, RoutedEventArgs e)
+        {
+            if (_connectionString == null || _installedVersion == null)
+            {
+                MessageBox.Show(this, "No installation detected.", "Info",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            var result = MessageBox.Show(this,
+                "WARNING: This will permanently remove the PerformanceMonitor database,\n" +
+                "all SQL Agent jobs, Extended Events sessions, and ALL collected data.\n\n" +
+                "This action CANNOT be undone!\n\n" +
+                $"Installed version: {_installedVersion}\n\n" +
+                "Are you sure you want to continue?",
+                "Confirm Uninstall",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning,
+                MessageBoxResult.No);
+
+            if (result != MessageBoxResult.Yes)
+            {
+                return;
+            }
+
+            _cancellationTokenSource?.Dispose();
+            _cancellationTokenSource = new CancellationTokenSource();
+            var cancellationToken = _cancellationTokenSource.Token;
+
+            SetUIState(installing: true);
+            ClearLog();
+
+            LogMessage($"Performance Monitor Uninstaller v{AppVersion}", "Info");
+            LogMessage("", "Info");
+
+            var progress = new Progress<InstallationProgress>(ReportProgress);
+
+            try
+            {
+                bool success = await InstallationService.ExecuteUninstallAsync(
+                    _connectionString,
+                    progress,
+                    cancellationToken);
+
+                if (success)
+                {
+                    LogMessage("", "Info");
+                    LogMessage("================================================================================", "Info");
+                    LogMessage("Uninstall completed successfully!", "Success");
+                    LogMessage("================================================================================", "Info");
+                    LogMessage("", "Info");
+                    LogMessage("Note: blocked process threshold (s) was NOT reset.", "Info");
+
+                    _installedVersion = null;
+                    ProgressBar.Value = 100;
+                    ProgressText.Text = "100%";
+
+                    MessageBox.Show(this,
+                        "Uninstall completed successfully!\n\n" +
+                        "Database, Agent jobs, and XE sessions have been removed.",
+                        "Uninstall Complete",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                LogMessage("", "Info");
+                LogMessage("Uninstall cancelled by user.", "Warning");
+            }
+            catch (Exception ex)
+            {
+                LogMessage("", "Info");
+                LogMessage($"Uninstall failed: {ex.Message}", "Error");
+
+                MessageBox.Show(this,
+                    $"Uninstall failed:\n\n{ex.Message}",
+                    "Uninstall Error",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+            }
+            finally
+            {
+                SetUIState(installing: false);
+                _cancellationTokenSource?.Dispose();
+                _cancellationTokenSource = null;
             }
         }
 
@@ -690,7 +815,8 @@ namespace PerformanceMonitorInstallerGui
             ServerTextBox.IsEnabled = !installing;
             WindowsAuthRadio.IsEnabled = !installing;
             SqlAuthRadio.IsEnabled = !installing;
-            UsernameTextBox.IsEnabled = !installing && SqlAuthRadio.IsChecked == true;
+            EntraAuthRadio.IsEnabled = !installing;
+            UsernameTextBox.IsEnabled = !installing && (SqlAuthRadio.IsChecked == true || EntraAuthRadio.IsChecked == true);
             PasswordBox.IsEnabled = !installing && SqlAuthRadio.IsChecked == true;
             TestConnectionButton.IsEnabled = !installing;
             CleanInstallCheckBox.IsEnabled = !installing;
@@ -701,6 +827,7 @@ namespace PerformanceMonitorInstallerGui
 
             TroubleshootButton.IsEnabled = !installing && _installationResult?.Success == true;
             ViewReportButton.IsEnabled = !installing && _installationResult?.ReportPath != null;
+            UninstallButton.IsEnabled = !installing && _installedVersion != null;
 
             if (!installing)
             {

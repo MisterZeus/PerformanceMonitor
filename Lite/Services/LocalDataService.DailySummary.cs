@@ -20,6 +20,7 @@ public partial class LocalDataService
     /// </summary>
     public async Task<DailySummaryRow?> GetDailySummaryAsync(int serverId, DateTime? summaryDate = null)
     {
+        using var _q = TimeQuery("GetDailySummaryAsync", "daily summary aggregation");
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 

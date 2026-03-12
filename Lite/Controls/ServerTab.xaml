@@ -119,7 +119,7 @@
 
         <!-- Main Tab Control -->
         <TabControl Grid.Row="1" x:Name="MainTabControl" Background="{DynamicResource BackgroundBrush}"
-                    BorderThickness="0" Padding="0">
+                    BorderThickness="0" Padding="0" SelectionChanged="MainTabControl_SelectionChanged">
 
             <!-- Wait Stats Tab -->
             <TabItem Header="Wait Stats">
@@ -179,7 +179,7 @@
             <!-- Query Performance Tab -->
             <TabItem Header="Queries">
                 <Grid Margin="8">
-                    <TabControl Background="Transparent" BorderThickness="0">
+                    <TabControl x:Name="QueriesSubTabControl" Background="Transparent" BorderThickness="0">
                         <TabItem Header="Performance Trends">
                             <Grid>
                                 <Grid.RowDefinitions>
@@ -245,7 +245,7 @@
                                         <DataGridTextColumn Binding="{Binding Status}" Width="80">
                                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Status" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Status" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         </DataGridTextColumn>
-                                        <DataGridTextColumn Binding="{Binding ElapsedTimeFormatted}" Width="120">
+                                        <DataGridTextColumn Binding="{Binding ElapsedTimeFormatted}" Width="120" SortMemberPath="TotalElapsedTimeMs">
                                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ElapsedTimeFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Elapsed" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         </DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding CpuTimeMs, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80">
@@ -697,7 +697,7 @@
 
             <!-- Memory Tab -->
             <TabItem Header="Memory">
-                <TabControl Background="Transparent" BorderThickness="0">
+                <TabControl x:Name="MemorySubTabControl" Background="Transparent" BorderThickness="0">
                     <!-- Memory Overview Sub-Tab -->
                     <TabItem Header="Overview">
                         <Grid Margin="8">
@@ -890,7 +890,7 @@
             <!-- Blocking Tab -->
             <TabItem Header="Blocking">
                 <Grid Margin="8">
-                    <TabControl Background="Transparent" BorderThickness="0">
+                    <TabControl x:Name="BlockingSubTabControl" Background="Transparent" BorderThickness="0">
                         <TabItem Header="Trends">
                             <Grid>
                                 <Grid.RowDefinitions>
@@ -942,7 +942,7 @@
                                     <DataGridTextColumn Binding="{Binding BlockingSpid}" ElementStyle="{StaticResource NumericCell}" Width="70">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BlockingSpid" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Blocking SPID" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding WaitTimeFormatted}" Width="80">
+                                    <DataGridTextColumn Binding="{Binding WaitTimeFormatted}" Width="80" SortMemberPath="WaitTimeMs">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="WaitTimeFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Wait Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding WaitResource}" Width="200">
@@ -1183,13 +1183,13 @@
                             <DataGridTextColumn Binding="{Binding StartTimeLocal}" Width="150">
                                 <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="StartTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Start Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding CurrentDurationFormatted}" Width="120">
+                            <DataGridTextColumn Binding="{Binding CurrentDurationFormatted}" Width="120" SortMemberPath="CurrentDurationSeconds">
                                 <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CurrentDurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Current Duration" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding AvgDurationFormatted}" Width="110">
+                            <DataGridTextColumn Binding="{Binding AvgDurationFormatted}" Width="110" SortMemberPath="AvgDurationSeconds">
                                 <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgDurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Avg Duration" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding P95DurationFormatted}" Width="110">
+                            <DataGridTextColumn Binding="{Binding P95DurationFormatted}" Width="110" SortMemberPath="P95DurationSeconds">
                                 <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="P95DurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="P95 Duration" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                             </DataGridTextColumn>
                             <DataGridTextColumn Binding="{Binding PercentOfAverageFormatted}" Width="100">
@@ -1403,7 +1403,7 @@
                             <DataGridTextColumn Binding="{Binding OverallHealth}" Width="120">
                                 <DataGridTextColumn.Header><TextBlock Text="Health" FontWeight="Bold"/></DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding TotalWaitFormatted}" ElementStyle="{StaticResource NumericCell}" Width="120">
+                            <DataGridTextColumn Binding="{Binding TotalWaitFormatted}" ElementStyle="{StaticResource NumericCell}" Width="120" SortMemberPath="TotalWaitTimeSec">
                                 <DataGridTextColumn.Header><TextBlock Text="Total Wait" FontWeight="Bold"/></DataGridTextColumn.Header>
                             </DataGridTextColumn>
                             <DataGridTextColumn Binding="{Binding TopWaitType}" Width="180">
@@ -1459,7 +1459,7 @@
                                     <DataGridTextColumn Binding="{Binding FailureRatePercent, StringFormat=N1}" ElementStyle="{StaticResource NumericCell}" Width="85">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="FailureRatePercent" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Fail %" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding AvgDurationFormatted}" Width="100">
+                                    <DataGridTextColumn Binding="{Binding AvgDurationFormatted}" Width="120" SortMemberPath="AvgDurationMs">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgDurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Avg Duration" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding LastSuccessFormatted}" Width="140">
@@ -1500,13 +1500,13 @@
                                         <DataGridTextColumn Binding="{Binding Status}" Width="80">
                                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Status" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Status" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         </DataGridTextColumn>
-                                        <DataGridTextColumn Binding="{Binding DurationFormatted}" Width="90">
+                                        <DataGridTextColumn Binding="{Binding DurationFormatted}" Width="90" SortMemberPath="DurationMs">
                                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Duration" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         </DataGridTextColumn>
-                                        <DataGridTextColumn Binding="{Binding SqlDurationFormatted}" Width="90">
+                                        <DataGridTextColumn Binding="{Binding SqlDurationFormatted}" Width="90" SortMemberPath="SqlDurationMs">
                                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SqlDurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="SQL (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         </DataGridTextColumn>
-                                        <DataGridTextColumn Binding="{Binding DuckDbDurationFormatted}" Width="100">
+                                        <DataGridTextColumn Binding="{Binding DuckDbDurationFormatted}" Width="120" SortMemberPath="DuckDbDurationMs">
                                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DuckDbDurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="DuckDB (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         </DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding RowsCollected, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80">

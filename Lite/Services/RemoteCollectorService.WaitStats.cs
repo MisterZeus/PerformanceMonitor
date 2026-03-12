@@ -127,15 +127,15 @@ OPTION(RECOMPILE);";
                 foreach (var stat in waitStats)
                 {
                     var deltaKey = stat.WaitType;
-                    var deltaWaitingTasks = _deltaCalculator.CalculateDelta(serverId, "wait_stats_tasks", deltaKey, stat.WaitingTasks);
-                    var deltaWaitTimeMs = _deltaCalculator.CalculateDelta(serverId, "wait_stats_time", deltaKey, stat.WaitTimeMs);
-                    var deltaSignalWaitTimeMs = _deltaCalculator.CalculateDelta(serverId, "wait_stats_signal", deltaKey, stat.SignalWaitTimeMs);
+                    var deltaWaitingTasks = _deltaCalculator.CalculateDelta(serverId, "wait_stats_tasks", deltaKey, stat.WaitingTasks, baselineOnly: true);
+                    var deltaWaitTimeMs = _deltaCalculator.CalculateDelta(serverId, "wait_stats_time", deltaKey, stat.WaitTimeMs, baselineOnly: true);
+                    var deltaSignalWaitTimeMs = _deltaCalculator.CalculateDelta(serverId, "wait_stats_signal", deltaKey, stat.SignalWaitTimeMs, baselineOnly: true);
 
                     var row = appender.CreateRow();
                     row.AppendValue(GenerateCollectionId())    /* collection_id BIGINT */
                        .AppendValue(collectionTime)            /* collection_time TIMESTAMP */
                        .AppendValue(serverId)                  /* server_id INTEGER */
-                       .AppendValue(server.ServerName)         /* server_name VARCHAR */
+                       .AppendValue(GetServerNameForStorage(server))         /* server_name VARCHAR */
                        .AppendValue(stat.WaitType)             /* wait_type VARCHAR */
                        .AppendValue(stat.WaitingTasks)         /* waiting_tasks_count BIGINT */
                        .AppendValue(stat.WaitTimeMs)           /* wait_time_ms BIGINT */

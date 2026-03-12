@@ -138,21 +138,21 @@ OPTION(RECOMPILE);";
             {
                 foreach (var stat in fileStats)
                 {
-                    var deltaKey = $"{stat.DatabaseId}_{stat.FileId}";
-                    var deltaReads = _deltaCalculator.CalculateDelta(serverId, "file_io_reads", deltaKey, stat.NumOfReads);
-                    var deltaWrites = _deltaCalculator.CalculateDelta(serverId, "file_io_writes", deltaKey, stat.NumOfWrites);
-                    var deltaReadBytes = _deltaCalculator.CalculateDelta(serverId, "file_io_read_bytes", deltaKey, stat.ReadBytes);
-                    var deltaWriteBytes = _deltaCalculator.CalculateDelta(serverId, "file_io_write_bytes", deltaKey, stat.WriteBytes);
-                    var deltaStallReadMs = _deltaCalculator.CalculateDelta(serverId, "file_io_stall_read", deltaKey, stat.IoStallReadMs);
-                    var deltaStallWriteMs = _deltaCalculator.CalculateDelta(serverId, "file_io_stall_write", deltaKey, stat.IoStallWriteMs);
-                    var deltaStallQueuedReadMs = _deltaCalculator.CalculateDelta(serverId, "file_io_stall_queued_read", deltaKey, stat.IoStallQueuedReadMs);
-                    var deltaStallQueuedWriteMs = _deltaCalculator.CalculateDelta(serverId, "file_io_stall_queued_write", deltaKey, stat.IoStallQueuedWriteMs);
+                    var deltaKey = $"{stat.DatabaseName}|{stat.FileName}";
+                    var deltaReads = _deltaCalculator.CalculateDelta(serverId, "file_io_reads", deltaKey, stat.NumOfReads, baselineOnly: true);
+                    var deltaWrites = _deltaCalculator.CalculateDelta(serverId, "file_io_writes", deltaKey, stat.NumOfWrites, baselineOnly: true);
+                    var deltaReadBytes = _deltaCalculator.CalculateDelta(serverId, "file_io_read_bytes", deltaKey, stat.ReadBytes, baselineOnly: true);
+                    var deltaWriteBytes = _deltaCalculator.CalculateDelta(serverId, "file_io_write_bytes", deltaKey, stat.WriteBytes, baselineOnly: true);
+                    var deltaStallReadMs = _deltaCalculator.CalculateDelta(serverId, "file_io_stall_read", deltaKey, stat.IoStallReadMs, baselineOnly: true);
+                    var deltaStallWriteMs = _deltaCalculator.CalculateDelta(serverId, "file_io_stall_write", deltaKey, stat.IoStallWriteMs, baselineOnly: true);
+                    var deltaStallQueuedReadMs = _deltaCalculator.CalculateDelta(serverId, "file_io_stall_queued_read", deltaKey, stat.IoStallQueuedReadMs, baselineOnly: true);
+                    var deltaStallQueuedWriteMs = _deltaCalculator.CalculateDelta(serverId, "file_io_stall_queued_write", deltaKey, stat.IoStallQueuedWriteMs, baselineOnly: true);
 
                     var row = appender.CreateRow();
                     row.AppendValue(GenerateCollectionId())
                        .AppendValue(collectionTime)
                        .AppendValue(serverId)
-                       .AppendValue(server.ServerName)
+                       .AppendValue(GetServerNameForStorage(server))
                        .AppendValue(stat.DatabaseName)
                        .AppendValue(stat.FileName)
                        .AppendValue(stat.FileType)

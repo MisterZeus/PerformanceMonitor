@@ -278,19 +278,19 @@ OPTION(RECOMPILE);";
                     /* Delta key: plan_handle to prevent cross-contamination
                        when multiple plans exist for the same object */
                     var deltaKey = planHandle ?? $"{dbName}.{schemaName}.{objectName}";
-                    var deltaExec = _deltaCalculator.CalculateDelta(serverId, "proc_stats_exec", deltaKey, execCount);
-                    var deltaWorker = _deltaCalculator.CalculateDelta(serverId, "proc_stats_worker", deltaKey, workerTime);
-                    var deltaElapsed = _deltaCalculator.CalculateDelta(serverId, "proc_stats_elapsed", deltaKey, elapsedTime);
-                    var deltaReads = _deltaCalculator.CalculateDelta(serverId, "proc_stats_reads", deltaKey, logicalReads);
-                    var deltaWrites = _deltaCalculator.CalculateDelta(serverId, "proc_stats_writes", deltaKey, logicalWrites);
-                    var deltaPhysReads = _deltaCalculator.CalculateDelta(serverId, "proc_stats_phys_reads", deltaKey, physicalReads);
+                    var deltaExec = _deltaCalculator.CalculateDelta(serverId, "proc_stats_exec", deltaKey, execCount, baselineOnly: true);
+                    var deltaWorker = _deltaCalculator.CalculateDelta(serverId, "proc_stats_worker", deltaKey, workerTime, baselineOnly: true);
+                    var deltaElapsed = _deltaCalculator.CalculateDelta(serverId, "proc_stats_elapsed", deltaKey, elapsedTime, baselineOnly: true);
+                    var deltaReads = _deltaCalculator.CalculateDelta(serverId, "proc_stats_reads", deltaKey, logicalReads, baselineOnly: true);
+                    var deltaWrites = _deltaCalculator.CalculateDelta(serverId, "proc_stats_writes", deltaKey, logicalWrites, baselineOnly: true);
+                    var deltaPhysReads = _deltaCalculator.CalculateDelta(serverId, "proc_stats_phys_reads", deltaKey, physicalReads, baselineOnly: true);
 
                     /* Appender column order must match DuckDB table definition exactly */
                     var row = appender.CreateRow();
                     row.AppendValue(GenerateCollectionId())                                     /* collection_id */
                        .AppendValue(collectionTime)                                             /* collection_time */
                        .AppendValue(serverId)                                                   /* server_id */
-                       .AppendValue(server.ServerName)                                          /* server_name */
+                       .AppendValue(GetServerNameForStorage(server))                                          /* server_name */
                        .AppendValue(dbName)                                                     /* database_name */
                        .AppendValue(schemaName)                                                 /* schema_name */
                        .AppendValue(objectName)                                                 /* object_name */

@@ -85,10 +85,28 @@ namespace PerformanceMonitorDashboard.Models
         public int PoisonWaitThresholdMs { get; set; } = 500; // Alert when avg ms per wait > X
         public bool NotifyOnLongRunningQueries { get; set; } = true;
         public int LongRunningQueryThresholdMinutes { get; set; } = 30; // Alert when query runs > X minutes
+        public int LongRunningQueryMaxResults { get; set; } = 5; // Max number of long-running queries returned per check
+        public bool LongRunningQueryExcludeSpServerDiagnostics { get; set; } = true;
+        public bool LongRunningQueryExcludeWaitFor { get; set; } = true;
+        public bool LongRunningQueryExcludeBackups { get; set; } = true;
+        public bool LongRunningQueryExcludeMiscWaits { get; set; } = true;
         public bool NotifyOnTempDbSpace { get; set; } = true;
         public int TempDbSpaceThresholdPercent { get; set; } = 80; // Alert when TempDB used > X%
         public bool NotifyOnLongRunningJobs { get; set; } = true;
         public int LongRunningJobMultiplier { get; set; } = 3; // Alert when job runs > Nx historical average
+        private int _alertCooldownMinutes = 5;
+        public int AlertCooldownMinutes
+        {
+            get => _alertCooldownMinutes;
+            set => _alertCooldownMinutes = Math.Clamp(value, 1, 120);
+        }
+
+        private int _emailCooldownMinutes = 15;
+        public int EmailCooldownMinutes
+        {
+            get => _emailCooldownMinutes;
+            set => _emailCooldownMinutes = Math.Clamp(value, 1, 120);
+        }
 
         // SMTP email alert settings
         public bool SmtpEnabled { get; set; } = false;
@@ -119,6 +137,9 @@ namespace PerformanceMonitorDashboard.Models
 
         // Update check settings
         public bool CheckForUpdatesOnStartup { get; set; } = true;
+
+        // Alert database exclusions
+        public List<string> AlertExcludedDatabases { get; set; } = new();
 
         // Alert suppression (persisted)
         public List<string> SilencedServers { get; set; } = new();

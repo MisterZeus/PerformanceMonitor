@@ -265,10 +265,11 @@ BEGIN
             total_worker_time_delta /
               NULLIF(sample_interval_seconds, 0) / 1000.
         ),
-        /*Query text and execution plan*/
-        query_text nvarchar(max) NULL,
-        query_plan_text nvarchar(max) NULL,
-        query_plan xml NULL,
+        /*Query text and execution plan (compressed with COMPRESS/DECOMPRESS)*/
+        query_text varbinary(max) NULL,
+        query_plan_text varbinary(max) NULL,
+        /*Deduplication hash for skipping unchanged rows*/
+        row_hash binary(32) NULL,
         CONSTRAINT
             PK_query_stats
         PRIMARY KEY CLUSTERED
@@ -446,9 +447,10 @@ BEGIN
             total_worker_time_delta /
               NULLIF(sample_interval_seconds, 0) / 1000.
         ),
-        /*Execution plan*/
-        query_plan_text nvarchar(max) NULL,
-        query_plan xml NULL,
+        /*Execution plan (compressed with COMPRESS/DECOMPRESS)*/
+        query_plan_text varbinary(max) NULL,
+        /*Deduplication hash for skipping unchanged rows*/
+        row_hash binary(32) NULL,
         CONSTRAINT
             PK_procedure_stats
         PRIMARY KEY CLUSTERED
@@ -491,7 +493,7 @@ BEGIN
         server_first_execution_time datetime2(7) NOT NULL,
         server_last_execution_time datetime2(7) NOT NULL,
         module_name nvarchar(261) NULL,
-        query_sql_text nvarchar(max) NULL,
+        query_sql_text varbinary(max) NULL,
         query_hash binary(8) NULL,
         /*Execution count*/
         count_executions bigint NOT NULL,
@@ -549,9 +551,11 @@ BEGIN
         last_force_failure_reason_desc nvarchar(128) NULL,
         plan_forcing_type nvarchar(60) NULL,
         compatibility_level smallint NULL,
-        query_plan_text nvarchar(max) NULL,
-        compilation_metrics xml NULL,
+        query_plan_text varbinary(max) NULL,
+        compilation_metrics varbinary(max) NULL,
         query_plan_hash binary(8) NULL,
+        /*Deduplication hash for skipping unchanged rows*/
+        row_hash binary(32) NULL,
         CONSTRAINT
             PK_query_store_data
         PRIMARY KEY CLUSTERED
@@ -1085,9 +1089,84 @@ BEGIN
             );
 
         END;
+        ELSE IF @table_name = N'database_size_stats'
+        BEGIN
+            CREATE TABLE
+                collect.database_size_stats
+            (
+                collection_id bigint IDENTITY NOT NULL,
+                collection_time datetime2(7) NOT NULL
+                    DEFAULT SYSDATETIME(),
+                database_name sysname NOT NULL,
+                database_id integer NOT NULL,
+                file_id integer NOT NULL,
+                file_type_desc nvarchar(60) NOT NULL,
+                file_name sysname NOT NULL,
+                physical_name nvarchar(260) NOT NULL,
+                total_size_mb decimal(19,2) NOT NULL,
+                used_size_mb decimal(19,2) NULL,
+                auto_growth_mb decimal(19,2) NULL,
+                max_size_mb decimal(19,2) NULL,
+                recovery_model_desc nvarchar(12) NULL,
+                compatibility_level integer NULL,
+                state_desc nvarchar(60) NULL,
+                volume_mount_point nvarchar(256) NULL,
+                volume_total_mb decimal(19,2) NULL,
+                volume_free_mb decimal(19,2) NULL,
+                free_space_mb AS
+                (
+                    total_size_mb - used_size_mb
+                ),
+                used_pct AS
+                (
+                    used_size_mb * 100.0 /
+                      NULLIF(total_size_mb, 0)
+                ),
+                CONSTRAINT
+                    PK_database_size_stats
+                PRIMARY KEY CLUSTERED
+                    (collection_time, collection_id)
+                WITH
+                    (DATA_COMPRESSION = PAGE)
+            );
+
+        END;
+        ELSE IF @table_name = N'server_properties'
+        BEGIN
+            CREATE TABLE
+                collect.server_properties
+            (
+                collection_id bigint IDENTITY NOT NULL,
+                collection_time datetime2(7) NOT NULL
+                    DEFAULT SYSDATETIME(),
+                server_name sysname NOT NULL,
+                edition sysname NOT NULL,
+                product_version sysname NOT NULL,
+                product_level sysname NOT NULL,
+                product_update_level sysname NULL,
+                engine_edition integer NOT NULL,
+                cpu_count integer NOT NULL,
+                hyperthread_ratio integer NOT NULL,
+                physical_memory_mb bigint NOT NULL,
+                socket_count integer NULL,
+                cores_per_socket integer NULL,
+                is_hadr_enabled bit NULL,
+                is_clustered bit NULL,
+                enterprise_features nvarchar(max) NULL,
+                service_objective sysname NULL,
+                row_hash binary(32) NULL,
+                CONSTRAINT
+                    PK_server_properties
+                PRIMARY KEY CLUSTERED
+                    (collection_time, collection_id)
+                WITH
+                    (DATA_COMPRESSION = PAGE)
+            );
+
+        END;
         ELSE
         BEGIN
-            SET @error_message = N'Unknown table name: ' + @table_name + N'. Valid table names are: wait_stats, query_stats, memory_stats, memory_pressure_events, deadlock_xml, blocked_process_xml, procedure_stats, query_snapshots, query_store_data, trace_analysis, default_trace_events, file_io_stats, memory_grant_stats, cpu_scheduler_stats, memory_clerks_stats, perfmon_stats, cpu_utilization_stats, blocking_deadlock_stats, latch_stats, spinlock_stats, tempdb_stats, plan_cache_stats, session_stats, waiting_tasks, running_jobs';
+            SET @error_message = N'Unknown table name: ' + @table_name + N'. Valid table names are: wait_stats, query_stats, memory_stats, memory_pressure_events, deadlock_xml, blocked_process_xml, procedure_stats, query_snapshots, query_store_data, trace_analysis, default_trace_events, file_io_stats, memory_grant_stats, cpu_scheduler_stats, memory_clerks_stats, perfmon_stats, cpu_utilization_stats, blocking_deadlock_stats, latch_stats, spinlock_stats, tempdb_stats, plan_cache_stats, session_stats, waiting_tasks, running_jobs, database_size_stats, server_properties';
             RAISERROR(@error_message, 16, 1);
             RETURN;
         END;

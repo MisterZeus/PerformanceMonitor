@@ -27,10 +27,22 @@ public class DuckDbInitializer
     /// <summary>
     /// Acquires a read lock on the database. Multiple readers can hold this concurrently.
     /// Dispose the returned object to release the lock.
+    /// If the current thread already owns a read lock (e.g., leaked by an unhandled exception),
+    /// returns a no-op disposable to allow the operation to proceed.
     /// </summary>
     public IDisposable AcquireReadLock()
     {
-        s_dbLock.EnterReadLock();
+        try
+        {
+            s_dbLock.EnterReadLock();
+        }
+        catch (LockRecursionException)
+        {
+            /* The current thread already owns a read lock — likely leaked by an unhandled
+               exception that prevented Dispose(). Since we're already protected by a read lock,
+               return a no-op disposable so the caller can proceed normally. */
+            return NoOpDisposable.Instance;
+        }
         return new LockReleaser(s_dbLock, write: false);
     }
 
@@ -42,6 +54,12 @@ public class DuckDbInitializer
     {
         s_dbLock.EnterWriteLock();
         return new LockReleaser(s_dbLock, write: true);
+    }
+
+    private sealed class NoOpDisposable : IDisposable
+    {
+        public static readonly NoOpDisposable Instance = new();
+        public void Dispose() { }
     }
 
     private sealed class LockReleaser : IDisposable
@@ -68,7 +86,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 15;
+    internal const int CurrentSchemaVersion = 21;
 
     private readonly string _archivePath;
 
@@ -79,13 +97,18 @@ public class DuckDbInitializer
         _archivePath = Path.Combine(Path.GetDirectoryName(databasePath) ?? ".", "archive");
     }
 
-    /* Tables that have parquet archives — views are created to UNION hot data with archived parquet files */
+    /* Tables that have parquet archives — views are created to UNION hot data with archived parquet files.
+       IMPORTANT: Must match ArchiveService.ArchivableTables — every archived table needs an archive view. */
     private static readonly string[] ArchivableTables =
     [
         "wait_stats", "query_stats", "procedure_stats", "query_store_stats",
         "query_snapshots", "cpu_utilization_stats", "file_io_stats", "memory_stats",
         "memory_clerks", "tempdb_stats", "perfmon_stats", "deadlocks",
-        "blocked_process_reports", "collection_log"
+        "blocked_process_reports", "memory_grant_stats", "waiting_tasks",
+        "running_jobs", "database_size_stats", "server_properties",
+        "session_stats", "server_config", "database_config",
+        "database_scoped_config", "trace_flags", "config_alert_log",
+        "collection_log"
     ];
 
     /// <summary>
@@ -299,6 +322,12 @@ public class DuckDbInitializer
     /// <summary>
     /// Runs schema migrations from the given version up to CurrentSchemaVersion.
     /// Each migration drops and recreates affected tables.
+    ///
+    /// IMPORTANT: When adding a new data collection table, you must also register it in:
+    ///   1. Schema.cs — GetAllTableStatements() and GetAllIndexStatements()
+    ///   2. DuckDbInitializer.cs — ArchivableTables (archive view creation)
+    ///   3. ArchiveService.cs — ArchivableTables (parquet export + purge)
+    /// Forgetting any of these causes unbounded growth and 512 MB reset loops.
     /// </summary>
     private async Task RunMigrationsAsync(DuckDBConnection connection, int fromVersion)
     {
@@ -479,6 +508,79 @@ public class DuckDbInitializer
             _logger?.LogInformation("Running migration to v15: rebuilding file_io_stats for queued I/O columns");
             await ExecuteNonQueryAsync(connection, "DROP TABLE IF EXISTS file_io_stats");
         }
+
+        if (fromVersion < 16)
+        {
+            /* v16: Added database_size_stats and server_properties tables for FinOps monitoring.
+                    New tables only — no existing table changes needed. Tables created by
+                    GetAllTableStatements() during initialization. */
+            _logger?.LogInformation("Running migration to v16: adding FinOps tables (database_size_stats, server_properties)");
+        }
+
+        if (fromVersion < 17)
+        {
+            /* v17: Added volume-level drive space columns to database_size_stats.
+                    Columns appended at end — safe for DuckDB appender positional writes. */
+            _logger?.LogInformation("Running migration to v17: adding volume stats columns to database_size_stats");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE database_size_stats ADD COLUMN IF NOT EXISTS volume_mount_point VARCHAR");
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE database_size_stats ADD COLUMN IF NOT EXISTS volume_total_mb DECIMAL(19,2)");
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE database_size_stats ADD COLUMN IF NOT EXISTS volume_free_mb DECIMAL(19,2)");
+            }
+            catch
+            {
+                /* Table doesn't exist yet — will be created with correct schema below */
+            }
+        }
+
+        if (fromVersion < 18)
+        {
+            /* v18: Added session_stats table for per-application connection tracking
+                    from sys.dm_exec_sessions. New table only — created by GetAllTableStatements(). */
+            _logger?.LogInformation("Running migration to v18: adding session_stats table for application connections");
+        }
+
+        if (fromVersion < 19)
+        {
+            _logger?.LogInformation("Running migration to v19: adding worker thread columns to memory_stats");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE memory_stats ADD COLUMN IF NOT EXISTS max_workers_count INTEGER");
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE memory_stats ADD COLUMN IF NOT EXISTS current_workers_count INTEGER");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v19 encountered an error (non-fatal): {Error}", ex.Message);
+            }
+        }
+
+        if (fromVersion < 20)
+        {
+            _logger?.LogInformation("Running migration to v20: adding mute rules table and muted column to alert log");
+            try
+            {
+                /* DuckDB does not support ADD COLUMN with NOT NULL — use nullable with DEFAULT */
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE config_alert_log ADD COLUMN IF NOT EXISTS muted BOOLEAN DEFAULT false");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v20 encountered an error (non-fatal): {Error}", ex.Message);
+            }
+        }
+
+        if (fromVersion < 21)
+        {
+            _logger?.LogInformation("Running migration to v21: adding detail_text column to alert log");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE config_alert_log ADD COLUMN IF NOT EXISTS detail_text VARCHAR");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v21 encountered an error (non-fatal): {Error}", ex.Message);
+            }
+        }
     }
 
     /// <summary>
@@ -655,6 +757,31 @@ public class DuckDbInitializer
 
         var fileInfo = new FileInfo(_databasePath);
         return fileInfo.Length / (1024.0 * 1024.0);
+    }
+
+    /// <summary>
+    /// Gets the actual used data size inside the database by querying pragma_database_size().
+    /// Returns null if the query fails (e.g., database busy).
+    /// </summary>
+    public double? GetUsedDataSizeMb()
+    {
+        try
+        {
+            using var connection = CreateConnection();
+            connection.Open();
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT (used_blocks * block_size)::BIGINT FROM pragma_database_size()";
+            var result = cmd.ExecuteScalar();
+            if (result != null && result != DBNull.Value)
+            {
+                return Convert.ToInt64(result) / (1024.0 * 1024.0);
+            }
+        }
+        catch
+        {
+            /* Database may be busy — fall back to null */
+        }
+        return null;
     }
 
     /// <summary>
