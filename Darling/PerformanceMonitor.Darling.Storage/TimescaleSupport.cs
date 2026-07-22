@@ -228,6 +228,144 @@ public static class TimescaleSupport
     public static string AddCompressionPolicySql(string table)
         => $"SELECT add_compression_policy('{table}', compress_after => INTERVAL '{CompressAfterDays} days', if_not_exists => true)";
 
+    /* ─────────────────────────── continuous aggregates (query acceleration) ─────────────────────────── */
+
+    /// <summary>The hourly continuous-aggregate view names — query-acceleration rollups for the two tables that
+    /// dominate the store (query_stats ~145 GB, procedure_stats ~49 GB, ~90% together). Every Custom Views
+    /// composer panel over these tables does date_trunc('hour', collection_time) + SUM(delta_*) GROUP BY a
+    /// dimension; these pre-materialize exactly that shape so anything older than the ~2-day hot window reads the
+    /// rollup instead of scanning raw per-sweep rows. NOT retention (raw still exists for the hot window; dropping
+    /// old raw chunks is a separate, unmade decision).</summary>
+    public const string QueryStatsHourlyView = "query_stats_hourly";
+
+    /// <summary><see cref="QueryStatsHourlyView"/>'s procedure_stats sibling.</summary>
+    public const string ProcedureStatsHourlyView = "procedure_stats_hourly";
+
+    /// <summary>
+    /// The query_stats hourly continuous aggregate. 1-hour buckets grouped by the SAME dimensions the composer's
+    /// <c>MeasureCatalog</c> uses for query_stats (server_id / server_name / database_name / query_hash), so a
+    /// panel can point here with no dimension remapping. SUM/MIN/MAX on each per-interval DELTA column (NOT a
+    /// pre-divided average — avg composes at query time as sum/execution_count_sum, which re-aggregates
+    /// correctly; a materialized average would not) plus a <c>sample_count</c>. Summing the deltas is
+    /// double-count-safe: they are Darling's own per-interval deltas, not raw cumulative DMV counters. Created
+    /// WITH NO DATA — a full historical refresh over 145 GB is heavy I/O, a deliberate off-hours manual op, NEVER
+    /// startup work; real-time aggregation stays ON (the default — no <c>materialized_only</c>), so the view is
+    /// correct to query for any window immediately, just un-accelerated for old windows until the policy + a
+    /// manual backfill materialize them. IF NOT EXISTS so a restart re-converges. A SINGLE statement: a CAGG
+    /// CREATE cannot run inside a transaction, so it must never be batched with the policy call.
+    /// </summary>
+    public const string CreateQueryStatsHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_hourly
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    query_hash,
+    time_bucket('1 hour', collection_time) AS bucket,
+    sum(delta_worker_time) AS worker_time_sum,
+    min(delta_worker_time) AS worker_time_min,
+    max(delta_worker_time) AS worker_time_max,
+    sum(delta_elapsed_time) AS elapsed_time_sum,
+    min(delta_elapsed_time) AS elapsed_time_min,
+    max(delta_elapsed_time) AS elapsed_time_max,
+    sum(delta_execution_count) AS execution_count_sum,
+    min(delta_execution_count) AS execution_count_min,
+    max(delta_execution_count) AS execution_count_max,
+    count(*) AS sample_count
+FROM collect.query_stats
+GROUP BY server_id, server_name, database_name, query_hash, bucket
+WITH NO DATA";
+
+    /// <summary>The procedure_stats hourly continuous aggregate — <see cref="CreateQueryStatsHourlySql"/>'s
+    /// sibling, grouped by <c>object_name</c> instead of <c>query_hash</c> (procedure_stats' composer
+    /// dimension). Same aggregation shape, same WITH NO DATA + IF NOT EXISTS discipline.</summary>
+    public const string CreateProcedureStatsHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.procedure_stats_hourly
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    object_name,
+    time_bucket('1 hour', collection_time) AS bucket,
+    sum(delta_worker_time) AS worker_time_sum,
+    min(delta_worker_time) AS worker_time_min,
+    max(delta_worker_time) AS worker_time_max,
+    sum(delta_elapsed_time) AS elapsed_time_sum,
+    min(delta_elapsed_time) AS elapsed_time_min,
+    max(delta_elapsed_time) AS elapsed_time_max,
+    sum(delta_execution_count) AS execution_count_sum,
+    min(delta_execution_count) AS execution_count_min,
+    max(delta_execution_count) AS execution_count_max,
+    count(*) AS sample_count
+FROM collect.procedure_stats
+GROUP BY server_id, server_name, database_name, object_name, bucket
+WITH NO DATA";
+
+    /// <summary>
+    /// The hourly refresh policy for a continuous aggregate: materialize the <c>[now - 3 days, now - 1 hour]</c>
+    /// window each hour. <c>start_offset 3 days</c> gives margin past the ~2-day compression/hot window (covers
+    /// same-day-arriving corrections); <c>end_offset 1 hour</c> leaves the still-filling current hour
+    /// unmaterialized (no repeated rework); <c>schedule_interval</c> matches the bucket. <c>if_not_exists</c> so a
+    /// restart re-converges. The conservative TimescaleDB default shape.
+    /// </summary>
+    public static string AddContinuousAggregatePolicySql(string view)
+        => $"SELECT add_continuous_aggregate_policy('collect.{view}', start_offset => INTERVAL '3 days', end_offset => INTERVAL '1 hour', schedule_interval => INTERVAL '1 hour', if_not_exists => true)";
+
+    /// <summary>
+    /// Creates the two hourly continuous aggregates (<see cref="CreateQueryStatsHourlySql"/> /
+    /// <see cref="CreateProcedureStatsHourlySql"/>) and attaches each one's refresh policy
+    /// (<see cref="AddContinuousAggregatePolicySql"/>). Runs in the worker's TimescaleDB block (CAGGs need the
+    /// extension), AFTER hypertables + compression are in place. The CREATE and the policy are SEPARATE commands
+    /// per aggregate — a CAGG CREATE cannot run inside a transaction, so it is never batched with another
+    /// statement. Failure-isolated per aggregate: one failure warns and the composer keeps querying raw.
+    /// Idempotent (IF NOT EXISTS on both), so it re-converges every restart. Does NOT backfill history (WITH NO
+    /// DATA + real-time aggregation keeps the view correct immediately; the heavy full refresh is a deliberate
+    /// off-hours op). Returns the number ready.
+    /// </summary>
+    public static async Task<int> EnsureContinuousAggregatesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var aggregates = new[]
+        {
+            (CreateSql: CreateQueryStatsHourlySql, View: QueryStatsHourlyView),
+            (CreateSql: CreateProcedureStatsHourlySql, View: ProcedureStatsHourlyView),
+        };
+
+        var ready = 0;
+        foreach (var (createSql, view) in aggregates)
+        {
+            try
+            {
+                using (var create = new NpgsqlCommand(createSql, connection) { CommandTimeout = SetupTimeoutSeconds })
+                {
+                    await create.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                using (var policy = new NpgsqlCommand(AddContinuousAggregatePolicySql(view), connection) { CommandTimeout = SetupTimeoutSeconds })
+                {
+                    await policy.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                ready++;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Continuous aggregate {View} setup failed — composer queries fall back to raw scans: {Message}",
+                    view, ex.Message);
+            }
+        }
+
+        logger?.LogInformation(
+            "TimescaleDB: {Ready}/{Total} hourly continuous aggregate(s) ready (query_stats, procedure_stats)",
+            ready, aggregates.Length);
+        return ready;
+    }
+
     /// <summary>
     /// Converts every collector table to a hypertable (<see cref="HypertableTables"/> scope;
     /// <see cref="CreateHypertableSql"/> per table). Failure-isolated per table: one failed

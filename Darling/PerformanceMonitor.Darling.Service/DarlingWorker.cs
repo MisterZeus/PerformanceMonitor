@@ -589,6 +589,7 @@ public sealed class DarlingWorker : BackgroundService
                 await TimescaleSupport.ConvertToHypertablesAsync(timescaleConnection, _logger, stoppingToken);
                 await TimescaleSupport.ApplyCompressionPolicyAsync(timescaleConnection, _logger, stoppingToken);
                 await TimescaleSupport.EnsureCollectionLogHypertableAsync(timescaleConnection, _logger, stoppingToken);
+                await TimescaleSupport.EnsureContinuousAggregatesAsync(timescaleConnection, _logger, stoppingToken);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -597,6 +598,23 @@ public sealed class DarlingWorker : BackgroundService
                too, so falling back to plain-PG mode is always safe. */
             _timescaleAvailable = false;
             _logger.LogWarning("TimescaleDB setup failed — continuing in plain-PostgreSQL mode: {Message}", ex.Message);
+        }
+
+        /* Composer + analyze_*_plan performance tuning (covering indexes + per-table autovacuum-insert override) —
+           idempotent RUNTIME setup, NOT a versioned migration: results-invariant perf, so it must not bump
+           StorageVersion and gate the Viewer's schema check on indexes it does not need (the role-GUC provisioning
+           reasoning). AFTER the TimescaleDB block so the collector tables are already hypertables when indexed
+           (CREATE INDEX / ALTER TABLE SET propagate to all chunks), BEFORE collectors so a first build never
+           contends with live inserts. Its own try/catch: a failure degrades to un-tuned (slower) queries, never
+           fatal (the same optional-feature discipline as the TimescaleDB block above). */
+        try
+        {
+            await using var tuningConnection = await postgres.OpenConnectionAsync(stoppingToken);
+            await PgTableTuning.ApplyAsync(tuningConnection, _logger, stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("Composer performance tuning failed — queries fall back to un-indexed scans: {Message}", ex.Message);
         }
 
         /* Restart continuity: re-seed delta baselines from the store (the Postgres twin of Lite's
