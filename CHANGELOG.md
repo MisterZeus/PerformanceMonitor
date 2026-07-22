@@ -7,13 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Darling Web: adaptive `auto` time bucket for composed time-series panels** ([#1619]) - a compose custom-view time-series panel can set `timeBucket: "auto"`, and the compiler resolves it to a concrete grain from the panel's window (minute up to 2 days, hour up to 60 days, day beyond) so any range from 1h to 90d renders a readable line and never trips the 5,000-bucket ceiling. Previously a fixed `hour` bucket collapsed a sub-hour workload (e.g. a 30-minute HammerDB run) into a single invisible point, while a fixed `minute` bucket errored past ~3.5 days. The composer now defaults new time-series panels to `auto` and the MCP `describe_custom_view_catalog` recommends it; non-auto buckets compile byte-for-byte as before. Pinned by `DarlingComposeTests` (auto boundary resolution + compile-by-window + non-auto passthrough).
+- **Darling Web: custom time span on the view range picker** ([#1619]) - the rendered custom-view range picker gains a "Custom..." option (a number + a hours/days unit, up to the 90-day window ceiling) so a view is no longer limited to the six presets; a non-preset window stays selectable so it survives the 60s refresh.
+
 ### Changed
 
 - **Full Dashboard and the CLI Installer are being retired.** They moved to a `deprecated/` folder and are no longer built into release artifacts; releases now ship Lite + Darling only, with Darling the flagship replacement for the Full Dashboard. The deprecated code still compiles and its tests run in CI. ([#1612])
+- **Darling Web: the custom-view panel grid is capped at two columns on wide screens** ([#1619]) - a dense view (e.g. four panels) no longer crams four-across on a wide monitor; the min column track is >=45% of the row so at most two columns ever fit, and a `span-2` (or lone) panel still takes the full width.
 
 ### Fixed
 
 - **Darling: collectors no longer fail with `22021: invalid byte sequence for encoding "UTF8": 0x00`** ([#1614]) - SQL Server NVARCHAR allows embedded NUL characters and query text from `sys.dm_exec_sql_text` sometimes carries them, but Postgres `text` columns reject the byte, so one NUL-laden cached query failed the entire `query_stats` COPY batch every cycle (`DBCC FREEPROCCACHE` never helped because the app re-caches the same query). The Postgres row writer now strips NULs from every collected string - query text, plan XML, deadlock and blocked-process XML included - at the single COPY choke point.
+- **Darling Web: a custom view no longer resets the picked time range / server / filters every 60 seconds** ([#1619]) - the background refresh that keeps the dashboard live rebuilt each view from its declared default, snapping any range/server/filter change back within a minute. A per-view scope memory now survives the re-render, so a picked scope sticks until you change it or hard-reload.
 
 ## [3.2.0] - 2026-07-21
 
@@ -504,6 +511,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#1609]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1609
 [#1612]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1612
 [#1614]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1614
+[#1619]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1619
 [#1601]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1601
 [#1604]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1604
 [#1602]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1602
