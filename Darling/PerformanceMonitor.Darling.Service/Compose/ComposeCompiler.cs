@@ -88,17 +88,21 @@ public static class ComposeCompiler
             throw new ArgumentNullException(nameof(context));
         }
 
+        /* Auto resolves to a concrete grain from the window before anything downstream (ceiling + date_trunc);
+           a non-Auto bucket passes through unchanged, so existing panels are byte-for-byte identical. */
+        var effectiveBucket = plan.TimeBucket;
         if (plan.Mode == PanelMode.TimeSeries)
         {
             var windowSeconds = (context.EndUtc - context.StartUtc).TotalSeconds;
-            var bucketSeconds = MeasureCatalog.BucketSeconds(plan.TimeBucket);
+            effectiveBucket = MeasureCatalog.ResolveBucket(plan.TimeBucket, windowSeconds);
+            var bucketSeconds = MeasureCatalog.BucketSeconds(effectiveBucket);
             if (bucketSeconds > 0)
             {
                 var buckets = Math.Ceiling(windowSeconds / bucketSeconds);
                 if (buckets > ComposeLimits.MaxBuckets)
                 {
                     return (null,
-                        $"the window and '{MeasureCatalog.WireName(plan.TimeBucket)}' bucket would produce {buckets:0} points " +
+                        $"the window and '{MeasureCatalog.WireName(effectiveBucket)}' bucket would produce {buckets:0} points " +
                         $"(max {ComposeLimits.MaxBuckets}); choose a coarser bucket or a shorter window.");
                 }
             }
@@ -147,7 +151,7 @@ public static class ComposeCompiler
 
         if (plan.Mode == PanelMode.TimeSeries)
         {
-            var bucketExpr = $"date_trunc('{MeasureCatalog.DateTruncField(plan.TimeBucket)}', {FactAlias}.{timeColumn})";
+            var bucketExpr = $"date_trunc('{MeasureCatalog.DateTruncField(effectiveBucket)}', {FactAlias}.{timeColumn})";
             selectExprs.Add(bucketExpr + " AS bucket");
             groupExprs.Add(bucketExpr);
         }
