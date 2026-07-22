@@ -12,8 +12,10 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Hosting;
 using Xunit;
 using Host = PerformanceMonitor.Darling.Service.Mcp.DarlingMcpHostService;
+using WebHost = PerformanceMonitor.Darling.Service.Mcp.DarlingWebHostService;
 
 namespace Darling.Tests;
 
@@ -482,6 +484,202 @@ public sealed class DarlingConfigureNetworkTests
     }
 
     [Fact]
+    public async Task ConfigureNetwork_Web_GeneratesToken_PrintsPlaintextOnce_StoresEncrypted_HintsLoginUrl()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The wizard generates a DPAPI-protected token.");
+
+        var root = Directory.CreateTempSubdirectory("darling-confignet-web-");
+        try
+        {
+            var configPath = CopySampleTo(root.FullName);
+
+            /* choice=Web, bind IP, CIDR, decline restart. No existing token -> one is generated. */
+            var input = Script("3", "192.168.1.205", "192.168.1.0/24", "n");
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            var exit = await DarlingCliCommands.ConfigureNetworkAsync(configPath, input, output, error, CancellationToken.None);
+            Assert.Equal(0, exit);
+
+            /* The written file parses and the WEB BIND RESOLVER (the one the web host fail-closes on)
+               reports it network-exposed — the exact acceptance for #1617's hand-edit incident. */
+            var written = await File.ReadAllTextAsync(configPath);
+            var config = DarlingConfig.Parse(written);
+            var decision = WebHost.ResolveWebBind(config.Web, managed: true);
+            Assert.Equal(DarlingHostBinding.BindMode.NetworkAndLoopback, decision.Mode);
+            Assert.Equal("192.168.1.205", config.Web.Network!.Listen);
+            Assert.Equal("192.168.1.0/24", config.Web.Network!.AllowFrom);
+
+            /* Stored only DPAPI-encrypted; the plaintext it decrypts to is the token printed to STDOUT. */
+            var encrypted = config.Web.Network!.EncryptedToken;
+            Assert.False(string.IsNullOrWhiteSpace(encrypted));
+            var plaintext = DarlingSecrets.Unprotect(encrypted!);
+
+            Assert.Equal(1, CountOccurrences(output.ToString(), plaintext));   // STDOUT: exactly once
+            Assert.Contains("SAVE THIS NOW", error.ToString(), StringComparison.Ordinal); // STDERR: the warning
+
+            /* The next-steps handoff includes the browser login hint — the one step Web does differently. */
+            Assert.Contains("http://192.168.1.205:5153/?token=", output.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ConfigureNetwork_Web_ExistingToken_KeptByDefault()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The wizard queries the Windows service + uses DPAPI.");
+
+        var root = Directory.CreateTempSubdirectory("darling-confignet-web-keep-");
+        try
+        {
+            var configPath = Path.Combine(root.FullName, "darling.json");
+            await File.WriteAllTextAsync(configPath, """
+                {
+                  "postgres": { "managed": true },
+                  "web": {
+                    "network": { "listen": "192.168.1.205", "allowFrom": "192.168.1.0/24", "encryptedToken": "KEEP-ME-BLOB" }
+                  },
+                  "servers": [ { "host": "S" } ]
+                }
+                """);
+
+            /* choice=Web, keep-token default (empty line), bind IP, CIDR, decline restart. */
+            var input = Script("3", "", "10.0.0.5", "10.0.0.0/24", "n");
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            var exit = await DarlingCliCommands.ConfigureNetworkAsync(configPath, input, output, error, CancellationToken.None);
+            Assert.Equal(0, exit);
+
+            /* The existing DPAPI blob survives; new listen/allowFrom land; no plaintext was generated. */
+            var config = DarlingConfig.Parse(await File.ReadAllTextAsync(configPath));
+            Assert.Equal("KEEP-ME-BLOB", config.Web.Network!.EncryptedToken);
+            Assert.Equal("10.0.0.5", config.Web.Network!.Listen);
+            Assert.DoesNotContain("SAVE THIS NOW", error.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ConfigureNetwork_CommaCombination_McpAndWeb_WritesBothBlocks()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The wizard generates DPAPI-protected tokens.");
+
+        var root = Directory.CreateTempSubdirectory("darling-confignet-combo-");
+        try
+        {
+            var configPath = CopySampleTo(root.FullName);
+
+            /* choice="2,3": MCP inputs first (bind, CIDR), then web (bind, CIDR), decline restart.
+               Both surfaces generate fresh tokens -> two SAVE THIS warnings, two STDOUT plaintexts. */
+            var input = Script("2,3", "192.168.1.205", "192.168.1.0/24", "192.168.1.205", "192.168.1.0/24", "n");
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            var exit = await DarlingCliCommands.ConfigureNetworkAsync(configPath, input, output, error, CancellationToken.None);
+            Assert.Equal(0, exit);
+
+            var config = DarlingConfig.Parse(await File.ReadAllTextAsync(configPath));
+            Assert.Equal(Host.McpBindMode.NetworkAndLoopback, Host.ResolveMcpBind(config.Mcp, managed: true).Mode);
+            Assert.Equal(DarlingHostBinding.BindMode.NetworkAndLoopback, WebHost.ResolveWebBind(config.Web, managed: true).Mode);
+
+            /* The store block was NOT touched (surface selection is exact). */
+            Assert.False(DarlingManagedPostgres.ResolveNetworkExposure(config.Postgres.Network, CertPath, KeyPath).Exposed);
+
+            /* Two distinct tokens, each printed exactly once. */
+            var mcpPlain = DarlingSecrets.Unprotect(config.Mcp.Network!.EncryptedToken!);
+            var webPlain = DarlingSecrets.Unprotect(config.Web.Network!.EncryptedToken!);
+            Assert.NotEqual(mcpPlain, webPlain);
+            Assert.Equal(1, CountOccurrences(output.ToString(), mcpPlain));
+            Assert.Equal(1, CountOccurrences(output.ToString(), webPlain));
+            Assert.Equal(2, CountOccurrences(error.ToString(), "SAVE THIS NOW"));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ConfigureNetwork_All_WritesAllThreeBlocks_EachResolverExposed()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The wizard generates DPAPI-protected tokens.");
+
+        var root = Directory.CreateTempSubdirectory("darling-confignet-all-");
+        try
+        {
+            var configPath = CopySampleTo(root.FullName);
+
+            /* choice="4" (all three): store inputs first (bind, CIDR, role), then MCP (bind, CIDR),
+               then web (bind, CIDR), decline restart — the three-upsert + three-guard path in one run. */
+            var input = Script("4",
+                "192.168.1.205", "192.168.1.0/24", "viewer",
+                "192.168.1.205", "192.168.1.0/24",
+                "192.168.1.205", "192.168.1.0/24",
+                "n");
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            var exit = await DarlingCliCommands.ConfigureNetworkAsync(configPath, input, output, error, CancellationToken.None);
+            Assert.Equal(0, exit);
+
+            var config = DarlingConfig.Parse(await File.ReadAllTextAsync(configPath));
+            Assert.True(DarlingManagedPostgres.ResolveNetworkExposure(config.Postgres.Network, CertPath, KeyPath).Exposed);
+            Assert.Equal(Host.McpBindMode.NetworkAndLoopback, Host.ResolveMcpBind(config.Mcp, managed: true).Mode);
+            Assert.Equal(DarlingHostBinding.BindMode.NetworkAndLoopback, WebHost.ResolveWebBind(config.Web, managed: true).Mode);
+
+            /* All three next-steps blocks made it out (store handoff, MCP + web firewall commands, login URL). */
+            var stdout = output.ToString();
+            Assert.Contains("--print-viewer-connection", stdout, StringComparison.Ordinal);
+            Assert.Contains("PerformanceMonitor Darling MCP (port", stdout, StringComparison.Ordinal);
+            Assert.Contains("PerformanceMonitor Darling Web (port", stdout, StringComparison.Ordinal);
+            Assert.Contains("?token=", stdout, StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("1", true, false, false)]
+    [InlineData("2", false, true, false)]
+    [InlineData("3", false, false, true)]
+    [InlineData("4", true, true, true)]
+    [InlineData("1,3", true, false, true)]
+    [InlineData("2 , 3", false, true, true)] // tokens are trimmed
+    [InlineData("1,2,3", true, true, true)]
+    [InlineData("1,4", true, true, true)] // 4 dominates
+    public void TryParseSurfaceChoice_ValidSelections(string choice, bool store, bool mcp, bool web)
+    {
+        Assert.True(DarlingCliCommands.TryParseSurfaceChoice(choice, out var doStore, out var doMcp, out var doWeb));
+        Assert.Equal(store, doStore);
+        Assert.Equal(mcp, doMcp);
+        Assert.Equal(web, doWeb);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("5")] // Disable is handled BEFORE the parser; it is not a surface
+    [InlineData("shop")]
+    [InlineData("1,shop")] // a typo rejects the WHOLE input — never silently configure a subset
+    [InlineData(",")]
+    [InlineData("")]
+    public void TryParseSurfaceChoice_RejectsUnknownTokens_NothingSelected(string choice)
+    {
+        Assert.False(DarlingCliCommands.TryParseSurfaceChoice(choice, out var doStore, out var doMcp, out var doWeb));
+        Assert.False(doStore);
+        Assert.False(doMcp);
+        Assert.False(doWeb);
+    }
+
+    [Fact]
     public async Task ConfigureNetwork_Byo_RefusesAndWritesNothing()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "The wizard queries the Windows service.");
@@ -510,7 +708,7 @@ public sealed class DarlingConfigureNetworkTests
     }
 
     [Fact]
-    public async Task ConfigureNetwork_Disable_RemovesBlock_BacksUp_ResolverLoopback()
+    public async Task ConfigureNetwork_Disable_RemovesAllBlocks_WebIncluded_BacksUp_ResolversLoopback()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "The wizard queries the Windows service.");
 
@@ -525,11 +723,14 @@ public sealed class DarlingConfigureNetworkTests
                     "port": 5641,
                     "network": { "listen": "192.168.1.205", "allowFrom": "192.168.1.0/24", "role": "viewer" }
                   },
+                  "web": {
+                    "network": { "listen": "192.168.1.205", "allowFrom": "192.168.1.0/24", "encryptedToken": "BLOB" }
+                  },
                   "servers": [ { "host": "S" } ]
                 }
                 """);
 
-            var input = Script("4", "n"); // Disable, then decline restart
+            var input = Script("5", "n"); // Disable, then decline restart
             var output = new StringWriter();
             var error = new StringWriter();
 
@@ -539,6 +740,9 @@ public sealed class DarlingConfigureNetworkTests
             var written = await File.ReadAllTextAsync(configPath);
             var config = DarlingConfig.Parse(written);
             Assert.False(DarlingManagedPostgres.ResolveNetworkExposure(config.Postgres.Network, CertPath, KeyPath).Exposed);
+            Assert.Equal(
+                DarlingHostBinding.BindMode.LoopbackOnly,
+                WebHost.ResolveWebBind(config.Web, managed: true).Mode);
             Assert.NotEmpty(Directory.GetFiles(root.FullName, "darling.json.bak-*"));
         }
         finally
