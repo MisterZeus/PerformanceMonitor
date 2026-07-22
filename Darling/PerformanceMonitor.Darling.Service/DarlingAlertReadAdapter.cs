@@ -292,7 +292,12 @@ ORDER BY r.total_elapsed_time_ms DESC
 LIMIT $3";
 
     /// <summary>The five opt-out noise filters — Lite's clauses with the N'' prefixes dropped.</summary>
-    public const string SpServerDiagnosticsFilter = "AND r.wait_type NOT LIKE '%SP_SERVER_DIAGNOSTICS%'";
+    /* sp_server_diagnostics (the AG/FCI health-check session) usually sits in SP_SERVER_DIAGNOSTICS_SLEEP, but it
+       also does Extended Events work, so it can be captured in a different wait (e.g. PREEMPTIVE_XE_GETTARGETSTATE)
+       where the wait-type match alone misses it and the Long-Running Query alert fires anyway. The query-text
+       match (case-insensitive, NULL-safe) catches it regardless of the wait it happens to be in at capture time. */
+    public const string SpServerDiagnosticsFilter =
+        "AND r.wait_type NOT LIKE '%SP_SERVER_DIAGNOSTICS%'\n    AND (r.query_text IS NULL OR r.query_text NOT ILIKE '%sp_server_diagnostics%')";
     public const string WaitForFilter = "AND r.wait_type NOT IN ('WAITFOR', 'BROKER_RECEIVE_WAITFOR')";
     public const string BackupsFilter = "AND r.wait_type NOT IN ('BACKUPTHREAD', 'BACKUPIO')";
     public const string MiscWaitsFilter = "AND r.wait_type NOT IN ('XE_LIVE_TARGET_TVF')";
