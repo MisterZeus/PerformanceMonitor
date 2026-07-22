@@ -21,11 +21,11 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para><b>Why text surgery and not a re-serialize.</b> darling.json / darling.sample.json are
 /// comment-rich BY DESIGN — the comments ARE the documentation (see the sample header). Round-tripping
 /// through <see cref="JsonSerializer"/> would silently delete every comment, so instead we splice the
-/// two <c>network</c> blocks (<c>postgres.network</c>, <c>mcp.network</c>) in/out while leaving every
-/// other byte — including the heavily-commented template blocks the sample ships COMMENTED OUT —
-/// untouched.</para>
+/// three <c>network</c> blocks (<c>postgres.network</c>, <c>mcp.network</c>, <c>web.network</c>) in/out
+/// while leaving every other byte — including the heavily-commented template blocks the sample ships
+/// COMMENTED OUT — untouched.</para>
 ///
-/// <para><b>Why a real scanner and not IndexOf.</b> The sample ships both network blocks commented out
+/// <para><b>Why a real scanner and not IndexOf.</b> The sample ships all three network blocks commented out
 /// (the <c>// "network": { ... }</c> templates), so a naive <c>IndexOf("\"network\"")</c> would match
 /// the TEMPLATE and corrupt the file. <see cref="Classify"/> walks the text once and labels every
 /// character as code / string / line-comment / block-comment; every structural scan below
@@ -438,6 +438,27 @@ internal static class DarlingNetworkConfigEditor
         var tokenLine = encryptedToken is not null
             ? FieldIndent + $"\"encryptedToken\": {JsonString(encryptedToken)}  // DPAPI bearer token (from --encrypt-password); required to expose.\n"
             : FieldIndent + $"\"token\": {JsonString(plaintextToken)}  // plaintext bearer token (dev only; prefer encryptedToken).\n";
+
+        return
+            "\"network\": {\n" +
+            FieldIndent + $"\"listen\": {JsonString(listen)},  // bind IP; 0.0.0.0 = all interfaces.\n" +
+            FieldIndent + $"\"allowFrom\": {JsonString(allowFrom)},  // in-app RemoteIpAddress check + firewall CIDR (loopback always allowed).\n" +
+            tokenLine +
+            ChildIndent + "}";
+    }
+
+    /// <summary>
+    /// The active (uncommented) <c>web.network</c> block the wizard writes (#1617) — the web-dashboard twin
+    /// of <see cref="BuildMcpNetworkBlock"/>, same exactly-one-of token contract: the wizard prefers
+    /// <c>encryptedToken</c> (a DPAPI blob) and only emits a plaintext <c>token</c> when preserving an
+    /// existing plaintext value the operator chose to keep. Pure.
+    /// </summary>
+    internal static string BuildWebNetworkBlock(
+        string listen, string allowFrom, string? encryptedToken, string? plaintextToken)
+    {
+        var tokenLine = encryptedToken is not null
+            ? FieldIndent + $"\"encryptedToken\": {JsonString(encryptedToken)}  // DPAPI access token (from --encrypt-password); the browser login secret.\n"
+            : FieldIndent + $"\"token\": {JsonString(plaintextToken)}  // plaintext access token (dev only; prefer encryptedToken).\n";
 
         return
             "\"network\": {\n" +

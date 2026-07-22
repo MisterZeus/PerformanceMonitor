@@ -7,6 +7,8 @@
  */
 
 using System;
+using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
@@ -21,6 +23,61 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class DarlingWebSupervisorTests
 {
+    /* ---- ResolveWebBind (#1617): the web twin of ResolveMcpBind — pins the PROJECTION of WebConfig onto
+       the shared DarlingHostBinding ladder (the ladder's own matrix lives in DarlingHostBindingTests).
+       The --configure-network wizard validates candidate web blocks through this exact method. ---- */
+
+    [Fact]
+    public void ResolveWebBind_Exposed_Managed_EncryptedTokenAndAllowFrom_IsNetworkAndLoopback()
+    {
+        var decision = DarlingWebHostService.ResolveWebBind(Web("192.168.1.205", "192.168.1.0/24", encryptedToken: "BLOB"), managed: true);
+        Assert.Equal(DarlingHostBinding.BindMode.NetworkAndLoopback, decision.Mode);
+        Assert.Equal(DarlingHostBinding.BindReason.NetworkExposed, decision.Reason);
+    }
+
+    [Fact]
+    public void ResolveWebBind_PlaintextTokenAlsoCountsAsPresent()
+    {
+        var decision = DarlingWebHostService.ResolveWebBind(Web("192.168.1.205", "192.168.1.0/24", plainToken: "s3cr3t"), managed: true);
+        Assert.Equal(DarlingHostBinding.BindMode.NetworkAndLoopback, decision.Mode);
+    }
+
+    [Fact]
+    public void ResolveWebBind_NoToken_IsLoopbackOnly_TokenMissing()
+    {
+        var decision = DarlingWebHostService.ResolveWebBind(Web("192.168.1.205", "192.168.1.0/24"), managed: true);
+        Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
+        Assert.Equal(DarlingHostBinding.BindReason.TokenMissing, decision.Reason);
+    }
+
+    [Fact]
+    public void ResolveWebBind_Byo_IsLoopbackOnly_ManagedModeRequired()
+    {
+        var decision = DarlingWebHostService.ResolveWebBind(Web("192.168.1.205", "192.168.1.0/24", encryptedToken: "BLOB"), managed: false);
+        Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
+        Assert.Equal(DarlingHostBinding.BindReason.ManagedModeRequired, decision.Reason);
+    }
+
+    [Fact]
+    public void ResolveWebBind_NoNetworkBlock_IsLoopbackByDefault()
+    {
+        var decision = DarlingWebHostService.ResolveWebBind(new WebConfig(), managed: true);
+        Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
+        Assert.Equal(DarlingHostBinding.BindReason.LoopbackByDefault, decision.Reason);
+    }
+
+    private static WebConfig Web(string listen, string allowFrom, string? encryptedToken = null, string? plainToken = null) => new()
+    {
+        Enabled = true,
+        Network = new WebNetworkConfig
+        {
+            Listen = listen,
+            AllowFrom = allowFrom,
+            EncryptedToken = encryptedToken,
+            Token = plainToken,
+        },
+    };
+
     [Theory]
     /* not running: start only when enabled */
     [InlineData(false, 0, false, 5153, DarlingWebHostService.WebSupervisorAction.None)]
