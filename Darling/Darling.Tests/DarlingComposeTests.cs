@@ -364,6 +364,39 @@ public sealed class DarlingComposeTests
         Assert.Contains("percentile_cont(0.95)", sql, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(ComposeTimeBucket.None)]
+    [InlineData(ComposeTimeBucket.Minute)]
+    [InlineData(ComposeTimeBucket.Hour)]
+    [InlineData(ComposeTimeBucket.Day)]
+    public void ResolveBucket_LeavesNonAutoUnchanged(ComposeTimeBucket bucket)
+    {
+        Assert.Equal(bucket, MeasureCatalog.ResolveBucket(bucket, 3600d));
+    }
+
+    [Fact]
+    public void ResolveBucket_Auto_PicksGrainFromWindow()
+    {
+        Assert.Equal(ComposeTimeBucket.Minute, MeasureCatalog.ResolveBucket(ComposeTimeBucket.Auto, 2d * 86_400d));       // 2 days -> minute
+        Assert.Equal(ComposeTimeBucket.Hour, MeasureCatalog.ResolveBucket(ComposeTimeBucket.Auto, 2d * 86_400d + 1d));   // just over 2 days -> hour
+        Assert.Equal(ComposeTimeBucket.Hour, MeasureCatalog.ResolveBucket(ComposeTimeBucket.Auto, 60d * 86_400d));       // 60 days -> hour
+        Assert.Equal(ComposeTimeBucket.Day, MeasureCatalog.ResolveBucket(ComposeTimeBucket.Auto, 60d * 86_400d + 1d));   // over 60 days -> day
+    }
+
+    [Theory]
+    [InlineData(6, "date_trunc('minute'")]      // 6h window -> minute grain
+    [InlineData(24 * 10, "date_trunc('hour'")]  // 10 days -> hour grain
+    [InlineData(24 * 90, "date_trunc('day'")]   // 90 days -> day grain
+    public void Compile_AutoBucket_ResolvesGrainFromWindow(int windowHours, string expectedTrunc)
+    {
+        var plan = ValidPlan("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"auto\",\"viz\":\"line\"}");
+        var end = WindowEnd;
+        var start = end.AddHours(-windowHours);
+        var (compiled, error) = ComposeCompiler.Compile(plan, new ComposeRunContext(null, start, end, ComposeRunContext.NoVariables));
+        Assert.True(error is null, error);
+        Assert.Contains(expectedTrunc, compiled!.Sql, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Compile_UnitConversion_ScalesMicrosecondsToMilliseconds()
     {

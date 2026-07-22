@@ -252,6 +252,28 @@ function importPanel() {
 
 /* ─────────────────────────── renderer ─────────────────────────── */
 
+/* Per-view scope memory: the picked server / time range / variable values survive the app's 60s background
+   re-render (app.js refresh() → route() rebuilds the whole view), which otherwise snapped the range back to the
+   view's default every minute. Keyed by view id, session-lived — a full page reload clears it, restoring the
+   view's declared default. */
+const viewScopeMemory = new Map();
+
+function seedState(id, defaultHours, variables) {
+  const cached = viewScopeMemory.get(String(id));
+  if (cached) {
+    return { server: cached.server, hours: cached.hours, values: { ...cached.values } };
+  }
+  const state = { server: "All", hours: defaultHours, values: {} };
+  for (const v of variables) {
+    if (v.dimension !== "server" && v.default) state.values[v.name] = v.default;
+  }
+  return state;
+}
+
+function rememberScope(id, state) {
+  viewScopeMemory.set(String(id), { server: state.server, hours: state.hours, values: { ...state.values } });
+}
+
 export async function renderView(main, id) {
   mount(main, loadingStrip("Loading view…"));
 
@@ -304,10 +326,7 @@ export async function renderView(main, id) {
   const defaultHours = def.range && typeof def.range.hours === "number" ? def.range.hours : 24;
   const hasComposed = panels.some((p) => p && p.source != null);
 
-  const state = { server: "All", hours: defaultHours, values: {} };
-  for (const v of variables) {
-    if (v.dimension !== "server" && v.default) state.values[v.name] = v.default;
-  }
+  const state = seedState(id, defaultHours, variables);
 
   function currentScope() {
     return {
@@ -324,7 +343,8 @@ export async function renderView(main, id) {
   }
 
   /* The chrome is only meaningful when a composed panel can re-scope; a pure v1 read view skips it. */
-  const controls = hasComposed ? buildViewControls(fleet, variables, state, defaultHours, renderGrid) : null;
+  const onChange = () => { rememberScope(id, state); renderGrid(); };
+  const controls = hasComposed ? buildViewControls(fleet, variables, state, defaultHours, onChange) : null;
 
   mount(main, [head, status, controls, gridBox]);
   renderGrid();
@@ -370,10 +390,7 @@ async function renderNotebookDoc(main, view, session, catalog, fleetRes) {
   const defaultHours = def.range && typeof def.range.hours === "number" ? def.range.hours : 24;
   const hasPanels = cells.some((c) => c && c.type === "panel" && c.source != null);
 
-  const state = { server: "All", hours: defaultHours, values: {} };
-  for (const v of variables) {
-    if (v.dimension !== "server" && v.default) state.values[v.name] = v.default;
-  }
+  const state = seedState(view.id, defaultHours, variables);
 
   function currentScope() {
     return {
@@ -389,7 +406,8 @@ async function renderNotebookDoc(main, view, session, catalog, fleetRes) {
     mount(docBox, cells.map((cell) => renderCell(cell, readSet, sourceSet, currentScope())));
   }
 
-  const controls = hasPanels ? buildViewControls(fleet, variables, state, defaultHours, renderDoc) : null;
+  const onChange = () => { rememberScope(view.id, state); renderDoc(); };
+  const controls = hasPanels ? buildViewControls(fleet, variables, state, defaultHours, onChange) : null;
   mount(main, [head, status, controls, docBox]);
   renderDoc();
 }
