@@ -140,19 +140,28 @@ if ($Network) {
 # -- 6. Viewer shortcuts --------------------------------------------------------------------------
 if (-not $NoShortcuts) {
     if (Test-Path $viewerExe) {
-        $shell = New-Object -ComObject WScript.Shell
-        $targets = @(
-            (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Darling Viewer.lnk'),
-            (Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs\Darling Viewer.lnk')
-        )
-        foreach ($lnkPath in $targets) {
-            $lnk = $shell.CreateShortcut($lnkPath)
-            $lnk.TargetPath = $viewerExe
-            $lnk.WorkingDirectory = Split-Path $viewerExe
-            $lnk.Description = 'PerformanceMonitor Darling Viewer'
-            $lnk.Save()
+        # GetFolderPath returns '' for Desktop/StartMenu in a non-interactive / SYSTEM context (e.g. an
+        # SSM or remote-exec session with no loaded user profile), and Join-Path then throws. Guard it:
+        # keep only the shortcut targets whose folder actually resolves, and skip cleanly otherwise.
+        $desktop   = [Environment]::GetFolderPath('Desktop')
+        $startMenu = [Environment]::GetFolderPath('StartMenu')
+        $targets = @()
+        if ($desktop)   { $targets += (Join-Path $desktop 'Darling Viewer.lnk') }
+        if ($startMenu) { $targets += (Join-Path $startMenu 'Programs\Darling Viewer.lnk') }
+        if ($targets.Count -gt 0) {
+            $shell = New-Object -ComObject WScript.Shell
+            foreach ($lnkPath in $targets) {
+                $lnk = $shell.CreateShortcut($lnkPath)
+                $lnk.TargetPath = $viewerExe
+                $lnk.WorkingDirectory = Split-Path $viewerExe
+                $lnk.Description = 'PerformanceMonitor Darling Viewer'
+                $lnk.Save()
+            }
+            Write-Host "Created 'Darling Viewer' shortcuts ($($targets.Count)). Pin to taskbar from the Start Menu entry if wanted."
         }
-        Write-Host "Created 'Darling Viewer' shortcuts (Desktop + Start Menu). Pin to taskbar from the Start Menu entry if wanted."
+        else {
+            Write-Host 'No interactive Desktop/Start Menu (non-interactive or SYSTEM context) - skipping viewer shortcuts.' -ForegroundColor Yellow
+        }
     }
     else {
         Write-Host 'viewer\PerformanceMonitor.Darling.Viewer.exe not found - skipping shortcuts.' -ForegroundColor Yellow
