@@ -25,8 +25,8 @@
 
   <!-- Embed SQL scripts as assembly resources for Dashboard consumption -->
   <ItemGroup>
-    <EmbeddedResource Include="..\install\**\*.sql" LinkBase="Resources\install" />
-    <EmbeddedResource Include="..\upgrades\**\*" LinkBase="Resources\upgrades" />
+    <EmbeddedResource Include="..\..\install\**\*.sql" LinkBase="Resources\install" />
+    <EmbeddedResource Include="..\..\upgrades\**\*" LinkBase="Resources\upgrades" />
   </ItemGroup>
 
 </Project>

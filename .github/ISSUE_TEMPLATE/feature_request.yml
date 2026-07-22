@@ -9,10 +9,8 @@ body:
     attributes:
       label: Which component(s) does this affect?
       options:
-        - label: Full Dashboard
         - label: Lite
-        - label: SQL collection scripts
-        - label: Installer
+        - label: Darling
         - label: Documentation
     validations:
       required: true
