@@ -627,6 +627,19 @@ PerformanceMonitor.Darling.Service.exe --disable-web
 
 Each flips only its endpoint's **live store flag** with a targeted `config_service` write; the service **hot-reloads within one collection sweep — no restart.** If that endpoint's `network` block opts into LAN exposure (a non-loopback `listen`), the verb also reconciles the **same scoped, idempotent-by-name firewall rule the service would**: **run elevated**, it opens (or, on `--disable-*`, removes) the rule; **run non-elevated**, the store toggle still succeeds and it prints the exact elevated firewall command to run by hand (a loopback-only endpoint needs no rule and says so). Managed-mode only, Windows only. So the headless bring-up is: write the `network` block (the wizard above or the manual reference below), then `--enable-mcp` / `--enable-web` from an **elevated** shell.
 
+### Verify it's actually reachable (and the two failures that look like bugs)
+
+Enabling an endpoint is **not** the same as reaching it, and both common failures leave the store flag reading `true`, so "it says enabled" is not proof. After `--enable-mcp` / `--enable-web`, verify on the **service host**:
+
+1. **The listener is on the LAN address, not loopback.** `Get-NetTCPConnection -State Listen | Where-Object LocalPort -eq 5152` (or `5153` for web) must show the box's LAN IP, e.g. `10.0.0.5:5152` — **not** only `::1` / `127.0.0.1`. *Enabled but still loopback-bound* is the single most common failure: the store flag is on, but the endpoint never re-bound to the LAN address in the `network` block. Re-running `--enable-mcp` **elevated** re-applies the `listen` and re-binds it.
+2. **The scoped firewall rule exists and covers the client.** `Get-NetFirewallRule -DisplayName 'PerformanceMonitor Darling MCP (port 5152)'` (or `... Web (port 5153)`) should be `Enabled=True, Action=Allow`, scoped to the `network.allowFrom` CIDR. A non-elevated `--enable-*` skips this and prints the exact command to run by hand.
+
+Then from the **client** host:
+
+3. **Connect to the box's LAN IP, never `localhost`.** Use `http://<box-LAN-IP>:5152/`. `localhost` / `127.0.0.1` only resolves *on the box itself*, so an off-box MCP client pointed at localhost fails silently — this is the number-one "MCP won't connect" cause. Send `Authorization: Bearer <token>` (the `network.token`), and do a **fresh** `initialize` + `tools/list` rather than trusting a cached tool list from a previous version.
+
+**After a reinstall:** the installer replaces binaries but does **not** touch `darling.json` (the zip ships only `darling.sample.json`) or the store, so the `network` block and both live flags survive the upgrade. If MCP stops connecting afterward it is almost always failure 1 (the restart left it loopback-bound) or failure 3 (the client pointed at `localhost`), **not** lost config — re-run `--enable-mcp` **elevated** to re-apply the LAN listen and firewall; a full `--configure-network` re-run is only needed if the `network` block itself is gone.
+
 ### Store endpoint (viewer over the LAN)
 
 Add a `network` block to `postgres` (managed mode):

@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Full Dashboard and the CLI Installer are being retired.** They moved to a `deprecated/` folder and are no longer built into release artifacts; releases now ship Lite + Darling only, with Darling the flagship replacement for the Full Dashboard. The deprecated code still compiles and its tests run in CI. ([#1612])
 
+### Documentation
+
+- Darling README: added a "verify it's actually reachable" recipe for the opt-in LAN MCP/web endpoints — confirm the listener is on the LAN address (not loopback), the scoped firewall rule covers the client, and the client connects to the box IP rather than `localhost` — plus what to re-run after a reinstall. Enabling an endpoint is not the same as reaching it. ([#1614])
+
 ## [3.2.0] - 2026-07-21
 
 ### Added
