@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Darling: collectors no longer fail with `22021: invalid byte sequence for encoding "UTF8": 0x00`** ([#1614]) - SQL Server NVARCHAR allows embedded NUL characters and query text from `sys.dm_exec_sql_text` sometimes carries them, but Postgres `text` columns reject the byte, so one NUL-laden cached query failed the entire `query_stats` COPY batch every cycle (`DBCC FREEPROCCACHE` never helped because the app re-caches the same query). The Postgres row writer now strips NULs from every collected string - query text, plan XML, deadlock and blocked-process XML included - at the single COPY choke point.
 - **Darling Web: a custom view no longer resets the picked time range / server / filters every 60 seconds** ([#1619]) - the background refresh that keeps the dashboard live rebuilt each view from its declared default, snapping any range/server/filter change back within a minute. A per-view scope memory now survives the re-render, so a picked scope sticks until you change it or hard-reload.
+- **Darling: the Custom Views composer and analyze_*_plan no longer time out on large stores** ([#1620]) - the columns the composer filters/groups by (`procedure_stats.object_name`, `query_stats.query_hash`, `query_store_stats.query_hash`) and the single-row `analyze_*_plan` lookups (`sql_handle` / `query_id`+`plan_id`) had no supporting index, so on a large store they fell to a Seq Scan and hit the 15 s statement_timeout. The service now applies (idempotently, at startup, NOT a versioned migration) six indexes - three COVERING (the aggregate columns the composer SUM/AVGs are `INCLUDE`d, for an Index Only Scan) plus three lookup indexes - and a per-table `autovacuum_vacuum_insert_scale_factor = 0.02` override so the visibility map stays current on the pure-insert hypertable chunks (the default 0.2 left the day's hot chunk stale before the daily TimescaleDB rollover, degrading the Index Only Scan back to heap fetches). EXPLAIN-verified on a 137 GB field store: two panels that timed out at 15 s now run in 139 ms / 514 ms with 0 heap fetches. Results-invariant perf tuning, so it deliberately does not bump the schema version or gate the viewer.
 
 ## [3.2.0] - 2026-07-21
 
@@ -514,6 +515,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#1612]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1612
 [#1614]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1614
 [#1619]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1619
+[#1620]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1620
 [#1617]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1617
 [#1621]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1621
 [#1601]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1601

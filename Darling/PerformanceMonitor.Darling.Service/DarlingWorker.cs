@@ -600,6 +600,23 @@ public sealed class DarlingWorker : BackgroundService
             _logger.LogWarning("TimescaleDB setup failed — continuing in plain-PostgreSQL mode: {Message}", ex.Message);
         }
 
+        /* Composer + analyze_*_plan performance tuning (covering indexes + per-table autovacuum-insert override) —
+           idempotent RUNTIME setup, NOT a versioned migration: results-invariant perf, so it must not bump
+           StorageVersion and gate the Viewer's schema check on indexes it does not need (the role-GUC provisioning
+           reasoning). AFTER the TimescaleDB block so the collector tables are already hypertables when indexed
+           (CREATE INDEX / ALTER TABLE SET propagate to all chunks), BEFORE collectors so a first build never
+           contends with live inserts. Its own try/catch: a failure degrades to un-tuned (slower) queries, never
+           fatal (the same optional-feature discipline as the TimescaleDB block above). */
+        try
+        {
+            await using var tuningConnection = await postgres.OpenConnectionAsync(stoppingToken);
+            await PgTableTuning.ApplyAsync(tuningConnection, _logger, stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("Composer performance tuning failed — queries fall back to un-indexed scans: {Message}", ex.Message);
+        }
+
         /* Restart continuity: re-seed delta baselines from the store (the Postgres twin of Lite's
            DuckDB seeding) so the first cycle after a service restart produces real deltas instead
            of zeroes. A seed failure logs a warning and collection proceeds with first-cycle-zero. */
