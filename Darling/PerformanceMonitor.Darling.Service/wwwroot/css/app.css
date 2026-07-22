@@ -153,15 +153,21 @@ a:hover { text-decoration: underline; }
 }
 .panel { margin-bottom: 1.25rem; }
 
-/* Custom-views renderer grid (#1563): stored panels tile responsively; a span-2 panel spans both columns via
-   the existing .panel.span-2 { grid-column: 1 / -1 } rule below. The grid gap owns spacing, so the panel's
-   stacked-page bottom margin is reset inside the grid. */
+/* Custom-views renderer grid (#1563): stored panels tile responsively, capped at two columns on wide screens so a
+   dense view no longer crams 4-across; a span-2 panel spans the full width via .panel.span-2 { grid-column: 1 / -1 }
+   below. The min track is >=45% of the row so at most two columns ever fit; a lone or span-2 panel takes the full
+   width. The grid gap owns spacing, so the panel's stacked-page bottom margin is reset inside the grid. */
 .panel-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(clamp(320px, 45%, 700px), 1fr));
   gap: 1.25rem;
 }
 .panel-grid .panel { margin-bottom: 0; }
+
+/* Time-range picker (view chrome): the preset <select> plus the inline custom-window input revealed by "Custom…". */
+.range-select { display: inline-flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+.range-custom { display: inline-flex; align-items: center; gap: 0.35rem; }
+.range-custom-n { width: 4.5rem; }
 
 .panel > h3 {
   margin: 0 0 0.6rem;

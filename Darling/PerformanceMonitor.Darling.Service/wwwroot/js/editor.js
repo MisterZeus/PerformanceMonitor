@@ -131,7 +131,7 @@ export function newComposedPanel() {
     aggregate: "",
     unit: "",
     shape: "timeseries",
-    timeBucket: "hour",
+    timeBucket: "auto",
     topN: 10,
     filters: [],
     groupBy: [],
@@ -187,7 +187,7 @@ export function descToComposedPanel(d) {
     aggregate: d.aggregate || "",
     unit: d.unit || "",
     shape: hasBucket ? "timeseries" : hasTopN ? "ranked" : "scalar",
-    timeBucket: hasBucket ? d.timeBucket : "hour",
+    timeBucket: hasBucket ? d.timeBucket : "auto",
     topN: hasTopN ? d.topN : 10,
     filters: Array.isArray(d.filters) ? d.filters.map(descToFilter) : [],
     groupBy: Array.isArray(d.groupBy) ? d.groupBy.map(String) : [],
@@ -236,7 +236,7 @@ export function composedPanelToDesc(p) {
   else d.measure = p.measure;
   if (!p.ratio && p.aggregate) d.aggregate = p.aggregate;
   if (p.unit) d.unit = p.unit;
-  if (p.shape === "timeseries") d.timeBucket = p.timeBucket || "hour";
+  if (p.shape === "timeseries") d.timeBucket = p.timeBucket || "auto";
   else if (p.shape === "ranked") d.topN = clampInt(p.topN, 1, 1000, 10);
   const filters = (p.filters || []).map(filterToDesc).filter((f) => f.dimension && f.op);
   if (filters.length) d.filters = filters;
@@ -859,7 +859,7 @@ function sampleUnavailableText(res) {
 const VIZ_LABELS = { line: "Line", area: "Area", stacked: "Stacked area", "stacked-bar": "Stacked bar", bar: "Bar", pie: "Pie / donut", table: "Table", stat: "Single value" };
 const AGG_LABELS = { sum: "Sum", avg: "Average", min: "Minimum", max: "Maximum", count: "Count", percentile_cont: "95th percentile" };
 const OP_LABELS = { eq: "is (=)", neq: "is not (≠)", like: "matches (LIKE)", gt: ">", gte: "≥", lt: "<", lte: "≤" };
-const BUCKET_LABELS = { minute: "Per minute", hour: "Per hour", day: "Per day" };
+const BUCKET_LABELS = { minute: "Per minute", hour: "Per hour", day: "Per day", auto: "Auto (fit to range)" };
 const ARCHETYPE_LABELS = { Cumulative: "counter", Delta: "per-interval delta", Gauge: "gauge", PerEvent: "per-event" };
 const SHAPE_LABELS = { timeseries: "Over time", ranked: "Ranked", scalar: "Single value" };
 
@@ -1040,7 +1040,7 @@ export function buildComposedPanelBody(p, opts) {
       btn.addEventListener("click", () => {
         if (p.shape === v) return;
         p.shape = v;
-        if (v === "timeseries" && !p.timeBucket) p.timeBucket = "hour";
+        if (v === "timeseries" && !p.timeBucket) p.timeBucket = "auto";
         if (v === "ranked" && !p.topN) p.topN = 10;
         if (v === "scalar") p.groupBy = [];
         if (!vizShapeCompatible(p.viz, p.shape)) p.viz = DEFAULT_VIZ_FOR_SHAPE[p.shape];
@@ -1056,7 +1056,7 @@ export function buildComposedPanelBody(p, opts) {
     for (const b of (compose.timeBuckets || []).filter((x) => x !== "none")) {
       sel.appendChild(el("option", { value: b, text: BUCKET_LABELS[b] || b }));
     }
-    sel.value = p.timeBucket || "hour";
+    sel.value = p.timeBucket || "auto";
     sel.addEventListener("change", () => {
       p.timeBucket = sel.value;
       onLive();
