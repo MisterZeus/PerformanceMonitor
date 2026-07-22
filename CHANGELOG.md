@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Full Dashboard and the CLI Installer are being retired.** They moved to a `deprecated/` folder and are no longer built into release artifacts; releases now ship Lite + Darling only, with Darling the flagship replacement for the Full Dashboard. The deprecated code still compiles and its tests run in CI. ([#1612])
+
 ## [3.2.0] - 2026-07-21
 
 ### Added
@@ -494,6 +498,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#1599]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1599
 [#1608]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1608
 [#1609]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1609
+[#1612]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1612
 [#1601]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1601
 [#1604]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1604
 [#1602]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1602

@@ -54,11 +54,11 @@ jobs:
             # Installer.Core is shared by the CLI Installer AND the Full Dashboard's integrated
             # installer — a change rebuilds both, and nothing else.
             installer_core:
-              - 'Installer.Core/**'
+              - 'deprecated/Installer.Core/**'
               - '!**/*.md'
             dashboard:
-              - 'Dashboard/**'
-              - 'Dashboard.Tests/**'
+              - 'deprecated/Dashboard/**'
+              - 'deprecated/Dashboard.Tests/**'
               - '!**/*.md'
             lite:
               - 'Lite/**'
@@ -75,8 +75,8 @@ jobs:
               - 'Lite/PerformanceMonitorLite.csproj'
               - '!**/*.md'
             installer:
-              - 'Installer/**'
-              - 'Installer.Tests/**'
+              - 'deprecated/Installer/**'
+              - 'deprecated/Installer.Tests/**'
               - 'install/**'
               - 'upgrades/**'
               - '!**/*.md'
@@ -102,11 +102,9 @@ jobs:
       - name: Restore dependencies
         if: steps.filter.outputs.code != 'false'
         run: |
-          dotnet restore Dashboard/Dashboard.csproj --locked-mode
           dotnet restore Lite/PerformanceMonitorLite.csproj --locked-mode
-          dotnet restore Installer/PerformanceMonitorInstaller.csproj --locked-mode
           dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
-          dotnet restore Installer.Tests/Installer.Tests.csproj --locked-mode
+          dotnet restore deprecated/Installer.Tests/Installer.Tests.csproj --locked-mode
           dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
           dotnet restore Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj --locked-mode
 
@@ -116,7 +114,7 @@ jobs:
 
       - name: Build Installer.Tests
         if: steps.filter.outputs.installer == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        run: dotnet build Installer.Tests/Installer.Tests.csproj -c Release --no-restore
+        run: dotnet build deprecated/Installer.Tests/Installer.Tests.csproj -c Release --no-restore
 
       - name: Build Darling
         if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
@@ -134,7 +132,7 @@ jobs:
 
       - name: Run Installer tests
         if: steps.filter.outputs.installer == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        run: dotnet test Installer.Tests/Installer.Tests.csproj -c Release --no-build --verbosity normal --filter "FullyQualifiedName!~VersionDetectionTests&FullyQualifiedName!~IdempotencyTests&FullyQualifiedName!~AdversarialTests"
+        run: dotnet test deprecated/Installer.Tests/Installer.Tests.csproj -c Release --no-build --verbosity normal --filter "FullyQualifiedName!~VersionDetectionTests&FullyQualifiedName!~IdempotencyTests&FullyQualifiedName!~AdversarialTests"
 
       - name: Run Darling tests
         if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
@@ -145,16 +143,8 @@ jobs:
         id: version
         shell: pwsh
         run: |
-          $version = ([xml](Get-Content Dashboard/Dashboard.csproj)).Project.PropertyGroup.Version | Where-Object { $_ }
+          $version = ([xml](Get-Content Lite/PerformanceMonitorLite.csproj)).Project.PropertyGroup.Version | Where-Object { $_ }
           echo "VERSION=$version" >> $env:GITHUB_OUTPUT
-
-      - name: Publish Dashboard
-        if: steps.filter.outputs.dashboard == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        run: dotnet publish Dashboard/Dashboard.csproj -c Release -o publish/Dashboard
-
-      - name: Publish Dashboard (self-contained for Velopack)
-        if: github.event_name == 'release'
-        run: dotnet publish Dashboard/Dashboard.csproj -c Release -r win-x64 --self-contained -o publish/Dashboard-velopack
 
       - name: Publish Lite
         if: steps.filter.outputs.lite == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
@@ -164,15 +154,6 @@ jobs:
         if: github.event_name == 'release'
         run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -r win-x64 --self-contained -o publish/Lite-velopack
 
-      - name: Publish CLI Installer
-        if: steps.filter.outputs.installer == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        run: dotnet publish Installer/PerformanceMonitorInstaller.csproj -c Release
-
-      # Darling (headless edition): the Windows-service collector and the WPF viewer, published
-      # framework-dependent for the plain zip (both apps). The SERVICE stays zip-only — a Windows
-      # service has a different update story, deliberately deferred for v1. The VIEWER additionally
-      # ships as a remote-seat Velopack Setup.exe (#1555) via the self-contained publish below,
-      # exactly like Dashboard/Lite.
       - name: Publish Darling Service
         if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -o publish/DarlingService
@@ -211,36 +192,9 @@ jobs:
           $version = "${{ steps.version.outputs.VERSION }}"
           New-Item -ItemType Directory -Force -Path releases
 
-          # Dashboard ZIP — portable artifact for advanced/air-gapped users.
-          # The README points end users at Setup.exe (Velopack) because it sets up Start Menu
-          # shortcuts and Apps & Features registration; this ZIP is the explicit fallback.
-          Compress-Archive -Path 'publish/Dashboard/*' -DestinationPath "releases/PerformanceMonitorDashboard-$version.zip" -Force
-
-          # Lite ZIP — same rationale.
+          # Lite ZIP - portable artifact for advanced/air-gapped users. The README points end
+          # users at Setup.exe (Velopack); this ZIP is the explicit fallback.
           Compress-Archive -Path 'publish/Lite/*' -DestinationPath "releases/PerformanceMonitorLite-$version.zip" -Force
-
-          # Installer ZIP (CLI + SQL scripts) — still shipped for server-side install
-          $instDir = 'publish/Installer'
-          New-Item -ItemType Directory -Force -Path $instDir
-          New-Item -ItemType Directory -Force -Path "$instDir/install"
-          New-Item -ItemType Directory -Force -Path "$instDir/upgrades"
-
-          Copy-Item 'Installer/bin/Release/net10.0/win-x64/publish/PerformanceMonitorInstaller.exe' $instDir
-          Copy-Item 'install/*.sql' "$instDir/install/"
-          if (Test-Path 'upgrades') { Copy-Item 'upgrades/*' "$instDir/upgrades/" -Recurse -ErrorAction SilentlyContinue }
-          if (Test-Path 'README.md') { Copy-Item 'README.md' $instDir }
-          if (Test-Path 'LICENSE') { Copy-Item 'LICENSE' $instDir }
-          if (Test-Path 'THIRD_PARTY_NOTICES.md') { Copy-Item 'THIRD_PARTY_NOTICES.md' $instDir }
-
-          Compress-Archive -Path 'publish/Installer/*' -DestinationPath "releases/PerformanceMonitorInstaller-$version.zip" -Force
-
-      - name: Upload Dashboard for signing
-        if: github.event_name == 'release'
-        id: upload-dashboard
-        uses: actions/upload-artifact@v6
-        with:
-          name: Dashboard-unsigned
-          path: publish/Dashboard/
 
       - name: Upload Lite for signing
         if: github.event_name == 'release'
@@ -250,19 +204,6 @@ jobs:
           name: Lite-unsigned
           path: publish/Lite/
 
-      - name: Upload Installer for signing
-        if: github.event_name == 'release'
-        id: upload-installer
-        uses: actions/upload-artifact@v6
-        with:
-          name: Installer-unsigned
-          path: publish/Installer/
-
-      # Only our own .NET output (the service + viewer apphost exes + PerformanceMonitor.* dlls) is
-      # uploaded to SignPath, staged in the exact layout the single 'Darling' artifact-configuration
-      # signs: the service at the root, the viewer under viewer/. pg-runtime.zip is deliberately NOT
-      # here — the bundled EDB PostgreSQL binaries inside are EDB's and ship as opaque data, so the
-      # zip is placed into the package AFTER signing (see "Package Darling (signed)" below).
       - name: Stage Darling for signing
         if: github.event_name == 'release'
         shell: pwsh
@@ -281,19 +222,6 @@ jobs:
           name: Darling-unsigned
           path: publish/Darling-signing/
 
-      - name: Sign Dashboard
-        if: github.event_name == 'release'
-        uses: signpath/github-action-submit-signing-request@v2
-        with:
-          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
-          organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
-          project-slug: 'PerformanceMonitor'
-          signing-policy-slug: 'release-signing'
-          artifact-configuration-slug: 'Dashboard'
-          github-artifact-id: '${{ steps.upload-dashboard.outputs.artifact-id }}'
-          wait-for-completion: true
-          output-artifact-directory: 'signed/Dashboard'
-
       - name: Sign Lite
         if: github.event_name == 'release'
         uses: signpath/github-action-submit-signing-request@v2
@@ -307,24 +235,6 @@ jobs:
           wait-for-completion: true
           output-artifact-directory: 'signed/Lite'
 
-      - name: Sign Installer
-        if: github.event_name == 'release'
-        uses: signpath/github-action-submit-signing-request@v2
-        with:
-          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
-          organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
-          project-slug: 'PerformanceMonitor'
-          signing-policy-slug: 'release-signing'
-          artifact-configuration-slug: 'Installers'
-          github-artifact-id: '${{ steps.upload-installer.outputs.artifact-id }}'
-          wait-for-completion: true
-          output-artifact-directory: 'signed/Installer'
-
-      # The single 'Darling' artifact-configuration slug on signpath.io signs the two apphost exes
-      # at their staged paths (PerformanceMonitor.Darling.Service.exe at the root and
-      # viewer/PerformanceMonitor.Darling.Viewer.exe) and leaves the PerformanceMonitor.* and
-      # third-party dlls alone. That config (which files get signed) lives outside this repo; until
-      # the 'Darling' slug exists this step fails the release.
       - name: Sign Darling
         if: github.event_name == 'release'
         uses: signpath/github-action-submit-signing-request@v2
@@ -344,12 +254,8 @@ jobs:
         run: |
           $version = "${{ steps.version.outputs.VERSION }}"
           # Re-zip signed files into release archives
-          Remove-Item "releases/PerformanceMonitorDashboard-$version.zip" -ErrorAction SilentlyContinue
-          Compress-Archive -Path 'signed/Dashboard/*' -DestinationPath "releases/PerformanceMonitorDashboard-$version.zip" -Force
           Remove-Item "releases/PerformanceMonitorLite-$version.zip" -ErrorAction SilentlyContinue
           Compress-Archive -Path 'signed/Lite/*' -DestinationPath "releases/PerformanceMonitorLite-$version.zip" -Force
-          Remove-Item "releases/PerformanceMonitorInstaller-$version.zip" -ErrorAction SilentlyContinue
-          Compress-Archive -Path 'signed/Installer/*' -DestinationPath "releases/PerformanceMonitorInstaller-$version.zip" -Force
 
       - name: Package Darling (signed)
         if: github.event_name == 'release'
@@ -375,14 +281,6 @@ jobs:
       # since Velopack packaging was introduced. These steps close that gap by
       # mirroring the exact upload/sign pattern used for Dashboard/Lite/Installer
       # above, and vpk pack below now reads from the signed output.
-      - name: Upload Dashboard (Velopack) for signing
-        if: github.event_name == 'release'
-        id: upload-dashboard-velopack
-        uses: actions/upload-artifact@v6
-        with:
-          name: Dashboard-Velopack-unsigned
-          path: publish/Dashboard-velopack/
-
       - name: Upload Lite (Velopack) for signing
         if: github.event_name == 'release'
         id: upload-lite-velopack
@@ -398,19 +296,6 @@ jobs:
         with:
           name: DarlingViewer-Velopack-unsigned
           path: publish/DarlingViewer-velopack/
-
-      - name: Sign Dashboard (Velopack)
-        if: github.event_name == 'release'
-        uses: signpath/github-action-submit-signing-request@v2
-        with:
-          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
-          organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
-          project-slug: 'PerformanceMonitor'
-          signing-policy-slug: 'release-signing'
-          artifact-configuration-slug: 'Dashboard'
-          github-artifact-id: '${{ steps.upload-dashboard-velopack.outputs.artifact-id }}'
-          wait-for-completion: true
-          output-artifact-directory: 'signed/Dashboard-Velopack'
 
       - name: Sign Lite (Velopack)
         if: github.event_name == 'release'
@@ -443,7 +328,7 @@ jobs:
           wait-for-completion: true
           output-artifact-directory: 'signed/DarlingViewer-Velopack'
 
-      - name: Create Velopack release (Dashboard)
+      - name: Create Velopack releases (Lite + Darling Viewer)
         if: github.event_name == 'release'
         shell: pwsh
         env:
@@ -451,15 +336,10 @@ jobs:
           VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
           # Pin vpk to the Velopack library version (keep in sync with the Velopack
-          # PackageReference in Dashboard.csproj / PerformanceMonitorLite.csproj).
+          # PackageReference in PerformanceMonitorLite.csproj).
           dotnet tool install -g vpk --version 1.2.0
-          New-Item -ItemType Directory -Force -Path releases/velopack-dashboard
           New-Item -ItemType Directory -Force -Path releases/velopack-lite
           New-Item -ItemType Directory -Force -Path releases/velopack-darlingviewer
-
-          # Dashboard: download previous + pack (from the SIGNED velopack output, not the raw publish dir)
-          vpk download github --repoUrl https://github.com/${{ github.repository }} --channel dashboard -o releases/velopack-dashboard --token $env:GH_TOKEN
-          vpk pack -u PerformanceMonitorDashboard -v $env:VERSION -p signed/Dashboard-Velopack -e PerformanceMonitorDashboard.exe -o releases/velopack-dashboard --channel dashboard
 
           # Lite: download previous + pack (from the SIGNED velopack output, not the raw publish dir)
           vpk download github --repoUrl https://github.com/${{ github.repository }} --channel lite -o releases/velopack-lite --token $env:GH_TOKEN
@@ -489,15 +369,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload ${{ github.event.release.tag_name }} releases/*.zip releases/SHA256SUMS.txt --clobber
-
-      - name: Upload Dashboard Velopack artifacts
-        if: github.event_name == 'release'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ steps.version.outputs.VERSION }}
-        run: |
-          vpk upload github --repoUrl https://github.com/${{ github.repository }} --channel dashboard -o releases/velopack-dashboard --releaseName "v$env:VERSION" --tag "v$env:VERSION" --merge --token $env:GH_TOKEN
 
       - name: Upload Lite Velopack artifacts
         if: github.event_name == 'release'
