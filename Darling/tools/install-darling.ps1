@@ -34,8 +34,9 @@ Do not create the viewer shortcuts.
 
 .PARAMETER Network
 After the service reaches Running, launch the interactive --configure-network wizard to opt into the
-store / MCP LAN endpoints (guided, delegated validation, comment-preserving darling.json edit + backup).
-Off by default; the endpoints stay loopback-only unless you pass this or edit darling.json by hand.
+store / MCP / web-dashboard LAN endpoints (guided, delegated validation, comment-preserving darling.json
+edit + backup). Off by default; the endpoints stay loopback-only unless you pass this or edit darling.json
+by hand.
 #>
 [CmdletBinding()]
 param(

@@ -19,6 +19,7 @@ using System.Security.Principal;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -444,7 +445,8 @@ public static class DarlingCliCommands
        Design invariants (the whole reason this is safe):
          - Validation is DELEGATED. Every candidate value is checked by building the SAME config object
            the service reads and running the SAME resolver it fail-closes on (the store's
-           DarlingManagedPostgres.ResolveNetworkExposure, the MCP host's DarlingMcpHostService.ResolveMcpBind).
+           DarlingManagedPostgres.ResolveNetworkExposure, the MCP host's DarlingMcpHostService.ResolveMcpBind,
+           the web host's DarlingWebHostService.ResolveWebBind).
            The wizard never re-implements CIDR / family / role / token rules — it re-prompts with the
            resolver's own degrade reason, so the wizard can never write what the service would reject.
          - The edit is comment-preserving TEXT SURGERY (DarlingNetworkConfigEditor) — the sample's
@@ -452,8 +454,9 @@ public static class DarlingCliCommands
          - Nothing is written until the new text passes DarlingConfig.Parse AND the resolver re-check on
            the REPARSED result, and only then behind a timestamped backup. An edit never leaves an
            unparseable or fail-closed darling.json.
-         - The MCP bearer token is generated + DPAPI-protected; the plaintext is printed to STDOUT exactly
-           once with the save-this warning on STDERR (the --print-viewer-connection secret-split posture).
+         - The MCP bearer / web access tokens are generated + DPAPI-protected; each plaintext is printed to
+           STDOUT exactly once with the save-this warning on STDERR (the --print-viewer-connection
+           secret-split posture).
          - mcp.enabled / mcp.port are control-plane after the first run (the Viewer's Settings toggle owns
            them live), so the wizard WARNS and points at Settings — it never edits them. The network block
            it writes is deliberately file-defined + restart-only.
@@ -462,7 +465,7 @@ public static class DarlingCliCommands
     private const string ServiceName = "PerformanceMonitor Darling";
 
     /// <summary>
-    /// Interactive wizard that guides the operator through the opt-in store / MCP LAN exposure and writes
+    /// Interactive wizard that guides the operator through the opt-in store / MCP / web-dashboard LAN exposure and writes
     /// a comment-preserving, resolver-validated edit to darling.json behind a timestamped backup. Managed
     /// mode only (BYO exposure is governed by the operator's own PostgreSQL). Windows-only (it generates a
     /// DPAPI-protected token and controls the Windows service). <paramref name="input"/> is the scripted-
@@ -519,12 +522,20 @@ public static class DarlingCliCommands
             mcpNow.Reason is DarlingMcpHostService.McpBindReason.NetworkExposed or DarlingMcpHostService.McpBindReason.LoopbackByDefault
                 ? null
                 : McpDegradeText(mcpNow.Reason, config.Mcp);
+        var webNow = DarlingWebHostService.ResolveWebBind(config.Web, postgres.Managed);
+        var webNowExposed = webNow.Mode == DarlingHostBinding.BindMode.NetworkAndLoopback;
+        var webNowDegrade =
+            webNow.Reason is DarlingHostBinding.BindReason.NetworkExposed or DarlingHostBinding.BindReason.LoopbackByDefault
+                ? null
+                : WebDegradeText(webNow.Reason, config.Web);
 
         output.WriteLine("Current exposure:");
         output.WriteLine(DarlingNetworkConfigEditor.FormatExposureState(
             "Store", storeNow.Exposed, storeNow.ListenIp, storeNow.Cidr, storeNow.Role, storeNow.DegradeReason));
         output.WriteLine(DarlingNetworkConfigEditor.FormatExposureState(
             "MCP  ", mcpNowExposed, config.Mcp.Network?.Listen, config.Mcp.Network?.AllowFrom, null, mcpNowDegrade));
+        output.WriteLine(DarlingNetworkConfigEditor.FormatExposureState(
+            "Web  ", webNowExposed, config.Web.Network?.Listen, config.Web.Network?.AllowFrom, null, webNowDegrade));
         output.WriteLine($"  Service: {await DescribeServiceStateAsync(cancellationToken)}");
         output.WriteLine();
 
@@ -535,7 +546,9 @@ public static class DarlingCliCommands
             output.WriteLine("This darling.json uses bring-your-own PostgreSQL (postgres.connectionString), so your own");
             output.WriteLine("PostgreSQL / reverse proxy governs network exposure — the wizard cannot open the endpoints here.");
 
-            var hasBlocks = (postgres.Network?.IsConfigured ?? false) || (config.Mcp.Network?.IsConfigured ?? false);
+            var hasBlocks = (postgres.Network?.IsConfigured ?? false)
+                || (config.Mcp.Network?.IsConfigured ?? false)
+                || (config.Web.Network?.IsConfigured ?? false);
             if (hasBlocks && AskYesNo(input, output, "A network block is present but IGNORED in this mode. Remove it from darling.json?", defaultYes: false))
             {
                 return await DisableExposureAsync(resolvedPath, originalText, input, output, error, cancellationToken);
@@ -544,12 +557,13 @@ public static class DarlingCliCommands
             return 1;
         }
 
-        /* Surface selection. */
+        /* Surface selection — one surface, a comma combination (e.g. "1,3"), all three, or disable. */
         output.WriteLine("What would you like to configure?");
         output.WriteLine("  [1] Store   — a remote Viewer over TLS (verify-full)");
         output.WriteLine("  [2] MCP     — a LAN assistant/client behind a bearer token");
-        output.WriteLine("  [3] Both");
-        output.WriteLine("  [4] Disable — remove all exposure (back to loopback-only)");
+        output.WriteLine("  [3] Web     — the browser dashboard behind a token->cookie login");
+        output.WriteLine("  [4] All     — every surface above (or pick a combination, e.g. 1,3)");
+        output.WriteLine("  [5] Disable — remove all exposure (back to loopback-only)");
         output.WriteLine("  [q] Quit without changes");
         var choice = Prompt(input, output, "Choice", "q");
         if (choice is null || choice.Length == 0 || string.Equals(choice, "q", StringComparison.OrdinalIgnoreCase))
@@ -558,21 +572,19 @@ public static class DarlingCliCommands
             return 0;
         }
 
-        if (choice == "4")
+        if (choice == "5")
         {
             return await DisableExposureAsync(resolvedPath, originalText, input, output, error, cancellationToken);
         }
 
-        var doStore = choice is "1" or "3";
-        var doMcp = choice is "2" or "3";
-        if (!doStore && !doMcp)
+        if (!TryParseSurfaceChoice(choice, out var doStore, out var doMcp, out var doWeb))
         {
             output.WriteLine("Unrecognized choice; no changes made.");
             return 0;
         }
 
         /* Gather all inputs (delegated validation) BEFORE writing anything, so a cancel leaves the file
-           untouched and a "both" run is all-or-nothing. */
+           untouched and a multi-surface run is all-or-nothing. */
         (string Listen, string AllowFrom, string Role)? store = null;
         if (doStore)
         {
@@ -604,6 +616,25 @@ public static class DarlingCliCommands
             }
         }
 
+        (string Listen, string AllowFrom, string? EncryptedToken, string? PlainToken, string? GeneratedPlain)? web = null;
+        if (doWeb)
+        {
+            output.WriteLine();
+            output.WriteLine("== Web dashboard exposure ==");
+            if (!config.Web.Enabled)
+            {
+                output.WriteLine("NOTE: web.enabled is currently false. The wizard writes the network block, but the dashboard");
+                output.WriteLine("      stays down until you enable it with --enable-web or the Viewer's Settings (enabled/port");
+                output.WriteLine("      are control-plane after first run; the wizard never edits them).");
+            }
+
+            web = GatherWebInputs(input, output, error, config.Web);
+            if (web is null)
+            {
+                return 1;
+            }
+        }
+
         /* Build the edit through the comment-preserving surgeon. */
         var newText = originalText;
         if (store is not null)
@@ -618,6 +649,13 @@ public static class DarlingCliCommands
             newText = DarlingNetworkConfigEditor.UpsertNetworkBlock(
                 newText, "mcp",
                 DarlingNetworkConfigEditor.BuildMcpNetworkBlock(mcp.Value.Listen, mcp.Value.AllowFrom, mcp.Value.EncryptedToken, mcp.Value.PlainToken));
+        }
+
+        if (web is not null)
+        {
+            newText = DarlingNetworkConfigEditor.UpsertNetworkBlock(
+                newText, "web",
+                DarlingNetworkConfigEditor.BuildWebNetworkBlock(web.Value.Listen, web.Value.AllowFrom, web.Value.EncryptedToken, web.Value.PlainToken));
         }
 
         /* Guard 1: the edited text must PARSE (comments/trailing-commas tolerated). */
@@ -654,14 +692,25 @@ public static class DarlingCliCommands
             }
         }
 
+        if (web is not null)
+        {
+            var check = DarlingWebHostService.ResolveWebBind(reparsed.Web, reparsed.Postgres.Managed);
+            if (check.Mode != DarlingHostBinding.BindMode.NetworkAndLoopback)
+            {
+                error.WriteLine($"Internal error: the web block would fail-close ({WebDegradeText(check.Reason, reparsed.Web)}). No changes were written.");
+                return 1;
+            }
+        }
+
         /* Only now: timestamped backup + write. */
         if (!await WriteWithBackupAsync(resolvedPath, newText, output, error, cancellationToken))
         {
             return 1;
         }
 
-        /* The generated MCP token plaintext — STDOUT exactly once; the save-this warning on STDERR so a
-           STDOUT redirect keeps the token without swallowing the warning. */
+        /* The generated token plaintexts — STDOUT exactly once each; the save-this warning on STDERR so a
+           STDOUT redirect keeps the token without swallowing the warning (MCP first, then web, so a
+           two-token capture is unambiguous by order). */
         if (mcp is not null && mcp.Value.GeneratedPlain is not null)
         {
             error.WriteLine();
@@ -670,13 +719,53 @@ public static class DarlingCliCommands
             output.WriteLine(mcp.Value.GeneratedPlain);
         }
 
+        if (web is not null && web.Value.GeneratedPlain is not null)
+        {
+            error.WriteLine();
+            error.WriteLine("SAVE THIS NOW — your new web dashboard access token is shown ONCE (darling.json stores only its DPAPI blob).");
+            error.WriteLine("A remote browser presents it once via ?token=... and gets a session cookie back.");
+            output.WriteLine(web.Value.GeneratedPlain);
+        }
+
         PrintNextSteps(
             output,
             store is not null, postgres.Port, store?.AllowFrom,
-            mcp is not null, config.Mcp.Port, mcp?.AllowFrom, config.Mcp.Enabled);
+            mcp is not null, config.Mcp.Port, mcp?.AllowFrom, config.Mcp.Enabled,
+            web is not null, config.Web.Port, web?.AllowFrom, config.Web.Enabled, web?.Listen);
 
         await OfferRestartAsync(input, output, error, cancellationToken);
         return 0;
+    }
+
+    /// <summary>
+    /// Parses the surface-selection choice: "1"/"2"/"3" (store/MCP/web), "4" = all three, or a comma
+    /// combination like "1,3". STRICT — every token must be a known surface digit, so a typo ("1,shop")
+    /// rejects the whole input instead of silently configuring a subset. False = unrecognized (nothing
+    /// selected). Pure.
+    /// </summary>
+    internal static bool TryParseSurfaceChoice(string choice, out bool doStore, out bool doMcp, out bool doWeb)
+    {
+        doStore = false;
+        doMcp = false;
+        doWeb = false;
+
+        foreach (var raw in choice.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+        {
+            switch (raw)
+            {
+                case "1": doStore = true; break;
+                case "2": doMcp = true; break;
+                case "3": doWeb = true; break;
+                case "4": doStore = true; doMcp = true; doWeb = true; break;
+                default:
+                    doStore = false;
+                    doMcp = false;
+                    doWeb = false;
+                    return false;
+            }
+        }
+
+        return doStore || doMcp || doWeb;
     }
 
     /// <summary>
@@ -943,6 +1032,97 @@ public static class DarlingCliCommands
         }
     }
 
+    /// <summary>
+    /// Gathers the web dashboard access token (default KEEP an existing one; else generate a fresh 32-char
+    /// token and DPAPI-protect it) plus listen / allowFrom, RE-PROMPTING with the web bind resolver's degrade
+    /// reason until it accepts them — the web twin of <see cref="GatherMcpInputs"/> (#1617). Returns the
+    /// fields to write plus the generated plaintext (non-null only when a token was generated, so the caller
+    /// prints it once). Returns null on cancel.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private static (string Listen, string AllowFrom, string? EncryptedToken, string? PlainToken, string? GeneratedPlain)? GatherWebInputs(
+        TextReader input, TextWriter output, TextWriter error, WebConfig currentWeb)
+    {
+        string? encryptedToken = null;
+        string? plainToken = null;
+        string? generatedPlain = null;
+
+        var existing = currentWeb.Network;
+        var hasExistingToken = existing is not null
+            && (!string.IsNullOrWhiteSpace(existing.EncryptedToken) || !string.IsNullOrWhiteSpace(existing.Token));
+
+        if (hasExistingToken && AskYesNo(input, output, "A web access token already exists. Keep it?", defaultYes: true))
+        {
+            if (!string.IsNullOrWhiteSpace(existing!.EncryptedToken))
+            {
+                encryptedToken = existing.EncryptedToken;
+            }
+            else
+            {
+                plainToken = existing!.Token;
+                output.WriteLine("  Keeping the existing PLAINTEXT token (consider regenerating to store it DPAPI-encrypted instead).");
+            }
+        }
+        else
+        {
+            generatedPlain = DarlingManagedPostgres.GeneratePassword();
+            encryptedToken = DarlingSecrets.Protect(generatedPlain);
+        }
+
+        while (true)
+        {
+            var listen = SelectListenAddress(input, output, "web");
+            if (listen is null)
+            {
+                output.WriteLine("Cancelled — no changes made.");
+                return null;
+            }
+
+            var allowFrom = Prompt(input, output, "Allowed remote CIDR (e.g. 192.168.1.0/24)");
+            if (allowFrom is null)
+            {
+                output.WriteLine("Cancelled — no changes made.");
+                return null;
+            }
+
+            var candidate = new WebConfig
+            {
+                Enabled = currentWeb.Enabled,
+                Port = currentWeb.Port,
+                Network = new WebNetworkConfig
+                {
+                    Listen = listen,
+                    AllowFrom = allowFrom,
+                    EncryptedToken = encryptedToken,
+                    Token = plainToken,
+                },
+            };
+
+            var decision = DarlingWebHostService.ResolveWebBind(candidate, managed: true);
+            if (decision.Mode == DarlingHostBinding.BindMode.NetworkAndLoopback)
+            {
+                return (listen, allowFrom, encryptedToken, plainToken, generatedPlain);
+            }
+
+            output.WriteLine($"  Not accepted: {WebDegradeText(decision.Reason, candidate)}");
+            output.WriteLine("  Let us try again.");
+        }
+    }
+
+    /// <summary>Human text for a web bind degrade reason (presentation only — the resolver decides; this narrates).</summary>
+    private static string WebDegradeText(DarlingHostBinding.BindReason reason, WebConfig web) => reason switch
+    {
+        DarlingHostBinding.BindReason.ListenInvalid =>
+            $"web.network.listen '{web.Network?.Listen}' is not a valid IP address (use a specific IP, or 0.0.0.0 for all interfaces).",
+        DarlingHostBinding.BindReason.TokenMissing =>
+            "no access token is set (the wizard should have supplied one — this is unexpected).",
+        DarlingHostBinding.BindReason.AllowFromInvalid =>
+            $"web.network.allowFrom '{web.Network?.AllowFrom}' is not a valid CIDR or its address family does not match listen (e.g. 192.168.1.0/24, host bits zeroed).",
+        DarlingHostBinding.BindReason.ManagedModeRequired =>
+            "network exposure is managed-mode only.",
+        _ => "the web bind resolver rejected these values.",
+    };
+
     /// <summary>Human text for an MCP bind degrade reason (presentation only — the resolver decides; this narrates).</summary>
     private static string McpDegradeText(DarlingMcpHostService.McpBindReason reason, McpConfig mcp) => reason switch
     {
@@ -957,13 +1137,14 @@ public static class DarlingCliCommands
         _ => "the MCP resolver rejected these values.",
     };
 
-    /// <summary>Removes BOTH network blocks (symmetric with the reconcilers), validating parse + loopback-only before the timestamped write, then offers a restart. Shared by the managed Disable choice and the BYO cleanup.</summary>
+    /// <summary>Removes all three network blocks (symmetric with the reconcilers), validating parse + loopback-only before the timestamped write, then offers a restart. Shared by the managed Disable choice and the BYO cleanup.</summary>
     [SupportedOSPlatform("windows")]
     private static async Task<int> DisableExposureAsync(
         string resolvedPath, string originalText, TextReader input, TextWriter output, TextWriter error, CancellationToken cancellationToken)
     {
         var newText = DarlingNetworkConfigEditor.RemoveNetworkBlock(originalText, "postgres");
         newText = DarlingNetworkConfigEditor.RemoveNetworkBlock(newText, "mcp");
+        newText = DarlingNetworkConfigEditor.RemoveNetworkBlock(newText, "web");
 
         if (string.Equals(newText, originalText, StringComparison.Ordinal))
         {
@@ -986,7 +1167,9 @@ public static class DarlingCliCommands
         var storeStillExposed = DarlingManagedPostgres.ResolveNetworkExposure(reparsed.Postgres.Network, certPath, keyPath).Exposed;
         var mcpStillExposed = DarlingMcpHostService.ResolveMcpBind(reparsed.Mcp, reparsed.Postgres.Managed).Mode
             == DarlingMcpHostService.McpBindMode.NetworkAndLoopback;
-        if (storeStillExposed || mcpStillExposed)
+        var webStillExposed = DarlingWebHostService.ResolveWebBind(reparsed.Web, reparsed.Postgres.Managed).Mode
+            == DarlingHostBinding.BindMode.NetworkAndLoopback;
+        if (storeStillExposed || mcpStillExposed || webStillExposed)
         {
             error.WriteLine("Internal error: exposure is still present after removal. No changes were written.");
             return 1;
@@ -1057,12 +1240,13 @@ public static class DarlingCliCommands
         output.WriteLine($"  (or:  sc.exe stop \"{ServiceName}\"   then   sc.exe start \"{ServiceName}\")");
     }
 
-    /// <summary>Prints the handoff reminders: the scoped firewall command(s) and, for the store, the --print-viewer-connection step.</summary>
+    /// <summary>Prints the handoff reminders: the scoped firewall command(s), the store's --print-viewer-connection step, and the web dashboard's browser login hint.</summary>
     [SupportedOSPlatform("windows")]
     private static void PrintNextSteps(
         TextWriter output,
         bool storeConfigured, int storePort, string? storeCidr,
-        bool mcpConfigured, int mcpPort, string? mcpCidr, bool mcpEnabled)
+        bool mcpConfigured, int mcpPort, string? mcpCidr, bool mcpEnabled,
+        bool webConfigured, int webPort, string? webCidr, bool webEnabled, string? webListen)
     {
         output.WriteLine();
         output.WriteLine("Next steps:");
@@ -1080,11 +1264,33 @@ public static class DarlingCliCommands
         {
             output.WriteLine("  MCP firewall rule (run ELEVATED; scoped to the port + CIDR):");
             output.WriteLine("    " + DarlingManagedPostgres.BuildFirewallEnableCommand(
-                $"PerformanceMonitor Darling MCP (port {mcpPort})", mcpPort, mcpCidr!));
+                DarlingMcpHostService.McpFirewallRuleName(mcpPort), mcpPort, mcpCidr!));
             if (!mcpEnabled)
             {
                 output.WriteLine("  NOTE: mcp.enabled is false, so the MCP endpoint stays down until you enable MCP in the");
                 output.WriteLine("        Viewer's Settings. The network block you just wrote applies once MCP is enabled.");
+            }
+        }
+
+        if (webConfigured)
+        {
+            output.WriteLine("  Web dashboard firewall rule (run ELEVATED; scoped to the port + CIDR — --enable-web also");
+            output.WriteLine("  reconciles this rule for you):");
+            output.WriteLine("    " + DarlingManagedPostgres.BuildFirewallEnableCommand(
+                DarlingWebHostService.WebFirewallRuleName(webPort), webPort, webCidr!));
+
+            /* The one login step a human does differently for Web: a remote browser presents the access token
+               once via ?token= and is 302'd back with a session cookie. A 0.0.0.0 bind has no single address
+               to print, so fall back to a placeholder. */
+            var webHost = webListen == "0.0.0.0" ? "<a-LAN-IP-of-this-machine>" : webListen;
+            output.WriteLine("  Remote browser login (after the service restarts):");
+            output.WriteLine($"    http://{webHost}:{webPort}/?token=<your-access-token>");
+            output.WriteLine("  (the token is exchanged for a session cookie and stripped from the URL; loopback needs no token)");
+            if (!webEnabled)
+            {
+                output.WriteLine("  NOTE: web.enabled is false, so the dashboard stays down until you enable it with --enable-web");
+                output.WriteLine("        or the Viewer's Settings. The network block you just wrote applies once the web dashboard");
+                output.WriteLine("        is enabled.");
             }
         }
     }

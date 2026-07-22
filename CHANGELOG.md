@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Darling: `--configure-network` can now expose the WEB DASHBOARD** ([#1617]) - the wizard offered Store and MCP but not the web dashboard, even though `--enable-web`'s own output told operators to run `--configure-network` to expose it on the LAN - a dead end that forced hand-editing `web.network` into darling.json. Web is now a first-class third surface, fully symmetric with Store/MCP: its own menu choice (plus comma combinations like `1,3`, and `4` = all three), a keep-or-generate DPAPI access token, listen/CIDR inputs validated by the SAME bind resolver the web host fail-closes on (extracted as `ResolveWebBind`, the web twin of `ResolveMcpBind` - never a reimplementation), the comment-preserving `web.network` write, a one-time token print, and next-steps text including the browser login URL (`http://<listen>:<port>/?token=...`, exchanged for a session cookie). Disable now removes all three network blocks. After the wizard, `--enable-web` opens the scoped firewall rule on the first try - no hand-editing required.
+
 ### Changed
 
 - **Full Dashboard and the CLI Installer are being retired.** They moved to a `deprecated/` folder and are no longer built into release artifacts; releases now ship Lite + Darling only, with Darling the flagship replacement for the Full Dashboard. The deprecated code still compiles and its tests run in CI. ([#1612])
@@ -504,6 +508,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#1609]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1609
 [#1612]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1612
 [#1614]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1614
+[#1617]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1617
 [#1601]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1601
 [#1604]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1604
 [#1602]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1602
