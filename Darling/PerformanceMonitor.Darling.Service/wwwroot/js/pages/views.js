@@ -467,20 +467,88 @@ function varControl(v, state, onChange) {
   return inp;
 }
 
-/* A native <select> time-range picker bound to state.hours. A stored default outside the standard options is added
-   so the view opens on exactly what it declared. */
-function buildRangeSelect(defaultHours, state, onChange) {
-  const sel = el("select", { class: "filter-box", "aria-label": "Time range" });
-  for (const r of VIEW_RANGE_OPTIONS) sel.appendChild(el("option", { value: String(r.hours), text: r.label }));
-  if (!VIEW_RANGE_OPTIONS.some((r) => r.hours === defaultHours)) {
-    sel.appendChild(el("option", { value: String(defaultHours), text: "Default (" + defaultHours + "h)" }));
+/* Mirror of the compose backend's window ceiling (ComposeLimits.MaxWindow = 90 days) — a custom range can't exceed it. */
+const MAX_RANGE_HOURS = 24 * 90;
+
+/* A human label for an arbitrary hour count (whole days render as days), matching the preset labels' style. */
+function rangeLabel(hours) {
+  if (hours % 24 === 0 && hours >= 24) {
+    const d = hours / 24;
+    return "Last " + d + (d === 1 ? " day" : " days");
   }
+  return "Last " + hours + (hours === 1 ? " hour" : " hours");
+}
+
+/* A time-range picker bound to state.hours: the presets, plus the view's stored default and the current value when
+   either is a non-preset custom window (kept selectable so the 60s refresh shows exactly what's applied), plus a
+   "Custom…" entry that reveals a number + unit input. The compose backend accepts any window up to MAX_RANGE_HOURS,
+   so an arbitrary span is purely this UI. */
+function buildRangeSelect(defaultHours, state, onChange) {
+  const wrap = el("span", { class: "range-select" });
+  const sel = el("select", { class: "filter-box", "aria-label": "Time range" });
+  const added = new Set(VIEW_RANGE_OPTIONS.map((r) => String(r.hours)));
+  for (const r of VIEW_RANGE_OPTIONS) sel.appendChild(el("option", { value: String(r.hours), text: r.label }));
+  for (const h of [state.hours, defaultHours]) {
+    const key = String(h);
+    if (h && !added.has(key)) {
+      sel.appendChild(el("option", { value: key, text: rangeLabel(h) }));
+      added.add(key);
+    }
+  }
+  sel.appendChild(el("option", { value: "custom", text: "Custom…" }));
   sel.value = String(state.hours);
+
+  const custom = buildCustomHoursInput(state, onChange);
+  custom.style.display = "none";
+
   sel.addEventListener("change", () => {
+    if (sel.value === "custom") {
+      custom.style.display = "";
+      return;
+    }
+    custom.style.display = "none";
     state.hours = parseInt(sel.value, 10) || defaultHours;
     onChange();
   });
-  return sel;
+
+  wrap.appendChild(sel);
+  wrap.appendChild(custom);
+  return wrap;
+}
+
+/* The inline custom-window input revealed by the "Custom…" range option: a number + unit (hours/days); Apply (or
+   Enter) commits it to state.hours, clamped to MAX_RANGE_HOURS, and re-runs the panels. */
+function buildCustomHoursInput(state, onChange) {
+  const box = el("span", { class: "range-custom" });
+  const num = el("input", { class: "filter-box range-custom-n", type: "number", min: "1", step: "1", "aria-label": "Custom range amount" });
+  const unit = el("select", { class: "filter-box range-custom-u", "aria-label": "Custom range unit" });
+  unit.appendChild(el("option", { value: "1", text: "hours" }));
+  unit.appendChild(el("option", { value: "24", text: "days" }));
+  if (state.hours % 24 === 0 && state.hours >= 24) {
+    num.value = String(state.hours / 24);
+    unit.value = "24";
+  } else {
+    num.value = String(state.hours);
+    unit.value = "1";
+  }
+  const apply = el("button", { class: "btn small", type: "button", text: "Apply" });
+  const commit = () => {
+    const n = parseInt(num.value, 10);
+    if (!n || n < 1) return;
+    state.hours = Math.min(n * parseInt(unit.value, 10), MAX_RANGE_HOURS);
+    onChange();
+  };
+  apply.addEventListener("click", commit);
+  num.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      commit();
+    }
+  });
+  box.appendChild(num);
+  box.appendChild(unit);
+  box.appendChild(apply);
+  return box;
 }
 
 /* The server scope picker: a <details> dropdown of checkboxes — "All servers (fleet)" plus each fleet server.
