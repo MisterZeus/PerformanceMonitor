@@ -53,7 +53,7 @@ jobs:
         id: version
         shell: pwsh
         run: |
-          $base = ([xml](Get-Content deprecated/Dashboard/Dashboard.csproj)).Project.PropertyGroup.Version | Where-Object { $_ }
+          $base = ([xml](Get-Content Lite/PerformanceMonitorLite.csproj)).Project.PropertyGroup.Version | Where-Object { $_ }
           $date = Get-Date -Format "yyyyMMdd"
           $nightly = "$base-nightly.$date"
           echo "VERSION=$nightly" >> $env:GITHUB_OUTPUT
@@ -61,23 +61,15 @@ jobs:
 
       - name: Restore dependencies
         run: |
-          dotnet restore deprecated/Dashboard/Dashboard.csproj --locked-mode
           dotnet restore Lite/PerformanceMonitorLite.csproj --locked-mode
-          dotnet restore deprecated/Installer/PerformanceMonitorInstaller.csproj --locked-mode
           dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
           dotnet restore Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj --locked-mode
 
       - name: Run tests
         run: dotnet test Lite.Tests/Lite.Tests.csproj -c Release --verbosity normal
 
-      - name: Publish Dashboard
-        run: dotnet publish deprecated/Dashboard/Dashboard.csproj -c Release -o publish/Dashboard
-
       - name: Publish Lite
         run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -o publish/Lite
-
-      - name: Publish CLI Installer
-        run: dotnet publish deprecated/Installer/PerformanceMonitorInstaller.csproj -c Release
 
       - name: Publish Darling Service
         run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -o publish/DarlingService
@@ -113,23 +105,8 @@ jobs:
           $version = "${{ steps.version.outputs.VERSION }}"
           New-Item -ItemType Directory -Force -Path releases
 
-          Compress-Archive -Path 'publish/Dashboard/*' -DestinationPath "releases/PerformanceMonitorDashboard-$version.zip" -Force
           Compress-Archive -Path 'publish/Lite/*' -DestinationPath "releases/PerformanceMonitorLite-$version.zip" -Force
 
-          $instDir = 'publish/Installer'
-          New-Item -ItemType Directory -Force -Path $instDir
-          New-Item -ItemType Directory -Force -Path "$instDir/install"
-          New-Item -ItemType Directory -Force -Path "$instDir/upgrades"
-
-          Copy-Item 'deprecated/Installer/bin/Release/net10.0/win-x64/publish/PerformanceMonitorInstaller.exe' $instDir
-          Copy-Item 'install/*.sql' "$instDir/install/"
-          if (Test-Path 'install/templates') { Copy-Item 'install/templates' "$instDir/install/templates" -Recurse -ErrorAction SilentlyContinue }
-          if (Test-Path 'upgrades') { Copy-Item 'upgrades/*' "$instDir/upgrades/" -Recurse -ErrorAction SilentlyContinue }
-          if (Test-Path 'README.md') { Copy-Item 'README.md' $instDir }
-          if (Test-Path 'LICENSE') { Copy-Item 'LICENSE' $instDir }
-          if (Test-Path 'THIRD_PARTY_NOTICES.md') { Copy-Item 'THIRD_PARTY_NOTICES.md' $instDir }
-
-          Compress-Archive -Path 'publish/Installer/*' -DestinationPath "releases/PerformanceMonitorInstaller-$version.zip" -Force
 
           # Same layout as the release zip (build.yml "Package Darling (signed)"): service at the
           # archive root with darling.sample.json alongside, viewer under viewer\, pg-runtime.zip
