@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `install-darling.ps1`: the viewer-shortcut step no longer throws when run in a non-interactive / SYSTEM context (SSM, remote-exec) where `GetFolderPath('Desktop'/'StartMenu')` returns empty. It creates only the shortcuts whose folder resolves and skips cleanly otherwise. ([#1613])
+- `install-darling.ps1`: the viewer-shortcut step no longer throws when run with no loaded user profile (a Windows service, scheduled task, CI runner, or remote session) where `GetFolderPath('Desktop'/'StartMenu')` returns empty. It creates only the shortcuts whose folder resolves and skips cleanly otherwise. ([#1613])
 
 ## [3.2.0] - 2026-07-21
 

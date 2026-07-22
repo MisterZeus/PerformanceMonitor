@@ -140,9 +140,9 @@ if ($Network) {
 # -- 6. Viewer shortcuts --------------------------------------------------------------------------
 if (-not $NoShortcuts) {
     if (Test-Path $viewerExe) {
-        # GetFolderPath returns '' for Desktop/StartMenu in a non-interactive / SYSTEM context (e.g. an
-        # SSM or remote-exec session with no loaded user profile), and Join-Path then throws. Guard it:
-        # keep only the shortcut targets whose folder actually resolves, and skip cleanly otherwise.
+        # GetFolderPath returns '' for Desktop/StartMenu whenever there is no loaded user profile - a
+        # Windows service, a scheduled task, a CI runner, a remote/SSM session - and Join-Path then
+        # throws. Guard it: keep only the targets whose folder resolves, and skip cleanly otherwise.
         $desktop   = [Environment]::GetFolderPath('Desktop')
         $startMenu = [Environment]::GetFolderPath('StartMenu')
         $targets = @()
