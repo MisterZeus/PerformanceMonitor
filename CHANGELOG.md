@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
-- Darling README: added a "verify it's actually reachable" recipe for the opt-in LAN MCP/web endpoints — confirm the listener is on the LAN address (not loopback), the scoped firewall rule covers the client, and the client connects to the box IP rather than `localhost` — plus what to re-run after a reinstall. Enabling an endpoint is not the same as reaching it. ([#1614])
+- Darling README: added a "verify it's actually reachable" recipe for the opt-in LAN MCP/web endpoints — confirm the listener is on the LAN address (not loopback), the scoped firewall rule covers the client, and the client connects to the box IP rather than `localhost` — plus what to re-run after a reinstall. Enabling an endpoint is not the same as reaching it. ([#1616])
 
 ## [3.2.0] - 2026-07-21
 
@@ -503,6 +503,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#1608]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1608
 [#1609]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1609
 [#1612]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1612
+[#1616]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1616
 [#1601]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1601
 [#1604]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1604
 [#1602]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1602
