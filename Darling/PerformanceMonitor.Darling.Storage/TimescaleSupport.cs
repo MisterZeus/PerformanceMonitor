@@ -291,14 +291,16 @@ GROUP BY server_id, server_name, database_name, query_hash, bucket
 WITH NO DATA";
 
     /// <summary>The procedure_stats hourly continuous aggregate — <see cref="CreateQueryStatsHourlySql"/>'s
-    /// sibling, grouped by <c>object_name</c> instead of <c>query_hash</c> (procedure_stats' composer
-    /// dimension). Same aggregation shape, same WITH NO DATA + IF NOT EXISTS discipline.</summary>
+    /// sibling, grouped by <c>schema_name</c> + <c>object_name</c> (procedure_stats' composer dimensions; a panel
+    /// grouping by schema_name alone re-aggregates over its objects). Same aggregation shape, same WITH NO DATA +
+    /// IF NOT EXISTS discipline.</summary>
     public const string CreateProcedureStatsHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.procedure_stats_hourly
 WITH (timescaledb.continuous) AS
 SELECT
     server_id,
     server_name,
     database_name,
+    schema_name,
     object_name,
     time_bucket('1 hour', collection_time) AS bucket,
     sum(delta_worker_time) AS worker_time_sum,
@@ -312,16 +314,18 @@ SELECT
     max(delta_execution_count) AS execution_count_max,
     count(*) AS sample_count
 FROM collect.procedure_stats
-GROUP BY server_id, server_name, database_name, object_name, bucket
+GROUP BY server_id, server_name, database_name, schema_name, object_name, bucket
 WITH NO DATA";
 
     /// <summary>
-    /// The query_store_stats hourly continuous aggregate. Grouped by QS's own identity dimensions
-    /// (server_id / server_name / database_name / query_id / plan_id) instead of a query_hash. query_store_stats
-    /// carries Query Store's already-aggregated per-collection figures (not Darling deltas), so this SUMs the
-    /// execution_count and takes MAX on the max_* columns; the avg_* columns are averaged (avg-of-avgs — QS does
-    /// not expose a total from which to weight, and QS is itself a sampled top-N, so the approximation is
-    /// acceptable). WITH NO DATA + IF NOT EXISTS, one statement, exactly like the delta-table hourly CAGGs.
+    /// The query_store_stats hourly continuous aggregate, grouped by the COMPOSER's Query Store dimensions
+    /// (server / database_name / module_name / query_hash) so a composed QS panel can route here — NOT Query
+    /// Store's own query_id/plan_id, which the composer never exposes. Carries the EXECUTION-WEIGHTED sums
+    /// (<c>sum(avg_* * execution_count)</c>) so the composer's weighted mean composes EXACTLY as
+    /// <c>duration_us_weighted_sum / execution_count_sum</c> across any window (avg*count = the interval's total,
+    /// summed = the true total) — never an avg-of-avgs. This matters the moment a writable-Query-Store primary is
+    /// added (the scenario this CAGG exists to be ready for); on the current read-only replica it is simply empty.
+    /// WITH NO DATA + IF NOT EXISTS, one statement.
     /// </summary>
     public const string CreateQueryStoreStatsHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_hourly
 WITH (timescaledb.continuous) AS
@@ -329,17 +333,17 @@ SELECT
     server_id,
     server_name,
     database_name,
-    query_id,
-    plan_id,
+    module_name,
+    query_hash,
     time_bucket('1 hour', collection_time) AS bucket,
     sum(execution_count) AS execution_count_sum,
-    avg(avg_duration_us) AS avg_duration_us_avg,
+    sum(avg_duration_us::double precision * execution_count) AS duration_us_weighted_sum,
+    sum(avg_cpu_time_us::double precision * execution_count) AS cpu_us_weighted_sum,
     max(max_duration_us) AS max_duration_us_max,
-    avg(avg_cpu_time_us) AS avg_cpu_time_us_avg,
     max(max_cpu_time_us) AS max_cpu_time_us_max,
     count(*) AS sample_count
 FROM collect.query_store_stats
-GROUP BY server_id, server_name, database_name, query_id, plan_id, bucket
+GROUP BY server_id, server_name, database_name, module_name, query_hash, bucket
 WITH NO DATA";
 
     /// <summary>
@@ -374,14 +378,15 @@ GROUP BY server_id, server_name, database_name, query_hash, time_bucket('1 day',
 WITH NO DATA";
 
     /// <summary>The procedure_stats DAILY continuous aggregate — <see cref="CreateQueryStatsDailySql"/>'s sibling,
-    /// sourced from <see cref="ProcedureStatsHourlyView"/> and grouped by <c>object_name</c>. Same hierarchical
-    /// re-aggregation and same explicit-<c>time_bucket</c> GROUP BY discipline.</summary>
+    /// sourced from <see cref="ProcedureStatsHourlyView"/> and grouped by <c>schema_name</c> + <c>object_name</c>.
+    /// Same hierarchical re-aggregation and same explicit-<c>time_bucket</c> GROUP BY discipline.</summary>
     public const string CreateProcedureStatsDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.procedure_stats_daily
 WITH (timescaledb.continuous) AS
 SELECT
     server_id,
     server_name,
     database_name,
+    schema_name,
     object_name,
     time_bucket('1 day', bucket) AS bucket,
     sum(worker_time_sum) AS worker_time_sum,
@@ -395,7 +400,7 @@ SELECT
     max(execution_count_max) AS execution_count_max,
     sum(sample_count) AS sample_count
 FROM collect.procedure_stats_hourly
-GROUP BY server_id, server_name, database_name, object_name, time_bucket('1 day', bucket)
+GROUP BY server_id, server_name, database_name, schema_name, object_name, time_bucket('1 day', bucket)
 WITH NO DATA";
 
     /// <summary>
@@ -408,6 +413,73 @@ WITH NO DATA";
     /// </summary>
     public static string AddContinuousAggregatePolicySql(string view, string endOffset = "1 hour", string scheduleInterval = "1 hour")
         => $"SELECT add_continuous_aggregate_policy('collect.{view}', start_offset => INTERVAL '3 days', end_offset => INTERVAL '{endOffset}', schedule_interval => INTERVAL '{scheduleInterval}', if_not_exists => true)";
+
+    /// <summary>
+    /// The composer-dimension reshape: the QS hourly CAGG regrouped query_id/plan_id → module_name/query_hash
+    /// (+ weighted sums), and the procedure_stats CAGGs gained schema_name. <c>CREATE ... IF NOT EXISTS</c> cannot
+    /// ALTER an existing CAGG, so a store that already built the OLD shape must DROP it first;
+    /// <see cref="EnsureContinuousAggregatesAsync"/> (run right after) recreates it in the new shape. Each affected
+    /// CAGG is empty (QS on a read-only replica) or only a day or two old, so the drop loses little and the refresh
+    /// backfills the recent window within the hour. Staleness is detected STRUCTURALLY — the OLD QS CAGG still has
+    /// a <c>query_id</c> column; the OLD procedure_stats CAGG lacks <c>schema_name</c> — so this is a strict no-op
+    /// once reshaped, and on a fresh store (no CAGG yet) nothing matches. Failure-isolated: a failed drop leaves the
+    /// old shape in place (logged), never kills startup. query_stats CAGGs are unchanged and untouched. CASCADE
+    /// drops the dependent daily CAGG, which the ensure sweep also recreates.
+    /// </summary>
+    public static async Task<int> DropStaleContinuousAggregatesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var reshapes = new[]
+        {
+            /* OLD query_store_stats_hourly grouped by query_id/plan_id → stale iff it still has a query_id column. */
+            (View: "query_store_stats_hourly",
+             StaleCheck: "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'query_store_stats_hourly' AND column_name = 'query_id')"),
+            /* OLD procedure_stats_hourly lacked schema_name → stale iff the view EXISTS but has no schema_name
+               column. CASCADE also drops procedure_stats_daily, which the ensure sweep recreates. */
+            (View: "procedure_stats_hourly",
+             StaleCheck: "SELECT (EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'procedure_stats_hourly') AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'procedure_stats_hourly' AND column_name = 'schema_name'))"),
+        };
+
+        var dropped = 0;
+        foreach (var (view, staleCheck) in reshapes)
+        {
+            try
+            {
+                bool stale;
+                using (var check = new NpgsqlCommand(staleCheck, connection) { CommandTimeout = SetupTimeoutSeconds })
+                {
+                    stale = await check.ExecuteScalarAsync(cancellationToken) is true;
+                }
+
+                if (!stale)
+                {
+                    continue;
+                }
+
+                using (var drop = new NpgsqlCommand($"DROP MATERIALIZED VIEW IF EXISTS collect.{view} CASCADE", connection) { CommandTimeout = SetupTimeoutSeconds })
+                {
+                    await drop.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                dropped++;
+                logger?.LogInformation(
+                    "TimescaleDB: dropped stale continuous aggregate {View} (composer-dimension reshape) — recreated in the new shape this cycle.",
+                    view);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Reshape drop of {View} failed — it stays in the OLD shape until the next restart retries: {Message}",
+                    view, ex.Message);
+            }
+        }
+
+        return dropped;
+    }
 
     /// <summary>
     /// Creates the continuous aggregates and attaches each one's refresh policy
