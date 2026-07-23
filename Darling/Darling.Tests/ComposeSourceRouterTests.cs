@@ -139,13 +139,12 @@ public sealed class ComposeSourceRouterTests
     }
 
     [Fact]
-    public void QueryStore_NoDailyCagg_OldWindowStaysHourly()
+    public void QueryStore_OldWindow_RoutesToDailyCagg()
     {
-        /* No query_store_stats_daily yet (deferred) → a 40-day window falls to the hourly CAGG (capped at its 21d),
-           NOT a non-existent daily. */
+        /* query_store_stats_daily now exists → a 40-day window routes to it, not the 21d-capped hourly. */
         var route = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-40));
-        Assert.Equal(ComposeSourceTier.Hourly, route.Tier);
-        Assert.Equal("query_store_stats_hourly", route.CaggRelation);
+        Assert.Equal(ComposeSourceTier.Daily, route.Tier);
+        Assert.Equal("query_store_stats_daily", route.CaggRelation);
     }
 
     [Fact]
