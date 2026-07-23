@@ -13,10 +13,11 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// Pins the hourly continuous-aggregate definitions (the query_stats / procedure_stats query-acceleration
-/// rollups) so the tested SQL shape can never silently drift. These are idempotent RUNTIME setup in
-/// <see cref="TimescaleSupport"/> (created in the worker's TimescaleDB block), NOT a versioned migration, so
-/// there is no schema-version change to pin. Query acceleration only — not retention.
+/// Pins the continuous-aggregate + retention-tier SQL so the tested shape can never silently drift: the three
+/// HOURLY rollups (query_stats / procedure_stats / query_store_stats), the two HIERARCHICAL daily rollups (sourced
+/// from the hourly CAGGs, not raw), the per-cadence refresh policies, and the tiered retention (raw 4d, hourly
+/// CAGGs 21d, daily kept indefinitely). All idempotent RUNTIME setup in <see cref="TimescaleSupport"/> (the
+/// worker's TimescaleDB block), NOT a versioned migration, so there is no schema-version change to pin.
 /// </summary>
 public sealed class TimescaleContinuousAggregateTests
 {
@@ -73,5 +74,91 @@ public sealed class TimescaleContinuousAggregateTests
         Assert.Contains("end_offset => INTERVAL '1 hour'", sql, StringComparison.Ordinal);
         Assert.Contains("schedule_interval => INTERVAL '1 hour'", sql, StringComparison.Ordinal);
         Assert.Contains("if_not_exists => true", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void QueryStoreStatsHourly_GroupedByQsIdentity_SumsCount_AveragesTheAvgColumns()
+    {
+        var sql = TimescaleSupport.CreateQueryStoreStatsHourlySql;
+
+        Assert.Contains("CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_hourly", sql, StringComparison.Ordinal);
+        Assert.Contains("WITH (timescaledb.continuous)", sql, StringComparison.Ordinal);
+        Assert.Contains("time_bucket('1 hour', collection_time) AS bucket", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.query_store_stats", sql, StringComparison.Ordinal);
+        /* QS's own identity (query_id / plan_id), not a query_hash. */
+        Assert.Contains("GROUP BY server_id, server_name, database_name, query_id, plan_id, bucket", sql, StringComparison.Ordinal);
+        /* QS carries already-aggregated figures (not Darling deltas): SUM the count, MAX the max_*, avg-of-avgs on avg_*. */
+        Assert.Contains("sum(execution_count) AS execution_count_sum", sql, StringComparison.Ordinal);
+        Assert.Contains("avg(avg_duration_us) AS avg_duration_us_avg", sql, StringComparison.Ordinal);
+        Assert.Contains("max(max_duration_us) AS max_duration_us_max", sql, StringComparison.Ordinal);
+        Assert.Contains("avg(avg_cpu_time_us) AS avg_cpu_time_us_avg", sql, StringComparison.Ordinal);
+        Assert.Contains("max(max_cpu_time_us) AS max_cpu_time_us_max", sql, StringComparison.Ordinal);
+        Assert.Contains("count(*) AS sample_count", sql, StringComparison.Ordinal);
+        Assert.Contains("WITH NO DATA", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void QueryStatsDaily_IsHierarchical_SourcedFromHourlyCagg_GroupedByExplicitDayBucket()
+    {
+        var sql = TimescaleSupport.CreateQueryStatsDailySql;
+
+        Assert.Contains("CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_daily", sql, StringComparison.Ordinal);
+        Assert.Contains("WITH (timescaledb.continuous)", sql, StringComparison.Ordinal);
+        /* HIERARCHICAL: sourced from the hourly CAGG, NOT raw. */
+        Assert.Contains("FROM collect.query_stats_hourly", sql, StringComparison.Ordinal);
+        Assert.Contains("time_bucket('1 day', bucket) AS bucket", sql, StringComparison.Ordinal);
+        /* GROUP BY uses the explicit time_bucket EXPRESSION, never the bare `bucket` alias: a bare alias binds to
+           the hourly source column under Postgres's input-column-wins rule and would group by hour, not day. */
+        Assert.Contains("GROUP BY server_id, server_name, database_name, query_hash, time_bucket('1 day', bucket)", sql, StringComparison.Ordinal);
+        /* Re-aggregates the hourly rollup: SUM of sums, MIN of mins, MAX of maxes, SUM of the sample_counts. */
+        Assert.Contains("sum(worker_time_sum) AS worker_time_sum", sql, StringComparison.Ordinal);
+        Assert.Contains("min(worker_time_min) AS worker_time_min", sql, StringComparison.Ordinal);
+        Assert.Contains("max(worker_time_max) AS worker_time_max", sql, StringComparison.Ordinal);
+        Assert.Contains("sum(sample_count) AS sample_count", sql, StringComparison.Ordinal);
+        Assert.Contains("WITH NO DATA", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ProcedureStatsDaily_MirrorsQueryStatsDaily_FromProcedureHourly_ByObjectName()
+    {
+        var sql = TimescaleSupport.CreateProcedureStatsDailySql;
+
+        Assert.Contains("CREATE MATERIALIZED VIEW IF NOT EXISTS collect.procedure_stats_daily", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.procedure_stats_hourly", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY server_id, server_name, database_name, object_name, time_bucket('1 day', bucket)", sql, StringComparison.Ordinal);
+        Assert.Contains("sum(sample_count) AS sample_count", sql, StringComparison.Ordinal);
+        Assert.Contains("WITH NO DATA", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DailyPolicy_UsesOneDayEndOffsetAndSchedule_KeepsThreeDayStart()
+    {
+        var sql = TimescaleSupport.AddContinuousAggregatePolicySql(TimescaleSupport.QueryStatsDailyView, "1 day", "1 day");
+
+        Assert.Contains("add_continuous_aggregate_policy('collect.query_stats_daily'", sql, StringComparison.Ordinal);
+        Assert.Contains("start_offset => INTERVAL '3 days'", sql, StringComparison.Ordinal);
+        Assert.Contains("end_offset => INTERVAL '1 day'", sql, StringComparison.Ordinal);
+        Assert.Contains("schedule_interval => INTERVAL '1 day'", sql, StringComparison.Ordinal);
+        Assert.Contains("if_not_exists => true", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RetentionPolicy_IsIdempotentChunkDrop()
+    {
+        var sql = TimescaleSupport.AddRetentionPolicySql("query_stats", TimescaleSupport.RawRetentionInterval);
+
+        Assert.Contains("add_retention_policy('collect.query_stats'", sql, StringComparison.Ordinal);
+        Assert.Contains("drop_after => INTERVAL '4 days'", sql, StringComparison.Ordinal);
+        Assert.Contains("if_not_exists => true", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RetentionTiers_RawFourDays_HourlyTwentyOneDays_StayPastTheNextRefreshWindow()
+    {
+        /* The buffers the whole tiering rests on: raw's 4d stays past the hourly CAGG's 3d refresh start; the
+           hourly CAGGs' 21d stays past the daily CAGG's 3d refresh start. Either dropping below 3 days would let a
+           drop outrun the aggregate meant to preserve that history. */
+        Assert.Equal("4 days", TimescaleSupport.RawRetentionInterval);
+        Assert.Equal("21 days", TimescaleSupport.HourlyRetentionInterval);
     }
 }
