@@ -93,14 +93,16 @@ public sealed class ComposeSourceRouterTests
     }
 
     [Fact]
-    public void ObjectNameDimension_StaysRaw()
+    public void ObjectNameDimension_NowRoutes_ViaModuleMap()
     {
-        /* query_stats grouped by object_name is a #1568 module join, not a CAGG column → stays raw (truncates 4d). */
+        /* query_stats object_name is a #1568 module join, but now coverable on the CAGG via module_map (the CAGG
+           carries sql_handle) → it routes; the compiler joins module_map for the attribution. */
         var objectName = MeasureCatalog.Dimension("query_stats", "object_name")!;
         var plan = Plan("query_worker_us", groupBy: new[] { objectName });
         Assert.True(plan.UsesModuleJoin);
         var route = ComposeSourceRouter.Resolve(plan, Now, Now.AddDays(-40));
-        Assert.Equal(ComposeSourceTier.Raw, route.Tier);
+        Assert.Equal(ComposeSourceTier.Daily, route.Tier);
+        Assert.Equal("query_stats_daily", route.CaggRelation);
     }
 
     [Fact]

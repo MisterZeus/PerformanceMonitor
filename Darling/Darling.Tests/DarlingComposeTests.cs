@@ -521,15 +521,18 @@ public sealed class DarlingComposeTests
     }
 
     [Fact]
-    public void Compile_OldWindow_ObjectNameDimension_StaysRaw()
+    public void Compile_OldWindow_ObjectName_RoutesToCagg_JoinsModuleMap()
     {
-        /* object_name is a #1568 module join, not a CAGG column -> raw even at 40 days old. */
-        var (compiled, _) = CompileAged(
+        /* object_name on query_stats now routes to the CAGG (40d -> daily) and joins the retained module_map for
+           attribution, instead of the window-bounded procedure_stats #1568 CTE. */
+        var (compiled, error) = CompileAged(
             "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"object_name\"],\"viz\":\"bar\"}",
             daysOld: 40, servers: new[] { "PROD-01" });
-        Assert.Contains("FROM collect.query_stats AS f", compiled!.Sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("query_stats_hourly", compiled.Sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("query_stats_daily", compiled.Sql, StringComparison.Ordinal);
+        Assert.True(error is null, error);
+        Assert.Contains("FROM collect.query_stats_daily AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN collect.module_map AS m ON m.sql_handle = f.sql_handle AND m.server_name = f.server_name", compiled.Sql, StringComparison.Ordinal);
+        Assert.Contains("m.object_name", compiled.Sql, StringComparison.Ordinal);        /* attribution from the map */
+        Assert.DoesNotContain("ROW_NUMBER()", compiled.Sql, StringComparison.Ordinal);   /* not the raw #1568 CTE */
     }
 
     [Fact]

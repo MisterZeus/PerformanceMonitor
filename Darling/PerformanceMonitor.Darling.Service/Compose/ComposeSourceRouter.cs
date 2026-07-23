@@ -61,16 +61,20 @@ public sealed record ComposeCaggInfo(
 /// CAGG reshape (query_store_stats regrouped to module_name/query_hash; procedure_stats carrying schema_name).
 /// Dimensions here are the CAGGs' GROUP BY columns (minus the universal server prefix); a panel routes only when
 /// its dimensions are covered (see <see cref="ComposeCaggInfo.Covers"/>). query_stats' <c>object_name</c> is
-/// deliberately absent: it is a #1568 module join (ViaModuleJoin), not a CAGG column, so those panels stay raw.
+/// covered via the module_map join (the CAGG carries sql_handle; the compiler joins collect.module_map for it) —
+/// it stays a ViaModuleJoin dimension so the RAW path still uses the live #1568 procedure_stats CTE.
 /// query_store_stats has no daily CAGG yet (deferred until a writable-QS primary supplies real data).
 /// </summary>
 public static class ComposeCaggCatalog
 {
     private static readonly Dictionary<string, ComposeCaggInfo> s_byTable = new(StringComparer.Ordinal)
     {
+        /* object_name is coverable via the module_map join (the query_stats CAGG carries sql_handle) — the
+           compiler joins collect.module_map for it on a CAGG route. It stays a ViaModuleJoin dimension, so the raw
+           path still uses the live #1568 procedure_stats CTE. */
         ["query_stats"] = new(
             "query_stats", "query_stats_hourly", "query_stats_daily",
-            new HashSet<string>(StringComparer.Ordinal) { "database_name", "query_hash" }),
+            new HashSet<string>(StringComparer.Ordinal) { "database_name", "query_hash", "object_name" }),
 
         ["procedure_stats"] = new(
             "procedure_stats", "procedure_stats_hourly", "procedure_stats_daily",
@@ -112,9 +116,9 @@ public static class ComposeSourceRouter
     /// <summary>
     /// The tier for <paramref name="plan"/> given the window's oldest point (<paramref name="windowStartUtc"/>)
     /// relative to <paramref name="nowUtc"/>. Falls through to <see cref="ComposeRoute.Raw"/> — the compiler's
-    /// unchanged path — whenever the table has no CAGG, the panel uses the #1568 module join (object_name), any
-    /// grouped/filtered dimension is outside the CAGG's coverage, or the window is recent enough that raw still
-    /// holds it.
+    /// unchanged path — whenever the table has no CAGG, a grouped/filtered dimension is outside the CAGG's coverage
+    /// (object_name IS covered on query_stats, via the module_map join), or the window is recent enough that raw
+    /// still holds it.
     /// </summary>
     public static ComposeRoute Resolve(PanelPlan plan, DateTime nowUtc, DateTime windowStartUtc)
     {
@@ -126,13 +130,13 @@ public static class ComposeSourceRouter
             return ComposeRoute.Raw;
         }
 
-        /* object_name on query_stats is stitched from procedure_stats read-time (#1568) — not a CAGG column. */
-        if (plan.UsesModuleJoin)
-        {
-            return ComposeRoute.Raw;
-        }
+        /* No blanket module-join gate: object_name (the only ViaModuleJoin dimension) is now coverable on the
+           query_stats CAGG via the module_map join (the CAGG carries sql_handle), and is in that CAGG's coverage
+           set below. The dimension-coverage loop is the sole gate — a dimension no CAGG can serve (directly or via
+           the map) still falls to raw. */
 
-        /* Every grouped/filtered dimension must live in the CAGG's GROUP BY, else the rollup can't reproduce it. */
+        /* Every grouped/filtered dimension must be served by the CAGG (a GROUP BY column, or object_name via the
+           module_map join), else the rollup can't reproduce it. */
         foreach (var dimension in plan.GroupBy)
         {
             if (!cagg.Covers(dimension.Name))
