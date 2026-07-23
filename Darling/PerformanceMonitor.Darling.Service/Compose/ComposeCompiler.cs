@@ -136,8 +136,9 @@ public static class ComposeCompiler
         var timeColumn = route.IsCagg ? ComposeRoute.CaggTimeColumn : s_timeColumnByTable[plan.Measure.SourceTable];
         var sql = new StringBuilder();
 
-        /* The #1568 module CTE (window-bounded) — only when a dimension is stitched from it. */
-        if (plan.UsesModuleJoin)
+        /* The #1568 module CTE (window-bounded from procedure_stats) — only on the RAW path. A CAGG route joins the
+           retained module_map instead (procedure_stats raw is dropped at 4d, so the CTE can't cover old windows). */
+        if (plan.UsesModuleJoin && !route.IsCagg)
         {
             /* Window-bounded AND scoped to the same server set — partitioned by (server_name, sql_handle) so a
                handle reused across servers attributes per server, not globally. */
@@ -188,9 +189,21 @@ public static class ComposeCompiler
 
         if (plan.UsesModuleJoin)
         {
-            sql.Append("LEFT JOIN ").Append(ModuleAlias).Append(" ON ").Append(ModuleAlias)
-                .Append(".sql_handle = ").Append(FactAlias).Append(".sql_handle AND ").Append(ModuleAlias)
-                .Append(".server_name = ").Append(FactAlias).Append(".server_name\n");
+            /* Raw joins the window-bounded CTE (m); a CAGG route joins the retained collect.module_map directly
+               (its raw procedure_stats is gone at 4d, but the CAGG carries sql_handle). Same alias + join keys, so
+               object_name resolves as m.object_name either way. */
+            if (route.IsCagg)
+            {
+                sql.Append("LEFT JOIN ").Append(PgSchemaGenerator.CollectSchema).Append(".module_map AS ").Append(ModuleAlias)
+                    .Append(" ON ").Append(ModuleAlias).Append(".sql_handle = ").Append(FactAlias).Append(".sql_handle AND ")
+                    .Append(ModuleAlias).Append(".server_name = ").Append(FactAlias).Append(".server_name\n");
+            }
+            else
+            {
+                sql.Append("LEFT JOIN ").Append(ModuleAlias).Append(" ON ").Append(ModuleAlias)
+                    .Append(".sql_handle = ").Append(FactAlias).Append(".sql_handle AND ").Append(ModuleAlias)
+                    .Append(".server_name = ").Append(FactAlias).Append(".server_name\n");
+            }
         }
 
         sql.Append("WHERE ").Append(FactAlias).Append('.').Append(timeColumn).Append(" >= ").Append(startParam).Append('\n');

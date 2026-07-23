@@ -616,6 +616,12 @@ public sealed class DarlingWorker : BackgroundService
         {
             await using var tuningConnection = await postgres.OpenConnectionAsync(stoppingToken);
             await PgTableTuning.ApplyAsync(tuningConnection, _logger, stoppingToken);
+            // The retained sql_handle->module map (#1568 object_name for OLD query_stats windows the CAGG serves,
+            // after procedure_stats raw drops at 4d): create it, then seed it from recent procedure_stats.
+            if (await DarlingModuleMap.EnsureTableAsync(tuningConnection, _logger, stoppingToken))
+            {
+                await DarlingModuleMap.RefreshAsync(tuningConnection, _logger, stoppingToken);
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -983,6 +989,11 @@ public sealed class DarlingWorker : BackgroundService
                    incidentally); a 24/7 service must actually invoke it or analysis_findings
                    grows unbounded. Rides the daily purge; never throws (logs + degrades). */
                 await new PgFindingStore(postgres, _logger).CleanupOldFindingsAsync(retentionDays: 30);
+
+                /* Keep the retained sql_handle->module map current (object_name attribution for old query_stats
+                   CAGG windows). Rides the daily purge; failure-isolated inside RefreshAsync. */
+                await using var moduleMapConnection = await postgres.OpenConnectionAsync(stoppingToken);
+                await DarlingModuleMap.RefreshAsync(moduleMapConnection, _logger, stoppingToken);
             }
 
             /* Stage 4 fleet-level self-alert: the store disk-pressure backstop. The daily purge is the ONLY
