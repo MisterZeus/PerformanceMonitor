@@ -43,13 +43,17 @@ public sealed class ComposeCaggValueMapperTests
     [InlineData("query_worker_us", ComposeAggregate.Min, true)]
     [InlineData("query_worker_us", ComposeAggregate.Max, true)]
     [InlineData("proc_executions", ComposeAggregate.Sum, true)]
-    [InlineData("query_avg_elapsed_us", ComposeAggregate.Sum, true)]  /* Sum-ratio */
-    [InlineData("proc_avg_cpu_us", ComposeAggregate.Sum, true)]       /* Sum-ratio */
-    [InlineData("wait_time_ms", ComposeAggregate.Sum, false)]         /* no CAGG */
-    [InlineData("qs_executions", ComposeAggregate.Sum, false)]        /* Query Store — deferred */
-    [InlineData("qs_avg_duration_us", ComposeAggregate.Sum, false)]   /* QS weighted — deferred */
+    [InlineData("query_avg_elapsed_us", ComposeAggregate.Sum, true)]      /* delta Sum-ratio */
+    [InlineData("proc_avg_cpu_us", ComposeAggregate.Sum, true)]           /* delta Sum-ratio */
+    [InlineData("qs_executions", ComposeAggregate.Sum, true)]             /* QS -> execution_count_sum */
+    [InlineData("qs_executions", ComposeAggregate.Avg, true)]             /* QS -> sum / sample_count */
+    [InlineData("qs_executions", ComposeAggregate.Max, false)]            /* QS kept no per-row max column */
+    [InlineData("qs_avg_duration_us", ComposeAggregate.Sum, true)]        /* QS execution-weighted mean */
+    [InlineData("qs_max_duration_us", ComposeAggregate.Max, true)]        /* QS peak -> _max */
+    [InlineData("qs_max_duration_us", ComposeAggregate.Avg, false)]       /* only MAX kept */
+    [InlineData("wait_time_ms", ComposeAggregate.Sum, false)]             /* no CAGG */
     [InlineData("sqlserver_cpu_utilization", ComposeAggregate.Avg, false)] /* gauge, no CAGG */
-    public void CanRemap_GatesToDeltaTablesOnly(string measureKey, ComposeAggregate aggregate, bool expected) =>
+    public void CanRemap_GatesToSupportedCaggCases(string measureKey, ComposeAggregate aggregate, bool expected) =>
         Assert.Equal(expected, ComposeCaggValueMapper.CanRemap(Measure(measureKey), aggregate));
 
     /* ---------------- scalar remap (query_worker_us => worker_time_*) ---------------- */
@@ -112,5 +116,48 @@ public sealed class ComposeCaggValueMapperTests
         Assert.Equal(
             "(CAST(SUM(f.worker_time_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0))",
             ComposeCaggValueMapper.BuildCaggNativeExpr(Plan("proc_avg_cpu_us")));
+    }
+
+    /* ---------------- Query Store remap (execution-weighted mean, executions, peaks) ---------------- */
+
+    [Fact]
+    public void QueryStore_WeightedRatio_Duration_UsesWeightedSumOverExecutionCount()
+    {
+        /* SUM(avg_duration_us * execution_count) / SUM(execution_count) reconstructs from the reshaped columns. */
+        Assert.Equal(
+            "(CAST(SUM(f.duration_us_weighted_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0))",
+            ComposeCaggValueMapper.BuildCaggNativeExpr(Plan("qs_avg_duration_us")));
+    }
+
+    [Fact]
+    public void QueryStore_WeightedRatio_Cpu_UsesCpuWeightedSum()
+    {
+        Assert.Equal(
+            "(CAST(SUM(f.cpu_us_weighted_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0))",
+            ComposeCaggValueMapper.BuildCaggNativeExpr(Plan("qs_avg_cpu_us")));
+    }
+
+    [Fact]
+    public void QueryStore_Executions_Sum_ReadsExecutionCountSum()
+    {
+        Assert.Equal(
+            "CAST(SUM(f.execution_count_sum) AS double precision)",
+            ComposeCaggValueMapper.BuildCaggNativeExpr(Plan("qs_executions", ComposeAggregate.Sum)));
+    }
+
+    [Fact]
+    public void QueryStore_Executions_Avg_IsSumOverSampleCount()
+    {
+        Assert.Equal(
+            "(CAST(SUM(f.execution_count_sum) AS double precision) / NULLIF(SUM(f.sample_count), 0))",
+            ComposeCaggValueMapper.BuildCaggNativeExpr(Plan("qs_executions", ComposeAggregate.Avg)));
+    }
+
+    [Fact]
+    public void QueryStore_PeakDuration_Max_ReadsMaxColumn()
+    {
+        Assert.Equal(
+            "CAST(MAX(f.max_duration_us_max) AS double precision)",
+            ComposeCaggValueMapper.BuildCaggNativeExpr(Plan("qs_max_duration_us", ComposeAggregate.Max)));
     }
 }

@@ -499,6 +499,18 @@ public sealed class DarlingComposeTests
     }
 
     [Fact]
+    public void Compile_OldWindow_QueryStore_WeightedRatio_RoutesToHourlyCagg_RemapsWeightedMean()
+    {
+        /* QS has no daily CAGG, so even 40 days old routes to the hourly rollup; the weighted mean remaps to the
+           reshaped weighted-sum over execution_count_sum (exact, not an avg-of-avgs). */
+        var (compiled, error) = CompileAged(
+            "{\"source\":\"query_store_stats\",\"ratio\":\"qs_avg_duration_us\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 40);
+        Assert.True(error is null, error);
+        Assert.Contains("FROM collect.query_store_stats_hourly AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(f.duration_us_weighted_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0)", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Compile_OldWindow_NonCaggTable_StaysRaw()
     {
         var (compiled, _) = CompileAged(
