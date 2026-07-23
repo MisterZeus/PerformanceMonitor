@@ -77,7 +77,7 @@ public static class ComposeCaggCatalog
             new HashSet<string>(StringComparer.Ordinal) { "database_name", "schema_name", "object_name" }),
 
         ["query_store_stats"] = new(
-            "query_store_stats", "query_store_stats_hourly", DailyView: null,
+            "query_store_stats", "query_store_stats_hourly", "query_store_stats_daily",
             new HashSet<string>(StringComparer.Ordinal) { "database_name", "module_name", "query_hash" }),
     };
 

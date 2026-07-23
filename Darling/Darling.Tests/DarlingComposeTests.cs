@@ -499,14 +499,25 @@ public sealed class DarlingComposeTests
     }
 
     [Fact]
-    public void Compile_OldWindow_QueryStore_WeightedRatio_RoutesToHourlyCagg_RemapsWeightedMean()
+    public void Compile_OldWindow_QueryStore_WeightedRatio_RoutesToCagg_RemapsWeightedMean()
     {
-        /* QS has no daily CAGG, so even 40 days old routes to the hourly rollup; the weighted mean remaps to the
-           reshaped weighted-sum over execution_count_sum (exact, not an avg-of-avgs). */
+        /* A 10-day window routes QS to the hourly CAGG; the weighted mean remaps to the reshaped weighted-sum over
+           execution_count_sum (exact, not an avg-of-avgs). A >21d window would route to query_store_stats_daily. */
         var (compiled, error) = CompileAged(
-            "{\"source\":\"query_store_stats\",\"ratio\":\"qs_avg_duration_us\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 40);
+            "{\"source\":\"query_store_stats\",\"ratio\":\"qs_avg_duration_us\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 10);
         Assert.True(error is null, error);
         Assert.Contains("FROM collect.query_store_stats_hourly AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(f.duration_us_weighted_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0)", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_VeryOldWindow_QueryStore_RoutesToDailyCagg()
+    {
+        /* A 40-day QS window now routes to query_store_stats_daily (same weighted-sum columns as the hourly). */
+        var (compiled, error) = CompileAged(
+            "{\"source\":\"query_store_stats\",\"ratio\":\"qs_avg_duration_us\",\"timeBucket\":\"day\",\"viz\":\"line\"}", daysOld: 40);
+        Assert.True(error is null, error);
+        Assert.Contains("FROM collect.query_store_stats_daily AS f", compiled!.Sql, StringComparison.Ordinal);
         Assert.Contains("SUM(f.duration_us_weighted_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0)", compiled.Sql, StringComparison.Ordinal);
     }
 
