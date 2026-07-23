@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Full Dashboard and the CLI Installer are being retired.** They moved to a `deprecated/` folder and are no longer built into release artifacts; releases now ship Lite + Darling only, with Darling the flagship replacement for the Full Dashboard. The deprecated code still compiles and its tests run in CI. ([#1612])
 - **Darling Web: the custom-view panel grid is capped at two columns on wide screens** ([#1619]) - a dense view (e.g. four panels) no longer crams four-across on a wide monitor; the min column track is >=45% of the row so at most two columns ever fit, and a `span-2` (or lone) panel still takes the full width.
+- **Darling: the query_store_stats + procedure_stats continuous aggregates are reshaped to the composer's dimensions** ([#1624]) - the #1621/#1623 CAGGs grouped query_store_stats by Query Store's native query_id/plan_id (which the composer never uses - it reads QS by module_name/query_hash) and dropped procedure_stats' schema_name, so a composed panel over those dimensions could not route to the rollup, and the QS execution-weighted mean was unreconstructable (it stored avg-of-avgs). Regrouped query_store_stats_hourly to server/database_name/module_name/query_hash carrying execution-weighted sums (so the weighted mean composes exactly), and added schema_name to the procedure_stats hourly + daily CAGGs. Reshaped now while the CAGGs are empty (QS is read-only on the current replica) or a day or two old, via a guarded drop+recreate that detects the old shape structurally. Matters ahead of a writable-Query-Store primary; query_stats CAGGs are unchanged.
 
 ### Fixed
 
@@ -520,6 +521,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#1620]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1620
 [#1622]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1622
 [#1623]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1623
+[#1624]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1624
 [#1617]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1617
 [#1621]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1621
 [#1601]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1601
