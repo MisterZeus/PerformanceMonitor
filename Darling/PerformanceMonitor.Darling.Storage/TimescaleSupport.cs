@@ -255,6 +255,11 @@ public static class TimescaleSupport
     /// <summary><see cref="QueryStatsDailyView"/>'s procedure_stats sibling (sourced from procedure_stats_hourly).</summary>
     public const string ProcedureStatsDailyView = "procedure_stats_daily";
 
+    /// <summary>The Query Store DAILY continuous aggregate — hierarchical from <see cref="QueryStoreStatsHourlyView"/>,
+    /// same composer dims (module_name / query_hash) + weighted sums. Kept indefinitely; a QS window past the
+    /// hourly's 21d horizon routes here.</summary>
+    public const string QueryStoreStatsDailyView = "query_store_stats_daily";
+
     /// <summary>
     /// The query_stats hourly continuous aggregate. 1-hour buckets grouped by the SAME dimensions the composer's
     /// <c>MeasureCatalog</c> uses for query_stats (server_id / server_name / database_name / query_hash), so a
@@ -405,6 +410,30 @@ FROM collect.procedure_stats_hourly
 GROUP BY server_id, server_name, database_name, schema_name, object_name, time_bucket('1 day', bucket)
 WITH NO DATA";
 
+    /// <summary>The Query Store DAILY continuous aggregate — <see cref="CreateQueryStatsDailySql"/>'s Query Store
+    /// sibling, hierarchical from <see cref="QueryStoreStatsHourlyView"/> and grouped by the composer's QS dims
+    /// (module_name / query_hash). SUM re-aggregates the hourly weighted sums (so the weighted mean composes as
+    /// duration_us_weighted_sum / execution_count_sum across days) and MAX the peaks. Same column NAMES as the
+    /// hourly, so <c>ComposeCaggValueMapper</c> reads both with no change. Explicit-<c>time_bucket</c> GROUP BY.</summary>
+    public const string CreateQueryStoreStatsDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_daily
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    module_name,
+    query_hash,
+    time_bucket('1 day', bucket) AS bucket,
+    sum(execution_count_sum) AS execution_count_sum,
+    sum(duration_us_weighted_sum) AS duration_us_weighted_sum,
+    sum(cpu_us_weighted_sum) AS cpu_us_weighted_sum,
+    max(max_duration_us_max) AS max_duration_us_max,
+    max(max_cpu_time_us_max) AS max_cpu_time_us_max,
+    sum(sample_count) AS sample_count
+FROM collect.query_store_stats_hourly
+GROUP BY server_id, server_name, database_name, module_name, query_hash, time_bucket('1 day', bucket)
+WITH NO DATA";
+
     /// <summary>
     /// The refresh policy for a continuous aggregate: materialize <c>[now - 3 days, now - endOffset]</c> every
     /// <c>scheduleInterval</c>. <c>start_offset 3 days</c> gives margin past the ~2-day compression/hot window
@@ -510,8 +539,6 @@ WITH NO DATA";
         // Hourly CAGGs FIRST (the two delta tables + query_store_stats), THEN the daily tier — the daily CAGGs are
         // hierarchical (sourced from the hourly CAGGs), so the hourly ones must be created earlier in this ordered
         // sweep. Daily policies use the 1-day end-offset/schedule; the hourly ones take the helper's defaults.
-        // (query_store_stats_daily is deliberately NOT here yet — added once query_store_stats_hourly has real data
-        // from a writable-QS primary to source from.)
         var aggregates = new[]
         {
             (CreateSql: CreateQueryStatsHourlySql,      View: QueryStatsHourlyView,      PolicySql: AddContinuousAggregatePolicySql(QueryStatsHourlyView)),
@@ -519,6 +546,7 @@ WITH NO DATA";
             (CreateSql: CreateQueryStoreStatsHourlySql, View: QueryStoreStatsHourlyView, PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsHourlyView)),
             (CreateSql: CreateQueryStatsDailySql,       View: QueryStatsDailyView,       PolicySql: AddContinuousAggregatePolicySql(QueryStatsDailyView, "1 day", "1 day")),
             (CreateSql: CreateProcedureStatsDailySql,   View: ProcedureStatsDailyView,   PolicySql: AddContinuousAggregatePolicySql(ProcedureStatsDailyView, "1 day", "1 day")),
+            (CreateSql: CreateQueryStoreStatsDailySql,  View: QueryStoreStatsDailyView,  PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsDailyView, "1 day", "1 day")),
         };
 
         var ready = 0;
@@ -547,7 +575,7 @@ WITH NO DATA";
         }
 
         logger?.LogInformation(
-            "TimescaleDB: {Ready}/{Total} continuous aggregate(s) ready (3 hourly: query_stats, procedure_stats, query_store_stats; 2 daily: query_stats, procedure_stats)",
+            "TimescaleDB: {Ready}/{Total} continuous aggregate(s) ready (3 hourly: query_stats, procedure_stats, query_store_stats; 3 daily: query_stats, procedure_stats, query_store_stats)",
             ready, aggregates.Length);
         return ready;
     }

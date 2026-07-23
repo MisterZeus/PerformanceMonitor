@@ -105,6 +105,25 @@ public sealed class TimescaleContinuousAggregateTests
     }
 
     [Fact]
+    public void QueryStoreStatsDaily_IsHierarchical_FromQsHourly_SameColumnsAsHourly()
+    {
+        var sql = TimescaleSupport.CreateQueryStoreStatsDailySql;
+
+        Assert.Contains("CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_daily", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.query_store_stats_hourly", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY server_id, server_name, database_name, module_name, query_hash, time_bucket('1 day', bucket)", sql, StringComparison.Ordinal);
+        /* Same column NAMES as the hourly (so ComposeCaggValueMapper reads both unchanged): SUM the weighted sums,
+           MAX the peaks, SUM executions + sample_count. */
+        Assert.Contains("sum(duration_us_weighted_sum) AS duration_us_weighted_sum", sql, StringComparison.Ordinal);
+        Assert.Contains("sum(cpu_us_weighted_sum) AS cpu_us_weighted_sum", sql, StringComparison.Ordinal);
+        Assert.Contains("sum(execution_count_sum) AS execution_count_sum", sql, StringComparison.Ordinal);
+        Assert.Contains("max(max_duration_us_max) AS max_duration_us_max", sql, StringComparison.Ordinal);
+        Assert.Contains("max(max_cpu_time_us_max) AS max_cpu_time_us_max", sql, StringComparison.Ordinal);
+        Assert.Contains("sum(sample_count) AS sample_count", sql, StringComparison.Ordinal);
+        Assert.Contains("WITH NO DATA", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void QueryStatsDaily_IsHierarchical_SourcedFromHourlyCagg_GroupedByExplicitDayBucket()
     {
         var sql = TimescaleSupport.CreateQueryStatsDailySql;
