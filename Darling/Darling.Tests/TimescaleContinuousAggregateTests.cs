@@ -52,14 +52,15 @@ public sealed class TimescaleContinuousAggregateTests
     }
 
     [Fact]
-    public void ProcedureStatsHourly_MirrorsQueryStats_GroupedByObjectName()
+    public void ProcedureStatsHourly_GroupedBySchemaAndObject()
     {
         var sql = TimescaleSupport.CreateProcedureStatsHourlySql;
 
         Assert.Contains("CREATE MATERIALIZED VIEW IF NOT EXISTS collect.procedure_stats_hourly", sql, StringComparison.Ordinal);
         Assert.Contains("WITH (timescaledb.continuous)", sql, StringComparison.Ordinal);
         Assert.Contains("FROM collect.procedure_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY server_id, server_name, database_name, object_name, bucket", sql, StringComparison.Ordinal);
+        /* schema_name + object_name — both composer dimensions (a panel by schema_name alone re-aggregates). */
+        Assert.Contains("GROUP BY server_id, server_name, database_name, schema_name, object_name, bucket", sql, StringComparison.Ordinal);
         Assert.Contains("count(*) AS sample_count", sql, StringComparison.Ordinal);
         Assert.Contains("WITH NO DATA", sql, StringComparison.Ordinal);
     }
@@ -77,7 +78,7 @@ public sealed class TimescaleContinuousAggregateTests
     }
 
     [Fact]
-    public void QueryStoreStatsHourly_GroupedByQsIdentity_SumsCount_AveragesTheAvgColumns()
+    public void QueryStoreStatsHourly_GroupedByComposerDims_CarriesWeightedSums()
     {
         var sql = TimescaleSupport.CreateQueryStoreStatsHourlySql;
 
@@ -85,14 +86,20 @@ public sealed class TimescaleContinuousAggregateTests
         Assert.Contains("WITH (timescaledb.continuous)", sql, StringComparison.Ordinal);
         Assert.Contains("time_bucket('1 hour', collection_time) AS bucket", sql, StringComparison.Ordinal);
         Assert.Contains("FROM collect.query_store_stats", sql, StringComparison.Ordinal);
-        /* QS's own identity (query_id / plan_id), not a query_hash. */
-        Assert.Contains("GROUP BY server_id, server_name, database_name, query_id, plan_id, bucket", sql, StringComparison.Ordinal);
-        /* QS carries already-aggregated figures (not Darling deltas): SUM the count, MAX the max_*, avg-of-avgs on avg_*. */
+        /* The COMPOSER's QS dimensions (module_name / query_hash) so a composed QS panel can route here — NOT
+           Query Store's own query_id / plan_id, which the composer never exposes. */
+        Assert.Contains("GROUP BY server_id, server_name, database_name, module_name, query_hash, bucket", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("query_id", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("plan_id", sql, StringComparison.Ordinal);
+        /* Execution-WEIGHTED sums so the composer's weighted mean = duration_us_weighted_sum / execution_count_sum
+           composes EXACTLY (avg*count = the interval total, summed = the true total) — never an avg-of-avgs. */
         Assert.Contains("sum(execution_count) AS execution_count_sum", sql, StringComparison.Ordinal);
-        Assert.Contains("avg(avg_duration_us) AS avg_duration_us_avg", sql, StringComparison.Ordinal);
+        Assert.Contains("sum(avg_duration_us::double precision * execution_count) AS duration_us_weighted_sum", sql, StringComparison.Ordinal);
+        Assert.Contains("sum(avg_cpu_time_us::double precision * execution_count) AS cpu_us_weighted_sum", sql, StringComparison.Ordinal);
         Assert.Contains("max(max_duration_us) AS max_duration_us_max", sql, StringComparison.Ordinal);
-        Assert.Contains("avg(avg_cpu_time_us) AS avg_cpu_time_us_avg", sql, StringComparison.Ordinal);
         Assert.Contains("max(max_cpu_time_us) AS max_cpu_time_us_max", sql, StringComparison.Ordinal);
+        /* The imprecise avg-of-avgs shape is gone. */
+        Assert.DoesNotContain("avg(avg_duration_us)", sql, StringComparison.Ordinal);
         Assert.Contains("count(*) AS sample_count", sql, StringComparison.Ordinal);
         Assert.Contains("WITH NO DATA", sql, StringComparison.Ordinal);
     }
@@ -125,7 +132,7 @@ public sealed class TimescaleContinuousAggregateTests
 
         Assert.Contains("CREATE MATERIALIZED VIEW IF NOT EXISTS collect.procedure_stats_daily", sql, StringComparison.Ordinal);
         Assert.Contains("FROM collect.procedure_stats_hourly", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY server_id, server_name, database_name, object_name, time_bucket('1 day', bucket)", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY server_id, server_name, database_name, schema_name, object_name, time_bucket('1 day', bucket)", sql, StringComparison.Ordinal);
         Assert.Contains("sum(sample_count) AS sample_count", sql, StringComparison.Ordinal);
         Assert.Contains("WITH NO DATA", sql, StringComparison.Ordinal);
     }
