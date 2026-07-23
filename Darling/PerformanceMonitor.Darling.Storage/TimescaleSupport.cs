@@ -241,6 +241,20 @@ public static class TimescaleSupport
     /// <summary><see cref="QueryStatsHourlyView"/>'s procedure_stats sibling.</summary>
     public const string ProcedureStatsHourlyView = "procedure_stats_hourly";
 
+    /// <summary>The query_store_stats hourly continuous aggregate. Built now, ahead of any writable-Query-Store
+    /// primary — on a read-only replica QS surfaces nothing new to harvest, so this sits empty until one is added,
+    /// but the rollup path exists the moment data starts flowing. Weaker cardinality reduction than the delta
+    /// tables (QS's own top-N sampling already surfaces a broad, shifting query/plan set), still worth having.</summary>
+    public const string QueryStoreStatsHourlyView = "query_store_stats_hourly";
+
+    /// <summary>The DAILY tier: hierarchical continuous aggregates sourced from the hourly CAGGs, NOT raw — 2.28.1
+    /// supports a continuous aggregate built directly on another. Kept indefinitely (no retention policy) as the
+    /// "coarsened but never fully lost" tier for anything past the hourly CAGG's own horizon.</summary>
+    public const string QueryStatsDailyView = "query_stats_daily";
+
+    /// <summary><see cref="QueryStatsDailyView"/>'s procedure_stats sibling (sourced from procedure_stats_hourly).</summary>
+    public const string ProcedureStatsDailyView = "procedure_stats_daily";
+
     /// <summary>
     /// The query_stats hourly continuous aggregate. 1-hour buckets grouped by the SAME dimensions the composer's
     /// <c>MeasureCatalog</c> uses for query_stats (server_id / server_name / database_name / query_hash), so a
@@ -302,20 +316,106 @@ GROUP BY server_id, server_name, database_name, object_name, bucket
 WITH NO DATA";
 
     /// <summary>
-    /// The hourly refresh policy for a continuous aggregate: materialize the <c>[now - 3 days, now - 1 hour]</c>
-    /// window each hour. <c>start_offset 3 days</c> gives margin past the ~2-day compression/hot window (covers
-    /// same-day-arriving corrections); <c>end_offset 1 hour</c> leaves the still-filling current hour
-    /// unmaterialized (no repeated rework); <c>schedule_interval</c> matches the bucket. <c>if_not_exists</c> so a
-    /// restart re-converges. The conservative TimescaleDB default shape.
+    /// The query_store_stats hourly continuous aggregate. Grouped by QS's own identity dimensions
+    /// (server_id / server_name / database_name / query_id / plan_id) instead of a query_hash. query_store_stats
+    /// carries Query Store's already-aggregated per-collection figures (not Darling deltas), so this SUMs the
+    /// execution_count and takes MAX on the max_* columns; the avg_* columns are averaged (avg-of-avgs — QS does
+    /// not expose a total from which to weight, and QS is itself a sampled top-N, so the approximation is
+    /// acceptable). WITH NO DATA + IF NOT EXISTS, one statement, exactly like the delta-table hourly CAGGs.
     /// </summary>
-    public static string AddContinuousAggregatePolicySql(string view)
-        => $"SELECT add_continuous_aggregate_policy('collect.{view}', start_offset => INTERVAL '3 days', end_offset => INTERVAL '1 hour', schedule_interval => INTERVAL '1 hour', if_not_exists => true)";
+    public const string CreateQueryStoreStatsHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_hourly
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    query_id,
+    plan_id,
+    time_bucket('1 hour', collection_time) AS bucket,
+    sum(execution_count) AS execution_count_sum,
+    avg(avg_duration_us) AS avg_duration_us_avg,
+    max(max_duration_us) AS max_duration_us_max,
+    avg(avg_cpu_time_us) AS avg_cpu_time_us_avg,
+    max(max_cpu_time_us) AS max_cpu_time_us_max,
+    count(*) AS sample_count
+FROM collect.query_store_stats
+GROUP BY server_id, server_name, database_name, query_id, plan_id, bucket
+WITH NO DATA";
 
     /// <summary>
-    /// Creates the two hourly continuous aggregates (<see cref="CreateQueryStatsHourlySql"/> /
-    /// <see cref="CreateProcedureStatsHourlySql"/>) and attaches each one's refresh policy
-    /// (<see cref="AddContinuousAggregatePolicySql"/>). Runs in the worker's TimescaleDB block (CAGGs need the
-    /// extension), AFTER hypertables + compression are in place. The CREATE and the policy are SEPARATE commands
+    /// The query_stats DAILY continuous aggregate — a HIERARCHICAL CAGG sourced from <see cref="QueryStatsHourlyView"/>
+    /// (not raw). Re-aggregates the hourly rollup to 1-day buckets: SUM of the hourly sums, MIN of the hourly mins,
+    /// MAX of the hourly maxes (each composes correctly across the coarser bucket), plus SUM of the hourly
+    /// sample_counts. The GROUP BY uses the explicit <c>time_bucket('1 day', bucket)</c> expression, NOT the bare
+    /// <c>bucket</c> alias: an unqualified <c>bucket</c> in GROUP BY binds to the SOURCE column (the hourly bucket)
+    /// under Postgres's input-column-wins ambiguity rule, which would group by hour, not day. WITH NO DATA +
+    /// IF NOT EXISTS; the hourly CAGG must already exist (it is created earlier in the same sweep).
+    /// </summary>
+    public const string CreateQueryStatsDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_daily
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    query_hash,
+    time_bucket('1 day', bucket) AS bucket,
+    sum(worker_time_sum) AS worker_time_sum,
+    min(worker_time_min) AS worker_time_min,
+    max(worker_time_max) AS worker_time_max,
+    sum(elapsed_time_sum) AS elapsed_time_sum,
+    min(elapsed_time_min) AS elapsed_time_min,
+    max(elapsed_time_max) AS elapsed_time_max,
+    sum(execution_count_sum) AS execution_count_sum,
+    min(execution_count_min) AS execution_count_min,
+    max(execution_count_max) AS execution_count_max,
+    sum(sample_count) AS sample_count
+FROM collect.query_stats_hourly
+GROUP BY server_id, server_name, database_name, query_hash, time_bucket('1 day', bucket)
+WITH NO DATA";
+
+    /// <summary>The procedure_stats DAILY continuous aggregate — <see cref="CreateQueryStatsDailySql"/>'s sibling,
+    /// sourced from <see cref="ProcedureStatsHourlyView"/> and grouped by <c>object_name</c>. Same hierarchical
+    /// re-aggregation and same explicit-<c>time_bucket</c> GROUP BY discipline.</summary>
+    public const string CreateProcedureStatsDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.procedure_stats_daily
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    object_name,
+    time_bucket('1 day', bucket) AS bucket,
+    sum(worker_time_sum) AS worker_time_sum,
+    min(worker_time_min) AS worker_time_min,
+    max(worker_time_max) AS worker_time_max,
+    sum(elapsed_time_sum) AS elapsed_time_sum,
+    min(elapsed_time_min) AS elapsed_time_min,
+    max(elapsed_time_max) AS elapsed_time_max,
+    sum(execution_count_sum) AS execution_count_sum,
+    min(execution_count_min) AS execution_count_min,
+    max(execution_count_max) AS execution_count_max,
+    sum(sample_count) AS sample_count
+FROM collect.procedure_stats_hourly
+GROUP BY server_id, server_name, database_name, object_name, time_bucket('1 day', bucket)
+WITH NO DATA";
+
+    /// <summary>
+    /// The refresh policy for a continuous aggregate: materialize <c>[now - 3 days, now - endOffset]</c> every
+    /// <c>scheduleInterval</c>. <c>start_offset 3 days</c> gives margin past the ~2-day compression/hot window
+    /// (covers same-day-arriving corrections) and is the buffer the retention tiers lean on — a tier's drop must
+    /// never outrun the next tier's 3-day refresh start. <c>endOffset</c> leaves the still-filling current bucket
+    /// unmaterialized (no repeated rework); <c>scheduleInterval</c> matches the bucket. Defaults are the hourly
+    /// shape; the daily CAGGs pass <c>"1 day"</c>/<c>"1 day"</c>. <c>if_not_exists</c> so a restart re-converges.
+    /// </summary>
+    public static string AddContinuousAggregatePolicySql(string view, string endOffset = "1 hour", string scheduleInterval = "1 hour")
+        => $"SELECT add_continuous_aggregate_policy('collect.{view}', start_offset => INTERVAL '3 days', end_offset => INTERVAL '{endOffset}', schedule_interval => INTERVAL '{scheduleInterval}', if_not_exists => true)";
+
+    /// <summary>
+    /// Creates the continuous aggregates and attaches each one's refresh policy
+    /// (<see cref="AddContinuousAggregatePolicySql"/>): three HOURLY (query_stats, procedure_stats,
+    /// query_store_stats) then two DAILY (query_stats, procedure_stats). The daily tier is HIERARCHICAL — each
+    /// daily CAGG is sourced from its hourly CAGG, so the ordered sweep creates the hourly ones first. Runs in the
+    /// worker's TimescaleDB block (CAGGs need the extension), AFTER hypertables + compression are in place. The
+    /// CREATE and the policy are SEPARATE commands
     /// per aggregate — a CAGG CREATE cannot run inside a transaction, so it is never batched with another
     /// statement. Failure-isolated per aggregate: one failure warns and the composer keeps querying raw.
     /// Idempotent (IF NOT EXISTS on both), so it re-converges every restart. Does NOT backfill history (WITH NO
@@ -329,14 +429,22 @@ WITH NO DATA";
             throw new ArgumentNullException(nameof(connection));
         }
 
+        // Hourly CAGGs FIRST (the two delta tables + query_store_stats), THEN the daily tier — the daily CAGGs are
+        // hierarchical (sourced from the hourly CAGGs), so the hourly ones must be created earlier in this ordered
+        // sweep. Daily policies use the 1-day end-offset/schedule; the hourly ones take the helper's defaults.
+        // (query_store_stats_daily is deliberately NOT here yet — added once query_store_stats_hourly has real data
+        // from a writable-QS primary to source from.)
         var aggregates = new[]
         {
-            (CreateSql: CreateQueryStatsHourlySql, View: QueryStatsHourlyView),
-            (CreateSql: CreateProcedureStatsHourlySql, View: ProcedureStatsHourlyView),
+            (CreateSql: CreateQueryStatsHourlySql,      View: QueryStatsHourlyView,      PolicySql: AddContinuousAggregatePolicySql(QueryStatsHourlyView)),
+            (CreateSql: CreateProcedureStatsHourlySql,  View: ProcedureStatsHourlyView,  PolicySql: AddContinuousAggregatePolicySql(ProcedureStatsHourlyView)),
+            (CreateSql: CreateQueryStoreStatsHourlySql, View: QueryStoreStatsHourlyView, PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsHourlyView)),
+            (CreateSql: CreateQueryStatsDailySql,       View: QueryStatsDailyView,       PolicySql: AddContinuousAggregatePolicySql(QueryStatsDailyView, "1 day", "1 day")),
+            (CreateSql: CreateProcedureStatsDailySql,   View: ProcedureStatsDailyView,   PolicySql: AddContinuousAggregatePolicySql(ProcedureStatsDailyView, "1 day", "1 day")),
         };
 
         var ready = 0;
-        foreach (var (createSql, view) in aggregates)
+        foreach (var (createSql, view, policySql) in aggregates)
         {
             try
             {
@@ -345,7 +453,7 @@ WITH NO DATA";
                     await create.ExecuteNonQueryAsync(cancellationToken);
                 }
 
-                using (var policy = new NpgsqlCommand(AddContinuousAggregatePolicySql(view), connection) { CommandTimeout = SetupTimeoutSeconds })
+                using (var policy = new NpgsqlCommand(policySql, connection) { CommandTimeout = SetupTimeoutSeconds })
                 {
                     await policy.ExecuteNonQueryAsync(cancellationToken);
                 }
@@ -361,9 +469,78 @@ WITH NO DATA";
         }
 
         logger?.LogInformation(
-            "TimescaleDB: {Ready}/{Total} hourly continuous aggregate(s) ready (query_stats, procedure_stats)",
+            "TimescaleDB: {Ready}/{Total} continuous aggregate(s) ready (3 hourly: query_stats, procedure_stats, query_store_stats; 2 daily: query_stats, procedure_stats)",
             ready, aggregates.Length);
         return ready;
+    }
+
+    /// <summary>Raw-tier retention horizon: keep per-sweep raw ~4 days — one day past the hourly CAGG's own 3-day
+    /// refresh window, so the raw drop never outruns the aggregate that preserves it.</summary>
+    public const string RawRetentionInterval = "4 days";
+
+    /// <summary>Hourly-CAGG-tier retention horizon: keep the hourly rollups 21 days — well past the daily CAGG's
+    /// 3-day refresh window, so the hourly drop never outruns the daily aggregate. The daily CAGGs themselves get
+    /// NO retention policy: they are the coarsened, kept-indefinitely tier.</summary>
+    public const string HourlyRetentionInterval = "21 days";
+
+    /// <summary>A TimescaleDB retention policy: schedule a background job that DROPs chunks older than
+    /// <paramref name="dropAfter"/>. <c>if_not_exists</c> so a restart re-converges. The actual drop is a
+    /// chunk-level DROP TABLE (cheap, no rewrite), so unlike the CAGG backfill it needs no off-hours window.</summary>
+    public static string AddRetentionPolicySql(string relation, string dropAfter)
+        => $"SELECT add_retention_policy('collect.{relation}', drop_after => INTERVAL '{dropAfter}', if_not_exists => true)";
+
+    /// <summary>
+    /// Attaches the tiered retention policies: the three raw tables drop at <see cref="RawRetentionInterval"/>, the
+    /// three hourly CAGGs at <see cref="HourlyRetentionInterval"/>; the daily CAGGs are kept indefinitely (no
+    /// policy). Ordering safety is by HORIZON, not run order — each tier's drop stays comfortably past the next
+    /// tier's 3-day refresh start_offset (4d raw vs 3d hourly refresh; 21d hourly vs 3d daily refresh), so a drop
+    /// never removes history the next tier has not yet materialized. Idempotent (<c>if_not_exists</c>) and
+    /// failure-isolated per policy. MUST run AFTER <see cref="EnsureContinuousAggregatesAsync"/> so the hourly
+    /// CAGGs the hourly policies target already exist. Returns the number of policies in place.
+    ///
+    /// COLD-START CAVEAT (existing stores only): on a store that already holds raw history OLDER than the hourly
+    /// CAGG has materialized, the first raw drop can remove buckets the CAGG never captured. Fresh installs are
+    /// safe automatically — nothing is older than 4 days until the CAGG has been materializing that long. For an
+    /// EXISTING store, backfill the hourly CAGGs past the raw horizon BEFORE this policy's first run.
+    /// </summary>
+    public static async Task<int> EnsureRetentionPoliciesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var policies = new[]
+        {
+            (Relation: "query_stats",             DropAfter: RawRetentionInterval),
+            (Relation: "procedure_stats",         DropAfter: RawRetentionInterval),
+            (Relation: "query_store_stats",       DropAfter: RawRetentionInterval),
+            (Relation: QueryStatsHourlyView,      DropAfter: HourlyRetentionInterval),
+            (Relation: ProcedureStatsHourlyView,  DropAfter: HourlyRetentionInterval),
+            (Relation: QueryStoreStatsHourlyView, DropAfter: HourlyRetentionInterval),
+        };
+
+        var applied = 0;
+        foreach (var (relation, dropAfter) in policies)
+        {
+            try
+            {
+                using var command = new NpgsqlCommand(AddRetentionPolicySql(relation, dropAfter), connection) { CommandTimeout = SetupTimeoutSeconds };
+                await command.ExecuteNonQueryAsync(cancellationToken);
+                applied++;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Retention policy for {Relation} ({DropAfter}) failed — that tier keeps growing until the next restart retries: {Message}",
+                    relation, dropAfter, ex.Message);
+            }
+        }
+
+        logger?.LogInformation(
+            "TimescaleDB: {Applied}/{Total} retention policies in place (raw {Raw}, hourly CAGGs {Hourly}; daily CAGGs kept indefinitely)",
+            applied, policies.Length, RawRetentionInterval, HourlyRetentionInterval);
+        return applied;
     }
 
     /// <summary>
