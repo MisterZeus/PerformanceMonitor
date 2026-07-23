@@ -275,6 +275,7 @@ SELECT
     server_name,
     database_name,
     query_hash,
+    sql_handle,
     time_bucket('1 hour', collection_time) AS bucket,
     sum(delta_worker_time) AS worker_time_sum,
     min(delta_worker_time) AS worker_time_min,
@@ -287,7 +288,7 @@ SELECT
     max(delta_execution_count) AS execution_count_max,
     count(*) AS sample_count
 FROM collect.query_stats
-GROUP BY server_id, server_name, database_name, query_hash, bucket
+GROUP BY server_id, server_name, database_name, query_hash, sql_handle, bucket
 WITH NO DATA";
 
     /// <summary>The procedure_stats hourly continuous aggregate — <see cref="CreateQueryStatsHourlySql"/>'s
@@ -362,6 +363,7 @@ SELECT
     server_name,
     database_name,
     query_hash,
+    sql_handle,
     time_bucket('1 day', bucket) AS bucket,
     sum(worker_time_sum) AS worker_time_sum,
     min(worker_time_min) AS worker_time_min,
@@ -374,7 +376,7 @@ SELECT
     max(execution_count_max) AS execution_count_max,
     sum(sample_count) AS sample_count
 FROM collect.query_stats_hourly
-GROUP BY server_id, server_name, database_name, query_hash, time_bucket('1 day', bucket)
+GROUP BY server_id, server_name, database_name, query_hash, sql_handle, time_bucket('1 day', bucket)
 WITH NO DATA";
 
     /// <summary>The procedure_stats DAILY continuous aggregate — <see cref="CreateQueryStatsDailySql"/>'s sibling,
@@ -442,6 +444,10 @@ WITH NO DATA";
                column. CASCADE also drops procedure_stats_daily, which the ensure sweep recreates. */
             (View: "procedure_stats_hourly",
              StaleCheck: "SELECT (EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'procedure_stats_hourly') AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'procedure_stats_hourly' AND column_name = 'schema_name'))"),
+            /* query_stats_hourly / _daily gained sql_handle (object_name routing) → stale iff the view EXISTS but
+               has no sql_handle column. CASCADE drops query_stats_daily, which the ensure sweep recreates. */
+            (View: "query_stats_hourly",
+             StaleCheck: "SELECT (EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'query_stats_hourly') AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'query_stats_hourly' AND column_name = 'sql_handle'))"),
         };
 
         var dropped = 0;

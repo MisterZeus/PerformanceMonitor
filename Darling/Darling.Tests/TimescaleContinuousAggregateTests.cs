@@ -31,7 +31,7 @@ public sealed class TimescaleContinuousAggregateTests
         Assert.Contains("time_bucket('1 hour', collection_time) AS bucket", sql, StringComparison.Ordinal);
         Assert.Contains("FROM collect.query_stats", sql, StringComparison.Ordinal);
         /* Grouped by the composer's query_stats dimensions, in order, so a panel points here with no remapping. */
-        Assert.Contains("GROUP BY server_id, server_name, database_name, query_hash, bucket", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY server_id, server_name, database_name, query_hash, sql_handle, bucket", sql, StringComparison.Ordinal);
 
         /* SUM/MIN/MAX on each per-interval delta (so avg composes at query time as sum/count) + a sample_count;
            deliberately NO materialized average (it would not re-aggregate correctly). */
@@ -116,7 +116,7 @@ public sealed class TimescaleContinuousAggregateTests
         Assert.Contains("time_bucket('1 day', bucket) AS bucket", sql, StringComparison.Ordinal);
         /* GROUP BY uses the explicit time_bucket EXPRESSION, never the bare `bucket` alias: a bare alias binds to
            the hourly source column under Postgres's input-column-wins rule and would group by hour, not day. */
-        Assert.Contains("GROUP BY server_id, server_name, database_name, query_hash, time_bucket('1 day', bucket)", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY server_id, server_name, database_name, query_hash, sql_handle, time_bucket('1 day', bucket)", sql, StringComparison.Ordinal);
         /* Re-aggregates the hourly rollup: SUM of sums, MIN of mins, MAX of maxes, SUM of the sample_counts. */
         Assert.Contains("sum(worker_time_sum) AS worker_time_sum", sql, StringComparison.Ordinal);
         Assert.Contains("min(worker_time_min) AS worker_time_min", sql, StringComparison.Ordinal);
