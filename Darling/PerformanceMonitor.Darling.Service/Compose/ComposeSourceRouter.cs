@@ -63,7 +63,8 @@ public sealed record ComposeCaggInfo(
 /// its dimensions are covered (see <see cref="ComposeCaggInfo.Covers"/>). query_stats' <c>object_name</c> is
 /// covered via the module_map join (the CAGG carries sql_handle; the compiler joins collect.module_map for it) —
 /// it stays a ViaModuleJoin dimension so the RAW path still uses the live #1568 procedure_stats CTE.
-/// query_store_stats has no daily CAGG yet (deferred until a writable-QS primary supplies real data).
+/// All three rolled tables (query_stats / procedure_stats / query_store_stats) now carry both an hourly and a
+/// daily CAGG, so every one tiers raw → hourly → daily.
 /// </summary>
 public static class ComposeCaggCatalog
 {
