@@ -446,6 +446,102 @@ public sealed class DarlingComposeTests
         Assert.Contains("points", error!, StringComparison.OrdinalIgnoreCase);
     }
 
+    /* ─────────────── CAGG read-routing (age-based source selection) ─────────────── */
+
+    private static (ComposeCompiled? Compiled, string? Error) CompileAged(string planJson, int daysOld, string[]? servers = null)
+    {
+        var plan = ValidPlan(planJson);
+        var end = WindowEnd;                 /* EndUtc serves as "now" in the compiler */
+        var start = end.AddDays(-daysOld);
+        return ComposeCompiler.Compile(plan, new ComposeRunContext(servers, start, end, ComposeRunContext.NoVariables));
+    }
+
+    [Fact]
+    public void Compile_OldWindow_RoutesQueryStatsToHourlyCagg_RemappingColumns()
+    {
+        var (compiled, error) = CompileAged(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 10);
+        Assert.True(error is null, error);
+        var sql = compiled!.Sql;
+        Assert.Contains("FROM collect.query_stats_hourly AS f", sql, StringComparison.Ordinal);
+        Assert.Contains("CAST(SUM(f.worker_time_sum) AS double precision)", sql, StringComparison.Ordinal);
+        Assert.Contains("date_trunc('hour', f.bucket)", sql, StringComparison.Ordinal);  /* the CAGG time column */
+        Assert.DoesNotContain("delta_worker_time", sql, StringComparison.Ordinal);       /* not the raw column */
+    }
+
+    [Fact]
+    public void Compile_VeryOldWindow_RoutesToDailyCagg_AndCoarsensDisplayGrainToDay()
+    {
+        /* hour requested, but 40 days old -> daily CAGG, and the grain clamps up to day (can't render finer). */
+        var (compiled, error) = CompileAged(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 40);
+        Assert.True(error is null, error);
+        Assert.Contains("FROM collect.query_stats_daily AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("date_trunc('day', f.bucket)", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_OldWindow_AvgRemapsToSumOverSampleCount()
+    {
+        var (compiled, error) = CompileAged(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"avg\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 10);
+        Assert.True(error is null, error);
+        Assert.Contains("CAST(SUM(f.worker_time_sum) AS double precision) / NULLIF(SUM(f.sample_count), 0)", compiled!.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_OldWindow_SumRatio_RemapsBothOperands()
+    {
+        var (compiled, error) = CompileAged(
+            "{\"source\":\"query_stats\",\"ratio\":\"query_avg_elapsed_us\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 10);
+        Assert.True(error is null, error);
+        Assert.Contains("SUM(f.elapsed_time_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0)", compiled!.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_OldWindow_QueryStore_WeightedRatio_RoutesToHourlyCagg_RemapsWeightedMean()
+    {
+        /* QS has no daily CAGG, so even 40 days old routes to the hourly rollup; the weighted mean remaps to the
+           reshaped weighted-sum over execution_count_sum (exact, not an avg-of-avgs). */
+        var (compiled, error) = CompileAged(
+            "{\"source\":\"query_store_stats\",\"ratio\":\"qs_avg_duration_us\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 40);
+        Assert.True(error is null, error);
+        Assert.Contains("FROM collect.query_store_stats_hourly AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(f.duration_us_weighted_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0)", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_OldWindow_NonCaggTable_StaysRaw()
+    {
+        var (compiled, _) = CompileAged(
+            "{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 40);
+        Assert.Contains("FROM collect.wait_stats AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("_hourly", compiled.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("_daily", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_OldWindow_ObjectNameDimension_StaysRaw()
+    {
+        /* object_name is a #1568 module join, not a CAGG column -> raw even at 40 days old. */
+        var (compiled, _) = CompileAged(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"object_name\"],\"viz\":\"bar\"}",
+            daysOld: 40, servers: new[] { "PROD-01" });
+        Assert.Contains("FROM collect.query_stats AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("query_stats_hourly", compiled.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("query_stats_daily", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_RecentWindow_QueryStats_StaysRaw()
+    {
+        /* The 6-hour helper window is well inside the raw horizon -> raw columns, byte-for-byte as before. */
+        var sql = Compile(ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}"));
+        Assert.Contains("FROM collect.query_stats AS f", sql, StringComparison.Ordinal);
+        Assert.Contains("delta_worker_time", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("worker_time_sum", sql, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Compile_ResolvesAVariableToABoundValue()
     {
