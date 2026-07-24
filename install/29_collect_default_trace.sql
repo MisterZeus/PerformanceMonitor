@@ -358,8 +358,19 @@ BEGIN
         FROM sys.traces AS st
         CROSS APPLY sys.fn_trace_gettable
         (
-            LEFT(st.path, LEN(st.path) - CHARINDEX('_', REVERSE(st.path))) + 
-            RIGHT(st.path, 4), 
+            /*
+            SQL Server on Linux names the initial trace file without a rollover suffix
+            (log.trc, not log_1.trc). An unconditional strip finds no underscore, LEFT
+            takes the full path unchanged, and appending the extension back doubles it
+            (log.trc.trc) - fn_trace_gettable then errors on the nonexistent file
+            (Msg 19049) and no events are collected. Fall back to st.path when
+            CHARINDEX returns 0.
+            */
+            CASE
+                WHEN CHARINDEX(N'_', REVERSE(st.path)) > 0
+                THEN LEFT(st.path, LEN(st.path) - CHARINDEX(N'_', REVERSE(st.path))) + RIGHT(st.path, 4)
+                ELSE st.path
+            END,
             st.max_files
         ) AS ft
         INNER JOIN sys.trace_events AS te
