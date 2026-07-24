@@ -83,17 +83,24 @@ GRANT SELECT ON ALL TABLES IN SCHEMA config  TO admin, viewer;
 -- 2b. Credential-column fail-closed ACLs (#1262). The read-only viewer must NOT read the secret columns of
 --     the three credential-bearing config tables: config_monitored_servers.encrypted_password (a DPAPI
 --     password blob), config_command.args_json (the inline test_connect credential blob), and
---     config_notification's SMTP password/username + Teams/Slack webhook URLs (a webhook URL is a bearer
---     secret). Instead of GRANT-ALL-then-REVOKE-each-secret (fail-OPEN -- a future secret column leaks until
+--     config_notification's SMTP password/username + the Teams/Slack/generic webhook URLs and the generic
+--     channel's headers (a webhook URL is a bearer secret, and generic_headers carries the Authorization
+--     token itself). Instead of GRANT-ALL-then-REVOKE-each-secret (fail-OPEN -- a future secret column leaks until
 --     someone revokes it), DROP viewer's table-wide SELECT on each and re-grant ONLY the non-secret columns
 --     (fail-CLOSED -- a column added later is invisible to viewer until you add it below). admin keeps its
 --     table-wide SELECT from step 2. Re-running this whole script re-asserts the carve idempotently. If a
 --     later schema upgrade ADDS a column to any of these three tables, add it to the matching GRANT list
 --     below (or, if it is itself secret, deliberately leave it out).
+--
+--     SOURCE OF TRUTH: DarlingManagedRoles.ViewerRestrictedConfigTables (the C# list managed mode builds its
+--     identical carve from). These three GRANT lists are a HAND MIRROR of it, and hand mirrors drift -- they
+--     did, silently, for three releases (see #1639). The ungated ProvisionRolesAclDriftTests parses THIS FILE
+--     and asserts set-equality against that C# list, so adding a column to one side without the other now
+--     fails the build. Keep the columns in the C# list's order so the two read as the same list.
 REVOKE SELECT ON config.config_monitored_servers FROM viewer;
 GRANT SELECT (server_id, name, host, database, auth, username, encrypt_mode, trust_server_certificate,
               read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, capture_plans,
-              is_enabled, created_at, modified_at)
+              is_enabled, created_at, modified_at, alert_delivery_mode_override)
     ON config.config_monitored_servers TO viewer;
 REVOKE SELECT ON config.config_command FROM viewer;
 GRANT SELECT (command_id, created_at, requested_by, command_type, target_server_id, status, claimed_at,
@@ -101,7 +108,8 @@ GRANT SELECT (command_id, created_at, requested_by, command_type, target_server_
     ON config.config_command TO viewer;
 REVOKE SELECT ON config.config_notification FROM viewer;
 GRANT SELECT (id, smtp_host, smtp_port, smtp_use_ssl, smtp_from_address, smtp_recipients,
-              email_cooldown_minutes, teams_proxy, slack_proxy, modified_at)
+              email_cooldown_minutes, teams_proxy, slack_proxy, modified_at,
+              generic_body_template, generic_proxy)
     ON config.config_notification TO viewer;
 
 -- 3. config writes -- admin only.
