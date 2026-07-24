@@ -68,6 +68,11 @@ public partial class MainWindow : Window
     /// </summary>
     private readonly OpenServerTabRegistry<TabItem> _openServerTabs = new();
 
+    /// <summary>The fleet: the authoritative full server set plus the filtered subset the sidebar shows.
+    /// Consumers asking "what servers exist?" must read <c>_fleet.All</c>, never the bound list — see
+    /// <see cref="FleetView"/> for why reading ItemsSource back is the bug this replaces.</summary>
+    private readonly FleetView _fleet = new();
+
     /// <summary>
     /// The viewer's per-user preferences store (a small JSON file in %APPDATA%) and the current in-memory
     /// copy. These are the persisted DEFAULTS that seed each newly-opened <see cref="ViewerServerTab"/>'s
@@ -258,9 +263,10 @@ public partial class MainWindow : Window
            the same tab a double-click opens. Case-insensitive on the registered server name;
            an unknown name is ignored (the window still opens normally). */
         var openServer = OpenServerNameFromArgs();
-        if (openServer is not null && ServerList.ItemsSource is IEnumerable<DarlingServer> loaded)
+        if (openServer is not null)
         {
-            var match = loaded.FirstOrDefault(s =>
+            /* Against the whole fleet: a deep link must open a server the current filter is hiding. */
+            var match = _fleet.All.FirstOrDefault(s =>
                 string.Equals(s.ServerName, openServer, StringComparison.OrdinalIgnoreCase));
             if (match is not null)
             {
@@ -640,8 +646,9 @@ public partial class MainWindow : Window
                collect.servers facts by the shared server_id, so a viewer add/remove/enable is reflected at
                once. Stamp the viewer's favorite pins (matched by server name) and sort favorites-first. */
             var servers = ApplyFavoritesAndSort(await _dataService.GetManagedServersAsync());
-            ServerList.ItemsSource = servers;
-            ServerCountText.Text = $"Servers: {servers.Count}";
+            _fleet.SetAll(servers);
+            ServerList.ItemsSource = _fleet.Visible;
+            ServerCountText.Text = $"Servers: {_fleet.TotalCount}";
 
             /* The Recommendations tab has its OWN server selector, synced to the sidebar selection on a
                single-click (SyncAggregateServerSelectors) yet independently changeable while the tab is open.
@@ -670,18 +677,12 @@ public partial class MainWindow : Window
             {
                 /* Triggers SelectionChanged, which loads the active aggregate tab. Restore the prior
                    selection after a server add/edit/remove (preserveSelection) so the view doesn't jump
-                   back to the first server; the initial load selects the first. */
-                var restore = preserveSelection && previousSelection is int prev
-                    ? servers.Find(s => s.ServerId == prev)
-                    : null;
-                if (restore is not null)
-                {
-                    ServerList.SelectedItem = restore;
-                }
-                else
-                {
-                    ServerList.SelectedIndex = 0;
-                }
+                   back to the first server; the initial load selects the first.
+
+                   Resolved by SERVER, never by index: once tag rows share this list, row 0 is a header
+                   rather than a server, so a SelectedIndex = 0 fallback would select a non-server and the
+                   aggregate-tab sync would silently never run. */
+                ServerList.SelectedItem = _fleet.ResolveSelection(preserveSelection ? previousSelection : null);
             }
             else
             {
@@ -964,7 +965,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (ServerList.ItemsSource is not IEnumerable<DarlingServer> servers)
+        var servers = _fleet.All;
+        if (servers.Count == 0)
         {
             OverviewItemsControl.ItemsSource = null;
             FleetRollupContainer.Visibility = Visibility.Collapsed;
@@ -1044,10 +1046,10 @@ public partial class MainWindow : Window
     private void OverviewCard_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
         if (e.ClickCount == 2
-            && sender is FrameworkElement { DataContext: ServerSummaryItem summary }
-            && ServerList.ItemsSource is IEnumerable<DarlingServer> servers)
+            && sender is FrameworkElement { DataContext: ServerSummaryItem summary })
         {
-            var server = servers.FirstOrDefault(s => s.ServerId == summary.ServerId);
+            /* Resolved against the whole fleet, so a card click still opens a filtered-out server. */
+            var server = _fleet.Find(summary.ServerId);
             if (server is not null)
             {
                 OpenServerTab(server);
@@ -1062,10 +1064,9 @@ public partial class MainWindow : Window
     /// </summary>
     private void FleetWorstServer_Click(object sender, MouseButtonEventArgs e)
     {
-        if (sender is FrameworkElement { DataContext: FleetRankedServer ranked }
-            && ServerList.ItemsSource is IEnumerable<DarlingServer> servers)
+        if (sender is FrameworkElement { DataContext: FleetRankedServer ranked })
         {
-            var server = servers.FirstOrDefault(s => s.ServerId == ranked.ServerId);
+            var server = _fleet.Find(ranked.ServerId);
             if (server is not null)
             {
                 OpenServerTab(server);
@@ -1328,8 +1329,9 @@ public partial class MainWindow : Window
     private void SettingsButton_Click(object sender, RoutedEventArgs e)
     {
         /* Hand the current managed-server list to the collector-schedule editor's per-server scope. */
-        var servers = (ServerList.ItemsSource as IReadOnlyList<DarlingServer>) ?? Array.Empty<DarlingServer>();
-        var settings = new SettingsWindow(_preferences, _appSettingsStore, _dataService, servers) { Owner = this };
+        /* The schedule editor edits CONFIG, so it must see every server — a filtered sidebar must never
+           mean you cannot edit the schedule of a server it happens to be hiding. */
+        var settings = new SettingsWindow(_preferences, _appSettingsStore, _dataService, _fleet.All) { Owner = this };
         if (settings.ShowDialog() == true && settings.Result is not null)
         {
             _preferences = settings.Result;

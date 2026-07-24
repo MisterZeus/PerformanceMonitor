@@ -66,22 +66,19 @@ public partial class MainWindow
     /// <summary>Re-stamps favorites on the currently-shown rows and re-sorts, preserving the selection.</summary>
     private void ReapplyFavoritesToServerList()
     {
-        if (ServerList.ItemsSource is not IEnumerable<DarlingServer> current)
-        {
-            return;
-        }
-
-        foreach (var s in current)
+        /* Favourite pins are a property of the SERVER, so stamp them across the whole fleet — not just
+           whatever the sidebar currently shows. */
+        foreach (var s in _fleet.All)
         {
             s.IsFavorite = _serverStore.IsFavorite(s.ServerName);
         }
 
-        var selected = ServerList.SelectedItem as DarlingServer;
-        ServerList.ItemsSource = SortWithFavorites(current.ToList());
-        if (selected is not null)
-        {
-            ServerList.SelectedItem = selected;
-        }
+        /* Re-sort through the model and rebind its projection once, rather than assigning a fresh list to
+           ItemsSource behind the model's back (which is how the bound list and the fleet drifted apart). */
+        var selected = (ServerList.SelectedItem as DarlingServer)?.ServerId;
+        _fleet.SetAll(SortWithFavorites(_fleet.All.ToList()));
+        ServerList.ItemsSource = _fleet.Visible;
+        ServerList.SelectedItem = _fleet.ResolveSelection(selected);
     }
 
     /// <summary>
@@ -108,7 +105,7 @@ public partial class MainWindow
         }
 
         var nowUtc = DateTime.UtcNow;
-        var servers = (ServerList.ItemsSource as IEnumerable<DarlingServer>)?.ToList() ?? new List<DarlingServer>();
+        var servers = _fleet.All;
 
         DateTime? newest = null;
 

@@ -444,10 +444,16 @@ CREATE TABLE IF NOT EXISTS config.custom_views (
     /// <para><b>NO <c>config_bump_version</c> trigger</b>, same reasoning as V31: tags feed the VIEWER's
     /// sidebar, never the collector/service loop, so there is nothing for the service to reload and a
     /// beacon bump would only cost a needless fleet reconcile. <c>id</c> is
-    /// <c>GENERATED ALWAYS AS IDENTITY</c> so INSERTs need no sequence USAGE grant, and both tables ride
-    /// the existing <c>ALTER DEFAULT PRIVILEGES ... IN SCHEMA config</c> — no explicit grant is added, and
-    /// no <c>ViewerRestrictedConfigTables</c> carve is needed because neither table has a secret
-    /// column.</para>
+    /// <c>GENERATED ALWAYS AS IDENTITY</c> so INSERTs need no sequence USAGE grant. No explicit grant is
+    /// added: both tables are picked up by the blanket <c>GRANT ... ON ALL TABLES IN SCHEMA config</c>
+    /// statements that provisioning re-runs on EVERY service start. Note it is those, not
+    /// <c>ALTER DEFAULT PRIVILEGES</c>, that cover a table introduced by a migration — ADP only applies to
+    /// objects created after it runs, and provisioning runs AFTER the migration pass. No
+    /// <c>ViewerRestrictedConfigTables</c> carve is needed either, because neither table has a secret
+    /// column — but note the corollary: a table in <c>config</c> is readable by the network-reachable
+    /// <c>mcp</c> role by default, so if tag names may carry customer identifiers the REVOKE must be
+    /// emitted inside provisioning AFTER that blanket grant (and mirrored into BYO
+    /// <c>tools/provision-roles.sql</c>), or the next service start silently re-grants it.</para>
     /// </summary>
     private const string V32Sql = @"
 CREATE TABLE IF NOT EXISTS config.server_tags (
