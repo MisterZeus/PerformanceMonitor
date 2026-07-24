@@ -33,5 +33,10 @@
     <None Include="Fixtures\SystemHealth\*.xml" CopyToOutputDirectory="PreserveNewest" />
     <!-- Deadlock graph parser/layout golden samples (real sql2025 captures + synthetic edge cases). -->
     <None Include="Fixtures\Deadlocks\*.xml" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The SHIPPED bring-your-own-Postgres provisioning script, copied beside the test binary so
+         ProvisionRolesAclDriftTests can parse the REAL file (never a stale second copy) from
+         AppContext.BaseDirectory, with no repo-root path walking. Same Link+copy delivery the Service
+         project uses for tools\install-darling.ps1. -->
+    <None Include="..\tools\provision-roles.sql" Link="Fixtures\provision-roles.sql" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
