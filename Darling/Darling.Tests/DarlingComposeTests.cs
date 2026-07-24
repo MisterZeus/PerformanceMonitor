@@ -364,6 +364,39 @@ public sealed class DarlingComposeTests
         Assert.Contains("percentile_cont(0.95)", sql, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(ComposeTimeBucket.None)]
+    [InlineData(ComposeTimeBucket.Minute)]
+    [InlineData(ComposeTimeBucket.Hour)]
+    [InlineData(ComposeTimeBucket.Day)]
+    public void ResolveBucket_LeavesNonAutoUnchanged(ComposeTimeBucket bucket)
+    {
+        Assert.Equal(bucket, MeasureCatalog.ResolveBucket(bucket, 3600d));
+    }
+
+    [Fact]
+    public void ResolveBucket_Auto_PicksGrainFromWindow()
+    {
+        Assert.Equal(ComposeTimeBucket.Minute, MeasureCatalog.ResolveBucket(ComposeTimeBucket.Auto, 2d * 86_400d));       // 2 days -> minute
+        Assert.Equal(ComposeTimeBucket.Hour, MeasureCatalog.ResolveBucket(ComposeTimeBucket.Auto, 2d * 86_400d + 1d));   // just over 2 days -> hour
+        Assert.Equal(ComposeTimeBucket.Hour, MeasureCatalog.ResolveBucket(ComposeTimeBucket.Auto, 60d * 86_400d));       // 60 days -> hour
+        Assert.Equal(ComposeTimeBucket.Day, MeasureCatalog.ResolveBucket(ComposeTimeBucket.Auto, 60d * 86_400d + 1d));   // over 60 days -> day
+    }
+
+    [Theory]
+    [InlineData(6, "date_trunc('minute'")]      // 6h window -> minute grain
+    [InlineData(24 * 10, "date_trunc('hour'")]  // 10 days -> hour grain
+    [InlineData(24 * 90, "date_trunc('day'")]   // 90 days -> day grain
+    public void Compile_AutoBucket_ResolvesGrainFromWindow(int windowHours, string expectedTrunc)
+    {
+        var plan = ValidPlan("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"auto\",\"viz\":\"line\"}");
+        var end = WindowEnd;
+        var start = end.AddHours(-windowHours);
+        var (compiled, error) = ComposeCompiler.Compile(plan, new ComposeRunContext(null, start, end, ComposeRunContext.NoVariables));
+        Assert.True(error is null, error);
+        Assert.Contains(expectedTrunc, compiled!.Sql, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Compile_UnitConversion_ScalesMicrosecondsToMilliseconds()
     {
@@ -411,6 +444,116 @@ public sealed class DarlingComposeTests
         var (compiled, error) = ComposeCompiler.Compile(plan, new ComposeRunContext(null, start, end, ComposeRunContext.NoVariables));
         Assert.Null(compiled);
         Assert.Contains("points", error!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /* ─────────────── CAGG read-routing (age-based source selection) ─────────────── */
+
+    private static (ComposeCompiled? Compiled, string? Error) CompileAged(string planJson, int daysOld, string[]? servers = null)
+    {
+        var plan = ValidPlan(planJson);
+        var end = WindowEnd;                 /* EndUtc serves as "now" in the compiler */
+        var start = end.AddDays(-daysOld);
+        return ComposeCompiler.Compile(plan, new ComposeRunContext(servers, start, end, ComposeRunContext.NoVariables));
+    }
+
+    [Fact]
+    public void Compile_OldWindow_RoutesQueryStatsToHourlyCagg_RemappingColumns()
+    {
+        var (compiled, error) = CompileAged(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 10);
+        Assert.True(error is null, error);
+        var sql = compiled!.Sql;
+        Assert.Contains("FROM collect.query_stats_hourly AS f", sql, StringComparison.Ordinal);
+        Assert.Contains("CAST(SUM(f.worker_time_sum) AS double precision)", sql, StringComparison.Ordinal);
+        Assert.Contains("date_trunc('hour', f.bucket)", sql, StringComparison.Ordinal);  /* the CAGG time column */
+        Assert.DoesNotContain("delta_worker_time", sql, StringComparison.Ordinal);       /* not the raw column */
+    }
+
+    [Fact]
+    public void Compile_VeryOldWindow_RoutesToDailyCagg_AndCoarsensDisplayGrainToDay()
+    {
+        /* hour requested, but 40 days old -> daily CAGG, and the grain clamps up to day (can't render finer). */
+        var (compiled, error) = CompileAged(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 40);
+        Assert.True(error is null, error);
+        Assert.Contains("FROM collect.query_stats_daily AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("date_trunc('day', f.bucket)", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_OldWindow_AvgRemapsToSumOverSampleCount()
+    {
+        var (compiled, error) = CompileAged(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"avg\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 10);
+        Assert.True(error is null, error);
+        Assert.Contains("CAST(SUM(f.worker_time_sum) AS double precision) / NULLIF(SUM(f.sample_count), 0)", compiled!.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_OldWindow_SumRatio_RemapsBothOperands()
+    {
+        var (compiled, error) = CompileAged(
+            "{\"source\":\"query_stats\",\"ratio\":\"query_avg_elapsed_us\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 10);
+        Assert.True(error is null, error);
+        Assert.Contains("SUM(f.elapsed_time_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0)", compiled!.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_OldWindow_QueryStore_WeightedRatio_RoutesToCagg_RemapsWeightedMean()
+    {
+        /* A 10-day window routes QS to the hourly CAGG; the weighted mean remaps to the reshaped weighted-sum over
+           execution_count_sum (exact, not an avg-of-avgs). A >21d window would route to query_store_stats_daily. */
+        var (compiled, error) = CompileAged(
+            "{\"source\":\"query_store_stats\",\"ratio\":\"qs_avg_duration_us\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 10);
+        Assert.True(error is null, error);
+        Assert.Contains("FROM collect.query_store_stats_hourly AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(f.duration_us_weighted_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0)", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_VeryOldWindow_QueryStore_RoutesToDailyCagg()
+    {
+        /* A 40-day QS window now routes to query_store_stats_daily (same weighted-sum columns as the hourly). */
+        var (compiled, error) = CompileAged(
+            "{\"source\":\"query_store_stats\",\"ratio\":\"qs_avg_duration_us\",\"timeBucket\":\"day\",\"viz\":\"line\"}", daysOld: 40);
+        Assert.True(error is null, error);
+        Assert.Contains("FROM collect.query_store_stats_daily AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(f.duration_us_weighted_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0)", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_OldWindow_NonCaggTable_StaysRaw()
+    {
+        var (compiled, _) = CompileAged(
+            "{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 40);
+        Assert.Contains("FROM collect.wait_stats AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("_hourly", compiled.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("_daily", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_OldWindow_ObjectName_RoutesToCagg_JoinsModuleMap()
+    {
+        /* object_name on query_stats now routes to the CAGG (40d -> daily) and joins the retained module_map for
+           attribution, instead of the window-bounded procedure_stats #1568 CTE. */
+        var (compiled, error) = CompileAged(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"object_name\"],\"viz\":\"bar\"}",
+            daysOld: 40, servers: new[] { "PROD-01" });
+        Assert.True(error is null, error);
+        Assert.Contains("FROM collect.query_stats_daily AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN collect.module_map AS m ON m.sql_handle = f.sql_handle AND m.server_name = f.server_name", compiled.Sql, StringComparison.Ordinal);
+        Assert.Contains("m.object_name", compiled.Sql, StringComparison.Ordinal);        /* attribution from the map */
+        Assert.DoesNotContain("ROW_NUMBER()", compiled.Sql, StringComparison.Ordinal);   /* not the raw #1568 CTE */
+    }
+
+    [Fact]
+    public void Compile_RecentWindow_QueryStats_StaysRaw()
+    {
+        /* The 6-hour helper window is well inside the raw horizon -> raw columns, byte-for-byte as before. */
+        var sql = Compile(ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}"));
+        Assert.Contains("FROM collect.query_stats AS f", sql, StringComparison.Ordinal);
+        Assert.Contains("delta_worker_time", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("worker_time_sum", sql, StringComparison.Ordinal);
     }
 
     [Fact]

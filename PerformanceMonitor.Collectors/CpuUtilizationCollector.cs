@@ -17,8 +17,8 @@ namespace PerformanceMonitor.Collectors;
 /// <summary>
 /// CPU utilization — ring buffer (on-prem, MI, RDS) or sys.dm_db_resource_stats (Azure SQL DB).
 /// Extracted verbatim from Lite's RemoteCollectorService.Cpu.cs, including the platform rules
-/// that are the parity contract: Linux stores NULL other-process CPU because SystemIdle is
-/// always 0 there (#1048); incomplete SystemHealth ring-buffer records are skipped (#989);
+/// that are the parity contract: Linux stores NULL other-process CPU when SystemIdle reports
+/// 0 there (#1048); incomplete SystemHealth ring-buffer records are skipped (#989);
 /// Azure filters server-side on the watermark while the ring buffer dedups client-side
 /// (its sample_time is computed and cannot be filtered in SQL).
 /// </summary>
@@ -70,11 +70,14 @@ SELECT
     @start_time = dosi.sqlserver_start_time
 FROM sys.dm_os_sys_info AS dosi;
 
-/* Detect SQL Server on Linux. SystemIdle is always 0 in the SCHEDULER_MONITOR
-   ring buffer on Linux, so 100 - SystemIdle - ProcessUtilization fabricates a
-   host figure that pins total CPU at 100% (Issue #1048). No DMV exposes true host
-   CPU on Linux, so other_process is stored as NULL there. sys.dm_os_host_info is
-   2017+; referenced via sp_executesql so SQL 2016 never binds it (@is_linux = 0). */
+/* Detect SQL Server on Linux. SystemIdle reports 0 in the SCHEDULER_MONITOR
+   ring buffer on some Linux/SQL Server version combos, so 100 - SystemIdle - ProcessUtilization
+   fabricates a host figure that pins total CPU at 100% (Issue #1048). Prior to SQL Server
+   2025 CU1 no DMV exposes true host CPU when that happens, so other_process is stored as NULL
+   there. sys.dm_os_linux_cpu_stats (2025 CU1+) exposes real host CPU jiffies but is a cumulative
+   counter requiring a two-sample delta, not a point-in-time snapshot like SCHEDULER_MONITOR, so
+   it isn't used here. sys.dm_os_host_info is 2017+; referenced via sp_executesql so SQL 2016
+   never binds it (@is_linux = 0). */
 IF OBJECT_ID(N'sys.dm_os_host_info', N'V') IS NOT NULL
     EXEC sys.sp_executesql
         N'SELECT @linux = CASE WHEN hi.host_platform = N''Linux'' THEN 1 ELSE 0 END FROM sys.dm_os_host_info AS hi;',
@@ -85,7 +88,7 @@ SELECT TOP (60)
     sqlserver_cpu_utilization = x.process_utilization,
     other_process_cpu_utilization =
         CASE
-            WHEN @is_linux = 1
+            WHEN @is_linux = 1 AND x.system_idle = 0
             THEN NULL
             WHEN (100 - x.system_idle - x.process_utilization) < 0
             THEN 0
@@ -161,7 +164,7 @@ OPTION(RECOMPILE);";
             rows.Add(new Row(
                 sampleTime,
                 reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
-                /* NULL = host/other CPU not derivable (SQL on Linux, Issue #1048) */
+                /* NULL = host/other CPU not derivable (SystemIdle reported 0, Issue #1048) */
                 reader.IsDBNull(2) ? (int?)null : reader.GetInt32(2)));
         }
 

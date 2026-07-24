@@ -92,6 +92,11 @@ public enum ComposeTimeBucket
     Minute,
     Hour,
     Day,
+
+    /// <summary>Adaptive: the compiler resolves this to a concrete grain (minute/hour/day) from the panel's
+    /// window at compile time (see <see cref="MeasureCatalog.ResolveBucket"/>), so any range renders a readable,
+    /// bounded point count. Never reaches <c>date_trunc</c> as-is.</summary>
+    Auto,
 }
 
 /// <summary>The fixed filter-operator vocabulary — each maps to a compile-time SQL operator string
@@ -1150,6 +1155,7 @@ public static class MeasureCatalog
     {
         (ComposeTimeBucket.None, "none", 0), (ComposeTimeBucket.Minute, "minute", 60),
         (ComposeTimeBucket.Hour, "hour", 3600), (ComposeTimeBucket.Day, "day", 86_400),
+        (ComposeTimeBucket.Auto, "auto", 0),
     };
 
     private static readonly (ComposeFilterOp Value, string Wire)[] s_opWire =
@@ -1188,6 +1194,25 @@ public static class MeasureCatalog
 
     /// <summary>Seconds per bucket (0 for <see cref="ComposeTimeBucket.None"/>) — drives the window×resolution ceiling.</summary>
     public static int BucketSeconds(ComposeTimeBucket value) => s_bucketWire.First(x => x.Value == value).Seconds;
+
+    /// <summary>Resolve <see cref="ComposeTimeBucket.Auto"/> to a concrete grain for a window of
+    /// <paramref name="windowSeconds"/>: minute up to 2 days, hour up to 60 days, day beyond — so any range
+    /// yields a readable, bounded point count (≤ ~2880, well under <see cref="ComposeLimits.MaxBuckets"/>).
+    /// Any non-Auto bucket is returned unchanged, so existing panels compile byte-for-byte as before.</summary>
+    public static ComposeTimeBucket ResolveBucket(ComposeTimeBucket value, double windowSeconds)
+    {
+        if (value != ComposeTimeBucket.Auto)
+        {
+            return value;
+        }
+
+        if (windowSeconds <= 2d * 86_400d)
+        {
+            return ComposeTimeBucket.Minute;
+        }
+
+        return windowSeconds <= 60d * 86_400d ? ComposeTimeBucket.Hour : ComposeTimeBucket.Day;
+    }
 
     /// <summary>The Postgres <c>date_trunc</c> field for a real bucket (a compile-time constant, never a user string).</summary>
     public static string DateTruncField(ComposeTimeBucket value) => value switch

@@ -85,9 +85,18 @@ public sealed class PgCollectorRowWriter : ICollectorRowWriter
     /// <summary>Naive-UTC storage: strip the Kind so Npgsql accepts the value for `timestamp`.</summary>
     private static DateTime Naive(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
 
+    /// <summary>
+    /// Postgres `text` cannot hold NUL (0x00), which SQL Server NVARCHAR allows — one NUL-laden
+    /// query text from dm_exec_sql_text fails the whole COPY batch with 22021 "invalid byte
+    /// sequence for encoding UTF8: 0x00" (#1614). Every collector string funnels through
+    /// <see cref="Value(string?)"/>, so stripping here covers all of them. String.Replace returns
+    /// the original instance when nothing matches, so clean strings (the vast majority) don't allocate.
+    /// </summary>
+    public static string StripEmbeddedNuls(string value) => value.Replace("\0", string.Empty);
+
     public ICollectorRowWriter Value(string? value)
     {
-        if (value is null) { Target.WriteNull(); } else { Target.Write(value, NpgsqlDbType.Text); }
+        if (value is null) { Target.WriteNull(); } else { Target.Write(StripEmbeddedNuls(value), NpgsqlDbType.Text); }
         return this;
     }
 

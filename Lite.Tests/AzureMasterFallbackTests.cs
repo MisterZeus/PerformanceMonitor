@@ -8,6 +8,7 @@
 
 using System;
 using System.Linq;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -29,6 +30,12 @@ namespace PerformanceMonitorLite.Tests;
 /// The fixes pinned here: reachability errors are not permission errors; the verdict expires; and a
 /// server coming back from an outage discards it immediately.
 ///
+/// Also #1631, the over-correction. #1506 removed 40615 from the rights list (right) AND from the
+/// single-database fallback path (wrong): a client can be firewalled out at the logical server while
+/// a DATABASE-level rule keeps its user database fully reachable, which is the #857 case and the
+/// configuration Microsoft recommends. "Not a rights denial" and "no fallback" are separate
+/// questions, and these tests now pin both independently.
+///
 /// Only in-memory state is touched, so the service is constructed with null dependencies — the same
 /// approach as <see cref="XeSessionHealthTests"/>.
 /// </summary>
@@ -43,17 +50,20 @@ public class AzureMasterFallbackTests
         new() { ServerName = name, DisplayName = name };
 
     /// <summary>
-    /// The bug itself. 40615 is "client with IP address ... is not allowed to access the server":
-    /// a firewall rejection at the logical server, which says nothing about master, and which no
-    /// fallback can route around because the same rule blocks every other database too.
-    /// 40613 is "not currently available, please retry later" — transient on its face.
+    /// The #1506 half. 40615 is "client with IP address ... is not allowed to access the server", a
+    /// firewall rejection at the logical server, and 40613 is "not currently available, please retry
+    /// later" — neither is a statement about this login's RIGHTS, so neither may form a rights verdict.
+    ///
+    /// Note this is now only half the story: 40615 not being a rights denial does NOT mean the
+    /// single-database fallback is wrong for it — see the #1631 pins below, which is the distinction
+    /// whose absence caused that regression.
     /// </summary>
     [Theory]
     [InlineData(40615)] // Cannot open server — client IP not allowed (firewall)
     [InlineData(40613)] // Database not currently available — retry later
     public void Reachability_Errors_Are_Not_Master_Access_Denied(int errorNumber)
     {
-        Assert.False(RemoteCollectorService.IsMasterAccessDeniedError(errorNumber));
+        Assert.False(SqlErrorClassification.IsMasterAccessDenied(errorNumber));
     }
 
     /// <summary>
@@ -68,24 +78,67 @@ public class AzureMasterFallbackTests
     [InlineData(18456)] // Login failed for user
     public void Permission_Errors_Are_Still_Master_Access_Denied(int errorNumber)
     {
-        Assert.True(RemoteCollectorService.IsMasterAccessDeniedError(errorNumber));
+        Assert.True(SqlErrorClassification.IsMasterAccessDenied(errorNumber));
     }
 
     /// <summary>
-    /// The invariant that would have caught this at authoring time: no error number may be both
-    /// "retry, this is temporary" and "stop, this is permanent". 40613 was on both lists.
+    /// #1631. Azure SQL DB evaluates DATABASE-level IP firewall rules BEFORE server-level ones, and a
+    /// client matching a database-level rule is granted a connection to that database even with no
+    /// server-level rule permitting it — while master, where server-level rules live, still needs one.
+    /// So "40615 opening master, user database perfectly reachable" is a real, Microsoft-recommended
+    /// configuration, and the single-database fallback is exactly right for it.
+    ///
+    /// #1506 correctly stopped reading 40615 as a rights denial but also dropped it from the fallback
+    /// path, on the mistaken premise that the same rule blocks the user database too. Every
+    /// database-scoped collector then failed outright against a reachable database.
+    /// </summary>
+    [Fact]
+    public void Firewall_Rejection_At_The_Server_Still_Falls_Back_To_The_Database()
+    {
+        Assert.True(RemoteCollectorService.ShouldFallBackToSingleDatabaseError(40615));
+    }
+
+    /// <summary>
+    /// Every rights denial still implies the fallback — the fallback set is a superset, never a
+    /// replacement, of the #857 list.
+    /// </summary>
+    [Theory]
+    [InlineData(229)]
+    [InlineData(230)]
+    [InlineData(916)]
+    [InlineData(4060)]
+    [InlineData(18456)]
+    public void Permission_Errors_Also_Fall_Back(int errorNumber)
+    {
+        Assert.True(RemoteCollectorService.ShouldFallBackToSingleDatabaseError(errorNumber));
+    }
+
+    /// <summary>
+    /// 40613 stays out of the fallback path: it is transient, so retrying — not degrading to
+    /// single-database collection — is the correct response.
+    /// </summary>
+    [Fact]
+    public void Transient_Unavailability_Does_Not_Trigger_The_Fallback()
+    {
+        Assert.False(RemoteCollectorService.ShouldFallBackToSingleDatabaseError(40613));
+    }
+
+    /// <summary>
+    /// The invariant that would have caught #1506 at authoring time: no error number may be both
+    /// "retry, this is temporary" and "stop, degrade to single-database". 40613 was on both lists.
+    /// Asserted against the FALLBACK set, which is the broader of the two give-up sets.
     /// </summary>
     [Fact]
     public void No_Error_Is_Both_Transient_And_Permanently_Fatal()
     {
         var contradictory = RetryHelper.TransientErrorNumbers
-            .Where(RemoteCollectorService.IsMasterAccessDeniedError)
+            .Where(RemoteCollectorService.ShouldFallBackToSingleDatabaseError)
             .ToList();
 
         Assert.True(
             contradictory.Count == 0,
             $"Error(s) {string.Join(", ", contradictory)} are treated as retryable-transient AND as a " +
-            "permanent master-access verdict. Pick one — see #1506.");
+            "reason to degrade to single-database collection. Pick one — see #1506.");
     }
 
     /// <summary>

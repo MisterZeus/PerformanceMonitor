@@ -942,10 +942,11 @@ BEGIN
         sample_time datetime2(7) NOT NULL,
         sqlserver_cpu_utilization integer NOT NULL,
         /*
-        Nullable: NULL means host/other-process CPU is not derivable. On SQL Server
-        on Linux the SCHEDULER_MONITOR ring buffer reports SystemIdle = 0, so the
-        collector cannot compute a real host figure and stores NULL here rather than
-        a false 100% (Issue #1048). NULL propagates to total_cpu_utilization below.
+        Nullable: NULL means host/other-process CPU is not derivable. On some
+        Linux/SQL Server version combos the SCHEDULER_MONITOR ring buffer reports
+        SystemIdle = 0, so the collector cannot compute a real host figure and
+        stores NULL here rather than a false 100% (Issue #1048). NULL propagates
+        to total_cpu_utilization below.
         */
         other_process_cpu_utilization integer NULL,
         total_cpu_utilization AS (sqlserver_cpu_utilization + other_process_cpu_utilization) PERSISTED,

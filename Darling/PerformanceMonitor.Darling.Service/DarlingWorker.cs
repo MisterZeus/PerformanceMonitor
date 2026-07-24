@@ -589,6 +589,12 @@ public sealed class DarlingWorker : BackgroundService
                 await TimescaleSupport.ConvertToHypertablesAsync(timescaleConnection, _logger, stoppingToken);
                 await TimescaleSupport.ApplyCompressionPolicyAsync(timescaleConnection, _logger, stoppingToken);
                 await TimescaleSupport.EnsureCollectionLogHypertableAsync(timescaleConnection, _logger, stoppingToken);
+                // Reshape: drop stale old-shape QS / procedure_stats CAGGs FIRST so the ensure below rebuilds them
+                // in the composer-dimension shape (no-op once reshaped, and on a fresh store nothing matches).
+                await TimescaleSupport.DropStaleContinuousAggregatesAsync(timescaleConnection, _logger, stoppingToken);
+                await TimescaleSupport.EnsureContinuousAggregatesAsync(timescaleConnection, _logger, stoppingToken);
+                // AFTER the CAGGs exist: the tiered retention (raw 4d, hourly CAGGs 21d; daily kept indefinitely).
+                await TimescaleSupport.EnsureRetentionPoliciesAsync(timescaleConnection, _logger, stoppingToken);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -597,6 +603,29 @@ public sealed class DarlingWorker : BackgroundService
                too, so falling back to plain-PG mode is always safe. */
             _timescaleAvailable = false;
             _logger.LogWarning("TimescaleDB setup failed — continuing in plain-PostgreSQL mode: {Message}", ex.Message);
+        }
+
+        /* Composer + analyze_*_plan performance tuning (covering indexes + per-table autovacuum-insert override) —
+           idempotent RUNTIME setup, NOT a versioned migration: results-invariant perf, so it must not bump
+           StorageVersion and gate the Viewer's schema check on indexes it does not need (the role-GUC provisioning
+           reasoning). AFTER the TimescaleDB block so the collector tables are already hypertables when indexed
+           (CREATE INDEX / ALTER TABLE SET propagate to all chunks), BEFORE collectors so a first build never
+           contends with live inserts. Its own try/catch: a failure degrades to un-tuned (slower) queries, never
+           fatal (the same optional-feature discipline as the TimescaleDB block above). */
+        try
+        {
+            await using var tuningConnection = await postgres.OpenConnectionAsync(stoppingToken);
+            await PgTableTuning.ApplyAsync(tuningConnection, _logger, stoppingToken);
+            // The retained sql_handle->module map (#1568 object_name for OLD query_stats windows the CAGG serves,
+            // after procedure_stats raw drops at 4d): create it, then seed it from recent procedure_stats.
+            if (await DarlingModuleMap.EnsureTableAsync(tuningConnection, _logger, stoppingToken))
+            {
+                await DarlingModuleMap.RefreshAsync(tuningConnection, _logger, stoppingToken);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("Composer performance tuning failed — queries fall back to un-indexed scans: {Message}", ex.Message);
         }
 
         /* Restart continuity: re-seed delta baselines from the store (the Postgres twin of Lite's
@@ -960,6 +989,11 @@ public sealed class DarlingWorker : BackgroundService
                    incidentally); a 24/7 service must actually invoke it or analysis_findings
                    grows unbounded. Rides the daily purge; never throws (logs + degrades). */
                 await new PgFindingStore(postgres, _logger).CleanupOldFindingsAsync(retentionDays: 30);
+
+                /* Keep the retained sql_handle->module map current (object_name attribution for old query_stats
+                   CAGG windows). Rides the daily purge; failure-isolated inside RefreshAsync. */
+                await using var moduleMapConnection = await postgres.OpenConnectionAsync(stoppingToken);
+                await DarlingModuleMap.RefreshAsync(moduleMapConnection, _logger, stoppingToken);
             }
 
             /* Stage 4 fleet-level self-alert: the store disk-pressure backstop. The daily purge is the ONLY

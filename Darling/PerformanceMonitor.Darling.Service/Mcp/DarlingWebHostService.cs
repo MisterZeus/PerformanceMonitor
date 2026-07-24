@@ -219,6 +219,26 @@ public sealed class DarlingWebHostService : BackgroundService
     }
 
     /// <summary>
+    /// The effective web-dashboard bind — the web twin of <see cref="DarlingMcpHostService.ResolveMcpBind"/>:
+    /// projects the web network block onto the shared <see cref="DarlingHostBinding.ResolveBind"/> ladder
+    /// (darling-network-endpoints anti-drift). The web host was built on the shared enums from the start, so
+    /// unlike MCP there is no nested-enum mapping — the shared decision is returned as-is. PURE; extracted so
+    /// the --configure-network wizard validates candidate web blocks through the SAME resolver the host
+    /// fail-closes on (#1617), exactly as the wizard's MCP path calls ResolveMcpBind.
+    /// </summary>
+    internal static DarlingHostBinding.BindDecision ResolveWebBind(WebConfig web, bool managed)
+    {
+        var network = web.Network;
+        return DarlingHostBinding.ResolveBind(
+            network?.Listen,
+            network?.AllowFrom,
+            tokenPresent: network is not null
+                && (!string.IsNullOrWhiteSpace(network.EncryptedToken) || !string.IsNullOrWhiteSpace(network.Token)),
+            networkConfigured: network is { IsConfigured: true },
+            managed: managed);
+    }
+
+    /// <summary>
     /// One start ATTEMPT of the inner web app at <paramref name="effectivePort"/>: the port comes from the live
     /// control-plane value, and every bail path returns false so the supervisor retries with backoff instead of
     /// standing down for the process lifetime. The bind/network/token decisions come from the FILE-loaded config
@@ -230,13 +250,7 @@ public sealed class DarlingWebHostService : BackgroundService
         var network = web.Network;
 
         /* Decide the effective bind PURELY (shared ladder), then map the reason -> severity here. */
-        var bind = DarlingHostBinding.ResolveBind(
-            network?.Listen,
-            network?.AllowFrom,
-            tokenPresent: network is not null
-                && (!string.IsNullOrWhiteSpace(network.EncryptedToken) || !string.IsNullOrWhiteSpace(network.Token)),
-            networkConfigured: network is { IsConfigured: true },
-            managed: config.Postgres.Managed);
+        var bind = ResolveWebBind(web, config.Postgres.Managed);
         LogBindReason(web, bind.Reason);
 
         try

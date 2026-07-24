@@ -228,6 +228,427 @@ public static class TimescaleSupport
     public static string AddCompressionPolicySql(string table)
         => $"SELECT add_compression_policy('{table}', compress_after => INTERVAL '{CompressAfterDays} days', if_not_exists => true)";
 
+    /* ─────────────────────────── continuous aggregates (query acceleration) ─────────────────────────── */
+
+    /// <summary>The hourly continuous-aggregate view names — query-acceleration rollups for the two tables that
+    /// dominate the store (query_stats ~145 GB, procedure_stats ~49 GB, ~90% together). Every Custom Views
+    /// composer panel over these tables does date_trunc('hour', collection_time) + SUM(delta_*) GROUP BY a
+    /// dimension; these pre-materialize exactly that shape so anything older than the ~2-day hot window reads the
+    /// rollup instead of scanning raw per-sweep rows. NOT retention (raw still exists for the hot window; dropping
+    /// old raw chunks is a separate, unmade decision).</summary>
+    public const string QueryStatsHourlyView = "query_stats_hourly";
+
+    /// <summary><see cref="QueryStatsHourlyView"/>'s procedure_stats sibling.</summary>
+    public const string ProcedureStatsHourlyView = "procedure_stats_hourly";
+
+    /// <summary>The query_store_stats hourly continuous aggregate. Built now, ahead of any writable-Query-Store
+    /// primary — on a read-only replica QS surfaces nothing new to harvest, so this sits empty until one is added,
+    /// but the rollup path exists the moment data starts flowing. Weaker cardinality reduction than the delta
+    /// tables (QS's own top-N sampling already surfaces a broad, shifting query/plan set), still worth having.</summary>
+    public const string QueryStoreStatsHourlyView = "query_store_stats_hourly";
+
+    /// <summary>The DAILY tier: hierarchical continuous aggregates sourced from the hourly CAGGs, NOT raw — 2.28.1
+    /// supports a continuous aggregate built directly on another. Kept indefinitely (no retention policy) as the
+    /// "coarsened but never fully lost" tier for anything past the hourly CAGG's own horizon.</summary>
+    public const string QueryStatsDailyView = "query_stats_daily";
+
+    /// <summary><see cref="QueryStatsDailyView"/>'s procedure_stats sibling (sourced from procedure_stats_hourly).</summary>
+    public const string ProcedureStatsDailyView = "procedure_stats_daily";
+
+    /// <summary>The Query Store DAILY continuous aggregate — hierarchical from <see cref="QueryStoreStatsHourlyView"/>,
+    /// same composer dims (module_name / query_hash) + weighted sums. Kept indefinitely; a QS window past the
+    /// hourly's 21d horizon routes here.</summary>
+    public const string QueryStoreStatsDailyView = "query_store_stats_daily";
+
+    /// <summary>
+    /// The query_stats hourly continuous aggregate. 1-hour buckets grouped by the SAME dimensions the composer's
+    /// <c>MeasureCatalog</c> uses for query_stats (server_id / server_name / database_name / query_hash), so a
+    /// panel can point here with no dimension remapping. SUM/MIN/MAX on each per-interval DELTA column (NOT a
+    /// pre-divided average — avg composes at query time as sum/execution_count_sum, which re-aggregates
+    /// correctly; a materialized average would not) plus a <c>sample_count</c>. Summing the deltas is
+    /// double-count-safe: they are Darling's own per-interval deltas, not raw cumulative DMV counters. Created
+    /// WITH NO DATA — a full historical refresh over 145 GB is heavy I/O, a deliberate off-hours manual op, NEVER
+    /// startup work; real-time aggregation stays ON (the default — no <c>materialized_only</c>), so the view is
+    /// correct to query for any window immediately, just un-accelerated for old windows until the policy + a
+    /// manual backfill materialize them. IF NOT EXISTS so a restart re-converges. A SINGLE statement: a CAGG
+    /// CREATE cannot run inside a transaction, so it must never be batched with the policy call.
+    /// </summary>
+    public const string CreateQueryStatsHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_hourly
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    query_hash,
+    sql_handle,
+    time_bucket('1 hour', collection_time) AS bucket,
+    sum(delta_worker_time) AS worker_time_sum,
+    min(delta_worker_time) AS worker_time_min,
+    max(delta_worker_time) AS worker_time_max,
+    sum(delta_elapsed_time) AS elapsed_time_sum,
+    min(delta_elapsed_time) AS elapsed_time_min,
+    max(delta_elapsed_time) AS elapsed_time_max,
+    sum(delta_execution_count) AS execution_count_sum,
+    min(delta_execution_count) AS execution_count_min,
+    max(delta_execution_count) AS execution_count_max,
+    count(*) AS sample_count
+FROM collect.query_stats
+GROUP BY server_id, server_name, database_name, query_hash, sql_handle, bucket
+WITH NO DATA";
+
+    /// <summary>The procedure_stats hourly continuous aggregate — <see cref="CreateQueryStatsHourlySql"/>'s
+    /// sibling, grouped by <c>schema_name</c> + <c>object_name</c> (procedure_stats' composer dimensions; a panel
+    /// grouping by schema_name alone re-aggregates over its objects). Same aggregation shape, same WITH NO DATA +
+    /// IF NOT EXISTS discipline.</summary>
+    public const string CreateProcedureStatsHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.procedure_stats_hourly
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    schema_name,
+    object_name,
+    time_bucket('1 hour', collection_time) AS bucket,
+    sum(delta_worker_time) AS worker_time_sum,
+    min(delta_worker_time) AS worker_time_min,
+    max(delta_worker_time) AS worker_time_max,
+    sum(delta_elapsed_time) AS elapsed_time_sum,
+    min(delta_elapsed_time) AS elapsed_time_min,
+    max(delta_elapsed_time) AS elapsed_time_max,
+    sum(delta_execution_count) AS execution_count_sum,
+    min(delta_execution_count) AS execution_count_min,
+    max(delta_execution_count) AS execution_count_max,
+    count(*) AS sample_count
+FROM collect.procedure_stats
+GROUP BY server_id, server_name, database_name, schema_name, object_name, bucket
+WITH NO DATA";
+
+    /// <summary>
+    /// The query_store_stats hourly continuous aggregate, grouped by the COMPOSER's Query Store dimensions
+    /// (server / database_name / module_name / query_hash) so a composed QS panel can route here — NOT Query
+    /// Store's own query_id/plan_id, which the composer never exposes. Carries the EXECUTION-WEIGHTED sums
+    /// (<c>sum(avg_* * execution_count)</c>) so the composer's weighted mean composes EXACTLY as
+    /// <c>duration_us_weighted_sum / execution_count_sum</c> across any window (avg*count = the interval's total,
+    /// summed = the true total) — never an avg-of-avgs. This matters the moment a writable-Query-Store primary is
+    /// added (the scenario this CAGG exists to be ready for); on the current read-only replica it is simply empty.
+    /// WITH NO DATA + IF NOT EXISTS, one statement.
+    /// </summary>
+    public const string CreateQueryStoreStatsHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_hourly
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    module_name,
+    query_hash,
+    time_bucket('1 hour', collection_time) AS bucket,
+    sum(execution_count) AS execution_count_sum,
+    sum(avg_duration_us::double precision * execution_count) AS duration_us_weighted_sum,
+    sum(avg_cpu_time_us::double precision * execution_count) AS cpu_us_weighted_sum,
+    max(max_duration_us) AS max_duration_us_max,
+    max(max_cpu_time_us) AS max_cpu_time_us_max,
+    count(*) AS sample_count
+FROM collect.query_store_stats
+GROUP BY server_id, server_name, database_name, module_name, query_hash, bucket
+WITH NO DATA";
+
+    /// <summary>
+    /// The query_stats DAILY continuous aggregate — a HIERARCHICAL CAGG sourced from <see cref="QueryStatsHourlyView"/>
+    /// (not raw). Re-aggregates the hourly rollup to 1-day buckets: SUM of the hourly sums, MIN of the hourly mins,
+    /// MAX of the hourly maxes (each composes correctly across the coarser bucket), plus SUM of the hourly
+    /// sample_counts. The GROUP BY uses the explicit <c>time_bucket('1 day', bucket)</c> expression, NOT the bare
+    /// <c>bucket</c> alias: an unqualified <c>bucket</c> in GROUP BY binds to the SOURCE column (the hourly bucket)
+    /// under Postgres's input-column-wins ambiguity rule, which would group by hour, not day. WITH NO DATA +
+    /// IF NOT EXISTS; the hourly CAGG must already exist (it is created earlier in the same sweep).
+    /// </summary>
+    public const string CreateQueryStatsDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_daily
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    query_hash,
+    sql_handle,
+    time_bucket('1 day', bucket) AS bucket,
+    sum(worker_time_sum) AS worker_time_sum,
+    min(worker_time_min) AS worker_time_min,
+    max(worker_time_max) AS worker_time_max,
+    sum(elapsed_time_sum) AS elapsed_time_sum,
+    min(elapsed_time_min) AS elapsed_time_min,
+    max(elapsed_time_max) AS elapsed_time_max,
+    sum(execution_count_sum) AS execution_count_sum,
+    min(execution_count_min) AS execution_count_min,
+    max(execution_count_max) AS execution_count_max,
+    sum(sample_count) AS sample_count
+FROM collect.query_stats_hourly
+GROUP BY server_id, server_name, database_name, query_hash, sql_handle, time_bucket('1 day', bucket)
+WITH NO DATA";
+
+    /// <summary>The procedure_stats DAILY continuous aggregate — <see cref="CreateQueryStatsDailySql"/>'s sibling,
+    /// sourced from <see cref="ProcedureStatsHourlyView"/> and grouped by <c>schema_name</c> + <c>object_name</c>.
+    /// Same hierarchical re-aggregation and same explicit-<c>time_bucket</c> GROUP BY discipline.</summary>
+    public const string CreateProcedureStatsDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.procedure_stats_daily
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    schema_name,
+    object_name,
+    time_bucket('1 day', bucket) AS bucket,
+    sum(worker_time_sum) AS worker_time_sum,
+    min(worker_time_min) AS worker_time_min,
+    max(worker_time_max) AS worker_time_max,
+    sum(elapsed_time_sum) AS elapsed_time_sum,
+    min(elapsed_time_min) AS elapsed_time_min,
+    max(elapsed_time_max) AS elapsed_time_max,
+    sum(execution_count_sum) AS execution_count_sum,
+    min(execution_count_min) AS execution_count_min,
+    max(execution_count_max) AS execution_count_max,
+    sum(sample_count) AS sample_count
+FROM collect.procedure_stats_hourly
+GROUP BY server_id, server_name, database_name, schema_name, object_name, time_bucket('1 day', bucket)
+WITH NO DATA";
+
+    /// <summary>The Query Store DAILY continuous aggregate — <see cref="CreateQueryStatsDailySql"/>'s Query Store
+    /// sibling, hierarchical from <see cref="QueryStoreStatsHourlyView"/> and grouped by the composer's QS dims
+    /// (module_name / query_hash). SUM re-aggregates the hourly weighted sums (so the weighted mean composes as
+    /// duration_us_weighted_sum / execution_count_sum across days) and MAX the peaks. Same column NAMES as the
+    /// hourly, so <c>ComposeCaggValueMapper</c> reads both with no change. Explicit-<c>time_bucket</c> GROUP BY.</summary>
+    public const string CreateQueryStoreStatsDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_daily
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    module_name,
+    query_hash,
+    time_bucket('1 day', bucket) AS bucket,
+    sum(execution_count_sum) AS execution_count_sum,
+    sum(duration_us_weighted_sum) AS duration_us_weighted_sum,
+    sum(cpu_us_weighted_sum) AS cpu_us_weighted_sum,
+    max(max_duration_us_max) AS max_duration_us_max,
+    max(max_cpu_time_us_max) AS max_cpu_time_us_max,
+    sum(sample_count) AS sample_count
+FROM collect.query_store_stats_hourly
+GROUP BY server_id, server_name, database_name, module_name, query_hash, time_bucket('1 day', bucket)
+WITH NO DATA";
+
+    /// <summary>
+    /// The refresh policy for a continuous aggregate: materialize <c>[now - 3 days, now - endOffset]</c> every
+    /// <c>scheduleInterval</c>. <c>start_offset 3 days</c> gives margin past the ~2-day compression/hot window
+    /// (covers same-day-arriving corrections) and is the buffer the retention tiers lean on — a tier's drop must
+    /// never outrun the next tier's 3-day refresh start. <c>endOffset</c> leaves the still-filling current bucket
+    /// unmaterialized (no repeated rework); <c>scheduleInterval</c> matches the bucket. Defaults are the hourly
+    /// shape; the daily CAGGs pass <c>"1 day"</c>/<c>"1 day"</c>. <c>if_not_exists</c> so a restart re-converges.
+    /// </summary>
+    public static string AddContinuousAggregatePolicySql(string view, string endOffset = "1 hour", string scheduleInterval = "1 hour")
+        => $"SELECT add_continuous_aggregate_policy('collect.{view}', start_offset => INTERVAL '3 days', end_offset => INTERVAL '{endOffset}', schedule_interval => INTERVAL '{scheduleInterval}', if_not_exists => true)";
+
+    /// <summary>
+    /// The composer-dimension reshape: the QS hourly CAGG regrouped query_id/plan_id → module_name/query_hash
+    /// (+ weighted sums), and the procedure_stats CAGGs gained schema_name. <c>CREATE ... IF NOT EXISTS</c> cannot
+    /// ALTER an existing CAGG, so a store that already built the OLD shape must DROP it first;
+    /// <see cref="EnsureContinuousAggregatesAsync"/> (run right after) recreates it in the new shape. Each affected
+    /// CAGG is empty (QS on a read-only replica) or only a day or two old, so the drop loses little and the refresh
+    /// backfills the recent window within the hour. Staleness is detected STRUCTURALLY — the OLD QS CAGG still has
+    /// a <c>query_id</c> column; the OLD procedure_stats CAGG lacks <c>schema_name</c> — so this is a strict no-op
+    /// once reshaped, and on a fresh store (no CAGG yet) nothing matches. Failure-isolated: a failed drop leaves the
+    /// old shape in place (logged), never kills startup. query_stats CAGGs are unchanged and untouched. CASCADE
+    /// drops the dependent daily CAGG, which the ensure sweep also recreates.
+    /// </summary>
+    public static async Task<int> DropStaleContinuousAggregatesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var reshapes = new[]
+        {
+            /* OLD query_store_stats_hourly grouped by query_id/plan_id → stale iff it still has a query_id column. */
+            (View: "query_store_stats_hourly",
+             StaleCheck: "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'query_store_stats_hourly' AND column_name = 'query_id')"),
+            /* OLD procedure_stats_hourly lacked schema_name → stale iff the view EXISTS but has no schema_name
+               column. CASCADE also drops procedure_stats_daily, which the ensure sweep recreates. */
+            (View: "procedure_stats_hourly",
+             StaleCheck: "SELECT (EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'procedure_stats_hourly') AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'procedure_stats_hourly' AND column_name = 'schema_name'))"),
+            /* query_stats_hourly / _daily gained sql_handle (object_name routing) → stale iff the view EXISTS but
+               has no sql_handle column. CASCADE drops query_stats_daily, which the ensure sweep recreates. */
+            (View: "query_stats_hourly",
+             StaleCheck: "SELECT (EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'query_stats_hourly') AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'query_stats_hourly' AND column_name = 'sql_handle'))"),
+        };
+
+        var dropped = 0;
+        foreach (var (view, staleCheck) in reshapes)
+        {
+            try
+            {
+                bool stale;
+                using (var check = new NpgsqlCommand(staleCheck, connection) { CommandTimeout = SetupTimeoutSeconds })
+                {
+                    stale = await check.ExecuteScalarAsync(cancellationToken) is true;
+                }
+
+                if (!stale)
+                {
+                    continue;
+                }
+
+                using (var drop = new NpgsqlCommand($"DROP MATERIALIZED VIEW IF EXISTS collect.{view} CASCADE", connection) { CommandTimeout = SetupTimeoutSeconds })
+                {
+                    await drop.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                dropped++;
+                logger?.LogInformation(
+                    "TimescaleDB: dropped stale continuous aggregate {View} (composer-dimension reshape) — recreated in the new shape this cycle.",
+                    view);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Reshape drop of {View} failed — it stays in the OLD shape until the next restart retries: {Message}",
+                    view, ex.Message);
+            }
+        }
+
+        return dropped;
+    }
+
+    /// <summary>
+    /// Creates the continuous aggregates and attaches each one's refresh policy
+    /// (<see cref="AddContinuousAggregatePolicySql"/>): three HOURLY (query_stats, procedure_stats,
+    /// query_store_stats) then two DAILY (query_stats, procedure_stats). The daily tier is HIERARCHICAL — each
+    /// daily CAGG is sourced from its hourly CAGG, so the ordered sweep creates the hourly ones first. Runs in the
+    /// worker's TimescaleDB block (CAGGs need the extension), AFTER hypertables + compression are in place. The
+    /// CREATE and the policy are SEPARATE commands
+    /// per aggregate — a CAGG CREATE cannot run inside a transaction, so it is never batched with another
+    /// statement. Failure-isolated per aggregate: one failure warns and the composer keeps querying raw.
+    /// Idempotent (IF NOT EXISTS on both), so it re-converges every restart. Does NOT backfill history (WITH NO
+    /// DATA + real-time aggregation keeps the view correct immediately; the heavy full refresh is a deliberate
+    /// off-hours op). Returns the number ready.
+    /// </summary>
+    public static async Task<int> EnsureContinuousAggregatesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        // Hourly CAGGs FIRST (the two delta tables + query_store_stats), THEN the daily tier — the daily CAGGs are
+        // hierarchical (sourced from the hourly CAGGs), so the hourly ones must be created earlier in this ordered
+        // sweep. Daily policies use the 1-day end-offset/schedule; the hourly ones take the helper's defaults.
+        var aggregates = new[]
+        {
+            (CreateSql: CreateQueryStatsHourlySql,      View: QueryStatsHourlyView,      PolicySql: AddContinuousAggregatePolicySql(QueryStatsHourlyView)),
+            (CreateSql: CreateProcedureStatsHourlySql,  View: ProcedureStatsHourlyView,  PolicySql: AddContinuousAggregatePolicySql(ProcedureStatsHourlyView)),
+            (CreateSql: CreateQueryStoreStatsHourlySql, View: QueryStoreStatsHourlyView, PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsHourlyView)),
+            (CreateSql: CreateQueryStatsDailySql,       View: QueryStatsDailyView,       PolicySql: AddContinuousAggregatePolicySql(QueryStatsDailyView, "1 day", "1 day")),
+            (CreateSql: CreateProcedureStatsDailySql,   View: ProcedureStatsDailyView,   PolicySql: AddContinuousAggregatePolicySql(ProcedureStatsDailyView, "1 day", "1 day")),
+            (CreateSql: CreateQueryStoreStatsDailySql,  View: QueryStoreStatsDailyView,  PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsDailyView, "1 day", "1 day")),
+        };
+
+        var ready = 0;
+        foreach (var (createSql, view, policySql) in aggregates)
+        {
+            try
+            {
+                using (var create = new NpgsqlCommand(createSql, connection) { CommandTimeout = SetupTimeoutSeconds })
+                {
+                    await create.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                using (var policy = new NpgsqlCommand(policySql, connection) { CommandTimeout = SetupTimeoutSeconds })
+                {
+                    await policy.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                ready++;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Continuous aggregate {View} setup failed — composer queries fall back to raw scans: {Message}",
+                    view, ex.Message);
+            }
+        }
+
+        logger?.LogInformation(
+            "TimescaleDB: {Ready}/{Total} continuous aggregate(s) ready (3 hourly: query_stats, procedure_stats, query_store_stats; 3 daily: query_stats, procedure_stats, query_store_stats)",
+            ready, aggregates.Length);
+        return ready;
+    }
+
+    /// <summary>Raw-tier retention horizon: keep per-sweep raw ~4 days — one day past the hourly CAGG's own 3-day
+    /// refresh window, so the raw drop never outruns the aggregate that preserves it.</summary>
+    public const string RawRetentionInterval = "4 days";
+
+    /// <summary>Hourly-CAGG-tier retention horizon: keep the hourly rollups 21 days — well past the daily CAGG's
+    /// 3-day refresh window, so the hourly drop never outruns the daily aggregate. The daily CAGGs themselves get
+    /// NO retention policy: they are the coarsened, kept-indefinitely tier.</summary>
+    public const string HourlyRetentionInterval = "21 days";
+
+    /// <summary>A TimescaleDB retention policy: schedule a background job that DROPs chunks older than
+    /// <paramref name="dropAfter"/>. <c>if_not_exists</c> so a restart re-converges. The actual drop is a
+    /// chunk-level DROP TABLE (cheap, no rewrite), so unlike the CAGG backfill it needs no off-hours window.</summary>
+    public static string AddRetentionPolicySql(string relation, string dropAfter)
+        => $"SELECT add_retention_policy('collect.{relation}', drop_after => INTERVAL '{dropAfter}', if_not_exists => true)";
+
+    /// <summary>
+    /// Attaches the tiered retention policies: the three raw tables drop at <see cref="RawRetentionInterval"/>, the
+    /// three hourly CAGGs at <see cref="HourlyRetentionInterval"/>; the daily CAGGs are kept indefinitely (no
+    /// policy). Ordering safety is by HORIZON, not run order — each tier's drop stays comfortably past the next
+    /// tier's 3-day refresh start_offset (4d raw vs 3d hourly refresh; 21d hourly vs 3d daily refresh), so a drop
+    /// never removes history the next tier has not yet materialized. Idempotent (<c>if_not_exists</c>) and
+    /// failure-isolated per policy. MUST run AFTER <see cref="EnsureContinuousAggregatesAsync"/> so the hourly
+    /// CAGGs the hourly policies target already exist. Returns the number of policies in place.
+    ///
+    /// COLD-START CAVEAT (existing stores only): on a store that already holds raw history OLDER than the hourly
+    /// CAGG has materialized, the first raw drop can remove buckets the CAGG never captured. Fresh installs are
+    /// safe automatically — nothing is older than 4 days until the CAGG has been materializing that long. For an
+    /// EXISTING store, backfill the hourly CAGGs past the raw horizon BEFORE this policy's first run.
+    /// </summary>
+    public static async Task<int> EnsureRetentionPoliciesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var policies = new[]
+        {
+            (Relation: "query_stats",             DropAfter: RawRetentionInterval),
+            (Relation: "procedure_stats",         DropAfter: RawRetentionInterval),
+            (Relation: "query_store_stats",       DropAfter: RawRetentionInterval),
+            (Relation: QueryStatsHourlyView,      DropAfter: HourlyRetentionInterval),
+            (Relation: ProcedureStatsHourlyView,  DropAfter: HourlyRetentionInterval),
+            (Relation: QueryStoreStatsHourlyView, DropAfter: HourlyRetentionInterval),
+        };
+
+        var applied = 0;
+        foreach (var (relation, dropAfter) in policies)
+        {
+            try
+            {
+                using var command = new NpgsqlCommand(AddRetentionPolicySql(relation, dropAfter), connection) { CommandTimeout = SetupTimeoutSeconds };
+                await command.ExecuteNonQueryAsync(cancellationToken);
+                applied++;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Retention policy for {Relation} ({DropAfter}) failed — that tier keeps growing until the next restart retries: {Message}",
+                    relation, dropAfter, ex.Message);
+            }
+        }
+
+        logger?.LogInformation(
+            "TimescaleDB: {Applied}/{Total} retention policies in place (raw {Raw}, hourly CAGGs {Hourly}; daily CAGGs kept indefinitely)",
+            applied, policies.Length, RawRetentionInterval, HourlyRetentionInterval);
+        return applied;
+    }
+
     /// <summary>
     /// Converts every collector table to a hypertable (<see cref="HypertableTables"/> scope;
     /// <see cref="CreateHypertableSql"/> per table). Failure-isolated per table: one failed

@@ -13,12 +13,16 @@ namespace PerformanceMonitor.Common;
 /// <summary>
 /// The single source of truth for how a SQL Server error number is judged.
 ///
-/// Two questions are asked about errors across the products, and they must never disagree:
+/// Three questions are asked about errors across the products, and they must never disagree:
 ///
-///   "Is this temporary — should we retry?"          <see cref="IsTransient"/>
-///   "Is this permanent — should we give up?"        <see cref="IsMasterAccessDenied"/>
+///   "Is this temporary — should we retry?"              <see cref="IsTransient"/>
+///   "Does this login lack rights to master?"            <see cref="IsMasterAccessDenied"/>
+///   "Should database-scoped collection go single-DB?"   <see cref="ShouldFallBackToSingleDatabase"/>
 ///
-/// The two sets MUST be disjoint. Issue #1506 is what happens when they aren't: error 40613
+/// The last two are deliberately NOT the same question, which is the #1631 lesson: an error can make
+/// the single-database fallback the right move without saying anything about the login's rights.
+///
+/// The retryable set MUST be disjoint from both. Issue #1506 is what happens when it isn't: error 40613
 /// ("database not currently available, please retry later") sat on the retryable list AND on the
 /// give-up list at the same time, so the same error meant both "this will pass" and "this is
 /// forever" depending on which code path saw it first.
@@ -64,12 +68,15 @@ public static class SqlErrorClassification
     ///   40613 — "not currently available, please retry later". Transient on its face, and listed as
     ///           retryable above — the contradiction this class exists to prevent.
     ///   40615 — "client with IP address ... is not allowed to access the server". A firewall rejection
-    ///           at the logical server. It says nothing about master specifically, and falling back to
-    ///           a user database is futile because the same rule blocks that connection too.
+    ///           at the logical server, which says nothing about this login's rights.
     ///
     /// Reported by a user whose public IP rotated daily: each rotation rejected the connection, the
     /// rejection was misread as "this login may not read master", and the verdict was cached — so
     /// collection stayed broken until the app was restarted.
+    ///
+    /// 40615 nonetheless SHOULD still trigger the single-database fallback — that is a separate
+    /// question, answered by <see cref="SingleDatabaseFallbackErrorNumbers"/>. Removing it from the
+    /// fallback path entirely (rather than only from this rights list) is what regressed #1631.
     ///
     /// 4060 and 18456 stay, because a contained user really does get them on master. Callers must
     /// still treat the verdict as revocable — both can also be thrown transiently.
@@ -84,6 +91,41 @@ public static class SqlErrorClassification
     };
 
     /// <summary>
+    /// Errors after which database-scoped collection on Azure SQL DB should stop trying to enumerate
+    /// databases from <c>master</c> and fall back to the connection's own catalog.
+    ///
+    /// This is a superset of <see cref="MasterAccessDeniedErrorNumbers"/> — every rights denial implies
+    /// the fallback — plus the one REACHABILITY error where the fallback genuinely works:
+    ///
+    ///   40615 — "client with IP address ... is not allowed to access the server". Azure SQL DB has two
+    ///           independent IP firewall layers, and the DATABASE-level rules are evaluated FIRST: a
+    ///           client whose IP matches a database-level rule is granted a connection to that database
+    ///           even with no server-level rule permitting it, while <c>master</c> (where server-level
+    ///           rules live) still requires a server-level rule. So "blocked at the server, allowed at
+    ///           the database" is a real, fully supported configuration — Microsoft in fact recommends
+    ///           database-level rules "whenever possible" — and it is exactly what #857 shipped for.
+    ///
+    /// #1506 removed 40615 from the rights list for good reason, but ALSO dropped it from the fallback
+    /// path on the mistaken premise that "the same rule blocks that connection too". It does not, and
+    /// #1631 was the result: every database-scoped collector failed outright on a server whose user
+    /// database was perfectly reachable.
+    ///
+    /// This is safe to act on because the resulting verdict is a revocable throttle, never a latch: it
+    /// expires (15 minutes), is cleared when a server returns from an outage, and is skipped entirely
+    /// when there is no target database to fall back to. A client that is merely firewalled out at the
+    /// server with no database-level rule therefore just fails its fallback attempt with the same 40615,
+    /// logs an ordinary collector error, and recovers on the next successful connect — the #1506
+    /// scenario, without the permanent wedge.
+    ///
+    /// 40613 stays out: it is transient, and retrying is the correct response.
+    /// </summary>
+    public static readonly IReadOnlySet<int> SingleDatabaseFallbackErrorNumbers = new HashSet<int>(
+        MasterAccessDeniedErrorNumbers)
+    {
+        40615  // Azure SQL - client IP not allowed at the logical server (database-level rule may still allow)
+    };
+
+    /// <summary>
     /// True when the error is temporary and the operation is worth retrying.
     /// </summary>
     public static bool IsTransient(int errorNumber) => TransientErrorNumbers.Contains(errorNumber);
@@ -94,4 +136,13 @@ public static class SqlErrorClassification
     /// <see cref="MasterAccessDeniedErrorNumbers"/>.
     /// </summary>
     public static bool IsMasterAccessDenied(int errorNumber) => MasterAccessDeniedErrorNumbers.Contains(errorNumber);
+
+    /// <summary>
+    /// True when database-scoped collection should fall back to the connection's own catalog instead of
+    /// enumerating from <c>master</c>. Broader than <see cref="IsMasterAccessDenied"/> on purpose — see
+    /// the remarks on <see cref="SingleDatabaseFallbackErrorNumbers"/>. This is the question the Azure
+    /// database-enumeration catch sites in both SKUs actually need answered.
+    /// </summary>
+    public static bool ShouldFallBackToSingleDatabase(int errorNumber) =>
+        SingleDatabaseFallbackErrorNumbers.Contains(errorNumber);
 }
