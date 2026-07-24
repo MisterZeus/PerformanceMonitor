@@ -39,6 +39,23 @@ public sealed class DarlingAlertReadAdapterTests
     private static readonly string TestServerKey = TestServerId.ToString(CultureInfo.InvariantCulture);
     private const string TestServerName = "alert-adapter-e2e";
 
+    /// <summary>
+    /// Regression guard: the sp_server_diagnostics exclusion must match on BOTH the wait type and the query text.
+    /// A field session (multi39, 2026-07-22) fired a false Long-Running Query alert because sp_server_diagnostics
+    /// was captured in a PREEMPTIVE_XE_GETTARGETSTATE wait (it also does Extended Events work), which the
+    /// wait-type-only match missed. The query-text match (case-insensitive, NULL-safe) catches it regardless of
+    /// the wait it is in at capture time. Ungated (a pure SQL-fragment pin).
+    /// </summary>
+    [Fact]
+    public void SpServerDiagnosticsFilter_AlsoMatchesQueryText_NotJustWaitType_AndIsNullSafe()
+    {
+        var filter = DarlingAlertReadAdapter.SpServerDiagnosticsFilter;
+        Assert.Contains("wait_type NOT LIKE '%SP_SERVER_DIAGNOSTICS%'", filter, StringComparison.Ordinal);
+        Assert.Contains("query_text NOT ILIKE '%sp_server_diagnostics%'", filter, StringComparison.Ordinal);
+        /* NULL-safe: a legitimate long-running query with a NULL query_text must NOT be dropped by this filter. */
+        Assert.Contains("r.query_text IS NULL OR", filter, StringComparison.Ordinal);
+    }
+
     private static readonly string[] AllFeedSql =
     {
         DarlingAlertReadAdapter.BlockedProcessReportsSql,

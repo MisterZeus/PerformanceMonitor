@@ -590,8 +590,12 @@ LIMIT 2000";
 
         var thresholdMs = (long)thresholdMinutes * 60 * 1000;
 
+        // sp_server_diagnostics usually sits in SP_SERVER_DIAGNOSTICS_SLEEP, but it also does Extended Events work,
+        // so it can be captured in a different wait (e.g. PREEMPTIVE_XE_GETTARGETSTATE) where the wait-type match
+        // alone misses it and the alert fires; the query-text match (case-insensitive, NULL-safe) catches it
+        // regardless of the wait it happens to be in at capture time.
         string spServerDiagnosticsFilter = excludeSpServerDiagnostics
-            ? "AND r.wait_type NOT LIKE N'%SP_SERVER_DIAGNOSTICS%'" : "";
+            ? "AND r.wait_type NOT LIKE N'%SP_SERVER_DIAGNOSTICS%' AND (r.query_text IS NULL OR r.query_text NOT ILIKE N'%sp_server_diagnostics%')" : "";
         string waitForFilter = excludeWaitFor
             ? "AND r.wait_type NOT IN (N'WAITFOR', N'BROKER_RECEIVE_WAITFOR')" : "";
         string backupsFilter = excludeBackups

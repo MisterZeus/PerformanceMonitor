@@ -88,17 +88,37 @@ public static class ComposeCompiler
             throw new ArgumentNullException(nameof(context));
         }
 
+        /* Source routing: read a CAGG rollup instead of raw when the window's oldest point is past the raw
+           horizon (ComposeSourceRouter). EndUtc is "now" — the endpoint always sets end = DateTime.UtcNow. Fall
+           back to raw when the measure's value expression can't be remapped to the CAGG columns (CanRemap). */
+        var route = ComposeSourceRouter.Resolve(plan, context.EndUtc, context.StartUtc);
+        if (route.IsCagg && !ComposeCaggValueMapper.CanRemap(plan.Measure, plan.Aggregate))
+        {
+            route = ComposeRoute.Raw;
+        }
+
+        /* Auto resolves to a concrete grain from the window before anything downstream (ceiling + date_trunc);
+           a non-Auto bucket passes through unchanged, so existing panels are byte-for-byte identical. */
+        var effectiveBucket = plan.TimeBucket;
         if (plan.Mode == PanelMode.TimeSeries)
         {
             var windowSeconds = (context.EndUtc - context.StartUtc).TotalSeconds;
-            var bucketSeconds = MeasureCatalog.BucketSeconds(plan.TimeBucket);
+            effectiveBucket = MeasureCatalog.ResolveBucket(plan.TimeBucket, windowSeconds);
+            /* A CAGG can't render finer than its own bucket — clamp the display grain up to the tier's grain
+               (hourly -> at least hour, daily -> at least day) so date_trunc re-aggregates, never under-reads. */
+            if (route.IsCagg)
+            {
+                effectiveBucket = CoarserBucket(
+                    effectiveBucket, route.Tier == ComposeSourceTier.Daily ? ComposeTimeBucket.Day : ComposeTimeBucket.Hour);
+            }
+            var bucketSeconds = MeasureCatalog.BucketSeconds(effectiveBucket);
             if (bucketSeconds > 0)
             {
                 var buckets = Math.Ceiling(windowSeconds / bucketSeconds);
                 if (buckets > ComposeLimits.MaxBuckets)
                 {
                     return (null,
-                        $"the window and '{MeasureCatalog.WireName(plan.TimeBucket)}' bucket would produce {buckets:0} points " +
+                        $"the window and '{MeasureCatalog.WireName(effectiveBucket)}' bucket would produce {buckets:0} points " +
                         $"(max {ComposeLimits.MaxBuckets}); choose a coarser bucket or a shorter window.");
                 }
             }
@@ -113,11 +133,12 @@ public static class ComposeCompiler
         var hasServerScope = context.Servers is { Count: > 0 };
         var serverScopeParam = hasServerScope ? p.AddTextArray(context.Servers!) : null;
 
-        var timeColumn = s_timeColumnByTable[plan.Measure.SourceTable];
+        var timeColumn = route.IsCagg ? ComposeRoute.CaggTimeColumn : s_timeColumnByTable[plan.Measure.SourceTable];
         var sql = new StringBuilder();
 
-        /* The #1568 module CTE (window-bounded) — only when a dimension is stitched from it. */
-        if (plan.UsesModuleJoin)
+        /* The #1568 module CTE (window-bounded from procedure_stats) — only on the RAW path. A CAGG route joins the
+           retained module_map instead (procedure_stats raw is dropped at 4d, so the CTE can't cover old windows). */
+        if (plan.UsesModuleJoin && !route.IsCagg)
         {
             /* Window-bounded AND scoped to the same server set — partitioned by (server_name, sql_handle) so a
                handle reused across servers attributes per server, not globally. */
@@ -147,7 +168,7 @@ public static class ComposeCompiler
 
         if (plan.Mode == PanelMode.TimeSeries)
         {
-            var bucketExpr = $"date_trunc('{MeasureCatalog.DateTruncField(plan.TimeBucket)}', {FactAlias}.{timeColumn})";
+            var bucketExpr = $"date_trunc('{MeasureCatalog.DateTruncField(effectiveBucket)}', {FactAlias}.{timeColumn})";
             selectExprs.Add(bucketExpr + " AS bucket");
             groupExprs.Add(bucketExpr);
         }
@@ -159,17 +180,30 @@ public static class ComposeCompiler
             groupExprs.Add(expr);
         }
 
-        selectExprs.Add(BuildValueExpr(plan) + " AS value");
+        selectExprs.Add(BuildValueExpr(plan, route) + " AS value");
 
         sql.Append("SELECT ").Append(string.Join(", ", selectExprs)).Append('\n');
-        sql.Append("FROM ").Append(PgSchemaGenerator.CollectSchema).Append('.').Append(plan.Measure.SourceTable)
+        sql.Append("FROM ").Append(PgSchemaGenerator.CollectSchema).Append('.')
+            .Append(route.IsCagg ? route.CaggRelation! : plan.Measure.SourceTable)
             .Append(" AS ").Append(FactAlias).Append('\n');
 
         if (plan.UsesModuleJoin)
         {
-            sql.Append("LEFT JOIN ").Append(ModuleAlias).Append(" ON ").Append(ModuleAlias)
-                .Append(".sql_handle = ").Append(FactAlias).Append(".sql_handle AND ").Append(ModuleAlias)
-                .Append(".server_name = ").Append(FactAlias).Append(".server_name\n");
+            /* Raw joins the window-bounded CTE (m); a CAGG route joins the retained collect.module_map directly
+               (its raw procedure_stats is gone at 4d, but the CAGG carries sql_handle). Same alias + join keys, so
+               object_name resolves as m.object_name either way. */
+            if (route.IsCagg)
+            {
+                sql.Append("LEFT JOIN ").Append(PgSchemaGenerator.CollectSchema).Append(".module_map AS ").Append(ModuleAlias)
+                    .Append(" ON ").Append(ModuleAlias).Append(".sql_handle = ").Append(FactAlias).Append(".sql_handle AND ")
+                    .Append(ModuleAlias).Append(".server_name = ").Append(FactAlias).Append(".server_name\n");
+            }
+            else
+            {
+                sql.Append("LEFT JOIN ").Append(ModuleAlias).Append(" ON ").Append(ModuleAlias)
+                    .Append(".sql_handle = ").Append(FactAlias).Append(".sql_handle AND ").Append(ModuleAlias)
+                    .Append(".server_name = ").Append(FactAlias).Append(".server_name\n");
+            }
         }
 
         sql.Append("WHERE ").Append(FactAlias).Append('.').Append(timeColumn).Append(" >= ").Append(startParam).Append('\n');
@@ -277,11 +311,24 @@ public static class ComposeCompiler
     private static string ColumnRef(ComposeDimension dimension) =>
         (dimension.ViaModuleJoin ? ModuleAlias : FactAlias) + "." + dimension.Column;
 
+    /// <summary>The coarser of two buckets (None &lt; Minute &lt; Hour &lt; Day) — clamps a display grain up to a
+    /// CAGG tier's own grain, since a rollup can never be rendered finer than it was materialized.</summary>
+    private static ComposeTimeBucket CoarserBucket(ComposeTimeBucket a, ComposeTimeBucket b) =>
+        (ComposeTimeBucket)Math.Max((int)a, (int)b);
+
     /// <summary>Builds the <c>value</c> expression: the archetype/kind-gated aggregate, cast to double, then
     /// scaled by the requested unit's conversion factor (a compile-time family constant).</summary>
-    private static string BuildValueExpr(PanelPlan plan)
+    private static string BuildValueExpr(PanelPlan plan, ComposeRoute route)
     {
         var measure = plan.Measure;
+
+        /* A CAGG route reads the pre-aggregated rollup columns instead of the raw delta (the route gate guarantees
+           the measure + aggregate is remappable — CanRemap); unit-scaled exactly like the raw paths below. */
+        if (route.IsCagg)
+        {
+            return ApplyUnitConversion(
+                ComposeCaggValueMapper.BuildCaggNativeExpr(plan), measure.UnitFamily, measure.NativeUnit, plan.Unit);
+        }
 
         if (measure.Kind == MeasureKind.Ratio)
         {

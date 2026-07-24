@@ -259,7 +259,8 @@ public sealed class DarlingMcpCustomViewTools
         "'validAggregates' and 'allowedDimensions' legal for it, its unit family + default/native unit, and " +
         "'appliesTo' (which server types — onPrem/azureSqlDb/azureMi/awsRds — can collect it). A panel then names a " +
         "'source' + 'measure'|'ratio', an 'aggregate' from that measure's validAggregates, a 'unit' from its family, " +
-        "an optional 'timeBucket' (time series) OR 'topN' (ranked, not both), 'groupBy'/'filters' from its " +
+        "an optional 'timeBucket' (time series; prefer 'auto', which adapts the grain minute/hour/day to the " +
+        "panel's window so any range renders) OR 'topN' (ranked, not both), 'groupBy'/'filters' from its " +
         "allowedDimensions (plus the universal 'server' axis), and a 'viz' coherent with the mode (line/area/" +
         "stacked for time series; bar/pie for ranked; stat for a single value; table for any). Static reference " +
         "data — no server or time window needed; it reads no monitored server and no collected data.")]

@@ -114,9 +114,14 @@ public sealed class DefaultTraceEventsCollector : CollectorDefinitionBase<Defaul
 
     /* The curated, config-slice-free event set (see the class remarks). A {0} placeholder is spliced with
        the per-server excluded-database clause on ft.DatabaseName; the rollover-file base-path normalization
-       (strip _NN + re-append the extension) reads every retained file. READ UNCOMMITTED like every collector;
-       OPTION(RECOMPILE) because the cutoff selectivity varies wildly between the all-history first run and the
-       tiny steady-state windows. */
+       (strip _NN + re-append the extension) reads every retained file. The strip is guarded by a CHARINDEX
+       check: SQL Server on Linux names the initial trace file without a rollover suffix (log.trc, not
+       log_1.trc), so an unconditional strip finds no underscore, LEFT takes the full path unchanged, and
+       appending the extension back doubles it (log.trc.trc) - fn_trace_gettable then errors on the
+       nonexistent file (Msg 19049) and no events are collected. Falling back to t.path when CHARINDEX
+       returns 0 keeps the Windows behavior (which always has the _N suffix) unchanged. READ UNCOMMITTED
+       like every collector; OPTION(RECOMPILE) because the cutoff selectivity varies wildly between the
+       all-history first run and the tiny steady-state windows. */
     private const string QueryTemplate = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
@@ -145,8 +150,11 @@ SELECT
 FROM sys.traces AS t
 CROSS APPLY sys.fn_trace_gettable
 (
-    LEFT(t.path, LEN(t.path) - CHARINDEX(N'_', REVERSE(t.path))) +
-    RIGHT(t.path, 4),
+    CASE
+        WHEN CHARINDEX(N'_', REVERSE(t.path)) > 0
+        THEN LEFT(t.path, LEN(t.path) - CHARINDEX(N'_', REVERSE(t.path))) + RIGHT(t.path, 4)
+        ELSE t.path
+    END,
     t.max_files
 ) AS ft
 JOIN sys.trace_events AS te

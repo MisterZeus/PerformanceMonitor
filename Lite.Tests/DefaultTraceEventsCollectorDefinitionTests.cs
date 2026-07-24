@@ -79,6 +79,19 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
     }
 
     [Fact]
+    public void BuildQuery_RolloverPathStrip_FallsBackToBasePath_WhenNoUnderscore()
+    {
+        /* SQL Server on Linux names the initial trace file without a rollover suffix (log.trc, not
+           log_1.trc). An unconditional strip finds no underscore, so LEFT takes the full path and
+           the re-appended extension doubles it (log.trc.trc), and fn_trace_gettable errors on the
+           nonexistent file. The CASE must fall back to the base t.path when CHARINDEX finds no underscore. */
+        var text = DefaultTraceEventsCollector.Instance.BuildQuery(MakeContext()).Text;
+
+        Assert.Contains("WHEN CHARINDEX(N'_', REVERSE(t.path)) > 0", text, StringComparison.Ordinal);
+        Assert.Contains("ELSE t.path", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void BuildQuery_CapturesTheCuratedEventSet()
     {
         var text = DefaultTraceEventsCollector.Instance.BuildQuery(MakeContext()).Text;
