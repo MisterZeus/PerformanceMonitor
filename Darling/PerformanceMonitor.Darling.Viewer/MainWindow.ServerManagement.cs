@@ -75,7 +75,7 @@ public partial class MainWindow
 
         /* Re-sort through the model and rebind its projection once, rather than assigning a fresh list to
            ItemsSource behind the model's back (which is how the bound list and the fleet drifted apart). */
-        var selected = (ServerList.SelectedItem as DarlingServer)?.ServerId;
+        var selected = (ServerList.SelectedItem as FleetServerRow)?.Server.ServerId;
         _fleet.SetAll(SortWithFavorites(_fleet.All.ToList()));
         ServerList.ItemsSource = _fleet.Visible;
         ServerList.SelectedItem = _fleet.ResolveSelection(selected);
@@ -247,7 +247,7 @@ public partial class MainWindow
 
         var contextMenu = menuItem.Parent as ContextMenu;
         var target = contextMenu?.PlacementTarget as FrameworkElement;
-        return target?.DataContext as DarlingServer;
+        return (target?.DataContext as FleetServerRow)?.Server;
     }
 
     private void ServerContextMenu_ToggleFavorite_Click(object sender, RoutedEventArgs e)

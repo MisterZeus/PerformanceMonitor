@@ -569,14 +569,33 @@ public partial class MainWindow : Window
     /// reloads the visible tab. The two syncs suppress their own SelectionChanged, so the visible tab is
     /// loaded exactly once here by <see cref="RefreshVisibleAsync"/>.
     /// </summary>
+    private bool _suppressSidebarSelection;
+
+    /// <summary>
+    /// Sidebar selection. A server row syncs the aggregate tabs and loads the visible tab; a group header
+    /// is never a real selection — clicking one expands/collapses its group and the selection is restored
+    /// to a server. The suppression guard stops that restore from re-entering this handler.
+    /// </summary>
     private async void ServerList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (ServerList.SelectedItem is DarlingServer server)
+        if (_suppressSidebarSelection)
         {
-            SyncAggregateServerSelectors(server);
+            return;
         }
 
-        await RefreshVisibleAsync();
+        if (ServerList.SelectedItem is FleetHeaderRow header)
+        {
+            /* The header just took the selection, so the previously-selected server is in RemovedItems. */
+            var previousServerId = e.RemovedItems.OfType<FleetServerRow>().FirstOrDefault()?.Server.ServerId;
+            ToggleGroup(header, previousServerId);
+            return;
+        }
+
+        if (ServerList.SelectedItem is FleetServerRow row)
+        {
+            SyncAggregateServerSelectors(row.Server);
+            await RefreshVisibleAsync();
+        }
     }
 
     /// <summary>
@@ -606,9 +625,31 @@ public partial class MainWindow : Window
     /// <summary>Double-click opens (or focuses) the selected server's per-server tab (Lite's rule).</summary>
     private void ServerList_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (ServerList.SelectedItem is DarlingServer server)
+        if (ServerList.SelectedItem is FleetServerRow row)
         {
-            OpenServerTab(server);
+            OpenServerTab(row.Server);
+        }
+    }
+
+    /// <summary>
+    /// Expands or collapses a sidebar group and re-selects a server so the sidebar never rests on a header.
+    /// Reprojects through <see cref="FleetView"/> (the single seam), rebinds, and restores the prior server
+    /// if it is still visible — else the first visible one — under the suppression guard so the
+    /// programmatic re-selection does not recurse into <see cref="ServerList_SelectionChanged"/>.
+    /// </summary>
+    private void ToggleGroup(FleetHeaderRow header, int? previousServerId)
+    {
+        _suppressSidebarSelection = true;
+        try
+        {
+            _fleet.ToggleExpanded(header);
+            ServerList.ItemsSource = _fleet.Visible;
+            ServerList.SelectedItem = _fleet.ResolveSelection(previousServerId);
+            PersistCollapseState();
+        }
+        finally
+        {
+            _suppressSidebarSelection = false;
         }
     }
 
@@ -640,7 +681,7 @@ public partial class MainWindow : Window
 
         try
         {
-            var previousSelection = (ServerList.SelectedItem as DarlingServer)?.ServerId;
+            var previousSelection = (ServerList.SelectedItem as FleetServerRow)?.Server.ServerId;
 
             /* The DESIRED-state managed set (config_monitored_servers), enriched with the observed
                collect.servers facts by the shared server_id, so a viewer add/remove/enable is reflected at
@@ -683,6 +724,11 @@ public partial class MainWindow : Window
                    rather than a server, so a SelectedIndex = 0 fallback would select a non-server and the
                    aggregate-tab sync would silently never run. */
                 ServerList.SelectedItem = _fleet.ResolveSelection(preserveSelection ? previousSelection : null);
+
+                /* Fold the fleet tags into the sidebar (opt-in: no tags => the list stays flat). Done after
+                   the selectors are populated and the initial selection is set, so the tag re-projection
+                   just preserves that selection under its own suppression guard. */
+                await LoadTagsAsync();
             }
             else
             {
