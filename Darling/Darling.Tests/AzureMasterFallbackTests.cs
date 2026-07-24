@@ -24,11 +24,16 @@ namespace Darling.Tests;
 /// Both SKUs now classify through the shared <see cref="SqlErrorClassification"/>, so the list cannot
 /// be edited in one and not the other. These tests exist so the invariant is enforced from Darling's
 /// suite too — Lite's copy of it protects Lite, and protecting only Lite is how this happened.
+///
+/// Also #1631, the over-correction: #1506 removed 40615 from the rights list (right) AND from the
+/// single-database fallback path (wrong). Azure evaluates DATABASE-level firewall rules first, so a
+/// user database can be fully reachable while master is firewalled off — the #857 case. "Not a rights
+/// denial" and "no fallback" are separate questions, pinned independently below.
 /// </summary>
 public class AzureMasterFallbackTests
 {
     /// <summary>
-    /// The bug. 40615 is a firewall rejection at the logical server and 40613 is "retry later" —
+    /// The #1506 half. 40615 is a firewall rejection at the logical server and 40613 is "retry later" —
     /// neither says anything about whether this login may read master.
     /// </summary>
     [Theory]
@@ -36,7 +41,7 @@ public class AzureMasterFallbackTests
     [InlineData(40613)]
     public void Reachability_Errors_Are_Not_Master_Access_Denied(int errorNumber)
     {
-        Assert.False(DarlingCollectorRunner.IsMasterAccessDeniedError(errorNumber));
+        Assert.False(SqlErrorClassification.IsMasterAccessDenied(errorNumber));
     }
 
     /// <summary>
@@ -51,24 +56,73 @@ public class AzureMasterFallbackTests
     [InlineData(18456)]
     public void Permission_Errors_Are_Still_Master_Access_Denied(int errorNumber)
     {
-        Assert.True(DarlingCollectorRunner.IsMasterAccessDeniedError(errorNumber));
+        Assert.True(SqlErrorClassification.IsMasterAccessDenied(errorNumber));
     }
 
     /// <summary>
-    /// No error may mean both "retry, this will pass" and "give up, this is permanent". 40613 meant
-    /// both, which is the whole bug.
+    /// #1631. A 40615 at the logical server is compatible with a database-level firewall rule that
+    /// leaves the user database reachable, so the single-database fallback must still fire — even
+    /// though 40615 is (correctly) not a rights denial.
+    /// </summary>
+    [Fact]
+    public void Firewall_Rejection_At_The_Server_Still_Falls_Back_To_The_Database()
+    {
+        Assert.True(DarlingCollectorRunner.ShouldFallBackToSingleDatabaseError(40615));
+    }
+
+    /// <summary>
+    /// Every rights denial still implies the fallback — the fallback set is a superset, never a
+    /// replacement, of the #857 list. 40613 stays out: transient, so retry rather than degrade.
+    /// </summary>
+    [Theory]
+    [InlineData(229, true)]
+    [InlineData(230, true)]
+    [InlineData(916, true)]
+    [InlineData(4060, true)]
+    [InlineData(18456, true)]
+    [InlineData(40613, false)]
+    public void Fallback_Set_Is_A_Superset_Of_The_Rights_Set(int errorNumber, bool expected)
+    {
+        Assert.Equal(expected, DarlingCollectorRunner.ShouldFallBackToSingleDatabaseError(errorNumber));
+    }
+
+    /// <summary>
+    /// The structural invariant behind the two lists, asserted on the SETS rather than on examples: a
+    /// rights denial must always imply the fallback, so the rights set can only ever be a subset.
+    ///
+    /// This also guards a real footgun — the fallback set is constructed FROM the rights set, so it
+    /// depends on static-initializer order. Moving either field above the other would leave the fallback
+    /// set holding only 40615 and silently disable the #857 fallback for every permission error.
+    /// </summary>
+    [Fact]
+    public void Every_Rights_Denial_Is_Also_A_Fallback_Trigger()
+    {
+        var missing = SqlErrorClassification.MasterAccessDeniedErrorNumbers
+            .Where(e => !SqlErrorClassification.ShouldFallBackToSingleDatabase(e))
+            .ToList();
+
+        Assert.True(
+            missing.Count == 0,
+            $"Error(s) {string.Join(", ", missing)} deny access to master but do not trigger the " +
+            "single-database fallback — #857 collection would fail outright for them.");
+    }
+
+    /// <summary>
+    /// No error may mean both "retry, this will pass" and "give up, degrade to single-database". 40613
+    /// meant both, which is the whole #1506 bug. Asserted against the FALLBACK set — the broader of the
+    /// two give-up sets, so this covers the rights set implicitly.
     /// </summary>
     [Fact]
     public void No_Error_Is_Both_Transient_And_Permanently_Fatal()
     {
         var contradictory = SqlErrorClassification.TransientErrorNumbers
-            .Where(SqlErrorClassification.IsMasterAccessDenied)
+            .Where(SqlErrorClassification.ShouldFallBackToSingleDatabase)
             .ToList();
 
         Assert.True(
             contradictory.Count == 0,
             $"Error(s) {string.Join(", ", contradictory)} are treated as retryable-transient AND as a " +
-            "permanent master-access verdict. Pick one — see #1506.");
+            "reason to degrade to single-database collection. Pick one — see #1506.");
     }
 
     /// <summary>
@@ -88,8 +142,8 @@ public class AzureMasterFallbackTests
         foreach (var errorNumber in everyErrorWeReasonAbout)
         {
             Assert.Equal(
-                SqlErrorClassification.IsMasterAccessDenied(errorNumber),
-                DarlingCollectorRunner.IsMasterAccessDeniedError(errorNumber));
+                SqlErrorClassification.ShouldFallBackToSingleDatabase(errorNumber),
+                DarlingCollectorRunner.ShouldFallBackToSingleDatabaseError(errorNumber));
         }
     }
 }
