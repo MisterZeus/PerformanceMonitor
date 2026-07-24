@@ -46,7 +46,10 @@ public sealed class CpuUtilizationCollectorDefinitionTests
             CollectorTestContext.Make(s_deltas, isAzureSqlDb: false));
 
         Assert.Contains("WHEN @is_linux = 1 AND x.system_idle = 0", plan.Text, StringComparison.Ordinal);
-        Assert.DoesNotContain("WHEN @is_linux = 1\n", plan.Text, StringComparison.Ordinal);
+
+        /* Normalize line endings first: on a CRLF checkout the template contains "= 1\r\n", which
+           the "\n"-suffixed needle would never match, making this guard vacuously pass. */
+        Assert.DoesNotContain("WHEN @is_linux = 1\n", plan.Text.Replace("\r\n", "\n"), StringComparison.Ordinal);
     }
 
     [Fact]
