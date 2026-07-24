@@ -92,6 +92,24 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
     }
 
     [Fact]
+    public void BuildQuery_RolloverPathStrip_OnlyStripsUnderscoresInTheFilename()
+    {
+        /* A trace DIRECTORY containing an underscore with an unsuffixed file (#1636:
+           /var/opt/my_sql/log/log.trc) must NOT strip — the last underscore has to sit AFTER the
+           last path separator (either family, since targets are Windows and Linux) to count as a
+           rollover suffix. Otherwise LEFT cuts at the directory underscore and produces a
+           nonexistent path (/var/opt/my.trc → Msg 19049). */
+        var text = DefaultTraceEventsCollector.Instance.BuildQuery(MakeContext()).Text;
+
+        Assert.Contains(
+            @"AND (CHARINDEX(N'\', REVERSE(t.path)) = 0 OR CHARINDEX(N'_', REVERSE(t.path)) < CHARINDEX(N'\', REVERSE(t.path)))",
+            text, StringComparison.Ordinal);
+        Assert.Contains(
+            "AND (CHARINDEX(N'/', REVERSE(t.path)) = 0 OR CHARINDEX(N'_', REVERSE(t.path)) < CHARINDEX(N'/', REVERSE(t.path)))",
+            text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void BuildQuery_CapturesTheCuratedEventSet()
     {
         var text = DefaultTraceEventsCollector.Instance.BuildQuery(MakeContext()).Text;

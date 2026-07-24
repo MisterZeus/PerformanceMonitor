@@ -72,12 +72,13 @@ FROM sys.dm_os_sys_info AS dosi;
 
 /* Detect SQL Server on Linux. SystemIdle reports 0 in the SCHEDULER_MONITOR
    ring buffer on some Linux/SQL Server version combos, so 100 - SystemIdle - ProcessUtilization
-   fabricates a host figure that pins total CPU at 100% (Issue #1048). Prior to SQL Server
-   2025 CU1 no DMV exposes true host CPU when that happens, so other_process is stored as NULL
-   there. sys.dm_os_linux_cpu_stats (2025 CU1+) exposes real host CPU jiffies but is a cumulative
-   counter requiring a two-sample delta, not a point-in-time snapshot like SCHEDULER_MONITOR, so
-   it isn't used here. sys.dm_os_host_info is 2017+; referenced via sp_executesql so SQL 2016
-   never binds it (@is_linux = 0). */
+   fabricates a host figure that pins total CPU at 100% (Issue #1048). The ring-buffer metrics
+   fix shipped in SQL Server 2025 CU1 (KB5078298 fix 4796293), so real SystemIdle values start
+   there, not at 2025 RTM. Prior to that no DMV exposes true host CPU when SystemIdle is 0, so
+   other_process is stored as NULL. sys.dm_os_linux_cpu_stats (2025 CU1+) exposes real host CPU
+   time but is a cumulative counter requiring a two-sample delta, not a point-in-time snapshot
+   like SCHEDULER_MONITOR, so it isn't used here. sys.dm_os_host_info is 2017+; referenced via
+   sp_executesql so SQL 2016 never binds it (@is_linux = 0). */
 IF OBJECT_ID(N'sys.dm_os_host_info', N'V') IS NOT NULL
     EXEC sys.sp_executesql
         N'SELECT @linux = CASE WHEN hi.host_platform = N''Linux'' THEN 1 ELSE 0 END FROM sys.dm_os_host_info AS hi;',
