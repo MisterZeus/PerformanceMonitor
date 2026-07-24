@@ -812,7 +812,7 @@ WHERE server_id = $3";
                 $"enumerate databases on {server.DisplayName}",
                 cancellationToken: cancellationToken);
         }
-        catch (SqlException ex) when (IsMasterAccessDeniedError(ex.Number))
+        catch (SqlException ex) when (ShouldFallBackToSingleDatabaseError(ex.Number))
         {
             MarkMasterInaccessible(serverId);
 
@@ -961,13 +961,16 @@ WHERE server_id = $3";
     }
 
     /// <summary>
-    /// Whether this error means the login cannot read master, in which case database-scoped collectors
-    /// fall back to the connection's own catalog (#857). The list — and the reason a reachability error
-    /// must never be on it (#1506) — is owned by <see cref="SqlErrorClassification"/>, shared with
-    /// Darling so the two cannot drift.
+    /// Whether master enumeration failed in a way that means database-scoped collectors should fall back
+    /// to the connection's own catalog (#857). Deliberately broader than "this login cannot read master":
+    /// a 40615 firewall rejection at the logical server says nothing about the login's rights, but the
+    /// fallback still works, because Azure evaluates DATABASE-level firewall rules first and a user
+    /// database can be reachable while master is not (#1631). The list — and the reason a reachability
+    /// error must never be read as a rights verdict (#1506) — is owned by
+    /// <see cref="SqlErrorClassification"/>, shared with Darling so the two cannot drift.
     /// </summary>
-    internal static bool IsMasterAccessDeniedError(int errorNumber) =>
-        SqlErrorClassification.IsMasterAccessDenied(errorNumber);
+    internal static bool ShouldFallBackToSingleDatabaseError(int errorNumber) =>
+        SqlErrorClassification.ShouldFallBackToSingleDatabase(errorNumber);
 
     /// <summary>
     /// Opens a SQL connection to a specific database on an Azure SQL DB logical server.

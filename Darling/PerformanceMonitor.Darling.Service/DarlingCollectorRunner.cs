@@ -683,7 +683,7 @@ public sealed class DarlingCollectorRunner
             _azureMasterInaccessibleSince.TryRemove(server.ServerId, out _);
             return databases;
         }
-        catch (SqlException ex) when (IsMasterAccessDeniedError(ex.Number))
+        catch (SqlException ex) when (ShouldFallBackToSingleDatabaseError(ex.Number))
         {
             _azureMasterInaccessibleSince[server.ServerId] = DateTime.UtcNow;
 
@@ -770,17 +770,17 @@ public sealed class DarlingCollectorRunner
     }
 
     /// <summary>
-    /// Error numbers indicating the login cannot open or read from master on Azure SQL DB —
-    /// trigger the single-database fallback (verbatim from Lite).
+    /// Whether master enumeration failed in a way that means database-scoped collectors should fall back
+    /// to the connection's own catalog (#857). Deliberately broader than "this login cannot read master":
+    /// a 40615 firewall rejection at the logical server says nothing about the login's rights, but the
+    /// fallback still works, because Azure evaluates DATABASE-level firewall rules first and a user
+    /// database can be reachable while master is not (#1631). The list — and the reason a reachability
+    /// error must never be read as a rights verdict (#1506) — is owned by
+    /// <see cref="SqlErrorClassification"/>, shared with Lite so the two cannot drift. This bug reached
+    /// Darling because the list was duplicated here.
     /// </summary>
-    /// <summary>
-    /// Whether this error means the login cannot read master, in which case database-scoped collectors
-    /// fall back to the connection's own catalog (#857). The list — and the reason a reachability error
-    /// must never be on it (#1506) — is owned by <see cref="SqlErrorClassification"/>, shared with Lite
-    /// so the two cannot drift. This bug reached Darling because the list was duplicated here.
-    /// </summary>
-    internal static bool IsMasterAccessDeniedError(int errorNumber) =>
-        SqlErrorClassification.IsMasterAccessDenied(errorNumber);
+    internal static bool ShouldFallBackToSingleDatabaseError(int errorNumber) =>
+        SqlErrorClassification.ShouldFallBackToSingleDatabase(errorNumber);
 
     private static SqlCommand CreateCollectorCommand(CollectorQuery plan, SqlConnection connection, int commandTimeoutSeconds)
     {
