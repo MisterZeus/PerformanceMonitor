@@ -59,12 +59,14 @@ BEGIN
     Detect SQL Server on Linux. On some Linux/SQL Server version combos the
     SCHEDULER_MONITOR ring buffer reports SystemIdle = 0, so 100 - SystemIdle -
     ProcessUtilization fabricates a host figure that pins total CPU at 100%
-    forever (Issue #1048). Prior to SQL Server 2025 CU1 there is no DMV that
-    exposes true host CPU when that happens, so we store NULL for
-    other_process_cpu_utilization instead of a false value. sys.dm_os_linux_cpu_stats
-    (2025 CU1+) exposes real host CPU jiffies but is a cumulative counter
-    requiring a two-sample delta, not a point-in-time snapshot like
-    SCHEDULER_MONITOR, so it isn't used here.
+    forever (Issue #1048). The ring-buffer metrics fix shipped in SQL Server
+    2025 CU1 (KB5078298 fix 4796293), so real SystemIdle values start there,
+    not at 2025 RTM. Prior to that there is no DMV that exposes true host CPU
+    when SystemIdle is 0, so we store NULL for other_process_cpu_utilization
+    instead of a false value. sys.dm_os_linux_cpu_stats (2025 CU1+) exposes
+    real host CPU time but is a cumulative counter requiring a two-sample
+    delta, not a point-in-time snapshot like SCHEDULER_MONITOR, so it isn't
+    used here.
 
     sys.dm_os_host_info exists only on SQL Server 2017+. It is referenced through
     sp_executesql so SQL Server 2016 (which has no Linux build) never binds it and

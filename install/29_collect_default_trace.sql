@@ -359,15 +359,19 @@ BEGIN
         CROSS APPLY sys.fn_trace_gettable
         (
             /*
-            SQL Server on Linux names the initial trace file without a rollover suffix
-            (log.trc, not log_1.trc). An unconditional strip finds no underscore, LEFT
-            takes the full path unchanged, and appending the extension back doubles it
-            (log.trc.trc) - fn_trace_gettable then errors on the nonexistent file
-            (Msg 19049) and no events are collected. Fall back to st.path when
-            CHARINDEX returns 0.
+            Strip the _N rollover suffix only when the LAST underscore sits in the
+            FILENAME, i.e. after the last path separator (either family). SQL Server
+            on Linux names the initial trace file without a rollover suffix (log.trc,
+            not log_1.trc), so an unguarded strip mangles the path (log.trc.trc,
+            issue 1633), and a trace DIRECTORY containing an underscore would mangle
+            it a second way (/var/opt/my_sql/log/log.trc -> /var/opt/my.trc, issue
+            1636) - fn_trace_gettable then errors on the nonexistent file (Msg 19049)
+            and no events are collected. Fall back to st.path in both cases.
             */
             CASE
                 WHEN CHARINDEX(N'_', REVERSE(st.path)) > 0
+                AND (CHARINDEX(N'\', REVERSE(st.path)) = 0 OR CHARINDEX(N'_', REVERSE(st.path)) < CHARINDEX(N'\', REVERSE(st.path)))
+                AND (CHARINDEX(N'/', REVERSE(st.path)) = 0 OR CHARINDEX(N'_', REVERSE(st.path)) < CHARINDEX(N'/', REVERSE(st.path)))
                 THEN LEFT(st.path, LEN(st.path) - CHARINDEX(N'_', REVERSE(st.path))) + RIGHT(st.path, 4)
                 ELSE st.path
             END,
