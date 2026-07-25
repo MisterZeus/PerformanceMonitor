@@ -2,7 +2,7 @@ name: Claude Auto Review
 
 # Reviews every pull request into dev or main when it is opened or updated. The review is
 # advisory (it posts comments) and is deliberately NOT a required status check, so it never
-# blocks a merge. It no-ops cleanly until the ANTHROPIC_API_KEY repo secret is set, and on
+# blocks a merge. It no-ops cleanly until the CLAUDE_CODE_OAUTH_TOKEN repo secret is set, and on
 # fork PRs (which do not receive secrets), so neither case shows a failed check.
 on:
   pull_request:
@@ -23,17 +23,17 @@ jobs:
       id-token: write
     env:
       # Mapped to env so the step guard below can skip cleanly when the secret is absent.
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 1
 
       - name: Claude review
-        if: ${{ env.ANTHROPIC_API_KEY != '' }}
+        if: ${{ env.CLAUDE_CODE_OAUTH_TOKEN != '' }}
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ env.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ env.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
