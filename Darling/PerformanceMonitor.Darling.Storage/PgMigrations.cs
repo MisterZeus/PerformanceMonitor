@@ -75,6 +75,7 @@ public static class PgMigrations
         new Migration(29, "long-query-completions-collector", V29Sql),
         new Migration(30, "web-dashboard-config", V30Sql),
         new Migration(31, "custom-views-table", V31Sql),
+        new Migration(32, "server-tags", V32Sql),
     };
 
     /// <summary>
@@ -402,6 +403,78 @@ CREATE TABLE IF NOT EXISTS config.custom_views (
     updated_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
     updated_by text
 );";
+
+    /// <summary>
+    /// V32 — the Viewer's fleet TAGS, the user-authored visual organization of a large server list
+    /// (~100 servers at the motivating field site). Two NEW config-plane tables, added additively exactly
+    /// like V31: <c>server_tags</c> is the tag tree, <c>server_tag_map</c> is the many-to-many assignment.
+    ///
+    /// <para><b>Tags, not exclusive groups.</b> A server may carry any number of tags, so the composite
+    /// PK <c>(server_id, tag_id)</c> on the map is the whole membership rule — deliberately NOT a unique
+    /// constraint on <c>server_id</c>, which is what an exclusive-group model would have needed.</para>
+    ///
+    /// <para><b>Membership lives in its own table, never as a column on
+    /// <c>config_monitored_servers</c>.</b> A column there would have required all four of: an edit to the
+    /// fail-closed <c>ViewerRestrictedConfigTables</c> column ACL (an unlisted column is invisible, which
+    /// breaks the read-only viewer's ENTIRE sidebar read, not just the new field); a matching hand edit to
+    /// BYO <c>tools/provision-roles.sql</c>; a silent widening of the network-reachable <c>mcp</c> role,
+    /// whose INSERT/UPDATE/DELETE on that table is TABLE-level and so would cover a new column it cannot
+    /// even SELECT (a blind write); and — because <c>trg_bump_monitored_servers</c> is a STATEMENT-level
+    /// trigger — a full service <c>ReloadFromStoreAsync</c> per tag write, up to one per server on a bulk
+    /// tag of 100. A side table avoids all four. It also survives the server-identity move
+    /// (<c>server_id</c> is derived from host+database+read_only_intent, so editing any of those
+    /// upserts-new-then-deletes-old), which a column on the server row would not.</para>
+    ///
+    /// <para><b>Nesting.</b> <c>parent_id</c> is a self-reference; NULL = a root tag. Depth is capped
+    /// app-side at 4 levels — Postgres cannot express that without a trigger, and the tag table is tiny
+    /// (dozens of rows), so the Viewer loads it whole, builds the tree in memory, and checks both the cap
+    /// and cycle-freedom there. No recursive CTE, no ltree extension, no closure table.
+    /// <c>ON DELETE CASCADE</c> on the self-reference means deleting a tag removes its whole subtree and
+    /// (via the map's own cascade) those assignments — the folder mental model. It can never reach
+    /// <c>config_monitored_servers</c>: there is no FK to it, so no server row, credential blob, or
+    /// collected history is touched. The Viewer still warns with the descendant + assignment counts.</para>
+    ///
+    /// <para><b>Uniqueness is per-parent</b> so <c>prod/primaries</c> and <c>staging/primaries</c> coexist.
+    /// It is a UNIQUE INDEX over <c>COALESCE(parent_id, 0)</c> rather than a plain <c>UNIQUE
+    /// (parent_id, name)</c>, because Postgres treats NULLs as DISTINCT — two ROOT tags both named
+    /// 'Prod' would otherwise both be accepted. Identity starts at 1, so 0 is never a real id.
+    /// <c>lower(name)</c> makes it case-insensitive, matching how the rest of the product treats
+    /// operator-entered names.</para>
+    ///
+    /// <para><b>NO <c>config_bump_version</c> trigger</b>, same reasoning as V31: tags feed the VIEWER's
+    /// sidebar, never the collector/service loop, so there is nothing for the service to reload and a
+    /// beacon bump would only cost a needless fleet reconcile. <c>id</c> is
+    /// <c>GENERATED ALWAYS AS IDENTITY</c> so INSERTs need no sequence USAGE grant. No explicit grant is
+    /// added: both tables are picked up by the blanket <c>GRANT ... ON ALL TABLES IN SCHEMA config</c>
+    /// statements that provisioning re-runs on EVERY service start. Note it is those, not
+    /// <c>ALTER DEFAULT PRIVILEGES</c>, that cover a table introduced by a migration — ADP only applies to
+    /// objects created after it runs, and provisioning runs AFTER the migration pass. No
+    /// <c>ViewerRestrictedConfigTables</c> carve is needed either, because neither table has a secret
+    /// column — but note the corollary: a table in <c>config</c> is readable by the network-reachable
+    /// <c>mcp</c> role by default, so if tag names may carry customer identifiers the REVOKE must be
+    /// emitted inside provisioning AFTER that blanket grant (and mirrored into BYO
+    /// <c>tools/provision-roles.sql</c>), or the next service start silently re-grants it.</para>
+    /// </summary>
+    private const string V32Sql = @"
+CREATE TABLE IF NOT EXISTS config.server_tags (
+    id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name text NOT NULL,
+    parent_id integer REFERENCES config.server_tags(id) ON DELETE CASCADE,
+    sort_order integer NOT NULL DEFAULT 0,
+    created_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC')
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_server_tags_parent_name
+    ON config.server_tags (COALESCE(parent_id, 0), lower(name));
+
+CREATE TABLE IF NOT EXISTS config.server_tag_map (
+    server_id integer NOT NULL,
+    tag_id integer NOT NULL REFERENCES config.server_tags(id) ON DELETE CASCADE,
+    PRIMARY KEY (server_id, tag_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_server_tag_map_tag
+    ON config.server_tag_map (tag_id);";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

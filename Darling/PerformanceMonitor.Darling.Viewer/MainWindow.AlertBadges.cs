@@ -46,8 +46,9 @@ public partial class MainWindow
     {
         var states = ServerAttentionDeriver.Derive(rows);
 
-        var servers = (ServerList.ItemsSource as IEnumerable<DarlingServer>)?.ToList()
-            ?? new List<DarlingServer>();
+        /* The WHOLE fleet, not the bound list: a badge must keep updating for a server the sidebar filter
+           is currently hiding, or hiding a tag would silently stop surfacing its alerts. */
+        var servers = _fleet.All;
 
         foreach (var server in servers)
         {
@@ -171,10 +172,8 @@ public partial class MainWindow
     {
         _alertStateService.AcknowledgeAlert(serverId);
 
-        if (ServerList.ItemsSource is IEnumerable<DarlingServer> servers)
-        {
-            servers.FirstOrDefault(s => s.ServerId == serverId)?.SetAttention(0, false, null);
-        }
+        /* Resolved against the whole fleet so acknowledging works for a filtered-out server too. */
+        _fleet.Find(serverId)?.SetAttention(0, false, null);
 
         if (_openServerTabs.TryGet(serverId, out var tab) && tab.Header is StackPanel header)
         {

@@ -32,9 +32,9 @@ public sealed class DarlingObservabilityTests
     private const int TestServerId = -424242;
 
     [Fact]
-    public void MigrationScripts_ThirtyOneVersions_V30WebDashboardConfig_V31CustomViews()
+    public void MigrationScripts_ThirtyTwoVersions_V31CustomViews_V32ServerTags()
     {
-        Assert.Equal(31, PgMigrations.Scripts.Count);
+        Assert.Equal(32, PgMigrations.Scripts.Count);
         Assert.Equal(1, PgMigrations.Scripts[0].Version);
         Assert.Equal(2, PgMigrations.Scripts[1].Version);
         Assert.Equal(3, PgMigrations.Scripts[2].Version);
@@ -66,7 +66,8 @@ public sealed class DarlingObservabilityTests
         Assert.Equal(29, PgMigrations.Scripts[28].Version);
         Assert.Equal(30, PgMigrations.Scripts[29].Version);
         Assert.Equal(31, PgMigrations.Scripts[30].Version);
-        Assert.Equal(31, StorageVersion.SchemaVersion);
+        Assert.Equal(32, PgMigrations.Scripts[31].Version);
+        Assert.Equal(32, StorageVersion.SchemaVersion);
 
         /* V26 (#1506) adds the generic webhook channel's four columns to the V17 control-plane table.
            Schema-qualified config.* and IF NOT EXISTS, per the file's additive-ALTER idiom. */
