@@ -48,6 +48,17 @@ public static class DarlingFileSecurity
     private static SecurityIdentifier Administrators => new(WellKnownSidType.BuiltinAdministratorsSid, null);
     private static SecurityIdentifier Interactive => new(WellKnownSidType.InteractiveSid, null);
 
+    /// <summary>The three "anyone on this box" groups a secret-bearing file must never grant read to
+    /// (<see cref="IsReadableByOrdinaryUsers"/>). <c>BUILTIN\Users</c> is the one that actually bites: a folder
+    /// created directly under <c>C:\</c> — the documented install location — inherits Read &amp; Execute for it
+    /// from the root DACL.</summary>
+    private static SecurityIdentifier[] OrdinaryUserGroups =>
+    [
+        new(WellKnownSidType.BuiltinUsersSid, null),
+        new(WellKnownSidType.AuthenticatedUserSid, null),
+        new(WellKnownSidType.WorldSid, null),
+    ];
+
     /// <summary>The account this process runs as — the service account when hosted as a service.</summary>
     private static SecurityIdentifier ServiceAccount =>
         WindowsIdentity.GetCurrent().User
@@ -129,6 +140,56 @@ public static class DarlingFileSecurity
                 && (owner.Equals(LocalSystem) || owner.Equals(Administrators) || owner.Equals(ServiceAccount));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Can an ordinary local user READ this file's bytes? True when the effective DACL carries an Allow ACE
+    /// granting <see cref="FileSystemRights.ReadData"/> to <c>Users</c>, <c>Authenticated Users</c>, or
+    /// <c>Everyone</c> — explicit or inherited. The verification half of <see cref="HardenFile"/>: for
+    /// LocalMachine-DPAPI content (the credential files, and <c>darling.json</c> since #1647) read access IS
+    /// the secret, so the caller reports a still-readable file as Critical rather than assuming the harden took.
+    ///
+    /// <para>Checks <see cref="FileSystemRights.ReadData"/> specifically, NOT the composite
+    /// <see cref="FileSystemRights.Read"/>: the latter ORs in ReadPermissions/ReadAttributes/
+    /// ReadExtendedAttributes, so a mask test against it would call a metadata-only grant "readable" and
+    /// train operators to ignore the alarm.</para>
+    ///
+    /// <para>Returns false when the DACL itself cannot be read — the harden attempt the caller just made
+    /// already logs loudly on failure, and a Critical raised on an unreadable DACL would be noise, not signal.</para>
+    /// </summary>
+    public static bool IsReadableByOrdinaryUsers(string path)
+    {
+        try
+        {
+            var rules = new FileInfo(path)
+                .GetAccessControl()
+                .GetAccessRules(includeExplicit: true, includeInherited: true, typeof(SecurityIdentifier));
+
+            var ordinary = OrdinaryUserGroups;
+            foreach (FileSystemAccessRule rule in rules)
+            {
+                if (rule.AccessControlType != AccessControlType.Allow
+                    || (rule.FileSystemRights & FileSystemRights.ReadData) != FileSystemRights.ReadData
+                    || rule.IdentityReference is not SecurityIdentifier sid)
+                {
+                    continue;
+                }
+
+                foreach (var group in ordinary)
+                {
+                    if (sid.Equals(group))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException)
         {
             return false;
         }
