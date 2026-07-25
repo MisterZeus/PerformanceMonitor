@@ -1430,6 +1430,48 @@ public static class DarlingCliCommands
         : elevated ? EndpointFirewallPlan.RunElevated
         : EndpointFirewallPlan.Handoff;
 
+    /// <summary>Whether an ENABLE toggle's <c>allowFrom</c> can be used as a firewall <c>-RemoteAddress</c> (#1646).</summary>
+    public enum EndpointAllowFromVerdict
+    {
+        /// <summary>Absent/blank — the service would fail-close this endpoint to loopback, so there is nothing to open.</summary>
+        Missing,
+
+        /// <summary>Present but not a CIDR — REFUSE. Never build a firewall command from it.</summary>
+        Invalid,
+
+        /// <summary>A valid CIDR; the canonical <c>IPNetwork.ToString()</c> form is what reaches the command.</summary>
+        Valid,
+    }
+
+    /// <summary>
+    /// PURE <c>allowFrom</c> gate for a toggle verb (#1646). <c>darling.json</c> is operator-supplied text that
+    /// <see cref="DarlingConfig.Load"/> only deserializes — it never calls <see cref="DarlingConfig.Validate"/> —
+    /// so this was the ONE <see cref="DarlingManagedPostgres.BuildFirewallEnableCommand"/> caller that reached
+    /// the PowerShell <c>-Command</c> string with an unparsed value, where a blank-check was the only gate.
+    /// Every other call site passes a canonicalized <c>IPNetwork.ToString()</c>; this makes that universal.
+    /// Parsing is the security property, not the formatting: <see cref="IPNetwork.TryParse"/> accepts ONLY
+    /// <c>address/prefix</c> with the host bits zeroed, so no shell metacharacter, statement separator, or
+    /// second CIDR can survive it — and <paramref name="canonicalCidr"/> is the PARSER'S output, never the
+    /// caller's string, so nothing unvalidated is carried through even on the valid path.
+    /// </summary>
+    public static EndpointAllowFromVerdict ClassifyAllowFrom(string? allowFrom, out string canonicalCidr)
+    {
+        canonicalCidr = "";
+
+        if (string.IsNullOrWhiteSpace(allowFrom))
+        {
+            return EndpointAllowFromVerdict.Missing;
+        }
+
+        if (!IPNetwork.TryParse(allowFrom.Trim(), out var cidr))
+        {
+            return EndpointAllowFromVerdict.Invalid;
+        }
+
+        canonicalCidr = cidr.ToString();
+        return EndpointAllowFromVerdict.Valid;
+    }
+
     /// <summary>
     /// Enables the embedded MCP endpoint on a headless managed deployment: flips
     /// <c>config.config_service.mcp_enabled</c> TRUE (the live switch — the worker hot-reloads within one sweep
@@ -1614,18 +1656,36 @@ public static class DarlingCliCommands
             return;
         }
 
-        if (enable && string.IsNullOrWhiteSpace(allowFrom))
+        /* #1646: parse allowFrom as a CIDR BEFORE it can reach a PowerShell -Command string, and pass the
+           parser's canonical form — the posture every other BuildFirewallEnableCommand caller already had.
+           An unparseable value is refused outright: the firewall is NOT touched and nothing is printed for an
+           operator to paste into an elevated shell, because the injected text would run either way (this verb
+           runs the command itself when elevated, and hands it to a human to run elevated when it is not). */
+        var canonicalCidr = "";
+        if (enable)
         {
-            /* Non-loopback listen but no allowFrom CIDR: the service itself would fail-close this to loopback, so
-               there is nothing to open. Point at the wizard rather than emit a malformed New-NetFirewallRule. */
-            output.WriteLine(
-                $"Firewall: the network block sets listen '{listen}' but no allowFrom CIDR, so the service will bind " +
-                "loopback-only until it is completed. Run --configure-network to finish the block; not opening the firewall.");
-            return;
+            switch (ClassifyAllowFrom(allowFrom, out canonicalCidr))
+            {
+                case EndpointAllowFromVerdict.Missing:
+                    /* Non-loopback listen but no allowFrom CIDR: the service itself would fail-close this to loopback, so
+                       there is nothing to open. Point at the wizard rather than emit a malformed New-NetFirewallRule. */
+                    output.WriteLine(
+                        $"Firewall: the network block sets listen '{listen}' but no allowFrom CIDR, so the service will bind " +
+                        "loopback-only until it is completed. Run --configure-network to finish the block; not opening the firewall.");
+                    return;
+
+                case EndpointAllowFromVerdict.Invalid:
+                    error.WriteLine(
+                        $"Firewall: allowFrom in darling.json is not a valid CIDR, so NO firewall change was made and no " +
+                        "command is being printed to run by hand. The endpoint toggle itself already succeeded; the service " +
+                        "will bind loopback-only until allowFrom is fixed. Expected an address/prefix with the host bits " +
+                        "zeroed, e.g. 192.168.1.0/24 or 2001:db8::/32. Run --configure-network to rewrite the block.");
+                    return;
+            }
         }
 
         var command = enable
-            ? DarlingManagedPostgres.BuildFirewallEnableCommand(ruleName, port, allowFrom!)
+            ? DarlingManagedPostgres.BuildFirewallEnableCommand(ruleName, port, canonicalCidr)
             : DarlingManagedPostgres.BuildFirewallDisableCommand(ruleName);
 
         if (plan == EndpointFirewallPlan.RunElevated)

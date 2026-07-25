@@ -141,6 +141,115 @@ public sealed class DarlingFileSecurityTests
         Assert.False(DarlingFileSecurity.IsTrustedOwner(path));
     }
 
+    /* ---- #1647: the verification half — is a secret-bearing file still readable by ordinary users? ----
+       darling.json carries every monitored server's encryptedPassword plus the MCP and web tokens, all under
+       DPAPI LocalMachine scope with an entropy constant published in this repo, so READ access to the file IS
+       the secret. It never got an ACL: it sits beside the binary, and the documented install (extract to
+       C:\PerformanceMonitorDarling) inherits BUILTIN\Users: Read & Execute from the root DACL. The service now
+       hardens it at startup and raises a Critical when it is still exposed — this is the check behind that. */
+
+    [Fact]
+    public void IsReadableByOrdinaryUsers_TrueWhenUsersHoldsAReadAce_FalseAfterHardening()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        var path = Path.Combine(Path.GetTempPath(), "darling-config-acl-" + Guid.NewGuid().ToString("N") + ".json");
+        File.WriteAllText(path, "{}");
+        try
+        {
+            /* Reproduce what an install under C:\ inherits: BUILTIN\Users allowed Read. Added explicitly
+               because %TEMP% is per-user and grants Users nothing to inherit. */
+            var exposed = new FileInfo(path).GetAccessControl();
+            exposed.AddAccessRule(new FileSystemAccessRule(
+                s_builtinUsers, FileSystemRights.Read, AccessControlType.Allow));
+            new FileInfo(path).SetAccessControl(exposed);
+
+            Assert.True(
+                DarlingFileSecurity.IsReadableByOrdinaryUsers(path),
+                "a file granting BUILTIN\\Users read must be reported as exposed");
+
+            /* The fix the service applies. HardenFile protects the DACL and drops every inherited ACE, so the
+               Users grant is gone even though INTERACTIVE read is added for the Viewer. */
+            DarlingFileSecurity.HardenFile(path, allowInteractiveRead: true);
+
+            Assert.False(
+                DarlingFileSecurity.IsReadableByOrdinaryUsers(path),
+                "after hardening, no Users/Authenticated Users/Everyone read ACE may survive");
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(WellKnownSidType.AuthenticatedUserSid)]
+    [InlineData(WellKnownSidType.WorldSid)]
+    public void IsReadableByOrdinaryUsers_AlsoCatchesAuthenticatedUsersAndEveryone(WellKnownSidType sidType)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        var path = Path.Combine(Path.GetTempPath(), "darling-config-acl-grp-" + Guid.NewGuid().ToString("N") + ".json");
+        File.WriteAllText(path, "{}");
+        try
+        {
+            var security = new FileInfo(path).GetAccessControl();
+            security.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(sidType, null), FileSystemRights.Read, AccessControlType.Allow));
+            new FileInfo(path).SetAccessControl(security);
+
+            Assert.True(DarlingFileSecurity.IsReadableByOrdinaryUsers(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void IsReadableByOrdinaryUsers_IgnoresAMetadataOnlyGrant_AndADenyAce()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        var path = Path.Combine(Path.GetTempPath(), "darling-config-acl-meta-" + Guid.NewGuid().ToString("N") + ".json");
+        File.WriteAllText(path, "{}");
+        try
+        {
+            DarlingFileSecurity.HardenFile(path, allowInteractiveRead: true);
+
+            var security = new FileInfo(path).GetAccessControl();
+            /* ReadAttributes/ReadPermissions grant no BYTES. Testing against the composite
+               FileSystemRights.Read mask would call this "readable" and cry wolf on a common,
+               harmless ACE — hence the check keys on ReadData specifically. */
+            security.AddAccessRule(new FileSystemAccessRule(
+                s_builtinUsers,
+                FileSystemRights.ReadAttributes | FileSystemRights.ReadPermissions,
+                AccessControlType.Allow));
+            /* A DENY ACE is not a grant either. */
+            security.AddAccessRule(new FileSystemAccessRule(
+                s_authenticatedUsers, FileSystemRights.Read, AccessControlType.Deny));
+            new FileInfo(path).SetAccessControl(security);
+
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void IsReadableByOrdinaryUsers_FalseForAnUnreadableDacl_RatherThanThrowing()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        /* A missing file has no DACL to read. It returns false rather than throwing or crying wolf: the
+           caller has ALREADY logged loudly if its harden attempt failed, and a Critical raised on an
+           unreadable DACL would be noise that trains operators to ignore the real one. */
+        Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(
+            Path.Combine(Path.GetTempPath(), "darling-config-absent-" + Guid.NewGuid().ToString("N") + ".json")));
+    }
+
     [Fact]
     public void HardenDirectory_OnTheCredentialParent_LeavesTheSiblingLogDirectoryWritable()
     {

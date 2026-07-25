@@ -108,8 +108,11 @@ public class DataImportService
                     var parquetPath = Path.Combine(archivePath, $"{timestamp}_{table}.parquet")
                         .Replace("\\", "/");
 
+                    /* The path is user-chosen (the import dialog's folder picker), and a single quote is legal
+                       in a Windows path — so escape it for the SQL literal the way every sibling COPY does
+                       (ArchiveService, ParquetCompaction), instead of interpolating it raw. */
                     using var exportCmd = connection.CreateCommand();
-                    exportCmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{parquetPath}' (FORMAT PARQUET, COMPRESSION ZSTD)";
+                    exportCmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{DuckDbInitializer.EscapeSqlPath(parquetPath)}' (FORMAT PARQUET, COMPRESSION ZSTD)";
                     exportCmd.ExecuteNonQuery();
 
                     tablesFlushed++;

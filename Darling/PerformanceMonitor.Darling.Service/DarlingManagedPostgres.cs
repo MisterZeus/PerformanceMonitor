@@ -1647,11 +1647,22 @@ public sealed class DarlingManagedPostgres
     /// <summary>The scoped store firewall rule name (idempotent by DisplayName), port-specific.</summary>
     private string StoreFirewallRuleName => $"PerformanceMonitor Darling store (port {_config.Port})";
 
+    /// <summary>
+    /// PowerShell single-quoted literal. Inside <c>'…'</c> PowerShell expands nothing — no <c>$</c>, no
+    /// backtick escapes, no subexpressions — so the ONE metacharacter is the quote itself, escaped by
+    /// doubling it. Every value the firewall builders interpolate goes through this (#1646): the builders
+    /// are then safe no matter what a caller hands them, INDEPENDENT of the caller-side CIDR parse that is
+    /// the primary fix. The rule names are internally generated and contain no quotes, so quoting them
+    /// leaves the emitted command byte-for-byte what it has always been.
+    /// </summary>
+    private static string SingleQuoted(string value)
+        => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
+
     /// <summary>Idempotent-named enable command (remove-by-name then add) — the exact scoped command the docs
     /// lead with (D1). Pure + testable.</summary>
     internal static string BuildFirewallEnableCommand(string ruleName, int port, string remoteCidr)
-        => $"Remove-NetFirewallRule -DisplayName '{ruleName}' -ErrorAction SilentlyContinue; " +
-           $"New-NetFirewallRule -DisplayName '{ruleName}' -Direction Inbound -Action Allow -Protocol TCP -LocalPort {port} -RemoteAddress {remoteCidr} | Out-Null";
+        => $"Remove-NetFirewallRule -DisplayName {SingleQuoted(ruleName)} -ErrorAction SilentlyContinue; " +
+           $"New-NetFirewallRule -DisplayName {SingleQuoted(ruleName)} -Direction Inbound -Action Allow -Protocol TCP -LocalPort {port} -RemoteAddress {SingleQuoted(remoteCidr)} | Out-Null";
 
     /// <summary>
     /// Idempotent-named disable command (remove-by-name). Pure + testable.
@@ -1665,7 +1676,7 @@ public sealed class DarlingManagedPostgres
     /// The catch alone is not enough: a caught error leaves the exit state non-zero, hence the exit 0.
     /// </summary>
     internal static string BuildFirewallDisableCommand(string ruleName)
-        => $"try {{ Remove-NetFirewallRule -DisplayName '{ruleName}' -ErrorAction Stop }} " +
+        => $"try {{ Remove-NetFirewallRule -DisplayName {SingleQuoted(ruleName)} -ErrorAction Stop }} " +
            $"catch {{ if ($_.CategoryInfo.Category -ne 'ObjectNotFound') {{ throw }} }}; exit 0";
 
     /// <summary>

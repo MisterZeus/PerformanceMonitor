@@ -13,6 +13,7 @@ using System.Data;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Runtime.Versioning;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -431,9 +432,10 @@ public sealed class DarlingWorker : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         DarlingConfig config;
+        string configPath;
         try
         {
-            var configPath = DarlingConfig.ResolveConfigPath();
+            configPath = DarlingConfig.ResolveConfigPath();
             config = DarlingConfig.Load();
             _logger.LogInformation("Loaded configuration from {Path}: {ServerCount} server(s)", configPath, config.Servers.Count);
         }
@@ -441,6 +443,11 @@ public sealed class DarlingWorker : BackgroundService
         {
             _logger.LogCritical("Cannot load configuration: {Message}", ex.Message);
             return;
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            TryHardenConfigFile(configPath);
         }
 
         var problems = config.Validate();
@@ -508,6 +515,53 @@ public sealed class DarlingWorker : BackgroundService
             {
                 await managedPostgres.StopIfStartedByThisProcessAsync();
             }
+        }
+    }
+
+    /// <summary>
+    /// #1647: locks <c>darling.json</c> down to the posture the DPAPI credential files already get, then
+    /// VERIFIES it. The config file is not ordinary config — it holds every monitored server's
+    /// <c>encryptedPassword</c>, the MCP bearer token, the web dashboard access token, and in BYO mode the
+    /// store connection string. Those blobs are DPAPI <b>LocalMachine</b> scope with an entropy constant that
+    /// ships in an open-source repo, so anything that can READ the file can unprotect all of it — the ACL is
+    /// the access boundary, exactly as <see cref="DarlingFileSecurity"/> says of the credential files. It never
+    /// got one: every harden call site targeted the credential directory, while the config sat beside the
+    /// binary, and the documented install (extract the zip to <c>C:\PerformanceMonitorDarling</c>) inherits
+    /// <c>BUILTIN\Users: Read &amp; Execute</c> from the root DACL. Any local unprivileged user could read it,
+    /// decrypt every SQL password, and lift the tokens that unlock the MCP write surface.
+    ///
+    /// <para><c>allowInteractiveRead: true</c> — the same argument the admin/viewer credentials pass, and
+    /// required here: the Viewer (<c>ViewerSettings.ResolveConfigPath</c>) and the CLI verbs run as the
+    /// interactive operator and must still read this file.</para>
+    ///
+    /// <para>Best-effort like every other ACL call (a failure is logged, never fatal — a monitoring service must
+    /// not refuse to monitor over a permissions problem), but a file that is STILL readable by
+    /// Users/Authenticated Users after the attempt is a <see cref="LogLevel.Critical"/>: at that point the
+    /// secrets in it are recoverable by anyone with a local logon.</para>
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private void TryHardenConfigFile(string path)
+    {
+        try
+        {
+            DarlingFileSecurity.HardenFile(path, allowInteractiveRead: true);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(
+                "Could not restrict the ACL on {Path} ({Message}). Fix the file permissions by hand " +
+                "(SYSTEM/Administrators/the service account, plus INTERACTIVE read for the Viewer).",
+                path, ex.Message);
+        }
+
+        if (DarlingFileSecurity.IsReadableByOrdinaryUsers(path))
+        {
+            _logger.LogCritical(
+                "{Path} is READABLE by Users/Authenticated Users/Everyone. It holds every monitored server's " +
+                "encrypted password plus the MCP and web access tokens, all protected with machine-scoped DPAPI — " +
+                "so any local user who can open this file can recover ALL of it. Remove the inherited read access " +
+                "(or move the install out of a world-readable folder such as one created directly under C:\\).",
+                path);
         }
     }
 

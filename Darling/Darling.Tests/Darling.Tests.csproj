@@ -38,5 +38,12 @@
          AppContext.BaseDirectory, with no repo-root path walking. Same Link+copy delivery the Service
          project uses for tools\install-darling.ps1. -->
     <None Include="..\tools\provision-roles.sql" Link="Fixtures\provision-roles.sql" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The two Darling Kestrel hosts' sources, copied beside the test binary (same Link+copy delivery as the
+         provisioning script above — the files live outside this project directory, so the default Compile glob
+         never sees them). HostHeaderGuardTests parses them to pin that the #1648 DNS-rebinding middleware is
+         installed FIRST and in BOTH bind modes: the defect was a WIRING omission, not a logic bug, so the pure
+         decision test alone would have passed on the broken build. -->
+    <None Include="..\PerformanceMonitor.Darling.Service\Mcp\DarlingMcpHostService.cs" Link="Fixtures\DarlingMcpHostService.cs" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\PerformanceMonitor.Darling.Service\Mcp\DarlingWebHostService.cs" Link="Fixtures\DarlingWebHostService.cs" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

@@ -61,6 +61,9 @@ public static class ParquetCompaction
         ["query_store_stats"] = ["query_plan_text"]
     };
 
+    /* Deliberately a local copy, NOT a forward to DuckDbInitializer.EscapeSqlPath the way ArchiveService
+       does: this file is compiled into tools/CompactionRepro as well (see the header), so it must stay free
+       of project dependencies. The DataImportPathEscapingTests source pin covers all three call sites. */
     private static string EscapeSqlPath(string path) => path.Replace("'", "''");
 
     /* Greedily group <paramref name="sortedPaths"/> (smallest-first) into batches

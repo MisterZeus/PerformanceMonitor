@@ -500,35 +500,14 @@ public sealed class DarlingWebHostService : BackgroundService
     /// ignored (already split into <see cref="HostString.Host"/>), and an empty Host is allowed (HTTP/1.0 / some
     /// health probes). This rejects a rebound foreign hostname pointed at 127.0.0.1:5153 before the tokenless
     /// loopback allow, while a direct IP request from the real operator passes.
+    ///
+    /// <para>#1648 lifted the decision itself into the shared
+    /// <see cref="PerformanceMonitor.Common.HostHeaderGuard"/> (via <see cref="DarlingHostBinding"/>) so the two
+    /// MCP hosts — Darling's and Lite's — install the SAME guard instead of going without one. This forwarder
+    /// stays so this host's behavior and its existing tests are byte-for-byte unchanged.</para>
     /// </summary>
     internal static bool IsAllowedHost(string? host, IPAddress? networkListenIp)
-    {
-        if (string.IsNullOrEmpty(host))
-        {
-            return true;
-        }
-
-        if (string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase))
-        {
-            return true;
-        }
-
-        if (IPAddress.TryParse(host, out var hostIp))
-        {
-            var ip = hostIp.IsIPv4MappedToIPv6 ? hostIp.MapToIPv4() : hostIp;
-            if (IPAddress.IsLoopback(ip))
-            {
-                return true;
-            }
-
-            if (networkListenIp is not null && ip.Equals(networkListenIp))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
+        => DarlingHostBinding.IsAllowedHost(host, networkListenIp);
 
     /// <summary>
     /// PURE route-auth decision (network mode). Loopback ALWAYS passes, tokenless, even while LAN-exposed

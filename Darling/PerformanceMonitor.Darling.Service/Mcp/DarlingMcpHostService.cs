@@ -502,6 +502,27 @@ public sealed class DarlingMcpHostService : BackgroundService
 
             _app = builder.Build();
 
+            /* DNS-rebinding guard (#1648) — the FIRST middleware, in BOTH modes, mirroring the web host's
+               #1576 fix. The loopback bind is tokenless by design (the network gates below install only in
+               network mode), so a browser ON this host that loads attacker content could be rebound to
+               127.0.0.1:5152 and reach the MCP surface same-origin — and that surface is no longer read-only
+               (custom-view CRUD, add_servers/remove_server, alert-config writes). The application/json content
+               type does NOT save us: under a rebind the browser treats the request as same-origin, so no CORS
+               preflight applies. Require the Host header to name an address we actually bind — a loopback
+               name/IP or, in network mode, the configured listen IP. networkListenIp is null in loopback mode,
+               so ONLY loopback Hosts pass there; a rebound foreign hostname is rejected 400 before the bearer
+               check, the CIDR check, MapMcp, or any tool handler. */
+            _app.Use(async (context, next) =>
+            {
+                if (!DarlingHostBinding.IsAllowedHost(context.Request.Host.Host, networkListenIp))
+                {
+                    context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                    return;
+                }
+
+                await next(context);
+            });
+
             /* Access-control middleware — installed ONLY in network mode (Round-4 #6). The default/degraded
                loopback-only server stays byte-for-byte today's tokenless local MCP, so existing local clients
                keep working. Both run BEFORE MapMcp (D3-b: "first ... before any handler/handshake"): the

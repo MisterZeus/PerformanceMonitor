@@ -19,6 +19,9 @@ C:\PerformanceMonitorDarling). What it does, in order:
      PostgreSQL refuses to run with administrative privileges), start=auto. If the service
      already exists this is an UPGRADE: it is stopped and its binPath updated in place; your
      darling.json, store data, and credentials are untouched.
+  4b. Restricts darling.json to SYSTEM / Administrators / the service account, plus read for
+     INTERACTIVE (the Viewer). It holds encrypted SQL passwords and the MCP/web access tokens,
+     and an install folder under C:\ otherwise inherits read access for BUILTIN\Users.
   5. Starts the service and confirms it reaches Running.
   6. Creates 'Darling Viewer' shortcuts on the Desktop and in the Start Menu pointing at
      viewer\PerformanceMonitor.Darling.Viewer.exe. (Taskbar pinning is deliberately not
@@ -121,6 +124,44 @@ else {
     & sc.exe create $serviceName binPath= "`"$serviceExe`"" start= auto obj= "NT SERVICE\$serviceName" | Out-Null
     if ($LASTEXITCODE -ne 0) { Fail "sc create failed ($LASTEXITCODE)." }
     Write-Host "Created service '$serviceName' (NT SERVICE virtual account, automatic start)."
+}
+
+# -- 4b. Lock down darling.json (#1647) -----------------------------------------------------------
+# The config holds every monitored server's encryptedPassword plus the MCP bearer and web access tokens.
+# They are DPAPI LocalMachine scope with an entropy constant that ships in the open-source repo, so READ
+# access to this file IS the secret - the ACL is the boundary, the same posture the PG credential files get.
+# Extracting the zip to a folder created directly under C:\ (the documented location) inherits
+# BUILTIN\Users: Read & Execute from the root DACL, which hands every local user the lot.
+#
+# Runs AFTER service creation on purpose: the NT SERVICE virtual account has no SID to grant until sc.exe
+# create has made it. Mirrors DarlingFileSecurity.HardenFile(path, allowInteractiveRead: true) exactly -
+# SYSTEM / Administrators / the service account get full control, INTERACTIVE gets read (the Viewer and the
+# CLI verbs run as the interactive operator and must still read the file). Best-effort: a failure warns
+# rather than aborting an otherwise good install, and the service re-asserts this ACL at every startup.
+try {
+    $wk = [System.Security.Principal.WellKnownSidType]
+    $systemSid      = New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)
+    $adminsSid      = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)
+    $interactiveSid = New-Object System.Security.Principal.SecurityIdentifier($wk::InteractiveSid, $null)
+    $serviceSid     = (New-Object System.Security.Principal.NTAccount("NT SERVICE\$serviceName")).Translate([System.Security.Principal.SecurityIdentifier])
+
+    $acl = New-Object System.Security.AccessControl.FileSecurity
+    # Protect the DACL and drop every inherited ACE: access is now EXACTLY the four rules below.
+    $acl.SetAccessRuleProtection($true, $false)
+    $full = [System.Security.AccessControl.FileSystemRights]::FullControl
+    $read = [System.Security.AccessControl.FileSystemRights]::Read -bor [System.Security.AccessControl.FileSystemRights]::Synchronize
+    $allow = [System.Security.AccessControl.AccessControlType]::Allow
+    foreach ($sid in @($systemSid, $adminsSid, $serviceSid)) {
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, $full, $allow)))
+    }
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($interactiveSid, $read, $allow)))
+    Set-Acl -Path $configPath -AclObject $acl
+    Write-Host "Restricted darling.json to SYSTEM, Administrators, the service account, and INTERACTIVE (it holds encrypted passwords and access tokens)."
+}
+catch {
+    Write-Host "WARNING: could not restrict permissions on darling.json ($($_.Exception.Message))." -ForegroundColor Yellow
+    Write-Host "         It holds encrypted SQL passwords and the MCP/web access tokens, which any local user who can read the file can recover." -ForegroundColor Yellow
+    Write-Host "         Fix it by hand, or move the install out of a world-readable folder." -ForegroundColor Yellow
 }
 
 # -- 5. Start + confirm ---------------------------------------------------------------------------

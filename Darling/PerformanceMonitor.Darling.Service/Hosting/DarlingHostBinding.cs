@@ -14,6 +14,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service.Hosting;
 
@@ -178,6 +179,16 @@ internal static class DarlingHostBinding
         var ip = remoteIp.IsIPv4MappedToIPv6 ? remoteIp.MapToIPv4() : remoteIp;
         return IPAddress.IsLoopback(ip) || allowedCidr.Contains(ip);
     }
+
+    /// <summary>
+    /// PURE Host-header allowlist — the DNS-rebinding guard both Darling hosts install as their FIRST
+    /// middleware, in BOTH bind modes. The decision itself lives in
+    /// <see cref="PerformanceMonitor.Common.HostHeaderGuard"/> so Lite's MCP host runs the SAME code (#1648);
+    /// this forwarder keeps it reachable where the rest of the two hosts' bind/auth helpers live, so neither
+    /// host reaches past this class. Pass <paramref name="networkListenIp"/> = null in loopback-only mode.
+    /// </summary>
+    internal static bool IsAllowedHost(string? host, IPAddress? networkListenIp)
+        => HostHeaderGuard.IsAllowedHost(host, networkListenIp);
 
     /// <summary>
     /// PURE constant-time token comparison. Both tokens are hashed to a fixed 32 bytes first, so the compare
