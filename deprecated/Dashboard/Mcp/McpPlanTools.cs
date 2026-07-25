@@ -29,13 +29,13 @@ public sealed class McpPlanTools
 
         try
         {
-            var xml = await resolved.Value.Service.GetPlanXmlByQueryHashAsync(query_hash);
+            var xml = await resolved.Service.GetPlanXmlByQueryHashAsync(query_hash);
             if (string.IsNullOrEmpty(xml))
                 return McpHelpers.Status(
                     "unavailable",
                     $"No plan found for query_hash '{query_hash}'. The query may have been evicted from the plan cache since the last collection.");
 
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.Value.ServerName, "query_stats", query_hash);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_stats", query_hash);
         }
         catch (Exception ex)
         {
@@ -58,13 +58,13 @@ public sealed class McpPlanTools
 
         try
         {
-            var xml = await resolved.Value.Service.GetProcedurePlanXmlBySqlHandleAsync(sql_handle);
+            var xml = await resolved.Service.GetProcedurePlanXmlBySqlHandleAsync(sql_handle);
             if (string.IsNullOrEmpty(xml))
                 return McpHelpers.Status(
                     "unavailable",
                     $"No plan found for sql_handle '{sql_handle}'. The procedure may have been evicted from the plan cache since the last collection.");
 
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.Value.ServerName, "procedure_stats", sql_handle);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "procedure_stats", sql_handle);
         }
         catch (Exception ex)
         {
@@ -88,13 +88,13 @@ public sealed class McpPlanTools
 
         try
         {
-            var xml = await resolved.Value.Service.GetQueryStorePlanXmlAsync(database_name, query_id);
+            var xml = await resolved.Service.GetQueryStorePlanXmlAsync(database_name, query_id);
             if (string.IsNullOrEmpty(xml))
                 return McpHelpers.Status(
                     "unavailable",
                     $"No plan found for query_id {query_id} in database '{database_name}'. Query Store may not be enabled or the query may have been purged.");
 
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.Value.ServerName, "query_store", $"{database_name}:{query_id}");
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_store", $"{database_name}:{query_id}");
         }
         catch (Exception ex)
         {
@@ -137,7 +137,7 @@ public sealed class McpPlanTools
 
         try
         {
-            var xml = await resolved.Value.Service.GetPlanXmlByQueryHashAsync(query_hash);
+            var xml = await resolved.Service.GetPlanXmlByQueryHashAsync(query_hash);
             if (string.IsNullOrEmpty(xml))
                 return McpHelpers.Status("unavailable", $"No plan found for query_hash '{query_hash}'.");
 

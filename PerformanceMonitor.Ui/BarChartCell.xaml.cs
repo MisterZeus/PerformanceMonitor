@@ -121,7 +121,7 @@ namespace PerformanceMonitor.Ui
             OnPropertyChanged(nameof(RestWidth));
         }
 
-        private static Brush MakeFrozen(string hex)
+        private static SolidColorBrush MakeFrozen(string hex)
         {
             var b = new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex));
             b.Freeze();

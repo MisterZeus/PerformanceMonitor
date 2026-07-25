@@ -68,9 +68,9 @@ public static class ComposeCompiler
 
     /// <summary>The fact-table alias every composed query uses, so fact columns qualify unambiguously
     /// against the <c>m</c> module-join alias.</summary>
-    private const string FactAlias = "f";
+    private const char FactAlias = 'f';
 
-    private const string ModuleAlias = "m";
+    private const char ModuleAlias = 'm';
 
     /// <summary>
     /// Compiles <paramref name="plan"/> against <paramref name="context"/>. Returns the parameterized SQL,

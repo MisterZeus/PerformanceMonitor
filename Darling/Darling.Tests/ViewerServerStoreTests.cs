@@ -160,7 +160,7 @@ public sealed class ViewerServerStoreTests : IDisposable
         store.DeleteServer(entry.Id);
 
         Assert.Empty(NewStore().GetAllServers());
-        Assert.Null(_secrets.Get(entry.Id));
+        Assert.Null(_secrets.Find(entry.Id));
     }
 
     [Fact]
@@ -197,7 +197,7 @@ public sealed class ViewerServerStoreTests : IDisposable
 
         public void Save(string id, string username, string password) => _map[id] = (username, password);
 
-        public (string Username, string Password)? Get(string id) =>
+        public (string Username, string Password)? Find(string id) =>
             _map.TryGetValue(id, out var v) ? v : null;
 
         public void Delete(string id) => _map.Remove(id);

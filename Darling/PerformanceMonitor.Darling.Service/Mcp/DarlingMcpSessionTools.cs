@@ -47,7 +47,7 @@ public sealed class DarlingMcpSessionTools
 
         try
         {
-            var rows = await DarlingSessionReader.GetLatestSessionStatsAsync(postgres, resolved.Value.ServerId);
+            var rows = await DarlingSessionReader.GetLatestSessionStatsAsync(postgres, resolved.ServerId);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No session statistics available. The session collector may not have run yet.");
 
@@ -58,7 +58,7 @@ public sealed class DarlingMcpSessionTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 collection_time = rows[0].CollectionTime.ToString("o"),
                 summary = new
                 {
@@ -107,7 +107,7 @@ public sealed class DarlingMcpSessionTools
         {
             var now = DateTime.UtcNow;
             var rows = await DarlingSessionReader.GetActiveQueriesAsync(
-                postgres, resolved.Value.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No active query snapshots found in the requested time range.");
 
@@ -148,7 +148,7 @@ public sealed class DarlingMcpSessionTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 total_snapshots = rows.Count,
                 shown = result.Count,
@@ -180,7 +180,7 @@ public sealed class DarlingMcpSessionTools
         {
             var now = DateTime.UtcNow;
             var rows = await DarlingSessionReader.GetWaitingTasksAsync(
-                postgres, resolved.Value.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No waiting tasks captured in the specified time range.");
 
@@ -197,7 +197,7 @@ public sealed class DarlingMcpSessionTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 tasks = result
             }, McpHelpers.JsonOptions);
         }

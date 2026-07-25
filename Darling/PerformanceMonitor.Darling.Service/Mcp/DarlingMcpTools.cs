@@ -52,13 +52,13 @@ public sealed class DarlingMcpTools
         try
         {
             var findings = await analysisService.AnalyzeAsync(
-                resolved.Value.ServerId, resolved.Value.ServerName, hours_back);
+                resolved.ServerId, resolved.ServerName, hours_back);
 
             if (analysisService.InsufficientDataMessage != null)
             {
                 return JsonSerializer.Serialize(new
                 {
-                    server = resolved.Value.ServerName,
+                    server = resolved.ServerName,
                     status = "insufficient_data",
                     message = analysisService.InsufficientDataMessage
                 }, McpHelpers.JsonOptions);
@@ -81,7 +81,7 @@ public sealed class DarlingMcpTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 status = "findings",
                 finding_count = findings.Count,
                 analysis_time = analysisService.LastAnalysisTime?.ToString("o"),
@@ -161,7 +161,7 @@ public sealed class DarlingMcpTools
         try
         {
             var facts = await analysisService.CollectAndScoreFactsAsync(
-                resolved.Value.ServerId, resolved.Value.ServerName, hours_back);
+                resolved.ServerId, resolved.ServerName, hours_back);
 
             if (facts.Count == 0)
             {
@@ -203,7 +203,7 @@ public sealed class DarlingMcpTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 total_facts = facts.Count,
                 shown = result.Count,
                 filters = new { source, min_severity },
@@ -244,7 +244,7 @@ public sealed class DarlingMcpTools
             var baselineStart = now.AddHours(-baseline_hours_back);
 
             var (baselineFacts, comparisonFacts) = await analysisService.ComparePeriodsAsync(
-                resolved.Value.ServerId, resolved.Value.ServerName,
+                resolved.ServerId, resolved.ServerName,
                 baselineStart, baselineEnd,
                 comparisonStart, comparisonEnd);
 
@@ -276,7 +276,7 @@ public sealed class DarlingMcpTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 baseline = new
                 {
                     start = baselineStart.ToString("o"),
@@ -318,7 +318,7 @@ public sealed class DarlingMcpTools
         try
         {
             var facts = await analysisService.CollectAndScoreFactsAsync(
-                resolved.Value.ServerId, resolved.Value.ServerName, 1);
+                resolved.ServerId, resolved.ServerName, 1);
 
             var factsByKey = facts.ToFactLookup();
 
@@ -491,7 +491,7 @@ public sealed class DarlingMcpTools
             {
                 return JsonSerializer.Serialize(new
                 {
-                    server = resolved.Value.ServerName,
+                    server = resolved.ServerName,
                     status = "no_config_data",
                     message = "No configuration data found. The config collector may not have run yet."
                 }, McpHelpers.JsonOptions);
@@ -499,7 +499,7 @@ public sealed class DarlingMcpTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 edition = editionName,
                 total_physical_memory_mb = totalMemoryMb > 0 ? totalMemoryMb : (double?)null,
                 total_database_size_mb = totalDbSizeMb > 0 ? totalDbSizeMb : (double?)null,
@@ -541,7 +541,7 @@ public sealed class DarlingMcpTools
         try
         {
             var findings = await analysisService.GetRecentFindingsAsync(
-                resolved.Value.ServerId, hours_back);
+                resolved.ServerId, hours_back);
 
             if (findings.Count == 0)
             {
@@ -562,7 +562,7 @@ public sealed class DarlingMcpTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 finding_count = findings.Count,
                 findings = findings.Select(f =>
                 {
@@ -635,7 +635,7 @@ public sealed class DarlingMcpTools
             {
                 var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
                 if (error != null) return error;
-                serverId = resolved.Value.ServerId;
+                serverId = resolved.ServerId;
             }
 
             var finding = new AnalysisFinding

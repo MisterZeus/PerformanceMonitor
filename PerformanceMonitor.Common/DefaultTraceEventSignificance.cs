@@ -120,7 +120,7 @@ public static class DefaultTraceEventSignificance
         IsSignificant(Classify(eventName), severity);
 
     private static bool Contains(string value, string token) =>
-        value.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0;
+        value.Contains(token, StringComparison.OrdinalIgnoreCase);
 
     private static bool Equals(string value, string other) =>
         string.Equals(value, other, StringComparison.OrdinalIgnoreCase);

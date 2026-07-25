@@ -40,15 +40,15 @@ public sealed class McpAnalysisTools
 
         try
         {
-            var analysisService = CreateAnalysisService(resolved.Value.Service);
-            var serverId = ServerIdHelper.GetDeterministicHashCode(resolved.Value.ServerName);
-            var findings = await analysisService.AnalyzeAsync(serverId, resolved.Value.ServerName, hours_back);
+            var analysisService = CreateAnalysisService(resolved.Service);
+            var serverId = ServerIdHelper.GetDeterministicHashCode(resolved.ServerName);
+            var findings = await analysisService.AnalyzeAsync(serverId, resolved.ServerName, hours_back);
 
             if (analysisService.InsufficientDataMessage != null)
             {
                 return JsonSerializer.Serialize(new
                 {
-                    server = resolved.Value.ServerName,
+                    server = resolved.ServerName,
                     status = "insufficient_data",
                     message = analysisService.InsufficientDataMessage
                 }, McpHelpers.JsonOptions);
@@ -71,7 +71,7 @@ public sealed class McpAnalysisTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 status = "findings",
                 finding_count = findings.Count,
                 analysis_time = analysisService.LastAnalysisTime?.ToString("o"),
@@ -141,9 +141,9 @@ public sealed class McpAnalysisTools
 
         try
         {
-            var analysisService = CreateAnalysisService(resolved.Value.Service);
-            var serverId = ServerIdHelper.GetDeterministicHashCode(resolved.Value.ServerName);
-            var facts = await analysisService.CollectAndScoreFactsAsync(serverId, resolved.Value.ServerName, hours_back);
+            var analysisService = CreateAnalysisService(resolved.Service);
+            var serverId = ServerIdHelper.GetDeterministicHashCode(resolved.ServerName);
+            var facts = await analysisService.CollectAndScoreFactsAsync(serverId, resolved.ServerName, hours_back);
 
             if (facts.Count == 0)
             {
@@ -183,7 +183,7 @@ public sealed class McpAnalysisTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 total_facts = facts.Count,
                 shown = result.Count,
                 filters = new { source, min_severity },
@@ -217,8 +217,8 @@ public sealed class McpAnalysisTools
 
         try
         {
-            var analysisService = CreateAnalysisService(resolved.Value.Service);
-            var serverId = ServerIdHelper.GetDeterministicHashCode(resolved.Value.ServerName);
+            var analysisService = CreateAnalysisService(resolved.Service);
+            var serverId = ServerIdHelper.GetDeterministicHashCode(resolved.ServerName);
 
             // Server-local clock so the comparison windows match the collectors' SYSDATETIME rows
             // (compare returns facts only — it does not persist, so no UTC conversion is needed).
@@ -228,7 +228,7 @@ public sealed class McpAnalysisTools
             var baselineStart = now.AddHours(-baseline_hours_back);
 
             var (baselineFacts, comparisonFacts) = await analysisService.ComparePeriodsAsync(
-                serverId, resolved.Value.ServerName, baselineStart, baselineEnd, comparisonStart, now);
+                serverId, resolved.ServerName, baselineStart, baselineEnd, comparisonStart, now);
 
             var baselineByKey = baselineFacts.ToFactLookup();
             var comparisonByKey = comparisonFacts.ToFactLookup();
@@ -256,7 +256,7 @@ public sealed class McpAnalysisTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 summary = new
                 {
                     worse = comparisons.Count(c => c.status == "worse"),
@@ -283,9 +283,9 @@ public sealed class McpAnalysisTools
 
         try
         {
-            var analysisService = CreateAnalysisService(resolved.Value.Service);
-            var serverId = ServerIdHelper.GetDeterministicHashCode(resolved.Value.ServerName);
-            var facts = await analysisService.CollectAndScoreFactsAsync(serverId, resolved.Value.ServerName, 1);
+            var analysisService = CreateAnalysisService(resolved.Service);
+            var serverId = ServerIdHelper.GetDeterministicHashCode(resolved.ServerName);
+            var facts = await analysisService.CollectAndScoreFactsAsync(serverId, resolved.ServerName, 1);
 
             var factsByKey = facts.ToFactLookup();
 
@@ -330,7 +330,7 @@ public sealed class McpAnalysisTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 edition = editionName,
                 recommendations
             }, McpHelpers.JsonOptions);
@@ -353,8 +353,8 @@ public sealed class McpAnalysisTools
 
         try
         {
-            var analysisService = CreateAnalysisService(resolved.Value.Service);
-            var serverId = ServerIdHelper.GetDeterministicHashCode(resolved.Value.ServerName);
+            var analysisService = CreateAnalysisService(resolved.Service);
+            var serverId = ServerIdHelper.GetDeterministicHashCode(resolved.ServerName);
             var findings = await analysisService.GetRecentFindingsAsync(serverId, hours_back);
 
             if (findings.Count == 0)
@@ -372,7 +372,7 @@ public sealed class McpAnalysisTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 finding_count = findings.Count,
                 findings = findings.Select(f =>
                 {
@@ -423,8 +423,8 @@ public sealed class McpAnalysisTools
 
         try
         {
-            var analysisService = CreateAnalysisService(resolved.Value.Service);
-            var serverId = ServerIdHelper.GetDeterministicHashCode(resolved.Value.ServerName);
+            var analysisService = CreateAnalysisService(resolved.Service);
+            var serverId = ServerIdHelper.GetDeterministicHashCode(resolved.ServerName);
             var finding = new AnalysisFinding { ServerId = serverId, StoryPathHash = story_path_hash, StoryPath = story_path_hash };
             await analysisService.MuteFindingAsync(finding, reason);
 

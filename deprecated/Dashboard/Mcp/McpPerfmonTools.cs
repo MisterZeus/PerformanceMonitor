@@ -31,7 +31,7 @@ public sealed class McpPerfmonTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var rows = await resolved.Value.Service.GetPerfmonStatsAsync(hours_back);
+            var rows = await resolved.Service.GetPerfmonStatsAsync(hours_back);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No perfmon stats available.");
@@ -58,7 +58,7 @@ public sealed class McpPerfmonTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 counters = result
             }, McpHelpers.JsonOptions);
         }
@@ -85,7 +85,7 @@ public sealed class McpPerfmonTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var rows = await resolved.Value.Service.GetPerfmonStatsAsync(hours_back);
+            var rows = await resolved.Service.GetPerfmonStatsAsync(hours_back);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No perfmon trend data available.");
@@ -110,7 +110,7 @@ public sealed class McpPerfmonTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 trend = result
             }, McpHelpers.JsonOptions);

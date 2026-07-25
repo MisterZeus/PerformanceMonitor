@@ -23,7 +23,7 @@ public sealed class McpHealthTools
 
         try
         {
-            var rows = await resolved.Value.Service.GetCollectionHealthAsync();
+            var rows = await resolved.Service.GetCollectionHealthAsync();
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No collection health data available.");
@@ -44,7 +44,7 @@ public sealed class McpHealthTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 collectors = result
             }, McpHelpers.JsonOptions);
         }
@@ -79,7 +79,7 @@ public sealed class McpHealthTools
                 }
             }
 
-            var rows = await resolved.Value.Service.GetDailySummaryAsync(date);
+            var rows = await resolved.Service.GetDailySummaryAsync(date);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No daily summary data available.");
@@ -101,7 +101,7 @@ public sealed class McpHealthTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 summaries = result
             }, McpHelpers.JsonOptions);
         }

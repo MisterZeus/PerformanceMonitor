@@ -128,8 +128,8 @@ public class DuckDbInitializer
        SQL-Server-side identity is. Other archivable tables can't double up this way (normal archival keeps
        hot and parquet disjoint, and their rows aren't re-collected after a reset), so they keep the plain
        union. Value = the PARTITION BY column list for the QUALIFY ROW_NUMBER dedup. */
-    private static readonly IReadOnlyDictionary<string, string> ArchiveViewDedupKeys =
-        new Dictionary<string, string>(StringComparer.Ordinal)
+    private static readonly Dictionary<string, string> ArchiveViewDedupKeys =
+        new(StringComparer.Ordinal)
         {
             /* sysjobhistory.instance_id: a unique monotonic IDENTITY per server that survives
                sp_purge_jobhistory — JobHistoryCollector's exact-and-complete dedup watermark. */

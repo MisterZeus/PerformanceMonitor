@@ -806,7 +806,7 @@ public static class DarlingCliCommands
     }
 
     /// <summary>The machine's non-loopback IPv4 unicast addresses (interface name + address). Impure (queries the OS); the pure menu formatter takes its output.</summary>
-    private static IReadOnlyList<(string Name, string Address)> EnumerateLocalIPv4()
+    private static List<(string Name, string Address)> EnumerateLocalIPv4()
     {
         var addresses = new List<(string Name, string Address)>();
         foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())

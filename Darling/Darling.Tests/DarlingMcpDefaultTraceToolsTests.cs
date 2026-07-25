@@ -117,7 +117,7 @@ public sealed class DarlingMcpDefaultTraceToolsSurfaceAndSqlTests
         using var provider = services.BuildServiceProvider();
         var tools = provider.GetServices<McpServerTool>().Select(t => t.ProtocolTool).ToList();
 
-        Assert.Equal(1, tools.Count);
+        Assert.Single(tools);
         var violations = tools.SelectMany(t => DarlingMcpSchemaAssert.Violations(t.Name, t.InputSchema)).ToList();
         Assert.True(violations.Count == 0, "Gemini-incompatible schema keywords leaked:\n" + string.Join("\n", violations));
         Assert.Empty(DarlingMcpSchemaAssert.RequiredOf(tools[0].InputSchema)); /* server_name / hours_back / limit all default */

@@ -47,7 +47,7 @@ public sealed class DarlingMcpObjectStatsTools
         {
             var now = DateTime.UtcNow;
             var rows = await DarlingObjectStatsReader.GetObjectSizeGrowthAsync(
-                postgres, resolved.Value.ServerId, now.AddDays(-7), now.AddDays(-30), TableSizesTop);
+                postgres, resolved.ServerId, now.AddDays(-7), now.AddDays(-30), TableSizesTop);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No object size data available. Index/object stats are collected daily.");
 
@@ -68,7 +68,7 @@ public sealed class DarlingMcpObjectStatsTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 tables = result
             }, McpHelpers.JsonOptions);
         }
@@ -88,7 +88,7 @@ public sealed class DarlingMcpObjectStatsTools
 
         try
         {
-            var rows = await DarlingObjectStatsReader.GetIndexUsageAsync(postgres, resolved.Value.ServerId, IndexUsageTop);
+            var rows = await DarlingObjectStatsReader.GetIndexUsageAsync(postgres, resolved.ServerId, IndexUsageTop);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No index usage data available. Index/object stats are collected daily.");
 
@@ -112,7 +112,7 @@ public sealed class DarlingMcpObjectStatsTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 indexes = result
             }, McpHelpers.JsonOptions);
         }
@@ -132,7 +132,7 @@ public sealed class DarlingMcpObjectStatsTools
 
         try
         {
-            var rows = await DarlingObjectStatsReader.GetIndexLockingAsync(postgres, resolved.Value.ServerId, ObjectLockingTop);
+            var rows = await DarlingObjectStatsReader.GetIndexLockingAsync(postgres, resolved.ServerId, ObjectLockingTop);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No locking/contention data recorded. Index/object stats are collected daily.");
 
@@ -156,7 +156,7 @@ public sealed class DarlingMcpObjectStatsTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 objects = result
             }, McpHelpers.JsonOptions);
         }
@@ -176,13 +176,13 @@ public sealed class DarlingMcpObjectStatsTools
 
         try
         {
-            var rows = await DarlingObjectStatsReader.GetLatestDatabaseSizesAsync(postgres, resolved.Value.ServerId);
+            var rows = await DarlingObjectStatsReader.GetLatestDatabaseSizesAsync(postgres, resolved.ServerId);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No database size data available. The size collector may not have run yet.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 collection_time = rows[0].CollectionTime.ToString("o"),
                 file_count = rows.Count,
                 databases = rows

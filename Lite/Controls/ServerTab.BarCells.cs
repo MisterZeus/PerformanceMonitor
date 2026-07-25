@@ -126,7 +126,7 @@ namespace PerformanceMonitorLite.Controls
                 .ToList();
         }
 
-        private static Brush BrushFromHex(string hex)
+        private static SolidColorBrush BrushFromHex(string hex)
         {
             var b = new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex));
             b.Freeze();

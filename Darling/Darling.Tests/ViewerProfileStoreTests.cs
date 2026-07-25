@@ -57,8 +57,8 @@ public sealed class ViewerProfileStoreTests : IDisposable
         store.AddProfile(profile, "sa", "the-password");
 
         /* Secret under profile_{id}, NOT a bare id key. */
-        Assert.NotNull(_profileSecrets.Get(ViewerProfileStore.ProfileCredentialId(profile.Id)));
-        Assert.Null(_profileSecrets.Get(profile.Id));
+        Assert.NotNull(_profileSecrets.Find(ViewerProfileStore.ProfileCredentialId(profile.Id)));
+        Assert.Null(_profileSecrets.Find(profile.Id));
 
         /* viewer-profiles.json holds the profile, never the secret. */
         var json = File.ReadAllText(_profilePath);
@@ -81,7 +81,7 @@ public sealed class ViewerProfileStoreTests : IDisposable
 
         store.AddProfile(profile, username: null, secret: null);
 
-        Assert.Null(_profileSecrets.Get(ViewerProfileStore.ProfileCredentialId(profile.Id)));
+        Assert.Null(_profileSecrets.Find(ViewerProfileStore.ProfileCredentialId(profile.Id)));
         Assert.True(store.HasStoredSecret(profile));  // MI needs none
     }
 
@@ -115,11 +115,11 @@ public sealed class ViewerProfileStoreTests : IDisposable
         /* Rename only (blank secret) → the stored secret is untouched. */
         profile.Name = "renamed";
         store.UpdateProfile(profile);
-        Assert.Equal("pw1", _profileSecrets.Get(ViewerProfileStore.ProfileCredentialId(profile.Id))!.Value.Password);
+        Assert.Equal("pw1", _profileSecrets.Find(ViewerProfileStore.ProfileCredentialId(profile.Id))!.Value.Password);
 
         /* Fresh secret → replaces it. */
         store.UpdateProfile(profile, "sa", "pw2");
-        Assert.Equal("pw2", _profileSecrets.Get(ViewerProfileStore.ProfileCredentialId(profile.Id))!.Value.Password);
+        Assert.Equal("pw2", _profileSecrets.Find(ViewerProfileStore.ProfileCredentialId(profile.Id))!.Value.Password);
         Assert.Equal("renamed", NewProfileStore(NewServerStore()).GetProfile(profile.Id)!.Name);
     }
 
@@ -133,7 +133,7 @@ public sealed class ViewerProfileStoreTests : IDisposable
         store.DeleteProfile(profile.Id);
 
         Assert.Null(store.GetProfile(profile.Id));
-        Assert.Null(_profileSecrets.Get(ViewerProfileStore.ProfileCredentialId(profile.Id)));
+        Assert.Null(_profileSecrets.Find(ViewerProfileStore.ProfileCredentialId(profile.Id)));
         Assert.Empty(NewProfileStore(NewServerStore()).GetAll());
     }
 
@@ -170,7 +170,7 @@ public sealed class ViewerProfileStoreTests : IDisposable
 
         public void Save(string id, string username, string password) => _map[id] = (username, password);
 
-        public (string Username, string Password)? Get(string id) =>
+        public (string Username, string Password)? Find(string id) =>
             _map.TryGetValue(id, out var v) ? v : null;
 
         public void Delete(string id) => _map.Remove(id);

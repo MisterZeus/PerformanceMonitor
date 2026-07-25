@@ -75,12 +75,31 @@ SELECT
         string? password = null;
         if (config.UsesSqlAuth)
         {
-            if (!OperatingSystem.IsWindows() && !string.IsNullOrWhiteSpace(config.EncryptedPassword))
+            bool usedPlaintext;
+            if (OperatingSystem.IsWindows())
             {
-                throw new PlatformNotSupportedException("encryptedPassword requires Windows (DPAPI).");
+                password = DarlingSecrets.ResolvePassword(config, out usedPlaintext);
+            }
+            else
+            {
+                /* Non-Windows: DPAPI (DarlingSecrets) is unavailable, so only the plaintext
+                   fallback of ResolvePassword applies — inlined here to keep the DPAPI call
+                   provably Windows-only for the platform analyzer. */
+                if (!string.IsNullOrWhiteSpace(config.EncryptedPassword))
+                {
+                    throw new PlatformNotSupportedException("encryptedPassword requires Windows (DPAPI).");
+                }
+
+                if (string.IsNullOrWhiteSpace(config.Password))
+                {
+                    throw new InvalidOperationException(
+                        $"Server '{config.DisplayName}' uses sql auth but has neither encryptedPassword nor password.");
+                }
+
+                password = config.Password;
+                usedPlaintext = true;
             }
 
-            password = DarlingSecrets.ResolvePassword(config, out var usedPlaintext);
             if (usedPlaintext)
             {
                 logger?.LogWarning(

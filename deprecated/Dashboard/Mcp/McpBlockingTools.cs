@@ -31,7 +31,7 @@ public sealed class McpBlockingTools
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
 
-            var rows = await resolved.Value.Service.GetBlockingEventsAsync(hours_back);
+            var rows = await resolved.Service.GetBlockingEventsAsync(hours_back);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("empty", "No blocking events found in the specified time range.");
@@ -63,7 +63,7 @@ public sealed class McpBlockingTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 total_events = rows.Count,
                 events = result
@@ -94,7 +94,7 @@ public sealed class McpBlockingTools
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
 
-            var rows = await resolved.Value.Service.GetDeadlocksAsync(hours_back);
+            var rows = await resolved.Service.GetDeadlocksAsync(hours_back);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("empty", "No deadlocks found in the specified time range.");
@@ -128,7 +128,7 @@ public sealed class McpBlockingTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 total_deadlocks = rows.Count,
                 deadlocks = result
@@ -159,7 +159,7 @@ public sealed class McpBlockingTools
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
 
-            var rows = await resolved.Value.Service.GetDeadlocksAsync(hours_back);
+            var rows = await resolved.Service.GetDeadlocksAsync(hours_back);
             var withXml = rows.Where(r => !string.IsNullOrEmpty(r.DeadlockGraph)).Take(limit).ToList();
             if (withXml.Count == 0)
             {
@@ -176,7 +176,7 @@ public sealed class McpBlockingTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 deadlocks = result
             }, McpHelpers.JsonOptions);
@@ -206,7 +206,7 @@ public sealed class McpBlockingTools
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
 
-            var rows = await resolved.Value.Service.GetBlockingEventsAsync(hours_back);
+            var rows = await resolved.Service.GetBlockingEventsAsync(hours_back);
             var withXml = rows.Where(r => !string.IsNullOrEmpty(r.BlockedProcessReportXml)).Take(limit).ToList();
             if (withXml.Count == 0)
             {
@@ -224,7 +224,7 @@ public sealed class McpBlockingTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 reports = result
             }, McpHelpers.JsonOptions);
@@ -250,7 +250,7 @@ public sealed class McpBlockingTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var rows = await resolved.Value.Service.GetBlockingDeadlockStatsAsync(hours_back);
+            var rows = await resolved.Service.GetBlockingDeadlockStatsAsync(hours_back);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No blocking/deadlock statistics available.");
@@ -258,7 +258,7 @@ public sealed class McpBlockingTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 stats = rows
             }, McpHelpers.JsonOptions);

@@ -12,6 +12,8 @@ namespace PerformanceMonitor.Collectors;
 /// Logical column types for collector payload columns — engine-neutral names each host maps to
 /// its own storage types (Lite/DuckDB and Darling/Postgres both have direct equivalents).
 /// </summary>
+[System.Diagnostics.CodeAnalysis.SuppressMessage("Naming", "CA1720:Identifier contains type name",
+    Justification = "Engine-neutral storage-type vocabulary by design — Integer/Double/Decimal name the logical column types the hosts map, not .NET types.")]
 public enum CollectorColumnType
 {
     BigInt,

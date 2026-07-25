@@ -22,13 +22,13 @@ public sealed class McpSchedulerTools
 
         try
         {
-            var item = await resolved.Value.Service.GetCpuPressureAsync();
+            var item = await resolved.Service.GetCpuPressureAsync();
             if (item == null)
                 return McpHelpers.Status("unavailable", "No CPU scheduler data available. The scheduler collector may not have run yet.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 collection_time = item.CollectionTime.ToString("o"),
                 schedulers = item.TotalSchedulers,
                 runnable_tasks = item.TotalRunnableTasks,

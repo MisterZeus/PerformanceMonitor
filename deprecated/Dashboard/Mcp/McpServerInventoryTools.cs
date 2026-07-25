@@ -23,13 +23,13 @@ public sealed class McpServerInventoryTools
 
         try
         {
-            var rows = await resolved.Value.Service.GetFinOpsDatabaseSizeStatsAsync();
+            var rows = await resolved.Service.GetFinOpsDatabaseSizeStatsAsync();
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No database size data available. The size collector may not have run yet.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 file_count = rows.Count,
                 databases = rows
                     .GroupBy(r => r.DatabaseName)
@@ -73,12 +73,12 @@ public sealed class McpServerInventoryTools
 
         try
         {
-            var connectionString = resolved.Value.Service.ConnectionString;
+            var connectionString = resolved.Service.ConnectionString;
             var row = await DatabaseService.GetServerPropertiesLiveAsync(connectionString);
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 edition = row.Edition,
                 engine_edition = row.EngineEdition,
                 sql_version = row.SqlVersion,

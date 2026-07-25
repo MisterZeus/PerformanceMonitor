@@ -365,15 +365,15 @@ public sealed class ViewerSystemEventsTests
         var result = SystemHealthParser.ParseEvents(events);
 
         // Scheduler (WARNING), Severe Error (sev 24), Memory Node OOM (ungated), and the wait all pass.
-        Assert.Single(result.SchedulerIssues.Where(SystemEventSignificance.IsSignificant));
-        Assert.Single(result.SevereErrors.Where(SystemEventSignificance.IsSignificant));
-        Assert.Single(result.MemoryNodeOom.Where(SystemEventSignificance.IsSignificant));
-        Assert.Single(result.SignificantWaits.Where(SystemEventSignificance.IsSignificant));
+        Assert.Single(result.SchedulerIssues, SystemEventSignificance.IsSignificant);
+        Assert.Single(result.SevereErrors, SystemEventSignificance.IsSignificant);
+        Assert.Single(result.MemoryNodeOom, SystemEventSignificance.IsSignificant);
+        Assert.Single(result.SignificantWaits, SystemEventSignificance.IsSignificant);
         // The memory-conditions / broker fixtures are RESOURCE_MEMPHYSICAL_HIGH — the warnings filter drops them.
-        Assert.Empty(result.MemoryConditions.Where(SystemEventSignificance.IsSignificant));
-        Assert.Empty(result.MemoryBroker.Where(SystemEventSignificance.IsSignificant));
+        Assert.DoesNotContain(result.MemoryConditions, SystemEventSignificance.IsSignificant);
+        Assert.DoesNotContain(result.MemoryBroker, SystemEventSignificance.IsSignificant);
         // CPU: the WARNING+15-pending event passes; the CLEAN one is dropped. I/O: both WARNING file rows pass.
-        Assert.Single(result.CpuTasks.Where(SystemEventSignificance.IsSignificant));
+        Assert.Single(result.CpuTasks, SystemEventSignificance.IsSignificant);
         Assert.Equal(2, result.IoIssues.Count(SystemEventSignificance.IsSignificant));
         // System Health (Corruption + Contention charts) has NO significance filter — the CLEAN SYSTEM
         // snapshot is kept, so the counter charts plot it (contrast with the dropped HIGH memory rows above).

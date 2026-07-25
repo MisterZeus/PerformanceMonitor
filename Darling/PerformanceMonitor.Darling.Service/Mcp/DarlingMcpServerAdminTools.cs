@@ -185,13 +185,13 @@ public sealed class DarlingMcpServerAdminTools
             }
 
             await using var command = postgres.CreateCommand("DELETE FROM config_monitored_servers WHERE server_id = $1");
-            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = resolved!.Value.ServerId });
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = resolved.ServerId });
             var affected = await command.ExecuteNonQueryAsync();
 
             return affected > 0
-                ? JsonSerializer.Serialize(new { status = "removed", server = resolved.Value.ServerName }, McpHelpers.JsonOptions)
+                ? JsonSerializer.Serialize(new { status = "removed", server = resolved.ServerName }, McpHelpers.JsonOptions)
                 : Outcome("not_found",
-                    $"'{resolved.Value.ServerName}' is registered but has no monitored-server definition to remove (it may have been added only via darling.json, or already removed).");
+                    $"'{resolved.ServerName}' is registered but has no monitored-server definition to remove (it may have been added only via darling.json, or already removed).");
         }
         catch (Exception ex)
         {

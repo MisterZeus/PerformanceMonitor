@@ -55,12 +55,12 @@ public sealed class DarlingMcpConfigHistoryTools
         try
         {
             var windowStart = NaiveUtcNow().AddHours(-hours_back);
-            var snapshots = await DarlingConfigHistoryReader.GetServerConfigSnapshotsAsync(postgres, resolved.Value.ServerId);
+            var snapshots = await DarlingConfigHistoryReader.GetServerConfigSnapshotsAsync(postgres, resolved.ServerId);
             /* The tool reads the full unbounded history and only lower-bounds, so pass DateTime.MaxValue as the
                (no-op) upper edge — the shared both-edges diff then reproduces the prior behavior exactly. */
             var changes = ConfigChangeDiff.DiffServerConfigChanges(snapshots, windowStart, DateTime.MaxValue);
             if (changes.Count == 0)
-                return NoChanges(resolved.Value.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)));
+                return NoChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)));
 
             var result = changes.Select(c => new
             {
@@ -76,7 +76,7 @@ public sealed class DarlingMcpConfigHistoryTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 change_count = changes.Count,
                 changes = result
@@ -103,10 +103,10 @@ public sealed class DarlingMcpConfigHistoryTools
         try
         {
             var windowStart = NaiveUtcNow().AddHours(-hours_back);
-            var snapshots = await DarlingConfigHistoryReader.GetDatabaseConfigSnapshotsAsync(postgres, resolved.Value.ServerId);
+            var snapshots = await DarlingConfigHistoryReader.GetDatabaseConfigSnapshotsAsync(postgres, resolved.ServerId);
             var changes = ConfigChangeDiff.DiffDatabaseConfigChanges(snapshots, windowStart, DateTime.MaxValue);
             if (changes.Count == 0)
-                return NoChanges(resolved.Value.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)));
+                return NoChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)));
 
             var result = changes.Select(c => new
             {
@@ -119,7 +119,7 @@ public sealed class DarlingMcpConfigHistoryTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 change_count = changes.Count,
                 changes = result
@@ -146,10 +146,10 @@ public sealed class DarlingMcpConfigHistoryTools
         try
         {
             var windowStart = NaiveUtcNow().AddHours(-hours_back);
-            var snapshots = await DarlingConfigHistoryReader.GetTraceFlagSnapshotsAsync(postgres, resolved.Value.ServerId);
+            var snapshots = await DarlingConfigHistoryReader.GetTraceFlagSnapshotsAsync(postgres, resolved.ServerId);
             var changes = ConfigChangeDiff.DiffTraceFlagChanges(snapshots, windowStart, DateTime.MaxValue);
             if (changes.Count == 0)
-                return NoChanges(resolved.Value.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)));
+                return NoChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)));
 
             var result = changes.Select(c => new
             {
@@ -165,7 +165,7 @@ public sealed class DarlingMcpConfigHistoryTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 change_count = changes.Count,
                 changes = result
@@ -188,7 +188,7 @@ public sealed class DarlingMcpConfigHistoryTools
 
         try
         {
-            var rows = await DarlingConfigHistoryReader.GetLatestDatabaseScopedConfigAsync(postgres, resolved.Value.ServerId);
+            var rows = await DarlingConfigHistoryReader.GetLatestDatabaseScopedConfigAsync(postgres, resolved.ServerId);
             if (rows.Count == 0)
                 return McpHelpers.Status(
                     "unavailable",
@@ -213,7 +213,7 @@ public sealed class DarlingMcpConfigHistoryTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 database_count = grouped.Count,
                 databases = grouped
             }, McpHelpers.JsonOptions);
