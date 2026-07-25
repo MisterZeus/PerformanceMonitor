@@ -41,9 +41,10 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// enable/port state arrives via <see cref="WebRuntimeState"/> (the worker publishes it), so the viewer's
 /// Settings toggle starts/stops/rebinds the dashboard with no service restart.</para>
 ///
-/// <para><b>Browser auth (network mode only):</b> loopback requests ALWAYS pass, tokenless, even while
-/// LAN-exposed (Erik-ratified — the surface is read-only, so the MCP host's exposed-mode loopback-token SSRF
-/// guard is deliberately not mirrored). A network (in-CIDR, non-loopback) request needs either a valid session
+/// <para><b>Browser auth (network mode only):</b> in network mode EVERY request authenticates, loopback
+/// included — the MCP host's exposed-mode loopback-token SSRF guard, now mirrored here (#1649). Loopback is
+/// exempt from the CIDR test only (127.0.0.1 is not in a LAN CIDR), never from the credential. A
+/// loopback-only dashboard registers no auth middleware at all and remains tokenless. A request needs either a valid session
 /// cookie or a valid <c>?token=</c> (constant-time), which is exchanged for an HMAC-signed HttpOnly
 /// SameSite=Strict cookie and 302-redirected to strip the token from the URL; out-of-CIDR is 403; no
 /// cookie/token gets a minimal inline login form. The cookie signing key is a per-process 32-byte RNG value,
@@ -510,22 +511,32 @@ public sealed class DarlingWebHostService : BackgroundService
         => DarlingHostBinding.IsAllowedHost(host, networkListenIp);
 
     /// <summary>
-    /// PURE route-auth decision (network mode). Loopback ALWAYS passes, tokenless, even while LAN-exposed
-    /// (Erik-ratified — the web surface is read-only). A non-loopback remote must be inside
-    /// <paramref name="allowedCidr"/> (a null/unverifiable remote fails closed to <see cref="WebAuthAction.Forbid"/>);
-    /// once in-CIDR, a valid session cookie passes, a valid <c>?token=</c> is exchanged for one
-    /// (<see cref="WebAuthAction.SetCookieAndRedirect"/>), and anything else gets the login form.
+    /// PURE route-auth decision. This method is only ever reached in NETWORK mode — the caller registers the
+    /// auth middleware inside <c>if (networkMode)</c> — so a loopback-only dashboard is unaffected by every
+    /// rule here and stays tokenless.
+    ///
+    /// <para>Loopback skips the CIDR check (127.0.0.1 is not in a LAN CIDR, so testing it there would 403 the
+    /// operator's own browser) but still needs a session cookie or a valid <c>?token=</c>, exactly like any
+    /// other remote. It previously passed tokenless on the grounds that the web surface was read-only; that
+    /// stopped being true when Custom Views v2 added view create/update/delete and <c>/api/compose/run</c>, so
+    /// any local process — a scheduled task, SSRF'd code, another user's session — could read the whole store
+    /// and mutate views with no credential while the host was LAN-exposed (#1649). This now mirrors the MCP
+    /// host's rule verbatim: in exposed mode even a local client presents the token, which IS the loopback
+    /// guard against SSRF and sandboxed sockets.</para>
+    ///
+    /// <para>A non-loopback remote must additionally be inside <paramref name="allowedCidr"/> (a
+    /// null/unverifiable remote fails closed to <see cref="WebAuthAction.Forbid"/>). Then a valid session
+    /// cookie passes, a valid <c>?token=</c> is exchanged for one
+    /// (<see cref="WebAuthAction.SetCookieAndRedirect"/>), and anything else gets the login form.</para>
     /// </summary>
     internal static WebAuthAction DecideWebAuth(IPAddress? remoteIp, IPNetwork allowedCidr, bool hasValidCookie, bool hasValidToken)
     {
-        /* Loopback determination (the tokenless-access arm) lives in DarlingWebEndpoints.IsLoopbackRemote
-           so the network auth gate and the mutation gate can never drift on how they unwrap IPv4-mapped-IPv6. */
-        if (DarlingWebEndpoints.IsLoopbackRemote(remoteIp))
-        {
-            return WebAuthAction.Allow;
-        }
+        /* Loopback determination lives in DarlingWebEndpoints.IsLoopbackRemote so every caller unwraps
+           IPv4-mapped-IPv6 (::ffff:127.0.0.1) identically. Loopback is exempt from the CIDR test ONLY — it
+           still has to authenticate below. */
+        var isLoopback = DarlingWebEndpoints.IsLoopbackRemote(remoteIp);
 
-        if (!DarlingHostBinding.IsRemoteAddressAllowed(remoteIp, allowedCidr))
+        if (!isLoopback && !DarlingHostBinding.IsRemoteAddressAllowed(remoteIp, allowedCidr))
         {
             return WebAuthAction.Forbid;
         }

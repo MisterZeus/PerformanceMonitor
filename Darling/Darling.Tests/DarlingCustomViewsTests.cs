@@ -21,7 +21,7 @@ namespace Darling.Tests;
 /// The ungated (no-live-store) contract for the #1563 custom-views backend: the V31 migration shape, the pure
 /// definition validator (the authority — a bad doc can never be stored), the read catalog's key-parity pin
 /// (CatalogDescriptors.Keys == BuildReadDispatch().Keys, so a new read forces a catalog entry) + its WIRE query
-/// keys, the loopback determination (host tokenless-auth arm), and the store's pure argument/optimistic-concurrency contract.
+/// keys, the loopback determination (host auth arm: the CIDR exemption, NOT a credential exemption — #1649), and the store's pure argument/optimistic-concurrency contract.
 /// The live CRUD round-trip + the DB-side grant proof are in the gated <see cref="DarlingCustomViewsLiveTests"/>
 /// and <see cref="DarlingSecuritySplitLiveTests"/>.
 /// </summary>
@@ -222,7 +222,7 @@ public sealed class DarlingCustomViewsTests
     private static bool RequiredParam(string read, string paramName) =>
         DarlingWebEndpoints.CatalogDescriptors[read].Params.Single(p => p.Name == paramName).Required;
 
-    /* ── loopback determination (host tokenless-auth arm) ── */
+    /* ── loopback determination (host auth arm: exempts the CIDR test only, never the credential — #1649) ── */
 
     [Theory]
     [InlineData("127.0.0.1", true)]

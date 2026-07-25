@@ -543,10 +543,12 @@ public static class DarlingWebEndpoints
     /* ── loopback determination (the web host's tokenless-loopback auth arm) ── */
 
     /// <summary>
-    /// PURE: whether a request's remote address is loopback — the tokenless-access arm of the web host's auth
-    /// gate (<see cref="DarlingWebHostService.DecideWebAuth"/> calls this: a loopback request needs no token).
-    /// Unwraps an IPv4-mapped-IPv6 address (<c>::ffff:127.0.0.1</c>) then defers to
-    /// <see cref="IPAddress.IsLoopback"/>; a null/unverifiable remote is NOT loopback (fail-closed).
+    /// PURE: whether a request's remote address is loopback — the CIDR-exemption arm of the web host's auth
+    /// gate (<see cref="DarlingWebHostService.DecideWebAuth"/> calls this). A loopback request skips the CIDR
+    /// test, because 127.0.0.1 is not inside a LAN CIDR and would otherwise 403 the operator's own browser; it
+    /// still has to present a session cookie or token (#1649). Unwraps an IPv4-mapped-IPv6 address
+    /// (<c>::ffff:127.0.0.1</c>) then defers to <see cref="IPAddress.IsLoopback"/>; a null/unverifiable remote
+    /// is NOT loopback (fail-closed).
     /// </summary>
     internal static bool IsLoopbackRemote(IPAddress? remoteIp)
     {
