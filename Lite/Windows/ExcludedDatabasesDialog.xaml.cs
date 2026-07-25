@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Media;
 using Microsoft.Data.SqlClient;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 
@@ -25,6 +26,12 @@ public partial class ExcludedDatabasesDialog : Window
     private readonly ServerManager _serverManager;
     private readonly ServerConnection _server;
     private ObservableCollection<DatabaseExclusionItem> _items = new();
+
+    /// <summary>Set when master could not be enumerated (an Azure server-firewall block, or a contained
+    /// login without master rights) and the list fell back to just the connected database — the picker then
+    /// shows an explanatory note instead of a raw error, mirroring the collectors' single-database
+    /// fallback (#1631).</summary>
+    private bool _masterUnreachableFellBackToConnectedDb;
 
     public bool ExclusionsModified { get; private set; }
 
@@ -41,6 +48,7 @@ public partial class ExcludedDatabasesDialog : Window
     {
         StatusText.Text = "Loading databases…";
         DatabasesItemsControl.ItemsSource = null;
+        _masterUnreachableFellBackToConnectedDb = false;
 
         try
         {
@@ -79,7 +87,9 @@ public partial class ExcludedDatabasesDialog : Window
             }
 
             DatabasesItemsControl.ItemsSource = _items;
-            StatusText.Text = $"{liveDatabases.Count} database(s) on this server, {existingExclusions.Count} currently excluded.";
+            StatusText.Text = _masterUnreachableFellBackToConnectedDb
+                ? "Server firewall blocks reading the full list from master (Azure database-level rule); showing only the connected database."
+                : $"{liveDatabases.Count} database(s) on this server, {existingExclusions.Count} currently excluded.";
         }
         catch (Exception ex)
         {
@@ -101,25 +111,40 @@ public partial class ExcludedDatabasesDialog : Window
             ConnectTimeout = 10
         };
 
-        using var connection = new SqlConnection(builder.ConnectionString);
-        await connection.OpenAsync();
+        try
+        {
+            using var connection = new SqlConnection(builder.ConnectionString);
+            await connection.OpenAsync();
 
-        using var cmd = new SqlCommand(@"
+            using var cmd = new SqlCommand(@"
 SELECT d.name
 FROM sys.databases AS d
 WHERE d.database_id > 4
 AND   d.state_desc = N'ONLINE'
 AND   d.database_id < 32761 /*exclude contained AG system databases*/
 ORDER BY d.name;", connection);
-        cmd.CommandTimeout = 30;
+            cmd.CommandTimeout = 30;
 
-        var names = new List<string>();
-        using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
-        {
-            names.Add(reader.GetString(0));
+            var names = new List<string>();
+            using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                names.Add(reader.GetString(0));
+            }
+            return names;
         }
-        return names;
+        catch (SqlException ex) when (SqlErrorClassification.ShouldFallBackToSingleDatabase(ex.Number))
+        {
+            /* Azure database-level firewall (or a contained login without master rights): master cannot be
+               enumerated, but the connected database is reachable. Fall back to it instead of failing the
+               picker outright, mirroring the collectors' single-database fallback (#1631). The connected
+               database is the connection string's own catalog. */
+            _masterUnreachableFellBackToConnectedDb = true;
+            var connectedDb = new SqlConnectionStringBuilder(connectionString).InitialCatalog;
+            return string.IsNullOrWhiteSpace(connectedDb)
+                ? new List<string>()
+                : new List<string> { connectedDb };
+        }
     }
 
     private void Save_Click(object sender, RoutedEventArgs e)
