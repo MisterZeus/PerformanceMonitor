@@ -16,10 +16,19 @@ namespace PerformanceMonitorLite.Services;
 
 /// <summary>
 /// Simple file-based application logger. Writes to logs/ directory with daily rotation.
-/// Thread-safe with buffered writes.
+/// Thread-safe with buffered writes. Files older than <see cref="RetentionDays"/> are swept at
+/// <see cref="Initialize"/> so the log directory never grows without bound.
 /// </summary>
 public static class AppLogger
 {
+    /// <summary>
+    /// How long a rotated <c>lite_yyyyMMdd.log</c> is kept. "Daily rotation" only ever meant a NEW
+    /// file per day — nothing deleted the old ones, so the directory grew for the life of the install
+    /// (#1652). Seven days matches both sibling loggers in this app (<see cref="Helpers.QueryLogger"/>
+    /// and <see cref="Helpers.MethodProfiler"/>), which is the window a bug report needs: the user
+    /// reproduces, then sends the logs.
+    /// </summary>
+    internal const int RetentionDays = 7;
     private static readonly ConcurrentQueue<string> s_buffer = new();
     private static readonly Timer s_flushTimer;
     private static string s_logDirectory = "";
@@ -38,10 +47,39 @@ public static class AppLogger
         {
             Directory.CreateDirectory(s_logDirectory);
         }
+        CleanOldLogs(s_logDirectory);
         s_initialized = true;
         s_flushTimer.Change(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
 
         Info("AppLogger", "Logging initialized");
+    }
+
+    /// <summary>
+    /// Deletes <c>lite_*.log</c> files older than <see cref="RetentionDays"/>. Mirrors
+    /// <see cref="Helpers.QueryLogger"/>'s sweep (same file-age predicate, same window) — the two
+    /// sibling loggers already pruned and this one did not, so an install that ran for a year kept
+    /// every daily log it ever wrote. Takes the directory rather than reading the static field so a
+    /// test can exercise it without initializing the process-wide logger. Best-effort and
+    /// never-throws: a locked or undeletable file is tomorrow's sweep's problem, and logging
+    /// retention must never be the reason startup fails.
+    /// </summary>
+    internal static void CleanOldLogs(string logDirectory)
+    {
+        try
+        {
+            var cutoff = DateTime.Now.AddDays(-RetentionDays);
+            foreach (var file in Directory.GetFiles(logDirectory, "lite_*.log"))
+            {
+                if (new FileInfo(file).CreationTime < cutoff)
+                {
+                    File.Delete(file);
+                }
+            }
+        }
+        catch
+        {
+            /* Retention is best-effort — never let it break logging or startup */
+        }
     }
 
     public static void Info(string source, string message)

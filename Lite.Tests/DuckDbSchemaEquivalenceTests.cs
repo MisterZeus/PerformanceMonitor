@@ -19,7 +19,7 @@ using Xunit;
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// THE data-safety proof for the catalog-driven collector schema: for every one of the 35 collector
+/// THE data-safety proof for the catalog-driven collector schema: for every one of the 36 collector
 /// tables, the DDL <see cref="DuckDbSchemaGenerator"/> now generates must produce a DuckDB table that
 /// is byte-for-byte STORAGE-equivalent to the hand-written table it replaced — identical columns,
 /// DuckDB types, column order, NOT NULL flags, DEFAULT values, and PRIMARY KEY, plus an identical

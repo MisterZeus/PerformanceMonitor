@@ -29,7 +29,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// AppLogger): buffered writes on a 5-second flush timer (a log line never blocks a collection
 /// sweep on disk I/O), one file per day, and never-throw — a full disk or an ACL surprise turns
 /// logging into a no-op, never a service crash. Files older than <see cref="RetentionDays"/> are
-/// swept at startup so an unattended service never grows an unbounded log directory.</para>
+/// swept at startup AND on the worker's daily maintenance tick (see the static
+/// <see cref="SweepOldFiles(string)"/>) so an unattended service never grows an unbounded log
+/// directory — startup alone left a months-uptime service sweeping exactly once (#1652).</para>
 ///
 /// <para>Directory: <c>%ProgramData%\PerformanceMonitorDarling\logs</c> — the machine-level Darling
 /// folder the managed store already lives under (<c>...\pg</c>), created by the service account on
@@ -213,12 +215,25 @@ public sealed class DarlingFileLoggerProvider : ILoggerProvider
         }
     }
 
-    private void SweepOldFiles()
+    private void SweepOldFiles() => SweepOldFiles(_logDirectory);
+
+    /// <summary>
+    /// Deletes <c>darling-service_*.log</c> files older than <see cref="RetentionDays"/> from
+    /// <paramref name="logDirectory"/>. Static and directory-parameterized so the DAILY MAINTENANCE TICK can
+    /// run it (DarlingWorker, alongside the retention purge) without holding a reference to the provider the
+    /// host owns — the sweep used to run ONLY from the constructor (#1652), so a service that stayed up for
+    /// months (which is the whole point of a service) swept exactly once, at the start, and then never again
+    /// while it wrote a file a day forever. Production always uses <see cref="DefaultLogDirectory"/> — the
+    /// directory-taking constructor is a test seam — so the tick sweeps precisely the directory the provider
+    /// writes to. Today's file is never in range: the cutoff is 14 days of last-write time.
+    /// Best-effort and never-throws, on both call paths.
+    /// </summary>
+    internal static void SweepOldFiles(string logDirectory)
     {
         try
         {
             var cutoff = DateTime.Now.AddDays(-RetentionDays);
-            foreach (var file in Directory.EnumerateFiles(_logDirectory, "darling-service_*.log")
+            foreach (var file in Directory.EnumerateFiles(logDirectory, "darling-service_*.log")
                 .Where(f => File.GetLastWriteTime(f) < cutoff))
             {
                 File.Delete(file);

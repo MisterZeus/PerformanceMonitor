@@ -28,6 +28,9 @@ namespace Lite.Tests;
 /// kept (upper-bound-only read), the window excludes out-of-window changes, the #1319 database filter, and the
 /// row VM's server-time render. The scenarios mirror the Darling config-history tests exactly.
 /// </summary>
+/* Renders through ServerTimeHelper.FormatServerTime, which reads the process-wide offset + display mode —
+   see the collection note on SystemEventsReaderTests, which MUTATES both. */
+[Collection("server-time-helper")]
 public sealed class ConfigChangesReaderTests : IDisposable
 {
     private const int ServerId = 8888;
