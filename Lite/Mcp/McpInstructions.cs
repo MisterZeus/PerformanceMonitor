@@ -164,7 +164,7 @@ internal static class McpInstructions
         ### Session & Active Query Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `get_active_queries` | Active query snapshots from sp_WhoIsActive — what was running at each collection point | `server_name`, `hours_back` (default 1), `database_name`, `blocking_only`, `limit` |
+        | `get_active_queries` | Active query snapshots from sys.dm_exec_requests — what was running at each collection point | `server_name`, `hours_back` (default 1), `database_name`, `blocking_only`, `limit` |
         | `get_session_stats` | Connection counts and resource usage grouped by application | `server_name` |
 
         ### Execution Plan Analysis Tools
