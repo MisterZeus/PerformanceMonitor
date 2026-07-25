@@ -25,9 +25,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// purge via hypertable <c>drop_chunks</c> instead, which detaches whole expired chunks in O(1)
 /// instead of scanning rows. collection_log — a hypertable since V23, though converted directly by the
 /// V23 migration rather than the catalog loop — purges the SAME way (drop_chunks with a DELETE fallback for
-/// a plain-PostgreSQL store). config_alert_log stays DELETE-based either way (never converted — a plain
-/// config-side registry table), as do the analysis tables (PgFindingStore.CleanupOldFindingsAsync owns
-/// those). Retention horizons are the shared
+/// a plain-PostgreSQL store). config_alert_log and config.config_command stay DELETE-based either way
+/// (never converted — plain config-side registry tables), as do the analysis tables
+/// (PgFindingStore.CleanupOldFindingsAsync owns those). Retention horizons are the shared
 /// per-collector <see cref="CollectorScheduleDefaults"/> (identity-pinned to Lite's
 /// ScheduleManager table), so both SKUs keep the same data horizons out of the box. NOTE: Lite
 /// archives expired rows to parquet before deleting (ArchiveService); Darling deliberately
@@ -72,6 +72,28 @@ public static class DarlingRetention
     /// </summary>
     internal const int AlertHistoryRetentionDays = 90;
 
+    /// <summary>
+    /// config.config_command (the imperative command queue the Viewer/MCP/CLI enqueue into and the service
+    /// executes) keeps its TERMINAL rows this long. Unlike config_alert_log this is not an audit surface
+    /// anyone reads — nothing in the viewer or the MCP tools queries command HISTORY; a caller polls its own
+    /// command_id for a terminal result and moves on — so the retained rows exist purely for post-hoc "what did
+    /// the service actually do" forensics, which is worth exactly as long as the metric data they would be
+    /// correlated against (<see cref="DataRetentionBaseDays"/>). It is also higher-volume than alert history:
+    /// every viewer live-plan / actual-plan / active-queries fetch enqueues a row, which is why it gets the
+    /// base window rather than the alert log's generous 90 days.
+    /// </summary>
+    internal const int CommandHistoryRetentionDays = DataRetentionBaseDays;
+
+    /// <summary>
+    /// The terminal-status filter for the command purge — the two states
+    /// <c>ViewerDataService.IsTerminal</c> recognizes, which are also the only two
+    /// <c>DarlingCommandExecutor</c> ever writes (its report path and its stale-command reaper). A
+    /// <c>pending</c> or <c>in_progress</c> row is NEVER purged no matter how old: deleting a live command
+    /// would strand the caller polling it, and an ancient pending row means an operator queued something the
+    /// service has not run yet — the reaper's job, not retention's.
+    /// </summary>
+    internal const string TerminalCommandStatuses = "status IN ('succeeded', 'failed')";
+
     /* Each one-day slice is bounded work (see TimeSlicedDeleteSql); the generous 300s per-slice command
        timeout (well above Npgsql's 30s default) is belt-and-suspenders for a slow disk. Slicing is also what
        keeps a large first purge from ever hitting a timeout at all — a single unbounded DELETE could roll
@@ -80,8 +102,9 @@ public static class DarlingRetention
 
     /// <summary>
     /// Purges every collector table past its shared <see cref="CollectorScheduleDefaults"/>
-    /// RetentionDays, plus collection_log past <see cref="CollectionLogRetentionDays"/> and
-    /// config_alert_log past <see cref="AlertHistoryRetentionDays"/>.
+    /// RetentionDays, plus collection_log past <see cref="CollectionLogRetentionDays"/>,
+    /// config_alert_log past <see cref="AlertHistoryRetentionDays"/>, and terminal
+    /// config.config_command rows past <see cref="CommandHistoryRetentionDays"/>.
     /// When <paramref name="timescaleAvailable"/> (the worker's startup detection), the
     /// collector tables purge via <c>drop_chunks</c> (<see cref="DropChunksSqlFor"/>) with a
     /// per-table DELETE fallback so a table that failed hypertable conversion still honors its
@@ -222,6 +245,33 @@ public static class DarlingRetention
                 tablesFailed++;
             }
 
+            /* config.config_command (the imperative command queue) — the backstop the viewer's per-command
+               cleanup already ASSUMED existed ("the service-side purge is the backstop",
+               ViewerDataService.RunTestConnectAsync) but which nothing implemented (#1651). The viewer deletes
+               its own row for exactly four self-cleaning flows, best-effort with the exception swallowed; every
+               other command type (pause/resume, snapshot_now, analyze_now, purge_now, the enable/firewall
+               verbs, collector toggles, anything from MCP or the CLI) left a terminal row and its result_json
+               behind forever, as did those four whenever the delete failed or the viewer died mid-poll.
+               SCHEMA-QUALIFIED deliberately: unlike collection_log / config_alert_log (created bare, so they
+               live in `collect` under search_path = collect, config, public), this table really is in `config`,
+               and a bare name here would resolve to a nonexistent collect.config_command — a purge that fails
+               every night into a warning nobody reads. Keyed on created_at (NOT NULL, so no row can slip past
+               the horizon by never being stamped) and filtered to terminal rows, never a live command.
+               Failure-isolated like every sibling. */
+            var commandsDeleted = await PurgeOneAsync(
+                postgres, "config.config_command",
+                TimeSlicedDeleteSql("config.config_command", "created_at", TerminalCommandStatuses),
+                utcNow.AddDays(-CommandHistoryRetentionDays), logger, cancellationToken);
+            if (commandsDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += commandsDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
             var summary = new PurgeSummary(tablesPurged, totalRowsDeleted, totalChunksDropped);
             logger?.LogInformation(
                 "Retention purge: {Tables} table(s) purged, {Rows} row(s) deleted, {Chunks} chunk(s) dropped, {Failed} failed, {ElapsedMs}ms",
@@ -303,11 +353,23 @@ public static class DarlingRetention
     /// <c>drop_chunks</c> failed — where compressed chunks are LIKELY, which is what makes the
     /// compressed-safe shape load-bearing. <c>$1</c> is bound once and referenced by all three positions.
     /// Table/column come from catalog constants (never user input), so interpolation is safe.</para>
+    /// <para><paramref name="extraPredicate"/> narrows WHICH rows are eligible — currently only
+    /// <see cref="TerminalCommandStatuses"/>, so the command purge cannot touch a live command. It is
+    /// applied to the DELETE <b>and to both <c>min()</c> subqueries</b>, which is load-bearing, not cosmetic:
+    /// with the predicate on the DELETE alone, a slice anchored on an INELIGIBLE row's timestamp would
+    /// delete zero rows, and the drain loop's "a slice that clears nothing means we are done" termination
+    /// would stop the purge with older eligible rows still in the table. Like the table and column it is a
+    /// compile-time constant, never user input.</para>
     /// </summary>
-    internal static string TimeSlicedDeleteSql(string table, string timeColumn)
-        => $"DELETE FROM {table} WHERE {timeColumn} < $1"
-         + $" AND {timeColumn} >= (SELECT min({timeColumn}) FROM {table} WHERE {timeColumn} < $1)"
-         + $" AND {timeColumn} < (SELECT min({timeColumn}) FROM {table} WHERE {timeColumn} < $1) + INTERVAL '{TimescaleSupport.ChunkIntervalDays} days'";
+    internal static string TimeSlicedDeleteSql(string table, string timeColumn, string? extraPredicate = null)
+    {
+        var and = extraPredicate is null ? string.Empty : $" AND {extraPredicate}";
+        var expired = $"{timeColumn} < $1{and}";
+
+        return $"DELETE FROM {table} WHERE {expired}"
+             + $" AND {timeColumn} >= (SELECT min({timeColumn}) FROM {table} WHERE {expired})"
+             + $" AND {timeColumn} < (SELECT min({timeColumn}) FROM {table} WHERE {expired}) + INTERVAL '{TimescaleSupport.ChunkIntervalDays} days'";
+    }
 
     /// <summary>
     /// The Timescale purge statement for one collector table — <c>drop_chunks</c> detaches every

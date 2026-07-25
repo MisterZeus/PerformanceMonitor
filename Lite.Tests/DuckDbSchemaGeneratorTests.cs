@@ -215,7 +215,7 @@ public sealed class DuckDbSchemaGeneratorTests
     /// <summary>
     /// Pins the "three registrations" collapse: the archive-view list (DuckDbInitializer) and the
     /// archival/purge list (ArchiveService) are now BOTH derived from the catalog, so they cover
-    /// exactly the 35 collector tables plus the two non-collector time-series tables, and can never
+    /// exactly the 36 collector tables plus the two non-collector time-series tables, and can never
     /// again fall out of sync by hand.
     /// </summary>
     [Fact]

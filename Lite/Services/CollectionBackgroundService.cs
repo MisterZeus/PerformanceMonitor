@@ -40,6 +40,7 @@ public class CollectionBackgroundService : BackgroundService
     private DateTime _lastRetentionTime = DateTime.UtcNow;
     private DateTime _lastAnalysisTime = DateTime.UtcNow;
     private DateTime _lastFindingsCleanupTime = DateTime.UtcNow;
+    private DateTime _lastDismissedAlertsCleanupTime = DateTime.UtcNow;
 
     /* Server IDs whose scheduled analysis is currently running — prevents relaunching
        analysis for a server whose previous (possibly hung) pass has not finished. */
@@ -51,6 +52,8 @@ public class CollectionBackgroundService : BackgroundService
     /* Analysis-findings retention purge — daily, matching the parquet-retention cadence
        above and Darling's daily findings-cleanup horizon. */
     private static readonly TimeSpan FindingsCleanupInterval = TimeSpan.FromHours(24);
+    /* dismissed_archive_alerts sidecar purge — the same daily cadence as its retention siblings. */
+    private static readonly TimeSpan DismissedAlertsCleanupInterval = TimeSpan.FromHours(24);
 
     /* Size-based trigger — when the database exceeds this size, archive ALL data
        to parquet and reset the database. INSERT performance degrades badly with
@@ -134,6 +137,9 @@ public class CollectionBackgroundService : BackgroundService
 
                 /* Periodic analysis-findings retention (rolling 30-day purge) */
                 await RunFindingsCleanupIfDueAsync();
+
+                /* Periodic dismissed-archive-alert sidecar retention (rolling 180-day purge) */
+                await RunDismissedAlertsCleanupIfDueAsync();
 
                 /* Periodic scheduled analysis + high-severity finding notifications */
                 await RunAnalysisIfDueAsync(stoppingToken);
@@ -238,6 +244,34 @@ public class CollectionBackgroundService : BackgroundService
         catch (Exception ex)
         {
             _logger?.LogError(ex, "Findings cleanup failed");
+        }
+    }
+
+    /// <summary>
+    /// Purges dismissed_archive_alerts rows past their retention horizon on a daily cadence. The
+    /// sidecar was the one table in Lite with NO purge path at all (#1651): it is INSERT-only, and
+    /// because it is in ArchiveService.PreservedConfigTables it is restored intact after the 512 MB
+    /// emergency reset that incidentally bounds everything else — so it grew for the life of the
+    /// install. It stays preserved (losing it resurrects every dismissal at once); this just gives it
+    /// the age horizon it never had. Kept a SEPARATE tick from the findings cleanup above rather than
+    /// folded into it so one purge failing cannot skip the other. Never throws: logs and degrades
+    /// like the archival/retention ticks.
+    /// </summary>
+    private async Task RunDismissedAlertsCleanupIfDueAsync()
+    {
+        if (_duckDb == null || DateTime.UtcNow - _lastDismissedAlertsCleanupTime < DismissedAlertsCleanupInterval)
+        {
+            return;
+        }
+
+        try
+        {
+            await new LocalDataService(_duckDb).PurgeOldDismissedArchiveAlertsAsync();
+            _lastDismissedAlertsCleanupTime = DateTime.UtcNow;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Dismissed-archive-alert cleanup failed");
         }
     }
 

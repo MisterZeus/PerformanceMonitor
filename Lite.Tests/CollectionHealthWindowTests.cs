@@ -23,6 +23,9 @@ namespace PerformanceMonitorLite.Tests;
 /// lower bound that ignored fromDate/toDate) could not express. The preset test proves a plain
 /// hoursBack read still lower-bounds "now".
 /// </summary>
+/* Reads the process-wide ServerTimeHelper.UtcOffsetMinutes to build its query window — see the collection
+   note on SystemEventsReaderTests, which MUTATES it. */
+[Collection("server-time-helper")]
 public sealed class CollectionHealthWindowTests : IDisposable
 {
     private const int ServerId = 4242;

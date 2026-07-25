@@ -131,4 +131,57 @@ public sealed class DarlingFileLoggerProviderTests : IDisposable
 
         Assert.Single(reports);
     }
+
+    /* ---------------- #1652 gap 3: the RECURRING retention sweep ---------------- */
+
+    /// <summary>
+    /// The sweep the worker's daily maintenance tick calls. It used to run only from the constructor, so a
+    /// service up for months — which is the normal case for a service — swept once at startup and never again
+    /// while writing a file a day. Static and directory-taking so the tick needs no reference to the provider
+    /// the host owns.
+    /// </summary>
+    [Fact]
+    public void SweepOldFiles_DeletesPastRetention_KeepsRecentAndForeignFiles()
+    {
+        var logDir = Path.Combine(_tempRoot, "logs");
+        Directory.CreateDirectory(logDir);
+
+        var expired = WriteAged(logDir, "darling-service_20240101.log", ageDays: 30);
+        var justOutside = WriteAged(logDir, "darling-service_20240102.log", ageDays: 15);
+        var justInside = WriteAged(logDir, "darling-service_20240103.log", ageDays: 13);
+        var foreign = WriteAged(logDir, "pg.log", ageDays: 30);
+
+        DarlingFileLoggerProvider.SweepOldFiles(logDir);
+
+        Assert.False(File.Exists(expired), "a 30-day-old service log survived the sweep");
+        Assert.False(File.Exists(justOutside), "a 15-day-old log survived the 14-day window");
+        Assert.True(File.Exists(justInside), "a 13-day-old log was deleted inside the 14-day window");
+        Assert.True(File.Exists(foreign), "the sweep deleted a file that is not a service log");
+    }
+
+    /// <summary>
+    /// Running on a maintenance tick means it runs forever, so it must never throw — a missing directory (the
+    /// provider failed to create it, or an operator removed it mid-run) must not take down the tick that also
+    /// carries the store's retention purge.
+    /// </summary>
+    [Fact]
+    public void SweepOldFiles_MissingDirectory_DoesNotThrow() =>
+        DarlingFileLoggerProvider.SweepOldFiles(Path.Combine(_tempRoot, "never-created"));
+
+    /// <summary>14 days, the window an operator needs to reconstruct an incident they noticed last week.</summary>
+    [Fact]
+    public void RetentionWindow_IsFourteenDays() =>
+        Assert.Equal(14, DarlingFileLoggerProvider.RetentionDays);
+
+    /// <summary>
+    /// Writes a file and backdates it. The sweep compares <see cref="File.GetLastWriteTime(string)"/>, so that
+    /// is the stamp the fixture has to move.
+    /// </summary>
+    private static string WriteAged(string directory, string name, int ageDays)
+    {
+        var path = Path.Combine(directory, name);
+        File.WriteAllText(path, "line");
+        File.SetLastWriteTime(path, DateTime.Now.AddDays(-ageDays));
+        return path;
+    }
 }

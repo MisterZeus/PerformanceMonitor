@@ -4,6 +4,7 @@ using System.IO;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Services;
 using PerformanceMonitorLite.Tests.Helpers;
 using Xunit;
 
@@ -266,6 +267,85 @@ AND    NOT EXISTS (
         afterCmd.CommandText = "SELECT COUNT(1) FROM v_config_alert_log WHERE dismissed = FALSE";
         var afterCount = Convert.ToInt64(await afterCmd.ExecuteScalarAsync(TestContext.Current.CancellationToken));
         Assert.Equal(0, afterCount);
+    }
+
+    /// <summary>
+    /// The sidecar's retention horizon (#1651). It was the one table in Lite with NO purge path at all —
+    /// INSERT-only, and preserved through the 512 MB emergency reset that incidentally bounds everything
+    /// else — so it grew for the life of the install. The purge keys on alert_time, the time of the alert
+    /// being suppressed, not on dismissed_at.
+    /// </summary>
+    [Fact]
+    public async Task PurgeOldDismissedArchiveAlerts_DropsRowsPastTheHorizon_KeepsRecentOnes()
+    {
+        using var connection = await InitializeDatabaseAsync();
+
+        /* One row well past the 180-day horizon, one just inside it, one recent. */
+        await InsertSidecarRowAsync(connection, DateTime.UtcNow.AddDays(-365), 1, "Ancient");
+        await InsertSidecarRowAsync(connection, DateTime.UtcNow.AddDays(-179), 1, "JustInside");
+        await InsertSidecarRowAsync(connection, DateTime.UtcNow.AddDays(-2), 1, "Recent");
+        connection.Close();
+
+        var service = new LocalDataService(new DuckDbInitializer(_dbPath));
+        var purged = await service.PurgeOldDismissedArchiveAlertsAsync();
+
+        Assert.Equal(1, purged);
+
+        using var verify = new DuckDBConnection($"Data Source={_dbPath}");
+        await verify.OpenAsync(TestContext.Current.CancellationToken);
+        using var cmd = verify.CreateCommand();
+        cmd.CommandText = "SELECT metric_name FROM dismissed_archive_alerts ORDER BY metric_name";
+
+        var survivors = new List<string>();
+        using var reader = await cmd.ExecuteReaderAsync(TestContext.Current.CancellationToken);
+        while (await reader.ReadAsync(TestContext.Current.CancellationToken))
+            survivors.Add(reader.GetString(0));
+
+        Assert.Equal(new[] { "JustInside", "Recent" }, survivors);
+    }
+
+    /// <summary>
+    /// The horizon must comfortably OUTLIVE the parquet archives the sidecar rows suppress. Purging a
+    /// suppression row while its alert is still readable through v_config_alert_log would make an alert the
+    /// user already dismissed reappear — the regression this constant exists to prevent. Parquet is pruned at
+    /// 3 months on the FILE's date prefix, and that prefix is the ARCHIVE date (always newer than the rows
+    /// inside), so real parquet lifetime already exceeds 3 months from alert_time before the app is ever
+    /// closed for a stretch.
+    /// </summary>
+    [Fact]
+    public void SidecarRetention_ComfortablyOutlivesTheParquetHorizon()
+    {
+        Assert.Equal(180, LocalDataService.DismissedArchiveAlertRetentionDays);
+
+        /* The parquet horizon is 3 months (RetentionService.CleanupOldArchives' default). Anything at or
+           below ~93 days could purge a suppression row while its parquet still exists. */
+        Assert.True(LocalDataService.DismissedArchiveAlertRetentionDays >= 180,
+            "the sidecar horizon must stay well clear of the 3-month parquet retention, or dismissed archived alerts reappear");
+    }
+
+    /// <summary>An explicit horizon purges nothing when every row is inside it — a no-op purge is safe.</summary>
+    [Fact]
+    public async Task PurgeOldDismissedArchiveAlerts_NothingExpired_RemovesNothing()
+    {
+        using var connection = await InitializeDatabaseAsync();
+        await InsertSidecarRowAsync(connection, DateTime.UtcNow.AddDays(-1), 1, "Recent");
+        connection.Close();
+
+        var service = new LocalDataService(new DuckDbInitializer(_dbPath));
+        Assert.Equal(0, await service.PurgeOldDismissedArchiveAlertsAsync());
+    }
+
+    private static async Task InsertSidecarRowAsync(
+        DuckDBConnection connection, DateTime alertTime, int serverId, string metricName)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+INSERT INTO dismissed_archive_alerts (alert_time, server_id, metric_name)
+VALUES ($1, $2, $3)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = alertTime });
+        cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = metricName });
+        await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 
     [Fact]
