@@ -32,8 +32,8 @@ public sealed class McpPlanCacheSchedulerTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var summary = await dataService.GetPlanCacheSummaryAsync(resolved.Value.ServerId, hours_back);
-            var cacheTypes = await dataService.GetPlanCacheSnapshotAsync(resolved.Value.ServerId, hours_back);
+            var summary = await dataService.GetPlanCacheSummaryAsync(resolved.ServerId, hours_back);
+            var cacheTypes = await dataService.GetPlanCacheSnapshotAsync(resolved.ServerId, hours_back);
             if (summary.TotalPlans == 0 && cacheTypes.Count == 0)
                 return McpHelpers.Status("unavailable", "No plan cache statistics available in the requested time range.");
 
@@ -44,7 +44,7 @@ public sealed class McpPlanCacheSchedulerTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 summary = new
                 {
                     total_plans = summary.TotalPlans,
@@ -90,7 +90,7 @@ public sealed class McpPlanCacheSchedulerTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var item = await dataService.GetCpuSchedulerSnapshotAsync(resolved.Value.ServerId, hours_back);
+            var item = await dataService.GetCpuSchedulerSnapshotAsync(resolved.ServerId, hours_back);
             if (item == null)
                 return McpHelpers.Status("unavailable", "No CPU scheduler data available. The scheduler collector may not have run yet.");
 
@@ -100,7 +100,7 @@ public sealed class McpPlanCacheSchedulerTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 collection_time = item.CollectionTime.ToString("o"),
                 schedulers = item.SchedulerCount,
                 cpu_count = item.CpuCount,

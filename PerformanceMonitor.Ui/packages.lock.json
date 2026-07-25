@@ -2,12 +2,6 @@
   "version": 1,
   "dependencies": {
     "net10.0-windows7.0": {
-      "Hardcodet.NotifyIcon.Wpf": {
-        "type": "Direct",
-        "requested": "[2.0.1, )",
-        "resolved": "2.0.1",
-        "contentHash": "dtxmeZXzV2GzSm91aZ3hqzgoeVoARSkDPVCYfhVUNyyKBWYxMgNC0EcLiSYxD4Uc4alq/2qb3SmV8DgAENLRLQ=="
-      },
       "ScottPlot.WPF": {
         "type": "Direct",
         "requested": "[5.1.59, )",
@@ -19,12 +13,6 @@
           "ScottPlot": "5.1.59",
           "SkiaSharp.Views.WPF": "3.119.0"
         }
-      },
-      "Velopack": {
-        "type": "Direct",
-        "requested": "[1.2.0, )",
-        "resolved": "1.2.0",
-        "contentHash": "Rz67gJL619fSBS6omaSINUxyDuwhIxkm5mmubf7uLd5Qgi6LLKaKCha+QFP6n+Bw/UjA0vutnH4JQfYzn6ANtw=="
       },
       "CredentialManagement": {
         "type": "Transitive",
@@ -253,14 +241,6 @@
           "Microsoft.Extensions.Logging.Abstractions": "10.0.7"
         }
       },
-      "Npgsql": {
-        "type": "Transitive",
-        "resolved": "10.0.3",
-        "contentHash": "7nb5YzXuvWWJxB0J8DiyL3we+X4FOctZrt0fIBnucOIaIevFEEwGQVZKtiu9olXdlNAK1eNgqSral6r/jlhI4w==",
-        "dependencies": {
-          "Microsoft.Extensions.Logging.Abstractions": "10.0.0"
-        }
-      },
       "OpenTK": {
         "type": "Transitive",
         "resolved": "4.9.4",
@@ -429,18 +409,6 @@
           "Microsoft.IdentityModel.Tokens": "8.16.0"
         }
       },
-      "performancemonitor.alerting": {
-        "type": "Project",
-        "dependencies": {
-          "PerformanceMonitor.Notifications": "[1.0.0, )"
-        }
-      },
-      "performancemonitor.analysis": {
-        "type": "Project"
-      },
-      "performancemonitor.collectors": {
-        "type": "Project"
-      },
       "performancemonitor.common": {
         "type": "Project",
         "dependencies": {
@@ -449,44 +417,11 @@
           "ModelContextProtocol": "[1.4.1, )"
         }
       },
-      "performancemonitor.darling.analysis": {
-        "type": "Project",
-        "dependencies": {
-          "Microsoft.Data.SqlClient": "[7.0.2, )",
-          "PerformanceMonitor.Analysis": "[1.0.0, )",
-          "PerformanceMonitor.Collectors": "[1.0.0, )",
-          "PerformanceMonitor.Darling.Storage": "[1.0.0, )",
-          "PerformanceMonitor.Notifications": "[1.0.0, )",
-          "PerformanceMonitor.PlanAnalysis": "[1.0.0, )"
-        }
-      },
-      "performancemonitor.darling.storage": {
-        "type": "Project",
-        "dependencies": {
-          "Npgsql": "[10.0.3, )",
-          "PerformanceMonitor.Collectors": "[1.0.0, )"
-        }
-      },
-      "performancemonitor.notifications": {
-        "type": "Project",
-        "dependencies": {
-          "Microsoft.Extensions.Logging.Abstractions": "[10.0.10, )",
-          "PerformanceMonitor.Analysis": "[1.0.0, )"
-        }
-      },
       "performancemonitor.plananalysis": {
         "type": "Project",
         "dependencies": {
           "Microsoft.Data.SqlClient": "[7.0.2, )",
           "PerformanceMonitor.Common": "[1.0.0, )"
-        }
-      },
-      "performancemonitor.ui": {
-        "type": "Project",
-        "dependencies": {
-          "PerformanceMonitor.Common": "[1.0.0, )",
-          "PerformanceMonitor.PlanAnalysis": "[1.0.0, )",
-          "ScottPlot.WPF": "[5.1.59, )"
         }
       }
     }

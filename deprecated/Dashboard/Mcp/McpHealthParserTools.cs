@@ -25,12 +25,12 @@ public sealed class McpHealthParserTools
 
         try
         {
-            var rows = await resolved.Value.Service.GetHealthParserSystemHealthAsync(hours_back);
+            var rows = await resolved.Service.GetHealthParserSystemHealthAsync(hours_back);
             if (rows.Count == 0) return McpHelpers.Status("empty", "No system health data found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 total_entries = rows.Count,
                 shown = Math.Min(rows.Count, limit),
@@ -53,12 +53,12 @@ public sealed class McpHealthParserTools
 
         try
         {
-            var rows = await resolved.Value.Service.GetHealthParserSevereErrorsAsync(hours_back);
+            var rows = await resolved.Service.GetHealthParserSevereErrorsAsync(hours_back);
             if (rows.Count == 0) return McpHelpers.Status("empty", "No severe errors found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 error_count = rows.Count,
                 shown = Math.Min(rows.Count, limit),
@@ -81,12 +81,12 @@ public sealed class McpHealthParserTools
 
         try
         {
-            var rows = await resolved.Value.Service.GetHealthParserIOIssuesAsync(hours_back);
+            var rows = await resolved.Service.GetHealthParserIOIssuesAsync(hours_back);
             if (rows.Count == 0) return McpHelpers.Status("empty", "No I/O issues found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 issue_count = rows.Count,
                 shown = Math.Min(rows.Count, limit),
@@ -109,12 +109,12 @@ public sealed class McpHealthParserTools
 
         try
         {
-            var rows = await resolved.Value.Service.GetHealthParserSchedulerIssuesAsync(hours_back);
+            var rows = await resolved.Service.GetHealthParserSchedulerIssuesAsync(hours_back);
             if (rows.Count == 0) return McpHelpers.Status("empty", "No scheduler issues found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 issue_count = rows.Count,
                 shown = Math.Min(rows.Count, limit),
@@ -137,12 +137,12 @@ public sealed class McpHealthParserTools
 
         try
         {
-            var rows = await resolved.Value.Service.GetHealthParserMemoryConditionsAsync(hours_back);
+            var rows = await resolved.Service.GetHealthParserMemoryConditionsAsync(hours_back);
             if (rows.Count == 0) return McpHelpers.Status("empty", "No memory condition events found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 event_count = rows.Count,
                 shown = Math.Min(rows.Count, limit),
@@ -165,12 +165,12 @@ public sealed class McpHealthParserTools
 
         try
         {
-            var rows = await resolved.Value.Service.GetHealthParserCPUTasksAsync(hours_back);
+            var rows = await resolved.Service.GetHealthParserCPUTasksAsync(hours_back);
             if (rows.Count == 0) return McpHelpers.Status("empty", "No CPU task events found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 event_count = rows.Count,
                 shown = Math.Min(rows.Count, limit),
@@ -193,12 +193,12 @@ public sealed class McpHealthParserTools
 
         try
         {
-            var rows = await resolved.Value.Service.GetHealthParserMemoryBrokerAsync(hours_back);
+            var rows = await resolved.Service.GetHealthParserMemoryBrokerAsync(hours_back);
             if (rows.Count == 0) return McpHelpers.Status("empty", "No memory broker events found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 event_count = rows.Count,
                 shown = Math.Min(rows.Count, limit),
@@ -221,12 +221,12 @@ public sealed class McpHealthParserTools
 
         try
         {
-            var rows = await resolved.Value.Service.GetHealthParserMemoryNodeOOMAsync(hours_back);
+            var rows = await resolved.Service.GetHealthParserMemoryNodeOOMAsync(hours_back);
             if (rows.Count == 0) return McpHelpers.Status("empty", "No memory node OOM events found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 event_count = rows.Count,
                 shown = Math.Min(rows.Count, limit),

@@ -27,7 +27,7 @@ public sealed class McpSessionTools
 
         try
         {
-            var rows = await dataService.GetLatestQuerySnapshotsAsync(resolved.Value.ServerId, hours_back);
+            var rows = await dataService.GetLatestQuerySnapshotsAsync(resolved.ServerId, hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No active query snapshots found in the requested time range.");
 
@@ -68,7 +68,7 @@ public sealed class McpSessionTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 total_snapshots = rows.Count,
                 shown = result.Count,
@@ -92,7 +92,7 @@ public sealed class McpSessionTools
 
         try
         {
-            var rows = await dataService.GetLatestSessionStatsAsync(resolved.Value.ServerId);
+            var rows = await dataService.GetLatestSessionStatsAsync(resolved.ServerId);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No session statistics available. The session collector may not have run yet.");
 
@@ -103,7 +103,7 @@ public sealed class McpSessionTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 collection_time = rows[0].CollectionTime.ToString("o"),
                 summary = new
                 {

@@ -28,7 +28,7 @@ public sealed class McpLatchSpinlockTools
 
         try
         {
-            var rows = await resolved.Value.Service.GetLatchStatsTopNAsync(top, hours_back);
+            var rows = await resolved.Service.GetLatchStatsTopNAsync(top, hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No latch statistics available in the requested time range.");
 
@@ -62,7 +62,7 @@ public sealed class McpLatchSpinlockTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 latch_count = latestPerClass.Count,
                 latches = latestPerClass
@@ -90,7 +90,7 @@ public sealed class McpLatchSpinlockTools
 
         try
         {
-            var rows = await resolved.Value.Service.GetSpinlockStatsTopNAsync(top, hours_back);
+            var rows = await resolved.Service.GetSpinlockStatsTopNAsync(top, hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No spinlock statistics available in the requested time range.");
 
@@ -123,7 +123,7 @@ public sealed class McpLatchSpinlockTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 spinlock_count = latestPerClass.Count,
                 spinlocks = latestPerClass

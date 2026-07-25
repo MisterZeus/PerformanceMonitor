@@ -1363,8 +1363,7 @@ public sealed class DarlingComposeTests
 
         var node = DarlingWebEndpoints.BuildSummariesNode(new[] { summary });
 
-        Assert.Equal(1, node.Count);
-        var one = Assert.IsType<JsonObject>(node[0]);
+        var one = Assert.IsType<JsonObject>(Assert.Single(node));
         Assert.Equal(expectedWireKind, one["kind"]!.GetValue<string>());
     }
 

@@ -589,12 +589,12 @@ public sealed class DarlingObservabilityTests
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
 
         await DarlingObservability.SyncServerEnabledStatesAsync(postgres, null, TestContext.Current.CancellationToken);
-        Assert.Equal(false, await ReadObservedEnabledAsync(connection));
+        Assert.False(await ReadObservedEnabledAsync(connection));
 
         /* Re-enable desired -> the sync flips the observed row back to TRUE. */
         await ExecAsync(connection, "UPDATE config.config_monitored_servers SET is_enabled = TRUE WHERE server_id = $1");
         await DarlingObservability.SyncServerEnabledStatesAsync(postgres, null, TestContext.Current.CancellationToken);
-        Assert.Equal(true, await ReadObservedEnabledAsync(connection));
+        Assert.True(await ReadObservedEnabledAsync(connection));
 
         await DeleteTestRowsAsync(connection);
     }
@@ -662,7 +662,7 @@ public sealed class DarlingObservabilityTests
 
         /* A re-connect upsert (ON CONFLICT) must NOT resurrect is_enabled to TRUE (Stage 2 fix). */
         await DarlingObservability.UpsertServerAsync(postgres, server, null, TestContext.Current.CancellationToken);
-        Assert.Equal(false, await ReadObservedEnabledAsync(connection));
+        Assert.False(await ReadObservedEnabledAsync(connection));
 
         await DeleteTestRowsAsync(connection);
     }

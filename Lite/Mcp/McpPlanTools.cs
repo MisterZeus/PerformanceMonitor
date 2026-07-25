@@ -27,13 +27,13 @@ public sealed class McpPlanTools
 
         try
         {
-            var xml = await dataService.GetCachedQueryPlanAsync(resolved.Value.ServerId, query_hash);
+            var xml = await dataService.GetCachedQueryPlanAsync(resolved.ServerId, query_hash);
             if (string.IsNullOrEmpty(xml))
                 return McpHelpers.Status(
                     "unavailable",
                     $"No plan found for query_hash '{query_hash}'. The query may have been evicted from the plan cache since the last collection.");
 
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.Value.ServerName, "query_stats", query_hash);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_stats", query_hash);
         }
         catch (Exception ex)
         {
@@ -56,13 +56,13 @@ public sealed class McpPlanTools
 
         try
         {
-            var xml = await dataService.GetCachedProcedurePlanAsync(resolved.Value.ServerId, plan_handle);
+            var xml = await dataService.GetCachedProcedurePlanAsync(resolved.ServerId, plan_handle);
             if (string.IsNullOrEmpty(xml))
                 return McpHelpers.Status(
                     "unavailable",
                     $"No plan found for plan_handle '{plan_handle}'. The procedure may have been evicted from the plan cache since the last collection.");
 
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.Value.ServerName, "procedure_stats", plan_handle);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "procedure_stats", plan_handle);
         }
         catch (Exception ex)
         {
@@ -89,11 +89,11 @@ public sealed class McpPlanTools
             var server = serverManager.GetEnabledServers().Find(s =>
             {
                 var storageName = RemoteCollectorService.GetServerNameForStorage(s);
-                return string.Equals(storageName, resolved.Value.ServerName, StringComparison.OrdinalIgnoreCase);
+                return string.Equals(storageName, resolved.ServerName, StringComparison.OrdinalIgnoreCase);
             });
 
             if (server == null)
-                return $"Could not find connection details for server '{resolved.Value.ServerName}'.";
+                return $"Could not find connection details for server '{resolved.ServerName}'.";
 
             var connectionString = serverManager.CredentialResolver.GetConnectionString(server);
             var xml = await LocalDataService.FetchQueryStorePlanAsync(connectionString, database_name, plan_id);
@@ -103,7 +103,7 @@ public sealed class McpPlanTools
                     "unavailable",
                     $"No plan found for plan_id {plan_id} in database '{database_name}'. Query Store may not be enabled or the plan may have been purged.");
 
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.Value.ServerName, "query_store", $"{database_name}:{plan_id}");
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_store", $"{database_name}:{plan_id}");
         }
         catch (Exception ex)
         {
@@ -146,7 +146,7 @@ public sealed class McpPlanTools
 
         try
         {
-            var xml = await dataService.GetCachedQueryPlanAsync(resolved.Value.ServerId, query_hash);
+            var xml = await dataService.GetCachedQueryPlanAsync(resolved.ServerId, query_hash);
             if (string.IsNullOrEmpty(xml))
                 return McpHelpers.Status("unavailable", $"No plan found for query_hash '{query_hash}'.");
 

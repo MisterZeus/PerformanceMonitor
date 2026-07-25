@@ -36,7 +36,7 @@ public sealed class McpQueryTools
             var topError = McpHelpers.ValidateTop(top, "top");
             if (topError != null) return topError;
 
-            var rows = await resolved.Value.Service.GetQueryStatsForMcpAsync(hours_back, top, database_name, parallel_only, min_dop);
+            var rows = await resolved.Service.GetQueryStatsForMcpAsync(hours_back, top, database_name, parallel_only, min_dop);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
@@ -74,7 +74,7 @@ public sealed class McpQueryTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 queries = result
             }, McpHelpers.JsonOptions);
@@ -105,7 +105,7 @@ public sealed class McpQueryTools
             var topError = McpHelpers.ValidateTop(top, "top");
             if (topError != null) return topError;
 
-            var rows = await resolved.Value.Service.GetProcedureStatsForMcpAsync(hours_back, top, database_name);
+            var rows = await resolved.Service.GetProcedureStatsForMcpAsync(hours_back, top, database_name);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No procedure stats available for the specified time range.");
@@ -136,7 +136,7 @@ public sealed class McpQueryTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 procedures = result
             }, McpHelpers.JsonOptions);
@@ -169,7 +169,7 @@ public sealed class McpQueryTools
             var topError = McpHelpers.ValidateTop(top, "top");
             if (topError != null) return topError;
 
-            var rows = await resolved.Value.Service.GetQueryStoreDataForMcpAsync(hours_back, top, database_name, parallel_only, min_dop);
+            var rows = await resolved.Service.GetQueryStoreDataForMcpAsync(hours_back, top, database_name, parallel_only, min_dop);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No Query Store data available. Query Store may not be enabled on target databases.");
@@ -199,7 +199,7 @@ public sealed class McpQueryTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 queries = result
             }, McpHelpers.JsonOptions);
@@ -230,7 +230,7 @@ public sealed class McpQueryTools
             var topError = McpHelpers.ValidateTop(top, "top");
             if (topError != null) return topError;
 
-            var rows = await resolved.Value.Service.GetExpensiveQueriesAsync(hours_back);
+            var rows = await resolved.Service.GetExpensiveQueriesAsync(hours_back);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No expensive query data available.");
@@ -262,7 +262,7 @@ public sealed class McpQueryTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 queries = result
             }, McpHelpers.JsonOptions);
@@ -286,7 +286,7 @@ public sealed class McpQueryTools
 
         try
         {
-            var rows = await resolved.Value.Service.GetQueryStatsHistoryAsync(database_name, query_hash);
+            var rows = await resolved.Service.GetQueryStatsHistoryAsync(database_name, query_hash);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("empty", $"No history found for query_hash '{query_hash}' in database '{database_name}'.");
@@ -318,7 +318,7 @@ public sealed class McpQueryTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 database_name,
                 query_hash,
                 data_points = rows.Count,

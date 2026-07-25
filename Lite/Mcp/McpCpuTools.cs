@@ -24,7 +24,7 @@ public sealed class McpCpuTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var rows = await dataService.GetCpuUtilizationAsync(resolved.Value.ServerId, hours_back);
+            var rows = await dataService.GetCpuUtilizationAsync(resolved.ServerId, hours_back);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No CPU utilization data available.");
@@ -47,7 +47,7 @@ public sealed class McpCpuTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 note = "Values are 1-minute averages of 15-second ring buffer samples.",
                 samples = bucketed

@@ -49,7 +49,7 @@ public class ConnectionEdgeDetectorTests
         var edges = ReplayPolls(observations);
 
         Assert.Equal(1, edges.Count(e => e == ConnectionAlertEdge.Lost));
-        Assert.Empty(edges.Where(e => e == ConnectionAlertEdge.Restored));
+        Assert.DoesNotContain(ConnectionAlertEdge.Restored, edges);
     }
 
     /// <summary>An outage that ends: exactly one Lost and exactly one Restored, in that order.</summary>

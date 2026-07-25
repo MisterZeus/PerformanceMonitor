@@ -512,7 +512,7 @@ public static class ComposeSpec
                 text = value.ToString();
             }
 
-            if (text.StartsWith("$", StringComparison.Ordinal))
+            if (text.StartsWith('$'))
             {
                 var varName = text.Substring(1);
                 if (varName.Length == 0 || !declaredVariables.Contains(varName))

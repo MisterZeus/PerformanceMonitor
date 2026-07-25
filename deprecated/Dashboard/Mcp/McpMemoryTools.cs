@@ -27,7 +27,7 @@ public sealed class McpMemoryTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var rows = await resolved.Value.Service.GetMemoryStatsAsync(hours_back);
+            var rows = await resolved.Service.GetMemoryStatsAsync(hours_back);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No memory stats available.");
@@ -42,7 +42,7 @@ public sealed class McpMemoryTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 collection_time = stats.CollectionTime.ToString("o"),
                 buffer_pool_mb = stats.BufferPoolMb,
                 plan_cache_mb = stats.PlanCacheMb,
@@ -76,7 +76,7 @@ public sealed class McpMemoryTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var rows = await resolved.Value.Service.GetMemoryStatsAsync(hours_back);
+            var rows = await resolved.Service.GetMemoryStatsAsync(hours_back);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No memory trend data available.");
@@ -93,7 +93,7 @@ public sealed class McpMemoryTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 trend = result
             }, McpHelpers.JsonOptions);
@@ -119,7 +119,7 @@ public sealed class McpMemoryTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var rows = await resolved.Value.Service.GetMemoryClerksAsync(hours_back);
+            var rows = await resolved.Service.GetMemoryClerksAsync(hours_back);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No memory clerk data available.");
@@ -140,7 +140,7 @@ public sealed class McpMemoryTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 clerks = result
             }, McpHelpers.JsonOptions);
         }
@@ -165,7 +165,7 @@ public sealed class McpMemoryTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var rows = await resolved.Value.Service.GetMemoryGrantStatsAsync(hours_back);
+            var rows = await resolved.Service.GetMemoryGrantStatsAsync(hours_back);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No memory grant data available.");
@@ -195,7 +195,7 @@ public sealed class McpMemoryTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 grants = result
             }, McpHelpers.JsonOptions);
         }

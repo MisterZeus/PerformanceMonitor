@@ -24,7 +24,7 @@ public sealed class McpTempDbTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var rows = await dataService.GetTempDbTrendAsync(resolved.Value.ServerId, hours_back);
+            var rows = await dataService.GetTempDbTrendAsync(resolved.ServerId, hours_back);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No TempDB data available.");
@@ -45,7 +45,7 @@ public sealed class McpTempDbTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 trend = result
             }, McpHelpers.JsonOptions);

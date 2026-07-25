@@ -46,7 +46,7 @@ public sealed class DarlingMcpPlanCacheSchedulerTools
         {
             var now = DateTime.UtcNow;
             var rows = await DarlingPlanCacheSchedulerReader.GetPlanCacheBloatAsync(
-                postgres, resolved.Value.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No plan cache statistics available in the requested time range.");
 
@@ -58,7 +58,7 @@ public sealed class DarlingMcpPlanCacheSchedulerTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 collection_time = rows[0].CollectionTime.ToString("o"),
                 summary = new
                 {
@@ -101,7 +101,7 @@ public sealed class DarlingMcpPlanCacheSchedulerTools
 
         try
         {
-            var item = await DarlingPlanCacheSchedulerReader.GetCpuSchedulerPressureAsync(postgres, resolved.Value.ServerId);
+            var item = await DarlingPlanCacheSchedulerReader.GetCpuSchedulerPressureAsync(postgres, resolved.ServerId);
             if (item == null)
                 return McpHelpers.Status("unavailable", "No CPU scheduler data available. The scheduler collector may not have run yet.");
 
@@ -115,7 +115,7 @@ public sealed class DarlingMcpPlanCacheSchedulerTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 collection_time = item.CollectionTime.ToString("o"),
                 schedulers = item.SchedulerCount,
                 runnable_tasks = item.TotalRunnableTasksCount,

@@ -126,7 +126,8 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
         // Open with the most informative node selected so the viewer lands with the details card showing
         // (mirrors the block-chain viewer, which auto-selects the clicked session). Prefer a victim — the
         // rolled-back process is the one you most want to inspect — else the first process.
-        var initial = _model.Processes.FirstOrDefault(p => p.IsVictim) ?? _model.Processes.FirstOrDefault();
+        var initial = _model.Processes.FirstOrDefault(p => p.IsVictim)
+            ?? (_model.Processes.Count > 0 ? _model.Processes[0] : null);
         if (initial != null)
             SelectNodeByModel(initial);
     }
@@ -399,7 +400,7 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
 
     private void RenderEdge(
         DeadlockWaitEdge edge,
-        IReadOnlyDictionary<string, DeadlockProcessNode> byId,
+        Dictionary<string, DeadlockProcessNode> byId,
         List<(Point, string, string)> labels)
     {
         if (!byId.TryGetValue(edge.WaiterProcessId, out var waiter) ||

@@ -28,7 +28,7 @@ public sealed class McpSystemEventTools
 
         try
         {
-            var rows = await resolved.Value.Service.GetDefaultTraceEventsAsync(hours_back);
+            var rows = await resolved.Service.GetDefaultTraceEventsAsync(hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No default trace events found in the requested time range.");
 
@@ -50,7 +50,7 @@ public sealed class McpSystemEventTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 total_events = rows.Count,
                 shown = result.Count,
@@ -79,7 +79,7 @@ public sealed class McpSystemEventTools
 
         try
         {
-            var rows = await resolved.Value.Service.GetTraceAnalysisAsync(hours_back);
+            var rows = await resolved.Service.GetTraceAnalysisAsync(hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No trace analysis data found in the requested time range.");
 
@@ -103,7 +103,7 @@ public sealed class McpSystemEventTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 total_entries = rows.Count,
                 shown = result.Count,
@@ -141,13 +141,13 @@ For actionable interpretation and suggested follow-up tools, see the 'Interpreti
 
         try
         {
-            var rows = await resolved.Value.Service.GetMemoryPressureEventsAsync(hours_back);
+            var rows = await resolved.Service.GetMemoryPressureEventsAsync(hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No memory pressure events found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 event_count = rows.Count,
                 events = rows.Select(r => new

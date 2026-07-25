@@ -957,7 +957,7 @@ public static class FactAdvice
         string? best = null;
         double bestMs = 0;
         foreach (var kv in f.Metadata)
-            if (kv.Key.EndsWith("_ms") && !standard.Contains(kv.Key) && kv.Value > bestMs)
+            if (kv.Key.EndsWith("_ms", StringComparison.Ordinal) && !standard.Contains(kv.Key) && kv.Value > bestMs)
             {
                 best = kv.Key;
                 bestMs = kv.Value;

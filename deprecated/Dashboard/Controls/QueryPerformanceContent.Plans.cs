@@ -313,6 +313,8 @@ namespace PerformanceMonitorDashboard.Controls
 
             if (result != MessageBoxResult.OK) return;
 
+            if (_databaseService == null) return;
+
             ActualPlanStarted?.Invoke(label);
 
             _actualPlanCts?.Dispose();
