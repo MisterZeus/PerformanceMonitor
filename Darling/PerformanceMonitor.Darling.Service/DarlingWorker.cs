@@ -990,6 +990,13 @@ public sealed class DarlingWorker : BackgroundService
                    grows unbounded. Rides the daily purge; never throws (logs + degrades). */
                 await new PgFindingStore(postgres, _logger).CleanupOldFindingsAsync(retentionDays: 30);
 
+                /* #1652: sweep the service's own rolling log files. The provider swept only in its
+                   constructor, so a service up for months — the normal case — swept once at startup and
+                   never again while writing a file a day. Rides the daily purge like every other
+                   maintenance chore; static + best-effort, so the worker needs no reference to the
+                   provider the host owns and a locked file can never break the tick. */
+                DarlingFileLoggerProvider.SweepOldFiles(DarlingFileLoggerProvider.DefaultLogDirectory());
+
                 /* Keep the retained sql_handle->module map current (object_name attribution for old query_stats
                    CAGG windows). Rides the daily purge; failure-isolated inside RefreshAsync. */
                 await using var moduleMapConnection = await postgres.OpenConnectionAsync(stoppingToken);

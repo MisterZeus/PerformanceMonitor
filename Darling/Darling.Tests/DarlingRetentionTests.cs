@@ -116,6 +116,40 @@ public sealed class DarlingRetentionTests
             DarlingRetention.TimeSlicedDeleteSql("config_alert_log", "alert_time"));
     }
 
+    [Fact]
+    public void CommandHistoryRetention_IsTheBaseWindow_AndPurgesOnlyTerminalRows()
+    {
+        /* config.config_command is not an audit surface anyone reads (a caller polls its OWN command_id and
+           moves on) and it is higher-volume than alert history — every viewer live-plan / actual-plan /
+           active-queries fetch enqueues a row — so it gets the base data window, not the alert log's 90 days. */
+        Assert.Equal(30, DarlingRetention.CommandHistoryRetentionDays);
+        Assert.Equal(DarlingRetention.DataRetentionBaseDays, DarlingRetention.CommandHistoryRetentionDays);
+
+        /* SCHEMA-QUALIFIED: unlike collection_log / config_alert_log (created bare, so they land in `collect`
+           under search_path = collect, config, public), this table really is in `config`. A bare name would
+           resolve to a nonexistent collect.config_command and the purge would fail every night into a warning
+           nobody reads. The terminal-status filter appears in the DELETE **and in both min() subqueries** —
+           anchoring a slice on an ineligible row would delete nothing and terminate the drain early. */
+        Assert.Equal(
+            "DELETE FROM config.config_command WHERE created_at < $1 AND status IN ('succeeded', 'failed')"
+            + " AND created_at >= (SELECT min(created_at) FROM config.config_command WHERE created_at < $1 AND status IN ('succeeded', 'failed'))"
+            + " AND created_at < (SELECT min(created_at) FROM config.config_command WHERE created_at < $1 AND status IN ('succeeded', 'failed')) + INTERVAL '1 days'",
+            DarlingRetention.TimeSlicedDeleteSql("config.config_command", "created_at", DarlingRetention.TerminalCommandStatuses));
+
+        /* Only the two states the executor ever writes terminally. A pending / in_progress row is never
+           purged: deleting a live command strands the caller polling it. */
+        Assert.Equal("status IN ('succeeded', 'failed')", DarlingRetention.TerminalCommandStatuses);
+    }
+
+    [Fact]
+    public void TimeSlicedDelete_WithoutAnExtraPredicate_IsUnchanged()
+    {
+        /* The optional predicate must not perturb the existing callers' statements by so much as a space. */
+        Assert.Equal(
+            DarlingRetention.TimeSlicedDeleteSql("collection_log", "collection_time"),
+            DarlingRetention.TimeSlicedDeleteSql("collection_log", "collection_time", extraPredicate: null));
+    }
+
     /* ---------------- batched-drain loop (pure, injected executor) ---------------- */
 
     [Fact]
@@ -323,6 +357,26 @@ public sealed class DarlingRetentionTests
                 await insert.ExecuteNonQueryAsync(ct);
             }
 
+            /* config.config_command purges TERMINAL rows past 30 days. Four rows prove the whole contract:
+               a 40-day succeeded and a 40-day failed row GO, a 40-day PENDING row SURVIVES (retention must
+               never delete a live command out from under the caller polling it, however old), and a fresh
+               terminal row survives the horizon. command_id is GENERATED ALWAYS AS IDENTITY, so it is never
+               supplied; target_server_id carries TestServerId so the cleanup can scope to our rows. */
+            foreach (var (status, ageDays) in new[]
+                     {
+                         ("succeeded", 40), ("failed", 40), ("pending", 40), ("succeeded", 0),
+                     })
+            {
+                using var insert = new NpgsqlCommand(
+                    "INSERT INTO config.config_command (created_at, requested_by, command_type, target_server_id, status) VALUES ($1, $2, $3, $4, $5)", connection);
+                insert.Parameters.AddWithValue(ageDays == 0 ? utcNow.AddHours(-1) : utcNow.AddDays(-ageDays));
+                insert.Parameters.AddWithValue("retention-e2e");
+                insert.Parameters.AddWithValue("snapshot_now");
+                insert.Parameters.AddWithValue(TestServerId);
+                insert.Parameters.AddWithValue(status);
+                await insert.ExecuteNonQueryAsync(ct);
+            }
+
             /* At least our three expired rows go (40-day wait_stats, 70-day collection_log, 100-day
                config_alert_log); a shared dev store may shed more. The extension-free DELETE path on purpose
                (timescaleAvailable: false) — it must keep working even on a store whose tables ARE hypertables,
@@ -370,6 +424,25 @@ public sealed class DarlingRetentionTests
                 var survivor = reader.GetDateTime(0);
                 Assert.True(survivor > utcNow.AddDays(-1), $"the surviving alert-history row should be the 1-hour one, got {survivor:O}; {purgeLog.Joined}");
                 Assert.False(await reader.ReadAsync(ct), $"the 100-day config_alert_log row survived past the 90-day horizon; {purgeLog.Joined}");
+            }
+
+            using (var read = new NpgsqlCommand(
+                "SELECT status, created_at FROM config.config_command WHERE target_server_id = $1 ORDER BY created_at", connection))
+            {
+                read.Parameters.AddWithValue(TestServerId);
+                using var reader = await read.ExecuteReaderAsync(ct);
+
+                var survivors = new List<(string Status, DateTime CreatedAt)>();
+                while (await reader.ReadAsync(ct))
+                {
+                    survivors.Add((reader.GetString(0), reader.GetDateTime(1)));
+                }
+
+                /* The 40-day pending row (never purged, whatever its age) and the 1-hour terminal row. */
+                Assert.Equal(2, survivors.Count);
+                Assert.Contains(survivors, s => s.Status == "pending" && s.CreatedAt < utcNow.AddDays(-39));
+                Assert.Contains(survivors, s => s.Status == "succeeded" && s.CreatedAt > utcNow.AddDays(-1));
+                Assert.DoesNotContain(survivors, s => s.Status == "failed");
             }
 
             /* The purge writes ONE auditable run-record under the fleet sentinel server_id — SUCCESS here
@@ -527,6 +600,7 @@ WHERE hypertable_name = 'wait_stats'
             $"DELETE FROM wait_stats WHERE server_id = {TestServerId}; " +
             $"DELETE FROM collection_log WHERE server_id = {TestServerId}; " +
             $"DELETE FROM config_alert_log WHERE server_id = {TestServerId}; " +
+            $"DELETE FROM config.config_command WHERE target_server_id = {TestServerId}; " +
             $"DELETE FROM collection_log WHERE server_id = {DarlingObservability.FleetServerId} AND collector_name = 'data_retention';",
             connection);
         await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);

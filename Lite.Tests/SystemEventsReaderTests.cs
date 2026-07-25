@@ -29,6 +29,13 @@ namespace Lite.Tests;
 /// projection, (3) the Severe-Errors database_id -> name resolution (DuckDB QUALIFY), (4) the #1319 database
 /// filter, (5) the event_time window bounding, and (6) the Default Trace server-local -> UTC de-skew.
 /// </summary>
+/* ServerTimeHelper.UtcOffsetMinutes / CurrentDisplayMode are process-wide mutable statics, and the
+   server-time projection test below SETS them for its duration. xUnit runs test CLASSES in parallel, so
+   without this shared collection that write lands underneath any sibling class reading the offset —
+   CollectionHealthWindowTests computes a query window from it and would silently look for its seeded rows
+   hours away, failing "expected 2, actual 0" at random. The three classes that touch ServerTimeHelper share
+   one collection so they serialize against each other (and only each other). */
+[Collection("server-time-helper")]
 public sealed class SystemEventsReaderTests : IDisposable
 {
     private const int ServerId = 7777;
