@@ -1449,10 +1449,13 @@ public static class DarlingCliCommands
     /// so this was the ONE <see cref="DarlingManagedPostgres.BuildFirewallEnableCommand"/> caller that reached
     /// the PowerShell <c>-Command</c> string with an unparsed value, where a blank-check was the only gate.
     /// Every other call site passes a canonicalized <c>IPNetwork.ToString()</c>; this makes that universal.
-    /// Parsing is the security property, not the formatting: <see cref="IPNetwork.TryParse"/> accepts ONLY
-    /// <c>address/prefix</c> with the host bits zeroed, so no shell metacharacter, statement separator, or
-    /// second CIDR can survive it — and <paramref name="canonicalCidr"/> is the PARSER'S output, never the
-    /// caller's string, so nothing unvalidated is carried through even on the valid path.
+    /// Parsing is the security property, not the formatting: <see cref="IPNetwork.TryParse"/> accepts ONLY a
+    /// single <c>address/prefix</c> pair, so no shell metacharacter, statement separator, or second CIDR can
+    /// survive it — and <paramref name="canonicalCidr"/> is the PARSER'S output, never the caller's string, so
+    /// nothing unvalidated is carried through even on the valid path. That last point is load-bearing rather
+    /// than belt-and-braces: <c>TryParse</c> MASKS host bits instead of rejecting them (<c>192.168.1.5/24</c>
+    /// parses, as <c>192.168.1.0/24</c>), so "validate, then use the original" would forward a string the
+    /// parser had already decided meant something else.
     /// </summary>
     public static EndpointAllowFromVerdict ClassifyAllowFrom(string? allowFrom, out string canonicalCidr)
     {
