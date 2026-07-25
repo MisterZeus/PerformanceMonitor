@@ -36,6 +36,7 @@
     <Window.Resources>
         <local:StatusToBrushConverter x:Key="StatusToBrush"/>
         <BooleanToVisibilityConverter x:Key="BoolToVisibility"/>
+        <local:FleetDepthToIndentConverter x:Key="FleetDepthToIndent"/>
 
         <Style x:Key="SectionHeader" TargetType="TextBlock">
             <Setter Property="FontSize" Value="14"/>
@@ -424,19 +425,26 @@
                             </Setter>
                         </Style>
                     </ListBox.ItemContainerStyle>
-                    <ListBox.ItemTemplate>
-                        <DataTemplate>
+                    <ListBox.Resources>
+                        <DataTemplate x:Key="FleetServerRowTemplate">
                             <!-- Ported from Lite's server-row template: a freshness status dot (green/amber/red
                                  from DotStatus), the name + version, a favorite star, and the right-click menu.
                                  Connect/Disconnect are omitted — the viewer never connects to monitored servers
                                  (it reads only the Postgres store). Transparent Border hosts the context menu so
                                  the whole row is a right-click target; the item background comes from the
                                  container style above. -->
-                            <Border Background="Transparent">
+                            <Border Background="Transparent"
+                                    Margin="{Binding Depth, Converter={StaticResource FleetDepthToIndent}}"
+                                    ContextMenuOpening="ServerRow_ContextMenuOpening">
                                 <Border.ContextMenu>
                                     <ContextMenu>
                                         <MenuItem Header="Toggle Favorite" Click="ServerContextMenu_ToggleFavorite_Click">
                                             <MenuItem.Icon><TextBlock Text="&#x2B50;"/></MenuItem.Icon>
+                                        </MenuItem>
+                                        <Separator/>
+                                        <!-- Populated on open by ServerRow_ContextMenuOpening: one checkable item per tag. -->
+                                        <MenuItem Header="Assign Tags">
+                                            <MenuItem.Icon><TextBlock Text="&#x1F3F7;"/></MenuItem.Icon>
                                         </MenuItem>
                                         <Separator/>
                                         <MenuItem Header="Edit..." Click="ServerContextMenu_Edit_Click">
@@ -461,7 +469,7 @@
                                         <!-- Acknowledge: quiet the alert badge (viewer-local) until a NEW alert
                                              arrives — unlike Silence, it does NOT stop the service's delivery. -->
                                         <MenuItem Header="Acknowledge Alerts" Click="ServerContextMenu_Acknowledge_Click"
-                                                  IsEnabled="{Binding HasAttention}"
+                                                  IsEnabled="{Binding Server.HasAttention}"
                                                   ToolTip="Quiet this server's alert badge until a new alert arrives (delivery continues)">
                                             <MenuItem.Icon><TextBlock Text="&#x2713;" FontWeight="Bold"/></MenuItem.Icon>
                                         </MenuItem>
@@ -488,13 +496,13 @@
                                             <Style TargetType="Ellipse">
                                                 <Setter Property="Fill" Value="{DynamicResource ForegroundMutedBrush}"/>
                                                 <Style.Triggers>
-                                                    <DataTrigger Binding="{Binding DotStatus}" Value="Online">
+                                                    <DataTrigger Binding="{Binding Server.DotStatus}" Value="Online">
                                                         <Setter Property="Fill" Value="{DynamicResource SuccessBrush}"/>
                                                     </DataTrigger>
-                                                    <DataTrigger Binding="{Binding DotStatus}" Value="Offline">
+                                                    <DataTrigger Binding="{Binding Server.DotStatus}" Value="Offline">
                                                         <Setter Property="Fill" Value="{DynamicResource ErrorBrush}"/>
                                                     </DataTrigger>
-                                                    <DataTrigger Binding="{Binding DotStatus}" Value="Warning">
+                                                    <DataTrigger Binding="{Binding Server.DotStatus}" Value="Warning">
                                                         <Setter Property="Fill" Value="{DynamicResource WarningBrush}"/>
                                                     </DataTrigger>
                                                 </Style.Triggers>
@@ -504,13 +512,13 @@
 
                                     <!-- Server name -->
                                     <TextBlock Grid.Column="1" Grid.Row="0"
-                                               Text="{Binding DisplayName}"
+                                               Text="{Binding Server.DisplayName}"
                                                FontSize="13" FontWeight="SemiBold"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
 
                                     <!-- Details (SQL version) -->
                                     <TextBlock Grid.Column="1" Grid.Row="1"
-                                               Text="{Binding VersionLabel}"
+                                               Text="{Binding Server.VersionLabel}"
                                                FontSize="11"
                                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
@@ -522,22 +530,22 @@
                                     <Border Grid.Column="2" Grid.RowSpan="2"
                                             CornerRadius="7" Padding="5,0" MinWidth="16" Height="15"
                                             VerticalAlignment="Center" Margin="4,0,0,0"
-                                            ToolTip="{Binding AttentionTooltip}">
+                                            ToolTip="{Binding Server.AttentionTooltip}">
                                         <Border.Style>
                                             <Style TargetType="Border">
                                                 <Setter Property="Visibility" Value="Collapsed"/>
                                                 <Setter Property="Background" Value="{DynamicResource WarningBrush}"/>
                                                 <Style.Triggers>
-                                                    <DataTrigger Binding="{Binding HasAttention}" Value="True">
+                                                    <DataTrigger Binding="{Binding Server.HasAttention}" Value="True">
                                                         <Setter Property="Visibility" Value="Visible"/>
                                                     </DataTrigger>
-                                                    <DataTrigger Binding="{Binding AttentionSeverity}" Value="Critical">
+                                                    <DataTrigger Binding="{Binding Server.AttentionSeverity}" Value="Critical">
                                                         <Setter Property="Background" Value="{DynamicResource ErrorBrush}"/>
                                                     </DataTrigger>
                                                 </Style.Triggers>
                                             </Style>
                                         </Border.Style>
-                                        <TextBlock Text="{Binding AttentionText}"
+                                        <TextBlock Text="{Binding Server.AttentionText}"
                                                    Foreground="White" FontSize="9" FontWeight="Bold"
                                                    HorizontalAlignment="Center" VerticalAlignment="Center"/>
                                     </Border>
@@ -552,7 +560,7 @@
                                             <Style TargetType="TextBlock">
                                                 <Setter Property="Visibility" Value="Collapsed"/>
                                                 <Style.Triggers>
-                                                    <DataTrigger Binding="{Binding IsFavorite}" Value="True">
+                                                    <DataTrigger Binding="{Binding Server.IsFavorite}" Value="True">
                                                         <Setter Property="Visibility" Value="Visible"/>
                                                     </DataTrigger>
                                                 </Style.Triggers>
@@ -562,7 +570,79 @@
                                 </Grid>
                             </Border>
                         </DataTemplate>
-                    </ListBox.ItemTemplate>
+
+                        <!-- Group header row: a tag, or the Favorites / Untagged pseudo-group. The chevron
+                             reflects expand state and is blank when the group has nothing under it; clicking
+                             the row toggles the group (handled in ServerList_SelectionChanged). The count is
+                             the group's directly-shown servers, hidden when zero (a container-only tag). -->
+                        <DataTemplate x:Key="FleetHeaderRowTemplate">
+                            <Border Background="Transparent" Padding="0,1"
+                                    Margin="{Binding Depth, Converter={StaticResource FleetDepthToIndent}}"
+                                    ContextMenuOpening="TagHeader_ContextMenuOpening">
+                                <Border.ContextMenu>
+                                    <ContextMenu>
+                                        <MenuItem Header="New Tag..." Click="TagHeaderContextMenu_NewTag_Click">
+                                            <MenuItem.Icon><TextBlock Text="&#x2795;"/></MenuItem.Icon>
+                                        </MenuItem>
+                                        <MenuItem Header="New Child Tag..." Click="TagHeaderContextMenu_NewChildTag_Click">
+                                            <MenuItem.Icon><TextBlock Text="&#x1F4C1;"/></MenuItem.Icon>
+                                        </MenuItem>
+                                        <MenuItem Header="Rename..." Click="TagHeaderContextMenu_Rename_Click">
+                                            <MenuItem.Icon><TextBlock Text="&#x270F;"/></MenuItem.Icon>
+                                        </MenuItem>
+                                        <MenuItem Header="Delete Tag" Click="TagHeaderContextMenu_Delete_Click">
+                                            <MenuItem.Icon><TextBlock Text="&#x1F5D1;"/></MenuItem.Icon>
+                                        </MenuItem>
+                                        <Separator/>
+                                        <MenuItem Header="Manage Tags..." Click="ManageTags_Click">
+                                            <MenuItem.Icon><TextBlock Text="&#x1F3F7;"/></MenuItem.Icon>
+                                        </MenuItem>
+                                    </ContextMenu>
+                                </Border.ContextMenu>
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Width="14" FontSize="9" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource ForegroundMutedBrush}">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Text" Value="&#x25B8;"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsExpanded}" Value="True">
+                                                        <Setter Property="Text" Value="&#x25BE;"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding HasChildren}" Value="False">
+                                                        <Setter Property="Text" Value=""/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                    <TextBlock Text="{Binding Title}" FontWeight="Bold" FontSize="12"
+                                               Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                                    <TextBlock Text="{Binding ServerCount, StringFormat='({0})'}"
+                                               FontSize="11" Margin="6,0,0,0" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource ForegroundMutedBrush}">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding ServerCount}" Value="0">
+                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </StackPanel>
+                            </Border>
+                        </DataTemplate>
+
+                        <local:FleetRowTemplateSelector x:Key="FleetRowSelector"
+                            ServerTemplate="{StaticResource FleetServerRowTemplate}"
+                            HeaderTemplate="{StaticResource FleetHeaderRowTemplate}"/>
+                    </ListBox.Resources>
+                    <ListBox.ItemTemplateSelector>
+                        <StaticResource ResourceKey="FleetRowSelector"/>
+                    </ListBox.ItemTemplateSelector>
                 </ListBox>
             </DockPanel>
 

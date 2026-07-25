@@ -52,10 +52,14 @@ public sealed class DarlingCustomViewsTests
     }
 
     [Fact]
-    public void StorageVersion_IsV31_AndTracksTheLastMigration()
+    public void V31_IsTheCustomViewsMigration_AndStorageVersionTracksTheLastOne()
     {
-        Assert.Equal(31, StorageVersion.SchemaVersion);
-        Assert.Equal(31, PgMigrations.Scripts[^1].Version);
+        /* This file's concern is that V31 IS custom-views; newer migrations simply append after it.
+           The global "StorageVersion == the last script" invariant is asserted version-agnostically so a
+           future migration does not have to churn this test (ScaffoldTests pins the same rule, and
+           DarlingObservabilityTests carries the full index->version ladder). */
+        Assert.Equal(31, PgMigrations.Scripts[30].Version);
+        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
     }
 
     /* ── ValidateDefinition: the authority ── */

@@ -87,7 +87,7 @@ public partial class MainWindow
         /* Return the content column to the state it was in before the Plan Viewer opened: if no servers
            are registered, restore the no-servers empty state (MainTabs collapsed, mirroring
            LoadServersAsync's no-servers branch); otherwise select the first visible non-plan tab. */
-        if (ServerList.ItemsSource is IEnumerable<DarlingServer> servers && servers.Any())
+        if (_fleet.All.Count > 0)
         {
             foreach (TabItem item in MainTabs.Items)
             {
