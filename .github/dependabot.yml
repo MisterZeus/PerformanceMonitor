@@ -1,0 +1,28 @@
+# Dependabot version updates (routine dependency bumps).
+# Security updates are enabled separately at the repo level and are not affected by this file.
+# NuGet projects use lockfiles (packages.lock.json); Dependabot regenerates them as part of each PR.
+version: 2
+updates:
+  # .NET packages across the solution (PerformanceMonitor.sln discovers all projects).
+  - package-ecosystem: "nuget"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    # One grouped PR for all NuGet bumps, to keep review noise down.
+    groups:
+      nuget:
+        patterns:
+          - "*"
+
+  # GitHub Actions used by the workflows in .github/workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
