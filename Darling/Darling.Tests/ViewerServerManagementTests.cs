@@ -429,7 +429,7 @@ public sealed class ViewerServerMigrationTests
     {
         private readonly Dictionary<string, (string Username, string Password)> _map = new();
         public void Save(string id, string username, string password) => _map[id] = (username, password);
-        public (string Username, string Password)? Get(string id) => _map.TryGetValue(id, out var v) ? v : null;
+        public (string Username, string Password)? Find(string id) => _map.TryGetValue(id, out var v) ? v : null;
         public void Delete(string id) => _map.Remove(id);
     }
 }
@@ -465,7 +465,7 @@ public sealed class ViewerServerManagementReadOnlyTests
     private sealed class NoopSecretStore : IViewerServerSecretStore
     {
         public void Save(string id, string username, string password) { }
-        public (string Username, string Password)? Get(string id) => null;
+        public (string Username, string Password)? Find(string id) => null;
         public void Delete(string id) { }
     }
 }

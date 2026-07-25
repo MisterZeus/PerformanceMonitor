@@ -46,7 +46,7 @@ public sealed class DarlingMcpMemoryGrantTools
         {
             var now = DateTime.UtcNow;
             var rows = await DarlingMemoryGrantReader.GetResourceSemaphoreLatestAsync(
-                postgres, resolved.Value.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No memory grant data available.");
 
@@ -71,7 +71,7 @@ public sealed class DarlingMcpMemoryGrantTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 grants
             }, McpHelpers.JsonOptions);
         }
@@ -97,7 +97,7 @@ public sealed class DarlingMcpMemoryGrantTools
         {
             var now = DateTime.UtcNow;
             var rows = await DarlingMemoryGrantReader.GetMemoryGrantsLatestAsync(
-                postgres, resolved.Value.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No memory grant data available.");
 
@@ -116,7 +116,7 @@ public sealed class DarlingMcpMemoryGrantTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 grants
             }, McpHelpers.JsonOptions);
         }
@@ -152,13 +152,13 @@ Not available on Azure SQL DB (ring buffer not exposed).")]
         {
             var now = DateTime.UtcNow;
             var rows = await DarlingMemoryGrantReader.GetMemoryPressureEventsAsync(
-                postgres, resolved.Value.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No memory pressure events found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 events = rows.Select(r => new
                 {

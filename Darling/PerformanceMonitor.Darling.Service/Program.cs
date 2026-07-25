@@ -187,7 +187,7 @@ if (OperatingSystem.IsWindows())
        elevated console run or an install script that pre-created it; see the README install step).
        When the source does not exist, the Event Log provider silently drops events — which is why
        the file log above, not this, is the primary surface. */
-    builder.Logging.AddEventLog(settings => settings.SourceName = "PerformanceMonitor Darling");
+    builder.Logging.AddEventLog(ConfigureWindowsEventLogSource);
     try
     {
         if (!System.Diagnostics.EventLog.SourceExists("PerformanceMonitor Darling"))
@@ -259,4 +259,17 @@ try
 finally
 {
     instanceGuard?.Dispose();
+}
+
+/* The delegate is registered inside the OperatingSystem.IsWindows() block above, but the platform
+   analyzer does not carry that guard into a delegate body — an explicit in-body guard keeps
+   EventLogSettings.SourceName provably Windows-only. */
+static void ConfigureWindowsEventLogSource(Microsoft.Extensions.Logging.EventLog.EventLogSettings settings)
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        return;
+    }
+
+    settings.SourceName = "PerformanceMonitor Darling";
 }

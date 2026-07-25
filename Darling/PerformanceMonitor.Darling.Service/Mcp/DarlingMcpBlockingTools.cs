@@ -61,7 +61,7 @@ public sealed class DarlingMcpBlockingTools
         {
             var now = DateTime.UtcNow;
             var rows = await DarlingBlockingReader.GetRecentBlockedProcessReportsAsync(
-                postgres, resolved.Value.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No blocking events found in the specified time range.");
 
@@ -107,7 +107,7 @@ public sealed class DarlingMcpBlockingTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 total_events = rows.Count,
                 events = result
@@ -138,7 +138,7 @@ public sealed class DarlingMcpBlockingTools
         {
             var now = DateTime.UtcNow;
             var rows = await DarlingBlockingReader.GetRecentDeadlocksAsync(
-                postgres, resolved.Value.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No deadlocks found in the specified time range.");
 
@@ -154,7 +154,7 @@ public sealed class DarlingMcpBlockingTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 total_deadlocks = rows.Count,
                 deadlocks = result
@@ -185,7 +185,7 @@ public sealed class DarlingMcpBlockingTools
         {
             var now = DateTime.UtcNow;
             var rows = await DarlingBlockingReader.GetRecentDeadlocksAsync(
-                postgres, resolved.Value.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             var withXml = rows.Where(r => r.HasDeadlockXml).Take(limit).ToList();
             if (withXml.Count == 0)
                 return McpHelpers.Status("empty", "No deadlock XML available in the specified time range.");
@@ -200,7 +200,7 @@ public sealed class DarlingMcpBlockingTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 deadlocks = result
             }, McpHelpers.JsonOptions);
@@ -230,7 +230,7 @@ public sealed class DarlingMcpBlockingTools
         {
             var now = DateTime.UtcNow;
             var rows = await DarlingBlockingReader.GetRecentBlockedProcessReportsAsync(
-                postgres, resolved.Value.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             var withXml = rows.Where(r => r.HasReportXml).Take(limit).ToList();
             if (withXml.Count == 0)
                 return McpHelpers.Status("empty", "No blocked process report XML available in the specified time range.");
@@ -247,7 +247,7 @@ public sealed class DarlingMcpBlockingTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 reports = result
             }, McpHelpers.JsonOptions);
@@ -274,11 +274,11 @@ public sealed class DarlingMcpBlockingTools
         {
             var now = DateTime.UtcNow;
             var points = await DarlingBlockingTrendReader.GetBlockingTrendAsync(
-                postgres, resolved.Value.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 trend = points.Select(p => new { time = p.Time.ToString("o"), count = p.Count })
             }, McpHelpers.JsonOptions);
@@ -305,11 +305,11 @@ public sealed class DarlingMcpBlockingTools
         {
             var now = DateTime.UtcNow;
             var points = await DarlingBlockingTrendReader.GetDeadlockTrendAsync(
-                postgres, resolved.Value.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 trend = points.Select(p => new { time = p.Time.ToString("o"), count = p.Count })
             }, McpHelpers.JsonOptions);

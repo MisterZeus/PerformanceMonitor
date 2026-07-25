@@ -23,7 +23,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 public interface IViewerServerSecretStore
 {
     void Save(string id, string username, string password);
-    (string Username, string Password)? Get(string id);
+    (string Username, string Password)? Find(string id);
     void Delete(string id);
 }
 
@@ -49,7 +49,7 @@ public sealed class WindowsCredentialServerSecretStore : IViewerServerSecretStor
         }
     }
 
-    public (string Username, string Password)? Get(string id)
+    public (string Username, string Password)? Find(string id)
     {
         try
         {
@@ -320,7 +320,7 @@ public sealed class ViewerServerStore
     }
 
     /// <summary>The stored (username, password) for a server id, or null — used to pre-fill the Edit dialog.</summary>
-    public (string Username, string Password)? GetCredential(string id) => _secrets.Get(id);
+    public (string Username, string Password)? GetCredential(string id) => _secrets.Find(id);
 
     private void ApplySecret(string id, string? username, string? password)
     {

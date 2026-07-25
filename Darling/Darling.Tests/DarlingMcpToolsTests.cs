@@ -136,8 +136,8 @@ public sealed class DarlingMcpToolsTests
         var (resolved, error) = DarlingServerResolver.ResolveOrError(new[] { sole }, null);
 
         Assert.Null(error);
-        Assert.Equal("SQL2022", resolved!.Value.ServerName);
-        Assert.Equal(ServerIdHelper.GetDeterministicHashCode("SQL2022"), resolved.Value.ServerId);
+        Assert.Equal("SQL2022", resolved.ServerName);
+        Assert.Equal(ServerIdHelper.GetDeterministicHashCode("SQL2022"), resolved.ServerId);
     }
 
     [Fact]
@@ -146,7 +146,7 @@ public sealed class DarlingMcpToolsTests
         var servers = new[] { Registered("SQL2022"), Registered("PROD1", "Production") };
         var (resolved, error) = DarlingServerResolver.ResolveOrError(servers, "  ");
 
-        Assert.Null(resolved);
+        Assert.Equal(default, resolved);
         Assert.NotNull(error);
         Assert.StartsWith("Could not resolve server.", error, StringComparison.Ordinal);
         Assert.Contains("SQL2022", error, StringComparison.Ordinal);
@@ -162,7 +162,7 @@ public sealed class DarlingMcpToolsTests
         var (resolved, error) = DarlingServerResolver.ResolveOrError(servers, "sql2022");
 
         Assert.Null(error);
-        Assert.Equal("SQL2022", resolved!.Value.ServerName);
+        Assert.Equal("SQL2022", resolved.ServerName);
 
         /* Display-name exact match resolves to the row's STORAGE name — the identity the
            collectors stamp on every row, so the tools' reads join the collected data. */
@@ -170,7 +170,7 @@ public sealed class DarlingMcpToolsTests
         (resolved, error) = DarlingServerResolver.ResolveOrError(byDisplay, "prod1");
 
         Assert.Null(error);
-        Assert.Equal("prod1.example.com", resolved!.Value.ServerName);
+        Assert.Equal("prod1.example.com", resolved.ServerName);
     }
 
     [Fact]
@@ -180,7 +180,7 @@ public sealed class DarlingMcpToolsTests
         var (resolved, error) = DarlingServerResolver.ResolveOrError(servers, "example");
 
         Assert.Null(error);
-        Assert.Equal("prod1.example.com", resolved!.Value.ServerName);
+        Assert.Equal("prod1.example.com", resolved.ServerName);
     }
 
     [Fact]
@@ -191,7 +191,7 @@ public sealed class DarlingMcpToolsTests
         var servers = new[] { Registered("SQL2022:RO", "Replica"), Registered("SQL2022") };
         var (resolved, error) = DarlingServerResolver.ResolveOrError(servers, "no-such-server");
 
-        Assert.Null(resolved);
+        Assert.Equal(default, resolved);
         Assert.NotNull(error);
         Assert.Contains("Replica (SQL2022:RO) [Read-Only]", error, StringComparison.Ordinal);
         Assert.Contains("SQL2022", error, StringComparison.Ordinal);
@@ -203,7 +203,7 @@ public sealed class DarlingMcpToolsTests
         var (resolved, error) = DarlingServerResolver.ResolveOrError(
             Array.Empty<DarlingServerResolver.RegisteredServer>(), "anything");
 
-        Assert.Null(resolved);
+        Assert.Equal(default, resolved);
         Assert.Contains("registers each monitored server on its first successful connection", error, StringComparison.Ordinal);
     }
 
@@ -216,7 +216,7 @@ public sealed class DarlingMcpToolsTests
         var (resolved, error) = DarlingServerResolver.ResolveOrError(new[] { row }, "darling-id-passthrough");
 
         Assert.Null(error);
-        Assert.Equal(-424242, resolved!.Value.ServerId);
+        Assert.Equal(-424242, resolved.ServerId);
     }
 
     [Fact]

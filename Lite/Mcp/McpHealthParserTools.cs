@@ -34,13 +34,13 @@ public sealed class McpHealthParserTools
             var validation = McpHelpers.ValidateHoursBack(hours_back) ?? McpHelpers.ValidateTop(limit);
             if (validation != null) return validation;
 
-            var rows = await dataService.GetSystemHealthAsync(resolved.Value.ServerId, hours_back);
+            var rows = await dataService.GetSystemHealthAsync(resolved.ServerId, hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No system health data found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 total_entries = rows.Count,
                 shown = Math.Min(rows.Count, limit),
@@ -84,13 +84,13 @@ public sealed class McpHealthParserTools
             var validation = McpHelpers.ValidateHoursBack(hours_back) ?? McpHelpers.ValidateTop(limit);
             if (validation != null) return validation;
 
-            var rows = await dataService.GetSevereErrorsAsync(resolved.Value.ServerId, hours_back);
+            var rows = await dataService.GetSevereErrorsAsync(resolved.ServerId, hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No severe errors found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 error_count = rows.Count,
                 shown = Math.Min(rows.Count, limit),
@@ -125,13 +125,13 @@ public sealed class McpHealthParserTools
             var validation = McpHelpers.ValidateHoursBack(hours_back) ?? McpHelpers.ValidateTop(limit);
             if (validation != null) return validation;
 
-            var rows = await dataService.GetIoIssuesAsync(resolved.Value.ServerId, hours_back);
+            var rows = await dataService.GetIoIssuesAsync(resolved.ServerId, hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No I/O issues found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 issue_count = rows.Count,
                 shown = Math.Min(rows.Count, limit),
@@ -166,13 +166,13 @@ public sealed class McpHealthParserTools
             var validation = McpHelpers.ValidateHoursBack(hours_back) ?? McpHelpers.ValidateTop(limit);
             if (validation != null) return validation;
 
-            var rows = await dataService.GetSchedulerIssuesAsync(resolved.Value.ServerId, hours_back);
+            var rows = await dataService.GetSchedulerIssuesAsync(resolved.ServerId, hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No scheduler issues found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 issue_count = rows.Count,
                 shown = Math.Min(rows.Count, limit),
@@ -209,13 +209,13 @@ public sealed class McpHealthParserTools
             var validation = McpHelpers.ValidateHoursBack(hours_back) ?? McpHelpers.ValidateTop(limit);
             if (validation != null) return validation;
 
-            var rows = await dataService.GetMemoryConditionsAsync(resolved.Value.ServerId, hours_back);
+            var rows = await dataService.GetMemoryConditionsAsync(resolved.ServerId, hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No memory condition events found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 event_count = rows.Count,
                 shown = Math.Min(rows.Count, limit),
@@ -275,13 +275,13 @@ public sealed class McpHealthParserTools
             var validation = McpHelpers.ValidateHoursBack(hours_back) ?? McpHelpers.ValidateTop(limit);
             if (validation != null) return validation;
 
-            var rows = await dataService.GetCpuTasksAsync(resolved.Value.ServerId, hours_back);
+            var rows = await dataService.GetCpuTasksAsync(resolved.ServerId, hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No CPU task events found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 event_count = rows.Count,
                 shown = Math.Min(rows.Count, limit),
@@ -320,13 +320,13 @@ public sealed class McpHealthParserTools
             var validation = McpHelpers.ValidateHoursBack(hours_back) ?? McpHelpers.ValidateTop(limit);
             if (validation != null) return validation;
 
-            var rows = await dataService.GetMemoryBrokerAsync(resolved.Value.ServerId, hours_back);
+            var rows = await dataService.GetMemoryBrokerAsync(resolved.ServerId, hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No memory broker events found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 event_count = rows.Count,
                 shown = Math.Min(rows.Count, limit),
@@ -367,13 +367,13 @@ public sealed class McpHealthParserTools
             var validation = McpHelpers.ValidateHoursBack(hours_back) ?? McpHelpers.ValidateTop(limit);
             if (validation != null) return validation;
 
-            var rows = await dataService.GetMemoryNodeOomAsync(resolved.Value.ServerId, hours_back);
+            var rows = await dataService.GetMemoryNodeOomAsync(resolved.ServerId, hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No memory node OOM events found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 event_count = rows.Count,
                 shown = Math.Min(rows.Count, limit),

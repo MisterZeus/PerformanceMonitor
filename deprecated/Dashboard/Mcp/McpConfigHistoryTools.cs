@@ -27,13 +27,13 @@ public sealed class McpConfigHistoryTools
 
         try
         {
-            var rows = await resolved.Value.Service.GetServerConfigChangesAsync(hours_back);
+            var rows = await resolved.Service.GetServerConfigChangesAsync(hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No server configuration changes found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 change_count = rows.Count,
                 changes = rows.Select(r => new
@@ -71,13 +71,13 @@ public sealed class McpConfigHistoryTools
 
         try
         {
-            var rows = await resolved.Value.Service.GetDatabaseConfigChangesAsync(hours_back);
+            var rows = await resolved.Service.GetDatabaseConfigChangesAsync(hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No database configuration changes found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 change_count = rows.Count,
                 changes = rows.Select(r => new
@@ -113,13 +113,13 @@ public sealed class McpConfigHistoryTools
 
         try
         {
-            var rows = await resolved.Value.Service.GetTraceFlagChangesAsync(hours_back);
+            var rows = await resolved.Service.GetTraceFlagChangesAsync(hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No trace flag changes found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 change_count = rows.Count,
                 changes = rows.Select(r => new

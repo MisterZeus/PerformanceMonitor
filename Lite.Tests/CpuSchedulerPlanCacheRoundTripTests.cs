@@ -68,7 +68,7 @@ public sealed class CpuSchedulerPlanCacheRoundTripTests : IDisposable
 
         Assert.Equal(1.50m, (decimal)await ScalarAsync(connection, "cpu_scheduler_stats", "avg_runnable_tasks_count"));
         Assert.Equal(0L, (long)await ScalarAsync(connection, "cpu_scheduler_stats", "total_work_queue_count"));
-        Assert.Equal(true, (bool)await ScalarAsync(connection, "cpu_scheduler_stats", "worker_thread_exhaustion_warning"));
+        Assert.True((bool)await ScalarAsync(connection, "cpu_scheduler_stats", "worker_thread_exhaustion_warning"));
         Assert.Equal("Available physical memory is high", (string)await ScalarAsync(connection, "cpu_scheduler_stats", "system_memory_state_desc"));
         Assert.Equal(DBNull.Value, await ScalarAsync(connection, "cpu_scheduler_stats", "runnable_percent"));
         Assert.Equal(DBNull.Value, await ScalarAsync(connection, "cpu_scheduler_stats", "runnable_request_count"));

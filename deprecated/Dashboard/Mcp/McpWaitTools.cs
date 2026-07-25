@@ -27,7 +27,7 @@ public sealed class McpWaitTools
 
         try
         {
-            var rows = await resolved.Value.Service.GetWaitStatsAsync();
+            var rows = await resolved.Service.GetWaitStatsAsync();
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No wait stats data available.");
@@ -47,7 +47,7 @@ public sealed class McpWaitTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 waits = result
             }, McpHelpers.JsonOptions);
         }
@@ -76,7 +76,7 @@ public sealed class McpWaitTools
 
         try
         {
-            var points = await resolved.Value.Service.GetWaitStatsDataAsync(hours_back, topWaitTypes: top_wait_types);
+            var points = await resolved.Service.GetWaitStatsDataAsync(hours_back, topWaitTypes: top_wait_types);
             if (points.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No wait stats trend data available.");
@@ -92,7 +92,7 @@ public sealed class McpWaitTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 trend = result
             }, McpHelpers.JsonOptions);

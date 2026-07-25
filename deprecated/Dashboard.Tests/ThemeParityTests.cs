@@ -39,10 +39,10 @@ public class ThemeParityTests
     {
         var repoRoot = FindRepoRoot();
         Assert.True(repoRoot is not null,
-            "Could not locate the repo root (a directory containing both Dashboard\\Themes and Lite\\Themes) " +
+            $"Could not locate the repo root (a directory containing both {DashboardThemesPath} and Lite\\Themes) " +
             $"by walking up from {AppContext.BaseDirectory}.");
 
-        var dashboardFile = Path.Combine(repoRoot!, "Dashboard", "Themes", $"{theme}Theme.xaml");
+        var dashboardFile = Path.Combine(repoRoot!, DashboardThemesPath, $"{theme}Theme.xaml");
         var liteFile = Path.Combine(repoRoot!, "Lite", "Themes", $"{theme}Theme.xaml");
         Assert.True(File.Exists(dashboardFile), $"Dashboard theme file not found: {dashboardFile}");
         Assert.True(File.Exists(liteFile), $"Lite theme file not found: {liteFile}");
@@ -192,12 +192,15 @@ public class ThemeParityTests
     /// Walks up from the test output directory to the repo root — the directory that contains both
     /// Dashboard\Themes and Lite\Themes. Mirrors Installer.Tests' FindInstallDirectory walk-up.
     /// </summary>
+    /// <summary>Repo-relative path to the Dashboard's theme folder — under deprecated/ since #1612.</summary>
+    private static readonly string DashboardThemesPath = Path.Combine("deprecated", "Dashboard", "Themes");
+
     private static string? FindRepoRoot()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         for (int i = 0; i < 10 && dir is not null; i++)
         {
-            if (Directory.Exists(Path.Combine(dir.FullName, "Dashboard", "Themes")) &&
+            if (Directory.Exists(Path.Combine(dir.FullName, DashboardThemesPath)) &&
                 Directory.Exists(Path.Combine(dir.FullName, "Lite", "Themes")))
             {
                 return dir.FullName;

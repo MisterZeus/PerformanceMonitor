@@ -124,6 +124,10 @@ public sealed class DefaultTraceEventsCollector : CollectorDefinitionBase<Defaul
        cases keeps the Windows behavior (which always has the _N suffix) unchanged. READ UNCOMMITTED
        like every collector; OPTION(RECOMPILE) because the cutoff selectivity varies wildly between the
        all-history first run and the tiny steady-state windows. */
+    /* Parsed once — the template is re-formatted every collection cycle (CA1863). */
+    private static readonly System.Text.CompositeFormat QueryTemplateFormat =
+        System.Text.CompositeFormat.Parse(QueryTemplate);
+
     private const string QueryTemplate = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
@@ -233,7 +237,7 @@ OPTION(RECOMPILE);";
         var (exclusionClause, exclusionParameters) = BuildNullSafeDatabaseExclusion(context.ExcludedDatabases);
         var exclusionSplice = exclusionClause.Length == 0 ? string.Empty : "\r\n" + exclusionClause;
 
-        var text = string.Format(CultureInfo.InvariantCulture, QueryTemplate, exclusionSplice);
+        var text = string.Format(CultureInfo.InvariantCulture, QueryTemplateFormat, exclusionSplice);
 
         /* Cutoff selection (the Dashboard's first-run guard, ported):
              - watermark present            -> steady state, collect newer than it.
