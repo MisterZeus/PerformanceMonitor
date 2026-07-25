@@ -94,6 +94,10 @@ public sealed class JobHistoryCollector : CollectorDefinitionBase<JobHistoryColl
        RunningJobsCollector. A {0} placeholder is spliced with the per-cycle incremental filter (see
        BuildQuery). READ UNCOMMITTED like every collector; OPTION(RECOMPILE) because the filter selectivity
        varies wildly between the all-history first run and the tiny steady-state instance_id windows. */
+    /* Parsed once — the template is re-formatted every collection cycle (CA1863). */
+    private static readonly System.Text.CompositeFormat QueryTemplateFormat =
+        System.Text.CompositeFormat.Parse(QueryTemplate);
+
     private const string QueryTemplate = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
@@ -224,7 +228,7 @@ AND   DATEADD
             parameters = Array.Empty<CollectorParameter>();
         }
 
-        var text = string.Format(CultureInfo.InvariantCulture, QueryTemplate, filter);
+        var text = string.Format(CultureInfo.InvariantCulture, QueryTemplateFormat, filter);
         return new CollectorQuery(text, parameters);
     }
 

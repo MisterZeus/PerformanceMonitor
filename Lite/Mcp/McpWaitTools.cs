@@ -28,7 +28,7 @@ public sealed class McpWaitTools
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
 
-            var rows = await dataService.GetWaitStatsAsync(resolved.Value.ServerId, hours_back);
+            var rows = await dataService.GetWaitStatsAsync(resolved.ServerId, hours_back);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No wait stats data available for the specified time range.");
@@ -46,7 +46,7 @@ public sealed class McpWaitTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 waits = result
             }, McpHelpers.JsonOptions);
@@ -72,10 +72,10 @@ public sealed class McpWaitTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var types = await dataService.GetDistinctWaitTypesAsync(resolved.Value.ServerId, hours_back);
+            var types = await dataService.GetDistinctWaitTypesAsync(resolved.ServerId, hours_back);
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 wait_types = types
             }, McpHelpers.JsonOptions);
@@ -102,12 +102,12 @@ public sealed class McpWaitTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var points = await dataService.GetWaitStatsTrendAsync(resolved.Value.ServerId, wait_type, hours_back);
+            var points = await dataService.GetWaitStatsTrendAsync(resolved.ServerId, wait_type, hours_back);
             if (points.Count == 0)
             {
                 /* Same shape as get_perfmon_trend: tell the caller whether the wait type is just
                    unknown here vs. nothing collected at all, and hand back the ones that do have data. */
-                var collected = await dataService.GetDistinctWaitTypesAsync(resolved.Value.ServerId, hours_back);
+                var collected = await dataService.GetDistinctWaitTypesAsync(resolved.ServerId, hours_back);
                 if (collected.Count == 0)
                     return McpHelpers.Status(
                         "unavailable",
@@ -129,7 +129,7 @@ public sealed class McpWaitTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 wait_type,
                 hours_back,
                 trend = result
@@ -160,7 +160,7 @@ public sealed class McpWaitTools
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
 
-            var rows = await dataService.GetWaitingTasksAsync(resolved.Value.ServerId, hours_back);
+            var rows = await dataService.GetWaitingTasksAsync(resolved.ServerId, hours_back);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("empty", "No waiting tasks found.");
@@ -179,7 +179,7 @@ public sealed class McpWaitTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 tasks = result
             }, McpHelpers.JsonOptions);
         }

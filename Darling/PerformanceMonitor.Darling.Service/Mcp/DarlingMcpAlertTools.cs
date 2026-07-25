@@ -83,8 +83,8 @@ public sealed class DarlingMcpAlertTools
         {
             var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
             if (error != null) return error;
-            serverId = resolved.Value.ServerId;
-            scope = resolved.Value.ServerName;
+            serverId = resolved.ServerId;
+            scope = resolved.ServerName;
         }
 
         try

@@ -27,7 +27,7 @@ public sealed class McpDiagnosticTools
 
         try
         {
-            var rows = await resolved.Value.Service.GetPlanCacheStatsAsync(hours_back);
+            var rows = await resolved.Service.GetPlanCacheStatsAsync(hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No plan cache statistics available in the requested time range.");
 
@@ -43,7 +43,7 @@ public sealed class McpDiagnosticTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 collection_time = latestTime.ToString("o"),
                 summary = new
                 {
@@ -89,13 +89,13 @@ public sealed class McpDiagnosticTools
 
         try
         {
-            var rows = await resolved.Value.Service.GetCriticalIssuesAsync(hours_back);
+            var rows = await resolved.Service.GetCriticalIssuesAsync(hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No critical issues found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 issue_count = rows.Count,
                 critical_count = rows.Count(r => r.Severity == "CRITICAL"),
@@ -136,14 +136,14 @@ public sealed class McpDiagnosticTools
 
         try
         {
-            var rows = await resolved.Value.Service.GetSessionStatsAsync(hours_back);
+            var rows = await resolved.Service.GetSessionStatsAsync(hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No session statistics available in the requested time range.");
 
             var latest = rows[0];
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 collection_time = latest.CollectionTime.ToString("o"),
                 total_sessions = latest.TotalSessions,
                 running = latest.RunningSessions,

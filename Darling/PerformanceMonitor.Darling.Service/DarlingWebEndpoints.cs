@@ -413,7 +413,7 @@ public static class DarlingWebEndpoints
     /// array of names), else the <c>$server</c> variable value. Absent / "All" / empty ⇒ null (the whole fleet,
     /// no server predicate); one or many names ⇒ that list, which the compiler binds as a
     /// <c>server_name = ANY($n)</c> text[] parameter — never resolved to ids or interpolated.</summary>
-    private static IReadOnlyList<string>? ParseServerScope(JsonObject body, IReadOnlyDictionary<string, string?> values)
+    private static List<string>? ParseServerScope(JsonObject body, Dictionary<string, string?> values)
     {
         var names = new List<string>();
 
@@ -455,7 +455,7 @@ public static class DarlingWebEndpoints
 
     /// <summary>Parses the run's resolved variable values (<c>{name: scalar}</c>) into the string map the
     /// compiler binds $var filters from. A non-scalar value maps to null (an unresolved variable).</summary>
-    private static IReadOnlyDictionary<string, string?> ParseRunValues(JsonNode? node)
+    private static Dictionary<string, string?> ParseRunValues(JsonNode? node)
     {
         var values = new Dictionary<string, string?>(StringComparer.Ordinal);
         if (node is JsonObject obj)
@@ -517,7 +517,7 @@ public static class DarlingWebEndpoints
         return annotations;
     }
 
-    private static JsonNode? DbValueToJson(object value) => value switch
+    private static JsonValue? DbValueToJson(object value) => value switch
     {
         DateTime dt => JsonValue.Create(dt.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture)),
         double d => JsonValue.Create(d),

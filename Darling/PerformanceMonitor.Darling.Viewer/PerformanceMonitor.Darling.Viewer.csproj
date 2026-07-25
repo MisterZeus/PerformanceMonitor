@@ -34,7 +34,7 @@
 
   <ItemGroup>
     <!-- Same package + version as Lite, so both chart hosts pin one ScottPlot. -->
-    <PackageReference Include="ScottPlot.WPF" Version="5.1.58" />
+    <PackageReference Include="ScottPlot.WPF" Version="5.1.59" />
     <!-- System tray icon + balloon toasts (ported from Lite's SystemTrayService). Same package + version
          as Lite so both WPF front ends pin one Hardcodet.NotifyIcon.Wpf. -->
     <PackageReference Include="Hardcodet.NotifyIcon.Wpf" Version="2.0.1" />

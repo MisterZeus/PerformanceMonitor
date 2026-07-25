@@ -42,7 +42,7 @@ public sealed class DarlingMcpConfigTools
 
         try
         {
-            var rows = await DarlingCurrentConfigReader.GetLatestServerConfigAsync(postgres, resolved.Value.ServerId);
+            var rows = await DarlingCurrentConfigReader.GetLatestServerConfigAsync(postgres, resolved.ServerId);
             if (rows.Count == 0)
                 return McpHelpers.Status(
                     "unavailable",
@@ -50,7 +50,7 @@ public sealed class DarlingMcpConfigTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 setting_count = rows.Count,
                 settings = rows.Select(r => new
                 {
@@ -80,7 +80,7 @@ public sealed class DarlingMcpConfigTools
 
         try
         {
-            var rows = await DarlingCurrentConfigReader.GetLatestDatabaseConfigAsync(postgres, resolved.Value.ServerId);
+            var rows = await DarlingCurrentConfigReader.GetLatestDatabaseConfigAsync(postgres, resolved.ServerId);
             if (rows.Count == 0)
                 return McpHelpers.Status(
                     "unavailable",
@@ -116,7 +116,7 @@ public sealed class DarlingMcpConfigTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 database_count = result.Count,
                 databases = result
             }, McpHelpers.JsonOptions);
@@ -137,13 +137,13 @@ public sealed class DarlingMcpConfigTools
 
         try
         {
-            var rows = await DarlingCurrentConfigReader.GetLatestTraceFlagsAsync(postgres, resolved.Value.ServerId);
+            var rows = await DarlingCurrentConfigReader.GetLatestTraceFlagsAsync(postgres, resolved.ServerId);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No trace flags found (none enabled, or the config collector has not run yet).");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 trace_flag_count = rows.Count,
                 trace_flags = rows.Select(r => new
                 {

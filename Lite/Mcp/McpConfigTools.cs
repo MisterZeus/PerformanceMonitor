@@ -20,7 +20,7 @@ public sealed class McpConfigTools
 
         try
         {
-            var rows = await dataService.GetLatestServerConfigAsync(resolved.Value.ServerId);
+            var rows = await dataService.GetLatestServerConfigAsync(resolved.ServerId);
             if (rows.Count == 0)
                 return McpHelpers.Status(
                     "unavailable",
@@ -28,7 +28,7 @@ public sealed class McpConfigTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 setting_count = rows.Count,
                 settings = rows.Select(r => new
                 {
@@ -59,7 +59,7 @@ public sealed class McpConfigTools
 
         try
         {
-            var rows = await dataService.GetLatestDatabaseConfigAsync(resolved.Value.ServerId);
+            var rows = await dataService.GetLatestDatabaseConfigAsync(resolved.ServerId);
             if (rows.Count == 0)
                 return McpHelpers.Status(
                     "unavailable",
@@ -95,7 +95,7 @@ public sealed class McpConfigTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 database_count = result.Count,
                 databases = result
             }, McpHelpers.JsonOptions);
@@ -118,7 +118,7 @@ public sealed class McpConfigTools
 
         try
         {
-            var rows = await dataService.GetLatestDatabaseScopedConfigAsync(resolved.Value.ServerId);
+            var rows = await dataService.GetLatestDatabaseScopedConfigAsync(resolved.ServerId);
             if (rows.Count == 0)
                 return McpHelpers.Status(
                     "unavailable",
@@ -143,7 +143,7 @@ public sealed class McpConfigTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 database_count = grouped.Count,
                 databases = grouped
             }, McpHelpers.JsonOptions);
@@ -165,13 +165,13 @@ public sealed class McpConfigTools
 
         try
         {
-            var rows = await dataService.GetLatestTraceFlagsAsync(resolved.Value.ServerId);
+            var rows = await dataService.GetLatestTraceFlagsAsync(resolved.ServerId);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No trace flags found (none enabled, or the config collector has not run yet).");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 trace_flag_count = rows.Count,
                 trace_flags = rows.Select(r => new
                 {

@@ -28,7 +28,7 @@ public sealed class McpActiveQueryTools
 
         try
         {
-            var rows = await resolved.Value.Service.GetQuerySnapshotsAsync(hours_back);
+            var rows = await resolved.Service.GetQuerySnapshotsAsync(hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No active query snapshots found in the requested time range.");
 
@@ -56,7 +56,7 @@ public sealed class McpActiveQueryTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 total_snapshots = rows.Count,
                 shown = result.Count,

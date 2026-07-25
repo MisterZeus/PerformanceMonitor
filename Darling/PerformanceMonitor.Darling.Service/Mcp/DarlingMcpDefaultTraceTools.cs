@@ -54,7 +54,7 @@ public sealed class DarlingMcpDefaultTraceTools
         {
             var now = DateTime.UtcNow;
             var all = await DarlingDefaultTraceReader.ReadEventsAsync(
-                postgres, resolved.Value.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
 
             /* The significant-set gate (shared with the viewer's System Events surface): every curated
                category is significant as collected, except ErrorLog which must clear the severity floor. */
@@ -95,7 +95,7 @@ public sealed class DarlingMcpDefaultTraceTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 total_events = significant.Count,
                 shown = events.Count,

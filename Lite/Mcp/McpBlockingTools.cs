@@ -28,7 +28,7 @@ public sealed class McpBlockingTools
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
 
-            var rows = await dataService.GetRecentDeadlocksAsync(resolved.Value.ServerId, hours_back);
+            var rows = await dataService.GetRecentDeadlocksAsync(resolved.ServerId, hours_back);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("empty", "No deadlocks found in the specified time range.");
@@ -46,7 +46,7 @@ public sealed class McpBlockingTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 total_deadlocks = rows.Count,
                 deadlocks = result
@@ -77,7 +77,7 @@ public sealed class McpBlockingTools
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
 
-            var rows = await dataService.GetRecentDeadlocksAsync(resolved.Value.ServerId, hours_back);
+            var rows = await dataService.GetRecentDeadlocksAsync(resolved.ServerId, hours_back);
             var withXml = rows.Where(r => r.HasDeadlockXml).Take(limit).ToList();
             if (withXml.Count == 0)
             {
@@ -94,7 +94,7 @@ public sealed class McpBlockingTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 deadlocks = result
             }, McpHelpers.JsonOptions);
@@ -124,7 +124,7 @@ public sealed class McpBlockingTools
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
 
-            var rows = await dataService.GetRecentBlockedProcessReportsAsync(resolved.Value.ServerId, hours_back);
+            var rows = await dataService.GetRecentBlockedProcessReportsAsync(resolved.ServerId, hours_back);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("empty", "No blocked process reports found.");
@@ -169,7 +169,7 @@ public sealed class McpBlockingTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 reports = result
             }, McpHelpers.JsonOptions);
@@ -199,7 +199,7 @@ public sealed class McpBlockingTools
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
 
-            var rows = await dataService.GetRecentBlockedProcessReportsAsync(resolved.Value.ServerId, hours_back);
+            var rows = await dataService.GetRecentBlockedProcessReportsAsync(resolved.ServerId, hours_back);
             var withXml = rows.Where(r => r.HasReportXml).Take(limit).ToList();
             if (withXml.Count == 0)
             {
@@ -218,7 +218,7 @@ public sealed class McpBlockingTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 reports = result
             }, McpHelpers.JsonOptions);
@@ -244,12 +244,12 @@ public sealed class McpBlockingTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var points = await dataService.GetBlockingTrendAsync(resolved.Value.ServerId, hours_back);
+            var points = await dataService.GetBlockingTrendAsync(resolved.ServerId, hours_back);
             var result = points.Select(p => new { time = p.Time.ToString("o"), count = p.Count });
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 trend = result
             }, McpHelpers.JsonOptions);
@@ -275,12 +275,12 @@ public sealed class McpBlockingTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var points = await dataService.GetDeadlockTrendAsync(resolved.Value.ServerId, hours_back);
+            var points = await dataService.GetDeadlockTrendAsync(resolved.ServerId, hours_back);
             var result = points.Select(p => new { time = p.Time.ToString("o"), count = p.Count });
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 trend = result
             }, McpHelpers.JsonOptions);

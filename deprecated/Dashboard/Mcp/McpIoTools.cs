@@ -23,7 +23,7 @@ public sealed class McpIoTools
 
         try
         {
-            var rows = await resolved.Value.Service.GetFileIoLatencyAsync();
+            var rows = await resolved.Service.GetFileIoLatencyAsync();
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No file I/O stats available.");
@@ -45,7 +45,7 @@ public sealed class McpIoTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 files = result
             }, McpHelpers.JsonOptions);
         }
@@ -70,7 +70,7 @@ public sealed class McpIoTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var points = await resolved.Value.Service.GetFileIoDataAsync(hours_back);
+            var points = await resolved.Service.GetFileIoDataAsync(hours_back);
             if (points.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No I/O trend data available.");
@@ -88,7 +88,7 @@ public sealed class McpIoTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 trend = result
             }, McpHelpers.JsonOptions);

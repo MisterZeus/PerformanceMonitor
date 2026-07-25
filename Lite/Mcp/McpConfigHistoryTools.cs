@@ -32,14 +32,14 @@ public sealed class McpConfigHistoryTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var rows = await dataService.GetServerConfigChangesAsync(resolved.Value.ServerId, hours_back);
+            var rows = await dataService.GetServerConfigChangesAsync(resolved.ServerId, hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty",
                     $"No server configuration changes detected in the last {hours_back}h. Config is captured on connect, so at least two snapshots are needed to detect a change.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 change_count = rows.Count,
                 changes = rows.Select(r => new
@@ -78,14 +78,14 @@ public sealed class McpConfigHistoryTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var rows = await dataService.GetDatabaseConfigChangesAsync(resolved.Value.ServerId, hours_back);
+            var rows = await dataService.GetDatabaseConfigChangesAsync(resolved.ServerId, hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty",
                     $"No database configuration changes detected in the last {hours_back}h. Config is captured on connect, so at least two snapshots are needed to detect a change.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 change_count = rows.Count,
                 changes = rows.Select(r => new
@@ -120,14 +120,14 @@ public sealed class McpConfigHistoryTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var rows = await dataService.GetTraceFlagChangesAsync(resolved.Value.ServerId, hours_back);
+            var rows = await dataService.GetTraceFlagChangesAsync(resolved.ServerId, hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty",
                     $"No trace flag changes detected in the last {hours_back}h. Config is captured on connect, so at least two snapshots are needed to detect a change.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 change_count = rows.Count,
                 changes = rows.Select(r => new

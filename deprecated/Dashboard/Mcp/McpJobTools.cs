@@ -31,7 +31,7 @@ public sealed class McpJobTools
 
         try
         {
-            var rows = await resolved.Value.Service.GetRunningJobsAsync();
+            var rows = await resolved.Service.GetRunningJobsAsync();
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("empty", "No running SQL Agent jobs found (or no data in report.running_jobs).");
@@ -56,7 +56,7 @@ public sealed class McpJobTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 running_job_count = rows.Count,
                 long_running_count = rows.Count(r => r.IsRunningLong),
                 jobs = result

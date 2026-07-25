@@ -347,7 +347,7 @@ public partial class MainWindow
 
     /// <summary>The tag forest in display order (roots by sort/name, each followed by its subtree), with
     /// depth — the order and indentation the quick submenu shows. Cycle-safe, like the sidebar projection.</summary>
-    private IEnumerable<(DarlingTag Tag, int Depth)> EnumerateTagForest()
+    private List<(DarlingTag Tag, int Depth)> EnumerateTagForest()
     {
         var byParent = _tags
             .Where(t => t.ParentId is not null)
@@ -363,7 +363,7 @@ public partial class MainWindow
             .ThenBy(t => t.Name, StringComparer.OrdinalIgnoreCase);
 
         var visited = new HashSet<int>();
-        var result = new List<(DarlingTag, int)>();
+        var result = new List<(DarlingTag Tag, int Depth)>();
 
         void Walk(DarlingTag tag, int depth)
         {

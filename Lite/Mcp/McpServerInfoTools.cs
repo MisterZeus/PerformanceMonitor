@@ -20,13 +20,13 @@ public sealed class McpServerInfoTools
 
         try
         {
-            var row = await dataService.GetLatestServerPropertiesAsync(resolved.Value.ServerId);
+            var row = await dataService.GetLatestServerPropertiesAsync(resolved.ServerId);
             if (row == null)
                 return McpHelpers.Status("unavailable", "No server properties available. The properties collector may not have run yet.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 collection_time = row.CollectionTime.ToString("o"),
                 edition = row.Edition,
                 engine_edition = row.EngineEdition,
@@ -61,13 +61,13 @@ public sealed class McpServerInfoTools
 
         try
         {
-            var rows = await dataService.GetLatestDatabaseSizeStatsAsync(resolved.Value.ServerId);
+            var rows = await dataService.GetLatestDatabaseSizeStatsAsync(resolved.ServerId);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No database size data available. The size collector may not have run yet.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 collection_time = rows[0].CollectionTime.ToString("o"),
                 file_count = rows.Count,
                 databases = rows

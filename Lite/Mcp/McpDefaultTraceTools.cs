@@ -33,13 +33,13 @@ public sealed class McpDefaultTraceTools
             var validation = McpHelpers.ValidateHoursBack(hours_back) ?? McpHelpers.ValidateTop(limit);
             if (validation != null) return validation;
 
-            var rows = await dataService.GetDefaultTraceEventsAsync(resolved.Value.ServerId, hours_back);
+            var rows = await dataService.GetDefaultTraceEventsAsync(resolved.ServerId, hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No significant default trace events found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 total_events = rows.Count,
                 shown = Math.Min(rows.Count, limit),
