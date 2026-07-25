@@ -1,0 +1,57 @@
+name: Claude Auto Review
+
+# Reviews every pull request into dev or main when it is opened or updated. The review is
+# advisory (it posts comments) and is deliberately NOT a required status check, so it never
+# blocks a merge. It no-ops cleanly until the CLAUDE_CODE_OAUTH_TOKEN repo secret is set, and on
+# fork PRs (which do not receive secrets), so neither case shows a failed check.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [dev, main]
+
+# Cancel an in-flight review when new commits are pushed to the same PR.
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    env:
+      # Mapped to env so the step guard below can skip cleanly when the secret is absent.
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Claude review
+        if: ${{ env.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ env.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review this pull request. Follow the conventions in CLAUDE.md and the T-SQL style
+            guide it points to. This repository ships two apps that must stay in parity — Lite
+            and Darling — so flag any change made to one but not its counterpart. Focus on:
+            - Correctness: bugs, edge cases, null/error handling at system boundaries
+            - Lite/Darling parity drift
+            - Security: input handling, SQL injection, secrets, file/network/process use
+            - Performance regressions
+            Do NOT suggest SQL Server missing-index DMV recommendations — they are folklore in
+            this codebase and explicitly unwanted.
+
+            The PR branch is already checked out in the working directory.
+            Use `gh pr comment` for top-level feedback, and
+            `mcp__github_inline_comment__create_inline_comment` (with confirmed: true) for
+            specific line-level issues. Only post GitHub comments — do not emit review text as
+            plain messages.
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
