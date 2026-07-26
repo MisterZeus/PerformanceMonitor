@@ -54,6 +54,10 @@ namespace PerformanceMonitor.Darling.Service;
 ///   a replica changed role ("AG Failover"), a replica lost or regained its connection to the primary
 ///   ("AG Replica Disconnected"/"AG Replica Reconnected"), a secondary fell behind by lag seconds or redo
 ///   queue ("AG Sync Fell Behind"), and data movement for a database was suspended ("AG Database Suspended").
+///   VANTAGE MATTERS: <c>sys.dm_hadr_*</c> on a SECONDARY carries only that replica's own rows, so a
+///   monitored secondary yields a one-row self-view of its AG rather than the whole topology (measured on a
+///   clusterless AG). Nothing here assumes it can see every replica from any node — the rules simply judge
+///   whatever rows arrive, keyed per ag+replica — but full AG coverage requires monitoring the primary.
 ///   Gated on the V35 <c>notify_ag_health</c> master switch, with the two thresholds
 ///   (<c>ag_lag_alert_seconds</c>, <c>ag_redo_queue_alert_kb</c>) store-backed alongside it. Keyed per AG
 ///   grain rather than per server, because a server hosts many replicas and databases.</item>
@@ -666,10 +670,10 @@ internal sealed class DarlingSelfAlertEvaluator
     /// very event that made it worse.</summary>
     internal enum AgSyncJudgement
     {
-        /// <summary>No enabled trigger had a usable reading — both thresholds off, the columns NULL (the
-        /// primary's own row, or WSFC quorum loss), or the only enabled trigger is the seconds one on a
-        /// SUSPENDED row. No signal: neither fire nor clear, the discipline
-        /// <see cref="ApplyAgentNotRunningAsync"/> uses for a stale agent_status reading.</summary>
+        /// <summary>Nothing trustworthy to judge on — both thresholds off, the columns NULL (the primary's own
+        /// row, or WSFC quorum loss), or a SUSPENDED row that is not over any threshold. No signal: neither
+        /// fire nor clear, the discipline <see cref="ApplyAgentNotRunningAsync"/> uses for a stale
+        /// agent_status reading.</summary>
         NotMeasurable,
 
         /// <summary>Measured, and within threshold.</summary>
@@ -687,23 +691,34 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <item><b>Lag seconds</b> — <c>secondary_lag_seconds &gt;= ag_lag_alert_seconds</c>.</item>
     /// <item><b>Redo queue</b> — <c>redo_queue_size &gt;= ag_redo_queue_alert_kb</c> (KB).</item>
     /// </list>
-    /// <para>THE TRAP this method exists to encode: MS Learn documents <c>secondary_lag_seconds</c> reading
-    /// <c>0</c> — not NULL — while data movement is SUSPENDED. So the database that is furthest behind, the
-    /// suspended one, reports as perfectly caught up, and a naive seconds check would clear right when it
-    /// should page. The seconds trigger therefore ABSTAINS on a suspended row and "AG Database Suspended" owns
-    /// that state. The redo-queue trigger keeps judging while suspended, because that backlog is real and keeps
-    /// growing.</para>
-    /// <para>Abstaining has to be its OWN answer rather than a <c>false</c>, or the caller reads it as recovery:
-    /// a lagging database that becomes suspended (or whose columns go NULL under quorum loss) would emit
-    /// "AG Sync Recovered — has caught up with the primary" in the same sweep that reports it suspended. That
-    /// is why this returns three states and not a bool.</para>
+    /// <para>SUSPENDED ROWS MAY RAISE AN ALARM BUT MAY NEVER CLEAR ONE. That asymmetry replaces an earlier rule
+    /// that made the seconds trigger abstain entirely while suspended, which was written to MS Learn's claim
+    /// that <c>secondary_lag_seconds</c> "shows as 0 if the data movement is suspended". THE DOCUMENTATION IS
+    /// WRONG. Measured against a live AG (SQL Server 2022 16.0.4265.3, clusterless AG, write load, sampled
+    /// across a SUSPEND_FROM_USER): lag ACCRUES monotonically at wall-clock rate while suspended
+    /// (…3993 → 4005 → 4017 → 4029 → 4041 over four 12-second intervals) and returns to 0 on resume. Abstaining
+    /// therefore silenced the lag alert on a suspended secondary — the single most common way a secondary falls
+    /// behind, and the case an operator most needs paged for.</para>
+    /// <para>The alarm/clear asymmetry is deliberately correct under BOTH behaviors, so this does not have to
+    /// bet on one: if lag accrues (measured), a suspended secondary crosses the threshold and fires; if it ever
+    /// did read <c>0</c> (documented), that <c>0</c> is below threshold and yields NotMeasurable rather than
+    /// CaughtUp, so it still cannot resolve a standing alert. The same rule protects the redo trigger, whose
+    /// value FREEZES at its last reading while suspended (also measured) — a frozen value over the threshold is
+    /// a real backlog worth firing on, while a frozen value under it is stale data that must not clear
+    /// anything.</para>
+    /// <para>Not clearing has to be its OWN answer rather than a <c>false</c>, or the caller reads it as
+    /// recovery: a lagging database that becomes suspended (or whose columns go NULL under quorum loss) would
+    /// emit "AG Sync Recovered — has caught up with the primary" in the same sweep that reports it suspended.
+    /// That is why this returns three states and not a bool.</para>
+    /// <para>One consequence worth knowing when tuning the redo trigger: on RESUME the secondary has a real,
+    /// large backlog to drain (measured at 388,620 KB after a 60-second suspend under load), so a single-sample
+    /// redo threshold will fire during legitimate catch-up. That firing is not wrong — the data-loss window is
+    /// genuinely open until the queue drains — but it is why the redo trigger ships OFF.</para>
     /// </summary>
     internal static AgSyncJudgement JudgeAgSync(
         AgDatabaseReading reading, int lagThresholdSeconds, long redoThresholdKb, out string reason)
     {
-        bool secondsUsable = lagThresholdSeconds > 0
-            && reading.IsSuspended != true
-            && reading.SecondaryLagSeconds.HasValue;
+        bool secondsUsable = lagThresholdSeconds > 0 && reading.SecondaryLagSeconds.HasValue;
         bool redoUsable = redoThresholdKb > 0 && reading.RedoQueueSizeKb.HasValue;
 
         if (secondsUsable && reading.SecondaryLagSeconds!.Value >= lagThresholdSeconds)
@@ -725,6 +740,16 @@ internal sealed class DarlingSelfAlertEvaluator
         }
 
         reason = "";
+
+        /* Under no threshold. A SUSPENDED row stops here rather than clearing: while movement is suspended the
+           lag reading cannot be trusted downward and the redo reading is frozen, so "not over the line" is not
+           evidence of recovery. "AG Database Suspended" is the alert that owns that state, and the sync alert
+           resolves only once movement is running again and a real measurement says so. */
+        if (reading.IsSuspended == true)
+        {
+            return AgSyncJudgement.NotMeasurable;
+        }
+
         return secondsUsable || redoUsable ? AgSyncJudgement.CaughtUp : AgSyncJudgement.NotMeasurable;
     }
 

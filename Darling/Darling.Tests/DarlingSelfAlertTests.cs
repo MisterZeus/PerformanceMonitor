@@ -1000,32 +1000,39 @@ public sealed class DarlingSelfAlertTests
     }
 
     [Fact]
-    public void JudgeAgSync_SuspendedDatabase_AbstainsOnSeconds_ButStillJudgesTheRedoQueue()
+    public void JudgeAgSync_SuspendedDatabase_MayFire_ButMayNeverResolve()
     {
-        /* THE TRAP: MS Learn documents secondary_lag_seconds reading 0 — not NULL — while movement is
-           SUSPENDED, so the database that is furthest behind reports as caught up. The seconds trigger
-           therefore abstains, and with only that trigger enabled the row is NOT MEASURABLE — emphatically not
-           CaughtUp, which would resolve the standing alert at the exact moment things got worse. */
+        /* Measured against a live AG: secondary_lag_seconds ACCRUES while suspended, it does not read 0 the
+           way MS Learn documents. A suspended secondary drifting past the threshold is the single most common
+           way a secondary falls behind, so it MUST fire — an earlier rule that abstained on suspended rows
+           silenced exactly that case. */
+        Assert.Equal(
+            DarlingSelfAlertEvaluator.AgSyncJudgement.Behind,
+            Judge(DatabaseRow(lagSeconds: 9999, suspended: true), 300, 0));
+
+        /* The other half of the asymmetry, and the reason this is not simply "judge suspended rows normally":
+           a suspended reading UNDER the threshold is not evidence of recovery. Were the documented zero-lag
+           behavior ever real, this is the row it would produce, and calling it CaughtUp would resolve a
+           standing alert at the exact moment things got worse. NotMeasurable is correct under both behaviors. */
         Assert.Equal(
             DarlingSelfAlertEvaluator.AgSyncJudgement.NotMeasurable,
             Judge(DatabaseRow(lagSeconds: 0, suspended: true), 300, 0));
 
-        /* Even a NON-zero lag reading is ignored while suspended — the column is not trustworthy in that
-           state at all, so the rule is "suspended means the seconds trigger abstains", not "suspended plus
-           zero". */
-        Assert.Equal(
-            DarlingSelfAlertEvaluator.AgSyncJudgement.NotMeasurable,
-            Judge(DatabaseRow(lagSeconds: 9999, suspended: true), 300, 0));
-
-        /* The redo queue keeps judging while suspended: that backlog is real and still growing. */
+        /* The redo queue fires while suspended too — a frozen queue over the threshold is a real backlog. */
         Assert.Equal(
             DarlingSelfAlertEvaluator.AgSyncJudgement.Behind,
             Judge(DatabaseRow(lagSeconds: 0, redoKb: 8192, suspended: true), 300, 4096));
 
-        /* ...and a suspended row with a SMALL redo queue is genuinely measured, so it may resolve. */
+        /* ...but a frozen queue UNDER the threshold is stale data, not a recovery: redo_queue_size freezes at
+           its last value while suspended (measured), so it cannot clear anything either. */
+        Assert.Equal(
+            DarlingSelfAlertEvaluator.AgSyncJudgement.NotMeasurable,
+            Judge(DatabaseRow(lagSeconds: 0, redoKb: 8, suspended: true), 300, 4096));
+
+        /* Once movement resumes, the same small readings are a real measurement and DO resolve. */
         Assert.Equal(
             DarlingSelfAlertEvaluator.AgSyncJudgement.CaughtUp,
-            Judge(DatabaseRow(lagSeconds: 0, redoKb: 8, suspended: true), 300, 4096));
+            Judge(DatabaseRow(lagSeconds: 0, redoKb: 8, suspended: false), 300, 4096));
     }
 
     [Fact]
@@ -1277,6 +1284,42 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal(3, h.Deliverer.Outcomes.Count);
         Assert.Equal("AG Sync Fell Behind", h.Deliverer.Outcomes[2].MetricName);
         Assert.Equal("AG Data Movement Resumed", Assert.Single(h.History.Records).MetricName);
+    }
+
+    [Fact]
+    public async Task AgSyncFellBehind_SuspendedSecondaryDriftingPastTheThreshold_Fires()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* Healthy baseline, then movement is suspended. The suspend edge fires on its own. */
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(lagSeconds: 0) }, Ct);
+        await e.ApplyAgDatabaseHealthAsync(
+            ServerId, Name, new[] { DatabaseRow(lagSeconds: 12, suspended: true, suspendReason: "SUSPEND_FROM_USER") }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("AG Database Suspended", h.Deliverer.Outcomes[0].MetricName);
+
+        /* Time passes and the lag accrues past the threshold while still suspended. This is the case the
+           product exists to catch, and the rule this test guards used to silence it: lag really does climb
+           while suspended (measured on a live AG), so the sync alert has to fire on its own rather than
+           trusting the suspend alert to have said everything. */
+        await e.ApplyAgDatabaseHealthAsync(
+            ServerId, Name, new[] { DatabaseRow(lagSeconds: 600, suspended: true, suspendReason: "SUSPEND_FROM_USER") }, Ct);
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Equal("AG Sync Fell Behind", h.Deliverer.Outcomes[1].MetricName);
+        Assert.Contains("600 seconds behind", h.Deliverer.Outcomes[1].DetailText, StringComparison.Ordinal);
+
+        /* Still suspended, still behind, inside the cooldown: no spam. */
+        await e.ApplyAgDatabaseHealthAsync(
+            ServerId, Name, new[] { DatabaseRow(lagSeconds: 700, suspended: true) }, Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* Resumed and genuinely caught up: NOW it resolves, off a measurement taken while movement was
+           running. Both the resume and the sync recovery are history rows. */
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(lagSeconds: 0) }, Ct);
+        Assert.Contains(h.History.Records, r => r.MetricName == "AG Sync Recovered");
+        Assert.Contains(h.History.Records, r => r.MetricName == "AG Data Movement Resumed");
     }
 
     [Fact]
