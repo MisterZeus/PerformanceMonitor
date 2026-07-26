@@ -14,6 +14,8 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
 
+using PerformanceMonitor.Darling.Storage;
+
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
 /// <summary>
@@ -180,127 +182,11 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
     }
 
     /// <summary>
-    /// Grouped per-day daily-summary aggregate — the viewer's <c>DailySummaryRangeSql</c> verbatim. $1
-    /// server_id, $2 range start, $3 range end (naive UTC, half-open <c>[start, end)</c>). Reads the
-    /// <c>v_wait_stats</c> / <c>v_query_stats</c> / <c>v_deadlocks</c> / <c>v_blocked_process_reports</c> (with
-    /// the <c>v_dmv_blocking_snapshots</c> fallback) / <c>v_cpu_utilization_stats</c> / <c>v_collection_log</c> /
-    /// <c>v_memory_pressure_events</c> passthrough views plus <c>config_alert_log</c>; one row per collected day.
+    /// The daily-summary aggregate SQL — single definition in <see cref="DailySummarySql"/>, shared with the
+    /// viewer's Performance Calendar. This was a hand-copied literal described as "verbatim" with nothing
+    /// enforcing it, so the calendar and this MCP tool could silently answer the same day differently (#1661).
     /// </summary>
-    public const string DailySummaryRangeSql = """
-        WITH wait_per_type AS (
-            SELECT date_trunc('day', collection_time) AS d, wait_type, SUM(delta_wait_time_ms) AS ms
-            FROM v_wait_stats
-            WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3 AND delta_wait_time_ms > 0
-            GROUP BY 1, 2
-        ),
-        wait_totals AS (
-            SELECT d, SUM(ms) / 1000.0 AS total_wait_sec
-            FROM wait_per_type
-            GROUP BY d
-        ),
-        wait_top AS (
-            SELECT DISTINCT ON (d) d, wait_type AS top_wait_type
-            FROM wait_per_type
-            ORDER BY d, ms DESC
-        ),
-        waits AS (
-            SELECT t.d, t.total_wait_sec, tp.top_wait_type
-            FROM wait_totals t
-            LEFT JOIN wait_top tp ON tp.d = t.d
-        ),
-        queries AS (
-            SELECT date_trunc('day', collection_time) AS d, COUNT(DISTINCT query_hash) AS c
-            FROM v_query_stats
-            WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-            GROUP BY 1
-        ),
-        deadlocks AS (
-            SELECT date_trunc('day', collection_time) AS d, COUNT(*) AS c
-            FROM v_deadlocks
-            WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-            GROUP BY 1
-        ),
-        bpr AS (
-            SELECT date_trunc('day', collection_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms
-            FROM v_blocked_process_reports
-            WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-            GROUP BY 1
-        ),
-        dmv AS (
-            SELECT date_trunc('day', collection_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms
-            FROM v_dmv_blocking_snapshots
-            WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-            GROUP BY 1
-        ),
-        cpu AS (
-            SELECT date_trunc('day', collection_time) AS d,
-                   COUNT(*) FILTER (WHERE (sqlserver_cpu_utilization + COALESCE(other_process_cpu_utilization, 0)) >= 80) AS c
-            FROM v_cpu_utilization_stats
-            WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-            GROUP BY 1
-        ),
-        coll AS (
-            SELECT date_trunc('day', collection_time) AS d,
-                   COUNT(*) AS runs,
-                   COUNT(*) FILTER (WHERE status = 'ERROR') AS errs
-            FROM v_collection_log
-            WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-            GROUP BY 1
-        ),
-        mem AS (
-            SELECT date_trunc('day', collection_time) AS d,
-                   COUNT(*) FILTER (WHERE memory_indicators_process >= 2 OR memory_indicators_system >= 2) AS pressure,
-                   COUNT(*) FILTER (WHERE memory_indicators_process >= 3) AS critical
-            FROM v_memory_pressure_events
-            WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-            GROUP BY 1
-        ),
-        alerts AS (
-            SELECT date_trunc('day', alert_time) AS d, COUNT(*) AS c
-            FROM config_alert_log
-            WHERE server_id = $1 AND alert_time >= $2 AND alert_time < $3
-              AND dismissed = FALSE
-              AND metric_name NOT LIKE '%Cleared%'
-              AND metric_name NOT LIKE '%Resolved%'
-              AND metric_name NOT LIKE '%Restored%'
-            GROUP BY 1
-        ),
-        day_spine AS (
-            SELECT d FROM waits
-            UNION SELECT d FROM queries
-            UNION SELECT d FROM deadlocks
-            UNION SELECT d FROM bpr
-            UNION SELECT d FROM dmv
-            UNION SELECT d FROM cpu
-            UNION SELECT d FROM coll
-            UNION SELECT d FROM mem
-            UNION SELECT d FROM alerts
-        )
-        SELECT
-            s.d AS day,
-            COALESCE(w.total_wait_sec, 0) AS total_wait_sec,
-            w.top_wait_type,
-            COALESCE(q.c, 0) AS unique_queries,
-            COALESCE(dl.c, 0) AS deadlock_count,
-            COALESCE(NULLIF(b.c, 0), dm.c, 0) AS blocking_events,
-            COALESCE(cp.c, 0) AS high_cpu_events,
-            COALESCE(cl.errs, 0) AS collection_errors,
-            COALESCE(m.pressure, 0) AS memory_pressure_events,
-            COALESCE(m.critical, 0) AS memory_critical_events,
-            COALESCE(al.c, 0) AS alert_count,
-            COALESCE(CASE WHEN COALESCE(b.c, 0) > 0 THEN b.max_wait_ms ELSE dm.max_wait_ms END, 0) AS peak_block_wait_ms
-        FROM day_spine s
-        LEFT JOIN waits w ON w.d = s.d
-        LEFT JOIN queries q ON q.d = s.d
-        LEFT JOIN deadlocks dl ON dl.d = s.d
-        LEFT JOIN bpr b ON b.d = s.d
-        LEFT JOIN dmv dm ON dm.d = s.d
-        LEFT JOIN cpu cp ON cp.d = s.d
-        LEFT JOIN coll cl ON cl.d = s.d
-        LEFT JOIN mem m ON m.d = s.d
-        LEFT JOIN alerts al ON al.d = s.d
-        ORDER BY s.d
-        """;
+    public const string DailySummaryRangeSql = DailySummarySql.RangeSql;
 
     /// <summary>One <see cref="DailySummaryReadRow"/> per collected day in the half-open [fromDate, toDate)
     /// window (the viewer's <c>GetDailySummaryRangeAsync</c>).</summary>
