@@ -15,7 +15,7 @@ jobs:
     outputs:
       has_changes: ${{ steps.check.outputs.has_changes }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: dev
           fetch-depth: 0
@@ -38,12 +38,12 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: dev
 
       - name: Setup .NET 10.0
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
           cache: true
@@ -89,7 +89,7 @@ jobs:
       # branch; nightly and release runs share the assembled zip whenever the cache is visible.
       - name: Cache Darling pg-runtime.zip
         id: cache-pg-runtime
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: Darling/artifacts/pg-runtime.zip
           key: pg-runtime-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-runtime.ps1') }}
@@ -196,12 +196,12 @@ jobs:
       # would be main). A manual dispatch tests the DISPATCHED ref — the only way to validate a
       # branch's gated-pg test changes before merge; the artifact-publishing build job stays
       # pinned to dev either way, so a branch dispatch can never ship branch binaries.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
 
       - name: Setup .NET 10.0
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
           cache: true
@@ -213,7 +213,7 @@ jobs:
       # release share one cache entry, so a warm cache means no download here.
       - name: Cache Darling pg-runtime.zip
         id: cache-pg-runtime
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: Darling/artifacts/pg-runtime.zip
           key: pg-runtime-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-runtime.ps1') }}

@@ -26,3 +26,10 @@ updates:
       github-actions:
         patterns:
           - "*"
+    ignore:
+      # upload-artifact majors are release-path sensitive: its artifact-id output feeds the
+      # SignPath signing steps, which only execute on release publish — a bad bump breaks
+      # signing at the worst possible moment. Bumped manually alongside a validated signing
+      # run instead (#1653).
+      - dependency-name: "actions/upload-artifact"
+        update-types: ["version-update:semver-major"]

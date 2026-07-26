@@ -10,7 +10,7 @@ jobs:
 
     steps:
       - name: Checkout PR branch
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       # Documentation-only PRs (e.g. a CHANGELOG correction) do not bump the
       # version. The workflow still runs so the required check reports a result
@@ -19,7 +19,7 @@ jobs:
       # any non-*.md file changed.
       - name: Detect non-documentation changes
         id: changes
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@v4
         with:
           filters: |
             code:
@@ -37,7 +37,7 @@ jobs:
 
       - name: Checkout main
         if: steps.changes.outputs.code == 'true'
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           ref: main
           path: main-branch
