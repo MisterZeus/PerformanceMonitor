@@ -373,6 +373,26 @@ time.
 last_commit_time` is not a lag measure: on a quiet, entirely healthy replica it grows without
 bound, and anything alerting on it will page about an idle database.
 
+### Commit-time deltas fail in *both* directions, which is why they are not a lag measure
+
+The two halves above are separated by a section, so the combined conclusion is easy to miss - and
+the combination is the whole argument:
+
+| Condition | What `now - last_commit_time` does | Failure |
+| --- | --- | --- |
+| Replica SUSPENDED | `last_commit_time` freezes, so the delta stops growing exactly when replication stops | **Silent** - understates at the moment it is worst |
+| Replica healthy but database QUIET | Nothing commits, so the delta grows without bound (measured 1757s at zero real lag) | **Loud** - pages about an idle database |
+
+Guarding only the suspended case therefore does not make a commit-delta trigger safe; it converts
+a silent failure into a noisy one. And the loud half is the more likely to actually ship, because
+it appears the first time anyone points the thing at a database nobody is writing to, whereas the
+silent half only shows up if you happen to suspend something.
+
+The conclusion is not "route commit deltas through the suspended-row gate" but **do not derive lag
+from commit times at all**. `secondary_lag_seconds` is the lag measure, with the caveats in finding
+3; the `*_time` columns are for showing an operator *when* something last happened, not for judging
+whether it is late.
+
 Source: [sys.dm_hadr_database_replica_states (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-hadr-database-replica-states-transact-sql)
 
 ## 7. Resource footprint (measured)

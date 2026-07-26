@@ -723,9 +723,17 @@ internal sealed class DarlingSelfAlertEvaluator
     /// stops growing exactly when replication stops, i.e. it looks like it is catching up. The sharpest example
     /// is any DRAIN-TIME measure: queue ÷ rate with both frozen holds a small, static, healthy-looking number
     /// (measured at a flat 0.0144 minutes across an entire suspension) when the true answer is "never, movement
-    /// is stopped". A drain-time or commit-delta trigger added here would therefore fail SILENT rather than
-    /// loud, which is worse. Anything new that judges a suspended row must route through the same
-    /// may-fire-never-clear gate below rather than being trusted on its own.</para>
+    /// is stopped". A drain-time trigger added here would therefore fail SILENT rather than loud, which is the
+    /// worse half. Anything new that judges a suspended row must route through the same may-fire-never-clear
+    /// gate below rather than being trusted on its own.</para>
+    /// <para>DO NOT DERIVE LAG FROM COMMIT TIMES AT ALL — <c>now - last_commit_time</c> is not a lag measure and
+    /// it is not a heartbeat. It fails in BOTH directions, so guarding only the suspended one is not enough.
+    /// On a suspended row it stops growing (the silent half above); on a QUIET BUT PERFECTLY HEALTHY replica it
+    /// grows without bound, because nothing has committed — measured at 1757 seconds, and separately at ~7
+    /// minutes, on secondaries that were SYNCHRONIZED, not suspended, and reporting
+    /// <c>secondary_lag_seconds = 0</c>. A trigger built on it would page about idle databases, which is the
+    /// loud half and the one more likely to actually ship. <c>secondary_lag_seconds</c> is the lag measure;
+    /// the commit times are useful for showing an operator WHEN something last happened, not for judging it.</para>
     /// <para>WHAT THE NUMBER IS NOT: it measures staleness, not volume. On an idle group a large lag means
     /// "nothing has been hardened in a while", which is not the same as "a lot of data is at risk" — the
     /// backlog measure would be <c>log_send_queue_size</c>, and that reads NULL while suspended. Worth knowing
