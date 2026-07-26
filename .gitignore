@@ -63,6 +63,9 @@ Lite/collection_schedule.json
 # Plans directory
 plans/
 
+# AG test fixture local passwords (copy tools/ag-fixture/.env.example to .env)
+tools/ag-fixture/.env
+
 # Community scripts (user-provided, not bundled)
 community/*.sql
 
