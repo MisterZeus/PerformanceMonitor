@@ -33,19 +33,37 @@ namespace PerformanceMonitor.Collectors;
 /// last_hardened_lsn is a log-block id padded with zeroes, so neither is safe to do arithmetic on.
 /// Deriving a byte distance between them is ANALYSIS, deliberately left to a reader.</para>
 ///
-/// <para>secondary_lag_seconds is 2016+ and the repo floor IS 2016, so it is referenced directly
-/// with no version branch. MEASURED BEHAVIOR, which contradicts the docs: MS Learn says it "shows as 0
-/// if the data movement is suspended", but on a live SQL Server 2022 (16.0.4265.3) CLUSTER_TYPE = NONE
-/// AG it does the inverse — it reads 0 while movement is ACTIVE and caught up, and accrues monotonically
-/// once SUSPENDED (0 → 15 → 31 → 46 → 62 s across a 60 s SUSPEND_FROM_USER, back to 0 on resume). So a
-/// suspended replica does NOT hide as zero lag, and a lag threshold fires on its own. Read is_suspended
-/// alongside it to explain WHY lag is climbing, not to catch lag that is being masked. (Validated on a
-/// clusterless AG on one build; WSFC untested, so treat the doc sentence as unreliable rather than
-/// inverted-everywhere.)</para>
+/// <para>THE RULE FOR EVERY COLUMN HERE, and the only safe one: while a replica is SUSPENDED, a reading
+/// may RAISE an alarm but may never CLEAR one. That asymmetry holds under both the documented and the
+/// measured behavior, so nothing downstream has to bet on which is true — which matters, because they
+/// disagree.</para>
 ///
-/// <para>Two more measured quirks of the SUSPENDED state, both relevant to anyone thresholding these:
-/// log_send_queue_size goes NULL rather than growing, while redo_queue_size FREEZES at its last value —
-/// so a redo-queue reading on a suspended replica is stale, not current.</para>
+/// <para>secondary_lag_seconds is 2016+ and the repo floor IS 2016, so it is referenced directly with no
+/// version branch. MS Learn says it "shows as 0 if the data movement is suspended". Measured on a live
+/// SQL Server 2022 (16.0.4265.3) CLUSTER_TYPE = NONE AG it does the inverse — 0 while movement is ACTIVE
+/// and caught up, accruing monotonically once suspended (two independent runs: 0→15→31→46→62 s, and
+/// 30→45→60→75 s, back to 0 on resume). Under the docs a suspended replica hides as zero lag; under the
+/// measurement it announces itself. The asymmetry above covers both: a growing lag fires, a zero lag on a
+/// suspended row resolves nothing. WSFC untested, one build — hence the rule rather than a new absolute.</para>
+///
+/// <para>The rest of the SUSPENDED surface, all measured, all pointing the same way — STALE, NOT CURRENT:
+/// log_send_queue_size goes NULL rather than growing; redo_queue_size FREEZES at its last value; and all
+/// four *_time columns FREEZE at their last pre-suspension instant. So a commit-time delta computed across
+/// replicas stops growing exactly when replication has stopped, understating the problem at the moment it
+/// is worst — the opposite direction from secondary_lag_seconds, which is why the two must never be
+/// averaged or cross-checked against each other without reading is_suspended first.</para>
+///
+/// <para>The drain estimates inherit that freeze and are the sharpest edge of it: est_redo_completion_time_min
+/// is queue ÷ rate, and with BOTH frozen it holds a small, static, reassuring value (measured 0.0144 min
+/// held flat across a 45 s suspension) when the honest answer is "never, movement is stopped".
+/// est_send_drain_time_min at least reads NULL, because its queue goes NULL. Threshold the redo estimate
+/// on its own and a suspended replica looks healthy; that is precisely the alarm a suspended row must
+/// never be allowed to clear.</para>
+///
+/// <para>last_received_time read NULL in every sample on that fixture, healthy and suspended alike, so
+/// treat it as optional rather than expected. last_commit_time and last_redone_time also sit still on an
+/// IDLE database — they are "time of last commit", not a heartbeat — so <c>now - last_commit_time</c> is
+/// not a lag measure: on a quiet, perfectly healthy replica it grows without bound.</para>
 ///
 /// <para>GRAIN WARNING: on a SECONDARY, sys.dm_hadr_database_replica_states carries only the LOCAL
 /// replica's rows, so this INNER JOIN narrows to a one-row self-view even though

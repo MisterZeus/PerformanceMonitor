@@ -1053,11 +1053,16 @@ public static class MeasureCatalog
              per-second nature stated in the display name rather than implied by a unit the picker would
              render as a plain size.
 
-             Lag trap worth knowing when reading these: secondary_lag_seconds reads 0, not NULL, while data
-             movement is SUSPENDED, so a suspended replica charts as zero lag. The two state columns are
-             exposed as DIMENSIONS so that is actionable rather than merely documented — filter a lag panel
-             to synchronization_state_desc <> 'NOT SYNCHRONIZING', or group by suspend_reason_desc, and a
-             suspended replica stops masquerading as a healthy one. ── */
+             SUSPENSION is the trap under all of these, and it does NOT hit them the same way. Measured on a
+             live 2022 AG: secondary_lag_seconds ACCRUES while suspended (the docs claim it reads 0 — either
+             way a lag panel is safe, it can only over-report), but every other measure here goes STALE.
+             log_send_queue_size reads NULL, redo_queue_size FREEZES at its last value, and — the sharp one —
+             ag_est_redo_drain_min is queue ÷ rate with both frozen, so it holds a small, static, reassuring
+             number (0.0144 min, flat across a 45 s suspension) when the true answer is "never, movement is
+             stopped". So a suspended replica can make a drain or queue panel look HEALTHIER than reality,
+             never worse. That is why the two state columns are dimensions rather than just documented:
+             filter to synchronization_state_desc <> 'NOT SYNCHRONIZING', or group by suspend_reason_desc,
+             before trusting any panel on this source to say something has recovered. ── */
         new ComposeMeasure
         {
             Key = "ag_log_send_queue", DisplayName = "AG log send queue", Category = CatAvailabilityGroups, SourceTable = "ag_database_replica_states",
