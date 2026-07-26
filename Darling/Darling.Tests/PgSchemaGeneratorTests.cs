@@ -26,10 +26,11 @@ public sealed class PgSchemaGeneratorTests
     [Fact]
     public void Catalog_CoversAllCollectors_WithUniqueTablesAndNames()
     {
-        /* 35 through agent_status + long_query_completions (#1496 long-query trace) = 36. */
-        Assert.Equal(36, CollectorCatalog.All.Count);
-        Assert.Equal(36, CollectorCatalog.All.Select(s => s.TargetTable).Distinct().Count());
-        Assert.Equal(36, CollectorCatalog.All.Select(s => s.Name).Distinct().Count());
+        /* 35 through agent_status + long_query_completions (#1496 long-query trace) = 36, plus the two
+           Availability Group collectors (#991) = 38. */
+        Assert.Equal(38, CollectorCatalog.All.Count);
+        Assert.Equal(38, CollectorCatalog.All.Select(s => s.TargetTable).Distinct().Count());
+        Assert.Equal(38, CollectorCatalog.All.Select(s => s.Name).Distinct().Count());
     }
 
     [Fact]
@@ -439,11 +440,11 @@ public sealed class PgSchemaGeneratorTests
         var script = PgSchemaGenerator.GenerateFullSchema();
 
         var tableCount = CollectorCatalog.All.Count(s => script.Contains($"CREATE TABLE IF NOT EXISTS {s.TargetTable} (", StringComparison.Ordinal));
-        Assert.Equal(36, tableCount);
+        Assert.Equal(38, tableCount);
 
-        /* 36 tables minus the two index-less config tables (server_config, database_config) = 34 indexes. */
+        /* 38 tables minus the two index-less config tables (server_config, database_config) = 36 indexes. */
         var indexCount = script.Split("CREATE INDEX IF NOT EXISTS").Length - 1;
-        Assert.Equal(34, indexCount);
+        Assert.Equal(36, indexCount);
 
         /* The precision guard can never regress silently. */
         Assert.DoesNotContain("numeric(0,0)", script, StringComparison.Ordinal);

@@ -248,6 +248,8 @@ public sealed class DarlingComposeTests
     [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"nope\",\"viz\":\"table\"}", "unknown aggregate")]
     /* SUM on a gauge — the grain-trap the archetype gate blocks. */
     [InlineData("{\"source\":\"cpu_utilization_stats\",\"measure\":\"sqlserver_cpu_utilization\",\"aggregate\":\"sum\",\"viz\":\"table\"}", "not valid for measure")]
+    /* Same trap on an AG backlog gauge (#991): summing queue depth over a window is meaningless. */
+    [InlineData("{\"source\":\"ag_database_replica_states\",\"measure\":\"ag_redo_queue\",\"aggregate\":\"sum\",\"viz\":\"table\"}", "not valid for measure")]
     /* percentile on a non-per-event measure. */
     [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"percentile_cont\",\"viz\":\"table\"}", "not valid for measure")]
     [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"unit\":\"gb\",\"viz\":\"table\"}", "not valid for measure")]
@@ -794,6 +796,7 @@ public sealed class DarlingComposeTests
             "session_stats", "session_summary_stats", "waiting_tasks", "query_snapshots",
             "blocked_process_reports", "dmv_blocking_snapshots", "deadlocks", "system_health_events",
             "default_trace_events", "running_jobs", "job_history", "perfmon_stats", "query_store_stats",
+            "ag_database_replica_states",
         })
         {
             Assert.True(sources.Contains(expected), $"catalog is missing a measure for '{expected}'.");
@@ -840,6 +843,103 @@ public sealed class DarlingComposeTests
         Assert.Contains("NULLIF(SUM(", sql, StringComparison.Ordinal);
         Assert.Contains("delta_elapsed_time", sql, StringComparison.Ordinal);
         Assert.Contains("delta_execution_count", sql, StringComparison.Ordinal);
+    }
+
+    /* ─────────────────────────── #991 Availability Group measures ─────────────────────────── */
+
+    [Fact]
+    public void Ag_Measures_AreAllGaugesOnTheDatabaseGrainTable()
+    {
+        /* The queues, rates and lag are recomputed from the CURRENT backlog on every read, so every one is
+           a Gauge — non-summable, avg/min/max only. A Cumulative or Delta archetype here would let the
+           composer SUM a backlog over a window and report a number that means nothing. */
+        var agMeasures = MeasureCatalog.Measures
+            .Where(m => string.Equals(m.SourceTable, "ag_database_replica_states", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.Equal(5, agMeasures.Count);
+
+        foreach (var measure in agMeasures)
+        {
+            Assert.Equal(MeasureKind.Scalar, measure.Kind);
+            Assert.Equal(MeasureArchetype.Gauge, measure.Archetype);
+            Assert.Null(measure.AggregationColumn);
+            Assert.Null(measure.DeltaColumn);
+            Assert.Equal(new[] { ComposeAggregate.Avg, ComposeAggregate.Min, ComposeAggregate.Max }, measure.ValidAggs);
+            Assert.DoesNotContain(ComposeAggregate.Sum, measure.ValidAggs);
+            Assert.Equal("Availability Groups", measure.Category);
+        }
+
+        Assert.Equal(
+            new[] { "ag_log_send_queue", "ag_log_send_rate", "ag_redo_queue", "ag_redo_rate", "ag_secondary_lag" },
+            agMeasures.Select(m => m.Key).OrderBy(k => k, StringComparer.Ordinal).ToArray());
+    }
+
+    [Fact]
+    public void Ag_Measures_CarryTheDmvsNativeUnits()
+    {
+        /* Straight from the DMV: the queues are KB, the rates KB/second, the lag seconds. Getting a unit
+           wrong here silently mis-scales every chart built on it. The two rates ride the bytes family
+           because the catalog has no per-second family — the display name carries the "per second". */
+        foreach (var key in new[] { "ag_log_send_queue", "ag_redo_queue", "ag_log_send_rate", "ag_redo_rate" })
+        {
+            var measure = MeasureCatalog.Measure(key)!;
+            Assert.Equal("kb", measure.NativeUnit);
+            Assert.Equal(MeasureCatalog.FamilyBytes, measure.UnitFamily);
+        }
+
+        Assert.Contains("per second", MeasureCatalog.Measure("ag_log_send_rate")!.DisplayName, StringComparison.Ordinal);
+        Assert.Contains("per second", MeasureCatalog.Measure("ag_redo_rate")!.DisplayName, StringComparison.Ordinal);
+
+        var lag = MeasureCatalog.Measure("ag_secondary_lag")!;
+        Assert.Equal("s", lag.NativeUnit);
+        Assert.Equal(MeasureCatalog.FamilyDuration, lag.UnitFamily);
+
+        /* Backlog and lag default to the worst reading in the bucket; the rates to the sustained average. */
+        Assert.Equal(ComposeAggregate.Max, MeasureCatalog.Measure("ag_log_send_queue")!.DefaultTimeAgg);
+        Assert.Equal(ComposeAggregate.Max, MeasureCatalog.Measure("ag_redo_queue")!.DefaultTimeAgg);
+        Assert.Equal(ComposeAggregate.Max, lag.DefaultTimeAgg);
+        Assert.Equal(ComposeAggregate.Avg, MeasureCatalog.Measure("ag_log_send_rate")!.DefaultTimeAgg);
+        Assert.Equal(ComposeAggregate.Avg, MeasureCatalog.Measure("ag_redo_rate")!.DefaultTimeAgg);
+    }
+
+    [Fact]
+    public void Ag_Dimensions_AreTheThreeGrainColumns()
+    {
+        foreach (var name in new[] { "ag_name", "database_name", "replica_server_name" })
+        {
+            var dimension = MeasureCatalog.Dimension("ag_database_replica_states", name);
+            Assert.NotNull(dimension);
+            Assert.Equal(name, dimension!.Column);
+            Assert.True(dimension.Likeable);
+        }
+
+        /* Every AG measure allows all three, so any of them can slice or group a panel. */
+        foreach (var measure in MeasureCatalog.Measures.Where(m => m.SourceTable == "ag_database_replica_states"))
+        {
+            Assert.Equal(
+                new[] { "ag_name", "database_name", "replica_server_name" },
+                measure.AllowedDimensions);
+        }
+
+        /* The universal server dimension resolves for this source too (fleet-wide AG views). */
+        Assert.NotNull(MeasureCatalog.Dimension("ag_database_replica_states", MeasureCatalog.ServerDimensionName));
+
+        /* The replica-grain table is all state strings — no numeric column worth aggregating — so it
+           deliberately contributes no measures and therefore no dimensions. */
+        Assert.False(MeasureCatalog.IsKnownSource("ag_replica_states"));
+    }
+
+    [Fact]
+    public void Ag_LagMeasure_CompilesAndGroupsByReplica()
+    {
+        /* The headline AG panel: worst secondary lag per replica over time. */
+        var sql = Compile(ValidPlan("{\"source\":\"ag_database_replica_states\",\"measure\":\"ag_secondary_lag\",\"aggregate\":\"max\",\"timeBucket\":\"hour\",\"groupBy\":[\"replica_server_name\"],\"viz\":\"line\"}"));
+
+        Assert.Contains("collect.ag_database_replica_states", sql, StringComparison.Ordinal);
+        Assert.Contains("MAX(", sql, StringComparison.Ordinal);
+        Assert.Contains("replica_server_name", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("config.", sql, StringComparison.Ordinal);
     }
 
     /* ─────────────────────────── D1: gauge-operand (Avg) ratios (#1563 follow-ups) ─────────────────────────── */

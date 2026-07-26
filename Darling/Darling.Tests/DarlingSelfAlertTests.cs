@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
@@ -104,6 +105,27 @@ public sealed class DarlingSelfAlertTests
             Task.FromResult<DateTime?>(null);
     }
 
+    /// <summary>
+    /// Minimal ILogger that records level + formatted message. #1681 pins that a self-alert FIRING reaches the
+    /// service log, which for a long time only recoveries did.
+    /// </summary>
+    private sealed class CapturingLogger : Microsoft.Extensions.Logging.ILogger
+    {
+        public List<(Microsoft.Extensions.Logging.LogLevel Level, string Message)> Entries { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            Microsoft.Extensions.Logging.LogLevel logLevel,
+            Microsoft.Extensions.Logging.EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter) =>
+            Entries.Add((logLevel, formatter(state, exception)));
+    }
+
     /// <summary>One evaluator + fakes + a controllable clock per test.</summary>
     private sealed class Harness
     {
@@ -125,10 +147,14 @@ public sealed class DarlingSelfAlertTests
 
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
+        /// <summary>#1681: captures what the evaluator writes to the service log, so the firing/recovery pair
+        /// can be asserted rather than assumed.</summary>
+        public CapturingLogger Log { get; } = new();
+
         public DarlingSelfAlertEvaluator Build() => new(
             Settings, Deliverer, History,
             _ => MuteThrows ? throw new InvalidOperationException("mute check boom") : Muted,
-            logger: null, utcNow: () => Now,
+            logger: Log, utcNow: () => Now,
             notifyConnectionChanges: () => NotifyConnectionChanges,
             notifyConnectionDownAtStartup: () => NotifyConnectionDownAtStartup,
             connectionRefireMinutes: () => ConnectionRefireMinutes);
@@ -1115,5 +1141,48 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM collection_log WHERE server_id = {LiveServerId.ToString(CultureInfo.InvariantCulture)};", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
+    }
+
+    /* ---------------- #1681: firings are logged, not just recoveries ---------------- */
+
+    /// <summary>
+    /// RecordResolutionAsync has always logged at Information, so the service log showed "... Recovered" with
+    /// nothing preceding it - a spontaneous recovery from a condition that never appeared, which is worse than
+    /// logging neither half. Every self-alert fired silently through the same path: compression stuck, disk
+    /// pressure, capture-down, agent-not-running, collection-health.
+    /// </summary>
+    [Fact]
+    public async Task CompressionStuck_Firing_IsLoggedAtWarning()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), new RearmRecorder().Delegate, Ct);
+
+        var warnings = h.Log.Entries
+            .Where(x => x.Level == Microsoft.Extensions.Logging.LogLevel.Warning)
+            .ToList();
+
+        Assert.NotEmpty(warnings);
+        Assert.Contains(warnings, x => x.Message.Contains("Compression Job Stuck", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// A muted alert still logs, flagged. Muting suppresses the notification CHANNELS, not the operator's ability
+    /// to find the event afterwards - suppressing both would make a muted condition invisible everywhere at once.
+    /// </summary>
+    [Fact]
+    public async Task CompressionStuck_Firing_IsLoggedEvenWhenMuted()
+    {
+        var h = new Harness { Muted = true };
+        var e = h.Build();
+
+        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), new RearmRecorder().Delegate, Ct);
+
+        var warnings = h.Log.Entries
+            .Where(x => x.Level == Microsoft.Extensions.Logging.LogLevel.Warning)
+            .ToList();
+
+        Assert.Contains(warnings, x => x.Message.Contains("[muted]", StringComparison.Ordinal));
     }
 }
