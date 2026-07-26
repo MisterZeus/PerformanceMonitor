@@ -34,7 +34,7 @@ public class FactCollectorMiseryTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task ZeroPeriodDuration_WaitFractionsShouldNotBeInfinity()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedMemoryStarvedServerAsync();
 
         var collector = new DuckDbFactCollector(_duckDb);
@@ -65,7 +65,7 @@ public class FactCollectorMiseryTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task ReversedTimeRange_ShouldNotProduceNegativeFractions()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedMemoryStarvedServerAsync();
 
         var collector = new DuckDbFactCollector(_duckDb);
@@ -100,7 +100,7 @@ public class FactCollectorMiseryTests : IClassFixture<SharedDuckDbFixture>
     public async Task EmptyTables_NoDataInRange_ProducesNoFacts()
     {
         // Seed the server but NO data — just the servers table entry
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
 
@@ -122,7 +122,7 @@ public class FactCollectorMiseryTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task DataOutsideTimeRange_ProducesNoTimeDependentFacts()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedEverythingOnFireServerAsync();
 
         var collector = new DuckDbFactCollector(_duckDb);
@@ -147,7 +147,7 @@ public class FactCollectorMiseryTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task NonExistentServer_ProducesNoFacts()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedEverythingOnFireServerAsync();
 
         var collector = new DuckDbFactCollector(_duckDb);
@@ -174,7 +174,7 @@ public class FactCollectorMiseryTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task SignalWaitExceedsTotalWait_ResourceWaitShouldNotBeNegative()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
 
@@ -205,7 +205,7 @@ public class FactCollectorMiseryTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task ZeroWaitingTasks_AvgMsPerWaitShouldBeZeroNotInfinity()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
 
@@ -235,7 +235,7 @@ public class FactCollectorMiseryTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task SingleCollectionPoint_CpuStillCollected()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
 
@@ -274,7 +274,7 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task IoLatency_ZeroStallWithReads_ProducesZeroLatency()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
 
@@ -295,7 +295,7 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task IoLatency_ZeroReadsWithStall_ShouldNotDivideByZero()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
 
@@ -321,7 +321,7 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task MemoryGrants_ZeroWaitersButTimeouts_StillCreatesFact()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
 
@@ -348,7 +348,7 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task TempDb_ZeroReservedAndUnallocated_ShouldNotDivideByZero()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
 
@@ -370,7 +370,7 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task DatabaseConfig_OnlySystemDatabases_ProducesNoFact()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
 
@@ -396,7 +396,7 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task LockGrouping_SingleLockType_StillGroupedIntoLck()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
 
@@ -428,7 +428,7 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task CxGrouping_SingleCxWait_NotGrouped()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
 
@@ -454,7 +454,7 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task CollectFacts_NoDuplicateKeys()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedEverythingOnFireServerAsync();
 
         var collector = new DuckDbFactCollector(_duckDb);
@@ -479,7 +479,7 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task DiskSpace_VerySmallVolume_ShouldNotOverflowPercent()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
 
@@ -504,7 +504,7 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task LargeValues_WaitTimeNearMaxLong_ShouldNotOverflow()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
 
@@ -534,7 +534,7 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task RunningJobs_NoneRunningLong_FactStillCreatedWithZeroValue()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
 
@@ -559,7 +559,7 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task Scoring_InvertedMetricAtZero_ShouldBeMaxSeverity()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
         await seeder.SeedServerEditionAsync(edition: 2, majorVersion: 16);
@@ -587,7 +587,7 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task AnalysisService_ZeroPeriod_ShouldNotCrash()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedEverythingOnFireServerAsync();
 
         var service = new AnalysisService(_duckDb) { MinimumDataHours = 0 };
@@ -616,7 +616,7 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task TraceFlags_OnlySessionFlags_ProducesNoFact()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
 
@@ -653,7 +653,7 @@ VALUES (-99999, $1, $2, $3, 1118, true, false, true)";
     [Fact]
     public async Task QueryStats_ZeroExecutions_ProducesNoFacts()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
 

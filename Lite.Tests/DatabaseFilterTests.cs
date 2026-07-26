@@ -106,7 +106,7 @@ public class DatabaseFilterTests : IDisposable
     public async Task GetCollectedDatabaseNames_UnionsBothStores_StripsSystemDbs_DistinctAndSorted()
     {
         await _duckDb.InitializeAsync();
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
 
@@ -132,7 +132,7 @@ public class DatabaseFilterTests : IDisposable
     public async Task GetCollectedDatabaseNames_NothingCollected_ReturnsEmpty()
     {
         await _duckDb.InitializeAsync();
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
 

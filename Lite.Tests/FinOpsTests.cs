@@ -240,7 +240,7 @@ public class FinOpsTests : IDisposable
     {
         await _duckDb.InitializeAsync();
 
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seedAction(seeder);
 
         var dataService = new LocalDataService(_duckDb);
@@ -252,7 +252,7 @@ public class FinOpsTests : IDisposable
     {
         await _duckDb.InitializeAsync();
 
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seedAction(seeder);
 
         var dataService = new LocalDataService(_duckDb);

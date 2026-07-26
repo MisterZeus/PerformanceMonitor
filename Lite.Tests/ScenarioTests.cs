@@ -421,7 +421,7 @@ public class ScenarioTests : IClassFixture<SharedDuckDbFixture>
     private async Task<(List<AnalysisStory> Stories, Dictionary<string, Fact> Facts)> RunFullPipelineAsync(
         Func<TestDataSeeder, Task> seedAction)
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seedAction(seeder);
 
         var collector = new DuckDbFactCollector(_duckDb);
@@ -525,7 +525,7 @@ public class ScenarioTests : IClassFixture<SharedDuckDbFixture>
     private async Task<(List<AnalysisStory> Stories, Dictionary<string, Fact> Facts)> RunFullPipelineWithAnomaliesAsync(
         Func<TestDataSeeder, Task> seedAction)
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seedAction(seeder);
 
         var collector = new DuckDbFactCollector(_duckDb);

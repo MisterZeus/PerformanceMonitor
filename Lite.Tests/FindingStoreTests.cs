@@ -178,7 +178,7 @@ public class FindingStoreTests : IDisposable
         await InitializeWithAnalysisAsync();
 
         // Seed test data
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedMemoryStarvedServerAsync();
 
         // Run pipeline

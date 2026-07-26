@@ -14,10 +14,11 @@ namespace PerformanceMonitorLite.Tests;
 /// Tests for BaselineProvider: time-bucketed baseline computation, bucket collapse
 /// with hysteresis, restart poisoning exclusion, and division-by-zero handling.
 /// </summary>
-public class BaselineProviderTests : IClassFixture<SharedDuckDbFixture>
+public class BaselineProviderTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private readonly DuckDbInitializer _duckDb;
     private readonly BaselineProvider _provider;
+    private DuckDBConnection? _seedConn;
 
     private const int ServerId = -999;
 
@@ -34,6 +35,22 @@ public class BaselineProviderTests : IClassFixture<SharedDuckDbFixture>
         _provider = new BaselineProvider(_duckDb);
         // Use very short TTL so cache doesn't interfere between tests
         BaselineProvider.CacheTtl = TimeSpan.FromMilliseconds(1);
+    }
+
+    public void Dispose() => _seedConn?.Dispose();
+
+    /// <summary>
+    /// One connection reused for every seeded row — opening a fresh connection per
+    /// single-row INSERT measured ~90ms/row and dominated this class's runtime.
+    /// </summary>
+    private async Task<DuckDBConnection> SeedConnectionAsync()
+    {
+        if (_seedConn is null)
+        {
+            _seedConn = _duckDb.CreateConnection();
+            await _seedConn.OpenAsync();
+        }
+        return _seedConn;
     }
 
     // ── Full bucket: enough samples in one hour+dow ──
@@ -411,8 +428,7 @@ public class BaselineProviderTests : IClassFixture<SharedDuckDbFixture>
     private async Task SeedCpuAsync(DateTime time, int cpuValue, int serverId = ServerId)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var conn = _duckDb.CreateConnection();
-        await conn.OpenAsync();
+        var conn = await SeedConnectionAsync();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"INSERT INTO cpu_utilization_stats
             (collection_id, collection_time, server_id, server_name, sample_time,
@@ -429,8 +445,7 @@ public class BaselineProviderTests : IClassFixture<SharedDuckDbFixture>
     private async Task SeedPerfmonAsync(DateTime time, string counterName, long deltaValue)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var conn = _duckDb.CreateConnection();
-        await conn.OpenAsync();
+        var conn = await SeedConnectionAsync();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"INSERT INTO perfmon_stats
             (collection_id, collection_time, server_id, server_name,
@@ -447,8 +462,7 @@ public class BaselineProviderTests : IClassFixture<SharedDuckDbFixture>
     private async Task SeedWaitStatAsync(DateTime time, string waitType, long deltaWaitMs)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var conn = _duckDb.CreateConnection();
-        await conn.OpenAsync();
+        var conn = await SeedConnectionAsync();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"INSERT INTO wait_stats
             (collection_id, collection_time, server_id, server_name, wait_type,
@@ -466,8 +480,7 @@ public class BaselineProviderTests : IClassFixture<SharedDuckDbFixture>
     private async Task SeedSessionStatAsync(DateTime time, string programName, long connectionCount)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var conn = _duckDb.CreateConnection();
-        await conn.OpenAsync();
+        var conn = await SeedConnectionAsync();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"INSERT INTO session_stats
             (collection_id, collection_time, server_id, server_name, program_name,
@@ -484,8 +497,7 @@ public class BaselineProviderTests : IClassFixture<SharedDuckDbFixture>
     private async Task SeedMemoryStatAsync(DateTime time, double totalServerMb, double targetMb)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var conn = _duckDb.CreateConnection();
-        await conn.OpenAsync();
+        var conn = await SeedConnectionAsync();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"INSERT INTO memory_stats
             (collection_id, collection_time, server_id, server_name,

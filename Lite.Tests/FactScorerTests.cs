@@ -1032,7 +1032,7 @@ public class FactScorerTests : IDisposable
         await _duckDb.InitializeAsync();
         await _duckDb.InitializeAnalysisSchemaAsync();
 
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seedAction(seeder);
 
         var collector = new DuckDbFactCollector(_duckDb);
