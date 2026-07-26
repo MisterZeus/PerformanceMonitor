@@ -15,28 +15,33 @@ jobs:
       # Documentation-only PRs (e.g. a CHANGELOG correction) do not bump the
       # version. The workflow still runs so the required check reports a result
       # — using paths-ignore would skip the run entirely and leave the check
-      # stuck pending. Instead, the version comparison below is gated on whether
-      # any non-documentation file changed. The exclusions MIRROR build.yml's
-      # documentation allowlist (its docs: filter) — keep the two in step, or a
-      # LICENSE-only correction will demand a version bump here while build.yml
-      # calls it documentation.
+      # stuck pending. Instead, the version comparison below is gated on a count
+      # comparison: all_count == docs_count means every changed file is on the
+      # documentation allowlist, which MIRRORS build.yml's docs: filter — keep
+      # the two in step, or a LICENSE-only correction will demand a version bump
+      # here while build.yml calls it documentation. A boolean '**'-plus-
+      # exclusions filter cannot express "any non-documentation file" under
+      # dorny v4's default predicate-quantifier ('some'): every changed file
+      # matches '**', so that filter shape is unconditionally true — which is
+      # why this gate had silently stopped skipping md-only PRs.
       - name: Detect non-documentation changes
         id: changes
         uses: dorny/paths-filter@v4
         with:
           filters: |
-            code:
+            docs:
+              - '**/*.md'
+              - 'LICENSE'
+              - 'CITATION.cff'
+              - '.gitignore'
+              - '.gitattributes'
+              - 'docs/**/*.{md,svg,png,jpg,jpeg,gif}'
+              - 'Screenshots/**/*.{md,svg,png,jpg,jpeg,gif}'
+            all:
               - '**'
-              - '!**/*.md'
-              - '!LICENSE'
-              - '!CITATION.cff'
-              - '!.gitignore'
-              - '!.gitattributes'
-              - '!docs/**/*.{md,svg,png,jpg,jpeg,gif}'
-              - '!Screenshots/**/*.{md,svg,png,jpg,jpeg,gif}'
 
       - name: Get PR version
-        if: steps.changes.outputs.code == 'true'
+        if: steps.changes.outputs.all_count != steps.changes.outputs.docs_count
         id: pr
         shell: pwsh
         run: |
@@ -45,14 +50,14 @@ jobs:
           Write-Host "PR version: $version"
 
       - name: Checkout main
-        if: steps.changes.outputs.code == 'true'
+        if: steps.changes.outputs.all_count != steps.changes.outputs.docs_count
         uses: actions/checkout@v7
         with:
           ref: main
           path: main-branch
 
       - name: Get main version
-        if: steps.changes.outputs.code == 'true'
+        if: steps.changes.outputs.all_count != steps.changes.outputs.docs_count
         id: main
         shell: pwsh
         run: |
@@ -61,7 +66,7 @@ jobs:
           Write-Host "Main version: $version"
 
       - name: Compare versions
-        if: steps.changes.outputs.code == 'true'
+        if: steps.changes.outputs.all_count != steps.changes.outputs.docs_count
         env:
           PR_VERSION: ${{ steps.pr.outputs.VERSION }}
           MAIN_VERSION: ${{ steps.main.outputs.VERSION }}
@@ -75,5 +80,5 @@ jobs:
           echo "✅ Version bumped: $MAIN_VERSION → $PR_VERSION"
 
       - name: Skip notice
-        if: steps.changes.outputs.code != 'true'
+        if: steps.changes.outputs.all_count == steps.changes.outputs.docs_count
         run: echo "Only documentation files changed — version bump check skipped."
