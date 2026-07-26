@@ -4,13 +4,49 @@ on:
   schedule:
     # 6:00 AM UTC (1:00 AM EST / 2:00 AM EDT)
     - cron: '0 6 * * *'
-  workflow_dispatch: # manual trigger
+  workflow_dispatch: # manual trigger — and the vehicle the scheduled re-dispatch below rides
+    inputs:
+      from_schedule:
+        description: 'Set true by the scheduled re-dispatch so the 24h new-commit check applies. Leave false for manual runs, which always build.'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
 
 jobs:
+  # Scheduled workflows always execute the DEFAULT branch's copy of this file, while nightly
+  # artifacts deliberately build from dev's tree. That skew is how the 2026-07-26 nightly
+  # failed (run 30194606068): main's stale copy still read Dashboard/Dashboard.csproj, a path
+  # #1612 moved to deprecated/ on dev, so 'Set nightly version' died on a file missing from
+  # the tree it had just checked out — and the same trap bit before (#1550/#1551). The cure
+  # is structural, not another sync: on schedule this workflow does NOTHING but re-dispatch
+  # itself onto the dev REF, because a workflow_dispatch run executes the dispatched ref's
+  # copy of this file — dev's, current by definition. Once main carries this shape, its copy
+  # has exactly one job that must keep working, and that job references no tree paths at
+  # all; every future change to the real nightly logic lands on dev and takes effect the
+  # night it merges, no promotion to main needed. GITHUB_TOKEN can create workflow_dispatch
+  # runs (the Actions recursion guard exempts workflow_dispatch and repository_dispatch),
+  # and the dispatched run cannot loop back here because it arrives as workflow_dispatch,
+  # not schedule. Until main is synced once, the scheduled run still executes main's OLD
+  # copy and keeps failing nightly — the one-time sync is in the PR that introduced this.
+  redispatch:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Re-dispatch this workflow onto the dev ref
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run nightly.yml --repo ${{ github.repository }} --ref dev -f from_schedule=true
+
+  # Everything below runs only in a workflow_dispatch run — the scheduled re-dispatch or a
+  # manual one — which executes from the dispatched ref (dev for the scheduled path).
   check:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     outputs:
       has_changes: ${{ steps.check.outputs.has_changes }}
@@ -34,7 +70,10 @@ jobs:
 
   build:
     needs: check
-    if: needs.check.outputs.has_changes == 'true' || github.event_name == 'workflow_dispatch'
+    # Manual dispatches always build (from_schedule defaults false); the scheduled
+    # re-dispatch sets from_schedule=true and builds only when dev changed in the last
+    # 24h — the same policy the schedule applied when it ran these jobs directly.
+    if: needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true
     runs-on: windows-latest
 
     steps:
@@ -188,7 +227,9 @@ jobs:
   darling-pg:
     name: Darling PostgreSQL tests
     needs: check
-    if: needs.check.outputs.has_changes == 'true' || github.event_name == 'workflow_dispatch'
+    # Same gating as the build job: manual dispatches always run, the scheduled
+    # re-dispatch (from_schedule=true) runs only when dev changed in the last 24h.
+    if: needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true
     runs-on: windows-latest
 
     steps:
