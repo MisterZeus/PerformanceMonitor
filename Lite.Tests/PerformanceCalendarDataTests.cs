@@ -7,7 +7,6 @@
  */
 
 using System;
-using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -24,11 +23,11 @@ namespace PerformanceMonitorLite.Tests;
 /// blocked-process-report -> DMV-snapshot blocking fallback, the actionable-alert filter) buckets each
 /// seeded day correctly and that each day's composite band matches the shared calculator.
 /// </summary>
-public class PerformanceCalendarDataTests : IDisposable
+public class PerformanceCalendarDataTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
-    private readonly string _tempDir;
     private readonly DuckDbInitializer _duckDb;
     private readonly LocalDataService _dataService;
+    private DuckDBConnection? _seedConn;
     private const int ServerId = -779;
     private const string ServerName = "CalTestServer";
     private long _nextId = -1;
@@ -36,26 +35,33 @@ public class PerformanceCalendarDataTests : IDisposable
     private static readonly DateTime MonthStart = new(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc);
     private static readonly DateTime MonthEnd = new(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc);
 
-    public PerformanceCalendarDataTests()
+    public PerformanceCalendarDataTests(SharedDuckDbFixture fixture)
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "CalTests_" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(_tempDir);
-        _duckDb = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
         _dataService = new LocalDataService(_duckDb);
     }
 
-    public void Dispose()
+    public void Dispose() => _seedConn?.Dispose();
+
+    /// <summary>
+    /// One connection reused for every seeded row — opening a fresh connection per
+    /// single-row INSERT measured ~90ms/row and dominated this class's runtime.
+    /// </summary>
+    private async Task<DuckDBConnection> SeedConnectionAsync()
     {
-        try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); }
-        catch { }
-        GC.SuppressFinalize(this);
+        if (_seedConn is null)
+        {
+            _seedConn = _duckDb.CreateConnection();
+            await _seedConn.OpenAsync();
+        }
+        return _seedConn;
     }
 
     private async Task ExecAsync(string sql, params object?[] values)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var conn = _duckDb.CreateConnection();
-        await conn.OpenAsync();
+        var conn = await SeedConnectionAsync();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = sql;
         foreach (var v in values)
@@ -108,8 +114,6 @@ public class PerformanceCalendarDataTests : IDisposable
     [Fact]
     public async Task GetDailySummaryRange_BucketsEachDay_AndBandsViaSharedCalculator()
     {
-        await _duckDb.InitializeAsync();
-
         // 07-02 Critical: a deadlock, plus waits (CXPACKET should win the top-wait ranking).
         await SeedCollectionRunAsync(Day(2));
         await SeedWaitAsync(Day(2), "CXPACKET", 100_000);
@@ -189,8 +193,6 @@ public class PerformanceCalendarDataTests : IDisposable
     [Fact]
     public async Task GetDailySummaryRange_CarriesPeakBlockDuration_FromBlockedProcessReports()
     {
-        await _duckDb.InitializeAsync();
-
         // Two blocked-process reports on 07-14 with different wait times; the day's peak is the max, and the
         // BPR-sourced count wins over any DMV fallback (there is none here). Feeds the day-detail blocking
         // reason ("N blocking events (peak block X)").
@@ -208,8 +210,6 @@ public class PerformanceCalendarDataTests : IDisposable
     [Fact]
     public async Task GetDailySummary_SingleDay_DelegatesToRange_AndReturnsNoDataRowWhenEmpty()
     {
-        await _duckDb.InitializeAsync();
-
         await SeedCollectionRunAsync(Day(2));
         await SeedDeadlockAsync(Day(2));
 
