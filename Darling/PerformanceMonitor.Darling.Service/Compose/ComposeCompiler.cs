@@ -20,6 +20,9 @@ namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>The server scope + window + variable bindings a <see cref="PanelPlan"/> compiles against. The
 /// window is naive UTC (Kind=Unspecified is stamped when bound, matching every other Darling read).
+/// <see cref="NowUtc"/> is the actual wall-clock now, DECOUPLED from <see cref="EndUtc"/> (#1606): the
+/// window binds $1/$2 and the bucket ceiling, but retention-tier routing and the partial-window notice
+/// measure AGE from now — an absolute (zoomed/historical) window can end long before now.
 /// <see cref="Servers"/> is the resolved <c>$server</c> scope (Erik's Decision 1 fleet axis): null/empty =
 /// the WHOLE FLEET (no server predicate); one or many server names = a bound <c>server_name = ANY($n)</c>
 /// filter, never interpolated (the compile-run endpoint resolves the $server variable to this). Group-by-server
@@ -29,7 +32,8 @@ public sealed record ComposeRunContext(
     DateTime StartUtc,
     DateTime EndUtc,
     IReadOnlyDictionary<string, string?> Variables,
-    RollupAvailability Rollups)
+    RollupAvailability Rollups,
+    DateTime NowUtc)
 {
     public static readonly IReadOnlyDictionary<string, string?> NoVariables =
         new Dictionary<string, string?>(StringComparer.Ordinal);
@@ -93,11 +97,17 @@ public static class ComposeCompiler
         }
 
         /* Source routing: read a CAGG rollup instead of raw when the window's oldest point is past the raw
-           horizon (ComposeSourceRouter). EndUtc is "now" — the endpoint always sets end = DateTime.UtcNow. Fall
-           back to raw when the measure's value expression can't be remapped to the CAGG columns (CanRemap). */
-        var route = ComposeSourceRouter.Resolve(plan, context.EndUtc, context.StartUtc, context.Rollups);
-        if (route.IsCagg && !ComposeCaggValueMapper.CanRemap(plan.Measure, plan.Aggregate))
+           horizon (ComposeSourceRouter). Age is measured from NowUtc, NOT EndUtc (#1606): an absolute zoomed
+           window can end well in the past, and retention drops by actual wall-clock now — a purely historical
+           window must reach the tier that still retains it. Fall back to raw when a value expression can't be
+           remapped to the CAGG columns (CanRemap; the overlay AND-gate below). */
+        var route = ComposeSourceRouter.Resolve(plan, context.NowUtc, context.StartUtc, context.Rollups);
+        if (route.IsCagg
+            && (!ComposeCaggValueMapper.CanRemap(plan.Measure, plan.Aggregate)
+                || (plan.Overlay is ComposeOverlay o && !ComposeCaggValueMapper.CanRemap(o.Measure, o.Aggregate))))
         {
+            /* One route serves BOTH value expressions — if either can't remap to the rollup columns, the whole
+               panel reads raw (#1606: the overlay AND-gate). */
             route = ComposeRoute.Raw;
         }
 
@@ -184,7 +194,13 @@ public static class ComposeCompiler
             groupExprs.Add(expr);
         }
 
-        selectExprs.Add(BuildValueExpr(plan, route) + " AS value");
+        selectExprs.Add(BuildValueExpr(plan.Measure, plan.Aggregate, plan.Unit, route) + " AS value");
+        if (plan.Overlay is ComposeOverlay overlay)
+        {
+            /* The second measure (#1606): one more select expression over the SAME fact rows — never a join,
+               never a parameter, never a second query. Same route as the primary (the AND-gate above). */
+            selectExprs.Add(BuildValueExpr(overlay.Measure, overlay.Aggregate, overlay.Unit, route) + " AS value2");
+        }
 
         sql.Append("SELECT ").Append(string.Join(", ", selectExprs)).Append('\n');
         sql.Append("FROM ").Append(PgSchemaGenerator.CollectSchema).Append('.')
@@ -321,17 +337,18 @@ public static class ComposeCompiler
         (ComposeTimeBucket)Math.Max((int)a, (int)b);
 
     /// <summary>Builds the <c>value</c> expression: the archetype/kind-gated aggregate, cast to double, then
-    /// scaled by the requested unit's conversion factor (a compile-time family constant).</summary>
-    private static string BuildValueExpr(PanelPlan plan, ComposeRoute route)
+    /// scaled by the requested unit's conversion factor (a compile-time family constant). Parameterized on
+    /// (measure, aggregate, unit) rather than the whole plan (#1606) so the overlay's <c>value2</c> compiles
+    /// through the SAME expression builder — the two can never drift. Binds ZERO parameters (the percentile
+    /// and unit factors are literals), so a second call cannot shift the $n order.</summary>
+    private static string BuildValueExpr(ComposeMeasure measure, ComposeAggregate aggregate, string unit, ComposeRoute route)
     {
-        var measure = plan.Measure;
-
         /* A CAGG route reads the pre-aggregated rollup columns instead of the raw delta (the route gate guarantees
            the measure + aggregate is remappable — CanRemap); unit-scaled exactly like the raw paths below. */
         if (route.IsCagg)
         {
             return ApplyUnitConversion(
-                ComposeCaggValueMapper.BuildCaggNativeExpr(plan), measure.UnitFamily, measure.NativeUnit, plan.Unit);
+                ComposeCaggValueMapper.BuildCaggNativeExpr(measure, aggregate), measure.UnitFamily, measure.NativeUnit, unit);
         }
 
         if (measure.Kind == MeasureKind.Ratio)
@@ -359,11 +376,11 @@ public static class ComposeCompiler
                       $"/ NULLIF(SUM({FactAlias}.{denominator.AggregationColumn}), 0))";
             }
 
-            return ApplyUnitConversion(native, measure.UnitFamily, measure.NativeUnit, plan.Unit);
+            return ApplyUnitConversion(native, measure.UnitFamily, measure.NativeUnit, unit);
         }
 
         /* COUNT is a plain, unitless row count. */
-        if (plan.Aggregate == ComposeAggregate.Count)
+        if (aggregate == ComposeAggregate.Count)
         {
             return "CAST(COUNT(*) AS double precision)";
         }
@@ -372,7 +389,7 @@ public static class ComposeCompiler
         var aggColumn = measure.Archetype == MeasureArchetype.Cumulative ? measure.DeltaColumn! : measure.Column!;
         var qualified = FactAlias + "." + aggColumn;
 
-        var nativeExpr = plan.Aggregate switch
+        var nativeExpr = aggregate switch
         {
             ComposeAggregate.Sum => $"CAST(SUM({qualified}) AS double precision)",
             ComposeAggregate.Avg => $"CAST(AVG({qualified}) AS double precision)",
@@ -380,10 +397,10 @@ public static class ComposeCompiler
             ComposeAggregate.Max => $"CAST(MAX({qualified}) AS double precision)",
             ComposeAggregate.PercentileCont =>
                 $"percentile_cont({FormatDouble(ComposeLimits.DefaultPercentile)}) WITHIN GROUP (ORDER BY {qualified})",
-            _ => throw new InvalidOperationException($"Unhandled aggregate {plan.Aggregate}"),
+            _ => throw new InvalidOperationException($"Unhandled aggregate {aggregate}"),
         };
 
-        return ApplyUnitConversion(nativeExpr, measure.UnitFamily, measure.NativeUnit, plan.Unit);
+        return ApplyUnitConversion(nativeExpr, measure.UnitFamily, measure.NativeUnit, unit);
     }
 
     /// <summary>Scales <paramref name="expr"/> (already a double) from <paramref name="nativeUnit"/> to

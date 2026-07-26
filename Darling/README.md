@@ -176,6 +176,27 @@ ALTER ROLE [SQLAgentReaderRole] ADD MEMBER [DarlingMonitor];
 
 Collectors that hit a permission error (SQL errors 229/297/300) log a `PERMISSIONS` row in `collection_log` and retry on their next scheduled run — one denied collector never stops the rest.
 
+#### Which collectors run on which platform
+
+Every collector declares its own applicability in code (`AppliesTo(CollectorTargetInfo)`), so this is not a hand-maintained list of 36 rows — the collectors fall into five groups, and a collector outside its supported platform is **skipped before it runs**, not failed and logged every cycle.
+
+| Runs on | Collectors | Gate |
+|---|---|---|
+| Everything | wait stats, CPU utilization, memory (stats/clerks/grants), file I/O, tempdb, latches, spinlocks, plan cache, session summary, plus blocking, deadlocks, blocked-process reports, DMV blocking snapshots, perfmon, query snapshots, procedure stats, index/object stats, long-query completions, database config/scoped-config/size, server properties, session stats, waiting tasks | no gate |
+| On-prem, Managed Instance, RDS — **not** Azure SQL DB | CPU scheduler stats, default trace events, memory pressure events, server config, system health events, trace flags | `!IsAzureSqlDb` |
+| On-prem and Managed Instance, needs msdb | job history | `!IsAzureSqlDb && HasMsdbAccess` |
+| On-prem and Managed Instance, needs msdb — **not** RDS | agent status, running jobs | `!IsAzureSqlDb && !IsAwsRds && HasMsdbAccess` |
+| SQL Server 2016+ (or any Azure flavour) | query stats, Query Store stats | `SqlMajorVersion >= 13 \|\| IsAzureSqlDb \|\| IsAzureManagedInstance` |
+
+Notes:
+
+- **Azure SQL DB** is the most restricted target: the six `!IsAzureSqlDb` collectors read server-scoped DMVs or on-disk artifacts that do not exist there, and the SQL Agent collectors have no Agent to read. Nothing about that is a permission problem, so it is not reported as one.
+- **AWS RDS** blocks direct `msdb` job reads specifically; the rest of the SQL Agent surface is unaffected.
+- **`HasMsdbAccess`** is probed per server at connect (`HAS_DBACCESS('msdb')`), so losing the `SQLAgentReaderRole` grant later moves those collectors from running to skipped without an error storm.
+- An unknown version (`SqlMajorVersion == 0`, i.e. detection has not completed yet) is treated as capable rather than skipped, so a collector is never silently dropped because a probe was slow.
+
+If a tab or column is empty and you expect data, check **Collection Health**: a collector skipped for platform reasons shows no runs at all, whereas one denied by permissions logs `PERMISSIONS` and is classified `NO_PERMISSIONS`. Those are different problems with different fixes — the first is expected on that platform, the second is a grant to add from the table above.
+
 ---
 
 ## Configuration Reference
