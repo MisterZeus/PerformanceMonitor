@@ -8,12 +8,17 @@ on:
     branches: [dev]
     paths: ['install/**', '.github/sql/**', '.github/workflows/sql-validation.yml']
 
-# A re-push to a PR cancels that PR's superseded in-flight matrix — four SQL Server
-# containers per run on the shared runner pool, validating code that is no longer the
-# PR's head. Push runs get a unique per-run group (run_id) and are never cancelled.
+# A re-push to a PR cancels that PR's superseded in-flight matrix, and a dev push cancels
+# dev's superseded in-flight matrix — four SQL Server containers per run on the shared
+# runner pool, validating code that is no longer the head. Newest-wins costs strictly
+# nothing here (same policy and 2026-07-26 baseline as build.yml): this workflow uploads
+# no artifacts at all, and it validates the FULL install/ tree at the SHA it checks out
+# rather than a diff, so the superseding run's coverage is a superset of whatever the
+# cancelled run was midway through. Any event this workflow ever grows beyond push and
+# pull_request falls to a unique per-run group and is never cancelled.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('sql-validation-pr-{0}', github.event.pull_request.number) || format('sql-validation-run-{0}', github.run_id) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.event_name == 'pull_request' && format('sql-validation-pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && format('sql-validation-push-{0}', github.ref) || format('sql-validation-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
 
 jobs:
   validate-sql:

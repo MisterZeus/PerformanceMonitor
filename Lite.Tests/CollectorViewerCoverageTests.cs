@@ -43,18 +43,14 @@ public sealed class CollectorViewerCoverageTests
     /// Every entry is Tier-1 unbuilt UI: Lite already collects the data, the Darling viewer already has
     /// the tab, and the Lite port is pending.
     ///
-    /// The list was fully drained once (<c>system_health_events</c> / <c>default_trace_events</c> shipped
-    /// as the System Events tab) and is re-opened here by the two Availability Group tables (#991), whose
-    /// v1 is DELIBERATELY collection-only: the design scoped the first cut to the two tables plus compose
-    /// measures so the data is usable from Custom Views and MCP immediately, with the viewer tab and the
-    /// failover / sync-fell-behind alerts as a follow-up. The ratchet still applies — when that tab ships,
-    /// <see cref="AllowList_HasNoEntryThatIsActuallyRead"/> goes red and these entries must be deleted.
+    /// The list has been fully drained twice now. The two Availability Group tables (#991) re-opened it
+    /// while their v1 was deliberately collection-only, and #1696 drained them again by giving Lite a
+    /// reader for both grains to drive its AG alerts — which is exactly the transition this ratchet exists
+    /// to force: the moment a reader appears, <see cref="AllowList_HasNoEntryThatIsActuallyRead"/> goes red
+    /// and the entry has to go. Leave the set EMPTY rather than deleting it; an empty allow-list is the
+    /// goal state and re-adding an entry should be a deliberate, visible act.
     /// </summary>
-    private static readonly HashSet<string> KnownStoreOnlyOrUnbuiltTables = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "ag_replica_states",
-        "ag_database_replica_states",
-    };
+    private static readonly HashSet<string> KnownStoreOnlyOrUnbuiltTables = new(StringComparer.OrdinalIgnoreCase);
 
     [Fact]
     public void EveryCollectorTable_HasALiteReader_OrIsAllowListed()
