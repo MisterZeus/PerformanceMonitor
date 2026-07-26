@@ -310,6 +310,15 @@ public sealed class AlertsConfig
     [JsonPropertyName("notifyConnectionChanges")]
     public bool NotifyConnectionChanges { get; set; } = true;
 
+    /// <summary>#1659 opt-in (V33): announce a server that is already down on its first-ever connect attempt
+    /// (a service started mid-outage otherwise never alerts — there was no edge). Default false: the classic
+    /// edge-only behavior.</summary>
+    public bool NotifyConnectionDownAtStartup { get; set; }
+
+    /// <summary>#1659 opt-in (V33): re-announce a standing outage every N minutes (0 = off). Re-fires deliver
+    /// under the SAME "Server Unreachable" metric name so webhook-driven automation keyed on it re-triggers.</summary>
+    public int ConnectionRefireMinutes { get; set; }
+
     [JsonPropertyName("cpuEnabled")]
     public bool CpuEnabled { get; set; } = true;
 

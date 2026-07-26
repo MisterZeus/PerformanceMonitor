@@ -91,6 +91,16 @@ public partial class App : Application
     /* Alert settings */
     public static bool AlertsEnabled { get; set; } = true;
     public static bool NotifyConnectionChanges { get; set; } = true;
+
+    /// <summary>#1659 opt-in: announce a server that is already down on its first-ever observation (an app
+    /// started mid-outage otherwise never alerts — there was no edge to see). Default off: the classic
+    /// edge-only behavior.</summary>
+    public static bool NotifyConnectionDownAtStartup { get; set; }
+
+    /// <summary>#1659 opt-in: re-announce a standing outage every N minutes (0 = off, the classic one-alert-
+    /// per-outage behavior). Re-fires deliver under the SAME "Server Unreachable" metric name so
+    /// webhook-driven automation keyed on it re-triggers.</summary>
+    public static int ConnectionRefireMinutes { get; set; }
     public static bool AlertCpuEnabled { get; set; } = true;
     public static int AlertCpuThreshold { get; set; } = 80;
     /// <summary>Which CPU metric the alert evaluates against. Total = sql_server_cpu + other_process_cpu (matches OS user+system). SqlOnly = SQL Server scheduler %.</summary>
@@ -512,6 +522,8 @@ public partial class App : Application
 
             if (root.TryGetProperty("alerts_enabled", out var v)) AlertsEnabled = v.GetBoolean();
             if (root.TryGetProperty("notify_connection_changes", out v)) NotifyConnectionChanges = v.GetBoolean();
+            if (root.TryGetProperty("notify_connection_down_at_startup", out v)) NotifyConnectionDownAtStartup = v.GetBoolean();
+            if (root.TryGetProperty("connection_refire_minutes", out v)) ConnectionRefireMinutes = Math.Clamp(v.GetInt32(), 0, 1440);
             if (root.TryGetProperty("alert_cpu_enabled", out v)) AlertCpuEnabled = v.GetBoolean();
             if (root.TryGetProperty("alert_cpu_threshold", out v)) AlertCpuThreshold = v.GetInt32();
             if (root.TryGetProperty("alert_cpu_mode", out v) && Enum.TryParse<CpuAlertMode>(v.GetString(), out var mode))

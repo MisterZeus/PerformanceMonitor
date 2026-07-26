@@ -76,6 +76,7 @@ public static class PgMigrations
         new Migration(30, "web-dashboard-config", V30Sql),
         new Migration(31, "custom-views-table", V31Sql),
         new Migration(32, "server-tags", V32Sql),
+        new Migration(33, "connection-alert-refire", V33Sql),
     };
 
     /// <summary>
@@ -475,6 +476,19 @@ CREATE TABLE IF NOT EXISTS config.server_tag_map (
 
 CREATE INDEX IF NOT EXISTS idx_server_tag_map_tag
     ON config.server_tag_map (tag_id);";
+
+    /// <summary>
+    /// V33 — the #1659 connection-alert opt-ins on the singleton config_alert_settings row: announce a
+    /// server already down at first sight, and re-announce a standing outage every N minutes (0 = off).
+    /// Both default OFF, preserving the classic edge-only behavior byte-for-byte. ADD COLUMN IF NOT EXISTS
+    /// keeps the migration idempotent; NOT NULL DEFAULT means a pre-V33 row reads correctly with no backfill.
+    /// No ACL/provisioning change: config_alert_settings carries table-level grants (no column carve).
+    /// </summary>
+    private const string V33Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS notify_connection_down_at_startup boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS connection_refire_minutes integer NOT NULL DEFAULT 0;";
+
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

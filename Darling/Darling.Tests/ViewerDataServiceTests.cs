@@ -428,6 +428,12 @@ public sealed class ViewerSchemaVersionGateTests
             hasConfigControlPlane, hasAlertDeliveryOverride, hasAnalysisState, hasAlertTuningKnobs, hasDefaultTraceEvents, hasIndexObjectStatsLatestIndex, hasCollectionLogHypertableOrPlainPg, hasJobHistory, hasAgentStatus, hasGenericWebhook, hasDeadlocksDatabaseName, hasQueryStoreReplicaRole, hasLongQueryCompletions, hasWebDashboardConfig, hasCustomViews, hasServerTags));
     }
 
+    /// <summary>An upgraded store mid-state: fleet tags present (V32) but the #1659 knobs not yet — the
+    /// probe reports 32, not 33, so the gate correctly blocks a V33 viewer until the service migrates.</summary>
+    [Fact]
+    public void MapProbedSchemaVersion_V33KnobsAbsent_CapsAt32() =>
+        Assert.Equal(32, ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+
     [Fact]
     public void MapProbedSchemaVersion_V23CompositeIsGatedBehindV22_NotAStandaloneTopArm()
     {
@@ -450,7 +456,7 @@ public sealed class ViewerSchemaVersionGateTests
            the connect-time gate refuse to open the viewer against a perfectly healthy store. */
         Assert.Equal(
             ViewerDataService.RequiredStoreSchemaVersion,
-            ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+            ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
     }
 }
 

@@ -793,7 +793,9 @@ public sealed class DarlingWorker : BackgroundService
             alertSettings, deliverer, historyStore, muteRuleService.IsAlertMuted, _logger,
             /* V20: the connect-edge Server-Unreachable/Restored delivery honors the notify toggle, read live
                through the same by-reference alertSettings seam a store reload hot-swaps. */
-            notifyConnectionChanges: () => alertSettings.NotifyConnectionChanges);
+            notifyConnectionChanges: () => alertSettings.NotifyConnectionChanges,
+            notifyConnectionDownAtStartup: () => alertSettings.NotifyConnectionDownAtStartup,
+            connectionRefireMinutes: () => alertSettings.ConnectionRefireMinutes);
 
         /* Phase-5 analysis slice AN3: the analysis pipeline's shared pieces, constructed once.
            The plan fetcher resolves a finding's serverId to the CONNECTED runtime's connection
