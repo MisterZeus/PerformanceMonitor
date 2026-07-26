@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
@@ -175,11 +176,11 @@ public sealed class DarlingSelfAlertTests
     private const string Replica = "NODE2";
     private const string Db = "Sales";
 
-    private static DarlingSelfAlertEvaluator.AgReplicaReading ReplicaRow(
+    private static AgReplicaReading ReplicaRow(
         string? role = "SECONDARY", string? connected = "CONNECTED", string replica = Replica, string ag = Ag) =>
         new(ag, replica, role, connected);
 
-    private static DarlingSelfAlertEvaluator.AgDatabaseReading DatabaseRow(
+    private static AgDatabaseReading DatabaseRow(
         long? lagSeconds = 0,
         long? redoKb = 0,
         bool? suspended = false,
@@ -1052,19 +1053,19 @@ public sealed class DarlingSelfAlertTests
 
     /* ---------------- #991 Availability Groups: sync-behind decision (pure) ---------------- */
 
-    private static DarlingSelfAlertEvaluator.AgSyncJudgement Judge(
-        DarlingSelfAlertEvaluator.AgDatabaseReading reading, int lagSeconds, long redoKb) =>
-        DarlingSelfAlertEvaluator.JudgeAgSync(reading, lagSeconds, redoKb, out _);
+    private static AgSyncJudgement Judge(
+        AgDatabaseReading reading, int lagSeconds, long redoKb) =>
+        AgAlertPolicy.JudgeSync(reading, lagSeconds, redoKb, out _);
 
     [Fact]
     public void JudgeAgSync_LagAtOrOverThreshold_IsBehind()
     {
         Assert.Equal(
-            DarlingSelfAlertEvaluator.AgSyncJudgement.Behind,
-            DarlingSelfAlertEvaluator.JudgeAgSync(DatabaseRow(lagSeconds: 300), 300, 0, out var reason));
+            AgSyncJudgement.Behind,
+            AgAlertPolicy.JudgeSync(DatabaseRow(lagSeconds: 300), 300, 0, out var reason));
         Assert.Contains("300 seconds behind", reason, StringComparison.Ordinal);
-        Assert.Equal(DarlingSelfAlertEvaluator.AgSyncJudgement.Behind, Judge(DatabaseRow(lagSeconds: 301), 300, 0));
-        Assert.Equal(DarlingSelfAlertEvaluator.AgSyncJudgement.CaughtUp, Judge(DatabaseRow(lagSeconds: 299), 300, 0));
+        Assert.Equal(AgSyncJudgement.Behind, Judge(DatabaseRow(lagSeconds: 301), 300, 0));
+        Assert.Equal(AgSyncJudgement.CaughtUp, Judge(DatabaseRow(lagSeconds: 299), 300, 0));
     }
 
     [Fact]
@@ -1073,13 +1074,13 @@ public sealed class DarlingSelfAlertTests
         /* Both off: a wildly lagging, hugely queued secondary is NOT MEASURABLE — not "caught up". The
            distinction matters because only a measured CaughtUp resolves a standing alert. */
         Assert.Equal(
-            DarlingSelfAlertEvaluator.AgSyncJudgement.NotMeasurable,
+            AgSyncJudgement.NotMeasurable,
             Judge(DatabaseRow(lagSeconds: 99999, redoKb: 99999999), 0, 0));
 
         /* Redo alone: the seconds trigger stays off, the KB trigger fires. */
         Assert.Equal(
-            DarlingSelfAlertEvaluator.AgSyncJudgement.Behind,
-            DarlingSelfAlertEvaluator.JudgeAgSync(DatabaseRow(lagSeconds: 99999, redoKb: 5000), 0, 4096, out var reason));
+            AgSyncJudgement.Behind,
+            AgAlertPolicy.JudgeSync(DatabaseRow(lagSeconds: 99999, redoKb: 5000), 0, 4096, out var reason));
         Assert.Contains("redo queue", reason, StringComparison.Ordinal);
     }
 
@@ -1091,7 +1092,7 @@ public sealed class DarlingSelfAlertTests
            way a secondary falls behind, so it MUST fire — an earlier rule that abstained on suspended rows
            silenced exactly that case. */
         Assert.Equal(
-            DarlingSelfAlertEvaluator.AgSyncJudgement.Behind,
+            AgSyncJudgement.Behind,
             Judge(DatabaseRow(lagSeconds: 9999, suspended: true), 300, 0));
 
         /* The other half of the asymmetry, and the reason this is not simply "judge suspended rows normally":
@@ -1101,23 +1102,23 @@ public sealed class DarlingSelfAlertTests
            never latch at all. Calling that CaughtUp would clear a standing alarm on a replica receiving
            nothing. (It also covers the documented flat-zero behavior, if any build really does that.) */
         Assert.Equal(
-            DarlingSelfAlertEvaluator.AgSyncJudgement.NotMeasurable,
+            AgSyncJudgement.NotMeasurable,
             Judge(DatabaseRow(lagSeconds: 0, suspended: true), 300, 0));
 
         /* The redo queue fires while suspended too — a frozen queue over the threshold is a real backlog. */
         Assert.Equal(
-            DarlingSelfAlertEvaluator.AgSyncJudgement.Behind,
+            AgSyncJudgement.Behind,
             Judge(DatabaseRow(lagSeconds: 0, redoKb: 8192, suspended: true), 300, 4096));
 
         /* ...but a frozen queue UNDER the threshold is stale data, not a recovery: redo_queue_size freezes at
            its last value while suspended (measured), so it cannot clear anything either. */
         Assert.Equal(
-            DarlingSelfAlertEvaluator.AgSyncJudgement.NotMeasurable,
+            AgSyncJudgement.NotMeasurable,
             Judge(DatabaseRow(lagSeconds: 0, redoKb: 8, suspended: true), 300, 4096));
 
         /* Once movement resumes, the same small readings are a real measurement and DO resolve. */
         Assert.Equal(
-            DarlingSelfAlertEvaluator.AgSyncJudgement.CaughtUp,
+            AgSyncJudgement.CaughtUp,
             Judge(DatabaseRow(lagSeconds: 0, redoKb: 8, suspended: false), 300, 4096));
     }
 
@@ -1127,12 +1128,12 @@ public sealed class DarlingSelfAlertTests
         /* The PRIMARY's own row, and every row under WSFC quorum loss, reads NULL. Reporting that as CaughtUp
            would resolve every standing lag alert on the fleet the moment the cluster lost quorum. */
         Assert.Equal(
-            DarlingSelfAlertEvaluator.AgSyncJudgement.NotMeasurable,
+            AgSyncJudgement.NotMeasurable,
             Judge(DatabaseRow(lagSeconds: null, redoKb: null, suspended: null), 300, 4096));
 
         /* One usable arm is enough to judge, even when the other reads NULL. */
         Assert.Equal(
-            DarlingSelfAlertEvaluator.AgSyncJudgement.CaughtUp,
+            AgSyncJudgement.CaughtUp,
             Judge(DatabaseRow(lagSeconds: 5, redoKb: null), 300, 4096));
     }
 
