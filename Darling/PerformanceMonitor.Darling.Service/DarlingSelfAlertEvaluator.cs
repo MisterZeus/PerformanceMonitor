@@ -136,6 +136,11 @@ internal sealed class DarlingSelfAlertEvaluator
     private readonly ConcurrentDictionary<string, DateTime> _lastCaptureDownAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activeAgentDown = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastAgentDownAlert = new();
+
+    /// <summary>Servers on which SQL Agent has been OBSERVED RUNNING at least once — the capability gate for
+    /// "Agent Not Running". Memoized only once true, so the store probe behind it stops after the first
+    /// positive and a server that genuinely runs Agent costs one extra read, once.</summary>
+    private readonly ConcurrentDictionary<string, bool> _agentEverSeenRunning = new();
     private readonly ConcurrentDictionary<string, ConnectionState> _connectionState = new();
 
     /* Store Disk Pressure edge state. FLEET-level (one shared store, not per server), so it is keyed by a
@@ -323,7 +328,26 @@ internal sealed class DarlingSelfAlertEvaluator
                 && _utcNow() - agentCollectionTimeUtc.Value < StaleWindow
                     ? agentRunning
                     : null;
-            await ApplyAgentNotRunningAsync(serverId, serverName, freshRunning, cancellationToken);
+
+            /* Capability gate: only a server that has been seen RUNNING Agent can report it stopped. The current
+               reading is itself the cheapest possible evidence, so a running Agent short-circuits the probe;
+               otherwise ask the collected history once and memoize the positive. */
+            var agentKey = Key(serverId);
+            if (freshRunning == true)
+            {
+                _agentEverSeenRunning[agentKey] = true;
+            }
+
+            if (!_agentEverSeenRunning.TryGetValue(agentKey, out var everRan) || !everRan)
+            {
+                everRan = await HasAgentEverBeenSeenRunningAsync(postgres, serverId, cancellationToken);
+                if (everRan)
+                {
+                    _agentEverSeenRunning[agentKey] = true;
+                }
+            }
+
+            await ApplyAgentNotRunningAsync(serverId, serverName, freshRunning, everRan, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -490,9 +514,24 @@ internal sealed class DarlingSelfAlertEvaluator
     /// snapshot is stale — the collection-stopped alert owns staleness), in which case the standing state is
     /// left untouched so a lagging feed neither fires nor spuriously clears. Gated on the master alerts switch.
     /// Testable directly with a recording deliverer + a controllable clock.
+    ///
+    /// <para><b>Capability gate (<paramref name="agentEverSeenRunning"/>).</b> A stopped Agent only alerts on a
+    /// server where Agent has been observed RUNNING at least once. This alert began life in the full Dashboard,
+    /// which collected THROUGH SQL Agent jobs — there, Agent down meant collection down, so it was a
+    /// collection-dependency alarm and firing on sight was right. Lite and Darling collect in-process and have no
+    /// Agent dependency whatsoever, so all that survives is a customer-WORKLOAD signal: "the jobs you rely on
+    /// stopped running". That signal is meaningless on a server that never ran Agent jobs — a container built
+    /// with Agent off, Express, a Linux-minimal image — and without this gate every such target nags on every
+    /// sweep, forever, with an alert whose remedy ("start the Agent service") the operator deliberately declined.
+    /// Observed on the AG fixture containers: identical Critical alerts every 5 minutes from first contact.</para>
+    ///
+    /// <para>This is the same first-sighting-silent discipline the connection edge below already applies, and the
+    /// baseline is durable because it is DERIVED from collected history rather than remembered in process (see
+    /// <see cref="HasAgentEverBeenSeenRunningAsync"/>) — a restart must not un-learn that a real server runs
+    /// Agent, or a genuinely stopped Agent would go quiet exactly when it matters.</para>
     /// </summary>
     internal async Task ApplyAgentNotRunningAsync(
-        int serverId, string serverName, bool? agentRunningFresh, CancellationToken cancellationToken)
+        int serverId, string serverName, bool? agentRunningFresh, bool agentEverSeenRunning, CancellationToken cancellationToken)
     {
         if (!_settings.AlertsEnabled)
         {
@@ -507,6 +546,14 @@ internal sealed class DarlingSelfAlertEvaluator
 
         var key = Key(serverId);
         var now = _utcNow();
+
+        /* Never seen running: this server does not use Agent, so there is no workload signal to report. Stay
+           silent WITHOUT recording a standing down-state, so a later first start is a plain baseline rather than
+           a spurious "Agent Restarted" recovery for an alert that never fired. */
+        if (!running && !agentEverSeenRunning)
+        {
+            return;
+        }
 
         if (!running)
         {
@@ -1410,6 +1457,35 @@ ORDER BY x.collector_name", connection);
         }
 
         return missing;
+    }
+
+    /// <summary>
+    /// Has SQL Agent EVER been observed running on this server, across the retained <c>agent_status</c> history?
+    /// The capability gate behind "Agent Not Running" — see <see cref="ApplyAgentNotRunningAsync"/> for why a
+    /// server that never ran Agent must never be told to start it.
+    ///
+    /// <para>Derived from collected evidence rather than tracked in process ON PURPOSE: a service restart must
+    /// not un-learn that a real server runs Agent, which is exactly when an in-memory baseline would go quiet —
+    /// Agent stops, the service restarts, and the alert that should fire never does.</para>
+    ///
+    /// <para>Bounded by that table's retention, which is the honest reading of the question: a server whose Agent
+    /// has not run once in the whole retained window is, for alerting purposes, a server that does not use Agent.
+    /// It re-arms by itself the moment Agent runs again.</para>
+    /// </summary>
+    internal static async Task<bool> HasAgentEverBeenSeenRunningAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    {
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        using var command = new NpgsqlCommand(@"
+SELECT EXISTS
+(
+    SELECT 1
+    FROM agent_status
+    WHERE server_id = $1
+    AND   agent_running
+)", connection);
+        command.Parameters.AddWithValue(serverId);
+        return (bool)(await command.ExecuteScalarAsync(cancellationToken))!;
     }
 
     /// <summary>
