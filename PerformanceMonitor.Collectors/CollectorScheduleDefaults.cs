@@ -75,5 +75,11 @@ public static class CollectorScheduleDefaults
         ["default_trace_events"] = new(5, 30),
         ["job_history"] = new(5, 365),
         ["agent_status"] = new(5, 7),
+        /* #991 Availability Group health. Per-minute like the other health time series (wait_stats,
+           cpu_utilization): send/redo queue depth and secondary lag are exactly the signals whose
+           spikes are lost at a coarser grain, and both queries are a handful of rows against
+           in-memory AG metadata. On an AG-less server every cycle is a zero-row read. */
+        ["ag_replica_states"] = new(1, 30),
+        ["ag_database_replica_states"] = new(1, 30),
     };
 }

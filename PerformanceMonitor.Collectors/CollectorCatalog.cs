@@ -57,6 +57,8 @@ public static class CollectorCatalog
         DefaultTraceEventsCollector.Instance,
         JobHistoryCollector.Instance,
         AgentStatusCollector.Instance,
+        AgReplicaStatesCollector.Instance,
+        AgDatabaseReplicaStatesCollector.Instance,
     };
 
     /// <summary>Name → definition, for the by-name target-gate lookup. Built once from <see cref="All"/>.</summary>
