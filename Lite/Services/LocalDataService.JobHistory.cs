@@ -250,7 +250,8 @@ public class JobHistoryRow
 
 /// <summary>
 /// The latest SQL Agent status snapshot for one server (issue #1433 Phase 2) — drives the Job History tab
-/// header and the "Agent Not Running" alert. next_scheduled_run is the server's local wall clock (from
+/// header, and Darling's "Agent Not Running" alert reads the same collected data (Lite raises no such alert
+/// itself). next_scheduled_run is the server's local wall clock (from
 /// msdb), shown as-is like the job run times.
 /// </summary>
 public class AgentStatusRow

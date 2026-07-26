@@ -362,7 +362,7 @@ public sealed class DarlingSelfAlertTests
         var h = new Harness();
         var e = h.Build();
 
-        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, Ct);
+        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, agentEverSeenRunning: true, Ct);
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("Agent Not Running", fired.MetricName);
         Assert.Equal("Stopped", fired.CurrentValue);
@@ -372,12 +372,12 @@ public sealed class DarlingSelfAlertTests
 
         /* Still stopped inside the cooldown — the EDGE: no re-fire. */
         h.Now = h.Now.AddMinutes(1);
-        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, Ct);
+        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, agentEverSeenRunning: true, Ct);
         Assert.Single(h.Deliverer.Outcomes);
 
         /* After the cooldown the standing condition re-fires. */
         h.Now = h.Now.AddMinutes(5);
-        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, Ct);
+        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, agentEverSeenRunning: true, Ct);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
     }
 
@@ -387,11 +387,11 @@ public sealed class DarlingSelfAlertTests
         var h = new Harness();
         var e = h.Build();
 
-        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, Ct);
+        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, agentEverSeenRunning: true, Ct);
         Assert.Empty(h.History.Records);
 
         /* Agent back up: exactly one "Agent Restarted" audit row, no email/webhook. */
-        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: true, Ct);
+        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: true, agentEverSeenRunning: true, Ct);
         var restarted = Assert.Single(h.History.Records);
         Assert.Equal("Agent Restarted", restarted.MetricName);
         Assert.True(restarted.AlertSent);
@@ -399,8 +399,92 @@ public sealed class DarlingSelfAlertTests
         Assert.Single(h.Deliverer.Outcomes);
 
         /* Still running on the next sweep — no duplicate resolution (edge-triggered). */
-        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: true, Ct);
+        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: true, agentEverSeenRunning: true, Ct);
         Assert.Single(h.History.Records);
+    }
+
+    /* ---------------- agent capability gate: never-seen-running stays silent ---------------- */
+
+    /// <summary>
+    /// THE fixture-container shape, and the field-noise case this gate exists for: a target where Agent has never
+    /// been observed running — a container built with Agent off, Express, a Linux-minimal image. Before the gate
+    /// this fired a Critical alert on EVERY sweep forever (observed on the AG fixture: identical alerts every 5
+    /// minutes from first contact). It must be silent, permanently, and never accumulate a standing down-state.
+    /// </summary>
+    [Fact]
+    public async Task AgentNotRunning_NeverSeenRunning_StaysSilentForever()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        for (var sweep = 0; sweep < 5; sweep++)
+        {
+            await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, agentEverSeenRunning: false, Ct);
+            h.Now = h.Now.AddMinutes(10); /* well past the cooldown, so silence is the gate and not the cooldown */
+        }
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    /// <summary>
+    /// A never-seen-running server whose Agent later starts must NOT emit "Agent Restarted": no alert ever fired,
+    /// so there is nothing to resolve. Suppressing the fire while still recording a standing down-state would
+    /// produce exactly that phantom recovery.
+    /// </summary>
+    [Fact]
+    public async Task AgentNotRunning_NeverSeenRunning_ThenStarts_EmitsNoPhantomRecovery()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, agentEverSeenRunning: false, Ct);
+        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: true, agentEverSeenRunning: false, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    /// <summary>
+    /// Once Agent HAS been seen running, the server is a real Agent user and the alert behaves exactly as before —
+    /// the gate must not silence the case the alert exists for. This is the transition a container makes the first
+    /// time someone actually starts Agent on it.
+    /// </summary>
+    [Fact]
+    public async Task AgentNotRunning_AfterAgentIsSeenRunning_AlertsNormallyOnceItStops()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* Silent while it has never run... */
+        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, agentEverSeenRunning: false, Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* ...Agent runs (the caller memoizes this), then stops: now it is a real signal. */
+        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: true, agentEverSeenRunning: true, Ct);
+        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, agentEverSeenRunning: true, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Agent Not Running", fired.MetricName);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+    }
+
+    /// <summary>
+    /// The gate never overrides the staleness rule: a null (no fresh reading) still refuses to judge, whichever
+    /// side of the gate the server is on.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AgentNotRunning_NoFreshReading_NeverJudges_RegardlessOfGate(bool everSeenRunning)
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: null, agentEverSeenRunning: everSeenRunning, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
     }
 
     [Fact]
@@ -410,18 +494,18 @@ public sealed class DarlingSelfAlertTests
         var e = h.Build();
 
         /* Fire on a fresh stopped reading. */
-        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, Ct);
+        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, agentEverSeenRunning: true, Ct);
         Assert.Single(h.Deliverer.Outcomes);
 
         /* No fresh reading (stale snapshot / never collected) — must NEITHER clear the standing alert (no
            resolution row) NOR fire. The collection-stopped alert owns staleness. */
         h.Now = h.Now.AddMinutes(10);
-        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: null, Ct);
+        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: null, agentEverSeenRunning: true, Ct);
         Assert.Empty(h.History.Records);
 
         /* The active flag persisted through the null gap: a fresh stopped reading after the cooldown re-fires
            (it would have been cleared to a first-fire if null had wrongly reset the state). */
-        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, Ct);
+        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, agentEverSeenRunning: true, Ct);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
     }
 
@@ -432,7 +516,7 @@ public sealed class DarlingSelfAlertTests
         h.Settings.AlertsEnabled = false;
         var e = h.Build();
 
-        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, Ct);
+        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, agentEverSeenRunning: true, Ct);
         Assert.Empty(h.Deliverer.Outcomes);
     }
 
