@@ -189,12 +189,19 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
     public const string DailySummaryRangeSql = DailySummarySql.RangeSql;
 
     /// <summary>One <see cref="DailySummaryReadRow"/> per collected day in the half-open [fromDate, toDate)
-    /// window (the viewer's <c>GetDailySummaryRangeAsync</c>).</summary>
+    /// window (the viewer's <c>GetDailySummaryRangeAsync</c>).
+    ///
+    /// <para>#1661: routes to the same retention tier the viewer's calendar does. This matters beyond
+    /// correctness — the calendar and this MCP tool answer the same question, so if only one routed they would
+    /// report different query counts for the same day and there would be no way to tell which was right.</para>
+    /// </summary>
     public static async Task<List<DailySummaryReadRow>> GetDailySummaryRangeAsync(
         NpgsqlDataSource postgres, int serverId, DateTime fromDate, DateTime toDate, CancellationToken cancellationToken = default)
     {
+        var tier = RetentionTierRouter.Resolve(DateTime.UtcNow, fromDate);
+
         var results = new List<DailySummaryReadRow>();
-        await using var command = postgres.CreateCommand(DailySummaryRangeSql);
+        await using var command = postgres.CreateCommand(DailySummarySql.RangeSqlFor(tier));
         DarlingMcpReadParameters.AddInt(command, serverId);
         DarlingMcpReadParameters.AddTimestamp(command, fromDate.Date);
         DarlingMcpReadParameters.AddTimestamp(command, toDate.Date);

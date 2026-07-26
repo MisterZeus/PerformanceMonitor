@@ -392,6 +392,7 @@ SELECT
     sum(delta_physical_reads) AS physical_reads_sum,
     sum(delta_logical_writes) AS logical_writes_sum,
     sum(delta_execution_count) AS execution_count_sum,
+    max(last_execution_time) AS last_execution_time_max,
     count(*) AS sample_count
 FROM collect.query_stats
 WHERE delta_worker_time IS NOT NULL
@@ -412,6 +413,7 @@ SELECT
     sum(physical_reads_sum) AS physical_reads_sum,
     sum(logical_writes_sum) AS logical_writes_sum,
     sum(execution_count_sum) AS execution_count_sum,
+    max(last_execution_time_max) AS last_execution_time_max,
     sum(sample_count) AS sample_count
 FROM collect.query_stats_db_hourly
 GROUP BY server_id, server_name, database_name, time_bucket('1 day', bucket)

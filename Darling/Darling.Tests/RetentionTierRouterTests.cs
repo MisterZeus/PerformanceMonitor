@@ -147,4 +147,55 @@ public sealed class RetentionTierRouterTests
     [Fact]
     public void QueryStatsCagg_GroupsByQueryHash_WhichIsWhatMakesTheDistinctCountExact() =>
         Assert.Contains("GROUP BY server_id, server_name, database_name, query_hash", TimescaleSupport.CreateQueryStatsHourlySql, StringComparison.Ordinal);
+
+    /* ── #1661: the FinOps aggregate readers route, and their drift guards are exercised ── */
+
+    /// <summary>
+    /// Each routed FinOps query throws if its raw fragment no longer matches the SQL. That guard is only
+    /// protective if something calls it, so these exercise every tier of every routed reader — otherwise a
+    /// drifted fragment would surface as a runtime exception in front of a user instead of a failed build.
+    /// </summary>
+    [Theory]
+    [InlineData(RetentionTier.Hourly)]
+    [InlineData(RetentionTier.Daily)]
+    public void FinOpsReaders_RouteWithoutTrippingTheirDriftGuards(RetentionTier tier)
+    {
+        var usage = ViewerDataService.DatabaseResourceUsageSqlFor(tier);
+        var byTotal = ViewerDataService.TopResourceConsumersByTotalSqlFor(tier);
+        var byAvg = ViewerDataService.TopResourceConsumersByAvgSqlFor(tier);
+
+        foreach (var sql in new[] { usage, byTotal, byAvg })
+        {
+            /* Routed off the raw passthrough, onto a rollup, with the rollup's time column. */
+            Assert.DoesNotContain("FROM v_query_stats", sql, StringComparison.Ordinal);
+            Assert.Contains("AND   bucket >= $2", sql, StringComparison.Ordinal);
+
+            /* The rollups pre-filter NULL worker time, so the reader must not re-apply a delta_ predicate. */
+            Assert.DoesNotContain("delta_worker_time IS NOT NULL", sql, StringComparison.Ordinal);
+        }
+
+        /* Only the database-grain reader needs the I/O rollup; the two top-consumer queries want CPU and
+           executions only, which the query-grain aggregate already carries. */
+        var dbGrain = tier == RetentionTier.Hourly
+            ? TimescaleSupport.QueryStatsDbHourlyView
+            : TimescaleSupport.QueryStatsDbDailyView;
+        var queryGrain = tier == RetentionTier.Hourly
+            ? TimescaleSupport.QueryStatsHourlyView
+            : TimescaleSupport.QueryStatsDailyView;
+
+        Assert.Contains($"FROM collect.{dbGrain}", usage, StringComparison.Ordinal);
+        Assert.Contains("SUM(logical_reads_sum)", usage, StringComparison.Ordinal);
+
+        Assert.Contains($"FROM collect.{queryGrain}", byTotal, StringComparison.Ordinal);
+        Assert.Contains($"FROM collect.{queryGrain}", byAvg, StringComparison.Ordinal);
+    }
+
+    /// <summary>Raw must return each constant untouched — the recent-window path is unchanged.</summary>
+    [Fact]
+    public void FinOpsReaders_RawTier_ReturnTheConstantsUnchanged()
+    {
+        Assert.Equal(ViewerDataService.DatabaseResourceUsageSql, ViewerDataService.DatabaseResourceUsageSqlFor(RetentionTier.Raw), StringComparer.Ordinal);
+        Assert.Equal(ViewerDataService.TopResourceConsumersByTotalSql, ViewerDataService.TopResourceConsumersByTotalSqlFor(RetentionTier.Raw), StringComparer.Ordinal);
+        Assert.Equal(ViewerDataService.TopResourceConsumersByAvgSql, ViewerDataService.TopResourceConsumersByAvgSqlFor(RetentionTier.Raw), StringComparer.Ordinal);
+    }
 }

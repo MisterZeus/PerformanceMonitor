@@ -12,6 +12,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 
+using PerformanceMonitor.Darling.Storage;
+
 namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>
@@ -25,6 +27,113 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed partial class ViewerDataService
 {
     /// <summary>Per-database resource usage from query_stats + file_io_stats deltas. $1 server_id, $2 cutoff.</summary>
+
+    /* ── #1661: retention-tier routing for the aggregate workload queries ───────────────────────────────
+       These sum additively over database_name, which is exactly what the rollups materialize, so routing
+       them is lossless. Each swap throws if it matches nothing, so editing the SQL without updating the
+       matching fragment fails loudly instead of silently leaving the panel on raw. */
+
+    /// <summary>The database-grain CTE in <see cref="DatabaseResourceUsageSql"/>, verbatim.</summary>
+    private const string WorkloadCteRaw = """
+        database_name,
+        SUM(delta_worker_time) / 1000.0 AS cpu_time_ms,
+        SUM(delta_logical_reads) AS logical_reads,
+        SUM(delta_physical_reads) AS physical_reads,
+        SUM(delta_logical_writes) AS logical_writes,
+        SUM(delta_execution_count) AS execution_count
+    FROM v_query_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   delta_worker_time IS NOT NULL
+    GROUP BY database_name
+""";
+
+    /// <summary>
+    /// The same CTE over the per-database rollup. This is the ONE reader that needs
+    /// <c>query_stats_db_hourly</c>: it sums the I/O columns, which the query-grain aggregate does not carry.
+    /// The rollup already applies the same <c>delta_worker_time IS NOT NULL</c> filter, so it is dropped here.
+    /// </summary>
+    private static string WorkloadCteForCagg(string relation) => $"""
+        database_name,
+        SUM(worker_time_sum) / 1000.0 AS cpu_time_ms,
+        SUM(logical_reads_sum) AS logical_reads,
+        SUM(physical_reads_sum) AS physical_reads,
+        SUM(logical_writes_sum) AS logical_writes,
+        SUM(execution_count_sum) AS execution_count
+    FROM collect.{relation}
+    WHERE server_id = $1
+    AND   bucket >= $2
+    GROUP BY database_name
+""";
+
+    /// <summary>The CPU/execution CTE shared by both top-consumer queries, verbatim.</summary>
+    private const string ConsumerCteRaw = """
+        database_name,
+        SUM(delta_worker_time) / 1000.0 AS cpu_time_ms,
+        SUM(delta_execution_count) AS execution_count
+    FROM v_query_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   delta_worker_time IS NOT NULL
+    GROUP BY database_name
+""";
+
+    /// <summary>
+    /// The same CTE over the QUERY-grain rollup — these two need only CPU and executions, both of which
+    /// <c>query_stats_hourly</c> already carries, so they route without the per-database aggregate.
+    /// </summary>
+    private static string ConsumerCteForCagg(string relation) => $"""
+        database_name,
+        SUM(worker_time_sum) / 1000.0 AS cpu_time_ms,
+        SUM(execution_count_sum) AS execution_count
+    FROM collect.{relation}
+    WHERE server_id = $1
+    AND   bucket >= $2
+    GROUP BY database_name
+""";
+
+    private static string RouteOrThrow(string sql, string from, string to, string what)
+    {
+        var routed = sql.Replace(from, to, StringComparison.Ordinal);
+        if (string.Equals(routed, sql, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"FinOps {what} CAGG routing found nothing to replace — its raw fragment has drifted from the SQL (#1661).");
+        }
+
+        return routed;
+    }
+
+    /// <summary>Database resource usage for <paramref name="tier"/>. Raw returns the constant untouched.</summary>
+    public static string DatabaseResourceUsageSqlFor(RetentionTier tier) =>
+        tier == RetentionTier.Raw
+            ? DatabaseResourceUsageSql
+            : RouteOrThrow(
+                DatabaseResourceUsageSql,
+                WorkloadCteRaw,
+                WorkloadCteForCagg(tier == RetentionTier.Hourly ? TimescaleSupport.QueryStatsDbHourlyView : TimescaleSupport.QueryStatsDbDailyView),
+                "database resource usage");
+
+    /// <summary>Top consumers (by total) for <paramref name="tier"/>.</summary>
+    public static string TopResourceConsumersByTotalSqlFor(RetentionTier tier) =>
+        tier == RetentionTier.Raw
+            ? TopResourceConsumersByTotalSql
+            : RouteOrThrow(
+                TopResourceConsumersByTotalSql,
+                ConsumerCteRaw,
+                ConsumerCteForCagg(tier == RetentionTier.Hourly ? TimescaleSupport.QueryStatsHourlyView : TimescaleSupport.QueryStatsDailyView),
+                "top consumers by total");
+
+    /// <summary>Top consumers (by average) for <paramref name="tier"/>.</summary>
+    public static string TopResourceConsumersByAvgSqlFor(RetentionTier tier) =>
+        tier == RetentionTier.Raw
+            ? TopResourceConsumersByAvgSql
+            : RouteOrThrow(
+                TopResourceConsumersByAvgSql,
+                ConsumerCteRaw,
+                ConsumerCteForCagg(tier == RetentionTier.Hourly ? TimescaleSupport.QueryStatsHourlyView : TimescaleSupport.QueryStatsDailyView),
+                "top consumers by average");
+
     public const string DatabaseResourceUsageSql = @"
 WITH workload AS (
     SELECT
@@ -93,7 +202,7 @@ ORDER BY c.cpu_time_ms DESC";
     {
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
 
-        await using var command = _dataSource.CreateCommand(DatabaseResourceUsageSql);
+        await using var command = _dataSource.CreateCommand(DatabaseResourceUsageSqlFor(RetentionTierRouter.Resolve(DateTime.UtcNow, DateTime.UtcNow.AddHours(-hoursBack))));
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
 
@@ -247,7 +356,7 @@ LIMIT $3";
     {
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
 
-        await using var command = _dataSource.CreateCommand(TopResourceConsumersByTotalSql);
+        await using var command = _dataSource.CreateCommand(TopResourceConsumersByTotalSqlFor(RetentionTierRouter.Resolve(DateTime.UtcNow, DateTime.UtcNow.AddHours(-hoursBack))));
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = topN });
@@ -309,7 +418,7 @@ LIMIT $3";
     {
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
 
-        await using var command = _dataSource.CreateCommand(TopResourceConsumersByAvgSql);
+        await using var command = _dataSource.CreateCommand(TopResourceConsumersByAvgSqlFor(RetentionTierRouter.Resolve(DateTime.UtcNow, DateTime.UtcNow.AddHours(-hoursBack))));
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = topN });
