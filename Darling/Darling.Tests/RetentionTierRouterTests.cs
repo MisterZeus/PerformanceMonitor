@@ -133,10 +133,34 @@ public sealed class RetentionTierRouterTests
             TimescaleSupport.QueryStatsDailyView,
             TimescaleSupport.QueryStatsDbHourlyView,
             TimescaleSupport.QueryStatsDbDailyView,
+            /* #1665: the composer routes onto all three catalog tables' pairs, not just the built-in tabs'. */
+            TimescaleSupport.ProcedureStatsHourlyView,
+            TimescaleSupport.ProcedureStatsDailyView,
+            TimescaleSupport.QueryStoreStatsHourlyView,
+            TimescaleSupport.QueryStoreStatsDailyView,
         })
         {
             Assert.Contains($"to_regclass('collect.{view}')", TimescaleSupport.RollupProbeSql, StringComparison.Ordinal);
+
+            /* And the flag lookup must answer for every probed view — an unmapped name would silently
+               report "absent" and route a healthy store's panels to raw. */
+            Assert.True(RollupAvailability.All.Has(view), $"RollupAvailability.Has must map '{view}'.");
         }
+
+        /* A name outside the probe's coverage is ABSENT by definition — the safe answer for a catalog
+           entry added without extending the probe. */
+        Assert.False(RollupAvailability.All.Has("some_future_rollup"));
+        Assert.True(RollupAvailability.All.AllPresent);
+        Assert.False(RollupAvailability.None.AllPresent);
+    }
+
+    /// <summary>The TimeSpan twins (#1665's notice arithmetic) must agree with the Postgres interval strings
+    /// the retention policies are created from — one horizon, two spellings, zero drift.</summary>
+    [Fact]
+    public void RetentionSpans_AgreeWithTheIntervalStrings()
+    {
+        Assert.Equal(ParseDays(TimescaleSupport.RawRetentionInterval), TimescaleSupport.RawRetentionSpan);
+        Assert.Equal(ParseDays(TimescaleSupport.HourlyRetentionInterval), TimescaleSupport.HourlyRetentionSpan);
     }
 
     private static TimeSpan ParseDays(string interval)
