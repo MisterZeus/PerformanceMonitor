@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -17,9 +16,8 @@ namespace PerformanceMonitorLite.Tests;
 /// methods (batch requests, sessions, query duration, memory), per-metric thresholds,
 /// and baseline context metadata.
 /// </summary>
-public class AnomalyDetectorTests : IDisposable
+public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>
 {
-    private readonly string _tempDir;
     private readonly DuckDbInitializer _duckDb;
     private readonly BaselineProvider _baselineProvider;
     private readonly AnomalyDetector _detector;
@@ -34,25 +32,13 @@ public class AnomalyDetectorTests : IDisposable
 
     private long _nextId = -1;
 
-    public AnomalyDetectorTests()
+    public AnomalyDetectorTests(SharedDuckDbFixture fixture)
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "AnomalyTests_" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(_tempDir);
-        var dbPath = Path.Combine(_tempDir, "test.duckdb");
-        _duckDb = new DuckDbInitializer(dbPath);
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
         _baselineProvider = new BaselineProvider(_duckDb);
         _detector = new AnomalyDetector(_duckDb, _baselineProvider);
         BaselineProvider.CacheTtl = TimeSpan.FromMilliseconds(1);
-    }
-
-    public void Dispose()
-    {
-        try
-        {
-            if (Directory.Exists(_tempDir))
-                Directory.Delete(_tempDir, recursive: true);
-        }
-        catch { }
     }
 
     private AnalysisContext CreateContext() => new()
@@ -68,8 +54,6 @@ public class AnomalyDetectorTests : IDisposable
     [Fact]
     public async Task DetectBatchRequestAnomalies_Spike_DetectsAnomaly()
     {
-        await _duckDb.InitializeAsync();
-
         // Baseline: normal batch requests (~5000)
         await SeedBaselinePerfmon("Batch Requests/sec", 5000, variance: 200);
 
@@ -93,8 +77,6 @@ public class AnomalyDetectorTests : IDisposable
     [Fact]
     public async Task DetectBatchRequestAnomalies_Normal_NoAnomaly()
     {
-        await _duckDb.InitializeAsync();
-
         await SeedBaselinePerfmon("Batch Requests/sec", 5000, variance: 200);
 
         // Analysis window: same as baseline
@@ -111,8 +93,6 @@ public class AnomalyDetectorTests : IDisposable
     [Fact]
     public async Task DetectBatchRequestAnomalies_LowVolumeSpike_NoAnomaly()
     {
-        await _duckDb.InitializeAsync();
-
         // Low-throughput server: a 6x relative spike but the peak stays at 300/sec
         // — below the 500/sec BatchRequestFloor — must NOT be flagged.
         await SeedBaselinePerfmon("Batch Requests/sec", 50, variance: 5);
@@ -131,8 +111,6 @@ public class AnomalyDetectorTests : IDisposable
     [Fact]
     public async Task DetectSessionAnomalies_Spike_DetectsAnomaly()
     {
-        await _duckDb.InitializeAsync();
-
         // Baseline: ~20 connections
         await SeedBaselineSessions(20, variance: 2);
 
@@ -157,8 +135,6 @@ public class AnomalyDetectorTests : IDisposable
     [Fact]
     public async Task DetectSessionAnomalies_Normal_NoAnomaly()
     {
-        await _duckDb.InitializeAsync();
-
         await SeedBaselineSessions(20, variance: 2);
 
         // Analysis window: same as baseline
@@ -179,8 +155,6 @@ public class AnomalyDetectorTests : IDisposable
     [Fact]
     public async Task DetectSessionAnomalies_LowCountSpike_NoAnomaly()
     {
-        await _duckDb.InitializeAsync();
-
         // Low-connection server: an 8x relative spike but the peak stays at 40
         // connections — below the 50 SessionCountFloor — must NOT be flagged.
         await SeedBaselineSessions(5, variance: 1);
@@ -205,8 +179,6 @@ public class AnomalyDetectorTests : IDisposable
     [Fact]
     public async Task DetectQueryDurationAnomalies_Spike_DetectsAnomaly()
     {
-        await _duckDb.InitializeAsync();
-
         // Baseline: ~10000 microseconds total elapsed per collection
         await SeedBaselineQueryStats(10_000, variance: 1000);
 
@@ -226,8 +198,6 @@ public class AnomalyDetectorTests : IDisposable
     [Fact]
     public async Task DetectQueryDurationAnomalies_SubFloorSpike_NoAnomaly()
     {
-        await _duckDb.InitializeAsync();
-
         // A huge *relative* spike (50x baseline) whose peak stays at 500,000 us
         // (0.5s) — below the 1s QueryDurationFloorUs — must NOT be flagged. Guards
         // against alarming on trivially small absolute query durations, the noise
@@ -249,8 +219,6 @@ public class AnomalyDetectorTests : IDisposable
     [Fact]
     public async Task DetectMemoryAnomalies_HighPressure_DetectsAnomaly()
     {
-        await _duckDb.InitializeAsync();
-
         // Baseline: ~70% memory pressure
         await SeedBaselineMemory(70_000, 100_000);
 
@@ -268,8 +236,6 @@ public class AnomalyDetectorTests : IDisposable
     [Fact]
     public async Task DetectMemoryAnomalies_SubFloorSpike_NoAnomaly()
     {
-        await _duckDb.InitializeAsync();
-
         // Pressure climbs sharply (40% -> 85%) but the peak stays below the 90%
         // MemoryPressureFloorPct — must NOT be flagged.
         await SeedBaselineMemory(40_000, 100_000);
@@ -286,8 +252,6 @@ public class AnomalyDetectorTests : IDisposable
     [Fact]
     public async Task DetectMemoryAnomalies_Normal_NoAnomaly()
     {
-        await _duckDb.InitializeAsync();
-
         await SeedBaselineMemory(70_000, 100_000);
 
         // Analysis window: same as baseline
@@ -306,8 +270,6 @@ public class AnomalyDetectorTests : IDisposable
     [Fact]
     public async Task SetDeviationThreshold_HigherThreshold_SuppressesAnomaly()
     {
-        await _duckDb.InitializeAsync();
-
         // Baseline: CPU ~10%
         await SeedBaselineCpu(10, variance: 2);
 
@@ -336,8 +298,6 @@ public class AnomalyDetectorTests : IDisposable
     [Fact]
     public async Task AnomalyFacts_ContainBaselineContextMetadata()
     {
-        await _duckDb.InitializeAsync();
-
         await SeedBaselineCpu(10, variance: 2);
 
         // Spike to trigger anomaly
@@ -362,8 +322,6 @@ public class AnomalyDetectorTests : IDisposable
     [Fact]
     public async Task DetectCpuAnomalies_ThinBaseline_AbsoluteFallbackFires_NotSilent()
     {
-        await _duckDb.InitializeAsync();
-
         // Thin baseline: only 2 distinct days (below the Full-tier 3-day minimum) → NOT trustworthy,
         // so the z-path is suppressed. But 95% CPU clears the absolute-fallback bar (90%) — the
         // detector must still fire (the interaction trap: a young store fires on the higher bar, not
@@ -385,8 +343,6 @@ public class AnomalyDetectorTests : IDisposable
     [Fact]
     public async Task DetectCpuAnomalies_ThinBaseline_SuppressesPureZSpikeBelowAbsoluteBar()
     {
-        await _duckDb.InitializeAsync();
-
         // Same thin (untrustworthy) baseline. 60% CPU is a large z-spike over a 10% baseline, but it is
         // BELOW the 90% absolute-fallback bar — a thin baseline must NOT let a pure z-spike fire.
         await SeedThinBaselineCpu(avgCpu: 10, variance: 2);
@@ -401,8 +357,6 @@ public class AnomalyDetectorTests : IDisposable
     [Fact]
     public async Task DetectCpuAnomalies_HealthyBaseline_TrustsZPath_NotFallback()
     {
-        await _duckDb.InitializeAsync();
-
         // Healthy baseline: 14 distinct days → trustworthy. A 70% spike over a 10% baseline clears the
         // 50% magnitude floor and fires on the TRUSTED z-path (not the fallback), with a real sigma.
         await SeedBaselineCpu(10, variance: 2);
@@ -423,8 +377,6 @@ public class AnomalyDetectorTests : IDisposable
     [Fact]
     public async Task DetectWaitAnomalies_EmitsOneProfile_CapturingMinorityButRealWait()
     {
-        await _duckDb.InitializeAsync();
-
         // Trustworthy WaitMsPerSec baseline: 14 distinct days of modest SOS.
         await SeedBaselineWaits();
         await SeedBaselineCpu(10, variance: 2); // HasBaselineData canary
@@ -455,8 +407,6 @@ public class AnomalyDetectorTests : IDisposable
     [Fact]
     public async Task DetectAnomalies_NoBaselineData_ReturnsEmpty()
     {
-        await _duckDb.InitializeAsync();
-
         // Only analysis window data, no baseline
         for (int i = 0; i < 16; i++)
             await SeedCpuAsync(_analysisStart.AddMinutes(i * 15), 90);
