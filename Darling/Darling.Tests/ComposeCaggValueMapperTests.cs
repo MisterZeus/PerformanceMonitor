@@ -63,7 +63,7 @@ public sealed class ComposeCaggValueMapperTests
     {
         Assert.Equal(
             "CAST(SUM(f.worker_time_sum) AS double precision)",
-            ComposeCaggValueMapper.BuildCaggNativeExpr(Plan("query_worker_us", ComposeAggregate.Sum)));
+            ComposeCaggValueMapper.BuildCaggNativeExpr(Measure("query_worker_us"), ComposeAggregate.Sum));
     }
 
     [Fact]
@@ -71,7 +71,7 @@ public sealed class ComposeCaggValueMapperTests
     {
         Assert.Equal(
             "CAST(MIN(f.worker_time_min) AS double precision)",
-            ComposeCaggValueMapper.BuildCaggNativeExpr(Plan("query_worker_us", ComposeAggregate.Min)));
+            ComposeCaggValueMapper.BuildCaggNativeExpr(Measure("query_worker_us"), ComposeAggregate.Min));
     }
 
     [Fact]
@@ -79,7 +79,7 @@ public sealed class ComposeCaggValueMapperTests
     {
         Assert.Equal(
             "CAST(MAX(f.worker_time_max) AS double precision)",
-            ComposeCaggValueMapper.BuildCaggNativeExpr(Plan("query_worker_us", ComposeAggregate.Max)));
+            ComposeCaggValueMapper.BuildCaggNativeExpr(Measure("query_worker_us"), ComposeAggregate.Max));
     }
 
     [Fact]
@@ -88,7 +88,7 @@ public sealed class ComposeCaggValueMapperTests
         /* The exact reconstruction: AVG(delta) == SUM(x_sum)/SUM(sample_count), never AVG(x_sum). */
         Assert.Equal(
             "(CAST(SUM(f.worker_time_sum) AS double precision) / NULLIF(SUM(f.sample_count), 0))",
-            ComposeCaggValueMapper.BuildCaggNativeExpr(Plan("query_worker_us", ComposeAggregate.Avg)));
+            ComposeCaggValueMapper.BuildCaggNativeExpr(Measure("query_worker_us"), ComposeAggregate.Avg));
     }
 
     [Fact]
@@ -96,7 +96,7 @@ public sealed class ComposeCaggValueMapperTests
     {
         Assert.Equal(
             "CAST(SUM(f.elapsed_time_sum) AS double precision)",
-            ComposeCaggValueMapper.BuildCaggNativeExpr(Plan("proc_elapsed_us", ComposeAggregate.Sum)));
+            ComposeCaggValueMapper.BuildCaggNativeExpr(Measure("proc_elapsed_us"), ComposeAggregate.Sum));
     }
 
     /* ---------------- Sum-ratio remap (both operands => *_sum) ---------------- */
@@ -107,7 +107,7 @@ public sealed class ComposeCaggValueMapperTests
         /* query_avg_elapsed_us = query_elapsed_us (delta_elapsed_time) / query_executions (delta_execution_count). */
         Assert.Equal(
             "(CAST(SUM(f.elapsed_time_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0))",
-            ComposeCaggValueMapper.BuildCaggNativeExpr(Plan("query_avg_elapsed_us")));
+            ComposeCaggValueMapper.BuildCaggNativeExpr(Measure("query_avg_elapsed_us"), Measure("query_avg_elapsed_us").DefaultTimeAgg));
     }
 
     [Fact]
@@ -115,7 +115,7 @@ public sealed class ComposeCaggValueMapperTests
     {
         Assert.Equal(
             "(CAST(SUM(f.worker_time_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0))",
-            ComposeCaggValueMapper.BuildCaggNativeExpr(Plan("proc_avg_cpu_us")));
+            ComposeCaggValueMapper.BuildCaggNativeExpr(Measure("proc_avg_cpu_us"), Measure("proc_avg_cpu_us").DefaultTimeAgg));
     }
 
     /* ---------------- Query Store remap (execution-weighted mean, executions, peaks) ---------------- */
@@ -126,7 +126,7 @@ public sealed class ComposeCaggValueMapperTests
         /* SUM(avg_duration_us * execution_count) / SUM(execution_count) reconstructs from the reshaped columns. */
         Assert.Equal(
             "(CAST(SUM(f.duration_us_weighted_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0))",
-            ComposeCaggValueMapper.BuildCaggNativeExpr(Plan("qs_avg_duration_us")));
+            ComposeCaggValueMapper.BuildCaggNativeExpr(Measure("qs_avg_duration_us"), Measure("qs_avg_duration_us").DefaultTimeAgg));
     }
 
     [Fact]
@@ -134,7 +134,7 @@ public sealed class ComposeCaggValueMapperTests
     {
         Assert.Equal(
             "(CAST(SUM(f.cpu_us_weighted_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0))",
-            ComposeCaggValueMapper.BuildCaggNativeExpr(Plan("qs_avg_cpu_us")));
+            ComposeCaggValueMapper.BuildCaggNativeExpr(Measure("qs_avg_cpu_us"), Measure("qs_avg_cpu_us").DefaultTimeAgg));
     }
 
     [Fact]
@@ -142,7 +142,7 @@ public sealed class ComposeCaggValueMapperTests
     {
         Assert.Equal(
             "CAST(SUM(f.execution_count_sum) AS double precision)",
-            ComposeCaggValueMapper.BuildCaggNativeExpr(Plan("qs_executions", ComposeAggregate.Sum)));
+            ComposeCaggValueMapper.BuildCaggNativeExpr(Measure("qs_executions"), ComposeAggregate.Sum));
     }
 
     [Fact]
@@ -150,7 +150,7 @@ public sealed class ComposeCaggValueMapperTests
     {
         Assert.Equal(
             "(CAST(SUM(f.execution_count_sum) AS double precision) / NULLIF(SUM(f.sample_count), 0))",
-            ComposeCaggValueMapper.BuildCaggNativeExpr(Plan("qs_executions", ComposeAggregate.Avg)));
+            ComposeCaggValueMapper.BuildCaggNativeExpr(Measure("qs_executions"), ComposeAggregate.Avg));
     }
 
     [Fact]
@@ -158,6 +158,6 @@ public sealed class ComposeCaggValueMapperTests
     {
         Assert.Equal(
             "CAST(MAX(f.max_duration_us_max) AS double precision)",
-            ComposeCaggValueMapper.BuildCaggNativeExpr(Plan("qs_max_duration_us", ComposeAggregate.Max)));
+            ComposeCaggValueMapper.BuildCaggNativeExpr(Measure("qs_max_duration_us"), ComposeAggregate.Max));
     }
 }

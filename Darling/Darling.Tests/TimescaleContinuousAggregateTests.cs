@@ -263,4 +263,54 @@ public sealed class TimescaleContinuousAggregateTests
     [Fact]
     public void QueryStatsDbHourly_ExcludesNullWorkerTime_MatchingTheReadersFilter() =>
         Assert.Contains("WHERE delta_worker_time IS NOT NULL", TimescaleSupport.CreateQueryStatsDbHourlySql, StringComparison.Ordinal);
+
+    /* -- #1680: retention policies are created paused, and only armed when provably safe -- */
+
+    /// <summary>
+    /// TimescaleDB runs a new retention policy's first check IMMEDIATELY at creation, not on its next interval.
+    /// A policy created live therefore drops before any external session can pause it - there is no window to
+    /// win, and on a field store that cost two days of history permanently. Creation must be paused.
+    /// </summary>
+    [Fact]
+    public void RetentionPolicies_AreCreatedPaused()
+    {
+        var sql = TimescaleSupport.AddRetentionPolicySql("query_stats", "4 days");
+
+        Assert.Contains("scheduled => false", sql, StringComparison.Ordinal);
+        Assert.Contains("add_retention_policy('collect.query_stats'", sql, StringComparison.Ordinal);
+        Assert.Contains("if_not_exists => true", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Arming is a separate statement, targeted at the retention job for one relation. It must filter by
+    /// proc_name AND the hypertable, so it can never arm some other policy - or every policy - by accident.
+    /// </summary>
+    [Fact]
+    public void ArmRetentionPolicy_TargetsExactlyOneRelationsRetentionJob()
+    {
+        var sql = TimescaleSupport.ArmRetentionPolicySql("query_stats");
+
+        Assert.Contains("scheduled => true", sql, StringComparison.Ordinal);
+        Assert.Contains("proc_name = 'policy_retention'", sql, StringComparison.Ordinal);
+        Assert.Contains("hypertable_name = 'query_stats'", sql, StringComparison.Ordinal);
+        Assert.Contains("hypertable_schema = 'collect'", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The safety probe compares the source's oldest row against the coverage tier's oldest bucket. Raw tables
+    /// key on collection_time, rollups on bucket - reading the wrong column would compare against nothing and
+    /// silently decide it was safe to arm.
+    /// </summary>
+    [Theory]
+    [InlineData("query_stats", "collection_time", "query_stats_hourly")]
+    [InlineData("query_stats_hourly", "bucket", "query_stats_daily")]
+    public void RetentionArmSafetySql_ComparesSourceOldestToCoverageOldest(string relation, string timeColumn, string coverage)
+    {
+        var sql = TimescaleSupport.RetentionArmSafetySql(relation, timeColumn, coverage);
+
+        Assert.Contains($"min({timeColumn}) FROM collect.{relation}", sql, StringComparison.Ordinal);
+        Assert.Contains($"min(bucket) FROM collect.{coverage}", sql, StringComparison.Ordinal);
+        Assert.Contains("AS source_oldest", sql, StringComparison.Ordinal);
+        Assert.Contains("AS coverage_oldest", sql, StringComparison.Ordinal);
+    }
 }

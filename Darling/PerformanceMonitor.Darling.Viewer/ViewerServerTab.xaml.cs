@@ -264,6 +264,10 @@ public partial class ViewerServerTab : UserControl
                in the active display mode). Non-critical chrome — its own try/catch keeps it off the load path. */
             await UpdateServerFreshnessLabelAsync();
 
+            /* #1591: same slot, same reasoning — a permission-denied collector is only visible on the Collection
+               Health tab, which is why it went unnoticed. Badge it so it is discoverable from any tab. */
+            await UpdatePermissionDeniedBadgeAsync();
+
             do
             {
                 _refreshRequested = false;
@@ -281,6 +285,26 @@ public partial class ViewerServerTab : UserControl
         finally
         {
             _refreshInFlight = false;
+        }
+    }
+
+    /// <summary>
+    /// #1591: badges the Collection Health tab header with the number of collectors that were permission-denied.
+    /// Mirrors Lite's <c>RefreshPermissionDeniedBadgeAsync</c>. Best-effort chrome like the freshness readout
+    /// above — a read failure leaves the plain header rather than disturbing the tab load.
+    /// </summary>
+    private async Task UpdatePermissionDeniedBadgeAsync()
+    {
+        try
+        {
+            var denied = await _dataService.GetPermissionDeniedCollectorCountAsync(_server.ServerId);
+            CollectionHealthTab.Header = denied > 0
+                ? $"Collection Health ({denied} no permission)"
+                : "Collection Health";
+        }
+        catch
+        {
+            /* Chrome only — never break the tab load over a badge. */
         }
     }
 

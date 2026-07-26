@@ -67,6 +67,35 @@ public sealed partial class ViewerDataService
         """;
 
     /// <summary>
+    /// #1591: how many DISTINCT collectors were permission-denied in the window — the badge count for the
+    /// Collection Health tab header. Lite's twin is
+    /// <c>LocalDataService.GetPermissionDeniedCollectorCountAsync</c>.
+    ///
+    /// <para>Its own narrow COUNT rather than a reuse of <see cref="CollectionHealthSql"/>: that one is
+    /// per-collector and only runs when its tab is selected, which is exactly why a permission problem stayed
+    /// invisible until someone thought to look. Counts collectors, not rows, so one collector failing every cycle
+    /// for a week reads as "1" rather than a meaningless four-figure number.</para>
+    /// </summary>
+    public const string PermissionDeniedCollectorCountSql = """
+        SELECT COUNT(DISTINCT collector_name)
+        FROM v_collection_log
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   status = 'PERMISSIONS'
+        """;
+
+    /// <summary>Runs <see cref="PermissionDeniedCollectorCountSql"/> over the same 7-day window the health grid uses.</summary>
+    public async Task<int> GetPermissionDeniedCollectorCountAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        await using var command = _dataSource.CreateCommand(PermissionDeniedCollectorCountSql);
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified) });
+
+        var scalar = await command.ExecuteScalarAsync(cancellationToken);
+        return scalar is null or DBNull ? 0 : Convert.ToInt32(scalar);
+    }
+
+    /// <summary>
     /// The fleet-cumulative variant of <see cref="CollectionHealthSql"/>: the same 10-column per-collector
     /// aggregate but across ALL enabled monitored servers (GROUP BY server_id, collector_name — one row per
     /// server/collector pair), for the status bar's aggregate-view total (mirrors Lite's cumulative
