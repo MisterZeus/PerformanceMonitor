@@ -409,6 +409,132 @@ WHERE hypertable_name = 'wait_stats'
            real end state on this fixture, and if_not_exists keeps every rerun a no-op. */
     }
 
+    /// <summary>
+    /// #1705: EXECUTES the retention policies instead of string-matching the SQL. The bug this replaces shipped
+    /// precisely because the only pin asserted the generated string contained <c>scheduled =&gt; false</c> — an
+    /// argument <c>add_retention_policy</c> has never had — so the pin passed while the statement failed 42883 on
+    /// every store and the per-policy catch downgraded it to a warning. Nothing that reads a string can catch
+    /// that; only running it can. Asserts every policy is created (not swallowed), lands in
+    /// <c>timescaledb_information.jobs</c>, and is created PAUSED so #1680's guarantee still holds.
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_RetentionPoliciesActuallyApply_AndAreCreatedPaused_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live retention test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+        Assert.Equal(CollectorCatalog.All.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
+
+        /* This test MUTATES the shared fixture's shape, so it restores it. Creating the hourly CAGGs changes
+           compose's tier routing (RunComposedPanel_OldWindow_AgainstPlainPostgres_RunsCleanOnRaw asserts a
+           10-day window lands on RAW, which only holds while no rollup exists), and leaving an ARMED raw
+           retention policy behind could drop chunks another live test planted. Snapshot what already exists,
+           and drop only what this test creates. */
+        var preexistingCaggs = await ExistingCaggsAsync(connection, ct);
+
+        try
+        {
+            /* Retention targets the hourly CAGGs as well as the raw tables, so the aggregates must exist first —
+               the same ordering EnsureRetentionPoliciesAsync documents. */
+            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+            /* THE assertion: every policy applied. A 42883 would be caught per-policy and counted as 0. */
+            var applied = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct);
+            Assert.True(applied == RetentionPolicyCount,
+                $"expected all {RetentionPolicyCount} retention policies to apply, got {applied} — a swallowed error means the policy SQL is invalid on this TimescaleDB");
+
+            /* Idempotent: the second pass hits if_not_exists (job_id -1) and must not throw on alter_job(-1). */
+            Assert.Equal(RetentionPolicyCount, await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct));
+
+            using var job = new NpgsqlCommand(@"
+SELECT COUNT(*)
+FROM timescaledb_information.jobs
+WHERE proc_name = 'policy_retention'
+AND   hypertable_schema = 'collect'", connection);
+            var jobs = (long)(await job.ExecuteScalarAsync(ct))!;
+            Assert.True(jobs >= RetentionPolicyCount,
+                $"expected at least {RetentionPolicyCount} policy_retention jobs on collect.*, found {jobs}");
+
+            /* Created PAUSED (#1680). The invariant that holds whether or not the safety check armed a policy:
+               none may be ARMED while its source still holds rows its coverage tier does not cover. An
+               un-paused creation is exactly what would violate it. */
+            using var unsafeArmed = new NpgsqlCommand(@"
+SELECT COUNT(*)
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.scheduled
+AND   j.hypertable_name = 'query_stats'
+AND   (SELECT min(collection_time) FROM collect.query_stats) IS NOT NULL
+AND   ((SELECT min(bucket) FROM collect.query_stats_hourly) IS NULL
+       OR (SELECT min(bucket) FROM collect.query_stats_hourly) > (SELECT min(collection_time) FROM collect.query_stats))", connection);
+            var bad = (long)(await unsafeArmed.ExecuteScalarAsync(ct))!;
+            Assert.True(bad == 0, "a retention policy is ARMED while its coverage tier does not cover everything the source holds — creation was not paused");
+        }
+        finally
+        {
+            /* Retention policies first (they reference the relations), then only the CAGGs this test created —
+               DROP ... CASCADE takes each aggregate's own policy with it. */
+            foreach (var relation in RetentionRelations)
+            {
+                await TryExecAsync(connection, $"SELECT remove_retention_policy('collect.{relation}', if_exists => true)", ct);
+            }
+
+            foreach (var cagg in (await ExistingCaggsAsync(connection, ct)).Except(preexistingCaggs, StringComparer.Ordinal))
+            {
+                await TryExecAsync(connection, $"DROP MATERIALIZED VIEW IF EXISTS collect.{cagg} CASCADE", ct);
+            }
+        }
+    }
+
+    /// <summary>The continuous aggregates present in <c>collect</c> right now, so the retention test can drop
+    /// exactly the ones it created and leave a pre-existing store's shape alone.</summary>
+    private static async Task<string[]> ExistingCaggsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(
+            "SELECT view_name FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect'", connection);
+        using var reader = await command.ExecuteReaderAsync(ct);
+        var names = new System.Collections.Generic.List<string>();
+        while (await reader.ReadAsync(ct))
+        {
+            names.Add(reader.GetString(0));
+        }
+
+        return names.ToArray();
+    }
+
+    /// <summary>Best-effort cleanup statement — a teardown failure must not mask the assertion that already ran.</summary>
+    private static async Task TryExecAsync(NpgsqlConnection connection, string sql, System.Threading.CancellationToken ct)
+    {
+        try
+        {
+            using var command = new NpgsqlCommand(sql, connection);
+            await command.ExecuteNonQueryAsync(ct);
+        }
+        catch (PostgresException)
+        {
+        }
+    }
+
+    /// <summary>The relations EnsureRetentionPoliciesAsync attaches policies to, for teardown.</summary>
+    private static readonly string[] RetentionRelations =
+    {
+        "query_stats", "procedure_stats", "query_store_stats",
+        "query_stats_hourly", "procedure_stats_hourly", "query_store_stats_hourly", "query_stats_db_hourly",
+    };
+
+    /// <summary>The policy set EnsureRetentionPoliciesAsync attaches: three raw tables plus four hourly CAGGs.</summary>
+    private const int RetentionPolicyCount = 7;
+
     [Fact]
     public async Task CompressionJobSelfHeal_DetectionQueryValid_AndRearmSucceeds_AgainstDevPostgres()
     {

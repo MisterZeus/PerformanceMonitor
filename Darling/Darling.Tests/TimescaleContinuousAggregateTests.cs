@@ -276,9 +276,33 @@ public sealed class TimescaleContinuousAggregateTests
     {
         var sql = TimescaleSupport.AddRetentionPolicySql("query_stats", "4 days");
 
-        Assert.Contains("scheduled => false", sql, StringComparison.Ordinal);
         Assert.Contains("add_retention_policy('collect.query_stats'", sql, StringComparison.Ordinal);
         Assert.Contains("if_not_exists => true", sql, StringComparison.Ordinal);
+
+        /* The pause is a SEPARATE statement run in the same transaction, targeted by job id. */
+        Assert.Contains("alter_job($1::integer, scheduled => false)", TimescaleSupport.PauseJobSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #1705: <c>add_retention_policy</c> accepts no <c>scheduled</c> argument on ANY TimescaleDB 2.x — the
+    /// parameter belongs to <c>add_job</c> / <c>alter_job</c>. Passing it made this statement fail with 42883 on
+    /// every store, and the per-policy catch downgraded that to a warning, so retention silently stopped existing
+    /// fleet-wide. The old pin asserted the string contained <c>scheduled =&gt; false</c> and therefore passed
+    /// against SQL no version could parse; this asserts the opposite, so the bug cannot come back the same way.
+    /// </summary>
+    [Fact]
+    public void AddRetentionPolicy_NeverPassesScheduled_ItIsNotAnArgumentOfThatFunction()
+    {
+        var sql = TimescaleSupport.AddRetentionPolicySql("query_stats", "4 days");
+
+        Assert.DoesNotContain("scheduled", sql, StringComparison.OrdinalIgnoreCase);
+
+        /* The accepted 2.28.1 signature is (regclass, "any", boolean, interval, timestamptz, text, interval);
+           these are the only named arguments this statement may use. */
+        foreach (var illegal in new[] { "scheduled =>", "paused =>", "enabled =>" })
+        {
+            Assert.DoesNotContain(illegal, sql, StringComparison.OrdinalIgnoreCase);
+        }
     }
 
     /// <summary>
