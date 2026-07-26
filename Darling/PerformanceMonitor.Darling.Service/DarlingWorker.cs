@@ -795,7 +795,13 @@ public sealed class DarlingWorker : BackgroundService
                through the same by-reference alertSettings seam a store reload hot-swaps. */
             notifyConnectionChanges: () => alertSettings.NotifyConnectionChanges,
             notifyConnectionDownAtStartup: () => alertSettings.NotifyConnectionDownAtStartup,
-            connectionRefireMinutes: () => alertSettings.ConnectionRefireMinutes);
+            connectionRefireMinutes: () => alertSettings.ConnectionRefireMinutes,
+            /* #991: the Availability Group alert family reads its master switch and both thresholds live
+               through the same by-reference alertSettings seam, so a store edit takes effect on the next sweep
+               without a restart (and the clamps live on the settings properties, not here). */
+            notifyAgHealth: () => alertSettings.NotifyAgHealth,
+            agLagAlertSeconds: () => alertSettings.AgLagAlertSeconds,
+            agRedoQueueAlertKb: () => alertSettings.AgRedoQueueAlertKb);
 
         /* Phase-5 analysis slice AN3: the analysis pipeline's shared pieces, constructed once.
            The plan fetcher resolves a finding's serverId to the CONNECTED runtime's connection

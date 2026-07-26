@@ -434,6 +434,20 @@ public sealed class ViewerSchemaVersionGateTests
     public void MapProbedSchemaVersion_V33KnobsAbsent_CapsAt32() =>
         Assert.Equal(32, ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
 
+    /// <summary>The next rung: the #1659 knobs present (V33) but neither #991 sentinel yet — the probe reports
+    /// 33, so the gate blocks a V34/V35 viewer until the service migrates.</summary>
+    [Fact]
+    public void MapProbedSchemaVersion_AgSentinelsAbsent_CapsAt33() =>
+        Assert.Equal(33, ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+
+    /// <summary>The rung that only exists because #991 shipped as two stacked migrations: the AG collector
+    /// TABLES are present (V34) but the AG ALERT knobs are not (V35). The probe must report 34, not 35 — a
+    /// store that took the collector migration and not the alert one is genuinely mid-upgrade, and reporting
+    /// 35 would let a V35 viewer open against a store whose config_alert_settings has no notify_ag_health.</summary>
+    [Fact]
+    public void MapProbedSchemaVersion_AgCollectorsPresentButAlertKnobsAbsent_CapsAt34() =>
+        Assert.Equal(34, ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+
     [Fact]
     public void MapProbedSchemaVersion_V23CompositeIsGatedBehindV22_NotAStandaloneTopArm()
     {
@@ -456,7 +470,7 @@ public sealed class ViewerSchemaVersionGateTests
            the connect-time gate refuse to open the viewer against a perfectly healthy store. */
         Assert.Equal(
             ViewerDataService.RequiredStoreSchemaVersion,
-            ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+            ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
     }
 }
 

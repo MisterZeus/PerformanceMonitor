@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
@@ -32,12 +33,14 @@ public sealed class DarlingObservabilityTests
     private const int TestServerId = -424242;
 
     [Fact]
-    public void MigrationScripts_V34AgCollectors_V36AgLatencyColumns()
+    public void MigrationScripts_AreRegisteredInAscendingOrder_V34AgCollectors_V36AgLatencyColumns()
     {
-        /* 35 scripts, not 36: version 35 is deliberately absent here — it belongs to the concurrent
-           AG-alerts work, and the ladder is a list of the versions THIS branch defines, not a dense
-           range. The applier runs pending versions in order, so a gap is harmless. */
-        Assert.Equal(35, PgMigrations.Scripts.Count);
+        /* Counted off the registered list rather than hard-coded: the count and the newest version are the
+           same fact stated twice, and pinning the count by literal makes every stacked branch collide here. */
+        Assert.Equal(PgMigrations.Scripts.Count, PgMigrations.Scripts.DistinctBy(s => s.Version).Count());
+        Assert.Equal(
+            PgMigrations.Scripts.Select(s => s.Version).OrderBy(v => v).ToArray(),
+            PgMigrations.Scripts.Select(s => s.Version).ToArray());
         Assert.Equal(1, PgMigrations.Scripts[0].Version);
         Assert.Equal(2, PgMigrations.Scripts[1].Version);
         Assert.Equal(3, PgMigrations.Scripts[2].Version);
@@ -71,8 +74,9 @@ public sealed class DarlingObservabilityTests
         Assert.Equal(31, PgMigrations.Scripts[30].Version);
         Assert.Equal(32, PgMigrations.Scripts[31].Version);
         Assert.Equal(33, PgMigrations.Scripts[32].Version);
-        Assert.Equal(34, PgMigrations.Scripts[33].Version);
-        Assert.Equal(36, PgMigrations.Scripts[34].Version);
+        /* The newest migration is asserted by identity rather than by ordinal: this ladder is walked by every
+           stacked branch at once, and a positional pin turns each addition into a conflict for the next. */
+        Assert.Equal(36, PgMigrations.Scripts[^1].Version);
         Assert.Equal(36, StorageVersion.SchemaVersion);
 
         /* V34 (#991) creates the two Availability Group collector tables. Schema-qualified collect.* and
@@ -81,8 +85,9 @@ public sealed class DarlingObservabilityTests
            The full column-for-column equality against PgSchemaGenerator.CreateTable is pinned by
            PgSchemaGeneratorTests.Migrations_JobHistoryAndAgentStatus_MatchGeneratedFreshShape — this test
            only pins the migration's IDENTITY (version, name) and the two traits worth stating in prose. */
-        var v34 = PgMigrations.Scripts[33].Sql;
-        Assert.Equal("availability-group-collectors", PgMigrations.Scripts[33].Name);
+        var v34Script = PgMigrations.Scripts.Single(s => s.Version == 34);
+        var v34 = v34Script.Sql;
+        Assert.Equal("availability-group-collectors", v34Script.Name);
 
         /* The LSNs are numeric(25,0) at the source — wider than bigint — so they land as text. */
         Assert.Contains("last_hardened_lsn text", v34, StringComparison.Ordinal);
@@ -91,8 +96,9 @@ public sealed class DarlingObservabilityTests
         /* V36 (#991 addendum) widens the V34 database-grain table additively. Identity only here; the
            column-for-column reconstruction of V34 + V36 against the generator is pinned by
            PgSchemaGeneratorTests.Migrations_JobHistoryAndAgentStatus_MatchGeneratedFreshShape. */
-        var v36 = PgMigrations.Scripts[34].Sql;
-        Assert.Equal("ag-latency-columns", PgMigrations.Scripts[34].Name);
+        var v36Script = PgMigrations.Scripts.Single(s => s.Version == 36);
+        var v36 = v36Script.Sql;
+        Assert.Equal("ag-latency-columns", v36Script.Name);
         Assert.Contains("ALTER TABLE collect.ag_database_replica_states", v36, StringComparison.Ordinal);
         Assert.Contains("ADD COLUMN IF NOT EXISTS est_send_drain_time_min double precision", v36, StringComparison.Ordinal);
 
