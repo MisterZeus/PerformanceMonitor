@@ -466,6 +466,11 @@ public sealed class DarlingMcpHostService : BackgroundService
                    store can serve, over the SHARED DarlingFleetReader that also powers the web /api/fleet and the
                    WPF viewer's Overview (one reader, one banding). ADDITIVE alongside get_server_summary. */
                 .WithGeminiCompatibleTools<DarlingMcpFleetTools>()
+                /* The Availability Group topology — get_ag_health (#991) — every monitored server's view of the
+                   AGs it hosts, replicas plus per-database secondary state, over the SHARED DarlingAgReader that
+                   also powers the web /api/ag and the Availability Groups page (one reader, one banding). Like
+                   get_fleet_overview this is a cross-server read the central store makes possible. */
+                .WithGeminiCompatibleTools<DarlingMcpAgTools>()
                 /* The system_health parse-on-read family — get_health_parser_cpu_tasks / _io_issues /
                    _memory_broker / _memory_conditions / _memory_node_oom / _scheduler_issues /
                    _severe_errors / _system_health — the same names the Dashboard exposes. Where the Dashboard
