@@ -208,8 +208,9 @@ public sealed class DarlingAgReaderTests
         string syncHealth = "HEALTHY",
         string? connected = "CONNECTED",
         string? operational = "ONLINE",
-        string? recoveryHealth = "ONLINE") =>
-        new(serverId, serverName, At(1), agName, replicaName, role, operational, connected, recoveryHealth, syncHealth, "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://" + replicaName + ":5022");
+        string? recoveryHealth = "ONLINE",
+        bool? isLocal = null) =>
+        new(serverId, serverName, At(1), agName, replicaName, role, isLocal, operational, connected, recoveryHealth, syncHealth, "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://" + replicaName + ":5022");
 
     private static Reader.DatabaseRow Database(
         int serverId,
@@ -369,7 +370,7 @@ public sealed class DarlingAgReaderTests
             "\"worst_severity\"", "\"availability_groups\"", "\"server_name\"", "\"ag_name\"", "\"collection_time\"",
             "\"primary_replica\"", "\"severity\"", "\"severity_label\"", "\"replicas\"", "\"databases\"",
             "\"database_collection_time\"",
-            "\"replica_server_name\"", "\"role\"", "\"role_severity\"", "\"is_primary\"",
+            "\"replica_server_name\"", "\"role\"", "\"role_severity\"", "\"is_primary\"", "\"is_local\"",
             "\"operational_state\"", "\"operational_state_severity\"",
             "\"connected_state\"", "\"connected_state_severity\"",
             "\"recovery_health\"", "\"recovery_health_severity\"",
@@ -444,6 +445,15 @@ public sealed class DarlingAgReaderTests
             Assert.Contains("GROUP BY server_id", sql, StringComparison.Ordinal);
             Assert.DoesNotContain("DISTINCT ON", sql, StringComparison.Ordinal);
         }
+    }
+
+    [Fact]
+    public void ReadSql_SelectsIsLocalOnBothGrains()
+    {
+        /* V37 put is_local on the replica grain; V34 already had it on the database grain. Inserting it shifted
+           the replica read's ordinals, which is the classic silent mis-map. */
+        Assert.Contains("r.is_local", Reader.ReplicaStatesSql, StringComparison.Ordinal);
+        Assert.Contains("d.is_local", Reader.DatabaseReplicaStatesSql, StringComparison.Ordinal);
     }
 
     [Fact]
