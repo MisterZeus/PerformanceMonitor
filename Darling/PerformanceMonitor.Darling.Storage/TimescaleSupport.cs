@@ -657,11 +657,35 @@ WITH NO DATA";
     /// RetentionTierRouterTests.</summary>
     public static readonly TimeSpan HourlyRetentionSpan = TimeSpan.FromDays(21);
 
-    /// <summary>A TimescaleDB retention policy: schedule a background job that DROPs chunks older than
+    /// <summary>
+    /// A TimescaleDB retention policy: schedule a background job that DROPs chunks older than
     /// <paramref name="dropAfter"/>. <c>if_not_exists</c> so a restart re-converges. The actual drop is a
-    /// chunk-level DROP TABLE (cheap, no rewrite), so unlike the CAGG backfill it needs no off-hours window.</summary>
+    /// chunk-level DROP TABLE (cheap, no rewrite), so unlike the CAGG backfill it needs no off-hours window.
+    ///
+    /// <para><b>There is deliberately no <c>scheduled</c> argument here (#1705).</b> <c>add_retention_policy</c>
+    /// has NEVER accepted one on any TimescaleDB 2.x — the parameter exists only on <c>add_job</c> /
+    /// <c>alter_job</c>. Passing it made this statement fail with <c>42883 function ... does not exist</c> on
+    /// EVERY store, fresh or upgraded, and the per-policy catch in
+    /// <see cref="EnsureRetentionPoliciesAsync"/> turned that into a warning — so retention silently stopped
+    /// existing everywhere rather than only on old versions. The paused-at-creation guarantee #1680 needs is
+    /// preserved by the CALLER instead: it creates and pauses inside ONE transaction (see
+    /// <see cref="PauseJobSql"/>). Verified against 2.28.1: the accepted signature is
+    /// <c>(regclass, "any", boolean, interval, timestamptz, text, interval)</c>.</para>
+    ///
+    /// <para>Returns the new policy's <c>job_id</c>, or <c>-1</c> when <c>if_not_exists</c> matched an existing
+    /// policy and skipped — the caller MUST NOT feed that -1 to <c>alter_job</c>.</para>
+    /// </summary>
     public static string AddRetentionPolicySql(string relation, string dropAfter)
-        => $"SELECT add_retention_policy('collect.{relation}', drop_after => INTERVAL '{dropAfter}', if_not_exists => true, scheduled => false)";
+        => $"SELECT add_retention_policy('collect.{relation}', drop_after => INTERVAL '{dropAfter}', if_not_exists => true)";
+
+    /// <summary>
+    /// Pauses a just-created job by id. Run in the SAME transaction as
+    /// <see cref="AddRetentionPolicySql"/>: the TimescaleDB job scheduler is a separate backend, so it cannot see
+    /// the <c>bgw_job</c> row until that transaction commits, and by then the row already reads
+    /// <c>scheduled = false</c>. That closes the #1680 window without needing a parameter the API does not have.
+    /// <c>job_id</c> is <c>integer</c>, not bigint (the #1586 cast trap). $1 the job id.
+    /// </summary>
+    public const string PauseJobSql = "SELECT alter_job($1::integer, scheduled => false)";
 
     /// <summary>
     /// Arms a retention policy that was created paused. Separated from creation because TimescaleDB runs a new
@@ -772,10 +796,32 @@ AND   j.hypertable_name = '{relation}'";
             {
                 /* Created PAUSED, always. TimescaleDB runs a new policy's first check immediately at creation
                    rather than on its next interval, so a policy created live drops before any external session
-                   can pause it - there is no window to win. That cost a field store two days of history. */
-                using (var create = new NpgsqlCommand(AddRetentionPolicySql(relation, dropAfter), connection) { CommandTimeout = SetupTimeoutSeconds })
+                   can pause it - there is no window to win. That cost a field store two days of history.
+
+                   The pause happens in the SAME transaction as the create (#1705). add_retention_policy has no
+                   scheduled argument on any 2.x, so the only way to never expose an armed job is to keep the
+                   bgw_job row invisible until it already reads scheduled = false: the scheduler is a separate
+                   backend and cannot see an uncommitted row. Verified on 2.28.1 against a hypertable holding
+                   30-day-old rows under a 4-day policy - the rows survived, so no immediate drop occurred. */
+                await using (var tx = await connection.BeginTransactionAsync(cancellationToken))
                 {
-                    await create.ExecuteNonQueryAsync(cancellationToken);
+                    int jobId;
+                    using (var create = new NpgsqlCommand(AddRetentionPolicySql(relation, dropAfter), connection, tx) { CommandTimeout = SetupTimeoutSeconds })
+                    {
+                        jobId = Convert.ToInt32(await create.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+                    }
+
+                    /* -1 means if_not_exists matched an existing policy and skipped. There is no new job to
+                       pause, and the existing one keeps whatever armed/paused state it already had - which is
+                       what makes a restart converge instead of re-pausing a policy this store already armed. */
+                    if (jobId > 0)
+                    {
+                        using var pause = new NpgsqlCommand(PauseJobSql, connection, tx) { CommandTimeout = SetupTimeoutSeconds };
+                        pause.Parameters.AddWithValue(jobId);
+                        await pause.ExecuteNonQueryAsync(cancellationToken);
+                    }
+
+                    await tx.CommitAsync(cancellationToken);
                 }
 
                 applied++;
