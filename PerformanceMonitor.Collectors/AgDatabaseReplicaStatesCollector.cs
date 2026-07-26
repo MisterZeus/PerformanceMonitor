@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Data.Common;
 using System.Threading;
@@ -33,14 +34,37 @@ namespace PerformanceMonitor.Collectors;
 /// Deriving a byte distance between them is ANALYSIS, deliberately left to a reader.</para>
 ///
 /// <para>secondary_lag_seconds is 2016+ and the repo floor IS 2016, so it is referenced directly
-/// with no version branch. MS Learn documents it reading <c>0</c> — not NULL — while data movement
-/// is SUSPENDED, so a suspended replica presents as zero lag: any later lag analysis has to read
-/// is_suspended alongside it or it will under-report the worst case. Both columns are collected here
-/// so that reading is possible.</para>
+/// with no version branch. MEASURED BEHAVIOR, which contradicts the docs: MS Learn says it "shows as 0
+/// if the data movement is suspended", but on a live SQL Server 2022 (16.0.4265.3) CLUSTER_TYPE = NONE
+/// AG it does the inverse — it reads 0 while movement is ACTIVE and caught up, and accrues monotonically
+/// once SUSPENDED (0 → 15 → 31 → 46 → 62 s across a 60 s SUSPEND_FROM_USER, back to 0 on resume). So a
+/// suspended replica does NOT hide as zero lag, and a lag threshold fires on its own. Read is_suspended
+/// alongside it to explain WHY lag is climbing, not to catch lag that is being masked. (Validated on a
+/// clusterless AG on one build; WSFC untested, so treat the doc sentence as unreliable rather than
+/// inverted-everywhere.)</para>
+///
+/// <para>Two more measured quirks of the SUSPENDED state, both relevant to anyone thresholding these:
+/// log_send_queue_size goes NULL rather than growing, while redo_queue_size FREEZES at its last value —
+/// so a redo-queue reading on a suspended replica is stale, not current.</para>
+///
+/// <para>GRAIN WARNING: on a SECONDARY, sys.dm_hadr_database_replica_states carries only the LOCAL
+/// replica's rows, so this INNER JOIN narrows to a one-row self-view even though
+/// sys.availability_replicas holds every replica. A complete AG picture requires collecting from the
+/// PRIMARY; monitoring only a secondary yields that replica's own view and nothing about its peers.</para>
 ///
 /// <para>synchronization_state_desc's values are space-separated (<c>NOT SYNCHRONIZING</c>), unlike
 /// the replica-grain synchronization_health_desc's underscores (<c>NOT_HEALTHY</c>) — stored
 /// verbatim as the DMV reports them.</para>
+///
+/// <para>The four *_time columns are the commit/hardened/redone/received timestamps the reference
+/// project skips; they are what the canonical primary-vs-secondary commit-time lag math needs, and
+/// unlike secondary_lag_seconds they are directly comparable across replicas. The two
+/// est_*_time_min columns are drain-time ESTIMATES computed server-side: queue ÷ rate ÷ 60. Both
+/// guard the two ways the raw expression misbehaves — <c>* 1.0</c> stops BIGINT ÷ BIGINT integer
+/// division, and <c>NULLIF(rate, 0)</c> stops the divide-by-zero an idle or suspended replica would
+/// otherwise raise. A NULL estimate therefore means "no drain rate" (idle, suspended, or caught up),
+/// which is the honest answer; it is deliberately never coerced to 0, which would read as "drains
+/// instantly" — the exact opposite of the truth.</para>
 ///
 /// <para>PERMISSIONS: this query joins the same two AG catalog views, which require VIEW ANY
 /// DEFINITION and hide rows rather than erroring without it — see
@@ -69,7 +93,13 @@ public sealed class AgDatabaseReplicaStatesCollector : CollectorDefinitionBase<A
         bool? IsSuspended,
         string? SuspendReasonDesc,
         string? AvailabilityModeDesc,
-        long? SecondaryLagSeconds);
+        long? SecondaryLagSeconds,
+        DateTime? LastCommitTime,
+        DateTime? LastHardenedTime,
+        DateTime? LastRedoneTime,
+        DateTime? LastReceivedTime,
+        double? EstRedoCompletionTimeMin,
+        double? EstSendDrainTimeMin);
 
     private const string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -89,7 +119,13 @@ SELECT
     is_suspended = hdrs.is_suspended,
     suspend_reason_desc = hdrs.suspend_reason_desc,
     availability_mode_desc = ar.availability_mode_desc,
-    secondary_lag_seconds = hdrs.secondary_lag_seconds
+    secondary_lag_seconds = hdrs.secondary_lag_seconds,
+    last_commit_time = hdrs.last_commit_time,
+    last_hardened_time = hdrs.last_hardened_time,
+    last_redone_time = hdrs.last_redone_time,
+    last_received_time = hdrs.last_received_time,
+    est_redo_completion_time_min = CONVERT(float, (hdrs.redo_queue_size * 1.0 / NULLIF(hdrs.redo_rate, 0)) / 60.0),
+    est_send_drain_time_min = CONVERT(float, (hdrs.log_send_queue_size * 1.0 / NULLIF(hdrs.log_send_rate, 0)) / 60.0)
 FROM sys.dm_hadr_database_replica_states AS hdrs
 JOIN sys.availability_replicas AS ar
   ON  hdrs.replica_id = ar.replica_id
@@ -138,6 +174,15 @@ OPTION(RECOMPILE);";
         new CollectorColumn("suspend_reason_desc", CollectorColumnType.Varchar),
         new CollectorColumn("availability_mode_desc", CollectorColumnType.Varchar),
         new CollectorColumn("secondary_lag_seconds", CollectorColumnType.BigInt),
+        /* Appended, never inserted (#991 addendum): an upgraded store gets these via ALTER TABLE ADD
+           COLUMN, which appends physically, so a fresh store's generated shape only matches if they
+           are last here too. */
+        new CollectorColumn("last_commit_time", CollectorColumnType.Timestamp),
+        new CollectorColumn("last_hardened_time", CollectorColumnType.Timestamp),
+        new CollectorColumn("last_redone_time", CollectorColumnType.Timestamp),
+        new CollectorColumn("last_received_time", CollectorColumnType.Timestamp),
+        new CollectorColumn("est_redo_completion_time_min", CollectorColumnType.Double),
+        new CollectorColumn("est_send_drain_time_min", CollectorColumnType.Double),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -161,7 +206,13 @@ OPTION(RECOMPILE);";
                 IsSuspended: reader.IsDBNull(11) ? null : reader.GetBoolean(11),
                 SuspendReasonDesc: reader.IsDBNull(12) ? null : reader.GetString(12),
                 AvailabilityModeDesc: reader.IsDBNull(13) ? null : reader.GetString(13),
-                SecondaryLagSeconds: reader.IsDBNull(14) ? null : reader.GetInt64(14)));
+                SecondaryLagSeconds: reader.IsDBNull(14) ? null : reader.GetInt64(14),
+                LastCommitTime: reader.IsDBNull(15) ? null : reader.GetDateTime(15),
+                LastHardenedTime: reader.IsDBNull(16) ? null : reader.GetDateTime(16),
+                LastRedoneTime: reader.IsDBNull(17) ? null : reader.GetDateTime(17),
+                LastReceivedTime: reader.IsDBNull(18) ? null : reader.GetDateTime(18),
+                EstRedoCompletionTimeMin: reader.IsDBNull(19) ? null : reader.GetDouble(19),
+                EstSendDrainTimeMin: reader.IsDBNull(20) ? null : reader.GetDouble(20)));
         }
 
         return rows;
@@ -184,6 +235,12 @@ OPTION(RECOMPILE);";
             .Value(row.IsSuspended)               /* is_suspended BOOLEAN */
             .Value(row.SuspendReasonDesc)         /* suspend_reason_desc VARCHAR */
             .Value(row.AvailabilityModeDesc)      /* availability_mode_desc VARCHAR */
-            .Value(row.SecondaryLagSeconds);      /* secondary_lag_seconds BIGINT (s) */
+            .Value(row.SecondaryLagSeconds)       /* secondary_lag_seconds BIGINT (s) */
+            .Value(row.LastCommitTime)            /* last_commit_time TIMESTAMP */
+            .Value(row.LastHardenedTime)          /* last_hardened_time TIMESTAMP */
+            .Value(row.LastRedoneTime)            /* last_redone_time TIMESTAMP */
+            .Value(row.LastReceivedTime)          /* last_received_time TIMESTAMP */
+            .Value(row.EstRedoCompletionTimeMin)  /* est_redo_completion_time_min DOUBLE (min) */
+            .Value(row.EstSendDrainTimeMin);      /* est_send_drain_time_min DOUBLE (min) */
     }
 }

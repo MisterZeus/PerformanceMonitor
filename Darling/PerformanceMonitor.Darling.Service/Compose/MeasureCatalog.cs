@@ -1094,6 +1094,27 @@ public static class MeasureCatalog
             DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = AgDatabaseDims,
         },
 
+        /* The two drain-time ESTIMATES (#991 addendum). Computed server-side per row, at the sample's own
+           instant, rather than composed here as a queue/rate ratio — and that is the whole point: a ratio
+           of two window AGGREGATES (avg queue ÷ avg rate) is not the average of the per-sample ratios, and
+           the two diverge badly exactly when rates swing, which is when anyone is looking. Storing the
+           per-row ratio and averaging THAT is the honest read. NULL where no rate exists (idle, suspended,
+           caught up); NULL is never coerced to 0, which would read as "drains instantly". */
+        new ComposeMeasure
+        {
+            Key = "ag_est_redo_drain_min", DisplayName = "AG estimated redo drain time", Category = CatAvailabilityGroups, SourceTable = "ag_database_replica_states",
+            Archetype = MeasureArchetype.Gauge, Column = "est_redo_completion_time_min",
+            NativeUnit = "min", DefaultUnit = "min", UnitFamily = FamilyDuration,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = AgDatabaseDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "ag_est_send_drain_min", DisplayName = "AG estimated send drain time", Category = CatAvailabilityGroups, SourceTable = "ag_database_replica_states",
+            Archetype = MeasureArchetype.Gauge, Column = "est_send_drain_time_min",
+            NativeUnit = "min", DefaultUnit = "min", UnitFamily = FamilyDuration,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = AgDatabaseDims,
+        },
+
         /* ═══════════ Same-source ratios (design §2c) — the bread-and-butter derived metrics ═══════════ */
         /* Supporting execution-count scalars the "average per execution" ratios divide by (query_stats had no
            executions measure; procedure_stats already exposes proc_executions). */

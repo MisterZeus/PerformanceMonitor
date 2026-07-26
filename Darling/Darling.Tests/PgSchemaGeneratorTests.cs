@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
@@ -420,17 +421,74 @@ public sealed class PgSchemaGeneratorTests
         Assert.Contains(CollectQualified(AgentStatusCollector.Instance), v25, StringComparison.Ordinal);
         Assert.Contains("CREATE INDEX IF NOT EXISTS idx_agent_status_time ON collect.agent_status(server_id, collection_time);", v25, StringComparison.Ordinal);
 
-        /* V34 (#991) creates BOTH Availability Group tables in one migration body — same contract, so it
-           is pinned here rather than by a name-presence check. The weaker `Assert.Contains(column.Name)`
-           sweep this replaces would have passed a V34 with the columns reordered, is_local typed text, or
-           a spurious NOT NULL: exactly the drifts that make an upgraded store's physical shape differ from
-           a fresh one. Compares the WHOLE generated CREATE TABLE, so shape is pinned, not vocabulary. */
+        /* V34 (#991) creates BOTH Availability Group tables in one migration body — same contract. The
+           weaker `Assert.Contains(column.Name)` sweep this replaces would have passed a V34 with the
+           columns reordered, is_local typed text, or a spurious NOT NULL: exactly the drifts that make an
+           upgraded store's physical shape differ from a fresh one. */
         var v34 = Lf(PgMigrations.Scripts.Single(m => m.Version == 34).Sql);
 
         Assert.Contains(CollectQualified(AgReplicaStatesCollector.Instance), v34, StringComparison.Ordinal);
         Assert.Contains("CREATE INDEX IF NOT EXISTS idx_ag_replica_states_time ON collect.ag_replica_states(server_id, collection_time);", v34, StringComparison.Ordinal);
-        Assert.Contains(CollectQualified(AgDatabaseReplicaStatesCollector.Instance), v34, StringComparison.Ordinal);
         Assert.Contains("CREATE INDEX IF NOT EXISTS idx_ag_database_replica_states_time ON collect.ag_database_replica_states(server_id, collection_time);", v34, StringComparison.Ordinal);
+
+        /* The database-grain table is the one case where a single migration is NOT the whole story: V34
+           created its first 15 payload columns and V36 (#991 addendum) appended 6 more, so an upgraded
+           store's shape is V34 + V36 and only their SUM can equal the generator's current output.
+           Reconstruct that here rather than weakening the pin to name-presence — generate the historical
+           15-column shape and assert V34 matches it exactly, then assert V36 appends the remaining columns
+           in order with the generator's own types. Together those two prove fresh == upgraded. */
+        var currentColumns = AgDatabaseReplicaStatesCollector.Instance.PayloadColumns;
+        const int V34ColumnCount = 15;
+
+        Assert.Contains(
+            CollectQualified(new TruncatedSchema(AgDatabaseReplicaStatesCollector.Instance, V34ColumnCount)),
+            v34,
+            StringComparison.Ordinal);
+
+        var v36 = Lf(PgMigrations.Scripts.Single(m => m.Version == 36).Sql);
+
+        foreach (var column in currentColumns.Skip(V34ColumnCount))
+        {
+            var generatedType = Lf(PgSchemaGenerator.CreateTable(new TruncatedSchema(AgDatabaseReplicaStatesCollector.Instance, currentColumns.Count)))
+                .Split('\n')
+                .Single(l => l.TrimStart().StartsWith(column.Name + " ", StringComparison.Ordinal))
+                .Trim()
+                .TrimEnd(',');
+
+            Assert.Contains($"ADD COLUMN IF NOT EXISTS {generatedType}", v36, StringComparison.Ordinal);
+        }
+
+        /* And V34 must NOT have been widened in place: its CREATE TABLE IF NOT EXISTS is a no-op on a store
+           that already ran it, so editing V34 instead of adding V36 would leave every migrated store short
+           the new columns while fresh installs got them. */
+        foreach (var appended in currentColumns.Skip(V34ColumnCount))
+        {
+            Assert.DoesNotContain($"    {appended.Name} ", v34, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// A collector's schema surface with its payload truncated to the first N columns — lets a test
+    /// generate the HISTORICAL shape a migration froze, so an additive migration can be pinned as
+    /// "V-old created these, V-new appended those, and together they equal today's generated table".
+    /// </summary>
+    private sealed class TruncatedSchema : ICollectorSchemaInfo
+    {
+        private readonly ICollectorSchemaInfo _inner;
+
+        public TruncatedSchema(ICollectorSchemaInfo inner, int columnCount)
+        {
+            _inner = inner;
+            PayloadColumns = inner.PayloadColumns.Take(columnCount).ToList();
+        }
+
+        public string Name => _inner.Name;
+        public string TargetTable => _inner.TargetTable;
+        public bool IncludesCollectionId => _inner.IncludesCollectionId;
+        public string PrefixIdColumnName => _inner.PrefixIdColumnName;
+        public string PrefixTimeColumnName => _inner.PrefixTimeColumnName;
+        public IReadOnlyList<CollectorColumn> PayloadColumns { get; }
+        public bool AppliesTo(CollectorTargetInfo target) => _inner.AppliesTo(target);
     }
 
     [Fact]

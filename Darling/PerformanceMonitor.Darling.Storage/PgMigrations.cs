@@ -78,6 +78,7 @@ public static class PgMigrations
         new Migration(32, "server-tags", V32Sql),
         new Migration(33, "connection-alert-refire", V33Sql),
         new Migration(34, "availability-group-collectors", V34Sql),
+        new Migration(36, "ag-latency-columns", V36Sql),
     };
 
     /// <summary>
@@ -544,6 +545,29 @@ CREATE TABLE IF NOT EXISTS collect.ag_database_replica_states (
 );
 
 CREATE INDEX IF NOT EXISTS idx_ag_database_replica_states_time ON collect.ag_database_replica_states(server_id, collection_time);";
+
+    /// <summary>
+    /// V36 — the AG latency columns (#991 addendum): the four commit/hardened/redone/received timestamps
+    /// the reference project's query skips, plus the two server-computed drain-time estimates
+    /// (queue ÷ rate ÷ 60, guarded against BIGINT integer division and a zero rate).
+    /// <para>APPENDED, never inserted, and deliberately a SEPARATE migration rather than an edit to V34:
+    /// V34's <c>CREATE TABLE IF NOT EXISTS</c> is a no-op on a store that already ran it, so widening V34
+    /// in place would silently leave every already-migrated store (the field box included) six columns
+    /// short while fresh installs got them — the exact drift the fresh-vs-upgraded shape pin exists to
+    /// catch. <c>ADD COLUMN IF NOT EXISTS</c> appends physically, matching the order
+    /// <see cref="PgSchemaGenerator.CreateTable"/> emits for a fresh store, so both provenances end up
+    /// column-for-column identical (pinned by PgSchemaGeneratorTests, which reconstructs the current
+    /// shape from V34 + V36 and compares it to the generator).</para>
+    /// <para>Version 36, not 35: 35 is claimed by the concurrent AG-alerts work.</para>
+    /// </summary>
+    private const string V36Sql = @"
+ALTER TABLE collect.ag_database_replica_states
+    ADD COLUMN IF NOT EXISTS last_commit_time timestamp,
+    ADD COLUMN IF NOT EXISTS last_hardened_time timestamp,
+    ADD COLUMN IF NOT EXISTS last_redone_time timestamp,
+    ADD COLUMN IF NOT EXISTS last_received_time timestamp,
+    ADD COLUMN IF NOT EXISTS est_redo_completion_time_min double precision,
+    ADD COLUMN IF NOT EXISTS est_send_drain_time_min double precision;";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

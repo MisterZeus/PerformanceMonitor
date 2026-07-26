@@ -34,7 +34,7 @@ public sealed class DarlingServerTagsTests
            and is what tracks the build version. */
         var v33 = PgMigrations.Scripts.Single(s => s.Version == 33);
         Assert.Equal("connection-alert-refire", v33.Name);
-        Assert.Equal(34, PgMigrations.Scripts[^1].Version);
+        Assert.Equal(36, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Contains("ALTER TABLE config.config_alert_settings", v33.Sql, StringComparison.Ordinal);
         Assert.Contains("notify_connection_down_at_startup boolean NOT NULL DEFAULT false", v33.Sql, StringComparison.Ordinal);

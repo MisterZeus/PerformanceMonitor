@@ -103,6 +103,14 @@ public sealed class PerfmonStatsCollector : CollectorDefinitionBase<PerfmonStats
         /* Wait counters */
         "Network IO waits",
         "Wait for the worker",
+        /* Availability Group counters (SQLServer:Database Replica object, #991). Both names are unique
+           to that object, so the collector's counter_name-only filter picks them up without an
+           object_name predicate. Transaction Delay / Mirrored Write Transactions/sec is the average
+           primary-side commit delay per mirrored transaction — the primary-side half of the AG latency
+           picture the ag_database_replica_states gauges cover from the secondary side. Absent on an
+           instance without AGs, which is simply fewer rows. */
+        "Transaction Delay",
+        "Mirrored Write Transactions/sec",
     };
 
     public override string Name => "perfmon_stats";
