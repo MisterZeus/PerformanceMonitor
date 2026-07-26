@@ -1124,13 +1124,20 @@ public sealed class DarlingManagedPostgres
         catch (Exception ex)
         {
             _logger.LogError(
-                "Could not restrict the ACL on {Path} ({Message}). The DPAPI credential files it holds may be readable by " +
-                "other local users — fix the directory permissions by hand (SYSTEM/Administrators/the service account only).",
-                path, ex.Message);
+                "Could not restrict the ACL on {Path}{Detail} ({Message}). The DPAPI credential files it holds may be " +
+                "readable by other local users. If the owner is not this service, the re-ACL can never succeed — it " +
+                "needs ownership or FullControl — so restarting will not clear this; grant the service account " +
+                "FullControl or make it the owner (SYSTEM/Administrators/the service account only).",
+                path, DarlingFileSecurity.DescribeOwnerAndExposure(path), ex.Message);
         }
     }
 
-    /// <summary>Best-effort restrictive ACL on one credential file — same posture as <see cref="TryHardenDirectory"/>.</summary>
+    /// <summary>
+    /// Best-effort restrictive ACL on one credential file — same posture as <see cref="TryHardenDirectory"/>,
+    /// and the same verify-don't-assume rule the config file already had: the harden is attempted, then the
+    /// RESULT is checked, because "we tried" is not the same claim as "the secret is not readable". These blobs
+    /// are machine-scoped DPAPI, so read access IS the secret.
+    /// </summary>
     private void TryHardenCredentialFile(string path, bool allowInteractiveRead)
     {
         try
@@ -1140,8 +1147,19 @@ public sealed class DarlingManagedPostgres
         catch (Exception ex)
         {
             _logger.LogError(
-                "Could not restrict the ACL on {Path} ({Message}). This DPAPI credential may be readable by other local " +
-                "users — fix the file permissions by hand.", path, ex.Message);
+                "Could not restrict the ACL on {Path}{Detail} ({Message}). If the owner is not this service, the " +
+                "re-ACL can never succeed — it needs ownership or FullControl — so restarting will not clear this; " +
+                "grant the service account FullControl or make it the owner.",
+                path, DarlingFileSecurity.DescribeOwnerAndExposure(path), ex.Message);
+        }
+
+        if (DarlingFileSecurity.IsReadableByOrdinaryUsers(path))
+        {
+            _logger.LogCritical(
+                "{Path} is READABLE by ordinary local users{Detail}. It holds a machine-scoped DPAPI credential, " +
+                "which any local process can decrypt — so read access to this file IS the credential. Remove the " +
+                "inherited read access.",
+                path, DarlingFileSecurity.DescribeOwnerAndExposure(path));
         }
     }
 

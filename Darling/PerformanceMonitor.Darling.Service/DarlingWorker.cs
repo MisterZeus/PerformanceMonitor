@@ -549,9 +549,11 @@ public sealed class DarlingWorker : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError(
-                "Could not restrict the ACL on {Path} ({Message}). Fix the file permissions by hand " +
-                "(SYSTEM/Administrators/the service account, plus INTERACTIVE read for the Viewer).",
-                path, ex.Message);
+                "Could not restrict the ACL on {Path}{Detail} ({Message}). If the owner is not this service, the " +
+                "re-ACL can never succeed — it needs ownership or FullControl — so restarting will not clear this; " +
+                "grant the service account FullControl or make it the owner (SYSTEM/Administrators/the service " +
+                "account, plus INTERACTIVE read for the Viewer).",
+                path, DarlingFileSecurity.DescribeOwnerAndExposure(path), ex.Message);
         }
 
         if (DarlingFileSecurity.IsReadableByOrdinaryUsers(path))

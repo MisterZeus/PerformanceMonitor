@@ -20,17 +20,26 @@ permissions:
   id-token: write
   actions: read
 
-# A re-push to a PR cancels that PR's superseded in-flight run: finishing a build of code
-# that is no longer the PR's head helps nobody, and the shared Windows runner pool is what
-# serializes everyone's CI (#1697 sat queued behind two dev builds), so a cancelled stale
-# run is reclaimed capacity for whatever is queued. Push, release, and merge-queue runs
-# deliberately get a UNIQUE group per run (run_id): integration builds, release builds, and
-# queue validations are never queued behind, replaced by, or cancelled through this
-# mechanism — every push commit keeps its own reported check result, which release cuts and
-# merge gating read.
+# A re-push to a PR cancels that PR's superseded in-flight run, and a push to dev/main
+# cancels that BRANCH's superseded in-flight run — newest SHA wins. Finishing a build of
+# code that is no longer the head helps nobody, and the shared Windows runner pool is what
+# serializes everyone's CI (#1697 sat queued behind two dev builds; on 2026-07-26 a
+# ~20-merge train left 13 of the day's 30 dev-push runs finishing SHAs a newer merge had
+# already replaced — ~60 reclaimable runner-minutes in one evening). Cancelling a
+# superseded PUSH run is safe because a push run produces nothing any other run consumes:
+# every upload-artifact step in this workflow is gated to the release event (the SignPath
+# signing path) or to failure() (darling-pg diagnostics), nothing in the repo downloads
+# cross-run artifacts (no download-artifact, gh run download, or workflow_run consumer
+# exists), nightly.yml builds its own tree from its own checkout, and a release compiles
+# fresh on the release event. The accepted trade: push builds are diff-scoped, so a
+# cancelled run's areas are not re-verified until the next change touches them — the
+# nightly and the all-areas dev->main release PR are the backstops. Release and
+# merge-queue runs deliberately keep a UNIQUE group per run (run_id) and are NEVER
+# cancelled: a release build waits on SignPath's manual approval gate, and a queue
+# validation is the last check before its result lands on dev.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('build-pr-{0}', github.event.pull_request.number) || format('build-run-{0}', github.run_id) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.event_name == 'pull_request' && format('build-pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && format('build-push-{0}', github.ref) || format('build-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
 
 jobs:
   build:

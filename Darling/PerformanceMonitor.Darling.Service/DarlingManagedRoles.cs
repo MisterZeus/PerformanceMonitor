@@ -240,7 +240,8 @@ public static class DarlingManagedRoles
         return password;
     }
 
-    /// <summary>Best-effort restrictive ACL on a role credential; a failure is logged loud, not fatal.</summary>
+    /// <summary>Best-effort restrictive ACL on a role credential; a failure is logged loud, not fatal — and the
+    /// RESULT is verified afterwards, because attempting a harden is not evidence the secret is protected.</summary>
     private static void TryHardenRoleCredential(string path, bool allowInteractiveRead, ILogger logger)
     {
         try
@@ -250,8 +251,19 @@ public static class DarlingManagedRoles
         catch (Exception ex)
         {
             logger.LogError(
-                "Could not restrict the ACL on {Path} ({Message}) — the role credential may be readable by other local users; fix the file permissions by hand.",
-                path, ex.Message);
+                "Could not restrict the ACL on {Path}{Detail} ({Message}). If the owner is not this service, the " +
+                "re-ACL can never succeed — it needs ownership or FullControl — so restarting will not clear this; " +
+                "grant the service account FullControl or make it the owner.",
+                path, DarlingFileSecurity.DescribeOwnerAndExposure(path), ex.Message);
+        }
+
+        if (DarlingFileSecurity.IsReadableByOrdinaryUsers(path))
+        {
+            logger.LogCritical(
+                "{Path} is READABLE by ordinary local users{Detail}. It holds this role's password as a " +
+                "machine-scoped DPAPI blob, which any local process can decrypt — so read access to this file IS " +
+                "the login. Remove the inherited read access.",
+                path, DarlingFileSecurity.DescribeOwnerAndExposure(path));
         }
     }
 
