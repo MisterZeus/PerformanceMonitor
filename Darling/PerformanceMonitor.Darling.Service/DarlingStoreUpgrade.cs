@@ -10,6 +10,8 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Net;
+using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Text;
@@ -417,6 +419,74 @@ internal sealed class DarlingStoreUpgrade
     internal const int UpgradeNewClusterPort = 55433;
 
     /// <summary>
+    /// Which of <paramref name="ports"/> already have a listener among <paramref name="activeListeners"/>.
+    /// PURE, so the decision is pinned by tests rather than by whatever happens to be bound on a dev box.
+    /// </summary>
+    internal static IReadOnlyList<int> FindOccupiedPorts(IEnumerable<IPEndPoint> activeListeners, params int[] ports)
+    {
+        var occupied = new List<int>();
+        var listening = new HashSet<int>();
+        foreach (var endpoint in activeListeners)
+        {
+            listening.Add(endpoint.Port);
+        }
+
+        foreach (var port in ports)
+        {
+            if (listening.Contains(port))
+            {
+                occupied.Add(port);
+            }
+        }
+
+        return occupied;
+    }
+
+    /// <summary>
+    /// Refuses to start pg_upgrade when either of its private ports already has a listener.
+    ///
+    /// <para>Moving off pg_upgrade's fixed default 50432 removed the collision with OTHER software; it did
+    /// not remove the collision with OURSELVES. The likeliest squatter on 55432/55433 is a previous run of
+    /// this very upgrade: <see cref="s_pgUpgradeTimeout"/> elapses, the runner gives up, and pg_upgrade's
+    /// throwaway postmasters can outlive it (<see cref="TryStopAsync"/> stops the store's own cluster, not
+    /// pg_upgrade's). The next start would then hand pg_upgrade a stranger's cluster to inspect — tonight's
+    /// failure, one retry later, on a private port. Failing honest and naming the port is worth far more
+    /// than a silent wrong answer, so this closes the class rather than relocating it.</para>
+    ///
+    /// <para>Not covered, deliberately: two Darling services on ONE host upgrading at the same moment share
+    /// these ports. That is out of scope for a single-store-per-host product, and this check turns it into a
+    /// clear error rather than cross-cluster corruption.</para>
+    /// </summary>
+    private void AssertUpgradePortsFree()
+    {
+        IPEndPoint[] listeners;
+        try
+        {
+            listeners = System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners();
+        }
+        catch (Exception ex) when (ex is NetworkInformationException or PlatformNotSupportedException)
+        {
+            /* Cannot enumerate listeners — do not block the upgrade on a diagnostic we could not run. */
+            _logger.LogWarning("Could not check whether the upgrade ports are free ({Message}); continuing.", ex.Message);
+            return;
+        }
+
+        var occupied = FindOccupiedPorts(listeners, UpgradeOldClusterPort, UpgradeNewClusterPort);
+        if (occupied.Count == 0)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"port {string.Join(" and ", occupied)} already has a listener, and pg_upgrade needs " +
+            $"{UpgradeOldClusterPort} and {UpgradeNewClusterPort} to itself for the clusters it starts. " +
+            "Something else is bound there — most likely a postmaster left behind by an interrupted upgrade. " +
+            "Stop it (or reboot) and restart the service; the store keeps running on its current major meanwhile. " +
+            "Continuing would let pg_upgrade inspect that process's cluster instead of this store's, which it " +
+            "cannot detect and which would produce a wrong answer with no error to act on.");
+    }
+
+    /// <summary>
     /// The pg_upgrade command line. <c>--check</c> first as a dry run (it validates locale/encoding/
     /// checksum compatibility and the loadable-library set WITHOUT touching either cluster), then the real
     /// pass. <c>-o</c>/<c>-O</c> carry <paramref name="serverOptions"/> to the old and new clusters
@@ -431,7 +501,10 @@ internal sealed class DarlingStoreUpgrade
         FileTransferMode mode,
         bool checkOnly,
         int jobs,
-        string? serverOptions = null)
+        /* REQUIRED, no default. Omitting it silently reproduces the loopback hang and the compiler would not
+           say a word — a third call site that forgets is exactly how this regresses. Callers that genuinely
+           want no server options pass null explicitly, which is a decision a reviewer can see. */
+        string? serverOptions)
     {
         var builder = new StringBuilder();
         builder.Append("--old-bindir \"").Append(oldBinDirectory).Append('"');
@@ -606,11 +679,28 @@ internal sealed class DarlingStoreUpgrade
 
             if (installedMajor is not null && zipMajor is not null && installedMajor == zipMajor)
             {
-                _logger.LogInformation(
-                    "Adopting the already-extracted PostgreSQL {Major} runtime: it matches the shipped package, so nothing is swapped. Recording its stamp so future package changes are detectable.",
-                    installedMajor);
-                TryWriteStamp(stampPath, zipHash);
-                return new RuntimeAdvance(false, null, zipHash);
+                /* Equal PostgreSQL majors do NOT mean equal runtimes, and adopting on the major alone would
+                   re-open #1705's drift inside the machinery built to end it: a host on PG 18 + TimescaleDB
+                   2.24.0 receiving PG 18 + 2.28.1 would be stamped as already-matching and keep 2.24.0
+                   forever, because the new versioned library never lands and the same-major extension update
+                   can then only reach the version already on disk. So the extension's library version is
+                   compared too — same major but a different TimescaleDB means a same-major runtime swap
+                   (rescue, extract, no pg_upgrade, extension update), which is a path that already exists. */
+                var installedTimescale = TryReadInstalledTimescaleVersion(binDirectory);
+                var zipTimescale = TryReadZipTimescaleVersion(runtimeZipPath);
+
+                if (string.Equals(installedTimescale, zipTimescale, StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogInformation(
+                        "Adopting the already-extracted runtime (PostgreSQL {Major}, TimescaleDB {Timescale}): it matches the shipped package, so nothing is swapped. Recording its stamp so future package changes are detectable.",
+                        installedMajor, installedTimescale ?? "(none)");
+                    TryWriteStamp(stampPath, zipHash);
+                    return new RuntimeAdvance(false, null, zipHash);
+                }
+
+                _logger.LogWarning(
+                    "The extracted runtime and the shipped package are both PostgreSQL {Major}, but their TimescaleDB differs ({Installed} on disk, {Package} in the package) — updating the runtime so the extension can actually move. This is the drift #1705 caught.",
+                    installedMajor, installedTimescale ?? "(none)", zipTimescale ?? "(none)");
             }
 
             if (installedMajor is null || zipMajor is null)
@@ -809,6 +899,82 @@ internal sealed class DarlingStoreUpgrade
         }
     }
 
+    /// <summary>
+    /// Pulls the TimescaleDB version out of a versioned library filename — <c>timescaledb-2.28.1.dll</c>
+    /// yields <c>2.28.1</c>. The TSL sibling (<c>timescaledb-tsl-2.28.1.dll</c>) and the unversioned loader
+    /// (<c>timescaledb.dll</c>) are deliberately not matched, so the answer comes from exactly one file shape.
+    /// Pure.
+    /// </summary>
+    internal static string? ParseTimescaleLibraryVersion(string fileName)
+    {
+        const string prefix = "timescaledb-";
+        const string suffix = ".dll";
+        var name = Path.GetFileName(fileName);
+        if (!name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+            || !name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var version = name[prefix.Length..^suffix.Length];
+        /* Reject the -tsl- variant and anything that is not a version. */
+        return version.Length > 0 && char.IsDigit(version[0]) ? version : null;
+    }
+
+    /// <summary>The TimescaleDB version the EXTRACTED runtime carries, from its versioned library filename.</summary>
+    private static string? TryReadInstalledTimescaleVersion(string binDirectory)
+    {
+        try
+        {
+            var pgsql = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(binDirectory));
+            if (pgsql is null)
+            {
+                return null;
+            }
+
+            foreach (var file in Directory.EnumerateFiles(Path.Combine(pgsql, "lib"), "timescaledb-*.dll"))
+            {
+                var version = ParseTimescaleLibraryVersion(file);
+                if (version is not null)
+                {
+                    return version;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            /* Unreadable lib directory answers "unknown", which the caller treats as a difference. */
+        }
+
+        return null;
+    }
+
+    /// <summary>The TimescaleDB version a runtime ZIP carries, read from its entry names alone — no extract.</summary>
+    internal static string? TryReadZipTimescaleVersion(string zipPath)
+    {
+        try
+        {
+            using var archive = System.IO.Compression.ZipFile.OpenRead(zipPath);
+            foreach (var entry in archive.Entries)
+            {
+                if (entry.FullName.Replace('\\', '/').StartsWith("pgsql/lib/", StringComparison.OrdinalIgnoreCase))
+                {
+                    var version = ParseTimescaleLibraryVersion(entry.Name);
+                    if (version is not null)
+                    {
+                        return version;
+                    }
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            /* Unreadable archive answers "unknown". */
+        }
+
+        return null;
+    }
+
     /// <summary>The extracted runtime's PostgreSQL major, from <c>pg_ctl --version</c>.</summary>
     private static async Task<int?> ReadRuntimeMajorFromBinariesAsync(string binDirectory, CancellationToken cancellationToken)
     {
@@ -953,6 +1119,11 @@ internal sealed class DarlingStoreUpgrade
 
         var step = "preflight";
         var oldStarted = false;
+
+        /* Whether the data directory swap has COMMITTED. Load-bearing: past that point the configured path
+           holds the new major and no failure path may revert the runtime, because old binaries in front of a
+           new data directory is an unbootable store. See the commit point below. */
+        var swapped = false;
         string? fromTimescale = null;
         var mode = FileTransferMode.Copy;
 
@@ -1036,6 +1207,9 @@ internal sealed class DarlingStoreUpgrade
 
             /* ---- 6. pg_upgrade: --check first (it validates the locale/encoding/checksum match and the
                     loadable-library set without touching either cluster), then the real pass ---- */
+            step = "upgrade-port-preflight";
+            AssertUpgradePortsFree();
+
             step = "pg_upgrade-check";
             WritePgPassFile(passFile, context.UserName, context.Password);
             var environment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PGPASSFILE"] = passFile };
@@ -1096,6 +1270,13 @@ internal sealed class DarlingStoreUpgrade
                 throw;
             }
 
+            /* THE COMMIT POINT. The configured path now holds the NEW major's cluster, and from here the
+               upgrade is irreversible by any means this method has: PostgreSQL 17 binaries cannot open a
+               PostgreSQL 18 data directory, so reverting the runtime past this line would leave the store
+               UNBOOTABLE. Everything after this is bookkeeping, and bookkeeping must never be able to undo
+               a completed upgrade. */
+            swapped = true;
+
             if (mode == FileTransferMode.Link)
             {
                 /* Hard-link mode leaves an old directory that SHARES its files with the new cluster — it is
@@ -1122,15 +1303,52 @@ internal sealed class DarlingStoreUpgrade
         }
         catch (OperationCanceledException)
         {
-            /* Service shutdown mid-upgrade. Copy mode has not touched the old data directory, so the revert
-               below restores the previous runtime and the next start simply tries again. */
+            /* Service shutdown mid-upgrade. Before the commit point the old data directory is untouched, so
+               the revert restores the previous runtime and the next start tries again. AFTER the commit point
+               the same revert would brick the store, so shutdown must leave the new runtime in place and let
+               the next start pick up an already-upgraded cluster — cancellation is not a licence to undo a
+               completed upgrade any more than an exception is. */
             await TryStopAsync(context, oldStarted);
-            TryDeleteDirectory(newDataDirectory);
-            RevertRuntimeForCancel(context);
+
+            if (!swapped)
+            {
+                TryDeleteDirectory(newDataDirectory);
+                RevertRuntimeForCancel(context);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Shutdown interrupted the store upgrade AFTER the data directory swap committed. The store is PostgreSQL {New} and the runtime is NOT being reverted; the next start continues on the upgraded cluster.",
+                    context.NewMajor);
+            }
+
             throw;
+        }
+        catch (Exception ex) when (swapped)
+        {
+            /* POST-COMMIT failure. The data directory swap succeeded, so the store IS the new major and the
+               only honest outcome is Succeeded — with the bookkeeping failure said out loud. Reverting the
+               runtime here would put the OLD binaries in front of a NEW data directory and brick the store,
+               which is precisely the class of self-inflicted damage the move-aside discipline exists to
+               prevent; this is that same lesson applied past the swap. So: no revert, no deletion of the new
+               data directory (it is the live store now), and no "nothing was modified" claim. */
+            await TryStopAsync(context, oldStarted);
+
+            var warning =
+                $"the upgrade to PostgreSQL {context.NewMajor} COMPLETED, but post-upgrade bookkeeping failed at step '{step}': {ex.Message}";
+            _logger.LogCritical(
+                "STORE UPGRADE COMPLETED WITH A WARNING: the data directory swap succeeded, so the store is now PostgreSQL {New} and is NOT being reverted — reverting past this point would leave the old binaries in front of a new data directory and the store would not boot. But post-upgrade bookkeeping failed at step '{Step}': {Message}. Check free disk space on the store volume and the pre-upgrade rollback copy's retention counter by hand.",
+                context.NewMajor, step, ex.Message);
+
+            return new StoreUpgradeOutcome(
+                StoreUpgradeStatus.Succeeded, context.OldMajor, context.NewMajor,
+                fromTimescale, context.BundledTimescaleVersion, null, warning, mode == FileTransferMode.Link);
         }
         catch (Exception ex)
         {
+            /* PRE-COMMIT failure: the data directory has not been swapped, so the old one is exactly where
+               it was and reverting the runtime restores a working store. The "never modified" claim below is
+               only true on this path, which is why it lives here and not in a shared message. */
             _logger.LogCritical(
                 "STORE UPGRADE FAILED at step '{Step}': {Message}. Reverting to PostgreSQL {Old} — the store keeps running on its existing major and NO data has been lost (the pre-upgrade data directory was never modified).",
                 step, ex.Message, context.OldMajor);

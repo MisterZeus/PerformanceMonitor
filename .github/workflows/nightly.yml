@@ -285,6 +285,26 @@ jobs:
           [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $dest)
           if (-not (Test-Path "$dest\pgsql\bin\pg_ctl.exe")) { throw "pg-runtime missing pgsql\bin\pg_ctl.exe" }
 
+      # The PREVIOUS-major runtime, for the upgraded-in-place fixture (#1706). Without it the gated
+      # store-upgrade E2E skips, and with it skips the ONLY behavioral coverage of the in-place
+      # 17-to-18 path: the runtime rescue, the TimescaleDB bridge, the data-directory swap, the
+      # revert, and the loopback override that stops pg_upgrade dialing ::1 against our IPv4-only
+      # listen_addresses. String assertions catch that constant being deleted; nothing but this
+      # catches the override ceasing to TAKE EFFECT, and the failure mode is a fleet-wide hang.
+      # Only the DOWNLOADS are cached (~340MB of pinned archives): the script re-verifies them by
+      # SHA256 and re-assembles in seconds, so a warm cache costs no network.
+      - name: Cache upgrade-fixture downloads (previous-major runtime)
+        uses: actions/cache@v6
+        with:
+          path: Darling/artifacts/upgrade-fixture/work/downloads
+          key: upgrade-fixture-${{ runner.os }}-${{ hashFiles('Darling/tools/new-upgraded-store-fixture.ps1') }}
+
+      # -SkipNew: the CURRENT runtime is already built/cached above as pg-runtime.zip, which is what
+      # DARLING_TEST_PGRUNTIME_NEWZIP points at. This step only needs the old side.
+      - name: Build previous-major runtime for the upgrade fixture
+        shell: pwsh
+        run: ./Darling/tools/new-upgraded-store-fixture.ps1 -SkipNew
+
       - name: Restore Darling.Tests
         run: dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
 
@@ -326,6 +346,13 @@ jobs:
         env:
           DARLING_TEST_PG: "Host=127.0.0.1;Port=5541;Username=darling;Database=darling"
           DARLING_TEST_PGRUNTIME: ${{ github.workspace }}\Darling\artifacts\pg-runtime
+          # #1706: the pair that lights up the upgraded-in-place store-upgrade E2E — a real
+          # previous-major store (hypertable, TOAST-sized plan XML, continuous aggregate,
+          # compressed chunk) upgraded through the production bootstrap and compared by ordered
+          # row checksum before and after. This is the [#1705] CI gap: every other job only ever
+          # sees a FRESH store, so nothing else can catch an upgrade path that breaks.
+          DARLING_TEST_PGRUNTIME_OLD: ${{ github.workspace }}\Darling\artifacts\upgrade-fixture\old\pg-runtime
+          DARLING_TEST_PGRUNTIME_NEWZIP: ${{ github.workspace }}\Darling\artifacts\pg-runtime.zip
         run: dotnet test Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build --verbosity normal --logger "trx;LogFileName=darling-nightly.trx" --results-directory TestResults
 
       - name: Stop PostgreSQL

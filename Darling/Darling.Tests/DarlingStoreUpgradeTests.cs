@@ -147,7 +147,7 @@ public sealed class DarlingStoreUpgradeTests
     {
         var check = DarlingStoreUpgrade.BuildPgUpgradeArguments(
             @"C:\pg\old\bin", @"C:\pg\new\bin", @"C:\data\pg", @"C:\data\pg-upgrade-18", "darling",
-            DarlingStoreUpgrade.FileTransferMode.Copy, checkOnly: true, jobs: 4);
+            DarlingStoreUpgrade.FileTransferMode.Copy, checkOnly: true, jobs: 4, serverOptions: null);
 
         Assert.Contains("--check", check, StringComparison.Ordinal);
         Assert.Contains(@"--old-bindir ""C:\pg\old\bin""", check, StringComparison.Ordinal);
@@ -159,7 +159,7 @@ public sealed class DarlingStoreUpgradeTests
 
         var real = DarlingStoreUpgrade.BuildPgUpgradeArguments(
             @"C:\pg\old\bin", @"C:\pg\new\bin", @"C:\data\pg", @"C:\data\pg-upgrade-18", "darling",
-            DarlingStoreUpgrade.FileTransferMode.Link, checkOnly: false, jobs: 4);
+            DarlingStoreUpgrade.FileTransferMode.Link, checkOnly: false, jobs: 4, serverOptions: null);
 
         Assert.Contains("--link", real, StringComparison.Ordinal);
         Assert.Contains("--jobs 4", real, StringComparison.Ordinal);
@@ -208,7 +208,7 @@ public sealed class DarlingStoreUpgradeTests
            service never started. */
         var arguments = DarlingStoreUpgrade.BuildPgUpgradeArguments(
             @"C:\pg\old\bin", @"C:\pg\new\bin", @"C:\data\pg", @"C:\data\pg-upgrade-18", "darling",
-            DarlingStoreUpgrade.FileTransferMode.Copy, checkOnly: true, jobs: 1);
+            DarlingStoreUpgrade.FileTransferMode.Copy, checkOnly: true, jobs: 1, serverOptions: null);
 
         Assert.Contains("--old-port ", arguments, StringComparison.Ordinal);
         Assert.Contains("--new-port ", arguments, StringComparison.Ordinal);
@@ -216,6 +216,44 @@ public sealed class DarlingStoreUpgradeTests
         /* The two must differ: pg_upgrade has both clusters up at once during the dump/restore. */
         Assert.NotEqual(DarlingStoreUpgrade.UpgradeOldClusterPort, DarlingStoreUpgrade.UpgradeNewClusterPort);
     }
+
+    [Fact]
+    public void FindOccupiedPorts_NamesOnlyThePortsActuallyListening()
+    {
+        /* MED-HIGH from review: moving off pg_upgrade's shared 50432 default removed the collision with
+           other software, not with OURSELVES — our own timed-out upgrade can leave a postmaster on 55432,
+           and the next attempt would then inspect a stranger's cluster with no actionable error. The
+           preflight must name which port so an operator can kill the right thing. */
+        var listeners = new[]
+        {
+            new IPEndPoint(IPAddress.Loopback, 5432),
+            new IPEndPoint(IPAddress.Loopback, DarlingStoreUpgrade.UpgradeNewClusterPort),
+            new IPEndPoint(IPAddress.IPv6Loopback, 8080),
+        };
+
+        var occupied = DarlingStoreUpgrade.FindOccupiedPorts(
+            listeners, DarlingStoreUpgrade.UpgradeOldClusterPort, DarlingStoreUpgrade.UpgradeNewClusterPort);
+
+        Assert.Equal(new[] { DarlingStoreUpgrade.UpgradeNewClusterPort }, occupied);
+    }
+
+    [Fact]
+    public void FindOccupiedPorts_EmptyWhenBothArePrivate()
+        => Assert.Empty(DarlingStoreUpgrade.FindOccupiedPorts(
+            new[] { new IPEndPoint(IPAddress.Loopback, 5432) },
+            DarlingStoreUpgrade.UpgradeOldClusterPort,
+            DarlingStoreUpgrade.UpgradeNewClusterPort));
+
+    [Theory]
+    [InlineData("timescaledb-2.28.1.dll", "2.28.1")]
+    [InlineData(@"C:\pg\lib\timescaledb-2.24.0.dll", "2.24.0")]
+    /* The TSL sibling and the unversioned loader must NOT answer, or the comparison could read a version
+       off the wrong file and call two different runtimes identical. */
+    [InlineData("timescaledb-tsl-2.28.1.dll", null)]
+    [InlineData("timescaledb.dll", null)]
+    [InlineData("libpq.dll", null)]
+    public void ParseTimescaleLibraryVersion_ReadsOnlyTheVersionedLoaderName(string fileName, string? expected)
+        => Assert.Equal(expected, DarlingStoreUpgrade.ParseTimescaleLibraryVersion(fileName));
 
     [Fact]
     public void RetainedDataDirectory_IsNamedForTheMajorItCameFrom()
