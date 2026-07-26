@@ -252,6 +252,12 @@ public static class TimescaleSupport
     /// "coarsened but never fully lost" tier for anything past the hourly CAGG's own horizon.</summary>
     public const string QueryStatsDailyView = "query_stats_daily";
 
+    /// <summary>The per-database query_stats rollup carrying the I/O sums FinOps needs (#1661).</summary>
+    public const string QueryStatsDbHourlyView = "query_stats_db_hourly";
+
+    /// <summary>The daily sibling of <see cref="QueryStatsDbHourlyView"/> — kept indefinitely.</summary>
+    public const string QueryStatsDbDailyView = "query_stats_db_daily";
+
     /// <summary><see cref="QueryStatsDailyView"/>'s procedure_stats sibling (sourced from procedure_stats_hourly).</summary>
     public const string ProcedureStatsDailyView = "procedure_stats_daily";
 
@@ -361,6 +367,56 @@ WITH NO DATA";
     /// under Postgres's input-column-wins ambiguity rule, which would group by hour, not day. WITH NO DATA +
     /// IF NOT EXISTS; the hourly CAGG must already exist (it is created earlier in the same sweep).
     /// </summary>
+    /// <summary>
+    /// The per-DATABASE query_stats rollup (#1661). Added rather than folded into
+    /// <see cref="CreateQueryStatsHourlySql"/> deliberately: TimescaleDB cannot ALTER columns into a continuous
+    /// aggregate, so widening that one would mean DROP + recreate, and now that retention is active the rebuild
+    /// would re-materialize from 4 days of raw and permanently destroy the 21-day hourly and indefinite daily
+    /// history the tiers exist to preserve. A NEW aggregate costs nothing existing; its history simply starts
+    /// accumulating from deploy.
+    ///
+    /// <para>Carries the I/O sums no other rollup has — FinOps' database-grain workload view sums
+    /// <c>delta_logical_reads</c> / <c>delta_physical_reads</c> / <c>delta_logical_writes</c>, and the composer's
+    /// measure set (which the other CAGGs were built to) never exposed I/O. Grouped by database_name only, NOT
+    /// query_hash, so it is far smaller than the query-grain aggregate despite carrying more columns.</para>
+    /// </summary>
+    public const string CreateQueryStatsDbHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_db_hourly
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    time_bucket('1 hour', collection_time) AS bucket,
+    sum(delta_worker_time) AS worker_time_sum,
+    sum(delta_logical_reads) AS logical_reads_sum,
+    sum(delta_physical_reads) AS physical_reads_sum,
+    sum(delta_logical_writes) AS logical_writes_sum,
+    sum(delta_execution_count) AS execution_count_sum,
+    count(*) AS sample_count
+FROM collect.query_stats
+WHERE delta_worker_time IS NOT NULL
+GROUP BY server_id, server_name, database_name, bucket
+WITH NO DATA";
+
+    /// <summary>The DAILY sibling of <see cref="CreateQueryStatsDbHourlySql"/> — hierarchical (sourced from the
+    /// hourly one, not raw), kept indefinitely like the other daily rollups.</summary>
+    public const string CreateQueryStatsDbDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_db_daily
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    time_bucket('1 day', bucket) AS bucket,
+    sum(worker_time_sum) AS worker_time_sum,
+    sum(logical_reads_sum) AS logical_reads_sum,
+    sum(physical_reads_sum) AS physical_reads_sum,
+    sum(logical_writes_sum) AS logical_writes_sum,
+    sum(execution_count_sum) AS execution_count_sum,
+    sum(sample_count) AS sample_count
+FROM collect.query_stats_db_hourly
+GROUP BY server_id, server_name, database_name, time_bucket('1 day', bucket)
+WITH NO DATA";
+
     public const string CreateQueryStatsDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_daily
 WITH (timescaledb.continuous) AS
 SELECT
@@ -544,9 +600,11 @@ WITH NO DATA";
             (CreateSql: CreateQueryStatsHourlySql,      View: QueryStatsHourlyView,      PolicySql: AddContinuousAggregatePolicySql(QueryStatsHourlyView)),
             (CreateSql: CreateProcedureStatsHourlySql,  View: ProcedureStatsHourlyView,  PolicySql: AddContinuousAggregatePolicySql(ProcedureStatsHourlyView)),
             (CreateSql: CreateQueryStoreStatsHourlySql, View: QueryStoreStatsHourlyView, PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsHourlyView)),
+            (CreateSql: CreateQueryStatsDbHourlySql,    View: QueryStatsDbHourlyView,    PolicySql: AddContinuousAggregatePolicySql(QueryStatsDbHourlyView)),
             (CreateSql: CreateQueryStatsDailySql,       View: QueryStatsDailyView,       PolicySql: AddContinuousAggregatePolicySql(QueryStatsDailyView, "1 day", "1 day")),
             (CreateSql: CreateProcedureStatsDailySql,   View: ProcedureStatsDailyView,   PolicySql: AddContinuousAggregatePolicySql(ProcedureStatsDailyView, "1 day", "1 day")),
             (CreateSql: CreateQueryStoreStatsDailySql,  View: QueryStoreStatsDailyView,  PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsDailyView, "1 day", "1 day")),
+            (CreateSql: CreateQueryStatsDbDailySql,     View: QueryStatsDbDailyView,     PolicySql: AddContinuousAggregatePolicySql(QueryStatsDbDailyView, "1 day", "1 day")),
         };
 
         var ready = 0;
@@ -624,6 +682,7 @@ WITH NO DATA";
             (Relation: QueryStatsHourlyView,      DropAfter: HourlyRetentionInterval),
             (Relation: ProcedureStatsHourlyView,  DropAfter: HourlyRetentionInterval),
             (Relation: QueryStoreStatsHourlyView, DropAfter: HourlyRetentionInterval),
+            (Relation: QueryStatsDbHourlyView,    DropAfter: HourlyRetentionInterval),
         };
 
         var applied = 0;
