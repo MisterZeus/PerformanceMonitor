@@ -18,12 +18,12 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Detect changed paths
         id: filter
         if: github.event_name != 'release'
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@v4
         with:
           # On push events, compare against the previous commit on this branch
           # (github.event.before). Without this, the action defaults to comparing
@@ -93,7 +93,7 @@ jobs:
 
       - name: Setup .NET 10.0
         if: steps.filter.outputs.code != 'false'
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
           cache: true
@@ -189,7 +189,7 @@ jobs:
       - name: Cache Darling pg-runtime.zip
         if: github.event_name == 'release'
         id: cache-pg-runtime
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: Darling/artifacts/pg-runtime.zip
           key: pg-runtime-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-runtime.ps1') }}
@@ -210,6 +210,11 @@ jobs:
           # users at Setup.exe (Velopack); this ZIP is the explicit fallback.
           Compress-Archive -Path 'publish/Lite/*' -DestinationPath "releases/PerformanceMonitorLite-$version.zip" -Force
 
+      # upload-artifact is deliberately HELD at v6 (#1653): every signing step below consumes
+      # `steps.upload-*.outputs.artifact-id`, and v7 changes artifact archiving semantics (the
+      # `archive` parameter). The signing path only executes on `release: [published]`, so a broken
+      # bump surfaces at release time — bump only alongside a validated real signing run.
+      # Dependabot is configured to skip this major (see .github/dependabot.yml).
       - name: Upload Lite for signing
         if: github.event_name == 'release'
         id: upload-lite
@@ -420,7 +425,7 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # Only do the expensive TimescaleDB work when Darling code changed — or when THIS workflow
       # changed, so a change to the gate itself is exercised by the gate (this is what makes the PR
@@ -430,7 +435,7 @@ jobs:
       - name: Detect changed paths
         id: filter
         if: github.event_name != 'release'
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@v4
         with:
           # On push, compare against the previous commit on this branch (mirrors the build job);
           # on pull_request, an empty base makes the action diff against the PR base branch.
@@ -443,7 +448,7 @@ jobs:
 
       - name: Setup .NET 10.0
         if: steps.filter.outputs.darling == 'true'
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
           cache: true
@@ -454,7 +459,7 @@ jobs:
       - name: Cache Darling pg-runtime.zip
         if: steps.filter.outputs.darling == 'true'
         id: cache-pg-runtime
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: Darling/artifacts/pg-runtime.zip
           key: pg-runtime-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-runtime.ps1') }}
