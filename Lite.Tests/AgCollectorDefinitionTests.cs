@@ -47,7 +47,8 @@ SELECT
     synchronization_health_desc = ars.synchronization_health_desc,
     availability_mode_desc = ar.availability_mode_desc,
     failover_mode_desc = ar.failover_mode_desc,
-    endpoint_url = ar.endpoint_url
+    endpoint_url = ar.endpoint_url,
+    is_local = ars.is_local
 FROM sys.availability_replicas AS ar
 JOIN sys.availability_groups AS ag
   ON ar.group_id = ag.group_id
@@ -182,11 +183,19 @@ OPTION(RECOMPILE);";
                 "availability_mode_desc",
                 "failover_mode_desc",
                 "endpoint_url",
+                /* #1696: appended LAST, so an upgraded store's ALTER lands it in the same physical position
+                   a fresh generated table puts it - which is what keeps the two provenances comparable. */
+                "is_local",
             },
             names);
 
-        Assert.All(AgReplicaStatesCollector.Instance.PayloadColumns,
+        /* Every state string is a Varchar; is_local is the one Boolean, and typing it as text would make the
+           migration's ALTER disagree with the generated fresh shape. */
+        Assert.All(AgReplicaStatesCollector.Instance.PayloadColumns.Where(c => c.Name != "is_local"),
             c => Assert.Equal(CollectorColumnType.Varchar, c.Type));
+        Assert.Equal(
+            CollectorColumnType.Boolean,
+            AgReplicaStatesCollector.Instance.PayloadColumns.Single(c => c.Name == "is_local").Type);
     }
 
     [Fact]
@@ -267,8 +276,8 @@ OPTION(RECOMPILE);";
     public async Task ReplicaReadAsync_MapsColumns()
     {
         using var reader = new FakeCollectorDataReader(
-            new object[] { "AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://NODE1.corp:5022" },
-            new object[] { "AG1", "NODE2", "SECONDARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://NODE2.corp:5022" });
+            new object[] { "AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://NODE1.corp:5022", true },
+            new object[] { "AG1", "NODE2", "SECONDARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://NODE2.corp:5022", false });
 
         var context = CollectorTestContext.Make(new RecordingCollectorDeltaCalculator());
 
@@ -276,10 +285,14 @@ OPTION(RECOMPILE);";
 
         Assert.Equal(2, rows.Count);
         Assert.Equal(
-            new AgReplicaStatesCollector.Row("AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://NODE1.corp:5022"),
+            new AgReplicaStatesCollector.Row("AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://NODE1.corp:5022", true),
             rows[0]);
         Assert.Equal("NODE2", rows[1].ReplicaServerName);
         Assert.Equal("SECONDARY", rows[1].RoleDesc);
+        /* #1696: is_local marks which row is the connected replica's own, so the alert path can pick ONE
+           node's view of an AG that every node can see. */
+        Assert.True(rows[0].IsLocal);
+        Assert.False(rows[1].IsLocal);
     }
 
     [Fact]
@@ -289,8 +302,8 @@ OPTION(RECOMPILE);";
            state sys.availability_replicas serves only locally cached metadata — so every column can be
            null. A quorum-loss read must produce a row, not an InvalidCastException. */
         using var reader = new FakeCollectorDataReader(
-            new object[] { "AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", DBNull.Value },
-            new object[] { DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value });
+            new object[] { "AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", DBNull.Value, DBNull.Value },
+            new object[] { DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value });
 
         var context = CollectorTestContext.Make(new RecordingCollectorDeltaCalculator());
 
@@ -298,6 +311,10 @@ OPTION(RECOMPILE);";
 
         Assert.Equal(2, rows.Count);
         Assert.Null(rows[0].EndpointUrl);
+        /* #1696: is_local must read NULL under quorum loss, never false — the de-dup treats unknown as
+           "cannot rank this vantage" and keeps judging, whereas a false would silently demote a real one. */
+        Assert.Null(rows[0].IsLocal);
+        Assert.Null(rows[1].IsLocal);
         Assert.Equal("AG1", rows[0].AgName);
         Assert.Equal(default(AgReplicaStatesCollector.Row), rows[1]);
     }
@@ -416,12 +433,12 @@ OPTION(RECOMPILE);";
 
         var replicaWriter = new RecordingCollectorRowWriter();
         AgReplicaStatesCollector.Instance.WritePayload(
-            new AgReplicaStatesCollector.Row("AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", null),
+            new AgReplicaStatesCollector.Row("AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", null, true),
             replicaWriter,
             context);
 
         Assert.Equal(
-            new object?[] { "AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", null },
+            new object?[] { "AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", null, true },
             replicaWriter.Values);
 
         /* Modeled on a real measured sample from the Docker AG fixture: a SUSPEND_FROM_USER replica 62 s

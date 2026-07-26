@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
@@ -151,6 +152,9 @@ public sealed class DarlingSelfAlertTests
         public int AgLagAlertSeconds { get; set; } = 300;
         public long AgRedoQueueAlertKb { get; set; }
 
+        /// <summary>#1696 (V37): AG disconnect re-fire minutes. Default 0 = off, the shipped behavior.</summary>
+        public int AgDisconnectRefireMinutes { get; set; }
+
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
         /// <summary>#1681: captures what the evaluator writes to the service log, so the firing/recovery pair
@@ -166,7 +170,8 @@ public sealed class DarlingSelfAlertTests
             connectionRefireMinutes: () => ConnectionRefireMinutes,
             notifyAgHealth: () => NotifyAgHealth,
             agLagAlertSeconds: () => AgLagAlertSeconds,
-            agRedoQueueAlertKb: () => AgRedoQueueAlertKb);
+            agRedoQueueAlertKb: () => AgRedoQueueAlertKb,
+            agDisconnectRefireMinutes: () => AgDisconnectRefireMinutes);
     }
 
     /* ---------------- #991 Availability Group fixtures ---------------- */
@@ -175,11 +180,12 @@ public sealed class DarlingSelfAlertTests
     private const string Replica = "NODE2";
     private const string Db = "Sales";
 
-    private static DarlingSelfAlertEvaluator.AgReplicaReading ReplicaRow(
-        string? role = "SECONDARY", string? connected = "CONNECTED", string replica = Replica, string ag = Ag) =>
-        new(ag, replica, role, connected);
+    private static AgReplicaReading ReplicaRow(
+        string? role = "SECONDARY", string? connected = "CONNECTED", string replica = Replica, string ag = Ag,
+        bool? isLocal = null) =>
+        new(ag, replica, role, connected, isLocal);
 
-    private static DarlingSelfAlertEvaluator.AgDatabaseReading DatabaseRow(
+    private static AgDatabaseReading DatabaseRow(
         long? lagSeconds = 0,
         long? redoKb = 0,
         bool? suspended = false,
@@ -1138,19 +1144,19 @@ public sealed class DarlingSelfAlertTests
 
     /* ---------------- #991 Availability Groups: sync-behind decision (pure) ---------------- */
 
-    private static DarlingSelfAlertEvaluator.AgSyncJudgement Judge(
-        DarlingSelfAlertEvaluator.AgDatabaseReading reading, int lagSeconds, long redoKb) =>
-        DarlingSelfAlertEvaluator.JudgeAgSync(reading, lagSeconds, redoKb, out _);
+    private static AgSyncJudgement Judge(
+        AgDatabaseReading reading, int lagSeconds, long redoKb) =>
+        AgAlertPolicy.JudgeSync(reading, lagSeconds, redoKb, out _);
 
     [Fact]
     public void JudgeAgSync_LagAtOrOverThreshold_IsBehind()
     {
         Assert.Equal(
-            DarlingSelfAlertEvaluator.AgSyncJudgement.Behind,
-            DarlingSelfAlertEvaluator.JudgeAgSync(DatabaseRow(lagSeconds: 300), 300, 0, out var reason));
+            AgSyncJudgement.Behind,
+            AgAlertPolicy.JudgeSync(DatabaseRow(lagSeconds: 300), 300, 0, out var reason));
         Assert.Contains("300 seconds behind", reason, StringComparison.Ordinal);
-        Assert.Equal(DarlingSelfAlertEvaluator.AgSyncJudgement.Behind, Judge(DatabaseRow(lagSeconds: 301), 300, 0));
-        Assert.Equal(DarlingSelfAlertEvaluator.AgSyncJudgement.CaughtUp, Judge(DatabaseRow(lagSeconds: 299), 300, 0));
+        Assert.Equal(AgSyncJudgement.Behind, Judge(DatabaseRow(lagSeconds: 301), 300, 0));
+        Assert.Equal(AgSyncJudgement.CaughtUp, Judge(DatabaseRow(lagSeconds: 299), 300, 0));
     }
 
     [Fact]
@@ -1159,13 +1165,13 @@ public sealed class DarlingSelfAlertTests
         /* Both off: a wildly lagging, hugely queued secondary is NOT MEASURABLE — not "caught up". The
            distinction matters because only a measured CaughtUp resolves a standing alert. */
         Assert.Equal(
-            DarlingSelfAlertEvaluator.AgSyncJudgement.NotMeasurable,
+            AgSyncJudgement.NotMeasurable,
             Judge(DatabaseRow(lagSeconds: 99999, redoKb: 99999999), 0, 0));
 
         /* Redo alone: the seconds trigger stays off, the KB trigger fires. */
         Assert.Equal(
-            DarlingSelfAlertEvaluator.AgSyncJudgement.Behind,
-            DarlingSelfAlertEvaluator.JudgeAgSync(DatabaseRow(lagSeconds: 99999, redoKb: 5000), 0, 4096, out var reason));
+            AgSyncJudgement.Behind,
+            AgAlertPolicy.JudgeSync(DatabaseRow(lagSeconds: 99999, redoKb: 5000), 0, 4096, out var reason));
         Assert.Contains("redo queue", reason, StringComparison.Ordinal);
     }
 
@@ -1177,7 +1183,7 @@ public sealed class DarlingSelfAlertTests
            way a secondary falls behind, so it MUST fire — an earlier rule that abstained on suspended rows
            silenced exactly that case. */
         Assert.Equal(
-            DarlingSelfAlertEvaluator.AgSyncJudgement.Behind,
+            AgSyncJudgement.Behind,
             Judge(DatabaseRow(lagSeconds: 9999, suspended: true), 300, 0));
 
         /* The other half of the asymmetry, and the reason this is not simply "judge suspended rows normally":
@@ -1187,23 +1193,23 @@ public sealed class DarlingSelfAlertTests
            never latch at all. Calling that CaughtUp would clear a standing alarm on a replica receiving
            nothing. (It also covers the documented flat-zero behavior, if any build really does that.) */
         Assert.Equal(
-            DarlingSelfAlertEvaluator.AgSyncJudgement.NotMeasurable,
+            AgSyncJudgement.NotMeasurable,
             Judge(DatabaseRow(lagSeconds: 0, suspended: true), 300, 0));
 
         /* The redo queue fires while suspended too — a frozen queue over the threshold is a real backlog. */
         Assert.Equal(
-            DarlingSelfAlertEvaluator.AgSyncJudgement.Behind,
+            AgSyncJudgement.Behind,
             Judge(DatabaseRow(lagSeconds: 0, redoKb: 8192, suspended: true), 300, 4096));
 
         /* ...but a frozen queue UNDER the threshold is stale data, not a recovery: redo_queue_size freezes at
            its last value while suspended (measured), so it cannot clear anything either. */
         Assert.Equal(
-            DarlingSelfAlertEvaluator.AgSyncJudgement.NotMeasurable,
+            AgSyncJudgement.NotMeasurable,
             Judge(DatabaseRow(lagSeconds: 0, redoKb: 8, suspended: true), 300, 4096));
 
         /* Once movement resumes, the same small readings are a real measurement and DO resolve. */
         Assert.Equal(
-            DarlingSelfAlertEvaluator.AgSyncJudgement.CaughtUp,
+            AgSyncJudgement.CaughtUp,
             Judge(DatabaseRow(lagSeconds: 0, redoKb: 8, suspended: false), 300, 4096));
     }
 
@@ -1213,12 +1219,12 @@ public sealed class DarlingSelfAlertTests
         /* The PRIMARY's own row, and every row under WSFC quorum loss, reads NULL. Reporting that as CaughtUp
            would resolve every standing lag alert on the fleet the moment the cluster lost quorum. */
         Assert.Equal(
-            DarlingSelfAlertEvaluator.AgSyncJudgement.NotMeasurable,
+            AgSyncJudgement.NotMeasurable,
             Judge(DatabaseRow(lagSeconds: null, redoKb: null, suspended: null), 300, 4096));
 
         /* One usable arm is enough to judge, even when the other reads NULL. */
         Assert.Equal(
-            DarlingSelfAlertEvaluator.AgSyncJudgement.CaughtUp,
+            AgSyncJudgement.CaughtUp,
             Judge(DatabaseRow(lagSeconds: 5, redoKb: null), 300, 4096));
     }
 
@@ -1528,28 +1534,28 @@ public sealed class DarlingSelfAlertTests
     }
 
     [Fact]
-    public async Task AgSyncFellBehind_RecoverySweep_IsScopedToTheServerBeingEvaluated()
+    public async Task AgSyncFellBehind_OneAgIsJudgedByOneServer_SoAFullyMonitoredAgReportsItOnce()
     {
         var h = new Harness();
         var e = h.Build();
 
-        const int otherServerId = 515151;
+        const int nodeA = 100001;
+        const int nodeB = 100002;
 
-        /* Two servers each have a lagging database. */
-        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(lagSeconds: 600) }, Ct);
-        await e.ApplyAgDatabaseHealthAsync(otherServerId, "OTHER-SRV", new[] { DatabaseRow(lagSeconds: 600) }, Ct);
-        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        /* #1696: both nodes are monitored and BOTH see the same AG database, because every replica is
+           visible from every node. Only one may judge it, or a 3-node AG reports one problem three times. */
+        await e.ApplyAgDatabaseHealthAsync(nodeA, "NODE-A", new[] { DatabaseRow(lagSeconds: 600) }, Ct);
+        await e.ApplyAgDatabaseHealthAsync(nodeB, "NODE-B", new[] { DatabaseRow(lagSeconds: 600) }, Ct);
 
-        /* The FIRST server catches up. Its snapshot says nothing about the second server, so a recovery sweep
-           that walked every tracked key would silently resolve the other server's live alert. */
-        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(lagSeconds: 0) }, Ct);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("AG Sync Fell Behind", fired.MetricName);
+
+        /* The recovery is announced once too, by the same authoritative node. */
+        await e.ApplyAgDatabaseHealthAsync(nodeA, "NODE-A", new[] { DatabaseRow(lagSeconds: 0) }, Ct);
+        await e.ApplyAgDatabaseHealthAsync(nodeB, "NODE-B", new[] { DatabaseRow(lagSeconds: 0) }, Ct);
+
         var resolution = Assert.Single(h.History.Records);
-        Assert.Equal(Key, resolution.ServerId);
-
-        /* Proof the other server's state survived: it is still inside its cooldown, so it stays quiet rather
-           than re-firing as a fresh episode. */
-        await e.ApplyAgDatabaseHealthAsync(otherServerId, "OTHER-SRV", new[] { DatabaseRow(lagSeconds: 600) }, Ct);
-        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Equal("AG Sync Recovered", resolution.MetricName);
     }
 
     /* ---------------- #991: database suspended ---------------- */
@@ -1606,6 +1612,119 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal("no reason reported", fired.CurrentValue);
     }
 
+    /* ---------------- #1696: fleet de-dup + disconnect re-fire ---------------- */
+
+    [Fact]
+    public async Task AgFailover_FullyMonitoredThreeNodeAg_ReportsTheFailoverOnce()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* Every replica is visible from EVERY node, so all three monitored servers report the same two
+           replica rows. Before #1696 that meant one failover paged three times. */
+        var beforeFailover = new[]
+        {
+            ReplicaRow(role: "PRIMARY", replica: "NODE1"),
+            ReplicaRow(role: "SECONDARY", replica: "NODE2"),
+        };
+        var afterFailover = new[]
+        {
+            ReplicaRow(role: "SECONDARY", replica: "NODE1"),
+            ReplicaRow(role: "PRIMARY", replica: "NODE2"),
+        };
+
+        foreach (var serverId in new[] { 100001, 100002, 100003 })
+        {
+            await e.ApplyAgReplicaHealthAsync(serverId, "NODE" + serverId, beforeFailover, Ct);
+        }
+
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        foreach (var serverId in new[] { 100001, 100002, 100003 })
+        {
+            await e.ApplyAgReplicaHealthAsync(serverId, "NODE" + serverId, afterFailover, Ct);
+        }
+
+        /* Two replicas changed role, so two alerts — NOT six. */
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.All(h.Deliverer.Outcomes, o => Assert.Equal("AG Failover", o.MetricName));
+    }
+
+    [Fact]
+    public async Task AgAuthority_PrimaryTakesOverFromASecondary_BecauseOnlyThePrimarySeesTheWholeGroup()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* A monitored SECONDARY claims the AG first — its sys.dm_hadr_* is a one-row self-view. */
+        await e.ApplyAgReplicaHealthAsync(
+            200001, "SEC", new[] { ReplicaRow(role: "SECONDARY", replica: "NODE2", isLocal: true) }, Ct);
+
+        /* The PRIMARY is then monitored. Its vantage is strictly better, so it takes over and its view of
+           NODE1 is judged — which the secondary could never have supplied. */
+        await e.ApplyAgReplicaHealthAsync(200002, "PRI", new[]
+        {
+            ReplicaRow(role: "PRIMARY", replica: "NODE1", isLocal: true),
+            ReplicaRow(role: "SECONDARY", replica: "NODE2"),
+        }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        await e.ApplyAgReplicaHealthAsync(200002, "PRI", new[]
+        {
+            ReplicaRow(role: "SECONDARY", replica: "NODE1", isLocal: true),
+            ReplicaRow(role: "SECONDARY", replica: "NODE2"),
+        }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("AG Failover", fired.MetricName);
+    }
+
+    [Fact]
+    public async Task AgReplicaDisconnected_RefireOff_IsAPureEdge()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(connected: "CONNECTED") }, Ct);
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(connected: "DISCONNECTED") }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Default is off, so a replica down for a week still announces exactly once. */
+        h.Now = h.Now.AddHours(8);
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(connected: "DISCONNECTED") }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task AgReplicaDisconnected_Refire_ReAnnouncesUnderTheSameMetricName_ThenReconnectClearsTheClock()
+    {
+        var h = new Harness { AgDisconnectRefireMinutes = 10 };
+        var e = h.Build();
+
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(connected: "CONNECTED") }, Ct);
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(connected: "DISCONNECTED") }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Inside the window: quiet. */
+        h.Now = h.Now.AddMinutes(5);
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(connected: "DISCONNECTED") }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Past it: re-announce under the SAME metric name, so webhook automation keyed on it re-triggers. */
+        h.Now = h.Now.AddMinutes(6);
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(connected: "DISCONNECTED") }, Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Equal("AG Replica Disconnected", h.Deliverer.Outcomes[1].MetricName);
+        Assert.Contains("STILL disconnected", h.Deliverer.Outcomes[1].ShortMessage, StringComparison.Ordinal);
+
+        /* Reconnect clears the clock, so a later outage starts a fresh episode rather than re-firing late. */
+        h.Now = h.Now.AddMinutes(1);
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(connected: "CONNECTED") }, Ct);
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+        Assert.Equal("AG Replica Reconnected", h.Deliverer.Outcomes[2].MetricName);
+    }
+
     /* ---------------- #991: gating and forget ---------------- */
 
     [Fact]
@@ -1645,30 +1764,33 @@ public sealed class DarlingSelfAlertTests
     }
 
     [Fact]
-    public async Task AgAlerts_Forget_DropsCompositeKeyedState_SoAReAddedServerReBaselines()
+    public async Task AgAlerts_Forget_ReleasesTheAgClaim_ButKeepsTheGroupsEdgeState()
     {
         var h = new Harness();
         var e = h.Build();
 
-        /* Establish a role baseline and a standing sync-behind alert. */
-        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(role: "PRIMARY") }, Ct);
-        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(lagSeconds: 600) }, Ct);
-        Assert.Single(h.Deliverer.Outcomes);
+        const int nodeA = 100001;
+        const int nodeB = 100002;
 
-        /* Removed from the monitored set. AG state is keyed by a COMPOSITE, so the per-server TryRemove that
-           clears the other conditions cannot reach it — Forget has to sweep the prefix. */
-        e.Forget(ServerId);
+        /* NODE-A claims the AG and establishes a role baseline; NODE-B sees the same AG but defers. */
+        await e.ApplyAgReplicaHealthAsync(nodeA, "NODE-A", new[] { ReplicaRow(role: "PRIMARY") }, Ct);
+        await e.ApplyAgReplicaHealthAsync(nodeB, "NODE-B", new[] { ReplicaRow(role: "PRIMARY") }, Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
 
-        /* Re-added: the role is a fresh baseline (no phantom failover) ... */
-        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(role: "SECONDARY") }, Ct);
-        Assert.Single(h.Deliverer.Outcomes);
+        /* NODE-A is removed from monitoring. Its CLAIM is released so a survivor can take over, but the
+           AG's edge state is deliberately kept: the group still exists and NODE-B is still watching it.
+           Dropping the state here would re-baseline a live group and swallow the next failover. */
+        e.Forget(nodeA);
 
-        /* ... and the sync-behind episode starts over rather than sitting inside the dropped cooldown stamp. */
-        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(lagSeconds: 600) }, Ct);
-        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        /* NODE-B takes over and sees the role change against the state NODE-A left behind — so the failover
+           is reported exactly once, by the new owner, with the correct previous role. */
+        await e.ApplyAgReplicaHealthAsync(nodeB, "NODE-B", new[] { ReplicaRow(role: "SECONDARY") }, Ct);
 
-        /* Nothing lingered to resolve, so no stray recovery row was written for the forgotten episode. */
-        Assert.Empty(h.History.Records);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("AG Failover", fired.MetricName);
+        Assert.Equal("PRIMARY", fired.ThresholdValue);
+        Assert.Equal("SECONDARY", fired.CurrentValue);
+        Assert.Equal(nodeB.ToString(System.Globalization.CultureInfo.InvariantCulture), fired.ServerKey);
     }
 
     [Fact]

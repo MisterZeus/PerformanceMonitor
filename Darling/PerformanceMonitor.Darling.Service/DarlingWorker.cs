@@ -556,9 +556,11 @@ public sealed class DarlingWorker : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError(
-                "Could not restrict the ACL on {Path} ({Message}). Fix the file permissions by hand " +
-                "(SYSTEM/Administrators/the service account, plus INTERACTIVE read for the Viewer).",
-                path, ex.Message);
+                "Could not restrict the ACL on {Path}{Detail} ({Message}). If the owner is not this service, the " +
+                "re-ACL can never succeed — it needs ownership or FullControl — so restarting will not clear this; " +
+                "grant the service account FullControl or make it the owner (SYSTEM/Administrators/the service " +
+                "account, plus INTERACTIVE read for the Viewer).",
+                path, DarlingFileSecurity.DescribeOwnerAndExposure(path), ex.Message);
         }
 
         if (DarlingFileSecurity.IsReadableByOrdinaryUsers(path))
@@ -831,7 +833,8 @@ public sealed class DarlingWorker : BackgroundService
                without a restart (and the clamps live on the settings properties, not here). */
             notifyAgHealth: () => alertSettings.NotifyAgHealth,
             agLagAlertSeconds: () => alertSettings.AgLagAlertSeconds,
-            agRedoQueueAlertKb: () => alertSettings.AgRedoQueueAlertKb);
+            agRedoQueueAlertKb: () => alertSettings.AgRedoQueueAlertKb,
+            agDisconnectRefireMinutes: () => alertSettings.AgDisconnectRefireMinutes);
 
         /* #1706: report this start's store runtime upgrade, now that there IS an alert engine to report it
            through. Fired once, here, and never re-evaluated — the store is down while an upgrade runs, so
@@ -2970,11 +2973,17 @@ LIMIT 1";
         }
         catch (SqlException ex) when (ex.Number is 229 or 297 or 300)
         {
+            /* Same Azure explanation Lite appends (#1631): error 300 on Azure SQL Database is a service
+               objective limit phrased as a permission denied on 'master', which reads as a missing GRANT
+               and sends people looking for one that cannot be issued. Appended, so the raw error stays
+               searchable. Parity is the point — a Darling operator gets the identical sentence Lite gives. */
+            var message = ex.Message + AzureDmvPermissionHint.For(ex.Number, server.Runtime?.Target.IsAzureSqlDb == true);
+
             _logger.LogWarning("  [{Server}] {Collector} => insufficient permissions ({Number}): {Message}",
-                server.Config.DisplayName, collectorName, ex.Number, ex.Message);
+                server.Config.DisplayName, collectorName, ex.Number, message);
 
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, 0, ex.Message, _logger, cancellationToken);
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, 0, message, _logger, cancellationToken);
             return 0;
         }
         catch (Exception ex)

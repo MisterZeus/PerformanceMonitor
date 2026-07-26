@@ -101,6 +101,22 @@ public partial class App : Application
     /// per-outage behavior). Re-fires deliver under the SAME "Server Unreachable" metric name so
     /// webhook-driven automation keyed on it re-triggers.</summary>
     public static int ConnectionRefireMinutes { get; set; }
+
+    /// <summary>#1696: the master switch for the Availability Group alert family — failover, replica
+    /// disconnect/reconnect, sync fell behind, database suspended. Default on, matching Darling's
+    /// notify_ag_health: a server with no AGs collects no AG rows so the alerts are silent anyway, and an
+    /// operator who DOES run AGs should not have to find a switch to be told about a failover.</summary>
+    public static bool NotifyAgHealth { get; set; } = true;
+
+    /// <summary>#1696: "AG Sync Fell Behind" fires when a secondary's secondary_lag_seconds reaches this
+    /// (0 = off). Default 300, the same as Darling's ag_lag_alert_seconds.</summary>
+    public static int AgLagAlertSeconds { get; set; } = 300;
+
+    /// <summary>#1696: the second, independent "AG Sync Fell Behind" trigger — the secondary's
+    /// redo_queue_size in KILOBYTES (0 = off, the default). Off because a healthy redo queue size is entirely
+    /// workload-dependent, and because a legitimate post-resume catch-up spike would otherwise page.</summary>
+    public static long AgRedoQueueAlertKb { get; set; }
+
     public static bool AlertCpuEnabled { get; set; } = true;
     public static int AlertCpuThreshold { get; set; } = 80;
     /// <summary>Which CPU metric the alert evaluates against. Total = sql_server_cpu + other_process_cpu (matches OS user+system). SqlOnly = SQL Server scheduler %.</summary>
@@ -524,6 +540,11 @@ public partial class App : Application
             if (root.TryGetProperty("notify_connection_changes", out v)) NotifyConnectionChanges = v.GetBoolean();
             if (root.TryGetProperty("notify_connection_down_at_startup", out v)) NotifyConnectionDownAtStartup = v.GetBoolean();
             if (root.TryGetProperty("connection_refire_minutes", out v)) ConnectionRefireMinutes = Math.Clamp(v.GetInt32(), 0, 1440);
+            /* #1696 AG knobs, clamped on READ to the same ranges Darling clamps, so a hand-edited settings.json
+               cannot drive a nonsense threshold in either app. */
+            if (root.TryGetProperty("notify_ag_health", out v)) NotifyAgHealth = v.GetBoolean();
+            if (root.TryGetProperty("ag_lag_alert_seconds", out v)) AgLagAlertSeconds = Math.Clamp(v.GetInt32(), 0, 86400);
+            if (root.TryGetProperty("ag_redo_queue_alert_kb", out v)) AgRedoQueueAlertKb = Math.Clamp(v.GetInt64(), 0L, 1073741824L);
             if (root.TryGetProperty("alert_cpu_enabled", out v)) AlertCpuEnabled = v.GetBoolean();
             if (root.TryGetProperty("alert_cpu_threshold", out v)) AlertCpuThreshold = v.GetInt32();
             if (root.TryGetProperty("alert_cpu_mode", out v) && Enum.TryParse<CpuAlertMode>(v.GetString(), out var mode))

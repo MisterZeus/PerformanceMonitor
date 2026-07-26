@@ -326,6 +326,11 @@
                     <TabItem Header="Job History" x:Name="JobHistoryTabItem">
                         <controls:JobHistoryTab x:Name="JobHistoryContent"/>
                     </TabItem>
+                    <!-- Availability Groups (#991): collapsed until a load finds AG rows. Always On is opt-in,
+                         so most installs would otherwise carry a permanently empty tab. -->
+                    <TabItem Header="Availability Groups" x:Name="AvailabilityGroupsTabItem" Visibility="Collapsed">
+                        <controls:AvailabilityGroupsTab x:Name="AvailabilityGroupsContent"/>
+                    </TabItem>
                     <TabItem Header="FinOps" x:Name="FinOpsTab">
                         <controls:FinOpsTab x:Name="FinOpsContent"/>
                     </TabItem>

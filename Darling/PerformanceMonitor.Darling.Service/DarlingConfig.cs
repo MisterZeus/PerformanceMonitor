@@ -340,6 +340,12 @@ public sealed class AlertsConfig
     [JsonPropertyName("agRedoQueueAlertKb")]
     public long AgRedoQueueAlertKb { get; set; }
 
+    /// <summary>#1696 (V37): re-announce a still-disconnected AG replica every N minutes (0 = off, the
+    /// default). "AG Replica Disconnected" was a pure edge, so a replica down for a week announced it once.
+    /// Re-fires deliver under the SAME metric name so webhook automation keyed on it re-triggers.</summary>
+    [JsonPropertyName("agDisconnectRefireMinutes")]
+    public int AgDisconnectRefireMinutes { get; set; }
+
     [JsonPropertyName("cpuEnabled")]
     public bool CpuEnabled { get; set; } = true;
 

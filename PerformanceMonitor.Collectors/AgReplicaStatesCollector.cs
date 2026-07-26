@@ -28,6 +28,12 @@ namespace PerformanceMonitor.Collectors;
 /// exist on every non-Azure-SQL-DB instance whether or not Always On is enabled, so an AG-less
 /// server returns an empty set rather than erroring, and the host records SUCCESS/0 rows.</para>
 ///
+/// <para><c>is_local</c> (#1696) marks the row describing the replica this collector is connected to. Every
+/// replica in an AG is visible from every node, so a fully-monitored 3-node AG collects the same replica's
+/// state three times; the alert path uses this flag to pick ONE node's view and report a failover once
+/// instead of three times. It comes from the DMV rather than being inferred, because matching the monitored
+/// server's name against <c>replica_server_name</c> is not reliable (instance names, aliases, listeners).</para>
+///
 /// <para><c>WHERE COALESCE(ag.is_distributed, 0) = 0</c> keeps distributed-AG container rows out;
 /// the member AGs themselves still appear. Drilling into a DAG's remote members
 /// (<c>sys.fn_hadr_distributed_ag_replica</c>) needs a connection per member and is out of scope.</para>
@@ -65,7 +71,8 @@ public sealed class AgReplicaStatesCollector : CollectorDefinitionBase<AgReplica
         string? SynchronizationHealthDesc,
         string? AvailabilityModeDesc,
         string? FailoverModeDesc,
-        string? EndpointUrl);
+        string? EndpointUrl,
+        bool? IsLocal);
 
     private const string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -80,7 +87,8 @@ SELECT
     synchronization_health_desc = ars.synchronization_health_desc,
     availability_mode_desc = ar.availability_mode_desc,
     failover_mode_desc = ar.failover_mode_desc,
-    endpoint_url = ar.endpoint_url
+    endpoint_url = ar.endpoint_url,
+    is_local = ars.is_local
 FROM sys.availability_replicas AS ar
 JOIN sys.availability_groups AS ag
   ON ar.group_id = ag.group_id
@@ -122,6 +130,7 @@ OPTION(RECOMPILE);";
         new CollectorColumn("availability_mode_desc", CollectorColumnType.Varchar),
         new CollectorColumn("failover_mode_desc", CollectorColumnType.Varchar),
         new CollectorColumn("endpoint_url", CollectorColumnType.Varchar),
+        new CollectorColumn("is_local", CollectorColumnType.Boolean),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -140,7 +149,8 @@ OPTION(RECOMPILE);";
                 SynchronizationHealthDesc: reader.IsDBNull(6) ? null : reader.GetString(6),
                 AvailabilityModeDesc: reader.IsDBNull(7) ? null : reader.GetString(7),
                 FailoverModeDesc: reader.IsDBNull(8) ? null : reader.GetString(8),
-                EndpointUrl: reader.IsDBNull(9) ? null : reader.GetString(9)));
+                EndpointUrl: reader.IsDBNull(9) ? null : reader.GetString(9),
+                IsLocal: reader.IsDBNull(10) ? null : reader.GetBoolean(10)));
         }
 
         return rows;
@@ -158,6 +168,7 @@ OPTION(RECOMPILE);";
             .Value(row.SynchronizationHealthDesc)  /* synchronization_health_desc VARCHAR */
             .Value(row.AvailabilityModeDesc)       /* availability_mode_desc VARCHAR */
             .Value(row.FailoverModeDesc)           /* failover_mode_desc VARCHAR */
-            .Value(row.EndpointUrl);               /* endpoint_url VARCHAR */
+            .Value(row.EndpointUrl)                /* endpoint_url VARCHAR */
+            .Value(row.IsLocal);                   /* is_local BOOLEAN */
     }
 }
