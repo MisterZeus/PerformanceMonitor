@@ -98,7 +98,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 47;
+    internal const int CurrentSchemaVersion = 48;
 
     private readonly string _archivePath;
 
@@ -1099,6 +1099,33 @@ public class DuckDbInitializer
             catch (Exception ex)
             {
                 _logger?.LogWarning("Migration to v47 encountered an error (non-fatal): {Error}", ex.Message);
+            }
+        }
+
+        if (fromVersion < 48)
+        {
+            /* v48: drop NOT NULL from server_properties.cpu_count / hyperthread_ratio /
+                    physical_memory_mb (#1591). Those three are the only columns in the collector
+                    sourced from sys.dm_os_sys_info, which needs VIEW SERVER STATE (VIEW DATABASE
+                    STATE on Azure SQL DB). The collector now reads them in a TRY/CATCH so a login
+                    without that grant keeps every permission-free column instead of losing the whole
+                    row — but that only helps if the column can actually hold NULL, so an existing
+                    database has to have the constraint dropped. New databases get it from the
+                    generator. Column types and ordinals are unchanged, so the positional appender
+                    and old parquet are unaffected. */
+            _logger?.LogInformation("Running migration to v48: server_properties hardware columns become nullable");
+            foreach (var column in new[] { "cpu_count", "hyperthread_ratio", "physical_memory_mb" })
+            {
+                try
+                {
+                    await ExecuteNonQueryAsync(connection, $"ALTER TABLE server_properties ALTER COLUMN {column} DROP NOT NULL");
+                }
+                catch (Exception ex)
+                {
+                    /* Already nullable, or the table does not exist yet (fresh install creates it
+                       correctly from the generator) — neither is fatal. */
+                    _logger?.LogWarning("Migration to v48 on {Column} encountered an error (non-fatal): {Error}", column, ex.Message);
+                }
             }
         }
     }

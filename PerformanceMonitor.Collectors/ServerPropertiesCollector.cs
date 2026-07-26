@@ -37,9 +37,12 @@ public sealed class ServerPropertiesCollector : CollectorDefinitionBase<ServerPr
         string ProductLevel,
         string? ProductUpdateLevel,
         int EngineEdition,
-        int CpuCount,
-        int HyperthreadRatio,
-        long PhysicalMemoryMb,
+        /* Nullable since #1591: these three come from sys.dm_os_sys_info, which needs VIEW SERVER
+           STATE (VIEW DATABASE STATE on Azure SQL DB). Without it the hardware facts are unknown
+           and the rest of the row is still collected, so "unknown" has to be representable. */
+        int? CpuCount,
+        int? HyperthreadRatio,
+        long? PhysicalMemoryMb,
         int? SocketCount,
         int? CoresPerSocket,
         bool? IsHadrEnabled,
@@ -92,6 +95,33 @@ BEGIN
     SET @ag_role = ISNULL(@ag_detected, N'Standalone');
 END;
 
+/* Hardware facts are the ONLY part of this collector that needs a DMV, and sys.dm_os_sys_info
+   requires VIEW SERVER STATE (VIEW DATABASE STATE on Azure SQL DB). Read them into variables
+   inside TRY/CATCH -- exactly as the supplemental health query below does -- so a login without
+   that grant loses only the hardware columns instead of the ENTIRE server_properties row.
+   Everything else in the SELECT is a permission-free SERVERPROPERTY/DATABASEPROPERTYEX scalar. */
+DECLARE
+    @cpu_count integer = NULL,
+    @hyperthread_ratio integer = NULL,
+    @physical_memory_mb bigint = NULL,
+    @socket_count integer = NULL,
+    @cores_per_socket integer = NULL,
+    @sqlserver_start_time datetime = NULL;
+
+BEGIN TRY
+    SELECT
+        @cpu_count = osi.cpu_count,
+        @hyperthread_ratio = osi.hyperthread_ratio,
+        @physical_memory_mb = osi.physical_memory_kb / 1024,
+        @socket_count = osi.socket_count,
+        @cores_per_socket = osi.cores_per_socket,
+        @sqlserver_start_time = osi.sqlserver_start_time
+    FROM sys.dm_os_sys_info AS osi;
+END TRY
+BEGIN CATCH
+    /* Permission denied (or the DMV is unavailable): leave every hardware value NULL. */
+END CATCH;
+
 SELECT
     server_name =
         CONVERT(nvarchar(128), SERVERPROPERTY(N'ServerName')),
@@ -118,15 +148,15 @@ SELECT
     engine_edition =
         CONVERT(int, SERVERPROPERTY(N'EngineEdition')),
     cpu_count =
-        osi.cpu_count,
+        @cpu_count,
     hyperthread_ratio =
-        osi.hyperthread_ratio,
+        @hyperthread_ratio,
     physical_memory_mb =
-        osi.physical_memory_kb / 1024,
+        @physical_memory_mb,
     socket_count =
-        osi.socket_count,
+        @socket_count,
     cores_per_socket =
-        osi.cores_per_socket,
+        @cores_per_socket,
     is_hadr_enabled =
         CONVERT(bit, SERVERPROPERTY(N'IsHadrEnabled')),
     is_clustered =
@@ -138,7 +168,7 @@ SELECT
             ELSE NULL
         END,
     sqlserver_start_time =
-        osi.sqlserver_start_time,
+        @sqlserver_start_time,
     host_os_version =
         @host_os,
     ag_replica_role =
@@ -148,7 +178,6 @@ SELECT
        live, can render timestamps in the server's own local time (Server-time display mode). */
     utc_offset_minutes =
         DATEDIFF(MINUTE, GETUTCDATE(), GETDATE())
-FROM sys.dm_os_sys_info AS osi
 OPTION(RECOMPILE);";
 
     private const string ServerHealthQueryText = @"
@@ -304,9 +333,9 @@ SELECT
             ProductLevel: reader.GetString(3),
             ProductUpdateLevel: reader.IsDBNull(4) ? null : reader.GetString(4),
             EngineEdition: reader.GetInt32(5),
-            CpuCount: reader.GetInt32(6),
-            HyperthreadRatio: reader.GetInt32(7),
-            PhysicalMemoryMb: reader.GetInt64(8),
+            CpuCount: reader.IsDBNull(6) ? null : reader.GetInt32(6),
+            HyperthreadRatio: reader.IsDBNull(7) ? null : reader.GetInt32(7),
+            PhysicalMemoryMb: reader.IsDBNull(8) ? null : reader.GetInt64(8),
             SocketCount: reader.IsDBNull(9) ? null : reader.GetInt32(9),
             CoresPerSocket: reader.IsDBNull(10) ? null : reader.GetInt32(10),
             IsHadrEnabled: reader.IsDBNull(11) ? null : reader.GetBoolean(11),

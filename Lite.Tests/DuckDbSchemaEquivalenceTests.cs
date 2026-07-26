@@ -124,6 +124,28 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
         Assert.Equal(new[] { "database_config", "server_config" }, goldenIndexless);
     }
 
+    /// <summary>
+    /// Columns whose storage shape has INTENTIONALLY diverged from the pre-change hand-written
+    /// schema since the extraction, each paired with the schema version that migrates existing
+    /// databases. The golden snapshot stays frozen — it is the proof the extraction itself was
+    /// lossless — so a deliberate change is recorded here rather than by rewriting history, and
+    /// every entry has to be justified in review.
+    ///
+    /// <para>#1591 / schema v48: <c>cpu_count</c>, <c>hyperthread_ratio</c> and
+    /// <c>physical_memory_mb</c> dropped NOT NULL. They are the only server_properties columns read
+    /// from <c>sys.dm_os_sys_info</c>, which requires VIEW SERVER STATE (VIEW DATABASE STATE on
+    /// Azure SQL DB). The collector now reads them inside TRY/CATCH so a login without that grant
+    /// keeps every permission-free column instead of losing the entire row — which only works if the
+    /// columns can hold NULL. <see cref="DuckDbInitializer"/>'s v48 migration drops the constraint on
+    /// existing databases.</para>
+    /// </summary>
+    private static readonly HashSet<string> IntentionalStorageDivergences = new(StringComparer.Ordinal)
+    {
+        "server_properties.cpu_count",
+        "server_properties.hyperthread_ratio",
+        "server_properties.physical_memory_mb",
+    };
+
     [Fact]
     public void GeneratedCollectorTables_AreStorageEquivalentToPreChangeHandWritten()
     {
@@ -142,7 +164,13 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
             var goldenInfo = TableInfo(conn, goldenDdl, table);
             var generatedInfo = TableInfo(conn, generatedDdl, table);
 
-            if (!goldenInfo.SequenceEqual(generatedInfo))
+            /* Allow ONLY the recorded divergences, and only in the NOT NULL flag — a changed type,
+               name, position, default or PK still fails even for a listed column. */
+            var goldenComparable = goldenInfo
+                .Select(c => IntentionalStorageDivergences.Contains($"{table}.{c.Name}") ? c with { NotNull = false } : c)
+                .ToList();
+
+            if (!goldenComparable.SequenceEqual(generatedInfo))
             {
                 failures.Add(BuildTableDiff(table, goldenInfo, generatedInfo));
             }

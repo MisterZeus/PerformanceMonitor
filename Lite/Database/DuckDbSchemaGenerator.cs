@@ -238,9 +238,10 @@ public static class DuckDbSchemaGenerator
             ["server_properties.product_version"] = "NOT NULL",
             ["server_properties.product_level"] = "NOT NULL",
             ["server_properties.engine_edition"] = "NOT NULL",
-            ["server_properties.cpu_count"] = "NOT NULL",
-            ["server_properties.hyperthread_ratio"] = "NOT NULL",
-            ["server_properties.physical_memory_mb"] = "NOT NULL",
+            /* cpu_count / hyperthread_ratio / physical_memory_mb are deliberately NULLABLE (#1591):
+               they come from sys.dm_os_sys_info, and a login without VIEW SERVER STATE (VIEW DATABASE
+               STATE on Azure SQL DB) still collects every other column. NOT NULL here would fail the
+               whole insert and lose the row -- the exact bug #1591 tracks. */
             ["session_stats.program_name"] = "NOT NULL",
             ["session_stats.connection_count"] = "NOT NULL",
             ["session_stats.running_count"] = "NOT NULL",
