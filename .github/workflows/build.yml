@@ -30,6 +30,10 @@ jobs:
           # against the default branch on non-default branch pushes, which would
           # match every accumulated change and defeat the filter.
           base: ${{ github.event_name == 'push' && github.event.before || '' }}
+          # Emit the matched file list so the fast-path step can NAME what it classified
+          # as documentation. A fast path that silently under-builds is the failure mode
+          # worth guarding against, so the reason is always printed, never inferred.
+          list-files: shell
           filters: |
             # A change to a root build file (the solution, restore config, or THIS workflow) can
             # affect every product, so it forces a full build/test/publish.
@@ -73,16 +77,86 @@ jobs:
             darling:
               - 'Darling/**'
               - '!**/*.md'
-            # True when any non-documentation file changed. Documentation-only
-            # changes (e.g. a CHANGELOG or README edit) skip the build/test/
-            # publish steps below — there is nothing to compile. The job still
-            # runs so the required 'build' check reports a result.
+            # The DOCUMENTATION allowlist: files that cannot affect a build under any
+            # job in this workflow. Deliberately an allowlist of non-executable content,
+            # not a "everything that isn't code" subtraction — a new file type defaults
+            # to being treated as code, which is the safe direction to be wrong in.
+            #
+            # NOT here, on purpose: *.sql (the installer and sql-validation compile it),
+            # *.yml (workflows), *.csproj / *.props / packages.lock.json (build inputs),
+            # and *.cs regardless of how comment-only the change looks — an XML doc
+            # comment still recompiles, and the compiler is what proves it still builds.
+            docs:
+              - '**/*.md'
+              - 'LICENSE'
+              - 'CITATION.cff'
+              - '.gitignore'
+              - '.gitattributes'
+              - 'docs/**'
+              - 'Screenshots/**'
+            # True when any file OUTSIDE the documentation allowlist changed. A docs-only
+            # change skips .NET setup, restore and versioning below — there is nothing to
+            # compile — while the job itself still runs, so the required 'build' check
+            # reports a result rather than going missing and blocking the merge.
+            #
+            # The exclusions MIRROR the docs filter above; they are the same list stated
+            # negatively because paths-filter has no "not in that other filter" operator.
+            # Keep the two in step: a path added to docs: but not here still forces a
+            # restore, and a path excluded here but absent from docs: makes the fast-path
+            # log under-report what it classified.
             code:
               - '**'
               - '!**/*.md'
+              - '!LICENSE'
+              - '!CITATION.cff'
+              - '!.gitignore'
+              - '!.gitattributes'
+              - '!docs/**'
+              - '!Screenshots/**'
+
+      # Decides the docs fast path ONCE, in one place, and says so out loud. Two guards
+      # keep it off the paths where a skipped restore would be a real loss:
+      #   release  — the filter step does not even run there, and a release must always
+      #              compile and publish from a cold, fully restored tree.
+      #   push     — dev/main pushes are the integration signal for what just merged, so
+      #              they restore unconditionally even for a docs-only commit. Cheap
+      #              insurance: this only forces the restore back on, it does not force
+      #              the per-product build/test steps, which stay path-gated as before.
+      # Everything else (pull_request) is eligible, and engages only when NOTHING outside
+      # the documentation allowlist changed.
+      - name: Classify change for the docs fast path
+        id: fastpath
+        shell: bash
+        env:
+          CODE_CHANGED: ${{ steps.filter.outputs.code }}
+          DOCS_FILES: ${{ steps.filter.outputs.docs_files }}
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "engaged=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Full build::Release event - the docs fast path never applies to a release."
+            exit 0
+          fi
+
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "engaged=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Full build::Push to '${{ github.ref_name }}' - branch pushes always restore, even for a docs-only commit."
+            exit 0
+          fi
+
+          if [ "${CODE_CHANGED}" = "false" ]; then
+            echo "engaged=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=DOCS FAST PATH ENGAGED::No file outside the documentation allowlist changed, so .NET setup, restore and versioning are skipped. This job still reports its result."
+            echo "Documentation files classified in this change:"
+            for f in ${DOCS_FILES}; do echo "  - ${f}"; done
+          else
+            echo "engaged=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Full build::At least one file outside the documentation allowlist changed."
+          fi
 
       - name: Setup .NET 10.0
-        if: steps.filter.outputs.code != 'false'
+        if: steps.fastpath.outputs.engaged != 'true'
         uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
@@ -90,7 +164,7 @@ jobs:
           cache-dependency-path: '**/packages.lock.json'
 
       - name: Restore dependencies
-        if: steps.filter.outputs.code != 'false'
+        if: steps.fastpath.outputs.engaged != 'true'
         run: |
           dotnet restore Lite/PerformanceMonitorLite.csproj --locked-mode
           dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
@@ -145,7 +219,7 @@ jobs:
         run: dotnet test Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build --verbosity normal
 
       - name: Get version
-        if: steps.filter.outputs.code != 'false'
+        if: steps.fastpath.outputs.engaged != 'true'
         id: version
         shell: pwsh
         run: |
@@ -437,6 +511,24 @@ jobs:
               - 'Darling/**'
               - '!Darling/**/*.md'
               - '.github/workflows/build.yml'
+
+      # This job's gate was already correct for documentation — a docs-only change leaves
+      # 'darling' false and every step below no-ops. What it lacked was SAYING so: a job
+      # that reports success having quietly run nothing looks identical to one that tested
+      # everything. Costs one step; buys a log you can point at when asking "did this
+      # actually get tested?".
+      - name: Report the Darling PG gate decision
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "::notice title=Darling PG tests skipped::Release event - the dev push that produced this commit already ran them."
+          elif [ "${{ steps.filter.outputs.darling }}" = "true" ]; then
+            echo "::notice title=Darling PG tests running::Darling code (or this workflow) changed."
+          else
+            echo "::notice title=Darling PG tests skipped::No Darling code changed - documentation-only Darling edits do not trigger the TimescaleDB suite."
+          fi
 
       - name: Setup .NET 10.0
         if: steps.filter.outputs.darling == 'true'
