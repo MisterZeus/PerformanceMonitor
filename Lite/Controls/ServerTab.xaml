@@ -2278,7 +2278,7 @@
             </TabItem>
 
             <!-- Collection Health Tab -->
-            <TabItem Header="Collection Health">
+            <TabItem x:Name="CollectionHealthTab" Header="Collection Health">
                 <Grid Margin="8">
                     <TabControl Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                         <TabItem Header="Health Summary">

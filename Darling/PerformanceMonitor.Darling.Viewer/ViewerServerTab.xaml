@@ -3204,7 +3204,7 @@
              HealthStatus cell is plain text (Lite doesn't color it — the shell's StatusToBrush stays on
              the Findings grid only), and Lite's "Open Log File" button is dropped (it opens Lite's local
              log file, which the viewer has no equivalent of). -->
-        <TabItem Header="Collection Health">
+        <TabItem x:Name="CollectionHealthTab" Header="Collection Health">
             <Grid Margin="8">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>

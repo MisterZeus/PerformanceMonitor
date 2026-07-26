@@ -18,6 +18,34 @@ namespace PerformanceMonitorLite.Services;
 public partial class LocalDataService
 {
     /// <summary>
+    /// #1591: how many DISTINCT collectors were permission-denied in the last 7 days — the badge count for the
+    /// Collection Health tab header.
+    ///
+    /// <para>Deliberately its own narrow COUNT rather than reusing <c>GetCollectionHealthAsync</c>: that one is
+    /// per-collector and only runs when its tab is selected, which is exactly why a permission problem stayed
+    /// invisible until someone thought to look. This runs on every refresh alongside the alert-count badge, so a
+    /// denied collector is discoverable from any tab. Counts collectors, not rows, so one collector failing every
+    /// cycle for a week reads as "1" rather than a meaningless four-figure number.</para>
+    /// </summary>
+    public async Task<int> GetPermissionDeniedCollectorCountAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = @"
+SELECT COUNT(DISTINCT collector_name)
+FROM v_collection_log
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   status = 'PERMISSIONS'";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
+
+        var scalar = await command.ExecuteScalarAsync();
+        return scalar is null or DBNull ? 0 : Convert.ToInt32(scalar);
+    }
+
+    /// <summary>
     /// Gets collection health summary for all collectors on a server.
     /// </summary>
     public async Task<List<CollectorHealthRow>> GetCollectionHealthAsync(int serverId)
