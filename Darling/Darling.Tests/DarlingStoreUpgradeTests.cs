@@ -305,9 +305,25 @@ public sealed class DarlingStoreUpgradeTests
             Assert.True(before.CaggRows > 0, "the fixture must contain a materialized continuous aggregate");
 
             /* ---- 3. Run the REAL bootstrap. This is the whole feature: detect, rescue the old runtime,
-                    extract the new one, bridge TimescaleDB, initdb, pg_upgrade, swap, start, verify. ---- */
-            var managed = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
-            var connectionString = await managed.EnsureRunningAsync(timeout.Token);
+                    extract the new one, bridge TimescaleDB, initdb, pg_upgrade, swap, start, verify.
+
+                    A CAPTURING logger, not NullLogger: the orchestration reports which of its steps failed
+                    and why through the log, and swallowing that turns any failure here into a bare stack
+                    trace with no cause. Replayed into the assertion message below so a red run in CI is
+                    diagnosable from the output alone. ---- */
+            var log = new CapturingLogger();
+            var managed = new DarlingManagedPostgres(config, log, runtimeRoot);
+
+            string connectionString;
+            try
+            {
+                connectionString = await managed.EnsureRunningAsync(timeout.Token);
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    $"The store upgrade bootstrap threw: {ex.Message}\n\n--- orchestration log ---\n{log}", ex);
+            }
 
             try
             {
@@ -315,7 +331,8 @@ public sealed class DarlingStoreUpgradeTests
                 var after = await MeasureStoreAsync(connectionString, timeout.Token);
 
                 Assert.True(after.ServerMajor > oldMajor,
-                    $"expected an upgrade past PostgreSQL {oldMajor}, but the server reports {after.ServerMajor}");
+                    $"expected an upgrade past PostgreSQL {oldMajor}, but the server reports {after.ServerMajor}." +
+                    $"\n\n--- orchestration log ---\n{log}");
                 Assert.Equal(before.LogRows, after.LogRows);
                 Assert.Equal(before.PlanRows, after.PlanRows);
                 Assert.Equal(before.PlanXmlLength, after.PlanXmlLength);
@@ -625,6 +642,45 @@ public sealed class DarlingStoreUpgradeTests
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             /* A leftover temp tree is not a test failure. */
+        }
+    }
+
+    /// <summary>
+    /// Keeps every line the orchestration logs so a failed gated run explains itself. The store upgrade
+    /// reports its failed STEP and the underlying error through <see cref="ILogger"/> and nowhere else, so
+    /// without this a red run is an unexplained stack trace.
+    /// </summary>
+    private sealed class CapturingLogger : Microsoft.Extensions.Logging.ILogger
+    {
+        private readonly System.Text.StringBuilder _lines = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            Microsoft.Extensions.Logging.LogLevel logLevel,
+            Microsoft.Extensions.Logging.EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            lock (_lines)
+            {
+                _lines.Append('[').Append(logLevel).Append("] ").AppendLine(formatter(state, exception));
+                if (exception is not null)
+                {
+                    _lines.Append("    ").AppendLine(exception.Message);
+                }
+            }
+        }
+
+        public override string ToString()
+        {
+            lock (_lines)
+            {
+                return _lines.ToString();
+            }
         }
     }
 

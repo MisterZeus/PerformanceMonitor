@@ -639,9 +639,18 @@ internal sealed class DarlingStoreUpgrade
         catch (Exception)
         {
             /* The new runtime is not usable; put the old one back so the store still boots, and let the
-               caller's existing error path report. Nothing has touched the data directory yet. */
-            TryDeleteDirectory(pgsqlDirectory);
+               caller's existing error path report. Nothing has touched the data directory yet. Move-aside
+               rather than delete-first, for the reason spelled out in RevertRuntime: a partial delete
+               would leave an unbootable runtime behind. */
+            var failedExtract = pgsqlDirectory + ".failed";
+            TryDeleteDirectory(failedExtract);
+            if (Directory.Exists(pgsqlDirectory))
+            {
+                Directory.Move(pgsqlDirectory, failedExtract);
+            }
+
             Directory.Move(previousPgsql, pgsqlDirectory);
+            TryDeleteDirectory(failedExtract);
             TryDeleteDirectory(previousRoot);
             throw;
         }
@@ -672,8 +681,21 @@ internal sealed class DarlingStoreUpgrade
                 return;
             }
 
-            TryDeleteDirectory(pgsqlDirectory);
+            /* MOVE the failed runtime aside, never delete-then-move. A delete can partially succeed — a
+               postmaster that has not finished exiting still holds its binaries — and the swallowed
+               failure would leave a half-emptied pgsql directory that the following Move then refuses to
+               overwrite. The store is then left with a runtime missing pg_ctl.exe: a self-inflicted
+               unbootable install, produced by the very path that exists to make failure safe. A rename
+               either works completely or fails without touching anything. */
+            var failedRuntime = pgsqlDirectory + ".failed";
+            TryDeleteDirectory(failedRuntime);
+            if (Directory.Exists(pgsqlDirectory))
+            {
+                Directory.Move(pgsqlDirectory, failedRuntime);
+            }
+
             Directory.Move(previousPgsql, pgsqlDirectory);
+            TryDeleteDirectory(failedRuntime);
             TryDeleteDirectory(previousRoot);
 
             /* Record the failing package so the next start does not run the same doomed upgrade again, and
