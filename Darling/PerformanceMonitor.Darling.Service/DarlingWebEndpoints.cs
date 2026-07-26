@@ -374,17 +374,60 @@ public static class DarlingWebEndpoints
            many names => a bound server_name = ANY filter. */
         var serverScope = ParseServerScope(body, values);
 
-        var hours = body["hours"] is JsonValue hoursValue && hoursValue.TryGetValue<int>(out var h) ? h : DefaultComposeHours;
-        hours = Math.Clamp(hours, 1, ComposeLimits.MaxWindowHours);
-        var end = DateTime.UtcNow;
-        var start = end.AddHours(-hours);
+        /* The run window (#1606): an explicit absolute pair (windowStart/windowEnd — the zoom/brush and
+           historical-analysis path) takes precedence over the relative `hours` (which the frontend keeps
+           sending alongside); both-or-neither, start < end, span capped at the same MaxWindowHours ceiling.
+           An explicit window is an explicit request, so violations REJECT rather than silently sliding an
+           endpoint. NowUtc stays the real wall clock either way — routing and the partial-window notice
+           measure age from now, never from a historical window's end. */
+        var now = DateTime.UtcNow;
+        DateTime start;
+        DateTime end;
+        var hasWindowStart = body["windowStart"] is not null;
+        var hasWindowEnd = body["windowEnd"] is not null;
+        if (hasWindowStart || hasWindowEnd)
+        {
+            if (!hasWindowStart || !hasWindowEnd)
+            {
+                return ComposeRunOutcome.BadRequest("windowStart and windowEnd must be provided together.");
+            }
+
+            if (!TryParseUtcInstant(body["windowStart"], out start) || !TryParseUtcInstant(body["windowEnd"], out end))
+            {
+                return ComposeRunOutcome.BadRequest("windowStart/windowEnd must be ISO-8601 timestamps (UTC; a trailing Z and fractional seconds are fine).");
+            }
+
+            /* The future is empty by definition — clamp the end to now for honesty (routing only cares about
+               the start's age, so this is presentation, not safety). */
+            if (end > now)
+            {
+                end = now;
+            }
+
+            if (start >= end)
+            {
+                return ComposeRunOutcome.BadRequest("windowStart must be earlier than windowEnd.");
+            }
+
+            if ((end - start) > TimeSpan.FromHours(ComposeLimits.MaxWindowHours))
+            {
+                return ComposeRunOutcome.BadRequest($"the window spans more than the {ComposeLimits.MaxWindowHours / 24}-day ceiling; narrow it.");
+            }
+        }
+        else
+        {
+            var hours = body["hours"] is JsonValue hoursValue && hoursValue.TryGetValue<int>(out var h) ? h : DefaultComposeHours;
+            hours = Math.Clamp(hours, 1, ComposeLimits.MaxWindowHours);
+            end = now;
+            start = end.AddHours(-hours);
+        }
 
         /* Which rollups exist in THIS store (#1665) gates the source routing below — a plain-PostgreSQL
            store (or a partially-built TimescaleDB one) must route to what it HAS, never onto a missing
            relation. Probed lazily, cached per data source. */
         var rollups = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
 
-        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups);
+        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now);
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, runContext);
         if (compileError is not null)
         {
@@ -402,7 +445,7 @@ public static class DarlingWebEndpoints
             /* Partial window, and says so (#1665): when the route landed on a tier whose retention cannot
                reach the window's start on a retention-active store, tell the caller instead of quietly
                returning a short slice of what they asked for. Additive — absent when the window fits. */
-            if (ComposeStoreAvailability.BuildRetentionNotice(plan!.Measure.SourceTable, compiled.Route, start, end, rollups) is string notice)
+            if (ComposeStoreAvailability.BuildRetentionNotice(plan!.Measure.SourceTable, compiled.Route, start, now, rollups) is string notice)
             {
                 payload["notice"] = notice;
             }
@@ -422,6 +465,30 @@ public static class DarlingWebEndpoints
 
     /// <summary>Default compose-run window (hours) when the request omits one.</summary>
     private const int DefaultComposeHours = 24;
+
+    /// <summary>Parses an absolute run-window bound (#1606): ISO-8601, treated as UTC whether or not it
+    /// carries a Z (JS <c>toISOString()</c> sends ms+Z; the store is naive UTC), normalized to
+    /// Kind-Unspecified naive UTC like every other Darling read binding.</summary>
+    private static bool TryParseUtcInstant(JsonNode? node, out DateTime value)
+    {
+        value = default;
+        if (node is not JsonValue jsonValue || !jsonValue.TryGetValue<string>(out var text) || string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        if (!DateTime.TryParse(
+                text,
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                out var parsed))
+        {
+            return false;
+        }
+
+        value = DateTime.SpecifyKind(parsed, DateTimeKind.Unspecified);
+        return true;
+    }
 
     /// <summary>Resolves the run's server scope (Erik's Decision 1): the top-level <c>server</c> (a name or an
     /// array of names), else the <c>$server</c> variable value. Absent / "All" / empty ⇒ null (the whole fleet,

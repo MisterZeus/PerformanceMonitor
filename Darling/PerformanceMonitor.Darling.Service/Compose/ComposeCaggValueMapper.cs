@@ -94,18 +94,17 @@ public static class ComposeCaggValueMapper
     /// The native (double-precision, NOT yet unit-scaled — the caller applies the same unit conversion as the raw
     /// path) aggregate expression reading the CAGG columns. Precondition: <see cref="CanRemap"/> is true.
     /// </summary>
-    public static string BuildCaggNativeExpr(PanelPlan plan)
+    public static string BuildCaggNativeExpr(ComposeMeasure measure, ComposeAggregate aggregate)
     {
-        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(measure);
 
-        return string.Equals(plan.Measure.SourceTable, QueryStoreTable, StringComparison.Ordinal)
-            ? BuildQueryStoreExpr(plan)
-            : BuildDeltaExpr(plan);
+        return string.Equals(measure.SourceTable, QueryStoreTable, StringComparison.Ordinal)
+            ? BuildQueryStoreExpr(measure, aggregate)
+            : BuildDeltaExpr(measure, aggregate);
     }
 
-    private static string BuildDeltaExpr(PanelPlan plan)
+    private static string BuildDeltaExpr(ComposeMeasure measure, ComposeAggregate aggregate)
     {
-        var measure = plan.Measure;
 
         if (measure.Kind == MeasureKind.Ratio)
         {
@@ -116,7 +115,7 @@ public static class ComposeCaggValueMapper
         }
 
         var baseColumn = CaggBase(measure.DeltaColumn!);
-        return plan.Aggregate switch
+        return aggregate switch
         {
             ComposeAggregate.Sum => $"CAST(SUM({F}.{baseColumn}_sum) AS double precision)",
             ComposeAggregate.Min => $"CAST(MIN({F}.{baseColumn}_min) AS double precision)",
@@ -124,13 +123,12 @@ public static class ComposeCaggValueMapper
             /* AVG(delta) == SUM(delta)/COUNT(delta) == SUM(x_sum)/SUM(sample_count), exact (deltas never NULL). */
             ComposeAggregate.Avg =>
                 $"(CAST(SUM({F}.{baseColumn}_sum) AS double precision) / NULLIF(SUM({F}.sample_count), 0))",
-            _ => throw NotRemappable(plan.Aggregate),
+            _ => throw NotRemappable(aggregate),
         };
     }
 
-    private static string BuildQueryStoreExpr(PanelPlan plan)
+    private static string BuildQueryStoreExpr(ComposeMeasure measure, ComposeAggregate aggregate)
     {
-        var measure = plan.Measure;
 
         if (measure.Kind == MeasureKind.Ratio)
         {
@@ -147,12 +145,12 @@ public static class ComposeCaggValueMapper
         }
 
         /* qs_executions (Delta over execution_count → execution_count_sum). */
-        return plan.Aggregate switch
+        return aggregate switch
         {
             ComposeAggregate.Sum => $"CAST(SUM({F}.{measure.Column}_sum) AS double precision)",
             ComposeAggregate.Avg =>
                 $"(CAST(SUM({F}.{measure.Column}_sum) AS double precision) / NULLIF(SUM({F}.sample_count), 0))",
-            _ => throw NotRemappable(plan.Aggregate),
+            _ => throw NotRemappable(aggregate),
         };
     }
 
