@@ -716,6 +716,16 @@ internal sealed class DarlingSelfAlertEvaluator
     /// The same rule protects the redo trigger, whose value FREEZES at its last reading while suspended (also
     /// measured) — a frozen value over the threshold is a real backlog worth firing on, while a frozen value
     /// under it is stale data that must not clear anything.</para>
+    /// <para>TREAT THIS AS A RULE ABOUT SUSPENDED ROWS, NOT ABOUT THESE TWO COLUMNS. Every measured signal on a
+    /// suspended replica is untrustworthy in the REASSURING direction, and they fail that way for different
+    /// reasons: lag can sit at 0 because it never latched, the redo queue is frozen, and the four
+    /// <c>*_time</c> columns freeze at their last pre-suspension instant — so a cross-replica commit-time delta
+    /// stops growing exactly when replication stops, i.e. it looks like it is catching up. The sharpest example
+    /// is any DRAIN-TIME measure: queue ÷ rate with both frozen holds a small, static, healthy-looking number
+    /// (measured at a flat 0.0144 minutes across an entire suspension) when the true answer is "never, movement
+    /// is stopped". A drain-time or commit-delta trigger added here would therefore fail SILENT rather than
+    /// loud, which is worse. Anything new that judges a suspended row must route through the same
+    /// may-fire-never-clear gate below rather than being trusted on its own.</para>
     /// <para>WHAT THE NUMBER IS NOT: it measures staleness, not volume. On an idle group a large lag means
     /// "nothing has been hardened in a while", which is not the same as "a lot of data is at risk" — the
     /// backlog measure would be <c>log_send_queue_size</c>, and that reads NULL while suspended. Worth knowing
