@@ -189,6 +189,109 @@ public sealed class DarlingManagedPostgresTests
     }
 
     /// <summary>
+    /// The v6 log-rotation block (#1652): the logging collector as a SELF-CAPPING weekday ring. The three
+    /// settings that make the ring bounded are load-bearing together — %a weekday naming caps the set at
+    /// seven files, truncate-on-rotation stops a weekday file from growing week over week, and
+    /// rotation_size 0 keeps size rolls (which append rather than truncate) from defeating the ring.
+    /// </summary>
+    [Fact]
+    public void LogRotationConfAppend_PinsV6Marker_AndTheSelfCappingWeekdayRing()
+    {
+        var block = DarlingManagedPostgres.BuildLogRotationConfAppend();
+
+        Assert.Contains(DarlingManagedPostgres.ConfMarkerV6, block, StringComparison.Ordinal);
+        Assert.Contains("logging_collector = on", block, StringComparison.Ordinal);
+        Assert.Contains("log_directory = 'log'", block, StringComparison.Ordinal);
+        Assert.Contains("log_filename = 'postgresql-%a.log'", block, StringComparison.Ordinal);
+        Assert.Contains("log_rotation_age = 1d", block, StringComparison.Ordinal);
+        Assert.Contains("log_rotation_size = 0", block, StringComparison.Ordinal);
+        Assert.Contains("log_truncate_on_rotation = on", block, StringComparison.Ordinal);
+
+        /* The blocks compose, they don't compete. */
+        Assert.DoesNotContain("shared_buffers", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("max_connections", block, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #1652: the diagnostics tail must follow the log wherever Postgres last wrote it — pg.log for
+    /// pre-collector/startup failures, the v6 ring for a server that came up and then complained.
+    /// </summary>
+    [Fact]
+    public void PickNewestServerLog_ChoosesTheNewestOfPgLogAndTheRing()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-pglogpick-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            Directory.CreateDirectory(dataDirectory);
+            var pgLog = Path.Combine(root.FullName, "pg.log");
+
+            /* Nothing exists yet. */
+            Assert.Null(DarlingManagedPostgres.PickNewestServerLog(pgLog, dataDirectory));
+
+            /* Only pg.log — the pre-collector failure shape. */
+            File.WriteAllText(pgLog, "FATAL: could not start");
+            Assert.Equal(pgLog, DarlingManagedPostgres.PickNewestServerLog(pgLog, dataDirectory));
+
+            /* The ring exists and is newer — the started-then-complained shape. */
+            var ringDirectory = Path.Combine(dataDirectory, "log");
+            Directory.CreateDirectory(ringDirectory);
+            var ringFile = Path.Combine(ringDirectory, "postgresql-Mon.log");
+            File.WriteAllText(ringFile, "ERROR: something after startup");
+            File.SetLastWriteTimeUtc(pgLog, DateTime.UtcNow.AddMinutes(-10));
+            File.SetLastWriteTimeUtc(ringFile, DateTime.UtcNow);
+            Assert.Equal(ringFile, DarlingManagedPostgres.PickNewestServerLog(pgLog, dataDirectory));
+
+            /* pg.log newer again (a fresh failed restart after the server had been up). */
+            File.SetLastWriteTimeUtc(pgLog, DateTime.UtcNow.AddMinutes(5));
+            Assert.Equal(pgLog, DarlingManagedPostgres.PickNewestServerLog(pgLog, dataDirectory));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// #1652: the one-time legacy cap — an oversized pre-rotation pg.log rolls to pg.log.old (replacing any
+    /// prior roll, so the pair is bounded forever); a small file is left alone; a missing file is a no-op.
+    /// </summary>
+    [Fact]
+    public void CapLegacyServerLog_RollsOnlyOversizedFiles()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-pglogcap-");
+        try
+        {
+            var pgLog = Path.Combine(root.FullName, "pg.log");
+            var rolled = pgLog + ".old";
+
+            /* Missing file: no-op, no throw. */
+            DarlingManagedPostgres.CapLegacyServerLog(pgLog, capBytes: 10, logger: null);
+            Assert.False(File.Exists(rolled));
+
+            /* Under the cap: untouched. */
+            File.WriteAllText(pgLog, "small");
+            DarlingManagedPostgres.CapLegacyServerLog(pgLog, capBytes: 1024, logger: null);
+            Assert.True(File.Exists(pgLog));
+            Assert.False(File.Exists(rolled));
+
+            /* Over the cap: rolled aside; a second oversized roll REPLACES the first (two files, ever). */
+            File.WriteAllText(pgLog, new string('x', 2048));
+            DarlingManagedPostgres.CapLegacyServerLog(pgLog, capBytes: 1024, logger: null);
+            Assert.False(File.Exists(pgLog));
+            Assert.True(File.Exists(rolled));
+
+            File.WriteAllText(pgLog, new string('y', 4096));
+            DarlingManagedPostgres.CapLegacyServerLog(pgLog, capBytes: 1024, logger: null);
+            Assert.Equal(4096, new FileInfo(rolled).Length);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
     /// On a big box every cap/ceiling engages: shared_buffers pins at 8 GB (not 25% = 16 GB),
     /// maintenance_work_mem at 1 GB (not 5% = 3.2 GB), work_mem at 64 MB (not RAM/512 = 128 MB);
     /// effective_cache_size stays the uncapped 75% planner hint.
@@ -458,6 +561,13 @@ public sealed class DarlingManagedPostgresTests
             Assert.Contains("max_connections = 200", conf, StringComparison.Ordinal);
             Assert.Contains("max_wal_size = 4GB", conf, StringComparison.Ordinal);
 
+            /* v6 log rotation rode the same first-run append, and the server ACCEPTED it (a bad line here
+               fails pg_ctl start outright) — the logging collector is live, proven by the weekday ring file
+               it creates under <data>\log the moment it starts (#1652). */
+            Assert.Contains(DarlingManagedPostgres.ConfMarkerV6, conf, StringComparison.Ordinal);
+            var ringFiles = Directory.GetFiles(Path.Combine(dataDirectory, "log"), "postgresql-*.log");
+            Assert.NotEmpty(ringFiles);
+
             /* The derived credential really authenticates (scram, not trust) into the darling
                database — and the server started with our appended conf, so the timescaledb
                preload line was accepted; the v2 worker sizing was accepted too (the setting is
@@ -499,6 +609,7 @@ public sealed class DarlingManagedPostgresTests
             Assert.Equal(1, CountOccurrences(confAfterSecond, DarlingManagedPostgres.ConfMarkerV3));
             Assert.Equal(1, CountOccurrences(confAfterSecond, DarlingManagedPostgres.ConfMarkerV4));
             Assert.Equal(1, CountOccurrences(confAfterSecond, DarlingManagedPostgres.ConfMarkerV5));
+            Assert.Equal(1, CountOccurrences(confAfterSecond, DarlingManagedPostgres.ConfMarkerV6));
 
             /* Both up/down probes below must bypass Npgsql's pool: OpenAsync on a pooled string
                can hand back an idle socket with no I/O at all, which "succeeds" against a stopped
