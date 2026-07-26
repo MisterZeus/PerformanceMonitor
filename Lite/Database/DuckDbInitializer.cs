@@ -1054,7 +1054,8 @@ public class DuckDbInitializer
         {
             /* v45: added agent_status (SQL Agent service Running/Stopped from sys.dm_server_services +
                     next scheduled run from msdb.dbo.sysjobschedules) — the current-state snapshot behind the
-                    Job History tab header and the "Agent Not Running" alert (issue #1433 Phase 2). New table
+                    Job History tab header (and Darling's "Agent Not Running" alert; Lite has no such alert of
+                    its own — issue #1433 Phase 2). New table
                     only — created by GetAllTableStatements() below; the v_ view comes from
                     CreateArchiveViewsAsync via ArchivableTables. */
             _logger?.LogInformation("Running migration to v45: adding agent_status table");
