@@ -56,6 +56,37 @@ public sealed class AgTopologyCardsTests
         }
     }
 
+    [Theory]
+    [InlineData(true, "local")]
+    [InlineData(false, "")]
+    [InlineData(null, "")]
+    public void LocalDisplay_ShownOnlyWhenExplicitlyLocal(bool? isLocal, string expected)
+    {
+        /* Mirror of Lite's pin. NULL is UNKNOWN, not remote — rows predating the column do not know. */
+        var replica = new AgTopologyReplicaRow
+        {
+            ServerId = 1,
+            ServerName = "NODE1",
+            AgName = "AG1",
+            ReplicaServerName = "NODE1",
+            RoleDesc = "PRIMARY",
+            IsLocal = isLocal,
+        };
+
+        var card = Assert.Single(AgTopology.BuildCards(new[] { replica }, Array.Empty<AgTopologyDatabaseRow>()));
+        Assert.Equal(expected, Assert.Single(card.Replicas).LocalDisplay);
+    }
+
+    [Fact]
+    public void AgSql_SelectsIsLocalOnBothGrains()
+    {
+        /* is_local arrived on the replica grain in V37; the database grain has carried it since V34. Both reads
+           must select it, and the replica read's ordinals shifted when it was inserted — this pin plus the
+           projection tests are what stand between that and a silently mis-mapped column. */
+        Assert.Contains("r.is_local", ViewerDataService.AgReplicaStatesSql, StringComparison.Ordinal);
+        Assert.Contains("d.is_local", ViewerDataService.AgDatabaseReplicaStatesSql, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void AgSql_RestrictsToTheEnabledServerRegistry()
     {

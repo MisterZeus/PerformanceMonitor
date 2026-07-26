@@ -161,6 +161,10 @@ function replicaChip(r) {
   return el("div", { class: "metric-chip ag-replica " + sevClass(r.severity) + (r.is_primary ? " is-primary" : "") }, [
     el("div", { class: "label" }, [
       el("span", { text: role }),
+      /* "local" marks the replica that IS the reporting server — the label that makes the per-perspective model
+         legible, separating what a server knows about ITSELF from what it believes about a remote node. Shown
+         only when explicitly true: null means unknown (rows predating the column), never "remote". */
+      r.is_local === true ? el("span", { class: "ag-local", text: "local" }) : null,
       badge ? el("span", { class: "sev-badge", text: badge }) : null,
     ]),
     el("div", { class: "value", text: fmtText(r.replica_server_name), title: r.endpoint_url || null }),
