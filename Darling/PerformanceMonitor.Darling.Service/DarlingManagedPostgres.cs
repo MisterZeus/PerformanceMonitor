@@ -275,6 +275,13 @@ public sealed class DarlingManagedPostgres
         builder.Append("shared_preload_libraries = 'timescaledb'\n");
         builder.Append("port = ").Append(port).Append('\n');
         builder.Append("listen_addresses = '127.0.0.1'\n");
+        /* #1681: per-run audit trail for TimescaleDB background jobs. Off by default, which meant
+           timescaledb_information.job_errors and job_history returned ZERO rows for every job on a field
+           store — including jobs with dozens of confirmed successful runs. When a compression job hung
+           there (9 times in 6 days, always the two highest-write hypertables) there was no captured error,
+           no worker PID, no start/finish record: nothing to diagnose from. The rows are small and written
+           once per job run, not per row processed. */
+        builder.Append("timescaledb.enable_job_execution_logging = on\n");
         /* LZ4 TOAST (PG14+; the bundled runtime is PG18): large text/XML values — query text, plan
            XML, deadlock/blocked-process XML — auto-compress on write faster than the pglz default
            and about as small, shrinking the ~1-day hot window before TimescaleDB's columnar

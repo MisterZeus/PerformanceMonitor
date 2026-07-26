@@ -951,6 +951,18 @@ LIMIT 1", connection);
            channels are skipped — the deliverer honors AlertOutcome.Muted. */
         bool muted = _isAlertMuted(new AlertMuteContext { ServerName = serverName, MetricName = metricName });
 
+        /* #1681: log the FIRING, not just the recovery. RecordResolutionAsync has always logged at Information,
+           so the service log showed "… Recovered" with nothing before it — which reads as a spontaneous
+           recovery from a condition that never happened, and is worse than logging neither half. Every
+           self-alert went through here silently: compression-job stuck, disk pressure, capture-down,
+           agent-not-running, collection-health. Warning rather than Information because a firing self-alert is
+           by definition something wrong with the monitor itself, and because it must stand out from the
+           Information-level recovery it will eventually pair with. Muted alerts are logged too — muting
+           suppresses the notification channels, not the operator's ability to find it in the log afterwards. */
+        _logger?.LogWarning(
+            "[{Server}] {Metric}: {Detail} (current {Current}, threshold {Threshold}){MutedSuffix}",
+            serverName, metricName, shortMessage, currentValue, thresholdValue, muted ? " [muted]" : "");
+
         await _deliverer.DeliverAsync(new AlertOutcome(
             serverKey, serverName, metricName, currentValue, thresholdValue,
             Context: null, DetailText: detail,
