@@ -1,13 +1,13 @@
-<UserControl x:Class="PerformanceMonitor.Darling.Viewer.AvailabilityGroupsTab"
+<UserControl x:Class="PerformanceMonitorLite.Controls.AvailabilityGroupsTab"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              mc:Ignorable="d"
-             xmlns:local="clr-namespace:PerformanceMonitor.Darling.Viewer"
+             xmlns:svc="clr-namespace:PerformanceMonitorLite.Services"
              d:DesignHeight="450" d:DesignWidth="900">
     <UserControl.Resources>
-        <local:SeverityBrushConverter x:Key="SeverityBrush"/>
+        <svc:SeverityBrushConverter x:Key="SeverityBrush"/>
     </UserControl.Resources>
     <!-- Fleet-wide Availability Group topology (#991) — the desktop twin of the web dashboard's
          Availability Groups page, rewired to Postgres via ViewerDataService.GetAvailabilityGroupsAsync.
@@ -36,7 +36,7 @@
         <TextBlock x:Name="EmptyState" Grid.Row="1" Visibility="Collapsed"
                    TextWrapping="Wrap" MaxWidth="620" HorizontalAlignment="Left" VerticalAlignment="Top"
                    Foreground="{DynamicResource ForegroundMutedBrush}"
-                   Text="No Availability Groups observed on any monitored server. The AG collectors write no rows for an instance that hosts none, and they do not run against Azure SQL Database."/>
+                   Text="No Availability Groups observed. The AG collector writes no rows for an instance that hosts none, and it does not run against Azure SQL Database."/>
 
         <ScrollViewer Grid.Row="1" x:Name="CardScroller" VerticalScrollBarVisibility="Auto">
             <ItemsControl x:Name="AgCards">

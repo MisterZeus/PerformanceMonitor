@@ -242,6 +242,9 @@ public partial class MainWindow : Window
             // Initialize job history tab
             JobHistoryContent.Initialize(_dataService);
 
+            // Availability Groups (#991): self-loading, and its tab stays hidden until a load finds AG rows.
+            AvailabilityGroupsContent.Initialize(_dataService);
+
             // Initialize FinOps tab
             FinOpsContent.Initialize(_dataService, _serverManager);
 
@@ -275,6 +278,24 @@ public partial class MainWindow : Window
                 "Initialization Error",
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
+        }
+    }
+
+
+    /// <summary>
+    /// Loads the Availability Groups tab and reveals it once the local store has AG rows (#991). Always On is
+    /// opt-in, so the tab ships collapsed rather than standing permanently empty. The reveal is one-way within a
+    /// session: an install that HAS AGs keeps the tab even if a later sweep reads zero, because a collector
+    /// hiccup should not make a tab vanish under the operator mid-look.
+    /// </summary>
+    private async Task RefreshAvailabilityGroupsAsync()
+    {
+        await AvailabilityGroupsContent.RefreshAgAsync();
+
+        if (AvailabilityGroupsContent.HasAvailabilityGroups
+            && AvailabilityGroupsTabItem.Visibility != Visibility.Visible)
+        {
+            AvailabilityGroupsTabItem.Visibility = Visibility.Visible;
         }
     }
 
@@ -403,6 +424,11 @@ public partial class MainWindow : Window
         }
 
         /* Refresh job history tab when selected */
+        if (ServerTabControl.SelectedItem == AvailabilityGroupsTabItem)
+        {
+            _ = RefreshAvailabilityGroupsAsync();
+        }
+
         if (ServerTabControl.SelectedItem == JobHistoryTabItem)
         {
             JobHistoryContent.RefreshJobs();

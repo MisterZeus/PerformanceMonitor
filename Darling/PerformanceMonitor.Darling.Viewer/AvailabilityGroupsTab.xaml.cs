@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -76,7 +77,7 @@ public partial class AvailabilityGroupsTab : UserControl
         }
     }
 
-    private void Render(List<ViewerAvailabilityGroup> groups)
+    private void Render(List<AgTopologyCard> groups)
     {
         HasAvailabilityGroups = groups.Count > 0;
 
@@ -95,20 +96,16 @@ public partial class AvailabilityGroupsTab : UserControl
     /// monitored replica, so "views" and "groups" legitimately differ and a reader seeing the same AG name twice
     /// needs that said out loud rather than inferred.
     /// </summary>
-    internal static string BuildSummary(IReadOnlyList<ViewerAvailabilityGroup> groups)
+    internal static string BuildSummary(IReadOnlyList<AgTopologyCard> groups)
     {
         if (groups.Count == 0)
         {
             return "none observed";
         }
 
-        var distinctAgs = groups
-            .Select(g => (g.AgName ?? "").ToUpperInvariant())
-            .Distinct(StringComparer.Ordinal)
-            .Count();
+        /* Counted by the shared projection so Lite's header and this one cannot drift apart. */
+        var (distinctAgs, servers, views) = AgTopology.Counts(groups);
 
-        var servers = groups.Select(g => g.ServerId).Distinct().Count();
-
-        return $"{distinctAgs} group{(distinctAgs == 1 ? "" : "s")} · {servers} reporting server{(servers == 1 ? "" : "s")} · {groups.Count} view{(groups.Count == 1 ? "" : "s")}";
+        return $"{distinctAgs} group{(distinctAgs == 1 ? "" : "s")} · {servers} reporting server{(servers == 1 ? "" : "s")} · {views} view{(views == 1 ? "" : "s")}";
     }
 }
