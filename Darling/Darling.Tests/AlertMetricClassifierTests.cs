@@ -13,10 +13,11 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #1225: the shared metric-name classifier that both apps' Alert History grids and the Dashboard
-/// sidebar Alert badge rely on. Locks in the resolution suffix set (Cleared/Resolved/Restored) —
-/// the "Restored" cases (Capture/Server Restored) are the ones the old duplicated inline copies
-/// missed — plus the critical (Deadlock/Poison) and warning buckets, over the metric names the
-/// alert engines actually emit.
+/// sidebar Alert badge rely on. Locks in the resolution suffix set (Cleared/Resolved/Restored, plus
+/// Resumed/Restarted/Recovered/Reconnected) — the "Restored" cases (Capture/Server Restored) are the ones
+/// the old duplicated inline copies missed, and the last four are the same drift caught one layer down in
+/// Darling's self-alert recoveries (#991) — plus the critical (Deadlock/Poison) and warning buckets, over
+/// the metric names the alert engines actually emit.
 /// </summary>
 public class AlertMetricClassifierTests
 {
@@ -31,6 +32,15 @@ public class AlertMetricClassifierTests
     [InlineData("Volume Free Space Resolved")]
     [InlineData("Capture Restored")]
     [InlineData("Server Restored")]
+    /* The suffixes the list had never caught up with. The first three are Darling self-alert recoveries that
+       have been shipping mis-classified as live actionable alerts in the history grids; the last three are the
+       #991 Availability Group family's recoveries, added alongside the fix rather than as a fifth blind spot. */
+    [InlineData("Collection Resumed")]
+    [InlineData("Agent Restarted")]
+    [InlineData("Compression Job Recovered")]
+    [InlineData("AG Replica Reconnected")]
+    [InlineData("AG Sync Recovered")]
+    [InlineData("AG Data Movement Resumed")]
     public void IsResolution_True_ForEveryResolutionNotice(string metric)
     {
         Assert.True(AlertMetricClassifier.IsResolution(metric));
@@ -49,6 +59,14 @@ public class AlertMetricClassifierTests
     [InlineData("Failed Agent Job")]
     [InlineData("Capture Down")]
     [InlineData("Server Unreachable")]
+    [InlineData("Agent Not Running")]
+    [InlineData("Compression Job Stuck")]
+    /* The AG family's actionable names, pinned against the widened suffix set: none of them may be dragged
+       into the resolution bucket by "Reconnected"/"Recovered"/"Resumed" appearing elsewhere in the vocabulary. */
+    [InlineData("AG Failover")]
+    [InlineData("AG Replica Disconnected")]
+    [InlineData("AG Sync Fell Behind")]
+    [InlineData("AG Database Suspended")]
     public void IsResolution_False_ForActionableAlerts(string metric)
     {
         Assert.False(AlertMetricClassifier.IsResolution(metric));

@@ -50,6 +50,13 @@ namespace PerformanceMonitor.Darling.Service;
 ///   flagship-appropriate maintenance backstop the daily time-based purge otherwise lacks — deliberately
 ///   NOT Lite's 512MB archive-then-reset (Postgres has no single-file INSERT cliff, and a blanket reset
 ///   would nuke every tenant of the shared store).</item>
+/// <item><b>Availability Group health</b> (#991) — four conditions over the AG collectors' latest snapshot:
+///   a replica changed role ("AG Failover"), a replica lost or regained its connection to the primary
+///   ("AG Replica Disconnected"/"AG Replica Reconnected"), a secondary fell behind by lag seconds or redo
+///   queue ("AG Sync Fell Behind"), and data movement for a database was suspended ("AG Database Suspended").
+///   Gated on the V35 <c>notify_ag_health</c> master switch, with the two thresholds
+///   (<c>ag_lag_alert_seconds</c>, <c>ag_redo_queue_alert_kb</c>) store-backed alongside it. Keyed per AG
+///   grain rather than per server, because a server hosts many replicas and databases.</item>
 /// </list>
 /// Each condition is EDGE-TRIGGERED (in-memory active flag + the shared alert cooldown for the polled
 /// conditions; a per-server connection state machine for the connect edge) so it fires once on the
@@ -101,6 +108,14 @@ internal sealed class DarlingSelfAlertEvaluator
     private readonly Func<bool> _notifyConnectionDownAtStartup;
     private readonly Func<int> _connectionRefireMinutes;
 
+    /// <summary>The Availability Group alert seams (#991, V35), read live through the same by-reference
+    /// settings the store reload hot-swaps — the <see cref="_notifyConnectionChanges"/> discipline. The
+    /// master switch gates all four AG conditions; the two thresholds are already clamped by
+    /// <see cref="DarlingAlertSettings"/>, so a hand-edited store row cannot drive a nonsense window.</summary>
+    private readonly Func<bool> _notifyAgHealth;
+    private readonly Func<int> _agLagAlertSeconds;
+    private readonly Func<long> _agRedoQueueAlertKb;
+
     /// <summary>When the last down alert fired per server — the re-fire clock for
     /// <see cref="ConnectionAlertPolicy"/> (#1659). Stamped on every down alert DELIVERED (not merely
     /// decided: a decision suppressed by the notify toggles must not consume the re-fire window), cleared
@@ -149,6 +164,43 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>Prefixes the fleet-level compression-job alert serverKey so it never parses as a server_id.</summary>
     private const string CompressionKeyPrefix = "compressjob:";
 
+    /* Availability Group edge state (#991), keyed by a COMPOSITE of serverId + the AG grain — an AG condition
+       is per replica (ag + replica) or per database (ag + database + replica), not per server, so one server's
+       two lagging databases must track (and recover) independently. Only the alert HISTORY is per server: every
+       AG alert fires under the real server_id as its serverKey, so per-server delivery overrides (#1236), mute
+       rules and history correlation keep working; the AG grain lives in the alert text. In-memory like every
+       sibling condition — the restart replay protection is the deliverer's history-seeded cooldown. */
+    private readonly ConcurrentDictionary<string, string> _agReplicaRole = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, string> _agReplicaConnectedState = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, bool> _activeAgSyncBehind = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTime> _lastAgSyncBehindAlert = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, bool> _agDatabaseSuspended = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The AG alert metric names. These are WEBHOOK AUTOMATION KEYS — downstream automation matches on them,
+    /// so they are consts rather than inline literals and must stay stable across releases. Each is also
+    /// registered in the shared <c>AlertSeverity</c> metric map so a renderer that consults the map without an
+    /// explicit severity override styles them correctly instead of falling through to INFO-blue.
+    /// </summary>
+    internal const string AgFailoverMetric = "AG Failover";
+    internal const string AgReplicaDisconnectedMetric = "AG Replica Disconnected";
+    internal const string AgReplicaReconnectedMetric = "AG Replica Reconnected";
+    internal const string AgSyncFellBehindMetric = "AG Sync Fell Behind";
+    internal const string AgDatabaseSuspendedMetric = "AG Database Suspended";
+
+    /// <summary>
+    /// Separates the parts of a composite AG state key. A UNIT SEPARATOR (U+001F) rather than a printable
+    /// character because AG / database / replica names are SQL Server identifiers, which may contain any
+    /// printable character when delimited — so a printable separator could let two different (ag, database,
+    /// replica) triples collide on one key. Never logged or displayed.
+    /// </summary>
+    private const char AgKeySeparator = '\u001f';
+
+    /// <summary>The <c>connected_state_desc</c> value that means the replica is not talking to the primary.
+    /// Compared exactly (not "anything that is not CONNECTED") so an unexpected or NULL-ish DMV value can
+    /// never page an operator for a state we did not recognize.</summary>
+    private const string DisconnectedState = "DISCONNECTED";
+
     /* Whether the service has successfully connected to this server at least once THIS process-run. Guards
        collection-stopped: unlike the Dashboard (whose target-side collection_log keeps filling regardless of
        the app), Darling IS the collector, so the service's own downtime makes collection_log stale. Without
@@ -167,7 +219,10 @@ internal sealed class DarlingSelfAlertEvaluator
         Func<DateTime>? utcNow = null,
         Func<bool>? notifyConnectionChanges = null,
         Func<bool>? notifyConnectionDownAtStartup = null,
-        Func<int>? connectionRefireMinutes = null)
+        Func<int>? connectionRefireMinutes = null,
+        Func<bool>? notifyAgHealth = null,
+        Func<int>? agLagAlertSeconds = null,
+        Func<long>? agRedoQueueAlertKb = null)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _deliverer = deliverer ?? throw new ArgumentNullException(nameof(deliverer));
@@ -178,6 +233,11 @@ internal sealed class DarlingSelfAlertEvaluator
         _notifyConnectionChanges = notifyConnectionChanges ?? (() => true);
         _notifyConnectionDownAtStartup = notifyConnectionDownAtStartup ?? (() => false);
         _connectionRefireMinutes = connectionRefireMinutes ?? (() => 0);
+        /* Unsupplied AG seams fall back to the V35 DDL defaults (master switch on, 5-minute lag, redo queue
+           off) so an evaluator built without them behaves like a store at its shipped defaults. */
+        _notifyAgHealth = notifyAgHealth ?? (() => true);
+        _agLagAlertSeconds = agLagAlertSeconds ?? (() => 300);
+        _agRedoQueueAlertKb = agRedoQueueAlertKb ?? (() => 0);
     }
 
     private enum ConnectionState
@@ -269,6 +329,47 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             _logger?.LogError("[{Server}] Agent-not-running self-alert failed: {Message}", serverName, ex.Message);
         }
+
+        /* Availability Group health (#991). Skipped entirely when the master AG switch is off, so a fleet that
+           runs no AGs — the common case — pays NOTHING for this on the per-server sweep: the read below is the
+           only work, and it does not happen. Like agent_status, only a FRESH snapshot judges; a stale one (the
+           collector lagging, or an AG that stopped existing so the collector now writes zero rows) yields no
+           signal, and the collection-stopped alert owns staleness. */
+        if (_notifyAgHealth())
+        {
+            try
+            {
+                /* Each grain is gated on its OWN snapshot time: the two AG collectors are scheduled
+                   independently, so one being disabled or broken must not let the other's fresh timestamp
+                   vouch for its stale rows. */
+                var (replicaTimeUtc, replicas) =
+                    await ReadLatestAgReplicaStatesAsync(postgres, serverId, cancellationToken);
+                if (IsFresh(replicaTimeUtc))
+                {
+                    await ApplyAgReplicaHealthAsync(serverId, serverName, replicas, cancellationToken);
+                }
+
+                var (databaseTimeUtc, databases) =
+                    await ReadLatestAgDatabaseReplicaStatesAsync(postgres, serverId, cancellationToken);
+                if (IsFresh(databaseTimeUtc))
+                {
+                    await ApplyAgDatabaseHealthAsync(serverId, serverName, databases, cancellationToken);
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError("[{Server}] Availability-Group self-alert failed: {Message}", serverName, ex.Message);
+            }
+        }
+
+        /* A snapshot only judges while it is fresh; a missing one (no AGs, or the collector has never run) and
+           a stale one are both "no signal", exactly as agent_status is treated above. */
+        bool IsFresh(DateTime? snapshotUtc) =>
+            snapshotUtc.HasValue && _utcNow() - snapshotUtc.Value < StaleWindow;
     }
 
     /// <summary>
@@ -535,6 +636,325 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             _logger?.LogError("[{Server}] Connection-change self-alert delivery failed: {Message}", serverName, ex.Message);
         }
+    }
+
+    /* ---------------- Availability Group health (#991, store-polled) ---------------- */
+
+    /// <summary>One replica's AG state from the latest <c>ag_replica_states</c> snapshot. Only the columns the
+    /// alerts judge; <c>AgName</c>/<c>ReplicaServerName</c> are non-null because the read drops rows that
+    /// cannot be keyed. Every other column is nullable ON PURPOSE: MS Learn documents that under WSFC quorum
+    /// loss the AG catalog views return only locally cached metadata, so any state string can read NULL.</summary>
+    internal readonly record struct AgReplicaReading(
+        string AgName,
+        string ReplicaServerName,
+        string? RoleDesc,
+        string? ConnectedStateDesc);
+
+    /// <summary>One database-on-one-replica's AG state from the latest <c>ag_database_replica_states</c>
+    /// snapshot. <c>RedoQueueSizeKb</c> is the DMV's <c>redo_queue_size</c>, which is KILOBYTES.</summary>
+    internal readonly record struct AgDatabaseReading(
+        string AgName,
+        string DatabaseName,
+        string ReplicaServerName,
+        long? SecondaryLagSeconds,
+        long? RedoQueueSizeKb,
+        bool? IsSuspended,
+        string? SuspendReasonDesc);
+
+    /// <summary>The outcome of <see cref="JudgeAgSync"/>. The third case is the one that matters: "we could not
+    /// measure this" is NOT "this is fine", and conflating them is how a standing alert gets resolved by the
+    /// very event that made it worse.</summary>
+    internal enum AgSyncJudgement
+    {
+        /// <summary>No enabled trigger had a usable reading — both thresholds off, the columns NULL (the
+        /// primary's own row, or WSFC quorum loss), or the only enabled trigger is the seconds one on a
+        /// SUSPENDED row. No signal: neither fire nor clear, the discipline
+        /// <see cref="ApplyAgentNotRunningAsync"/> uses for a stale agent_status reading.</summary>
+        NotMeasurable,
+
+        /// <summary>Measured, and within threshold.</summary>
+        CaughtUp,
+
+        /// <summary>Measured, and past a threshold.</summary>
+        Behind,
+    }
+
+    /// <summary>
+    /// Pure "how far behind is this secondary" decision — no I/O, so it pins directly. Two independent
+    /// triggers, each disabled by a zero threshold (the shipped default has seconds on at 300 and the redo
+    /// queue off):
+    /// <list type="bullet">
+    /// <item><b>Lag seconds</b> — <c>secondary_lag_seconds &gt;= ag_lag_alert_seconds</c>.</item>
+    /// <item><b>Redo queue</b> — <c>redo_queue_size &gt;= ag_redo_queue_alert_kb</c> (KB).</item>
+    /// </list>
+    /// <para>THE TRAP this method exists to encode: MS Learn documents <c>secondary_lag_seconds</c> reading
+    /// <c>0</c> — not NULL — while data movement is SUSPENDED. So the database that is furthest behind, the
+    /// suspended one, reports as perfectly caught up, and a naive seconds check would clear right when it
+    /// should page. The seconds trigger therefore ABSTAINS on a suspended row and "AG Database Suspended" owns
+    /// that state. The redo-queue trigger keeps judging while suspended, because that backlog is real and keeps
+    /// growing.</para>
+    /// <para>Abstaining has to be its OWN answer rather than a <c>false</c>, or the caller reads it as recovery:
+    /// a lagging database that becomes suspended (or whose columns go NULL under quorum loss) would emit
+    /// "AG Sync Recovered — has caught up with the primary" in the same sweep that reports it suspended. That
+    /// is why this returns three states and not a bool.</para>
+    /// </summary>
+    internal static AgSyncJudgement JudgeAgSync(
+        AgDatabaseReading reading, int lagThresholdSeconds, long redoThresholdKb, out string reason)
+    {
+        bool secondsUsable = lagThresholdSeconds > 0
+            && reading.IsSuspended != true
+            && reading.SecondaryLagSeconds.HasValue;
+        bool redoUsable = redoThresholdKb > 0 && reading.RedoQueueSizeKb.HasValue;
+
+        if (secondsUsable && reading.SecondaryLagSeconds!.Value >= lagThresholdSeconds)
+        {
+            long lagSeconds = reading.SecondaryLagSeconds!.Value;
+            reason = $"Availability Group '{reading.AgName}': database {reading.DatabaseName} on replica " +
+                $"{reading.ReplicaServerName} is {lagSeconds.ToString(CultureInfo.InvariantCulture)} seconds behind " +
+                $"the primary (threshold {lagThresholdSeconds.ToString(CultureInfo.InvariantCulture)}).";
+            return AgSyncJudgement.Behind;
+        }
+
+        if (redoUsable && reading.RedoQueueSizeKb!.Value >= redoThresholdKb)
+        {
+            long redoKb = reading.RedoQueueSizeKb!.Value;
+            reason = $"Availability Group '{reading.AgName}': database {reading.DatabaseName} on replica " +
+                $"{reading.ReplicaServerName} has a {redoKb.ToString(CultureInfo.InvariantCulture)} KB redo queue " +
+                $"(threshold {redoThresholdKb.ToString(CultureInfo.InvariantCulture)} KB) still to be applied.";
+            return AgSyncJudgement.Behind;
+        }
+
+        reason = "";
+        return secondsUsable || redoUsable ? AgSyncJudgement.CaughtUp : AgSyncJudgement.NotMeasurable;
+    }
+
+    /// <summary>
+    /// Edge-applies the two REPLICA-grain AG conditions from the latest snapshot — "AG Failover" (role_desc
+    /// changed since the previous sweep) and "AG Replica Disconnected"/"AG Replica Reconnected"
+    /// (connected_state_desc crossed DISCONNECTED). Both are pure transitions per ag+replica, and the FIRST
+    /// sighting of a replica is a silent BASELINE (the <c>ConnectionAlertPolicy</c> discipline): a service that
+    /// starts up must not page "failover" simply because it has never seen the role before, nor "disconnected"
+    /// for a replica that was already down when monitoring began — a genuine change from a known state is the
+    /// signal. A NULL state string is skipped rather than treated as a transition, so WSFC quorum loss (which
+    /// nulls the catalog views wholesale) cannot spray alerts for every replica at once.
+    /// Gated on the master alerts switch AND <c>notify_ag_health</c>, the sibling gate shape
+    /// <see cref="ApplyCaptureDownAsync"/> uses for its blocking/deadlock opt-in. Testable directly with a
+    /// recording deliverer + a controllable clock.
+    /// </summary>
+    internal async Task ApplyAgReplicaHealthAsync(
+        int serverId, string serverName, IReadOnlyList<AgReplicaReading> replicas, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled || !_notifyAgHealth())
+        {
+            return;
+        }
+
+        foreach (var replica in replicas)
+        {
+            var key = AgReplicaKey(serverId, replica.AgName, replica.ReplicaServerName);
+
+            /* --- 1. Failover: the role changed since we last looked. --- */
+            if (!string.IsNullOrEmpty(replica.RoleDesc))
+            {
+                bool seen = _agReplicaRole.TryGetValue(key, out var previousRole);
+                _agReplicaRole[key] = replica.RoleDesc;
+
+                if (seen && !string.Equals(previousRole, replica.RoleDesc, StringComparison.Ordinal))
+                {
+                    await FireAsync(
+                        Key(serverId), serverName, AgFailoverMetric, replica.RoleDesc, previousRole!,
+                        detail: $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} changed " +
+                            $"role from {previousRole} to {replica.RoleDesc}. A role change is either a failover somebody " +
+                            "performed or an automatic one the cluster performed after a health-check timeout — if nobody " +
+                            "initiated it, the previous primary had a problem worth finding. Confirm the new primary is the " +
+                            "node you want serving the workload, check the WSFC cluster log for the failover reason, and " +
+                            "verify that backups, index maintenance and integrity checks run against the new primary.",
+                        severity: AlertSeverityLevel.Warning,
+                        shortMessage: $"{replica.ReplicaServerName} in AG {replica.AgName} changed role from " +
+                            $"{previousRole} to {replica.RoleDesc}", cancellationToken);
+                }
+            }
+
+            /* --- 2. Disconnected / reconnected. --- */
+            if (!string.IsNullOrEmpty(replica.ConnectedStateDesc))
+            {
+                bool seen = _agReplicaConnectedState.TryGetValue(key, out var previousState);
+                bool disconnected = IsDisconnected(replica.ConnectedStateDesc);
+                bool wasDisconnected = seen && IsDisconnected(previousState!);
+                _agReplicaConnectedState[key] = replica.ConnectedStateDesc;
+
+                if (seen && disconnected && !wasDisconnected)
+                {
+                    await FireAsync(
+                        Key(serverId), serverName, AgReplicaDisconnectedMetric, replica.ConnectedStateDesc, "CONNECTED",
+                        detail: $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is " +
+                            "DISCONNECTED from the primary. A disconnected replica receives no log at all, so it falls " +
+                            "further behind every second and cannot be failed over to without losing whatever the primary " +
+                            "has committed since. If it is a synchronous-commit replica, the primary also loses its " +
+                            "automatic-failover partner. Check the replica's SQL Server service, the availability endpoint " +
+                            "(TCP 5022 by default) and its firewall rule, the WSFC quorum, and the network between the nodes.",
+                        severity: AlertSeverityLevel.Critical,
+                        shortMessage: $"{replica.ReplicaServerName} in AG {replica.AgName} is disconnected from the primary",
+                        cancellationToken);
+                }
+                else if (seen && !disconnected && wasDisconnected)
+                {
+                    /* Severity null → the shared AlertSeverity map renders the reconnect green/RESOLVED, the same
+                       treatment "Server Restored" gets on the connect edge. */
+                    await FireAsync(
+                        Key(serverId), serverName, AgReplicaReconnectedMetric, replica.ConnectedStateDesc, "CONNECTED",
+                        detail: $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is connected " +
+                            "to the primary again. It is still behind by whatever accumulated while it was gone — watch the " +
+                            "send and redo queues until they drain before you count it as a failover target again.",
+                        severity: null,
+                        shortMessage: $"{replica.ReplicaServerName} in AG {replica.AgName} reconnected", cancellationToken);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Applies the two DATABASE-grain AG conditions from the latest snapshot, per ag+database+replica:
+    /// <list type="bullet">
+    /// <item><b>AG Database Suspended</b> — a pure <c>is_suspended</c> false→true transition (first sighting is
+    /// a silent baseline), carrying <c>suspend_reason_desc</c>. Recovery writes one "AG Data Movement Resumed"
+    /// history row, the sibling conditions' recovery shape.</item>
+    /// <item><b>AG Sync Fell Behind</b> — a standing CONDITION rather than an edge, so it takes the evaluator's
+    /// active-flag + <see cref="CooldownElapsed"/> idiom: fire once when a database starts breaching, re-fire
+    /// only after the alert cooldown while it keeps breaching, and write one "AG Sync Recovered" row when it
+    /// catches up. Each database tracks independently, so a second database falling behind fires on its own
+    /// merits instead of hiding behind the first.</item>
+    /// </list>
+    /// Recovery fires only for a database this sweep MEASURED as caught up (see
+    /// <see cref="AgSyncJudgement"/>) — never merely for one that stopped breaching, which is also what a
+    /// suspend or a quorum-loss NULL looks like. Gated on the master alerts switch AND <c>notify_ag_health</c>.
+    /// <para>State for a replica or database that disappears from the snapshot entirely (removed from the AG)
+    /// is deliberately left in place rather than swept: an absent row is no signal, the same as a stale one,
+    /// and <see cref="Forget"/> clears everything when the server leaves the monitored set.</para>
+    /// Testable directly with a recording deliverer + a controllable clock.
+    /// </summary>
+    internal async Task ApplyAgDatabaseHealthAsync(
+        int serverId, string serverName, IReadOnlyList<AgDatabaseReading> databases, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled || !_notifyAgHealth())
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        int lagThresholdSeconds = _agLagAlertSeconds();
+        long redoThresholdKb = _agRedoQueueAlertKb();
+        var measuredCaughtUp = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var database in databases)
+        {
+            var key = AgDatabaseKey(serverId, database.AgName, database.DatabaseName, database.ReplicaServerName);
+
+            /* --- 3. Data movement suspended (edge). --- */
+            if (database.IsSuspended is bool suspended)
+            {
+                bool seen = _agDatabaseSuspended.TryGetValue(key, out var wasSuspended);
+                _agDatabaseSuspended[key] = suspended;
+
+                if (seen && suspended && !wasSuspended)
+                {
+                    var suspendReason = string.IsNullOrWhiteSpace(database.SuspendReasonDesc)
+                        ? "no reason reported"
+                        : database.SuspendReasonDesc!;
+                    await FireAsync(
+                        Key(serverId), serverName, AgDatabaseSuspendedMetric, suspendReason, "SYNCHRONIZING",
+                        detail: $"Availability Group '{database.AgName}': data movement for database " +
+                            $"{database.DatabaseName} on replica {database.ReplicaServerName} is SUSPENDED " +
+                            $"({suspendReason}). While movement is suspended the secondary receives nothing AND the " +
+                            "primary cannot truncate its transaction log, so the primary's log grows until its disk " +
+                            "fills — this is a primary-side outage risk, not just a secondary-side one. Fix the " +
+                            "underlying cause, then resume it with ALTER DATABASE " +
+                            $"[{database.DatabaseName}] SET HADR RESUME.",
+                        severity: AlertSeverityLevel.Warning,
+                        shortMessage: $"Data movement for {database.DatabaseName} in AG {database.AgName} is " +
+                            $"suspended ({suspendReason})", cancellationToken);
+                }
+                else if (seen && !suspended && wasSuspended)
+                {
+                    await RecordResolutionAsync(new AlertResolution(
+                        Key(serverId), serverName, AgDatabaseSuspendedMetric,
+                        "AG Data Movement Resumed",
+                        $"{serverName}: data movement for {database.DatabaseName} in AG {database.AgName} on replica " +
+                        $"{database.ReplicaServerName} has resumed"), cancellationToken);
+                }
+            }
+
+            /* --- 4. Sync fell behind (standing condition). --- */
+            var judgement = JudgeAgSync(database, lagThresholdSeconds, redoThresholdKb, out var behindReason);
+            if (judgement == AgSyncJudgement.CaughtUp)
+            {
+                measuredCaughtUp.Add(key);
+            }
+            else if (judgement == AgSyncJudgement.Behind)
+            {
+                _activeAgSyncBehind[key] = true;
+                if (CooldownElapsed(_lastAgSyncBehindAlert, key, now))
+                {
+                    _lastAgSyncBehindAlert[key] = now;
+                    await FireAsync(
+                        Key(serverId), serverName, AgSyncFellBehindMetric, behindReason, "caught up",
+                        detail: behindReason + " A secondary that trails the primary is a data-loss window: an " +
+                            "automatic failover cannot complete until it catches up, and a forced failover throws away " +
+                            "everything still queued. Look at the network throughput between the replicas, the " +
+                            "secondary's redo thread (it is single-threaded per database on older versions and is " +
+                            "easily starved by CPU or storage latency on the secondary), and whether something on the " +
+                            "primary — an index rebuild, a bulk load, a long transaction — is generating log faster " +
+                            "than the secondary can consume it.",
+                        severity: AlertSeverityLevel.Warning,
+                        shortMessage: behindReason, cancellationToken);
+                }
+            }
+        }
+
+        /* Recovery is driven off the databases this sweep MEASURED as caught up — never off "everything tracked
+           that did not breach". Those are different sets, and the difference is the bug: a lagging database that
+           becomes SUSPENDED, or whose columns go NULL under quorum loss, stops breaching without recovering, so
+           the looser rule would announce "has caught up with the primary" in the same sweep that reports it
+           suspended. Iterating the measured set also makes cross-server resolution structurally impossible —
+           every key in it came from THIS server's snapshot — rather than something a prefix check has to catch. */
+        foreach (var key in measuredCaughtUp)
+        {
+            _lastAgSyncBehindAlert.TryRemove(key, out _);
+            if (_activeAgSyncBehind.TryRemove(key, out _))
+            {
+                await RecordResolutionAsync(new AlertResolution(
+                    Key(serverId), serverName, AgSyncFellBehindMetric,
+                    "AG Sync Recovered",
+                    $"{serverName}: {DescribeAgDatabaseKey(key)} has caught up with the primary"), cancellationToken);
+            }
+        }
+    }
+
+    /// <summary>Whether a <c>connected_state_desc</c> reading means the replica is not talking to the primary.
+    /// An exact match on <see cref="DisconnectedState"/> — see that constant for why an unrecognized value is
+    /// deliberately treated as connected rather than as a page.</summary>
+    private static bool IsDisconnected(string connectedStateDesc) =>
+        string.Equals(connectedStateDesc, DisconnectedState, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The prefix every AG state key for one server starts with — the scope for
+    /// <see cref="Forget"/> and for the per-server recovery sweep.</summary>
+    private static string AgServerPrefix(int serverId) => Key(serverId) + AgKeySeparator;
+
+    private static string AgReplicaKey(int serverId, string agName, string replicaServerName) =>
+        AgServerPrefix(serverId) + agName + AgKeySeparator + replicaServerName;
+
+    private static string AgDatabaseKey(int serverId, string agName, string databaseName, string replicaServerName) =>
+        AgServerPrefix(serverId) + agName + AgKeySeparator + databaseName + AgKeySeparator + replicaServerName;
+
+    /// <summary>Renders a database-grain AG key back into prose for a recovery message. The key is built here
+    /// and never escaped, so this is a straight positional split; an unexpected shape degrades to the raw key
+    /// rather than throwing inside a recovery write.</summary>
+    private static string DescribeAgDatabaseKey(string key)
+    {
+        var parts = key.Split(AgKeySeparator);
+        return parts.Length == 4
+            ? $"database {parts[2]} in AG {parts[1]} on replica {parts[3]}"
+            : key;
     }
 
     /* ---------------- store disk pressure (fleet-level, polled) ---------------- */
@@ -812,6 +1232,28 @@ internal sealed class DarlingSelfAlertEvaluator
         _lastAgentDownAlert.TryRemove(key, out _);
         _connectionState.TryRemove(key, out _);
         _hasBeenOnline.TryRemove(key, out _);
+
+        /* AG state is keyed by a COMPOSITE (serverId + AG grain), so an exact-key TryRemove like the
+           per-server conditions above cannot reach it — sweep this server's key prefix instead. Missing this
+           is how a removed-then-re-added server would inherit a stale role and page a phantom failover.
+           ConcurrentDictionary.Keys hands back a snapshot, so removing while enumerating it is safe. */
+        var agPrefix = AgServerPrefix(serverId);
+        ForgetAgKeys(_agReplicaRole, agPrefix);
+        ForgetAgKeys(_agReplicaConnectedState, agPrefix);
+        ForgetAgKeys(_activeAgSyncBehind, agPrefix);
+        ForgetAgKeys(_lastAgSyncBehindAlert, agPrefix);
+        ForgetAgKeys(_agDatabaseSuspended, agPrefix);
+    }
+
+    private static void ForgetAgKeys<TValue>(ConcurrentDictionary<string, TValue> state, string prefix)
+    {
+        foreach (var key in state.Keys)
+        {
+            if (key.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                state.TryRemove(key, out _);
+            }
+        }
     }
 
     /* ---------------- store reads ---------------- */
@@ -924,6 +1366,117 @@ LIMIT 1", connection);
             ? null
             : DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc);
         return (collectionTime, running);
+    }
+
+    /// <summary>
+    /// The server's LATEST <c>ag_replica_states</c> snapshot (#991) — the rows at that table's own
+    /// MAX(collection_time), covered by the collector migration's (server_id, collection_time) index, plus that
+    /// timestamp as the caller's freshness signal.
+    /// <para>ONE STATEMENT PER COMMAND, deliberately. The two grains were briefly read as two statements over a
+    /// single command to save a round trip; that cannot work here. Npgsql only splits multi-statement text into
+    /// a batch when it parses the SQL for NAMED placeholders — with POSITIONAL (<c>$1</c>) parameters, which is
+    /// what every read in this file uses, it sends the text as one extended-protocol Parse, and PostgreSQL
+    /// rejects that with "cannot insert multiple commands into a prepared statement". Failure-isolated as this
+    /// path is, that would have been an error logged per server per sweep with the whole alert family silently
+    /// dead. Two commands, matching the three sibling reads above; <see cref="NpgsqlBatch"/> would restore the
+    /// single round trip but has no precedent in this codebase, and the AG read is skipped entirely when the
+    /// master switch is off, so an AG-free fleet pays nothing either way.</para>
+    /// <para>Rows whose <c>ag_name</c> or <c>replica_server_name</c> is NULL are DROPPED: those are the identity
+    /// of the alert's state key, and under WSFC quorum loss they can read NULL. A row we cannot key is a row we
+    /// cannot track an edge for, so keying it under a placeholder identity would invent transitions. Zero rows
+    /// is the NORMAL result on a server with no Availability Groups.</para>
+    /// Static + parameterized so a gated live test can seed rows and assert the raw signals.
+    /// </summary>
+    internal static async Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgReplicaReading> Replicas)> ReadLatestAgReplicaStatesAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    {
+        var replicas = new List<AgReplicaReading>();
+        DateTime? newest = null;
+
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        using var command = new NpgsqlCommand(@"
+SELECT ag_name, replica_server_name, role_desc, connected_state_desc, collection_time
+FROM ag_replica_states
+WHERE server_id = $1
+AND   collection_time = (SELECT MAX(collection_time) FROM ag_replica_states WHERE server_id = $1)
+ORDER BY ag_name, replica_server_name", connection);
+        command.Parameters.AddWithValue(serverId);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            newest = Newest(newest, reader, 4);
+            if (reader.IsDBNull(0) || reader.IsDBNull(1))
+            {
+                continue;
+            }
+
+            replicas.Add(new AgReplicaReading(
+                AgName: reader.GetString(0),
+                ReplicaServerName: reader.GetString(1),
+                RoleDesc: reader.IsDBNull(2) ? null : reader.GetString(2),
+                ConnectedStateDesc: reader.IsDBNull(3) ? null : reader.GetString(3)));
+        }
+
+        return (newest, replicas);
+    }
+
+    /// <summary>
+    /// The server's LATEST <c>ag_database_replica_states</c> snapshot (#991), with its OWN
+    /// MAX(collection_time). Separate from <see cref="ReadLatestAgReplicaStatesAsync"/> — and separately
+    /// freshness-gated by the caller — because the two AG collectors carry independent schedule entries: a
+    /// disabled or failing database-grain collector must not have the replica grain's healthy timestamp vouch
+    /// for its stale rows, which would keep re-firing "AG Sync Fell Behind" off days-old lag readings.
+    /// Same NULL-identity drop and same one-statement-per-command rule as the replica read.
+    /// </summary>
+    internal static async Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgDatabaseReading> Databases)> ReadLatestAgDatabaseReplicaStatesAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    {
+        var databases = new List<AgDatabaseReading>();
+        DateTime? newest = null;
+
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        using var command = new NpgsqlCommand(@"
+SELECT ag_name, database_name, replica_server_name, secondary_lag_seconds, redo_queue_size,
+       is_suspended, suspend_reason_desc, collection_time
+FROM ag_database_replica_states
+WHERE server_id = $1
+AND   collection_time = (SELECT MAX(collection_time) FROM ag_database_replica_states WHERE server_id = $1)
+ORDER BY ag_name, database_name, replica_server_name", connection);
+        command.Parameters.AddWithValue(serverId);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            newest = Newest(newest, reader, 7);
+            if (reader.IsDBNull(0) || reader.IsDBNull(1) || reader.IsDBNull(2))
+            {
+                continue;
+            }
+
+            databases.Add(new AgDatabaseReading(
+                AgName: reader.GetString(0),
+                DatabaseName: reader.GetString(1),
+                ReplicaServerName: reader.GetString(2),
+                SecondaryLagSeconds: reader.IsDBNull(3) ? null : reader.GetInt64(3),
+                RedoQueueSizeKb: reader.IsDBNull(4) ? null : reader.GetInt64(4),
+                IsSuspended: reader.IsDBNull(5) ? null : reader.GetBoolean(5),
+                SuspendReasonDesc: reader.IsDBNull(6) ? null : reader.GetString(6)));
+        }
+
+        return (newest, databases);
+    }
+
+    /// <summary>Running maximum of a snapshot's <c>collection_time</c> column, as naive UTC.</summary>
+    private static DateTime? Newest(DateTime? running, NpgsqlDataReader reader, int ordinal)
+    {
+        if (reader.IsDBNull(ordinal))
+        {
+            return running;
+        }
+
+        var candidate = DateTime.SpecifyKind(reader.GetDateTime(ordinal), DateTimeKind.Utc);
+        return running is null || candidate > running ? candidate : running;
     }
 
     /* ---------------- shared helpers ---------------- */

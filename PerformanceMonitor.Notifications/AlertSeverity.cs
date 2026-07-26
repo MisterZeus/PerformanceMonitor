@@ -59,6 +59,15 @@ internal static class AlertSeverity
             "Volume Free Space" => ("#D97706", "WARNING", "\U0001F7E0"),
             "Server Unreachable" => ("#DC2626", "CRITICAL", "\U0001F534"),
             "Server Restored" => ("#16A34A", "RESOLVED", "\U0001F7E2"),
+            // Availability Group family (#991). "AG Replica Reconnected" fires with severity null on purpose,
+            // so its arm here is load-bearing (green/RESOLVED, matching "Server Restored"). The other four pass
+            // an explicit override at the fire site and reach this map only via a renderer that has none — an
+            // alert-history replay — which is exactly the INFO-blue fall-through the #1136 gap fix was about.
+            "AG Failover" => ("#D97706", "WARNING", "\U0001F7E0"),
+            "AG Replica Disconnected" => ("#DC2626", "CRITICAL", "\U0001F534"),
+            "AG Replica Reconnected" => ("#16A34A", "RESOLVED", "\U0001F7E2"),
+            "AG Sync Fell Behind" => ("#D97706", "WARNING", "\U0001F7E0"),
+            "AG Database Suspended" => ("#D97706", "WARNING", "\U0001F7E0"),
             _ => ("#2eaef1", "INFO", "\U0001F535")
         }
     };

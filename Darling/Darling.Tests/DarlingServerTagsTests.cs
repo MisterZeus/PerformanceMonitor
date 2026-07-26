@@ -23,22 +23,32 @@ public sealed class DarlingServerTagsTests
         PgMigrations.Scripts.Single(s => s.Version == 32).Sql;
 
     [Fact]
-    public void V32_IsSchemaQualified_AndV33_IsRegisteredLast()
+    public void V32_IsSchemaQualified_AndV35_IsRegisteredLast()
     {
         var v32 = PgMigrations.Scripts.Single(s => s.Version == 32);
 
         Assert.Equal("server-tags", v32.Name);
 
-        /* V33 (#1659 connection-alert opt-ins): its ALTERs are config.-qualified like every additive
-           control-plane migration. V34 (#991 AG collectors) now sits after it as the newest migration
-           and is what tracks the build version. */
+        /* V33 (#1659 connection-alert opt-ins): config.-qualified like every additive control-plane
+           migration, and every added column NOT NULL DEFAULT so a pre-V33 row needs no backfill. */
         var v33 = PgMigrations.Scripts.Single(s => s.Version == 33);
         Assert.Equal("connection-alert-refire", v33.Name);
-        Assert.Equal(34, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Contains("ALTER TABLE config.config_alert_settings", v33.Sql, StringComparison.Ordinal);
         Assert.Contains("notify_connection_down_at_startup boolean NOT NULL DEFAULT false", v33.Sql, StringComparison.Ordinal);
         Assert.Contains("connection_refire_minutes integer NOT NULL DEFAULT 0", v33.Sql, StringComparison.Ordinal);
+
+        /* V35 (#991 Availability Group alert knobs) is now the newest migration and tracks the build version.
+           Same discipline: registered LAST, config.-qualified, every column NOT NULL DEFAULT — and the two
+           thresholds carry the SHIPPED defaults (lag on at 300s, redo queue off), which the service's fallback
+           seams and the viewer's parse fallbacks both mirror. */
+        var v35 = PgMigrations.Scripts.Single(s => s.Version == 35);
+        Assert.Equal("availability-group-alerts", v35.Name);
+        Assert.Equal(35, PgMigrations.Scripts[^1].Version);
+        Assert.Equal(StorageVersion.SchemaVersion, v35.Version);
+        Assert.Contains("ALTER TABLE config.config_alert_settings", v35.Sql, StringComparison.Ordinal);
+        Assert.Contains("notify_ag_health boolean NOT NULL DEFAULT true", v35.Sql, StringComparison.Ordinal);
+        Assert.Contains("ag_lag_alert_seconds integer NOT NULL DEFAULT 300", v35.Sql, StringComparison.Ordinal);
+        Assert.Contains("ag_redo_queue_alert_kb bigint NOT NULL DEFAULT 0", v35.Sql, StringComparison.Ordinal);
 
         /* config.-QUALIFIED: the migrate session runs under search_path = collect, config, public, so an
            unqualified CREATE TABLE would land in collect — the wrong schema AND the wrong ACL. */

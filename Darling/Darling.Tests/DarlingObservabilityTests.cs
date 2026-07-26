@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
@@ -32,9 +33,14 @@ public sealed class DarlingObservabilityTests
     private const int TestServerId = -424242;
 
     [Fact]
-    public void MigrationScripts_ThirtyFourVersions_V33ConnectionAlertOptIns_V34AgCollectors()
+    public void MigrationScripts_AreRegisteredInAscendingOrder_V34AgCollectors_V35AgAlertKnobs()
     {
-        Assert.Equal(34, PgMigrations.Scripts.Count);
+        /* Counted off the registered list rather than hard-coded: the count and the newest version are the
+           same fact stated twice, and pinning the count by literal makes every stacked branch collide here. */
+        Assert.Equal(PgMigrations.Scripts.Count, PgMigrations.Scripts.DistinctBy(s => s.Version).Count());
+        Assert.Equal(
+            PgMigrations.Scripts.Select(s => s.Version).OrderBy(v => v).ToArray(),
+            PgMigrations.Scripts.Select(s => s.Version).ToArray());
         Assert.Equal(1, PgMigrations.Scripts[0].Version);
         Assert.Equal(2, PgMigrations.Scripts[1].Version);
         Assert.Equal(3, PgMigrations.Scripts[2].Version);
@@ -68,8 +74,10 @@ public sealed class DarlingObservabilityTests
         Assert.Equal(31, PgMigrations.Scripts[30].Version);
         Assert.Equal(32, PgMigrations.Scripts[31].Version);
         Assert.Equal(33, PgMigrations.Scripts[32].Version);
-        Assert.Equal(34, PgMigrations.Scripts[33].Version);
-        Assert.Equal(34, StorageVersion.SchemaVersion);
+        /* The newest migration is asserted by identity rather than by ordinal: this ladder is walked by every
+           stacked branch at once, and a positional pin turns each addition into a conflict for the next. */
+        Assert.Equal(35, PgMigrations.Scripts[^1].Version);
+        Assert.Equal(35, StorageVersion.SchemaVersion);
 
         /* V34 (#991) creates the two Availability Group collector tables. Schema-qualified collect.* and
            CREATE TABLE IF NOT EXISTS, per the file's additive-create idiom (V29): a no-op on a fresh store
