@@ -15,9 +15,32 @@ the secondary.
 USE master;
 GO
 
+/*
+Explicit small files. The model database's defaults are far larger than this fixture
+needs, and automatic seeding reproduces the primary's file layout on ag2, so every
+megabyte here is paid for twice. Growth increments are small for the same reason -
+the write-load script is meant to grow the log a little, not run away with the disk.
+
+RECOVERY FULL is mandatory, not a default worth trimming: an availability group will
+not accept a database in SIMPLE recovery. "Small" here is about file sizes only.
+*/
 IF DB_ID(N'AgFixtureDb') IS NULL
 BEGIN
-    CREATE DATABASE AgFixtureDb;
+    CREATE DATABASE AgFixtureDb
+    ON PRIMARY
+    (
+        NAME = N'AgFixtureDb',
+        FILENAME = N'/var/opt/mssql/data/AgFixtureDb.mdf',
+        SIZE = 64MB,
+        FILEGROWTH = 32MB
+    )
+    LOG ON
+    (
+        NAME = N'AgFixtureDb_log',
+        FILENAME = N'/var/opt/mssql/data/AgFixtureDb_log.ldf',
+        SIZE = 64MB,
+        FILEGROWTH = 32MB
+    );
 END;
 GO
 

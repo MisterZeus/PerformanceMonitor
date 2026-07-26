@@ -3,6 +3,8 @@
 **Date:** 2026-07-26
 **Fixture:** `tools/ag-fixture`, two-node `CLUSTER_TYPE = NONE` availability group `ag_fixture`
 **Instances:** SQL Server 2022, `16.0.4265.3` RTM, Developer Edition, `IsHadrEnabled = 1`
+**Resources:** 1 CPU and 2 GB per container, engine capped at 1536 MB - see
+[Resource footprint](#7-resource-footprint-measured)
 **Collector source:** `feature/991-ag-health-collector` @ `530b3b66`, queries taken verbatim from
 `PerformanceMonitor.Collectors/AgReplicaStatesCollector.cs` and
 `PerformanceMonitor.Collectors/AgDatabaseReplicaStatesCollector.cs`
@@ -26,6 +28,12 @@ full below because they change how the data should be read, and one of them cont
 | Same queries from a *secondary* return the full AG | **No, 1 row - see finding 1** |
 | `log_send_queue_size` grows while suspended | **No, reads NULL - see finding 2** |
 | `secondary_lag_seconds` reads 0 while suspended, per MS Learn | **No, it accrues - see finding 3** |
+| Whole fixture builds and runs within 1 CPU / 2 GB per container | Pass, no OOM kill |
+| `teardown.ps1` removes containers, network, and both volumes | Pass |
+
+Everything below was re-measured after the resource caps went on. Findings 1-3 were first
+observed uncapped and reproduce identically at 1 CPU / 2 GB, which is expected - they are DMV
+semantics, not resource effects.
 
 ## 1. Fixture state after setup
 
@@ -236,6 +244,65 @@ Scope of this claim: one build (`16.0.4265.3`), clusterless AG only. A WSFC-base
 tested, and the fixture cannot test one.
 
 Source: [sys.dm_hadr_database_replica_states (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-hadr-database-replica-states-transact-sql)
+
+## 7. Resource footprint (measured)
+
+The fixture is capped at **1 CPU and 2 GB per container**, with the engine held to 1536 MB by
+`MSSQL_MEMORY_LIMIT_MB`, so it can share a machine with a busy VM fleet. These are measured
+numbers from `docker stats --no-stream`, not the caps:
+
+```
+state                     container  CPU      memory              % of 2 GB cap
+------------------------  ---------  -------  ------------------  -------------
+idle, just after setup    ag1        3.82%    1.345GiB / 2GiB     67.25%
+                          ag2        4.06%    1.325GiB / 2GiB     66.25%
+under write load          ag1        71.69%   1.718GiB / 2GiB     85.91%
+                          ag2        99.38%   1.689GiB / 2GiB     84.43%
+settled, after load       ag1        2.75%    1.78GiB / 2GiB      88.98%
+                          ag2        4.33%    1.798GiB / 2GiB     89.88%
+```
+
+Two containers, so roughly **3.5 GB and 2 CPUs in total** at the working peak.
+
+Both instances built the AG, seeded, ran load, and survived a suspend/resume fault at these
+limits with no OOM kill and no restart - `docker ps` showed both healthy throughout. 1536 MB was
+stable, so it was not stepped up to 2048.
+
+Memory settles near 90% of the cap after load and stays there. That is normal: SQL Server does
+not hand the buffer pool back, and `MSSQL_MEMORY_LIMIT_MB` governs the engine's own budget rather
+than the container's total RSS, so ~250 MB of process overhead sits on top of the 1536 MB. It is
+the reason `mem_limit` is 2 GB and not lower. SQL Server on Linux also refuses to start at all
+below ~2000 MB, so 2 GB is a floor, not a preference.
+
+### Database files stay small
+
+Fresh, and after a 70-second write load:
+
+```
+                     size_mb  used_mb
+fresh after setup
+  AgFixtureDb        64       2
+  AgFixtureDb_log    64       0
+after 70s of load
+  AgFixtureDb        672      654
+  AgFixtureDb_log    64       15
+```
+
+The log does not grow. That is the periodic overwriting `BACKUP LOG` in
+`sql/90_write_load.sql` doing its job - the database must be in FULL recovery for the AG to
+accept it, so the log cannot truncate on its own. Without that backup the same workload took the
+log to **1632 MB used**, and a data file to 1376 MB, in a single 90-second run:
+
+```
+                     size_mb  used_mb
+before the log trim was added
+  AgFixtureDb        1376     1351
+  AgFixtureDb_log    1632     1620
+```
+
+The data file still grows with the rows inserted; the start-of-run `TRUNCATE TABLE` past 250,000
+rows keeps that from compounding across runs. `teardown.ps1` deletes both volumes and reclaims
+everything.
 
 ## Reproducing
 

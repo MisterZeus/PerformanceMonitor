@@ -16,10 +16,36 @@ a listener or automatic failover, so it is not the fixture for testing those.
 ## Requirements
 
 - Docker Desktop, Linux containers, engine running.
-- ~4 GB of RAM free. Two SQL Server instances are not cheap.
+- ~4 GB of RAM free and 2 CPUs, which is what the caps below add up to.
 - `docker.exe` is **not** on PATH in a default Docker Desktop install. The scripts
   default to `C:\Program Files\Docker\Docker\resources\bin\docker.exe`; pass
   `-DockerPath` if yours lives somewhere else.
+
+## Resource footprint
+
+This fixture is sized to **coexist with the VM fleet on this machine**, not to
+perform. It is capped, and the caps are deliberately at the floor:
+
+| Cap | Per container | Where |
+| --- | --- | --- |
+| Container memory | 2 GB (`mem_limit: 2g`) | `docker-compose.yml` |
+| Container CPU | 1.0 (`cpus: "1.0"`) | `docker-compose.yml` |
+| SQL Server engine memory | 1536 MB (`MSSQL_MEMORY_LIMIT_MB`) | `docker-compose.yml` |
+| Seed database files | 64 MB data + 64 MB log, 32 MB growth | `sql/06_seed_database.sql` |
+| Write-load batch | 200 rows, table truncated past 250k rows | `sql/90_write_load.sql` |
+| Log growth during load | bounded by a periodic overwriting log backup | `sql/90_write_load.sql` |
+
+Two containers, so **4 GB and 2 CPUs total** at the ceiling. Measured steady-state
+idle usage is well under that and is recorded in [VALIDATION.md](VALIDATION.md).
+
+`mem_limit` cannot go below 2 GB: SQL Server on Linux refuses to start on a machine
+with less than ~2000 MB and exits immediately. `MSSQL_MEMORY_LIMIT_MB` is the knob
+that actually lowers the engine's appetite inside that, and 1536 MB is enough to run
+a synchronous-commit AG with a seeded database. SQL Server Agent is deliberately not
+enabled - the AG needs no jobs, and it would be another resident process per node.
+
+If you need the memory back, `.\teardown.ps1` frees all of it: containers, network,
+and both data volumes.
 
 ## Start
 
