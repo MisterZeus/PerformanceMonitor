@@ -8,8 +8,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -1550,6 +1553,27 @@ public sealed class DarlingComposeTests
                 "{\"type\":\"markdown\",\"text\":\"## Top memory clerks\"}," +
                 "{\"type\":\"panel\",\"source\":\"memory_clerks\",\"viz\":\"bar\",\"topN\":10,\"title\":\"Top memory clerks\",\"groupBy\":[\"clerk_type\"],\"measure\":\"clerk_memory_mb\",\"aggregate\":\"max\",\"unit\":\"mb\"}," +
                 "{\"type\":\"markdown\",\"text\":\"RESOURCE_SEMAPHORE notes\"}]}"),
+
+            /* #991: the AG Health seed. Exercises three shapes the other four seeds do not — a dual-axis
+               overlay (ungrouped line + second measure), a stacked time series, and a scalar stat tile —
+               so this entry is also the drift guard for those panel modes staying valid. */
+            ("ag-health",
+                "{\"kind\":\"notebook\",\"cells\":[" +
+                "{\"type\":\"markdown\",\"text\":\"# Availability Group health\"}," +
+                "{\"type\":\"markdown\",\"text\":\"## 1. How far behind is each secondary?\"}," +
+                "{\"type\":\"panel\",\"source\":\"ag_database_replica_states\",\"viz\":\"line\",\"timeBucket\":\"hour\",\"title\":\"Secondary lag by replica\",\"measure\":\"ag_secondary_lag\",\"aggregate\":\"max\",\"unit\":\"s\",\"groupBy\":[\"replica_server_name\"]}," +
+                "{\"type\":\"markdown\",\"text\":\"Reading the lag panel\"}," +
+                "{\"type\":\"markdown\",\"text\":\"## 2. Send vs redo: which side is the bottleneck?\"}," +
+                "{\"type\":\"panel\",\"source\":\"ag_database_replica_states\",\"viz\":\"line\",\"timeBucket\":\"hour\",\"title\":\"Log send rate vs redo rate\",\"measure\":\"ag_log_send_rate\",\"aggregate\":\"avg\",\"unit\":\"kb\",\"overlay\":{\"measure\":\"ag_redo_rate\",\"aggregate\":\"avg\",\"unit\":\"kb\"}}," +
+                "{\"type\":\"markdown\",\"text\":\"Reading the rate panel\"}," +
+                "{\"type\":\"markdown\",\"text\":\"## 3. Where is the redo backlog?\"}," +
+                "{\"type\":\"panel\",\"source\":\"ag_database_replica_states\",\"viz\":\"stacked\",\"timeBucket\":\"hour\",\"title\":\"Redo queue by database\",\"measure\":\"ag_redo_queue\",\"aggregate\":\"max\",\"unit\":\"kb\",\"groupBy\":[\"database_name\"]}," +
+                "{\"type\":\"markdown\",\"text\":\"## 4. How long until the redo queue clears?\"}," +
+                "{\"type\":\"panel\",\"source\":\"ag_database_replica_states\",\"viz\":\"stat\",\"title\":\"Estimated redo drain (worst, minutes)\",\"measure\":\"ag_est_redo_drain_min\",\"aggregate\":\"max\",\"unit\":\"min\"}," +
+                "{\"type\":\"markdown\",\"text\":\"Blank means no drain rate\"}," +
+                "{\"type\":\"markdown\",\"text\":\"## 5. Which databases are backing up on the send side?\"}," +
+                "{\"type\":\"panel\",\"source\":\"ag_database_replica_states\",\"viz\":\"bar\",\"topN\":10,\"title\":\"Log send queue by database\",\"groupBy\":[\"database_name\"],\"measure\":\"ag_log_send_queue\",\"aggregate\":\"max\",\"unit\":\"kb\"}," +
+                "{\"type\":\"markdown\",\"text\":\"Next steps\"}]}"),
         };
 
         foreach (var (name, definition) in templates)
@@ -1557,6 +1581,31 @@ public sealed class DarlingComposeTests
             var result = DarlingWebEndpoints.ValidateDefinition(definition);
             Assert.True(result.IsValid, $"seed template '{name}' failed validation: {result.Error}");
         }
+
+        /* The hole a hand-written mirror always has: it protects the templates it happens to list. Read the
+           REAL key list out of notebook.js and require the mirror to cover exactly it, so a sixth template
+           added without a mirror entry fails here instead of silently going unvalidated until it 400s in
+           someone's browser. Source-scanned rather than executed — Darling.Tests has no JS runtime, and the
+           same read-the-source idiom already backs the cross-app preset pin. */
+        var declaredKeys = NotebookTemplateKeys();
+        Assert.NotEmpty(declaredKeys);
+        Assert.Equal(declaredKeys, templates.Select(t => t.Name).OrderBy(k => k, StringComparer.Ordinal).ToArray());
+    }
+
+    /// <summary>Every <c>key:</c> declared in <c>NOTEBOOK_TEMPLATES</c> (wwwroot/js/notebook.js), sorted.
+    /// <c>key:</c> appears nowhere else in that file, so a plain line scan is unambiguous.</summary>
+    private static string[] NotebookTemplateKeys([CallerFilePath] string thisFile = "")
+    {
+        var testDir = Path.GetDirectoryName(thisFile)!;
+        var notebookJs = Path.GetFullPath(Path.Combine(
+            testDir, "..", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "notebook.js"));
+
+        Assert.True(File.Exists(notebookJs), $"notebook.js not found at {notebookJs} (did the frontend move?)");
+
+        return Regex.Matches(File.ReadAllText(notebookJs), @"^\s*key:\s*""([^""]+)""", RegexOptions.Multiline)
+            .Select(m => m.Groups[1].Value)
+            .OrderBy(k => k, StringComparer.Ordinal)
+            .ToArray();
     }
 
     /* ─────────────── #1665: availability-gated routing + the partial-window notice ─────────────── */
