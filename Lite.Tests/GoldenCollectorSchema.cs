@@ -859,7 +859,8 @@ internal static class GoldenCollectorSchema
     synchronization_health_desc VARCHAR,
     availability_mode_desc VARCHAR,
     failover_mode_desc VARCHAR,
-    endpoint_url VARCHAR
+    endpoint_url VARCHAR,
+    is_local BOOLEAN
 )",
         ["ag_database_replica_states"] = @"CREATE TABLE IF NOT EXISTS ag_database_replica_states (
     collection_id BIGINT PRIMARY KEY,

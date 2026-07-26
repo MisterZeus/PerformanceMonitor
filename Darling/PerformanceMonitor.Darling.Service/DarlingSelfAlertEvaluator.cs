@@ -117,6 +117,10 @@ internal sealed class DarlingSelfAlertEvaluator
     /// master switch gates all four AG conditions; the two thresholds are already clamped by
     /// <see cref="DarlingAlertSettings"/>, so a hand-edited store row cannot drive a nonsense window.</summary>
     private readonly Func<bool> _notifyAgHealth;
+
+    /// <summary>#1696 (V37) re-fire interval for "AG Replica Disconnected", read live like the other AG
+    /// seams. 0 = off, the shipped default.</summary>
+    private readonly Func<int> _agDisconnectRefireMinutes;
     private readonly Func<int> _agLagAlertSeconds;
     private readonly Func<long> _agRedoQueueAlertKb;
 
@@ -185,6 +189,19 @@ internal sealed class DarlingSelfAlertEvaluator
     private readonly ConcurrentDictionary<string, DateTime> _lastAgSyncBehindAlert = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, bool> _agDatabaseSuspended = new(StringComparer.Ordinal);
 
+    /// <summary>Which monitored server currently judges each Availability Group, and how good its view is
+    /// (#1696). Every replica is visible from every node, so a fully-monitored 3-node AG previously reported
+    /// one failover THREE times. One server owns each AG; a server with a strictly better vantage takes over
+    /// (a secondary yielding to the primary, whose view is the only complete one). Fleet-level, so it is
+    /// deliberately NOT dropped by <see cref="Forget"/> the way the per-server state is — see there.</summary>
+    private readonly ConcurrentDictionary<string, (int ServerId, AgVantage Vantage)> _agAuthority =
+        new(StringComparer.Ordinal);
+
+    /// <summary>When "AG Replica Disconnected" last DELIVERED per ag+replica — the #1659 re-fire clock
+    /// (V37). Stamped on delivery only, so a decision suppressed by the master switch cannot consume the
+    /// window; cleared on reconnect.</summary>
+    private readonly ConcurrentDictionary<string, DateTime> _lastAgDisconnectAlert = new(StringComparer.Ordinal);
+
     /* The AG alert metric names and every pure AG decision now live in the shared
        PerformanceMonitor.Common.AgAlertPolicy, so Lite fires the SAME names off the SAME rules (#1696) — the
        ConnectionAlertPolicy discipline. This evaluator keeps only the edge STATE and the delivery; the
@@ -225,7 +242,8 @@ internal sealed class DarlingSelfAlertEvaluator
         Func<int>? connectionRefireMinutes = null,
         Func<bool>? notifyAgHealth = null,
         Func<int>? agLagAlertSeconds = null,
-        Func<long>? agRedoQueueAlertKb = null)
+        Func<long>? agRedoQueueAlertKb = null,
+        Func<int>? agDisconnectRefireMinutes = null)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _deliverer = deliverer ?? throw new ArgumentNullException(nameof(deliverer));
@@ -241,6 +259,7 @@ internal sealed class DarlingSelfAlertEvaluator
         _notifyAgHealth = notifyAgHealth ?? (() => true);
         _agLagAlertSeconds = agLagAlertSeconds ?? (() => 300);
         _agRedoQueueAlertKb = agRedoQueueAlertKb ?? (() => 0);
+        _agDisconnectRefireMinutes = agDisconnectRefireMinutes ?? (() => 0);
     }
 
     private enum ConnectionState
@@ -713,7 +732,18 @@ internal sealed class DarlingSelfAlertEvaluator
 
         foreach (var replica in replicas)
         {
-            var key = AgReplicaKey(serverId, replica.AgName, replica.ReplicaServerName);
+            /* #1696 fleet-side de-dup: one monitored server judges each AG, so a fully-monitored 3-node AG
+               reports a failover ONCE instead of once per node that can see it. A server with a strictly
+               better vantage takes over — a secondary yielding to the primary, whose view is the only
+               complete one. The state key drops serverId for the same reason: whoever is authoritative
+               reads and writes the SAME edge state, so authority moving cannot re-baseline and lose an
+               alert, and cannot double-fire one either. */
+            if (!IsAuthoritativeFor(serverId, replica.AgName, replicas))
+            {
+                continue;
+            }
+
+            var key = AgReplicaKey(replica.AgName, replica.ReplicaServerName);
 
             /* --- 1. Failover: the role changed since we last looked. --- */
             if (!string.IsNullOrEmpty(replica.RoleDesc))
@@ -745,7 +775,20 @@ internal sealed class DarlingSelfAlertEvaluator
                 var connection = AgAlertPolicy.DecideConnection(previousState, replica.ConnectedStateDesc);
                 _agReplicaConnectedState[key] = replica.ConnectedStateDesc;
 
-                if (connection == AgConnectionDecision.Disconnected)
+                /* #1696 (V37): "AG Replica Disconnected" was a pure edge, so a replica that stayed
+                   disconnected for a week announced it ONCE. The #1659 treatment: re-announce every N
+                   minutes while it is still down (0 = off, the shipped default, so nothing starts
+                   re-alerting on upgrade). Re-fires deliver under the SAME metric name, because webhook
+                   automation keyed on it is exactly what a re-fire exists to re-trigger. */
+                bool stillDisconnected =
+                    connection == AgConnectionDecision.None
+                    && AgAlertPolicy.IsDisconnected(replica.ConnectedStateDesc)
+                    && _agDisconnectRefireMinutes() is int refire
+                    && refire > 0
+                    && (!_lastAgDisconnectAlert.TryGetValue(key, out var lastDown)
+                        || _utcNow() - lastDown >= TimeSpan.FromMinutes(refire));
+
+                if (connection == AgConnectionDecision.Disconnected || stillDisconnected)
                 {
                     await FireAsync(
                         Key(serverId), serverName, AgReplicaDisconnectedMetric, replica.ConnectedStateDesc, "CONNECTED",
@@ -756,8 +799,14 @@ internal sealed class DarlingSelfAlertEvaluator
                             "automatic-failover partner. Check the replica's SQL Server service, the availability endpoint " +
                             "(TCP 5022 by default) and its firewall rule, the WSFC quorum, and the network between the nodes.",
                         severity: AlertSeverityLevel.Critical,
-                        shortMessage: $"{replica.ReplicaServerName} in AG {replica.AgName} is disconnected from the primary",
+                        shortMessage: stillDisconnected
+                            ? $"{replica.ReplicaServerName} in AG {replica.AgName} is STILL disconnected from the primary"
+                            : $"{replica.ReplicaServerName} in AG {replica.AgName} is disconnected from the primary",
                         cancellationToken);
+
+                    /* Stamped on DELIVERY, never on the decision: an alert suppressed by the master switch
+                       must not consume the re-fire window (the #1659 discipline). */
+                    _lastAgDisconnectAlert[key] = _utcNow();
                 }
                 else if (connection == AgConnectionDecision.Reconnected)
                 {
@@ -770,6 +819,7 @@ internal sealed class DarlingSelfAlertEvaluator
                             "send and redo queues until they drain before you count it as a failover target again.",
                         severity: null,
                         shortMessage: $"{replica.ReplicaServerName} in AG {replica.AgName} reconnected", cancellationToken);
+                    _lastAgDisconnectAlert.TryRemove(key, out _);
                 }
             }
         }
@@ -810,7 +860,14 @@ internal sealed class DarlingSelfAlertEvaluator
 
         foreach (var database in databases)
         {
-            var key = AgDatabaseKey(serverId, database.AgName, database.DatabaseName, database.ReplicaServerName);
+            /* Same #1696 de-dup as the replica grain: without it a fully-monitored 3-node AG reports the
+               same database's lag once per node. */
+            if (!IsAuthoritativeFor(serverId, database.AgName))
+            {
+                continue;
+            }
+
+            var key = AgDatabaseKey(database.AgName, database.DatabaseName, database.ReplicaServerName);
 
             /* --- 3. Data movement suspended (edge). --- */
             if (database.IsSuspended is bool suspended)
@@ -899,13 +956,47 @@ internal sealed class DarlingSelfAlertEvaluator
 
     /// <summary>The prefix every AG state key for one server starts with — the scope for
     /// <see cref="Forget"/> and for the per-server recovery sweep.</summary>
-    private static string AgServerPrefix(int serverId) => Key(serverId) + AgKeySeparator;
+    /* AG edge state is keyed by the AG GRAIN ALONE, deliberately without the serverId (#1696). An AG is one
+       object no matter how many of its nodes we monitor, so whichever server is authoritative reads and
+       writes the same state — which is what makes authority able to move (a secondary yielding to the
+       primary) without re-baselining and losing an alert, or double-firing one. */
+    private static string AgReplicaKey(string agName, string replicaServerName) =>
+        agName + AgKeySeparator + replicaServerName;
 
-    private static string AgReplicaKey(int serverId, string agName, string replicaServerName) =>
-        AgServerPrefix(serverId) + agName + AgKeySeparator + replicaServerName;
+    private static string AgDatabaseKey(string agName, string databaseName, string replicaServerName) =>
+        agName + AgKeySeparator + databaseName + AgKeySeparator + replicaServerName;
 
-    private static string AgDatabaseKey(int serverId, string agName, string databaseName, string replicaServerName) =>
-        AgServerPrefix(serverId) + agName + AgKeySeparator + databaseName + AgKeySeparator + replicaServerName;
+    /// <summary>
+    /// Whether <paramref name="serverId"/> is the server that judges <paramref name="agName"/> right now.
+    /// The first server to report an AG claims it; a server with a STRICTLY better vantage takes over, so a
+    /// secondary's one-row self-view yields to the primary's complete one as soon as the primary is
+    /// monitored. Ties keep the incumbent, so authority does not oscillate between equally-placed nodes.
+    /// </summary>
+    private bool IsAuthoritativeFor(int serverId, string agName, IReadOnlyList<AgReplicaReading> snapshot)
+    {
+        var vantage = AgAlertPolicy.ClassifyVantage(snapshot, agName);
+        var claimed = _agAuthority.AddOrUpdate(
+            agName,
+            _ => (serverId, vantage),
+            (_, current) => current.ServerId == serverId
+                ? (serverId, vantage)
+                : (vantage > current.Vantage ? (serverId, vantage) : current));
+
+        return claimed.ServerId == serverId;
+    }
+
+    /// <summary>
+    /// The database-grain check. The replica grain runs first in the same sweep and has normally already
+    /// decided who owns this AG, so this defers to the incumbent rather than re-classifying. When nothing has
+    /// claimed the AG — the replica-grain snapshot was missing or stale while the database one is fresh — the
+    /// caller claims it at the weakest vantage, so the group is still judged by SOMEBODY rather than by
+    /// nobody. Judging once from a poor vantage beats silence; that is the direction that keeps alerts.
+    /// </summary>
+    private bool IsAuthoritativeFor(int serverId, string agName)
+    {
+        var claimed = _agAuthority.GetOrAdd(agName, _ => (serverId, AgVantage.Remote));
+        return claimed.ServerId == serverId;
+    }
 
     /// <summary>Renders a database-grain AG key back into prose for a recovery message. The key is built here
     /// and never escaped, so this is a straight positional split; an unexpected shape degrades to the raw key
@@ -913,8 +1004,8 @@ internal sealed class DarlingSelfAlertEvaluator
     private static string DescribeAgDatabaseKey(string key)
     {
         var parts = key.Split(AgKeySeparator);
-        return parts.Length == 4
-            ? $"database {parts[2]} in AG {parts[1]} on replica {parts[3]}"
+        return parts.Length == 3
+            ? $"database {parts[1]} in AG {parts[0]} on replica {parts[2]}"
             : key;
     }
 
@@ -1194,25 +1285,20 @@ internal sealed class DarlingSelfAlertEvaluator
         _connectionState.TryRemove(key, out _);
         _hasBeenOnline.TryRemove(key, out _);
 
-        /* AG state is keyed by a COMPOSITE (serverId + AG grain), so an exact-key TryRemove like the
-           per-server conditions above cannot reach it — sweep this server's key prefix instead. Missing this
-           is how a removed-then-re-added server would inherit a stale role and page a phantom failover.
-           ConcurrentDictionary.Keys hands back a snapshot, so removing while enumerating it is safe. */
-        var agPrefix = AgServerPrefix(serverId);
-        ForgetAgKeys(_agReplicaRole, agPrefix);
-        ForgetAgKeys(_agReplicaConnectedState, agPrefix);
-        ForgetAgKeys(_activeAgSyncBehind, agPrefix);
-        ForgetAgKeys(_lastAgSyncBehindAlert, agPrefix);
-        ForgetAgKeys(_agDatabaseSuspended, agPrefix);
-    }
+        /* AG state is keyed by the AG GRAIN, not by server (#1696), so there is deliberately nothing here to
+           drop: an Availability Group outlives any one of its monitored nodes, and another node may still be
+           watching it. Dropping the edge state on removal would re-baseline a group that is still monitored
+           and silently swallow the next failover.
 
-    private static void ForgetAgKeys<TValue>(ConcurrentDictionary<string, TValue> state, string prefix)
-    {
-        foreach (var key in state.Keys)
+           What DOES belong to the departing server is its claim to judge an AG. Releasing it lets a
+           surviving node take over on its next sweep; the edge state it inherits is the same state, so the
+           handover neither re-baselines nor double-fires. If the removed server was the group's only
+           monitor, the state simply goes quiet — no snapshots arrive, so nothing fires. */
+        foreach (var entry in _agAuthority)
         {
-            if (key.StartsWith(prefix, StringComparison.Ordinal))
+            if (entry.Value.ServerId == serverId)
             {
-                state.TryRemove(key, out _);
+                _agAuthority.TryRemove(entry.Key, out _);
             }
         }
     }
@@ -1385,7 +1471,7 @@ LIMIT 1", connection);
 
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
         using var command = new NpgsqlCommand(@"
-SELECT ag_name, replica_server_name, role_desc, connected_state_desc, collection_time
+SELECT ag_name, replica_server_name, role_desc, connected_state_desc, is_local, collection_time
 FROM ag_replica_states
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM ag_replica_states WHERE server_id = $1)
@@ -1395,7 +1481,7 @@ ORDER BY ag_name, replica_server_name", connection);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            newest = Newest(newest, reader, 4);
+            newest = Newest(newest, reader, 5);
             if (reader.IsDBNull(0) || reader.IsDBNull(1))
             {
                 continue;
@@ -1405,7 +1491,8 @@ ORDER BY ag_name, replica_server_name", connection);
                 AgName: reader.GetString(0),
                 ReplicaServerName: reader.GetString(1),
                 RoleDesc: reader.IsDBNull(2) ? null : reader.GetString(2),
-                ConnectedStateDesc: reader.IsDBNull(3) ? null : reader.GetString(3)));
+                ConnectedStateDesc: reader.IsDBNull(3) ? null : reader.GetString(3),
+                IsLocal: reader.IsDBNull(4) ? null : reader.GetBoolean(4)));
         }
 
         return (newest, replicas);

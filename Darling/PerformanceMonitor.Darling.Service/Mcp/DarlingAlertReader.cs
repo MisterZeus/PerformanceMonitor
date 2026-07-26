@@ -131,7 +131,8 @@ LIMIT $2";
         int ConnectionRefireMinutes,
         bool NotifyAgHealth,
         int AgLagAlertSeconds,
-        long AgRedoQueueAlertKb);
+        long AgRedoQueueAlertKb,
+        int AgDisconnectRefireMinutes);
 
     /// <summary>The single global alert-settings row (id=1) — the viewer's <c>AlertSettingsSelectSql</c>. The
     /// 41 columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>). This had
@@ -149,7 +150,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        long_running_query_exclude_wait_for, long_running_query_exclude_backups,
        long_running_query_exclude_misc_waits, long_running_query_exclude_cdc, notify_connection_changes,
        notify_connection_down_at_startup, connection_refire_minutes,
-       notify_ag_health, ag_lag_alert_seconds, ag_redo_queue_alert_kb
+       notify_ag_health, ag_lag_alert_seconds, ag_redo_queue_alert_kb,
+       ag_disconnect_refire_minutes
 FROM config_alert_settings
 WHERE id = 1";
 
@@ -178,6 +180,7 @@ WHERE id = 1";
             reader.GetBoolean(35),
             /* V33 (#1659) at 36-37, V35 (#991) at 38-40. */
             reader.GetBoolean(36), reader.GetInt32(37),
-            reader.GetBoolean(38), reader.GetInt32(39), reader.GetInt64(40));
+            reader.GetBoolean(38), reader.GetInt32(39), reader.GetInt64(40),
+            reader.GetInt32(41));
     }
 }

@@ -427,8 +427,36 @@ public sealed class PgSchemaGeneratorTests
            upgraded store's physical shape differ from a fresh one. */
         var v34 = Lf(PgMigrations.Scripts.Single(m => m.Version == 34).Sql);
 
-        Assert.Contains(CollectQualified(AgReplicaStatesCollector.Instance), v34, StringComparison.Ordinal);
+        /* The REPLICA-grain table is now the same two-migration story as the database grain below: V34
+           created its first 10 payload columns and V37 (#1696) appended is_local, so an upgraded store's
+           shape is V34 + V37 and only their sum equals the generator's current output. */
+        var replicaColumns = AgReplicaStatesCollector.Instance.PayloadColumns;
+        const int V34ReplicaColumnCount = 10;
+
+        Assert.Contains(
+            CollectQualified(new TruncatedSchema(AgReplicaStatesCollector.Instance, V34ReplicaColumnCount)),
+            v34,
+            StringComparison.Ordinal);
         Assert.Contains("CREATE INDEX IF NOT EXISTS idx_ag_replica_states_time ON collect.ag_replica_states(server_id, collection_time);", v34, StringComparison.Ordinal);
+
+        var v37 = Lf(PgMigrations.Scripts.Single(m => m.Version == 37).Sql);
+
+        foreach (var column in replicaColumns.Skip(V34ReplicaColumnCount))
+        {
+            var generatedType = Lf(PgSchemaGenerator.CreateTable(new TruncatedSchema(AgReplicaStatesCollector.Instance, replicaColumns.Count)))
+                .Split('\n')
+                .Single(l => l.TrimStart().StartsWith(column.Name + " ", StringComparison.Ordinal))
+                .Trim()
+                .TrimEnd(',');
+
+            Assert.Contains($"ADD COLUMN IF NOT EXISTS {generatedType}", v37, StringComparison.Ordinal);
+        }
+
+        /* No "V34 was not widened in place" sweep for this grain, unlike the database one below: the
+           TruncatedSchema assertion above already matches V34's ag_replica_states block EXACTLY, which is a
+           strictly stronger statement than any name-absence check. A substring sweep would also be wrong
+           here — is_local is a real V34 column on the DATABASE grain, so searching the whole migration body
+           for it finds the other table's legitimate column and fails. */
         Assert.Contains("CREATE INDEX IF NOT EXISTS idx_ag_database_replica_states_time ON collect.ag_database_replica_states(server_id, collection_time);", v34, StringComparison.Ordinal);
 
         /* The database-grain table is the one case where a single migration is NOT the whole story: V34

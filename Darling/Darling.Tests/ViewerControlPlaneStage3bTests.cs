@@ -27,7 +27,7 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class ViewerAlertSettingsSqlTests
 {
-    /* The 41 AlertsConfig + AnalysisConfig columns the service reads (StoreConfigProvider.ReadAlertSettingsAsync)
+    /* The 42 AlertsConfig + AnalysisConfig columns the service reads (StoreConfigProvider.ReadAlertSettingsAsync)
        — delivery_mode/per_event_max appended in V18 (#1141/#1236), the six long-running-query read knobs + the
        connection-change notify toggle in V20, the two connection opt-ins in V33 (#1659), and the three
        Availability Group knobs in V35 (#991).
@@ -50,6 +50,7 @@ public sealed class ViewerAlertSettingsSqlTests
         "long_running_query_exclude_misc_waits", "long_running_query_exclude_cdc", "notify_connection_changes",
         "notify_connection_down_at_startup", "connection_refire_minutes",
         "notify_ag_health", "ag_lag_alert_seconds", "ag_redo_queue_alert_kb",
+        "ag_disconnect_refire_minutes",
     };
 
     [Fact]
