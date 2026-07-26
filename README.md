@@ -423,11 +423,17 @@ Nothing is installed on the target server. The login only needs:
 USE [master];
 GRANT VIEW SERVER STATE TO [YourLogin];
 
+-- Optional: for Availability Group health (see the note below - without this
+-- the AG collectors return zero rows on a server that HAS availability groups)
+GRANT VIEW ANY DEFINITION TO [YourLogin];
+
 -- Optional: for SQL Agent job monitoring
 USE [msdb];
 CREATE USER [YourLogin] FOR LOGIN [YourLogin];
 ALTER ROLE [SQLAgentReaderRole] ADD MEMBER [YourLogin];
 ```
+
+**Availability Groups need a second grant.** The `ag_replica_states` / `ag_database_replica_states` collectors read the AG *catalog views* (`sys.availability_groups`, `sys.availability_replicas`) alongside the `sys.dm_hadr_*` DMVs. The DMVs are covered by `VIEW SERVER STATE`, but [the catalog views require `VIEW ANY DEFINITION`](https://learn.microsoft.com/en-us/sql/database-engine/availability-groups/windows/monitor-availability-groups-transact-sql) — and catalog views enforce that by *hiding rows*, not by raising an error. So on a real AG cluster a login with only `VIEW SERVER STATE` gets zero rows, which looks exactly like a server with no availability groups. If your AG dashboards are empty, this grant is why.
 
 Darling uses the same target-server grants; its bundled PostgreSQL store and service account are covered in the [Darling operator guide](Darling/README.md). The deprecated Full edition's install/least-privilege grants are in [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md).
 

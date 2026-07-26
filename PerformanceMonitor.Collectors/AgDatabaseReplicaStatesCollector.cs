@@ -41,6 +41,10 @@ namespace PerformanceMonitor.Collectors;
 /// <para>synchronization_state_desc's values are space-separated (<c>NOT SYNCHRONIZING</c>), unlike
 /// the replica-grain synchronization_health_desc's underscores (<c>NOT_HEALTHY</c>) — stored
 /// verbatim as the DMV reports them.</para>
+///
+/// <para>PERMISSIONS: this query joins the same two AG catalog views, which require VIEW ANY
+/// DEFINITION and hide rows rather than erroring without it — see
+/// <see cref="AgReplicaStatesCollector"/> for the full trap and the fingerprint that identifies it.</para>
 /// </summary>
 public sealed class AgDatabaseReplicaStatesCollector : CollectorDefinitionBase<AgDatabaseReplicaStatesCollector.Row>
 {

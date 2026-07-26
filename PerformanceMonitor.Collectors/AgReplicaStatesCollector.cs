@@ -36,6 +36,16 @@ namespace PerformanceMonitor.Collectors;
 /// instance cannot reach the failover cluster, sys.availability_replicas returns only locally cached
 /// metadata. <c>endpoint_url</c> is explicitly documented NULL in that state. So the reads below are
 /// null-tolerant throughout rather than only on the columns whose steady-state value is optional.</para>
+///
+/// <para>PERMISSIONS, and the trap they create: the two catalog views require VIEW ANY DEFINITION,
+/// while only the dm_hadr_* DMV is covered by the VIEW SERVER STATE the product otherwise asks for
+/// (learn.microsoft.com/en-us/sql/database-engine/availability-groups/windows/monitor-availability-groups-transact-sql).
+/// Catalog views enforce that by HIDING ROWS rather than raising an error, so a monitoring login
+/// without the grant makes this query return zero rows on a fully configured AG cluster — the same
+/// result as the AG-less server above, and therefore invisible. Both READMEs call the grant out. A
+/// collector-side fingerprint exists if this is ever worth surfacing automatically: the DMV returning
+/// rows while sys.availability_replicas returns none is unambiguous, and SERVERPROPERTY('IsHadrEnabled')
+/// is readable by every login.</para>
 /// </summary>
 public sealed class AgReplicaStatesCollector : CollectorDefinitionBase<AgReplicaStatesCollector.Row>
 {
