@@ -661,7 +661,71 @@ WITH NO DATA";
     /// <paramref name="dropAfter"/>. <c>if_not_exists</c> so a restart re-converges. The actual drop is a
     /// chunk-level DROP TABLE (cheap, no rewrite), so unlike the CAGG backfill it needs no off-hours window.</summary>
     public static string AddRetentionPolicySql(string relation, string dropAfter)
-        => $"SELECT add_retention_policy('collect.{relation}', drop_after => INTERVAL '{dropAfter}', if_not_exists => true)";
+        => $"SELECT add_retention_policy('collect.{relation}', drop_after => INTERVAL '{dropAfter}', if_not_exists => true, scheduled => false)";
+
+    /// <summary>
+    /// Arms a retention policy that was created paused. Separated from creation because TimescaleDB runs a new
+    /// policy's first check IMMEDIATELY at creation, not on its next interval (#1680).
+    /// </summary>
+    public static string ArmRetentionPolicySql(string relation)
+        => $@"SELECT alter_job(j.job_id, scheduled => true)
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '{relation}'";
+
+    /// <summary>
+    /// Is it safe to arm <paramref name="relation"/>'s retention policy — i.e. does the tier below it already
+    /// cover everything this relation holds? Returns true when the source is empty (nothing to lose), or when the
+    /// coverage relation's oldest bucket is at or before the source's oldest row.
+    ///
+    /// <para>This is the check that makes arming provably non-destructive rather than a race the operator has to
+    /// win. It also self-heals: a store that is not yet covered stays paused and arms on the first start AFTER a
+    /// backfill, with no manual step.</para>
+    /// </summary>
+    public static string RetentionArmSafetySql(string relation, string sourceTimeColumn, string coverageRelation)
+        => $@"SELECT
+    (SELECT min({sourceTimeColumn}) FROM collect.{relation}) AS source_oldest,
+    (SELECT min(bucket) FROM collect.{coverageRelation}) AS coverage_oldest";
+
+    /// <summary>
+    /// True when arming <paramref name="relation"/>'s retention policy cannot drop anything the tier below has
+    /// not already captured (#1680): the source is empty, or <paramref name="coverageRelation"/> reaches at least
+    /// as far back as the source does. Any failure to determine this returns FALSE - an unknown coverage state
+    /// must leave the policy paused, never armed on an assumption.
+    /// </summary>
+    private static async Task<bool> IsSafeToArmRetentionAsync(
+        NpgsqlConnection connection, string relation, string sourceTimeColumn, string coverageRelation, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var command = new NpgsqlCommand(RetentionArmSafetySql(relation, sourceTimeColumn, coverageRelation), connection) { CommandTimeout = SetupTimeoutSeconds };
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return false;
+            }
+
+            /* Nothing in the source - a fresh store. No history to lose, so arm. */
+            if (await reader.IsDBNullAsync(0, cancellationToken))
+            {
+                return true;
+            }
+
+            /* Source has data but the coverage tier is empty - arming would drop history nothing else holds. */
+            if (await reader.IsDBNullAsync(1, cancellationToken))
+            {
+                return false;
+            }
+
+            return reader.GetDateTime(1) <= reader.GetDateTime(0);
+        }
+        catch (Exception)
+        {
+            /* Fail closed: if coverage cannot be established, the policy stays paused. */
+            return false;
+        }
+    }
 
     /// <summary>
     /// Attaches the tiered retention policies: the three raw tables drop at <see cref="RawRetentionInterval"/>, the
@@ -684,37 +748,63 @@ WITH NO DATA";
             throw new ArgumentNullException(nameof(connection));
         }
 
+        /* Each policy names the tier that must already cover it before arming is safe (#1680). Raw tables are
+           covered by their hourly CAGG; hourly CAGGs by their daily one. Every policy has a coverage tier - a
+           policy with nothing below it would have no safe arming condition and does not belong in this list. */
         var policies = new[]
         {
-            (Relation: "query_stats",             DropAfter: RawRetentionInterval),
-            (Relation: "procedure_stats",         DropAfter: RawRetentionInterval),
-            (Relation: "query_store_stats",       DropAfter: RawRetentionInterval),
-            (Relation: QueryStatsHourlyView,      DropAfter: HourlyRetentionInterval),
-            (Relation: ProcedureStatsHourlyView,  DropAfter: HourlyRetentionInterval),
-            (Relation: QueryStoreStatsHourlyView, DropAfter: HourlyRetentionInterval),
-            (Relation: QueryStatsDbHourlyView,    DropAfter: HourlyRetentionInterval),
+            (Relation: "query_stats",             DropAfter: RawRetentionInterval,    TimeColumn: "collection_time", Coverage: QueryStatsHourlyView),
+            (Relation: "procedure_stats",         DropAfter: RawRetentionInterval,    TimeColumn: "collection_time", Coverage: ProcedureStatsHourlyView),
+            (Relation: "query_store_stats",       DropAfter: RawRetentionInterval,    TimeColumn: "collection_time", Coverage: QueryStoreStatsHourlyView),
+            (Relation: QueryStatsHourlyView,      DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: QueryStatsDailyView),
+            (Relation: ProcedureStatsHourlyView,  DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: ProcedureStatsDailyView),
+            (Relation: QueryStoreStatsHourlyView, DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: QueryStoreStatsDailyView),
+            (Relation: QueryStatsDbHourlyView,    DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: QueryStatsDbDailyView),
         };
 
         var applied = 0;
-        foreach (var (relation, dropAfter) in policies)
+        var armed = 0;
+        var held = 0;
+
+        foreach (var (relation, dropAfter, timeColumn, coverage) in policies)
         {
             try
             {
-                using var command = new NpgsqlCommand(AddRetentionPolicySql(relation, dropAfter), connection) { CommandTimeout = SetupTimeoutSeconds };
-                await command.ExecuteNonQueryAsync(cancellationToken);
+                /* Created PAUSED, always. TimescaleDB runs a new policy's first check immediately at creation
+                   rather than on its next interval, so a policy created live drops before any external session
+                   can pause it - there is no window to win. That cost a field store two days of history. */
+                using (var create = new NpgsqlCommand(AddRetentionPolicySql(relation, dropAfter), connection) { CommandTimeout = SetupTimeoutSeconds })
+                {
+                    await create.ExecuteNonQueryAsync(cancellationToken);
+                }
+
                 applied++;
+
+                if (await IsSafeToArmRetentionAsync(connection, relation, timeColumn, coverage, cancellationToken))
+                {
+                    using var arm = new NpgsqlCommand(ArmRetentionPolicySql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
+                    await arm.ExecuteNonQueryAsync(cancellationToken);
+                    armed++;
+                }
+                else
+                {
+                    held++;
+                    logger?.LogWarning(
+                        "Retention policy for {Relation} created but HELD PAUSED - {Coverage} does not yet cover everything it holds, so arming could drop history no rollup has. Backfill that rollup past the {DropAfter} horizon and the policy arms itself on the next start.",
+                        relation, coverage, dropAfter);
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 logger?.LogWarning(
-                    "Retention policy for {Relation} ({DropAfter}) failed — that tier keeps growing until the next restart retries: {Message}",
+                    "Retention policy for {Relation} ({DropAfter}) failed - that tier keeps growing until the next restart retries: {Message}",
                     relation, dropAfter, ex.Message);
             }
         }
 
         logger?.LogInformation(
-            "TimescaleDB: {Applied}/{Total} retention policies in place (raw {Raw}, hourly CAGGs {Hourly}; daily CAGGs kept indefinitely)",
-            applied, policies.Length, RawRetentionInterval, HourlyRetentionInterval);
+            "TimescaleDB: {Applied}/{Total} retention policies in place, {Armed} armed, {Held} held paused pending backfill (raw {Raw}, hourly CAGGs {Hourly}; daily CAGGs kept indefinitely)",
+            applied, policies.Length, armed, held, RawRetentionInterval, HourlyRetentionInterval);
         return applied;
     }
 
