@@ -13,6 +13,17 @@ permissions:
   id-token: write
   actions: read
 
+# A re-push to a PR cancels that PR's superseded in-flight run: finishing a build of code
+# that is no longer the PR's head helps nobody, and the shared Windows runner pool is what
+# serializes everyone's CI (#1697 sat queued behind two dev builds), so a cancelled stale
+# run is reclaimed capacity for whatever is queued. Push and release runs deliberately get
+# a UNIQUE group per run (run_id): dev/main integration builds and release builds are never
+# queued behind, replaced by, or cancelled through this mechanism — every push commit keeps
+# its own reported check result, which release cuts and merge gating read.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('build-pr-{0}', github.event.pull_request.number) || format('build-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build:
     runs-on: windows-latest

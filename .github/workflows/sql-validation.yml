@@ -8,6 +8,13 @@ on:
     branches: [dev]
     paths: ['install/**', '.github/sql/**', '.github/workflows/sql-validation.yml']
 
+# A re-push to a PR cancels that PR's superseded in-flight matrix — four SQL Server
+# containers per run on the shared runner pool, validating code that is no longer the
+# PR's head. Push runs get a unique per-run group (run_id) and are never cancelled.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('sql-validation-pr-{0}', github.event.pull_request.number) || format('sql-validation-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   validate-sql:
     runs-on: ubuntu-latest
