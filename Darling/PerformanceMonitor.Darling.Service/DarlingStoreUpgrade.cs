@@ -87,6 +87,15 @@ internal sealed class DarlingStoreUpgrade
        for the duration — but a partial copy is worse than a slow one, so the budget is generous rather
        than tight. initdb/pg_controldata are quick; the bridge has to tolerate a big catalog rewrite. */
     private static readonly TimeSpan s_pgUpgradeTimeout = TimeSpan.FromHours(4);
+
+    /// <summary>
+    /// The DRY RUN gets a far tighter budget than the real pass. <c>--check</c> copies nothing — it reads
+    /// catalogs and compares settings — so minutes is generous where the copy legitimately needs hours. The
+    /// asymmetry matters because this is the step that runs FIRST and with the store already offline: giving
+    /// a stuck check the copy's budget would hold the store down for hours before the revert, which is a
+    /// worse outcome than any upgrade is worth.
+    /// </summary>
+    private static readonly TimeSpan s_pgUpgradeCheckTimeout = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan s_initDbTimeout = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan s_toolTimeout = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan s_bridgeTimeout = TimeSpan.FromHours(1);
@@ -845,7 +854,7 @@ internal sealed class DarlingStoreUpgrade
                 BuildPgUpgradeArguments(
                     context.OldBinDirectory, context.NewBinDirectory, context.DataDirectory, newDataDirectory,
                     context.UserName, mode, checkOnly: true, jobs: 1, QuiesceTimescaleServerOptions),
-                s_pgUpgradeTimeout,
+                s_pgUpgradeCheckTimeout,
                 cancellationToken,
                 environment,
                 parent);
