@@ -27,7 +27,9 @@ full below because they change how the data should be read, and one of them cont
 | Suspend sets `is_suspended` + `suspend_reason_desc`, resume clears | Pass |
 | Same queries from a *secondary* return the full AG | **No, 1 row - see finding 1** |
 | `log_send_queue_size` grows while suspended | **No, reads NULL - see finding 2** |
-| `secondary_lag_seconds` reads 0 while suspended, per MS Learn | **No, it accrues - see finding 3** |
+| `secondary_lag_seconds` reads 0 while suspended, per MS Learn | **Neither - it accrues under load, and can read 0 for a whole outage when quiet. See finding 3** |
+| A lag threshold can detect suspended data movement | **No, not on a quiet group - see finding 3** |
+| `*_time` columns and drain estimates stay current while suspended | **No, all freeze - see 6b** |
 | Whole fixture builds and runs within 1 CPU / 2 GB per container | Pass, no OOM kill |
 | `teardown.ps1` removes containers, network, and both volumes | Pass |
 
@@ -273,15 +275,103 @@ Two consequences for anything thresholding on this column:
   idleness rather than data at risk. The magnitude is staleness of the last hardening, not a
   measure of how much data is behind - `log_send_queue_size` would be that, and it is NULL here
   (finding 2).
-- The column does **not** update the moment movement stops. At +15s suspended it still read `0`
-  while already `NOT SYNCHRONIZING`, only latching at the +30s sample. A rule that treats a `0`
-  from a suspended row as "caught up" will therefore clear an alarm during that window. Treating a
-  suspended row as never able to *clear* an alarm - only raise one - is correct under both the
-  measured and the documented behavior.
+- The column does **not** update the moment movement stops, and **the delay is not bounded** - see
+  the next section. A rule that treats a `0` from a suspended row as "caught up" can therefore
+  clear an alarm mid-fault. Treating a suspended row as never able to *clear* an alarm - only
+  raise one - is correct under both the measured and the documented behavior.
 
 Scope of these claims: one build (`16.0.4265.3`), clusterless AG only. A WSFC-based AG was not
 tested, and the fixture cannot test one. The accrual itself has now been reproduced independently
 by a second party on this fixture, in both the loaded and idle cases.
+
+### On a quiet group it may never latch at all, for the whole outage
+
+An earlier revision of this file said the column "only latched at the +30s sample", which implied
+a short bounded window. That was too generous, and it has been corrected. Two further runs on a
+group with **no write load** - one by ag-alerts-builder, one reproduced here independently - found
+it never latching at all:
+
+```
+elapsed  is_suspended  sync_state         lag  secs_since_hardened
+-------  ------------  -----------------  ---  -------------------
+healthy  0             SYNCHRONIZED       0    1757
+0s       1             NOT SYNCHRONIZING  0    1757
++15s     1             NOT SYNCHRONIZING  0    1772
++30s     1             NOT SYNCHRONIZING  0    1788
++45s     1             NOT SYNCHRONIZING  0    1803
++60s     1             NOT SYNCHRONIZING  0    1818
+resume   0             SYNCHRONIZED       0    16
+```
+
+Zero at every sample through a full 60-second suspension, already `NOT SYNCHRONIZING`, with the
+last hardened log **nearly thirty minutes** stale. One earlier idle run did latch at +30s and
+these did not, which is the point: **the timing is not dependable in either direction and nothing
+should be built on it.**
+
+The operational consequence is stronger than "there is a window":
+
+> **A lag threshold alone cannot detect suspended data movement on a quiet group.** It can read 0
+> for the entire outage.
+
+The intuitive assumption is the opposite - that a lag alert covers suspension. It does not. A
+dedicated suspended-state alert reading `is_suspended` / `synchronization_state_desc` is what owns
+that case; lag thresholds only work while there is traffic to be behind on.
+
+## 6b. Everything else on a suspended row is stale, not current
+
+The `*_time` columns and the drain estimates were added to the collector after the original pass,
+and the doc block cites this file for how they behave while suspended. Measured on the primary's
+remote row.
+
+**Under write load**, suspending the secondary and sampling every 15 seconds (ag-collector-builder's
+run):
+
+```
+t    susp sync               lag send_q redo_q commit_t     hardened_t   redone_t     received_t est_redo_min est_send_min
+---- ---- ------------------ --- ------ ------ ------------ ------------ ------------ ---------- ------------ ------------
+0s   1    NOT SYNCHRONIZING  30  NULL   21896  19:08:26.687 19:08:26.930 19:08:26.687 NULL       0.014356     NULL
++15s 1    NOT SYNCHRONIZING  45  NULL   21896  (unchanged)  (unchanged)  (unchanged)  NULL       0.014356     NULL
++30s 1    NOT SYNCHRONIZING  60  NULL   21896  (unchanged)  (unchanged)  (unchanged)  NULL       0.014356     NULL
++45s 1    NOT SYNCHRONIZING  75  NULL   21896  (unchanged)  (unchanged)  (unchanged)  NULL       0.014356     NULL
+```
+
+**Idle**, reproduced here independently, same freeze:
+
+```
+sample   commit_t     hardened_t   redone_t     received_t est_redo_min est_send_min
+-------- ------------ ------------ ------------ ---------- ------------ ------------
+healthy  19:22:29.957 19:22:29.963 19:22:29.957 NULL       0            3.31e-006
+0s       19:22:29.957 19:22:29.963 19:22:29.957 NULL       0            NULL
++60s     19:22:29.957 19:22:29.963 19:22:29.957 NULL       0            NULL
+```
+
+Four things, all pointing the same way - a suspended row reports the past, not the present:
+
+- **All four `*_time` columns freeze** at their last pre-suspension instant and do not move again
+  until resume. So `now - last_commit_time` computed across replicas stops growing exactly when
+  replication stops, understating the problem at the moment it is worst. That is the opposite
+  direction from `secondary_lag_seconds`, which is why the two must never be cross-checked against
+  each other without reading `is_suspended` first.
+- **`redo_queue_size` freezes** at its last value rather than growing (21896 KB, flat).
+- **`est_redo_completion_time_min` is the sharpest edge.** It is queue divided by rate, and with
+  both frozen it holds a small, static, reassuring number - 0.0144 min under load, 0 when idle -
+  for the entire suspension, when the honest answer is "never, movement is stopped". Threshold it
+  on its own and a suspended replica looks *healthier* than a working one.
+  `est_send_drain_time_min` at least reads NULL, because its queue goes NULL.
+- **`last_received_time` read NULL in every sample**, healthy and suspended alike, on both runs.
+  Treat it as optional rather than expected.
+
+### `last_commit_time` is not a heartbeat
+
+Worth stating separately because it bites on *healthy* replicas, not just suspended ones. In the
+idle baseline above the secondary was `SYNCHRONIZED`, `is_suspended = 0`, and
+`secondary_lag_seconds = 0` - a perfectly healthy replica - while `last_commit_time` sat **1757
+seconds (29 minutes)** behind wall clock, because nothing had committed on the database in that
+time.
+
+`last_commit_time` is the time of the last commit, not a liveness signal. So `now -
+last_commit_time` is not a lag measure: on a quiet, entirely healthy replica it grows without
+bound, and anything alerting on it will page about an idle database.
 
 Source: [sys.dm_hadr_database_replica_states (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-hadr-database-replica-states-transact-sql)
 
