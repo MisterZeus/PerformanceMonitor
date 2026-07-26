@@ -379,7 +379,12 @@ public static class DarlingWebEndpoints
         var end = DateTime.UtcNow;
         var start = end.AddHours(-hours);
 
-        var runContext = new ComposeRunContext(serverScope, start, end, values);
+        /* Which rollups exist in THIS store (#1665) gates the source routing below — a plain-PostgreSQL
+           store (or a partially-built TimescaleDB one) must route to what it HAS, never onto a missing
+           relation. Probed lazily, cached per data source. */
+        var rollups = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
+
+        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups);
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, runContext);
         if (compileError is not null)
         {
@@ -393,7 +398,16 @@ public static class DarlingWebEndpoints
                source, on the SAME window + server scope, under the same statement_timeout. Additive —
                {sql, rows} are unchanged; a panel that requests no annotations returns an empty array. */
             var annotations = await RunAnnotationsAsync(postgres, plan!, runContext, cancellationToken);
-            return ComposeRunOutcome.Ok(new JsonObject { ["sql"] = compiled!.Sql, ["rows"] = rows, ["annotations"] = annotations });
+            var payload = new JsonObject { ["sql"] = compiled!.Sql, ["rows"] = rows, ["annotations"] = annotations };
+            /* Partial window, and says so (#1665): when the route landed on a tier whose retention cannot
+               reach the window's start on a retention-active store, tell the caller instead of quietly
+               returning a short slice of what they asked for. Additive — absent when the window fits. */
+            if (ComposeStoreAvailability.BuildRetentionNotice(plan!.Measure.SourceTable, compiled.Route, start, end, rollups) is string notice)
+            {
+                payload["notice"] = notice;
+            }
+
+            return ComposeRunOutcome.Ok(payload);
         }
         catch (PostgresException ex)
         {

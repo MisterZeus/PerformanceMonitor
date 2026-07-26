@@ -54,6 +54,11 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, bool> _badgeFailedJob = new();
     private readonly Dictionary<string, (int Blocking, int Deadlock, DateTime? LatestEvent)> _lastBadgeCounts = new();
     private readonly Dictionary<string, bool> _previousConnectionStates = new();
+
+    /// <summary>When the last down alert (Lost / AlreadyDownAtFirstSight / StillDown) fired per server —
+    /// the re-fire clock for <see cref="PerformanceMonitor.Common.ConnectionAlertPolicy"/> (#1659).
+    /// Stamped on every down alert delivered, cleared on Restored.</summary>
+    private readonly Dictionary<string, DateTime> _lastConnectionDownAlertUtc = new();
     private readonly Dictionary<string, bool> _previousCollectorErrorStates = new();
     private readonly Dictionary<string, bool> _previousXeSessionFailureStates = new();
     private readonly DispatcherTimer _statusTimer;
@@ -1539,26 +1544,46 @@ public partial class MainWindow : Window
 
                 /* null = never observed: a silent baseline (no edge, but a refresh). */
                 bool? previouslyOnline = _previousConnectionStates.TryGetValue(server.Id, out var prev) ? prev : null;
-                var connectionEdge = ConnectionEdgeDetector.Detect(previouslyOnline, isOnline);
+                var connectionDecision = ConnectionAlertPolicy.Decide(
+                    previouslyOnline,
+                    isOnline,
+                    App.NotifyConnectionDownAtStartup,
+                    App.ConnectionRefireMinutes > 0 ? TimeSpan.FromMinutes(App.ConnectionRefireMinutes) : null,
+                    _lastConnectionDownAlertUtc.TryGetValue(server.Id, out var lastDown) ? lastDown : null,
+                    DateTime.UtcNow);
 
                 if (App.AlertsEnabled && App.NotifyConnectionChanges)
                 {
-                    /* Each edge now ALSO routes through Lite's alert path — email + webhook + a
-                       config_alert_log row (#1506) — alongside the tray balloon it always showed. The
-                       detector is the edge trigger: a server that stays down is offline→offline, so an
-                       outage produces ONE "Server Unreachable", not one per poll. */
-                    if (connectionEdge == ConnectionAlertEdge.Lost)
+                    /* Each announcement routes through Lite's alert path — email + webhook + a
+                       config_alert_log row (#1506) — alongside the tray balloon it always showed. The shared
+                       policy is the trigger: edge-only by default (one "Server Unreachable" per outage), with
+                       the two #1659 opt-ins — announce a server already down at first sight, and re-announce
+                       a standing outage every N minutes. Every down flavor delivers under the SAME
+                       "Server Unreachable" metric name, because downstream automation (the webhook-driven
+                       auto-heal loop this exists for) matches on it. */
+                    if (connectionDecision is ConnectionAlertDecision.Lost
+                        or ConnectionAlertDecision.AlreadyDownAtFirstSight
+                        or ConnectionAlertDecision.StillDown)
                     {
                         var reason = status.ErrorMessage ?? "unknown error";
+                        var detail = connectionDecision switch
+                        {
+                            ConnectionAlertDecision.AlreadyDownAtFirstSight =>
+                                $"Already unreachable when monitoring started: {reason}",
+                            ConnectionAlertDecision.StillDown =>
+                                $"Still unreachable (re-alerting every {App.ConnectionRefireMinutes} min): {reason}",
+                            _ => reason
+                        };
 
                         _trayService?.ShowNotification(
                             "Server Offline",
                             $"{server.DisplayNameWithIntent} is unreachable: {reason}",
                             Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Error);
 
-                        SendConnectionAlert(server, "Server Unreachable", reason, reason);
+                        SendConnectionAlert(server, "Server Unreachable", reason, detail);
+                        _lastConnectionDownAlertUtc[server.Id] = DateTime.UtcNow;
                     }
-                    else if (connectionEdge == ConnectionAlertEdge.Restored)
+                    else if (connectionDecision == ConnectionAlertDecision.Restored)
                     {
                         _trayService?.ShowNotification(
                             "Server Online",
@@ -1566,6 +1591,7 @@ public partial class MainWindow : Window
                             Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Info);
 
                         SendConnectionAlert(server, "Server Restored", "Online", "Connection restored");
+                        _lastConnectionDownAlertUtc.Remove(server.Id);
                     }
                 }
 

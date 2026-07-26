@@ -649,6 +649,14 @@ WITH NO DATA";
     /// NO retention policy: they are the coarsened, kept-indefinitely tier.</summary>
     public const string HourlyRetentionInterval = "21 days";
 
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="RawRetentionInterval"/> for callers doing arithmetic
+    /// (the #1665 partial-window notice); RetentionTierRouterTests pins the two equal so they can't drift.</summary>
+    public static readonly TimeSpan RawRetentionSpan = TimeSpan.FromDays(4);
+
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="HourlyRetentionInterval"/>; pinned equal by
+    /// RetentionTierRouterTests.</summary>
+    public static readonly TimeSpan HourlyRetentionSpan = TimeSpan.FromDays(21);
+
     /// <summary>A TimescaleDB retention policy: schedule a background job that DROPs chunks older than
     /// <paramref name="dropAfter"/>. <c>if_not_exists</c> so a restart re-converges. The actual drop is a
     /// chunk-level DROP TABLE (cheap, no rewrite), so unlike the CAGG backfill it needs no off-hours window.</summary>
@@ -724,7 +732,11 @@ WITH NO DATA";
         $"to_regclass('collect.{QueryStatsHourlyView}') IS NOT NULL, " +
         $"to_regclass('collect.{QueryStatsDailyView}') IS NOT NULL, " +
         $"to_regclass('collect.{QueryStatsDbHourlyView}') IS NOT NULL, " +
-        $"to_regclass('collect.{QueryStatsDbDailyView}') IS NOT NULL";
+        $"to_regclass('collect.{QueryStatsDbDailyView}') IS NOT NULL, " +
+        $"to_regclass('collect.{ProcedureStatsHourlyView}') IS NOT NULL, " +
+        $"to_regclass('collect.{ProcedureStatsDailyView}') IS NOT NULL, " +
+        $"to_regclass('collect.{QueryStoreStatsHourlyView}') IS NOT NULL, " +
+        $"to_regclass('collect.{QueryStoreStatsDailyView}') IS NOT NULL";
 
     /// <summary>
     /// Detects which continuous-aggregate rollups exist in the store (<see cref="RollupProbeSql"/>). On a
@@ -746,7 +758,8 @@ WITH NO DATA";
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         await reader.ReadAsync(cancellationToken);
         return new RollupAvailability(
-            reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3));
+            reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3),
+            reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7));
     }
 
     /// <summary>
@@ -1072,18 +1085,45 @@ public sealed record StuckCompressionJob(long JobId, string? HypertableName, str
 
 /// <summary>
 /// Which retention rollups exist in a store (<see cref="TimescaleSupport.DetectRollupsAsync"/>): the
-/// query-grain pair (query_stats_hourly / _daily — the Daily Summary and top-consumer readers) and the
-/// database-grain pair (query_stats_db_hourly / _daily — the FinOps database-resource reader). All false on a
+/// query-grain pair (query_stats_hourly / _daily — the Daily Summary and top-consumer readers), the
+/// database-grain pair (query_stats_db_hourly / _daily — the FinOps database-resource reader), and the
+/// composer's remaining catalog pairs (procedure_stats and query_store_stats, #1665 — the built-in tabs never
+/// read those rollups, but <c>ComposeSourceRouter</c> routes onto all three tables' pairs). All false on a
 /// plain-PostgreSQL store, where raw is complete anyway; per-flag on a TimescaleDB store so a
 /// failure-isolated partial build degrades one tier instead of erroring (#1664).
 /// </summary>
 public readonly record struct RollupAvailability(
-    bool QueryGrainHourly, bool QueryGrainDaily, bool DbGrainHourly, bool DbGrainDaily)
+    bool QueryGrainHourly, bool QueryGrainDaily, bool DbGrainHourly, bool DbGrainDaily,
+    bool ProcedureGrainHourly, bool ProcedureGrainDaily, bool QueryStoreGrainHourly, bool QueryStoreGrainDaily)
 {
     /// <summary>True when every rollup exists — the steady state on a TimescaleDB store, safe to cache
     /// permanently (a created continuous aggregate is never dropped outside the reshape sweep).</summary>
-    public bool AllPresent => QueryGrainHourly && QueryGrainDaily && DbGrainHourly && DbGrainDaily;
+    public bool AllPresent =>
+        QueryGrainHourly && QueryGrainDaily && DbGrainHourly && DbGrainDaily
+        && ProcedureGrainHourly && ProcedureGrainDaily && QueryStoreGrainHourly && QueryStoreGrainDaily;
 
     /// <summary>No rollups at all — the plain-PostgreSQL shape, and the safe fallback when a probe fails.</summary>
     public static RollupAvailability None => default;
+
+    /// <summary>Every flag true — the fully-built TimescaleDB shape (and the test shorthand for it).</summary>
+    public static RollupAvailability All => new(true, true, true, true, true, true, true, true);
+
+    /// <summary>
+    /// Whether <paramref name="caggView"/> (an unqualified <c>collect.*</c> rollup view name — the strings the
+    /// compose catalog carries, which are the <see cref="TimescaleSupport"/> view constants) exists in this
+    /// store. Unknown names answer false: a view this probe never checked must be treated as absent, so a
+    /// catalog entry added without extending the probe degrades to raw instead of routing blind (#1665).
+    /// </summary>
+    public bool Has(string caggView) => caggView switch
+    {
+        TimescaleSupport.QueryStatsHourlyView => QueryGrainHourly,
+        TimescaleSupport.QueryStatsDailyView => QueryGrainDaily,
+        TimescaleSupport.QueryStatsDbHourlyView => DbGrainHourly,
+        TimescaleSupport.QueryStatsDbDailyView => DbGrainDaily,
+        TimescaleSupport.ProcedureStatsHourlyView => ProcedureGrainHourly,
+        TimescaleSupport.ProcedureStatsDailyView => ProcedureGrainDaily,
+        TimescaleSupport.QueryStoreStatsHourlyView => QueryStoreGrainHourly,
+        TimescaleSupport.QueryStoreStatsDailyView => QueryStoreGrainDaily,
+        _ => false,
+    };
 }

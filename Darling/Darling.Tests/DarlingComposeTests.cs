@@ -10,8 +10,11 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json.Nodes;
+using System.Threading.Tasks;
+using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -302,7 +305,7 @@ public sealed class DarlingComposeTests
     private static string Compile(PanelPlan plan, IReadOnlyList<string>? servers = null, IReadOnlyDictionary<string, string?>? variables = null)
     {
         var (compiled, error) = ComposeCompiler.Compile(
-            plan, new ComposeRunContext(servers, WindowStart, WindowEnd, variables ?? ComposeRunContext.NoVariables));
+            plan, new ComposeRunContext(servers, WindowStart, WindowEnd, variables ?? ComposeRunContext.NoVariables, RollupAvailability.All));
         Assert.True(error is null, error);
         Assert.NotNull(compiled);
         return compiled!.Sql;
@@ -392,7 +395,7 @@ public sealed class DarlingComposeTests
         var plan = ValidPlan("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"auto\",\"viz\":\"line\"}");
         var end = WindowEnd;
         var start = end.AddHours(-windowHours);
-        var (compiled, error) = ComposeCompiler.Compile(plan, new ComposeRunContext(null, start, end, ComposeRunContext.NoVariables));
+        var (compiled, error) = ComposeCompiler.Compile(plan, new ComposeRunContext(null, start, end, ComposeRunContext.NoVariables, RollupAvailability.All));
         Assert.True(error is null, error);
         Assert.Contains(expectedTrunc, compiled!.Sql, StringComparison.Ordinal);
     }
@@ -441,7 +444,7 @@ public sealed class DarlingComposeTests
         var plan = ValidPlan("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"minute\",\"viz\":\"line\"}");
         var start = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
         var end = start.AddDays(60); /* 60 days of minutes >> MaxBuckets */
-        var (compiled, error) = ComposeCompiler.Compile(plan, new ComposeRunContext(null, start, end, ComposeRunContext.NoVariables));
+        var (compiled, error) = ComposeCompiler.Compile(plan, new ComposeRunContext(null, start, end, ComposeRunContext.NoVariables, RollupAvailability.All));
         Assert.Null(compiled);
         Assert.Contains("points", error!, StringComparison.OrdinalIgnoreCase);
     }
@@ -453,7 +456,7 @@ public sealed class DarlingComposeTests
         var plan = ValidPlan(planJson);
         var end = WindowEnd;                 /* EndUtc serves as "now" in the compiler */
         var start = end.AddDays(-daysOld);
-        return ComposeCompiler.Compile(plan, new ComposeRunContext(servers, start, end, ComposeRunContext.NoVariables));
+        return ComposeCompiler.Compile(plan, new ComposeRunContext(servers, start, end, ComposeRunContext.NoVariables, RollupAvailability.All));
     }
 
     [Fact]
@@ -1090,7 +1093,7 @@ public sealed class DarlingComposeTests
 
     private static IReadOnlyList<(string Source, ComposeCompiled Compiled)> CompileAnnotations(
         PanelPlan plan, IReadOnlyList<string>? servers = null) =>
-        ComposeCompiler.CompileAnnotations(plan, new ComposeRunContext(servers, WindowStart, WindowEnd, ComposeRunContext.NoVariables));
+        ComposeCompiler.CompileAnnotations(plan, new ComposeRunContext(servers, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All));
 
     [Fact]
     public void CompileAnnotations_ReturnsEmpty_WhenNoneRequested()
@@ -1437,5 +1440,120 @@ public sealed class DarlingComposeTests
             var result = DarlingWebEndpoints.ValidateDefinition(definition);
             Assert.True(result.IsValid, $"seed template '{name}' failed validation: {result.Error}");
         }
+    }
+
+    /* ─────────────── #1665: availability-gated routing + the partial-window notice ─────────────── */
+
+    /// <summary>
+    /// The compile-level 42P01 repro: a store with NO rollups (plain PostgreSQL, or a probe that failed)
+    /// must compile an old window against the raw table — never against a rollup relation that does not
+    /// exist there. Raw is complete on that store shape, so this is the correct route, not a degraded one.
+    /// </summary>
+    [Fact]
+    public void Compile_OldWindow_NoRollupsInStore_CompilesRaw()
+    {
+        var plan = ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"day\",\"viz\":\"line\"}");
+        var end = WindowEnd;
+        var (compiled, error) = ComposeCompiler.Compile(
+            plan, new ComposeRunContext(null, end.AddDays(-10), end, ComposeRunContext.NoVariables, RollupAvailability.None));
+        Assert.True(error is null, error);
+        Assert.Contains("FROM collect.query_stats AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("_hourly", compiled.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("_daily", compiled.Sql, StringComparison.Ordinal);
+        Assert.Equal(ComposeSourceTier.Raw, compiled.Route.Tier);
+    }
+
+    /// <summary>The compiled result carries the route it took — the runner's input for the notice.</summary>
+    [Fact]
+    public void Compile_CarriesTheRouteItTook()
+    {
+        var (compiled, error) = CompileAged("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"day\",\"viz\":\"line\"}", 10);
+        Assert.True(error is null, error);
+        Assert.Equal(ComposeSourceTier.Hourly, compiled!.Route.Tier);
+    }
+
+    /// <summary>
+    /// The "partial window, and says so" notice (#1665): fires only when the route's tier cannot RETAIN the
+    /// window's start on a retention-active store. Plain PG (no rollups) is silent — raw is complete there —
+    /// and the daily tier is silent always (kept indefinitely).
+    /// </summary>
+    [Fact]
+    public void RetentionNotice_FiresOnlyWhenTheTierCannotRetainTheWindow()
+    {
+        var now = new DateTime(2026, 7, 23, 12, 0, 0, DateTimeKind.Utc);
+        var rawRoute = ComposeRoute.Raw;
+        var hourlyRoute = new ComposeRoute(ComposeSourceTier.Hourly, "query_stats_hourly");
+        var dailyRoute = new ComposeRoute(ComposeSourceTier.Daily, "query_stats_daily");
+
+        /* Plain PG: silent even for a 40-day raw window — nothing ever dropped raw. */
+        Assert.Null(ComposeStoreAvailability.BuildRetentionNotice("query_stats", rawRoute, now.AddDays(-40), now, RollupAvailability.None));
+
+        /* Retention-active store, raw route, window fits raw's ~4 days: silent. */
+        Assert.Null(ComposeStoreAvailability.BuildRetentionNotice("query_stats", rawRoute, now.AddDays(-1), now, RollupAvailability.All));
+
+        /* Retention-active store, raw route, 10-day window: partial — says so, with the tier's horizon. */
+        var rawNotice = ComposeStoreAvailability.BuildRetentionNotice("query_stats", rawRoute, now.AddDays(-10), now, RollupAvailability.All);
+        Assert.NotNull(rawNotice);
+        Assert.Contains("partial window", rawNotice, StringComparison.Ordinal);
+        Assert.Contains("4 days", rawNotice, StringComparison.Ordinal);
+        Assert.Contains("10 days back", rawNotice, StringComparison.Ordinal);
+
+        /* Hourly route past its 21-day horizon (daily view missing on this store): partial. */
+        var partial = RollupAvailability.All with { QueryGrainDaily = false };
+        var hourlyNotice = ComposeStoreAvailability.BuildRetentionNotice("query_stats", hourlyRoute, now.AddDays(-40), now, partial);
+        Assert.NotNull(hourlyNotice);
+        Assert.Contains("21 days", hourlyNotice, StringComparison.Ordinal);
+
+        /* Hourly route, window inside 21 days: silent. */
+        Assert.Null(ComposeStoreAvailability.BuildRetentionNotice("query_stats", hourlyRoute, now.AddDays(-10), now, RollupAvailability.All));
+
+        /* Daily route: kept indefinitely — silent no matter the window. */
+        Assert.Null(ComposeStoreAvailability.BuildRetentionNotice("query_stats", dailyRoute, now.AddDays(-400), now, RollupAvailability.All));
+
+        /* A NON-TIERED table (no CAGG pair) reaches Raw via the no-CAGG early return and lives on the
+           30-day collector purge, not the 4-day tier — a 7-day wait_stats window is complete on raw, so
+           a notice would be a false alarm even on a fully-built TimescaleDB store. */
+        Assert.Null(ComposeStoreAvailability.BuildRetentionNotice("wait_stats", rawRoute, now.AddDays(-7), now, RollupAvailability.All));
+    }
+
+    /// <summary>
+    /// The live #1665 repro, end-to-end through the ONE shared runner: a >3-day window against a plain
+    /// PostgreSQL store (the darling-pg CI service container — no TimescaleDB, so no rollups exist). Before
+    /// the availability gate this compiled <c>collect.query_stats_hourly</c> and failed 42P01 at run time;
+    /// now it routes raw, runs clean, and carries NO notice (raw is complete on this store shape).
+    /// </summary>
+    [Fact]
+    public async Task RunComposedPanel_OldWindow_AgainstPlainPostgres_RunsCleanOnRaw()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live compose-routing test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using (var connection = new NpgsqlConnection(connectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+
+        var body = new JsonObject
+        {
+            ["panel"] = JsonNode.Parse(
+                "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"day\",\"viz\":\"line\"}"),
+            ["hours"] = 240, /* 10 days — far past the 3-day raw route horizon */
+        };
+
+        var outcome = await DarlingWebEndpoints.RunComposedPanelAsync(postgres, body, ct);
+
+        Assert.True(outcome.Error is null, $"compose run failed: {outcome.Error}");
+        Assert.NotNull(outcome.Payload);
+        var sql = (string)outcome.Payload!["sql"]!;
+        Assert.Contains("collect.query_stats", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("_hourly", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("_daily", sql, StringComparison.Ordinal);
+        Assert.Null(outcome.Payload["notice"]);
     }
 }

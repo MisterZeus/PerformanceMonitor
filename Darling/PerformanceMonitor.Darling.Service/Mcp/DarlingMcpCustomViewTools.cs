@@ -207,7 +207,8 @@ public sealed class DarlingMcpCustomViewTools
     }
 
     [McpServerTool(Name = "run_custom_view_panel"), Description(
-        "Runs a single composed (v2) panel and returns the DATA it produces — {sql, rows, annotations} — so a " +
+        "Runs a single composed (v2) panel and returns the DATA it produces — {sql, rows, annotations, notice?} " +
+        "(notice = a partial-window caveat when the store's retention cannot cover the whole requested range) — so a " +
         "generated view can be checked end-to-end without saving it. This is the SAME compile-and-run the web " +
         "composer's live preview uses: the panel is validated, compiled to catalog-only bound SQL, and executed " +
         "against the collected store under a statement_timeout. The spec is a JSON object " +

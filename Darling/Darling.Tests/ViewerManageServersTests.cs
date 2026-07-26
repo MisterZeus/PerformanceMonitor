@@ -21,6 +21,10 @@ namespace Darling.Tests;
 /// is a single documented query already exercised by the sidebar; the CELL logic is what this change adds, and
 /// it is pure (given the display mode), so it is unit-testable without a live Postgres.
 /// </summary>
+/* Serialized: these classes flip the process-wide ViewerTimeHelper.CurrentDisplayMode static (each
+   restores in finally, but xUnit runs CLASSES in parallel — two flippers racing corrupts the mode a
+   third class reads). One shared collection serializes them. */
+[Collection("viewer-time-statics")]
 public sealed class ViewerManageServersColumnTests
 {
     private static ManagedServerListItem Item(DateTime? lastCollectedUtc) =>

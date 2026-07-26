@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
@@ -96,6 +97,16 @@ internal sealed class DarlingSelfAlertEvaluator
        to always-on when unsupplied (preserving the pre-V20 behavior). */
     private readonly Func<bool> _notifyConnectionChanges;
 
+    /// <summary>#1659 opt-in seams, read live like <see cref="_notifyConnectionChanges"/>.</summary>
+    private readonly Func<bool> _notifyConnectionDownAtStartup;
+    private readonly Func<int> _connectionRefireMinutes;
+
+    /// <summary>When the last down alert fired per server — the re-fire clock for
+    /// <see cref="ConnectionAlertPolicy"/> (#1659). Stamped on every down alert DELIVERED (not merely
+    /// decided: a decision suppressed by the notify toggles must not consume the re-fire window), cleared
+    /// on a delivered Restored.</summary>
+    private readonly ConcurrentDictionary<string, DateTime> _lastConnectionDownAlertUtc = new();
+
     /* Edge state, keyed by the engine's serverKey (the server_id as an invariant string — the same
        identity the deliverer/history/watermark stores use). In-memory only, exactly like the shared
        engine's active-condition flags; the restart replay protection is the deliverer's own
@@ -154,7 +165,9 @@ internal sealed class DarlingSelfAlertEvaluator
         Func<AlertMuteContext, bool> isAlertMuted,
         ILogger? logger = null,
         Func<DateTime>? utcNow = null,
-        Func<bool>? notifyConnectionChanges = null)
+        Func<bool>? notifyConnectionChanges = null,
+        Func<bool>? notifyConnectionDownAtStartup = null,
+        Func<int>? connectionRefireMinutes = null)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _deliverer = deliverer ?? throw new ArgumentNullException(nameof(deliverer));
@@ -163,6 +176,8 @@ internal sealed class DarlingSelfAlertEvaluator
         _logger = logger;
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
         _notifyConnectionChanges = notifyConnectionChanges ?? (() => true);
+        _notifyConnectionDownAtStartup = notifyConnectionDownAtStartup ?? (() => false);
+        _connectionRefireMinutes = connectionRefireMinutes ?? (() => 0);
     }
 
     private enum ConnectionState
@@ -441,10 +456,28 @@ internal sealed class DarlingSelfAlertEvaluator
             _hasBeenOnline[key] = true;
         }
 
+        /* The shared policy (#1659) replaces the inline edge machine: same edge-only semantics by default,
+           plus the two OPT-INs — announce a server already down on its first-ever attempt, and re-announce a
+           standing outage every N minutes. One definition with Lite (ConnectionAlertPolicy), the
+           SqlErrorClassification discipline. */
+        var decision = ConnectionAlertPolicy.Decide(
+            previousOnline: previous switch
+            {
+                ConnectionState.Online => true,
+                ConnectionState.Offline => false,
+                _ => null,
+            },
+            online,
+            _notifyConnectionDownAtStartup(),
+            _connectionRefireMinutes() is int refire && refire > 0 ? TimeSpan.FromMinutes(refire) : null,
+            _lastConnectionDownAlertUtc.TryGetValue(key, out var lastDown) ? lastDown : null,
+            _utcNow());
+
         /* Delivery is gated on the master switch AND the connection-change notify toggle (V20); the state
            machine above already advanced, so toggling either off then back on resumes from the correct
            baseline rather than replaying a stale edge — the same "track always, deliver conditionally"
-           posture the master switch already had. */
+           posture the master switch already had. (The re-fire clock is stamped only on DELIVERY, below, so a
+           suppressed decision does not consume the window.) */
         if (!_settings.AlertsEnabled || !_notifyConnectionChanges())
         {
             return;
@@ -459,7 +492,7 @@ internal sealed class DarlingSelfAlertEvaluator
            Cancellation still propagates. */
         try
         {
-            if (online && previous == ConnectionState.Offline)
+            if (decision == ConnectionAlertDecision.Restored)
             {
                 /* Severity null → the shared AlertSeverity map renders "Server Restored" green/RESOLVED. */
                 await FireAsync(
@@ -467,17 +500,32 @@ internal sealed class DarlingSelfAlertEvaluator
                     detail: $"{serverName}: connection restored",
                     severity: null,
                     shortMessage: "connection restored", cancellationToken);
+                _lastConnectionDownAlertUtc.TryRemove(key, out _);
             }
-            else if (!online && previous == ConnectionState.Online)
+            else if (decision is ConnectionAlertDecision.Lost
+                     or ConnectionAlertDecision.AlreadyDownAtFirstSight
+                     or ConnectionAlertDecision.StillDown)
             {
+                /* Every down flavor delivers under the SAME "Server Unreachable" metric name — downstream
+                   automation (the #1659 reporter's webhook-driven auto-heal loop) matches on it, and a
+                   re-fire exists precisely to re-trigger that match. The detail says which flavor. */
                 var reason = string.IsNullOrWhiteSpace(error) ? "Connection failed" : error!;
+                var detail = decision switch
+                {
+                    ConnectionAlertDecision.AlreadyDownAtFirstSight =>
+                        $"Already unreachable when monitoring started: {reason}",
+                    ConnectionAlertDecision.StillDown =>
+                        $"Still unreachable (re-alerting every {_connectionRefireMinutes()} min): {reason}",
+                    _ => reason,
+                };
                 await FireAsync(
                     key, serverName, "Server Unreachable", reason, "Online",
-                    detail: reason,
+                    detail: detail,
                     severity: AlertSeverityLevel.Critical,
                     shortMessage: reason, cancellationToken);
+                _lastConnectionDownAlertUtc[key] = _utcNow();
             }
-            /* previous == Unknown → baseline only (no fire). */
+            /* None → steady state or silent baseline. */
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
