@@ -928,7 +928,14 @@ internal sealed class DarlingStoreUpgrade
             }
 
             step = "pg_upgrade";
-            var jobs = Math.Clamp(Environment.ProcessorCount, 1, 4);
+            /* SERIAL, deliberately — but NOT because parallelism was proven harmful. It was suspected (the
+               dry run, which never passes --jobs, completed while the real pass did not) and then tested:
+               --jobs 1 fails identically, so the suspicion was wrong and is recorded here only so nobody
+               re-derives it. Serial stays because a store upgrade is a once-per-major event that already
+               has the server offline, and one fewer concurrency mode is one fewer thing that can differ
+               between a developer's box and a field install. Revisit if a large store's copy time ever
+               becomes the complaint. */
+            const int jobs = 1;
             var upgradeExit = await DarlingManagedPostgres.RunDetachingToolAsync(
                 Path.Combine(context.NewBinDirectory, "pg_upgrade.exe"),
                 BuildPgUpgradeArguments(
