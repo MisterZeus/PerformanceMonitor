@@ -664,6 +664,7 @@ public partial class SettingsWindow : Window
         NotifyAgHealthCheckBox.IsChecked = r.NotifyAgHealth;
         AgLagAlertSecondsBox.Text = r.AgLagAlertSeconds.ToString(CultureInfo.InvariantCulture);
         AgRedoQueueAlertKbBox.Text = r.AgRedoQueueAlertKb.ToString(CultureInfo.InvariantCulture);
+        AgDisconnectRefireMinutesBox.Text = r.AgDisconnectRefireMinutes.ToString(CultureInfo.InvariantCulture);
         AlertCpuCheckBox.IsChecked = r.CpuEnabled;
         AlertCpuThresholdBox.Text = r.CpuThresholdPercent.ToString(CultureInfo.InvariantCulture);
         AlertCpuModeBox.SelectedIndex = ViewerDataService.MapCpuModeFromStore(r.CpuMode) == "SqlOnly" ? 1 : 0;
@@ -723,6 +724,8 @@ public partial class SettingsWindow : Window
                 ? Math.Clamp(agLag, 0, 86400) : 300,
             AgRedoQueueAlertKb = long.TryParse(AgRedoQueueAlertKbBox.Text, out var agRedo)
                 ? Math.Clamp(agRedo, 0L, 1073741824L) : 0L,
+            AgDisconnectRefireMinutes = int.TryParse(AgDisconnectRefireMinutesBox.Text, out var agRefire)
+                ? Math.Clamp(agRefire, 0, 1440) : 0,
             CpuEnabled = AlertCpuCheckBox.IsChecked == true,
             CpuMode = ViewerDataService.MapCpuModeToStore((AlertCpuModeBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "Total"),
             BlockingEnabled = AlertBlockingCheckBox.IsChecked == true,
@@ -892,6 +895,7 @@ public partial class SettingsWindow : Window
         NotifyAgHealthCheckBox.IsEnabled = enabled;
         AgLagAlertSecondsBox.IsEnabled = enabled;
         AgRedoQueueAlertKbBox.IsEnabled = enabled;
+        AgDisconnectRefireMinutesBox.IsEnabled = enabled;
         AlertCpuCheckBox.IsEnabled = enabled;
         AlertCpuThresholdBox.IsEnabled = enabled;
         AlertCpuModeBox.IsEnabled = enabled;

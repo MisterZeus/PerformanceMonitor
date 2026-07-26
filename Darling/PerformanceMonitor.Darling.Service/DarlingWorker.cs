@@ -803,7 +803,8 @@ public sealed class DarlingWorker : BackgroundService
                without a restart (and the clamps live on the settings properties, not here). */
             notifyAgHealth: () => alertSettings.NotifyAgHealth,
             agLagAlertSeconds: () => alertSettings.AgLagAlertSeconds,
-            agRedoQueueAlertKb: () => alertSettings.AgRedoQueueAlertKb);
+            agRedoQueueAlertKb: () => alertSettings.AgRedoQueueAlertKb,
+            agDisconnectRefireMinutes: () => alertSettings.AgDisconnectRefireMinutes);
 
         /* Phase-5 analysis slice AN3: the analysis pipeline's shared pieces, constructed once.
            The plan fetcher resolves a finding's serverId to the CONNECTED runtime's connection

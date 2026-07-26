@@ -104,6 +104,11 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     /// it is indistinguishable from off, and a negative would fire on every healthy row.</summary>
     public long AgRedoQueueAlertKb => Math.Clamp(_config.Alerts.AgRedoQueueAlertKb, 0L, 1073741824L);
 
+    /// <summary>#1696 (V37), read live: re-announce a still-disconnected AG replica every N minutes
+    /// (0 = off). Clamped 0–1440 like the sibling connection re-fire, so a hand-edited row can drive
+    /// neither a per-sweep spam loop nor a never-fires interval.</summary>
+    public int AgDisconnectRefireMinutes => Math.Clamp(_config.Alerts.AgDisconnectRefireMinutes, 0, 1440);
+
     /// <summary>"sql" → SqlProcess; anything else (incl. Lite's default "total") → TotalServer.</summary>
     public CpuAlertMode CpuAlertMode =>
         string.Equals(_config.Alerts.CpuMode, "sql", StringComparison.OrdinalIgnoreCase)

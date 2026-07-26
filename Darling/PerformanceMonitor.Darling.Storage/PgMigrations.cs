@@ -80,6 +80,7 @@ public static class PgMigrations
         new Migration(34, "availability-group-collectors", V34Sql),
         new Migration(35, "availability-group-alerts", V35Sql),
         new Migration(36, "ag-latency-columns", V36Sql),
+        new Migration(37, "ag-local-replica-and-disconnect-refire", V37Sql),
     };
 
     /// <summary>
@@ -585,6 +586,32 @@ ALTER TABLE collect.ag_database_replica_states
     ADD COLUMN IF NOT EXISTS last_received_time timestamp,
     ADD COLUMN IF NOT EXISTS est_redo_completion_time_min double precision,
     ADD COLUMN IF NOT EXISTS est_send_drain_time_min double precision;";
+
+    /// <summary>
+    /// V37 — two additive columns for #1696, in ONE migration because they ship together.
+    ///
+    /// <para><c>ag_replica_states.is_local</c> marks the row describing the replica the collector was
+    /// connected to. Every replica in an AG is visible from every node, so a fully-monitored 3-node AG
+    /// collects the same replica's state three times and previously reported one failover three times. The
+    /// alert path uses this to pick one node's view. NULLABLE, unlike the settings column below: rows
+    /// collected before this migration genuinely do not know, and a NULL must read as "unknown" rather than
+    /// as "not local" — de-duplicating on a false negative would drop a real alert. The de-dup treats a
+    /// snapshot with no known-local row as un-de-duplicable and keeps every row, which is the safe direction.</para>
+    ///
+    /// <para><c>config_alert_settings.ag_disconnect_refire_minutes</c> is the #1659 re-fire treatment for
+    /// "AG Replica Disconnected", which until now was a pure edge: a replica that stayed disconnected for a
+    /// week announced it once. NOT NULL DEFAULT 0 = off, so the shipped behavior is byte-for-byte the old
+    /// edge-only one and nothing starts re-alerting on upgrade.</para>
+    ///
+    /// ADD COLUMN IF NOT EXISTS throughout, per the file's additive idiom; config.-qualified because the
+    /// migrate session runs under search_path = collect, config, public.
+    /// </summary>
+    private const string V37Sql = @"
+ALTER TABLE collect.ag_replica_states
+    ADD COLUMN IF NOT EXISTS is_local boolean;
+
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS ag_disconnect_refire_minutes integer NOT NULL DEFAULT 0;";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

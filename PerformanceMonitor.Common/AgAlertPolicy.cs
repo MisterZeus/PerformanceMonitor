@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 
 namespace PerformanceMonitor.Common;
@@ -80,6 +81,26 @@ public enum AgSuspensionDecision
     Resumed,
 }
 
+/// <summary>How good one monitored server's view of a given Availability Group is (#1696). Every replica in
+/// an AG is visible from every node, so a fully-monitored 3-node AG yields three views of the same replica —
+/// and judging all three reports one failover three times. Ranked so the best available view wins.</summary>
+public enum AgVantage
+{
+    /// <summary>This server's snapshot says nothing about the AG.</summary>
+    None,
+
+    /// <summary>The AG appears, but no row is flagged local — either a pre-#1696 store whose rows predate
+    /// the <c>is_local</c> column, or a genuinely remote-only view. Usable, but the weakest evidence.</summary>
+    Remote,
+
+    /// <summary>This server is one of the AG's replicas, but not its primary.</summary>
+    Local,
+
+    /// <summary>This server is the AG's PRIMARY. The best vantage by a distance: a SECONDARY's
+    /// <c>sys.dm_hadr_*</c> carries only its OWN row, so only the primary sees the whole group.</summary>
+    LocalPrimary,
+}
+
 /// <summary>
 /// The single definition of when an Availability Group alert fires, shared by Darling's headless self-alert
 /// evaluator and Lite's alert path (#991/#1696) — the <see cref="ConnectionAlertPolicy"/> discipline: pure
@@ -136,6 +157,53 @@ public static class AgAlertPolicy
     /// primary. See <see cref="DisconnectedState"/> for why an unrecognized value reads as connected.</summary>
     public static bool IsDisconnected(string? connectedStateDesc) =>
         string.Equals(connectedStateDesc, DisconnectedState, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// How good this snapshot's view of <paramref name="agName"/> is (#1696), for choosing ONE monitored
+    /// server to judge each Availability Group from.
+    ///
+    /// <para>Without this, a fully-monitored 3-node AG reports every failover three times — once per node
+    /// that can see it. Preferring the PRIMARY's view is not just tie-breaking: measured on a live AG, a
+    /// SECONDARY's <c>sys.dm_hadr_*</c> returns only that replica's OWN row, so only the primary actually
+    /// sees the whole group. A secondary-only vantage is a one-row self-view.</para>
+    ///
+    /// <para>A row whose <c>IsLocal</c> is NULL counts as <see cref="AgVantage.Remote"/>, never as "not
+    /// local": rows collected before the column existed genuinely do not know, and treating unknown as
+    /// not-local would let a real vantage lose to nothing and drop the alert entirely. The safe direction is
+    /// to keep judging.</para>
+    /// </summary>
+    public static AgVantage ClassifyVantage(IReadOnlyList<AgReplicaReading>? snapshot, string agName)
+    {
+        if (snapshot is null)
+        {
+            return AgVantage.None;
+        }
+
+        var best = AgVantage.None;
+        foreach (var replica in snapshot)
+        {
+            if (!string.Equals(replica.AgName, agName, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (replica.IsLocal == true)
+            {
+                if (string.Equals(replica.RoleDesc, "PRIMARY", StringComparison.OrdinalIgnoreCase))
+                {
+                    return AgVantage.LocalPrimary;
+                }
+
+                best = AgVantage.Local;
+            }
+            else if (best == AgVantage.None)
+            {
+                best = AgVantage.Remote;
+            }
+        }
+
+        return best;
+    }
 
     /// <summary>
     /// Whether a replica's role changed since the previous sweep — the "AG Failover" trigger. Any change
