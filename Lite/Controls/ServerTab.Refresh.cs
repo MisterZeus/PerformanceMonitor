@@ -103,6 +103,10 @@ public partial class ServerTab : UserControl
             if (MainTabControl.SelectedIndex != 8)
                 await RefreshAlertCountsAsync(hoursBack, fromDate, toDate);
 
+            /* #1591: same reasoning as the alert badge above — a permission-denied collector is only visible on
+               the Collection Health tab, which is precisely why it went unnoticed. Badge it from every tab. */
+            await RefreshPermissionDeniedBadgeAsync();
+
             var tz = ServerTimeHelper.GetTimezoneLabel(ServerTimeHelper.CurrentDisplayMode);
             ConnectionStatusText.Text = $"Last refresh: {DateTime.Now:HH:mm:ss} ({tz})";
         }
@@ -159,6 +163,26 @@ public partial class ServerTab : UserControl
         catch (Exception ex)
         {
             AppLogger.Info("ServerTab", $"[{_server.DisplayName}] RefreshAlertCountsAsync failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// #1591: badges the Collection Health tab header with the number of collectors that were permission-denied.
+    /// Runs on every refresh, like the alert badge, so an empty tab caused by a missing grant is discoverable
+    /// without knowing to go looking for it. Never throws — a failed badge must not break the refresh.
+    /// </summary>
+    private async System.Threading.Tasks.Task RefreshPermissionDeniedBadgeAsync()
+    {
+        try
+        {
+            var denied = await Task.Run(() => _dataService.GetPermissionDeniedCollectorCountAsync(_serverId));
+            CollectionHealthTab.Header = denied > 0
+                ? $"Collection Health ({denied} no permission)"
+                : "Collection Health";
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] RefreshPermissionDeniedBadgeAsync failed: {ex.Message}");
         }
     }
 
