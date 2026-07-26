@@ -247,6 +247,40 @@ public sealed class AgTopologyTests
         Assert.Equal("1 group · 2 reporting servers · 2 views", AvailabilityGroupsTab.BuildSummary(cards));
     }
 
+    /* ─────────────────────────── the local marker (V37) ─────────────────────────── */
+
+    [Theory]
+    [InlineData(true, "local")]
+    [InlineData(false, "")]
+    [InlineData(null, "")]
+    public void LocalDisplay_ShownOnlyWhenExplicitlyLocal(bool? isLocal, string expected)
+    {
+        /* NULL means UNKNOWN, not remote: rows collected before is_local existed genuinely do not know, and
+           labelling them either way would assert something the data cannot support. Both false and null render
+           blank, but only false actually MEANS remote. */
+        var replica = new AgTopologyReplicaRow
+        {
+            ServerId = 1,
+            ServerName = "SQL01",
+            AgName = "AG1",
+            ReplicaServerName = "SQL01",
+            RoleDesc = "PRIMARY",
+            IsLocal = isLocal,
+        };
+
+        var card = Assert.Single(AgTopology.BuildCards(new[] { replica }, Array.Empty<AgTopologyDatabaseRow>()));
+        Assert.Equal(expected, Assert.Single(card.Replicas).LocalDisplay);
+        Assert.Equal(isLocal, card.Replicas[0].IsLocal);
+    }
+
+    [Fact]
+    public void TopologySql_SelectsIsLocalOnTheReplicaGrain()
+    {
+        /* The whole point of the marker: without it a reader cannot tell a server describing ITSELF from a
+           server describing a node it only sees across the wire. */
+        Assert.Contains("is_local", LocalDataService.AgTopologyReplicaSql, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Summary_EmptySaysSo() =>
         Assert.Equal("none observed", AvailabilityGroupsTab.BuildSummary(Array.Empty<AgTopologyCard>()));

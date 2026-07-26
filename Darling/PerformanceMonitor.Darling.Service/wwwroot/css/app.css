@@ -791,3 +791,12 @@ pre.code {
 .ag-databases td .sev-Healthy { color: var(--ok); }
 .ag-databases td .sev-Warning { color: var(--warn); }
 .ag-databases td .sev-Critical { color: var(--err); }
+
+/* The "local" marker on an AG replica chip — quiet, since it is a fact about whose view this is rather than a
+   health signal. */
+.ag-replica .ag-local {
+  font-size: 0.58rem;
+  font-style: italic;
+  color: var(--dim);
+  margin-left: 0.3rem;
+}

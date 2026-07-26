@@ -350,6 +350,18 @@ public sealed class AgTopologyReplica
     public HealthSeverity Severity { get; init; }
 
     public string RoleDisplay => string.IsNullOrWhiteSpace(RoleDesc) ? "UNKNOWN ROLE" : RoleDesc!;
+
+    /// <summary>
+    /// Marks the replica that IS the reporting server. This is the label that makes the per-perspective model
+    /// legible: without it a reader cannot tell "this row is the server telling us about ITSELF" from "this is
+    /// what that server BELIEVES about a node it only sees across the wire" — and those carry very different
+    /// weight, because the DMV populates operational state and recovery health for the local replica only.
+    ///
+    /// <para>Shown only when explicitly true. A NULL means UNKNOWN, not remote: rows collected before the column
+    /// existed genuinely do not know, and labelling them "remote" would assert something the data cannot
+    /// support.</para>
+    /// </summary>
+    public string LocalDisplay => IsLocal == true ? "local" : "";
     public string NameDisplay => string.IsNullOrWhiteSpace(ReplicaServerName) ? "—" : ReplicaServerName!;
 
     /// <summary>The states worth reading at chip size. A column the DMV leaves null is omitted rather than shown

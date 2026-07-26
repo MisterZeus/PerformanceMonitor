@@ -79,8 +79,16 @@
                                                     Background="{DynamicResource BackgroundDarkBrush}"
                                                     BorderBrush="{Binding Severity, Converter={StaticResource SeverityBrush}}" BorderThickness="3,0,0,0">
                                                 <StackPanel>
-                                                    <TextBlock Text="{Binding RoleDisplay}" FontSize="10"
-                                                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <TextBlock Text="{Binding RoleDisplay}" FontSize="10"
+                                                                   Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                                        <!-- "local" marks the replica that IS the reporting
+                                                             server, which is what makes the per-perspective
+                                                             model legible. Blank when unknown. -->
+                                                        <TextBlock Text="{Binding LocalDisplay}" FontSize="10"
+                                                                   Margin="6,0,0,0" FontStyle="Italic"
+                                                                   Foreground="{DynamicResource ForegroundDimBrush}"/>
+                                                    </StackPanel>
                                                     <TextBlock Text="{Binding NameDisplay}" FontSize="13" FontWeight="SemiBold"
                                                                Foreground="{DynamicResource ForegroundBrush}"
                                                                ToolTip="{Binding EndpointUrl}"/>

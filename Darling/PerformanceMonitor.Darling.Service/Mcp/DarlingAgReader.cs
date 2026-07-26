@@ -81,6 +81,7 @@ SELECT
     r.ag_name,
     r.replica_server_name,
     r.role_desc,
+    r.is_local,
     r.operational_state_desc,
     r.connected_state_desc,
     r.recovery_health_desc,
@@ -479,13 +480,14 @@ ORDER BY d.server_name, d.ag_name, d.database_name, d.replica_server_name";
                 Text(reader, 3),
                 Text(reader, 4),
                 Text(reader, 5),
-                Text(reader, 6),
+                Flag(reader, 6),
                 Text(reader, 7),
                 Text(reader, 8),
                 Text(reader, 9),
                 Text(reader, 10),
                 Text(reader, 11),
-                Text(reader, 12)));
+                Text(reader, 12),
+                Text(reader, 13)));
         }
 
         return rows;
@@ -552,6 +554,7 @@ ORDER BY d.server_name, d.ag_name, d.database_name, d.replica_server_name";
         string? AgName,
         string? ReplicaServerName,
         string? RoleDesc,
+        bool? IsLocal,
         string? OperationalStateDesc,
         string? ConnectedStateDesc,
         string? RecoveryHealthDesc,
@@ -594,6 +597,10 @@ public sealed class AgReplicaView
     [JsonPropertyName("role_severity")] public HealthSeverity RoleSeverity { get; init; }
 
     [JsonPropertyName("is_primary")] public bool IsPrimary { get; init; }
+
+    /// <summary>Is this the replica the reporting server IS? NULL on rows collected before the column existed —
+    /// UNKNOWN, not "remote".</summary>
+    [JsonPropertyName("is_local")] public bool? IsLocal { get; init; }
     [JsonPropertyName("operational_state")] public string? OperationalStateDesc { get; init; }
     [JsonPropertyName("operational_state_severity")] public HealthSeverity OperationalStateSeverity { get; init; }
     [JsonPropertyName("connected_state")] public string? ConnectedStateDesc { get; init; }
