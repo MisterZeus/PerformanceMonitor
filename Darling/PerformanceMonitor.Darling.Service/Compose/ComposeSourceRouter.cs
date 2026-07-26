@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -107,12 +108,14 @@ public static class ComposeCaggCatalog
 public static class ComposeSourceRouter
 {
     /// <summary>Raw is chosen only for windows whose oldest point is within this age — a day inside the 4-day raw
-    /// retention, so raw never routes to an about-to-drop chunk.</summary>
-    public static readonly TimeSpan RawRouteMaxAge = TimeSpan.FromDays(3);
+    /// retention, so raw never routes to an about-to-drop chunk. Aliases the shared definition (#1661); the
+    /// viewer's built-in tabs route off the same value.</summary>
+    public static readonly TimeSpan RawRouteMaxAge = RetentionTierRouter.RawMaxAge;
 
     /// <summary>The hourly CAGG is chosen up to this age — a day inside the 21-day hourly retention; older windows
-    /// fall to the daily CAGG (or stay on the hourly, capped, when no daily CAGG exists yet).</summary>
-    public static readonly TimeSpan HourlyRouteMaxAge = TimeSpan.FromDays(20);
+    /// fall to the daily CAGG (or stay on the hourly, capped, when no daily CAGG exists yet). Aliases the shared
+    /// definition (#1661).</summary>
+    public static readonly TimeSpan HourlyRouteMaxAge = RetentionTierRouter.HourlyMaxAge;
 
     /// <summary>
     /// The tier for <paramref name="plan"/> given the window's oldest point (<paramref name="windowStartUtc"/>)
@@ -154,13 +157,17 @@ public static class ComposeSourceRouter
             }
         }
 
-        var oldestAge = nowUtc - windowStartUtc;
-        if (oldestAge <= RawRouteMaxAge)
+        /* The age decision itself is shared with the viewer's built-in tabs (#1661) — one definition in
+           RetentionTierRouter, so the two readers can never drift into disagreeing about which tier still
+           retains a window. The coverage gates above stay composer-specific. */
+        var tier = RetentionTierRouter.Resolve(nowUtc, windowStartUtc);
+
+        if (tier == RetentionTier.Raw)
         {
             return ComposeRoute.Raw;
         }
 
-        if (oldestAge <= HourlyRouteMaxAge || cagg.DailyView is null)
+        if (tier == RetentionTier.Hourly || cagg.DailyView is null)
         {
             return new ComposeRoute(ComposeSourceTier.Hourly, cagg.HourlyView);
         }

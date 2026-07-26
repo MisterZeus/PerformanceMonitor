@@ -252,6 +252,12 @@ public static class TimescaleSupport
     /// "coarsened but never fully lost" tier for anything past the hourly CAGG's own horizon.</summary>
     public const string QueryStatsDailyView = "query_stats_daily";
 
+    /// <summary>The per-database query_stats rollup carrying the I/O sums FinOps needs (#1661).</summary>
+    public const string QueryStatsDbHourlyView = "query_stats_db_hourly";
+
+    /// <summary>The daily sibling of <see cref="QueryStatsDbHourlyView"/> — kept indefinitely.</summary>
+    public const string QueryStatsDbDailyView = "query_stats_db_daily";
+
     /// <summary><see cref="QueryStatsDailyView"/>'s procedure_stats sibling (sourced from procedure_stats_hourly).</summary>
     public const string ProcedureStatsDailyView = "procedure_stats_daily";
 
@@ -361,6 +367,58 @@ WITH NO DATA";
     /// under Postgres's input-column-wins ambiguity rule, which would group by hour, not day. WITH NO DATA +
     /// IF NOT EXISTS; the hourly CAGG must already exist (it is created earlier in the same sweep).
     /// </summary>
+    /// <summary>
+    /// The per-DATABASE query_stats rollup (#1661). Added rather than folded into
+    /// <see cref="CreateQueryStatsHourlySql"/> deliberately: TimescaleDB cannot ALTER columns into a continuous
+    /// aggregate, so widening that one would mean DROP + recreate, and now that retention is active the rebuild
+    /// would re-materialize from 4 days of raw and permanently destroy the 21-day hourly and indefinite daily
+    /// history the tiers exist to preserve. A NEW aggregate costs nothing existing; its history simply starts
+    /// accumulating from deploy.
+    ///
+    /// <para>Carries the I/O sums no other rollup has — FinOps' database-grain workload view sums
+    /// <c>delta_logical_reads</c> / <c>delta_physical_reads</c> / <c>delta_logical_writes</c>, and the composer's
+    /// measure set (which the other CAGGs were built to) never exposed I/O. Grouped by database_name only, NOT
+    /// query_hash, so it is far smaller than the query-grain aggregate despite carrying more columns.</para>
+    /// </summary>
+    public const string CreateQueryStatsDbHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_db_hourly
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    time_bucket('1 hour', collection_time) AS bucket,
+    sum(delta_worker_time) AS worker_time_sum,
+    sum(delta_logical_reads) AS logical_reads_sum,
+    sum(delta_physical_reads) AS physical_reads_sum,
+    sum(delta_logical_writes) AS logical_writes_sum,
+    sum(delta_execution_count) AS execution_count_sum,
+    max(last_execution_time) AS last_execution_time_max,
+    count(*) AS sample_count
+FROM collect.query_stats
+WHERE delta_worker_time IS NOT NULL
+GROUP BY server_id, server_name, database_name, bucket
+WITH NO DATA";
+
+    /// <summary>The DAILY sibling of <see cref="CreateQueryStatsDbHourlySql"/> — hierarchical (sourced from the
+    /// hourly one, not raw), kept indefinitely like the other daily rollups.</summary>
+    public const string CreateQueryStatsDbDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_db_daily
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    time_bucket('1 day', bucket) AS bucket,
+    sum(worker_time_sum) AS worker_time_sum,
+    sum(logical_reads_sum) AS logical_reads_sum,
+    sum(physical_reads_sum) AS physical_reads_sum,
+    sum(logical_writes_sum) AS logical_writes_sum,
+    sum(execution_count_sum) AS execution_count_sum,
+    max(last_execution_time_max) AS last_execution_time_max,
+    sum(sample_count) AS sample_count
+FROM collect.query_stats_db_hourly
+GROUP BY server_id, server_name, database_name, time_bucket('1 day', bucket)
+WITH NO DATA";
+
     public const string CreateQueryStatsDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_daily
 WITH (timescaledb.continuous) AS
 SELECT
@@ -544,9 +602,11 @@ WITH NO DATA";
             (CreateSql: CreateQueryStatsHourlySql,      View: QueryStatsHourlyView,      PolicySql: AddContinuousAggregatePolicySql(QueryStatsHourlyView)),
             (CreateSql: CreateProcedureStatsHourlySql,  View: ProcedureStatsHourlyView,  PolicySql: AddContinuousAggregatePolicySql(ProcedureStatsHourlyView)),
             (CreateSql: CreateQueryStoreStatsHourlySql, View: QueryStoreStatsHourlyView, PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsHourlyView)),
+            (CreateSql: CreateQueryStatsDbHourlySql,    View: QueryStatsDbHourlyView,    PolicySql: AddContinuousAggregatePolicySql(QueryStatsDbHourlyView)),
             (CreateSql: CreateQueryStatsDailySql,       View: QueryStatsDailyView,       PolicySql: AddContinuousAggregatePolicySql(QueryStatsDailyView, "1 day", "1 day")),
             (CreateSql: CreateProcedureStatsDailySql,   View: ProcedureStatsDailyView,   PolicySql: AddContinuousAggregatePolicySql(ProcedureStatsDailyView, "1 day", "1 day")),
             (CreateSql: CreateQueryStoreStatsDailySql,  View: QueryStoreStatsDailyView,  PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsDailyView, "1 day", "1 day")),
+            (CreateSql: CreateQueryStatsDbDailySql,     View: QueryStatsDbDailyView,     PolicySql: AddContinuousAggregatePolicySql(QueryStatsDbDailyView, "1 day", "1 day")),
         };
 
         var ready = 0;
@@ -624,6 +684,7 @@ WITH NO DATA";
             (Relation: QueryStatsHourlyView,      DropAfter: HourlyRetentionInterval),
             (Relation: ProcedureStatsHourlyView,  DropAfter: HourlyRetentionInterval),
             (Relation: QueryStoreStatsHourlyView, DropAfter: HourlyRetentionInterval),
+            (Relation: QueryStatsDbHourlyView,    DropAfter: HourlyRetentionInterval),
         };
 
         var applied = 0;
@@ -647,6 +708,45 @@ WITH NO DATA";
             "TimescaleDB: {Applied}/{Total} retention policies in place (raw {Raw}, hourly CAGGs {Hourly}; daily CAGGs kept indefinitely)",
             applied, policies.Length, RawRetentionInterval, HourlyRetentionInterval);
         return applied;
+    }
+
+    /* ─────────────── rollup availability (the plain-PostgreSQL guard, #1664) ─────────────── */
+
+    /// <summary>
+    /// One catalog round trip answering "which retention rollups exist in THIS store?" — the availability
+    /// input to <see cref="RetentionTierRouter.Resolve(DateTime, DateTime, bool, bool)"/>. <c>to_regclass</c>
+    /// needs no table privilege and returns NULL for a missing relation, so this is safe under the viewer's
+    /// least-privilege role and on any store shape. Column order matches
+    /// <see cref="RollupAvailability"/>'s constructor.
+    /// </summary>
+    public static readonly string RollupProbeSql =
+        "SELECT " +
+        $"to_regclass('collect.{QueryStatsHourlyView}') IS NOT NULL, " +
+        $"to_regclass('collect.{QueryStatsDailyView}') IS NOT NULL, " +
+        $"to_regclass('collect.{QueryStatsDbHourlyView}') IS NOT NULL, " +
+        $"to_regclass('collect.{QueryStatsDbDailyView}') IS NOT NULL";
+
+    /// <summary>
+    /// Detects which continuous-aggregate rollups exist in the store (<see cref="RollupProbeSql"/>). On a
+    /// plain-PostgreSQL store every flag is false — and that is a COMPLETE configuration, not a degraded one:
+    /// without the extension no retention policy ever drops raw, so the raw tables hold full history and
+    /// routing everything to raw loses nothing. On a TimescaleDB store the worker's ensure sweep creates the
+    /// views before any reader can need them; a partially-built store (one aggregate's failure-isolated
+    /// setup failed) reports exactly what exists, so the router degrades per tier instead of a reader
+    /// throwing 42P01 at a user (#1664, the gated-live catch on #1661's first cut).
+    /// </summary>
+    public static async Task<RollupAvailability> DetectRollupsAsync(NpgsqlDataSource dataSource, CancellationToken cancellationToken = default)
+    {
+        if (dataSource is null)
+        {
+            throw new ArgumentNullException(nameof(dataSource));
+        }
+
+        await using var command = dataSource.CreateCommand(RollupProbeSql);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await reader.ReadAsync(cancellationToken);
+        return new RollupAvailability(
+            reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3));
     }
 
     /// <summary>
@@ -969,3 +1069,21 @@ WHERE j.proc_name LIKE '%compression%'
 /// may be null on an odd catalog), and the human-readable reason the pure predicate produced.
 /// </summary>
 public sealed record StuckCompressionJob(long JobId, string? HypertableName, string Reason);
+
+/// <summary>
+/// Which retention rollups exist in a store (<see cref="TimescaleSupport.DetectRollupsAsync"/>): the
+/// query-grain pair (query_stats_hourly / _daily — the Daily Summary and top-consumer readers) and the
+/// database-grain pair (query_stats_db_hourly / _daily — the FinOps database-resource reader). All false on a
+/// plain-PostgreSQL store, where raw is complete anyway; per-flag on a TimescaleDB store so a
+/// failure-isolated partial build degrades one tier instead of erroring (#1664).
+/// </summary>
+public readonly record struct RollupAvailability(
+    bool QueryGrainHourly, bool QueryGrainDaily, bool DbGrainHourly, bool DbGrainDaily)
+{
+    /// <summary>True when every rollup exists — the steady state on a TimescaleDB store, safe to cache
+    /// permanently (a created continuous aggregate is never dropped outside the reshape sweep).</summary>
+    public bool AllPresent => QueryGrainHourly && QueryGrainDaily && DbGrainHourly && DbGrainDaily;
+
+    /// <summary>No rollups at all — the plain-PostgreSQL shape, and the safe fallback when a probe fails.</summary>
+    public static RollupAvailability None => default;
+}

@@ -516,6 +516,48 @@ public sealed class ViewerDailyHealthLivePostgresTests
         }
     }
 
+    /// <summary>
+    /// #1664: a window FIRMLY past the raw route margin, against the dev store, which is plain PostgreSQL and
+    /// has no continuous aggregates. #1661's first cut routed this by age alone straight onto
+    /// <c>collect.query_stats_hourly</c> and threw 42P01 — exactly what a bring-your-own plain-PG store would
+    /// have hit in the field. The availability gate must detect the missing rollups and answer from raw,
+    /// which on a plain-PG store holds full history (no retention policies without the extension).
+    /// </summary>
+    [Fact]
+    public async Task DailySummary_OldWindow_FallsBackToRaw_WhenTheStoreHasNoRollups_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live rollup-fallback test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteSummaryRowsAsync(connection);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        try
+        {
+            /* -10 days is deterministically Hourly-age (the -3d sibling above straddles the margin by
+               time-of-day, which is how the first cut's live runs happened to pass). */
+            var day = DateTime.UtcNow.Date.AddDays(-10);
+            var inDay = day.AddHours(9);
+
+            await InsertDmvBlockingAsync(connection, SummaryServerId, inDay);
+            await InsertDmvBlockingAsync(connection, SummaryServerId, inDay);
+
+            var summary = await viewer.GetDailySummaryAsync(SummaryServerId, day);
+
+            Assert.NotNull(summary);
+            Assert.Equal(2, summary!.BlockingEvents);
+        }
+        finally
+        {
+            await DeleteSummaryRowsAsync(connection);
+        }
+    }
+
     [Fact]
     public async Task CollectionHealth_SevenDayAggregate_BandsEachCollector_AgainstDevPostgres()
     {

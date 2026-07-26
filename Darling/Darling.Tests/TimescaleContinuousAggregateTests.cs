@@ -187,4 +187,80 @@ public sealed class TimescaleContinuousAggregateTests
         Assert.Equal("4 days", TimescaleSupport.RawRetentionInterval);
         Assert.Equal("21 days", TimescaleSupport.HourlyRetentionInterval);
     }
+
+    /* ── #1661: the per-database rollup carrying the I/O sums no other aggregate has ── */
+
+    /// <summary>
+    /// FinOps' database-grain workload view sums delta_logical_reads / delta_physical_reads /
+    /// delta_logical_writes, and NO other continuous aggregate carries any of them — the others were built to the
+    /// composer's measure set, which never exposed I/O. Without this rollup that view cannot route past the raw
+    /// horizon at all.
+    /// </summary>
+    [Fact]
+    public void QueryStatsDbHourly_CarriesTheIoSumsNoOtherAggregateHas()
+    {
+        var sql = TimescaleSupport.CreateQueryStatsDbHourlySql;
+
+        Assert.Contains("CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_db_hourly", sql, StringComparison.Ordinal);
+        Assert.Contains("WITH (timescaledb.continuous)", sql, StringComparison.Ordinal);
+        Assert.Contains("time_bucket('1 hour', collection_time) AS bucket", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.query_stats", sql, StringComparison.Ordinal);
+
+        foreach (var column in new[] { "delta_logical_reads", "delta_physical_reads", "delta_logical_writes", "delta_worker_time", "delta_execution_count" })
+        {
+            Assert.Contains("sum(" + column + ")", sql, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("count(*) AS sample_count", sql, StringComparison.Ordinal);
+
+        /* The I/O columns must exist HERE and nowhere else — if they are ever added to the query-grain aggregate
+           this rollup becomes redundant, and that should be a deliberate decision, not a silent duplication. */
+        foreach (var io in new[] { "delta_logical_reads", "delta_physical_reads", "delta_logical_writes" })
+        {
+            Assert.DoesNotContain(io, TimescaleSupport.CreateQueryStatsHourlySql, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// Grouped by database_name and deliberately NOT query_hash. That coarser grain is what keeps it small despite
+    /// carrying more columns than the query-grain aggregate — one row per database per hour, not one per query.
+    /// </summary>
+    [Fact]
+    public void QueryStatsDbHourly_IsDatabaseGrain_NotQueryGrain()
+    {
+        var sql = TimescaleSupport.CreateQueryStatsDbHourlySql;
+
+        Assert.Contains("GROUP BY server_id, server_name, database_name, bucket", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("query_hash", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The daily sibling must be HIERARCHICAL — sourced from the hourly rollup, never from raw. Sourcing a daily
+    /// aggregate from raw would make it collapse to whatever raw still retains (4 days), which is the entire
+    /// failure this tiering exists to prevent.
+    /// </summary>
+    [Fact]
+    public void QueryStatsDbDaily_IsHierarchical_SourcedFromTheHourlyRollup()
+    {
+        var sql = TimescaleSupport.CreateQueryStatsDbDailySql;
+
+        Assert.Contains("CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_db_daily", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.query_stats_db_hourly", sql, StringComparison.Ordinal);
+        Assert.Contains("time_bucket('1 day', bucket) AS bucket", sql, StringComparison.Ordinal);
+
+        /* Re-aggregates the hourly SUMS, never the raw deltas. */
+        foreach (var column in new[] { "logical_reads_sum", "physical_reads_sum", "logical_writes_sum", "worker_time_sum", "execution_count_sum" })
+        {
+            Assert.Contains("sum(" + column + ")", sql, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// The rollup filters out rows the FinOps view itself excludes (delta_worker_time IS NULL), so the
+    /// pre-aggregated totals match what the raw query would have produced rather than including
+    /// never-counted rows.
+    /// </summary>
+    [Fact]
+    public void QueryStatsDbHourly_ExcludesNullWorkerTime_MatchingTheReadersFilter() =>
+        Assert.Contains("WHERE delta_worker_time IS NOT NULL", TimescaleSupport.CreateQueryStatsDbHourlySql, StringComparison.Ordinal);
 }
