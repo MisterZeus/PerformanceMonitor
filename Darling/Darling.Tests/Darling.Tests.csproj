@@ -48,5 +48,9 @@
          decision test alone would have passed on the broken build. -->
     <None Include="..\PerformanceMonitor.Darling.Service\Mcp\DarlingMcpHostService.cs" Link="Fixtures\DarlingMcpHostService.cs" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\PerformanceMonitor.Darling.Service\Mcp\DarlingWebHostService.cs" Link="Fixtures\DarlingWebHostService.cs" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The runtime fetch script, copied beside the test binary so DarlingPgRuntimeVersionPinTests reads
+         the REAL pins (#1706) rather than a second copy that could itself go stale — the exact failure
+         mode the test exists to catch. Same Link+copy delivery as the provisioning script above. -->
+    <None Include="..\tools\fetch-pg-runtime.ps1" Link="Fixtures\fetch-pg-runtime.ps1" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
