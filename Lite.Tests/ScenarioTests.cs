@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using PerformanceMonitor.Analysis;
@@ -15,28 +14,14 @@ namespace PerformanceMonitorLite.Tests;
 /// Each test seeds a specific server profile, runs the entire engine,
 /// and validates the engine output (paths, severity, facts) for that scenario.
 /// </summary>
-public class ScenarioTests : IDisposable
+public class ScenarioTests : IClassFixture<SharedDuckDbFixture>
 {
-    private readonly string _tempDir;
-    private readonly string _dbPath;
     private readonly DuckDbInitializer _duckDb;
 
-    public ScenarioTests()
+    public ScenarioTests(SharedDuckDbFixture fixture)
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "LiteTests_" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(_tempDir);
-        _dbPath = Path.Combine(_tempDir, "test.duckdb");
-        _duckDb = new DuckDbInitializer(_dbPath);
-    }
-
-    public void Dispose()
-    {
-        try
-        {
-            if (Directory.Exists(_tempDir))
-                Directory.Delete(_tempDir, recursive: true);
-        }
-        catch { /* Best-effort cleanup */ }
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
     }
 
     /* ── Thread Exhaustion ── */
@@ -436,9 +421,6 @@ public class ScenarioTests : IDisposable
     private async Task<(List<AnalysisStory> Stories, Dictionary<string, Fact> Facts)> RunFullPipelineAsync(
         Func<TestDataSeeder, Task> seedAction)
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
         var seeder = new TestDataSeeder(_duckDb);
         await seedAction(seeder);
 
@@ -543,9 +525,6 @@ public class ScenarioTests : IDisposable
     private async Task<(List<AnalysisStory> Stories, Dictionary<string, Fact> Facts)> RunFullPipelineWithAnomaliesAsync(
         Func<TestDataSeeder, Task> seedAction)
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
         var seeder = new TestDataSeeder(_duckDb);
         await seedAction(seeder);
 

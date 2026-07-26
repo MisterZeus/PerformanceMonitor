@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -16,27 +15,14 @@ namespace PerformanceMonitorLite.Tests;
 /// These test failure modes, edge cases, and data corruption scenarios
 /// that the happy-path tests don't cover.
 /// </summary>
-public class FactCollectorMiseryTests : IDisposable
+public class FactCollectorMiseryTests : IClassFixture<SharedDuckDbFixture>
 {
-    private readonly string _tempDir;
     private readonly DuckDbInitializer _duckDb;
 
-    public FactCollectorMiseryTests()
+    public FactCollectorMiseryTests(SharedDuckDbFixture fixture)
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "LiteTests_" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(_tempDir);
-        var dbPath = Path.Combine(_tempDir, "test.duckdb");
-        _duckDb = new DuckDbInitializer(dbPath);
-    }
-
-    public void Dispose()
-    {
-        try
-        {
-            if (Directory.Exists(_tempDir))
-                Directory.Delete(_tempDir, recursive: true);
-        }
-        catch { /* Best-effort cleanup */ }
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
     }
 
     /* ═══════════════════════════════════════════════════════════════════
@@ -48,9 +34,6 @@ public class FactCollectorMiseryTests : IDisposable
     [Fact]
     public async Task ZeroPeriodDuration_WaitFractionsShouldNotBeInfinity()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
         var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedMemoryStarvedServerAsync();
 
@@ -82,9 +65,6 @@ public class FactCollectorMiseryTests : IDisposable
     [Fact]
     public async Task ReversedTimeRange_ShouldNotProduceNegativeFractions()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
         var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedMemoryStarvedServerAsync();
 
@@ -119,9 +99,6 @@ public class FactCollectorMiseryTests : IDisposable
     [Fact]
     public async Task EmptyTables_NoDataInRange_ProducesNoFacts()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
         // Seed the server but NO data — just the servers table entry
         var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
@@ -145,9 +122,6 @@ public class FactCollectorMiseryTests : IDisposable
     [Fact]
     public async Task DataOutsideTimeRange_ProducesNoTimeDependentFacts()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
         var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedEverythingOnFireServerAsync();
 
@@ -173,9 +147,6 @@ public class FactCollectorMiseryTests : IDisposable
     [Fact]
     public async Task NonExistentServer_ProducesNoFacts()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
         var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedEverythingOnFireServerAsync();
 
@@ -203,9 +174,6 @@ public class FactCollectorMiseryTests : IDisposable
     [Fact]
     public async Task SignalWaitExceedsTotalWait_ResourceWaitShouldNotBeNegative()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
         var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
@@ -237,9 +205,6 @@ public class FactCollectorMiseryTests : IDisposable
     [Fact]
     public async Task ZeroWaitingTasks_AvgMsPerWaitShouldBeZeroNotInfinity()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
         var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
@@ -270,9 +235,6 @@ public class FactCollectorMiseryTests : IDisposable
     [Fact]
     public async Task SingleCollectionPoint_CpuStillCollected()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
         var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
@@ -312,9 +274,6 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task IoLatency_ZeroStallWithReads_ProducesZeroLatency()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
         var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
@@ -336,9 +295,6 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task IoLatency_ZeroReadsWithStall_ShouldNotDivideByZero()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
         var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
@@ -365,9 +321,6 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task MemoryGrants_ZeroWaitersButTimeouts_StillCreatesFact()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
         var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
@@ -395,9 +348,6 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task TempDb_ZeroReservedAndUnallocated_ShouldNotDivideByZero()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
         var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
@@ -420,9 +370,6 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task DatabaseConfig_OnlySystemDatabases_ProducesNoFact()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
         var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
@@ -449,9 +396,6 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task LockGrouping_SingleLockType_StillGroupedIntoLck()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
         var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
@@ -484,9 +428,6 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task CxGrouping_SingleCxWait_NotGrouped()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
         var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
@@ -513,9 +454,6 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task CollectFacts_NoDuplicateKeys()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
         var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedEverythingOnFireServerAsync();
 
@@ -541,9 +479,6 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task DiskSpace_VerySmallVolume_ShouldNotOverflowPercent()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
         var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
@@ -569,9 +504,6 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task LargeValues_WaitTimeNearMaxLong_ShouldNotOverflow()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
         var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
@@ -602,9 +534,6 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task RunningJobs_NoneRunningLong_FactStillCreatedWithZeroValue()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
         var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
@@ -630,9 +559,6 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task Scoring_InvertedMetricAtZero_ShouldBeMaxSeverity()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
         var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
@@ -661,9 +587,6 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task AnalysisService_ZeroPeriod_ShouldNotCrash()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
         var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedEverythingOnFireServerAsync();
 
@@ -693,9 +616,6 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     [Fact]
     public async Task TraceFlags_OnlySessionFlags_ProducesNoFact()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
         var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
@@ -733,9 +653,6 @@ VALUES (-99999, $1, $2, $3, 1118, true, false, true)";
     [Fact]
     public async Task QueryStats_ZeroExecutions_ProducesNoFacts()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
         var seeder = new TestDataSeeder(_duckDb);
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();

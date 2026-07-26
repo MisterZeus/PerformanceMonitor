@@ -27,9 +27,15 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class ViewerAlertSettingsSqlTests
 {
-    /* The 36 AlertsConfig + AnalysisConfig columns the service reads (StoreConfigProvider.ReadAlertSettingsAsync)
+    /* The 41 AlertsConfig + AnalysisConfig columns the service reads (StoreConfigProvider.ReadAlertSettingsAsync)
        — delivery_mode/per_event_max appended in V18 (#1141/#1236), the six long-running-query read knobs + the
-       connection-change notify toggle in V20. */
+       connection-change notify toggle in V20, the two connection opt-ins in V33 (#1659), and the three
+       Availability Group knobs in V35 (#991).
+
+       This list is the guard against the highest-risk defect class in the alert-settings plumbing: four
+       parallel sequences (this list, the upsert's $N placeholders, the bind order, and the reader ordinals)
+       have to agree, and a mismatch only shows up against a live Postgres. It had stopped at 36 while the
+       store grew to 41, so the five newest columns — every one added since — were unguarded. */
     private static readonly string[] Columns =
     {
         "enabled", "cpu_enabled", "cpu_threshold_percent", "cpu_mode", "blocking_enabled", "blocking_count_threshold",
@@ -42,6 +48,8 @@ public sealed class ViewerAlertSettingsSqlTests
         "long_running_query_max_results", "long_running_query_exclude_sp_server_diagnostics",
         "long_running_query_exclude_wait_for", "long_running_query_exclude_backups",
         "long_running_query_exclude_misc_waits", "long_running_query_exclude_cdc", "notify_connection_changes",
+        "notify_connection_down_at_startup", "connection_refire_minutes",
+        "notify_ag_health", "ag_lag_alert_seconds", "ag_redo_queue_alert_kb",
     };
 
     [Fact]
@@ -56,7 +64,9 @@ public sealed class ViewerAlertSettingsSqlTests
             Assert.Contains(column, sql, StringComparison.Ordinal);
         }
 
-        for (var i = 1; i <= 36; i++)
+        /* Driven off Columns.Length rather than a literal, so adding a column to the list above is enough to
+           extend the placeholder check too — the previous literal is exactly how this drifted to 36. */
+        for (var i = 1; i <= Columns.Length; i++)
         {
             Assert.Contains("$" + i.ToString(System.Globalization.CultureInfo.InvariantCulture), sql, StringComparison.Ordinal);
         }

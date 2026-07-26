@@ -68,3 +68,6 @@ tools/ag-fixture/.env
 
 # Community scripts (user-provided, not bundled)
 community/*.sql
+
+# Test-run artifacts (dotnet test --logger trx)
+TestResults/

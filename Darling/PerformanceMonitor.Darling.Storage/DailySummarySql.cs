@@ -104,8 +104,10 @@ public static class DailySummarySql
             GROUP BY 1
         ),
         alerts AS (
-            /* Actionable alerts only: exclude dismissed rows and resolution/good-news notices (Cleared /
-               Resolved / Restored), mirroring AlertMetricClassifier.IsResolution. */
+            /* Actionable alerts only: exclude dismissed rows and resolution/good-news notices, mirroring
+               AlertMetricClassifier.IsResolution. The suffix list must match that method exactly — it is a
+               hand-maintained SQL copy, so widening one without the other silently counts recoveries
+               ("Collection Resumed", "Agent Restarted", "AG Sync Recovered") as actionable alerts. */
             SELECT date_trunc('day', alert_time) AS d, COUNT(*) AS c
             FROM config_alert_log
             WHERE server_id = $1 AND alert_time >= $2 AND alert_time < $3
@@ -113,6 +115,10 @@ public static class DailySummarySql
               AND metric_name NOT LIKE '%Cleared%'
               AND metric_name NOT LIKE '%Resolved%'
               AND metric_name NOT LIKE '%Restored%'
+              AND metric_name NOT LIKE '%Resumed%'
+              AND metric_name NOT LIKE '%Restarted%'
+              AND metric_name NOT LIKE '%Recovered%'
+              AND metric_name NOT LIKE '%Reconnected%'
             GROUP BY 1
         ),
         day_spine AS (
