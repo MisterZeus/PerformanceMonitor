@@ -880,7 +880,13 @@ internal static class GoldenCollectorSchema
     is_suspended BOOLEAN,
     suspend_reason_desc VARCHAR,
     availability_mode_desc VARCHAR,
-    secondary_lag_seconds BIGINT
+    secondary_lag_seconds BIGINT,
+    last_commit_time TIMESTAMP,
+    last_hardened_time TIMESTAMP,
+    last_redone_time TIMESTAMP,
+    last_received_time TIMESTAMP,
+    est_redo_completion_time_min DOUBLE,
+    est_send_drain_time_min DOUBLE
 )",
     };
 

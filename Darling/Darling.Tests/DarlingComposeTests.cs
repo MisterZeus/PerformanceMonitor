@@ -857,7 +857,7 @@ public sealed class DarlingComposeTests
             .Where(m => string.Equals(m.SourceTable, "ag_database_replica_states", StringComparison.Ordinal))
             .ToList();
 
-        Assert.Equal(5, agMeasures.Count);
+        Assert.Equal(7, agMeasures.Count);
 
         foreach (var measure in agMeasures)
         {
@@ -871,7 +871,7 @@ public sealed class DarlingComposeTests
         }
 
         Assert.Equal(
-            new[] { "ag_log_send_queue", "ag_log_send_rate", "ag_redo_queue", "ag_redo_rate", "ag_secondary_lag" },
+            new[] { "ag_est_redo_drain_min", "ag_est_send_drain_min", "ag_log_send_queue", "ag_log_send_rate", "ag_redo_queue", "ag_redo_rate", "ag_secondary_lag" },
             agMeasures.Select(m => m.Key).OrderBy(k => k, StringComparer.Ordinal).ToArray());
     }
 

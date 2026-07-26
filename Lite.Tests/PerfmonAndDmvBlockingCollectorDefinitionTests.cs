@@ -24,10 +24,17 @@ public sealed class PerfmonStatsCollectorDefinitionTests
     [Fact]
     public void DefaultCounterList_IsTheCuratedParityContract()
     {
-        Assert.Equal(59, PerfmonStatsCollector.DefaultCounters.Count);
+        Assert.Equal(61, PerfmonStatsCollector.DefaultCounters.Count);
         Assert.Contains("Batch Requests/sec", PerfmonStatsCollector.DefaultCounters);
         Assert.Contains("Number of Deadlocks/sec", PerfmonStatsCollector.DefaultCounters);
         Assert.Contains("Wait for the worker", PerfmonStatsCollector.DefaultCounters);
+
+        /* #991: the two SQLServer:Database Replica counters that carry the PRIMARY side of AG commit
+           latency. Their ratio (delay per mirrored transaction) is the number sync-commit conversations
+           are actually about, and neither name occurs on any other perfmon object, so the collector's
+           counter_name-only filter is safe without an object_name predicate. */
+        Assert.Contains("Transaction Delay", PerfmonStatsCollector.DefaultCounters);
+        Assert.Contains("Mirrored Write Transactions/sec", PerfmonStatsCollector.DefaultCounters);
     }
 
     [Fact]

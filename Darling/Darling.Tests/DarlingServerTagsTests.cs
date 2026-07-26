@@ -23,7 +23,7 @@ public sealed class DarlingServerTagsTests
         PgMigrations.Scripts.Single(s => s.Version == 32).Sql;
 
     [Fact]
-    public void V32_IsSchemaQualified_AndV35_IsRegisteredLast()
+    public void V32_IsSchemaQualified_AndTheNewestMigrationTracksTheBuildVersion()
     {
         var v32 = PgMigrations.Scripts.Single(s => s.Version == 32);
 
@@ -37,14 +37,16 @@ public sealed class DarlingServerTagsTests
         Assert.Contains("notify_connection_down_at_startup boolean NOT NULL DEFAULT false", v33.Sql, StringComparison.Ordinal);
         Assert.Contains("connection_refire_minutes integer NOT NULL DEFAULT 0", v33.Sql, StringComparison.Ordinal);
 
-        /* V35 (#991 Availability Group alert knobs) is now the newest migration and tracks the build version.
-           Same discipline: registered LAST, config.-qualified, every column NOT NULL DEFAULT — and the two
-           thresholds carry the SHIPPED defaults (lag on at 300s, redo queue off), which the service's fallback
-           seams and the viewer's parse fallbacks both mirror. */
+        /* V35 (#991 Availability Group alert knobs). Same discipline: config.-qualified, every column
+           NOT NULL DEFAULT — and the two thresholds carry the SHIPPED defaults (lag on at 300s, redo queue
+           off), which the service's fallback seams and the viewer's parse fallbacks both mirror.
+           No longer the newest migration (V36 appends the AG latency columns), so the "tracks the build
+           version" assertion moved to the newest by IDENTITY rather than by number — a positional or
+           literal pin here turns every stacked branch into a conflict, which is the lesson this file's
+           own ordinal-free rewrite already records. */
         var v35 = PgMigrations.Scripts.Single(s => s.Version == 35);
         Assert.Equal("availability-group-alerts", v35.Name);
-        Assert.Equal(35, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, v35.Version);
+        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Contains("ALTER TABLE config.config_alert_settings", v35.Sql, StringComparison.Ordinal);
         Assert.Contains("notify_ag_health boolean NOT NULL DEFAULT true", v35.Sql, StringComparison.Ordinal);
         Assert.Contains("ag_lag_alert_seconds integer NOT NULL DEFAULT 300", v35.Sql, StringComparison.Ordinal);

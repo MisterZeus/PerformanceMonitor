@@ -33,7 +33,7 @@ public sealed class DarlingObservabilityTests
     private const int TestServerId = -424242;
 
     [Fact]
-    public void MigrationScripts_AreRegisteredInAscendingOrder_V34AgCollectors_V35AgAlertKnobs()
+    public void MigrationScripts_AreRegisteredInAscendingOrder_V34AgCollectors_V36AgLatencyColumns()
     {
         /* Counted off the registered list rather than hard-coded: the count and the newest version are the
            same fact stated twice, and pinning the count by literal makes every stacked branch collide here. */
@@ -76,8 +76,8 @@ public sealed class DarlingObservabilityTests
         Assert.Equal(33, PgMigrations.Scripts[32].Version);
         /* The newest migration is asserted by identity rather than by ordinal: this ladder is walked by every
            stacked branch at once, and a positional pin turns each addition into a conflict for the next. */
-        Assert.Equal(35, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(35, StorageVersion.SchemaVersion);
+        Assert.Equal(36, PgMigrations.Scripts[^1].Version);
+        Assert.Equal(36, StorageVersion.SchemaVersion);
 
         /* V34 (#991) creates the two Availability Group collector tables. Schema-qualified collect.* and
            CREATE TABLE IF NOT EXISTS, per the file's additive-create idiom (V29): a no-op on a fresh store
@@ -85,12 +85,22 @@ public sealed class DarlingObservabilityTests
            The full column-for-column equality against PgSchemaGenerator.CreateTable is pinned by
            PgSchemaGeneratorTests.Migrations_JobHistoryAndAgentStatus_MatchGeneratedFreshShape — this test
            only pins the migration's IDENTITY (version, name) and the two traits worth stating in prose. */
-        var v34 = PgMigrations.Scripts[33].Sql;
-        Assert.Equal("availability-group-collectors", PgMigrations.Scripts[33].Name);
+        var v34Script = PgMigrations.Scripts.Single(s => s.Version == 34);
+        var v34 = v34Script.Sql;
+        Assert.Equal("availability-group-collectors", v34Script.Name);
 
         /* The LSNs are numeric(25,0) at the source — wider than bigint — so they land as text. */
         Assert.Contains("last_hardened_lsn text", v34, StringComparison.Ordinal);
         Assert.Contains("last_commit_lsn text", v34, StringComparison.Ordinal);
+
+        /* V36 (#991 addendum) widens the V34 database-grain table additively. Identity only here; the
+           column-for-column reconstruction of V34 + V36 against the generator is pinned by
+           PgSchemaGeneratorTests.Migrations_JobHistoryAndAgentStatus_MatchGeneratedFreshShape. */
+        var v36Script = PgMigrations.Scripts.Single(s => s.Version == 36);
+        var v36 = v36Script.Sql;
+        Assert.Equal("ag-latency-columns", v36Script.Name);
+        Assert.Contains("ALTER TABLE collect.ag_database_replica_states", v36, StringComparison.Ordinal);
+        Assert.Contains("ADD COLUMN IF NOT EXISTS est_send_drain_time_min double precision", v36, StringComparison.Ordinal);
 
         /* V26 (#1506) adds the generic webhook channel's four columns to the V17 control-plane table.
            Schema-qualified config.* and IF NOT EXISTS, per the file's additive-ALTER idiom. */
