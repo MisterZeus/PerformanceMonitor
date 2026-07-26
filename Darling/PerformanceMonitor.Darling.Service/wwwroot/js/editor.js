@@ -141,6 +141,7 @@ export function newComposedPanel() {
     hours: null,
     thresholds: [],
     annotations: [],
+    overlay: null, // { measure, aggregate, unit } or null (#1606 — scatter's y / a dual-axis right axis)
   };
 }
 
@@ -197,6 +198,10 @@ export function descToComposedPanel(d) {
     hours: typeof d.hours === "number" ? d.hours : null,
     thresholds: cleanThresholds(d.thresholds),
     annotations: Array.isArray(d.annotations) ? d.annotations.map(String) : [],
+    overlay:
+      d.overlay && typeof d.overlay === "object" && d.overlay.measure
+        ? { measure: String(d.overlay.measure), aggregate: d.overlay.aggregate ? String(d.overlay.aggregate) : "", unit: d.overlay.unit ? String(d.overlay.unit) : "" }
+        : null,
   };
 }
 
@@ -250,6 +255,15 @@ export function composedPanelToDesc(p) {
   if (p.shape === "timeseries") {
     const annotations = cleanAnnotations(p.annotations);
     if (annotations.length) d.annotations = annotations;
+  }
+  /* The overlay (#1606) is only meaningful on scatter and ungrouped line/area — the server rejects it
+     anywhere else — so, like annotations, it stays in the model across viz flips but only serializes
+     where it is legal. */
+  if (p.overlay && p.overlay.measure && (p.viz === "scatter" || p.viz === "line" || p.viz === "area")) {
+    const o = { measure: p.overlay.measure };
+    if (p.overlay.aggregate) o.aggregate = p.overlay.aggregate;
+    if (p.overlay.unit) o.unit = p.overlay.unit;
+    d.overlay = o;
   }
   return d;
 }
@@ -509,7 +523,7 @@ export function composedBlocker(p, catalog) {
   const groups = (p.groupBy || []).length;
   if (p.shape === "scalar" && groups > 0) return "a single value can't group — switch to Over time or Ranked.";
   if (p.shape === "ranked" && groups === 0) return "a ranked chart needs a group-by (the categories to rank).";
-  const reason = vizModeReason(p.viz, p.shape, groups);
+  const reason = vizModeReason(p.viz, p.shape, groups, p.overlay);
   if (reason) return reason;
   return null;
 }
@@ -856,7 +870,8 @@ function sampleUnavailableText(res) {
 /* ─────────────────────────── composed (v2) panel editor ─────────────────────────── */
 
 /* Display maps for the compose vocabularies (data-driven off /api/catalog; these only humanize the wire tokens). */
-const VIZ_LABELS = { line: "Line", area: "Area", stacked: "Stacked area", "stacked-bar": "Stacked bar", bar: "Bar", pie: "Pie / donut", table: "Table", stat: "Single value" };
+const VIZ_LABELS = {
+  scatter: "Scatter (two measures)", line: "Line", area: "Area", stacked: "Stacked area", "stacked-bar": "Stacked bar", bar: "Bar", pie: "Pie / donut", table: "Table", stat: "Single value" };
 const AGG_LABELS = { sum: "Sum", avg: "Average", min: "Minimum", max: "Maximum", count: "Count", percentile_cont: "95th percentile" };
 const OP_LABELS = { eq: "is (=)", neq: "is not (≠)", like: "matches (LIKE)", gt: ">", gte: "≥", lt: "<", lte: "≤" };
 const BUCKET_LABELS = { minute: "Per minute", hour: "Per hour", day: "Per day", auto: "Auto (fit to range)" };
@@ -1110,8 +1125,43 @@ export function buildComposedPanelBody(p, opts) {
       p.viz = v;
       onStructural();
     });
-    const reason = vizModeReason(p.viz, p.shape, (p.groupBy || []).length);
-    return el("div", {}, [field("Chart type", sel), reason ? el("div", { class: "block-help warn-hint", text: reason }) : null]);
+    const reason = vizModeReason(p.viz, p.shape, (p.groupBy || []).length, p.overlay);
+    const kids = [field("Chart type", sel)];
+    /* Second measure (#1606): scatter's y axis, or an ungrouped line/area's right-hand axis. Only offered
+       where the server accepts one; the model keeps it across viz flips (composedPanelToDesc gates it). */
+    if (p.viz === "scatter" || ((p.viz === "line" || p.viz === "area") && p.shape === "timeseries")) {
+      kids.push(field(p.viz === "scatter" ? "Second measure (y axis)" : "Second measure (right axis)", overlayControl()));
+    }
+    if (reason) kids.push(el("div", { class: "block-help warn-hint", text: reason }));
+    return el("div", {}, kids);
+  }
+
+  function overlayControl() {
+    const sameSource = (compose.measures || []).filter((x) => x.source === p.source);
+    const sel = el("select", { class: "editor-select", "aria-label": "Second measure" });
+    sel.appendChild(el("option", { value: "", text: "— none —" }));
+    for (const x of sameSource.sort((a, b) => a.displayName.localeCompare(b.displayName))) {
+      sel.appendChild(el("option", { value: x.key, text: x.displayName + (x.kind === "ratio" ? " (ratio)" : "") }));
+    }
+    sel.value = p.overlay && p.overlay.measure ? p.overlay.measure : "";
+    sel.addEventListener("change", () => {
+      if (!sel.value) {
+        p.overlay = null;
+      } else {
+        const chosen = sameSource.find((x) => x.key === sel.value);
+        /* A ratio's aggregation is fixed (the server rejects an explicit one); a scalar takes its default. */
+        p.overlay = {
+          measure: sel.value,
+          aggregate: chosen && chosen.kind !== "ratio" ? chosen.defaultAggregate || (chosen.validAggregates || [])[0] || "" : "",
+          unit: chosen ? chosen.defaultUnit || "" : "",
+        };
+      }
+      onStructural();
+    });
+    const note = p.overlay && p.overlay.measure
+      ? el("div", { class: "block-help", text: "Aggregated with its default; the second axis carries its own unit." })
+      : null;
+    return el("div", {}, [sel, note]);
   }
 
   function advancedBlock(m) {
@@ -1289,7 +1339,7 @@ function composedPreviewBlocker(p, catalog) {
   if (m.kind !== "ratio" && !p.aggregate) return "Choose an aggregate to preview this panel.";
   if (!p.viz) return "Choose a chart type to preview this panel.";
   /* Catch an incoherent shape/chart/group combo here so the preview shows a clean hint, not a red run error. */
-  return vizModeReason(p.viz, p.shape, (p.groupBy || []).length);
+  return vizModeReason(p.viz, p.shape, (p.groupBy || []).length, p.overlay);
 }
 
 /* The filters sub-editor (its own redraw, so a dimension change can retune the operator list — LIKE only shows on a
@@ -1528,14 +1578,14 @@ function measureAvailabilityNote(m, scopeServer) {
 function vizShapeCompatible(viz, shape) {
   if (viz === "table") return true;
   if (shape === "timeseries") return viz === "line" || viz === "area" || viz === "stacked" || viz === "stacked-bar";
-  if (shape === "ranked") return viz === "bar" || viz === "pie";
+  if (shape === "ranked") return viz === "bar" || viz === "pie" || viz === "scatter";
   return viz === "stat";
 }
 
 /** Where a viz belongs (for a disabled option's reason on the wrong shape). */
 function shapeHintFor(viz) {
   if (viz === "line" || viz === "area" || viz === "stacked" || viz === "stacked-bar") return "over time";
-  if (viz === "bar" || viz === "pie") return "ranked";
+  if (viz === "bar" || viz === "pie" || viz === "scatter") return "ranked";
   if (viz === "stat") return "single value";
   return "";
 }
@@ -1548,22 +1598,27 @@ function vizDrawsThresholds(viz) {
 
 /* The full viz↔shape coherence reason (mirrors the server's ValidateVizMode), or null when coherent — drives the
    inline hint under the chart picker. */
-function vizModeReason(viz, shape, groupCount) {
+function vizModeReason(viz, shape, groupCount, overlay) {
   if (!viz) return null;
-  if (viz === "table") return null;
+  const hasOverlay = !!(overlay && overlay.measure);
+  if (viz === "table") return hasOverlay ? "A table can't carry a second measure — overlays belong to scatter and ungrouped line/area." : null;
   if (shape === "timeseries") {
     if (!["line", "area", "stacked", "stacked-bar"].includes(viz)) return "A " + (VIZ_LABELS[viz] || viz) + " chart isn't a time series — use line, area, stacked, or stacked bar.";
     if ((viz === "stacked" || viz === "stacked-bar") && groupCount === 0) return "A stacked chart needs a group-by (the parts that stack).";
+    if (hasOverlay && !(viz === "line" || viz === "area")) return "A second measure (overlay) needs a line or area chart.";
+    if (hasOverlay && groupCount > 0) return "A dual-axis chart can't also group by a dimension — drop the group-by or the second measure.";
     return null;
   }
   if (shape === "ranked") {
-    if (!["bar", "pie"].includes(viz)) return "A " + (VIZ_LABELS[viz] || viz) + " chart can't rank a top-N — use bar or pie.";
+    if (!["bar", "pie", "scatter"].includes(viz)) return "A " + (VIZ_LABELS[viz] || viz) + " chart can't rank a top-N — use bar, pie, or scatter.";
     if (groupCount === 0) return "A " + (VIZ_LABELS[viz] || viz) + " chart needs a group-by (the categories to rank).";
+    if (viz === "scatter" && !hasOverlay) return "A scatter needs a second measure (the y axis) — pick one under Second measure.";
+    if (viz !== "scatter" && hasOverlay) return "A " + (VIZ_LABELS[viz] || viz) + " chart can't carry a second measure — use scatter.";
     return null;
   }
   if (groupCount > 0) return "A single value can't group — switch to Over time or Ranked.";
   if (viz !== "stat") return "A single value uses the stat chart (or a table).";
-  return null;
+  return hasOverlay ? "A single value can't carry a second measure." : null;
 }
 
 function buildComposedMeasureSelect(compose, current, scopeServer, onChange) {
