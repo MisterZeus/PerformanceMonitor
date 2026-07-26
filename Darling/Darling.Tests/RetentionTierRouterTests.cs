@@ -9,6 +9,7 @@
 using System;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
 namespace Darling.Tests;
@@ -98,4 +99,52 @@ public sealed class RetentionTierRouterTests
         var days = int.Parse(interval.Split(' ')[0], System.Globalization.CultureInfo.InvariantCulture);
         return TimeSpan.FromDays(days);
     }
+
+    /* ── #1661: the Daily Summary reader actually routes ── */
+
+    /// <summary>
+    /// Raw must return the frozen constant byte-for-byte — the recent-window path is unchanged.
+    /// </summary>
+    [Fact]
+    public void DailySummary_RawTier_ReturnsTheConstantUnchanged() =>
+        Assert.Equal(
+            ViewerDataService.DailySummaryRangeSql,
+            ViewerDataService.DailySummaryRangeSqlFor(RetentionTier.Raw),
+            StringComparer.Ordinal);
+
+    /// <summary>
+    /// A rollup tier must swap the query-count CTE onto the matching CAGG and switch its time column to
+    /// <c>bucket</c>, while leaving every other CTE alone — the wait / deadlock / blocking / CPU / collection /
+    /// memory / alert sources all read tables on the 30-day default retention and must keep reading raw.
+    /// </summary>
+    [Theory]
+    [InlineData(RetentionTier.Hourly, "query_stats_hourly")]
+    [InlineData(RetentionTier.Daily, "query_stats_daily")]
+    public void DailySummary_RollupTier_RoutesOnlyTheQueryCte(RetentionTier tier, string expectedRelation)
+    {
+        var sql = ViewerDataService.DailySummaryRangeSqlFor(tier);
+
+        Assert.Contains($"FROM collect.{expectedRelation}", sql, StringComparison.Ordinal);
+        Assert.Contains("SELECT date_trunc('day', bucket) AS d, COUNT(DISTINCT query_hash) AS c", sql, StringComparison.Ordinal);
+
+        /* The routed CTE no longer reads the raw passthrough view... */
+        Assert.DoesNotContain("FROM v_query_stats", sql, StringComparison.Ordinal);
+
+        /* ...but the untouched sources still do. */
+        foreach (var untouched in new[] { "FROM v_wait_stats", "FROM v_deadlocks", "FROM v_cpu_utilization_stats", "FROM v_collection_log", "FROM v_memory_pressure_events" })
+        {
+            Assert.Contains(untouched, sql, StringComparison.Ordinal);
+        }
+
+        /* Parameter positions are unchanged, so the caller binds the same three values on every tier. */
+        Assert.Contains("WHERE server_id = $1 AND bucket >= $2 AND bucket < $3", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// COUNT(DISTINCT query_hash) is only exact over a rollup because query_hash is one of the CAGG's GROUP BY
+    /// columns. If that ever stops being true the routing silently starts under-counting, so pin it.
+    /// </summary>
+    [Fact]
+    public void QueryStatsCagg_GroupsByQueryHash_WhichIsWhatMakesTheDistinctCountExact() =>
+        Assert.Contains("GROUP BY server_id, server_name, database_name, query_hash", TimescaleSupport.CreateQueryStatsHourlySql, StringComparison.Ordinal);
 }

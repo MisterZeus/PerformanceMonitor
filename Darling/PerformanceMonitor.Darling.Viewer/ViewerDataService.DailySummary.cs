@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -163,13 +164,77 @@ public sealed partial class ViewerDataService
         """;
 
     /// <summary>
+    /// The <c>queries</c> CTE exactly as it appears in <see cref="DailySummaryRangeSql"/> — the ONE part of the
+    /// daily summary that reads a table subject to the 4-day raw drop. Every other source here (wait_stats,
+    /// deadlocks, alerts, memory) keeps <c>DarlingRetention</c>'s 30-day default, so they need no routing.
+    /// </summary>
+    private const string DailySummaryQueriesCteRaw = """
+        queries AS (
+            SELECT date_trunc('day', collection_time) AS d, COUNT(DISTINCT query_hash) AS c
+            FROM v_query_stats
+            WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+            GROUP BY 1
+        ),
+        """;
+
+    /// <summary>
+    /// The same CTE against a rollup. <c>COUNT(DISTINCT query_hash)</c> is exact over a CAGG because query_hash is
+    /// one of its GROUP BY columns — the rollup preserves every distinct hash per bucket, so counting them per day
+    /// gives the identical answer raw would. The time column becomes <c>bucket</c>; parameter positions are
+    /// unchanged, so the caller binds the same three values either way.
+    /// </summary>
+    private static string DailySummaryQueriesCteForCagg(string relation) => $"""
+        queries AS (
+            SELECT date_trunc('day', bucket) AS d, COUNT(DISTINCT query_hash) AS c
+            FROM collect.{relation}
+            WHERE server_id = $1 AND bucket >= $2 AND bucket < $3
+            GROUP BY 1
+        ),
+        """;
+
+    /// <summary>
+    /// #1661: the daily summary SQL for <paramref name="tier"/>. Raw returns the frozen constant untouched; a
+    /// rollup tier swaps only the <c>queries</c> CTE. Throws if the swap finds nothing, so editing
+    /// <see cref="DailySummaryRangeSql"/> without updating <see cref="DailySummaryQueriesCteRaw"/> fails loudly
+    /// instead of silently leaving the tab on raw — which is precisely how this bug went unnoticed.
+    /// </summary>
+    public static string DailySummaryRangeSqlFor(RetentionTier tier)
+    {
+        if (tier == RetentionTier.Raw)
+        {
+            return DailySummaryRangeSql;
+        }
+
+        var relation = tier == RetentionTier.Hourly
+            ? TimescaleSupport.QueryStatsHourlyView
+            : TimescaleSupport.QueryStatsDailyView;
+
+        var routed = DailySummaryRangeSql.Replace(
+            DailySummaryQueriesCteRaw, DailySummaryQueriesCteForCagg(relation), StringComparison.Ordinal);
+
+        if (string.Equals(routed, DailySummaryRangeSql, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "Daily-summary CAGG routing found no queries CTE to replace — DailySummaryQueriesCteRaw has drifted from DailySummaryRangeSql (#1661).");
+        }
+
+        return routed;
+    }
+
+    /// <summary>
     /// Returns one <see cref="DailySummaryRow"/> per collected day in the half-open [fromDate, toDate)
     /// window. Powers the Performance Calendar month grid.
+    ///
+    /// <para>#1661: routes the query-count CTE to the hourly or daily rollup when the window reaches past the raw
+    /// retention horizon. Without this the calendar silently reported zero distinct queries for every day older
+    /// than ~4 days once retention began dropping chunks.</para>
     /// </summary>
     public async Task<List<DailySummaryRow>> GetDailySummaryRangeAsync(
         int serverId, DateTime fromDate, DateTime toDate, CancellationToken cancellationToken = default)
     {
-        await using var command = _dataSource.CreateCommand(DailySummaryRangeSql);
+        var tier = RetentionTierRouter.Resolve(DateTime.UtcNow, fromDate);
+
+        await using var command = _dataSource.CreateCommand(DailySummaryRangeSqlFor(tier));
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(fromDate.Date, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(toDate.Date, DateTimeKind.Unspecified) });
