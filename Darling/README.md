@@ -4,7 +4,7 @@ Darling is the headless, centralized edition of Performance Monitor: a 24/7 Wind
 
 It runs the **same monitoring brain as the Lite edition** — one shared codebase, two storage engines:
 
-- `PerformanceMonitor.Collectors` owns all 32 collector definitions: the exact T-SQL sent to monitored servers, the result-row mappings, the delta rules, the default cadences and retention horizons, and the ignored-wait-types list. Lite writes those rows to DuckDB; Darling writes the same rows to PostgreSQL via binary COPY.
+- `PerformanceMonitor.Collectors` owns all 38 collector definitions: the exact T-SQL sent to monitored servers, the result-row mappings, the delta rules, the default cadences and retention horizons, and the ignored-wait-types list. Lite writes those rows to DuckDB; Darling writes the same rows to PostgreSQL via binary COPY.
 - `PerformanceMonitor.Alerting` owns the shared alert engine — the same thresholds, edge-trigger gates, cooldowns, and dedup fingerprints Lite uses.
 - The analysis/recommendations pipeline (the same inference engine behind both apps' Recommendations tabs and the `analyze_server` MCP tool) runs on a schedule inside the service.
 
@@ -107,7 +107,7 @@ The same executable serves interactive debugging and service installation; the W
 Darling\PerformanceMonitor.Darling.Service\bin\Release\net10.0\PerformanceMonitor.Darling.Service.exe
 ```
 
-Watch the log output: you should see the config load (`Loaded configuration from ...`), the store migrate (`Postgres store ready (schema v20, ...)`), the TimescaleDB detection result, per-server connects, and then per-collector run lines with row counts.
+Watch the log output: you should see the config load (`Loaded configuration from ...`), the store migrate (`Postgres store ready (schema v34, ...)`), the TimescaleDB detection result, per-server connects, and then per-collector run lines with row counts.
 
 ### Install as a Windows Service
 

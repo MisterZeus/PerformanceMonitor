@@ -20,6 +20,8 @@
     { "name": "long_query_completions", "enabled": false, "frequency_minutes": 1, "retention_days": 30, "description": "Long-running query completions from a dedicated XE ring buffer session. OPT-IN, default OFF (#1496)" },
     { "name": "database_scoped_config", "enabled": true, "frequency_minutes": 0, "retention_days": 30, "description": "Database-scoped configurations (on-load only)" },
     { "name": "trace_flags", "enabled": true, "frequency_minutes": 0, "retention_days": 30, "description": "Active trace flags via DBCC TRACESTATUS (on-load only)" },
-    { "name": "running_jobs", "enabled": true, "frequency_minutes": 5, "retention_days": 7, "description": "Currently running SQL Agent jobs with duration comparison" }
+    { "name": "running_jobs", "enabled": true, "frequency_minutes": 5, "retention_days": 7, "description": "Currently running SQL Agent jobs with duration comparison" },
+    { "name": "ag_replica_states", "enabled": true, "frequency_minutes": 1, "retention_days": 30, "description": "Availability Group replica health from sys.dm_hadr_availability_replica_states (#991)" },
+    { "name": "ag_database_replica_states", "enabled": true, "frequency_minutes": 1, "retention_days": 30, "description": "Availability Group per-database replica health, queues, rates and secondary lag from sys.dm_hadr_database_replica_states (#991)" }
   ]
 }

@@ -29,12 +29,13 @@ public sealed class DarlingServerTagsTests
 
         Assert.Equal("server-tags", v32.Name);
 
-        /* V33 (#1659 connection-alert opt-ins) is the newest migration and tracks the build version;
-           its ALTERs are config.-qualified like every additive control-plane migration. */
+        /* V33 (#1659 connection-alert opt-ins): its ALTERs are config.-qualified like every additive
+           control-plane migration. V34 (#991 AG collectors) now sits after it as the newest migration
+           and is what tracks the build version. */
         var v33 = PgMigrations.Scripts.Single(s => s.Version == 33);
         Assert.Equal("connection-alert-refire", v33.Name);
-        Assert.Equal(33, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, v33.Version);
+        Assert.Equal(34, PgMigrations.Scripts[^1].Version);
+        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Contains("ALTER TABLE config.config_alert_settings", v33.Sql, StringComparison.Ordinal);
         Assert.Contains("notify_connection_down_at_startup boolean NOT NULL DEFAULT false", v33.Sql, StringComparison.Ordinal);
         Assert.Contains("connection_refire_minutes integer NOT NULL DEFAULT 0", v33.Sql, StringComparison.Ordinal);

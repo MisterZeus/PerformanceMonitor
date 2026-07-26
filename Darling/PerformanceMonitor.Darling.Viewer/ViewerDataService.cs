@@ -394,7 +394,8 @@ SELECT
     EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_service' AND column_name = 'web_enabled'),
     EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'custom_views'),
     EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'server_tags'),
-    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_alert_settings' AND column_name = 'notify_connection_down_at_startup')";
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_alert_settings' AND column_name = 'notify_connection_down_at_startup'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'ag_database_replica_states')";
 
     /// <summary>The store schema version this viewer build requires — the highest migration it knows
     /// (<see cref="StorageVersion.SchemaVersion"/>). The connect-time gate blocks a store below this.</summary>
@@ -415,7 +416,7 @@ SELECT
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {
-                return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15), reader.GetBoolean(16));
+                return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15), reader.GetBoolean(16), reader.GetBoolean(17));
             }
 
             return null;
@@ -437,11 +438,21 @@ SELECT
     /// 19, else <paramref name="hasAlertDeliveryOverride"/> (V18) → 18, else
     /// <paramref name="hasConfigControlPlane"/> (V17) → 17, else 16 — the "older than the V17 config control
     /// plane" floor (the exact pre-17 version isn't probed, but it is below what the viewer needs). Pure, so it
-    /// is unit-tested without a live store; a schema bump past 29 trips the pinning test that keeps this in step
-    /// with <see cref="StorageVersion.SchemaVersion"/>.
+    /// is unit-tested without a live store; any schema bump past the newest arm trips the pinning test that keeps
+    /// this in step with <see cref="StorageVersion.SchemaVersion"/>.
     /// </summary>
-    internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false)
+    internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false, bool hasAgCollectors = false)
     {
+        /* V34 (#991 Availability Group collectors): engine-agnostic table-existence sentinel, newest-first
+           arm. The AG database-grain collector table exists only at V34 or later. (Named only in the probe
+           SQL, deliberately not repeated here: ViewerCollectorCoverageTests scans this layer by substring
+           and strips the probe's information_schema lines, so spelling the table in prose would make it
+           read as "covered" and quietly exempt it from the coverage ratchet.) */
+        if (hasAgCollectors)
+        {
+            return 34;
+        }
+
         /* V33 (#1659 connection-alert opt-ins): engine-agnostic column-existence sentinel, newest-first
            arm. config_alert_settings.notify_connection_down_at_startup exists only at V33 or later. */
         if (hasConnectionRefireKnobs)

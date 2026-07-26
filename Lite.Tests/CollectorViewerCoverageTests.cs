@@ -43,13 +43,18 @@ public sealed class CollectorViewerCoverageTests
     /// Every entry is Tier-1 unbuilt UI: Lite already collects the data, the Darling viewer already has
     /// the tab, and the Lite port is pending.
     ///
-    /// EMPTY (fully drained). The last two entries — <c>system_health_events</c> and
-    /// <c>default_trace_events</c> — shipped as the System Events tab (its nine parse-on-read grids read
-    /// <c>v_system_health_events</c>; the Default Trace lane reads <c>v_default_trace_events</c>), so the
-    /// ratchet retired them. Every collector table now has a Lite reader; a NEW collect-but-don't-show
-    /// table must add a reader/tab or re-open this list with a Tier-1 comment.
+    /// The list was fully drained once (<c>system_health_events</c> / <c>default_trace_events</c> shipped
+    /// as the System Events tab) and is re-opened here by the two Availability Group tables (#991), whose
+    /// v1 is DELIBERATELY collection-only: the design scoped the first cut to the two tables plus compose
+    /// measures so the data is usable from Custom Views and MCP immediately, with the viewer tab and the
+    /// failover / sync-fell-behind alerts as a follow-up. The ratchet still applies — when that tab ships,
+    /// <see cref="AllowList_HasNoEntryThatIsActuallyRead"/> goes red and these entries must be deleted.
     /// </summary>
-    private static readonly HashSet<string> KnownStoreOnlyOrUnbuiltTables = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly HashSet<string> KnownStoreOnlyOrUnbuiltTables = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "ag_replica_states",
+        "ag_database_replica_states",
+    };
 
     [Fact]
     public void EveryCollectorTable_HasALiteReader_OrIsAllowListed()

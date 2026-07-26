@@ -106,7 +106,7 @@ Data starts flowing within 1–5 minutes. That's it. No installation on your ser
 
 ### Lite Collectors
 
-36 collectors run on independent, configurable schedules (the long-running-query completion trace is opt-in and ships disabled):
+38 collectors run on independent, configurable schedules (the long-running-query completion trace is opt-in and ships disabled):
 
 | Collector | Default | Source |
 |---|---|---|
@@ -128,6 +128,8 @@ Data starts flowing within 1–5 minutes. That's it. No installation on your ser
 | perfmon_stats | 1 min | `sys.dm_os_performance_counters` (deltas) |
 | deadlocks | 1 min | dedicated `PerformanceMonitor_Deadlock` XE session (`xml_deadlock_report`; `database_xml_deadlock_report` on Azure SQL DB) |
 | dmv_blocking_snapshot | 1 min | `sys.dm_os_waiting_tasks` + `sys.dm_exec_*` (always-on blocking fallback when the blocked-process-report XE is unavailable) |
+| ag_replica_states | 1 min | `sys.dm_hadr_availability_replica_states` + `sys.availability_replicas` (Availability Group replica health; zero rows without AGs, not Azure SQL DB) |
+| ag_database_replica_states | 1 min | `sys.dm_hadr_database_replica_states` (per-database send/redo queues, rates, secondary lag; zero rows without AGs, not Azure SQL DB) |
 | session_stats | 5 min | `sys.dm_exec_sessions` active session tracking |
 | session_summary_stats | 5 min | `sys.dm_exec_sessions` top app/host/database summary |
 | memory_clerks | 5 min | `sys.dm_os_memory_clerks` |
