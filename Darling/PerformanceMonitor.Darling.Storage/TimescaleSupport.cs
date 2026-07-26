@@ -710,6 +710,45 @@ WITH NO DATA";
         return applied;
     }
 
+    /* ─────────────── rollup availability (the plain-PostgreSQL guard, #1664) ─────────────── */
+
+    /// <summary>
+    /// One catalog round trip answering "which retention rollups exist in THIS store?" — the availability
+    /// input to <see cref="RetentionTierRouter.Resolve(DateTime, DateTime, bool, bool)"/>. <c>to_regclass</c>
+    /// needs no table privilege and returns NULL for a missing relation, so this is safe under the viewer's
+    /// least-privilege role and on any store shape. Column order matches
+    /// <see cref="RollupAvailability"/>'s constructor.
+    /// </summary>
+    public static readonly string RollupProbeSql =
+        "SELECT " +
+        $"to_regclass('collect.{QueryStatsHourlyView}') IS NOT NULL, " +
+        $"to_regclass('collect.{QueryStatsDailyView}') IS NOT NULL, " +
+        $"to_regclass('collect.{QueryStatsDbHourlyView}') IS NOT NULL, " +
+        $"to_regclass('collect.{QueryStatsDbDailyView}') IS NOT NULL";
+
+    /// <summary>
+    /// Detects which continuous-aggregate rollups exist in the store (<see cref="RollupProbeSql"/>). On a
+    /// plain-PostgreSQL store every flag is false — and that is a COMPLETE configuration, not a degraded one:
+    /// without the extension no retention policy ever drops raw, so the raw tables hold full history and
+    /// routing everything to raw loses nothing. On a TimescaleDB store the worker's ensure sweep creates the
+    /// views before any reader can need them; a partially-built store (one aggregate's failure-isolated
+    /// setup failed) reports exactly what exists, so the router degrades per tier instead of a reader
+    /// throwing 42P01 at a user (#1664, the gated-live catch on #1661's first cut).
+    /// </summary>
+    public static async Task<RollupAvailability> DetectRollupsAsync(NpgsqlDataSource dataSource, CancellationToken cancellationToken = default)
+    {
+        if (dataSource is null)
+        {
+            throw new ArgumentNullException(nameof(dataSource));
+        }
+
+        await using var command = dataSource.CreateCommand(RollupProbeSql);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await reader.ReadAsync(cancellationToken);
+        return new RollupAvailability(
+            reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3));
+    }
+
     /// <summary>
     /// Converts every collector table to a hypertable (<see cref="HypertableTables"/> scope;
     /// <see cref="CreateHypertableSql"/> per table). Failure-isolated per table: one failed
@@ -1030,3 +1069,21 @@ WHERE j.proc_name LIKE '%compression%'
 /// may be null on an odd catalog), and the human-readable reason the pure predicate produced.
 /// </summary>
 public sealed record StuckCompressionJob(long JobId, string? HypertableName, string Reason);
+
+/// <summary>
+/// Which retention rollups exist in a store (<see cref="TimescaleSupport.DetectRollupsAsync"/>): the
+/// query-grain pair (query_stats_hourly / _daily — the Daily Summary and top-consumer readers) and the
+/// database-grain pair (query_stats_db_hourly / _daily — the FinOps database-resource reader). All false on a
+/// plain-PostgreSQL store, where raw is complete anyway; per-flag on a TimescaleDB store so a
+/// failure-isolated partial build degrades one tier instead of erroring (#1664).
+/// </summary>
+public readonly record struct RollupAvailability(
+    bool QueryGrainHourly, bool QueryGrainDaily, bool DbGrainHourly, bool DbGrainDaily)
+{
+    /// <summary>True when every rollup exists — the steady state on a TimescaleDB store, safe to cache
+    /// permanently (a created continuous aggregate is never dropped outside the reshape sweep).</summary>
+    public bool AllPresent => QueryGrainHourly && QueryGrainDaily && DbGrainHourly && DbGrainDaily;
+
+    /// <summary>No rollups at all — the plain-PostgreSQL shape, and the safe fallback when a probe fails.</summary>
+    public static RollupAvailability None => default;
+}

@@ -83,6 +83,33 @@ public static class RetentionTierRouter
     }
 
     /// <summary>
+    /// The availability-gated form (#1664): the age decision of <see cref="Resolve(DateTime, DateTime)"/>,
+    /// degraded to what the store actually HAS. Age alone is only half the answer — the rollups are runtime
+    /// TimescaleDB setup, so a plain-PostgreSQL store never has them (and never drops raw either, making raw
+    /// both available AND complete there), and a partially-built TimescaleDB store may have one tier but not
+    /// the other. Degrade mirrors <c>ComposeSourceRouter</c>: a daily-age window with no daily view falls to
+    /// the hourly view (capped at its horizon); a window whose resolved tier's view is missing falls to raw.
+    /// Callers get the flags from <see cref="TimescaleSupport.DetectRollupsAsync"/>, picking the grain pair
+    /// their query reads.
+    /// </summary>
+    public static RetentionTier Resolve(DateTime nowUtc, DateTime windowStartUtc, bool hourlyAvailable, bool dailyAvailable)
+    {
+        var tier = Resolve(nowUtc, windowStartUtc);
+
+        if (tier == RetentionTier.Daily && !dailyAvailable)
+        {
+            tier = RetentionTier.Hourly;
+        }
+
+        if (tier == RetentionTier.Hourly && !hourlyAvailable)
+        {
+            tier = RetentionTier.Raw;
+        }
+
+        return tier;
+    }
+
+    /// <summary>
     /// The earliest instant a reader that projects per-row text can honestly cover, as of
     /// <paramref name="nowUtc"/>. Callers clamp their window start to this and surface the clamp.
     /// </summary>

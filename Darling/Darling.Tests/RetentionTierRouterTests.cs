@@ -94,6 +94,51 @@ public sealed class RetentionTierRouterTests
         Assert.Equal(RetentionTierRouter.HourlyMaxAge, ComposeSourceRouter.HourlyRouteMaxAge);
     }
 
+    /* ── #1664: availability gates the age decision — plain PostgreSQL has no rollups ── */
+
+    /// <summary>
+    /// Age is only half the decision: the rollups are runtime TimescaleDB setup, so a plain-PostgreSQL store
+    /// never has them — and never drops raw either, so raw is both available AND complete there. Routing an
+    /// old window to a rollup that does not exist threw 42P01 in front of the user (the gated-live catch on
+    /// #1661's first cut). Degrade mirrors the composer: daily-age with no daily view falls to hourly
+    /// (capped); a missing hourly view falls to raw.
+    /// </summary>
+    [Theory]
+    /* A TimescaleDB store with every rollup — the age decision is unchanged. */
+    [InlineData(1, true, true, RetentionTier.Raw)]
+    [InlineData(10, true, true, RetentionTier.Hourly)]
+    [InlineData(30, true, true, RetentionTier.Daily)]
+    /* Plain PostgreSQL — no rollups, raw holds full history: every window is raw. */
+    [InlineData(10, false, false, RetentionTier.Raw)]
+    [InlineData(30, false, false, RetentionTier.Raw)]
+    /* Partial builds (failure-isolated setup): daily missing → hourly, mirroring
+       ComposeSourceRouter's DailyView-is-null rule; hourly missing → raw, the safe floor. */
+    [InlineData(30, true, false, RetentionTier.Hourly)]
+    [InlineData(10, false, true, RetentionTier.Raw)]
+    [InlineData(30, false, true, RetentionTier.Daily)]
+    public void Resolve_WithAvailability_DegradesToWhatTheStoreActuallyHas(
+        int ageDays, bool hourlyAvailable, bool dailyAvailable, RetentionTier expected) =>
+        Assert.Equal(expected, RetentionTierRouter.Resolve(Now, Now.AddDays(-ageDays), hourlyAvailable, dailyAvailable));
+
+    /// <summary>
+    /// The probe must ask about exactly the views the routed readers can choose — a renamed or added rollup
+    /// that the probe does not cover would route on a stale answer.
+    /// </summary>
+    [Fact]
+    public void RollupProbe_CoversEveryViewTheRoutedReadersUse()
+    {
+        foreach (var view in new[]
+        {
+            TimescaleSupport.QueryStatsHourlyView,
+            TimescaleSupport.QueryStatsDailyView,
+            TimescaleSupport.QueryStatsDbHourlyView,
+            TimescaleSupport.QueryStatsDbDailyView,
+        })
+        {
+            Assert.Contains($"to_regclass('collect.{view}')", TimescaleSupport.RollupProbeSql, StringComparison.Ordinal);
+        }
+    }
+
     private static TimeSpan ParseDays(string interval)
     {
         var days = int.Parse(interval.Split(' ')[0], System.Globalization.CultureInfo.InvariantCulture);

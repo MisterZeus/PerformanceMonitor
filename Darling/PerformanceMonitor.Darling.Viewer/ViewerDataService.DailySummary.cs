@@ -45,12 +45,15 @@ public sealed partial class ViewerDataService
     ///
     /// <para>#1661: routes the query-count CTE to the hourly or daily rollup when the window reaches past the raw
     /// retention horizon. Without this the calendar silently reported zero distinct queries for every day older
-    /// than ~4 days once retention began dropping chunks.</para>
+    /// than ~4 days once retention began dropping chunks. #1664: gated on the rollups actually existing — a
+    /// plain-PostgreSQL store has none (and never drops raw, so raw is complete there); routing by age alone
+    /// threw 42P01 at the user.</para>
     /// </summary>
     public async Task<List<DailySummaryRow>> GetDailySummaryRangeAsync(
         int serverId, DateTime fromDate, DateTime toDate, CancellationToken cancellationToken = default)
     {
-        var tier = RetentionTierRouter.Resolve(DateTime.UtcNow, fromDate);
+        var rollups = await GetRollupAvailabilityAsync(cancellationToken);
+        var tier = RetentionTierRouter.Resolve(DateTime.UtcNow, fromDate, rollups.QueryGrainHourly, rollups.QueryGrainDaily);
 
         await using var command = _dataSource.CreateCommand(DailySummaryRangeSqlFor(tier));
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });

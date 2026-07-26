@@ -198,7 +198,11 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
     public static async Task<List<DailySummaryReadRow>> GetDailySummaryRangeAsync(
         NpgsqlDataSource postgres, int serverId, DateTime fromDate, DateTime toDate, CancellationToken cancellationToken = default)
     {
-        var tier = RetentionTierRouter.Resolve(DateTime.UtcNow, fromDate);
+        /* #1664: gate the age decision on the rollups actually existing — a plain-PostgreSQL store has none
+           (and never drops raw, so raw is complete there). Probed per call, uncached: get_daily_health runs at
+           human/model cadence and the probe is one catalog lookup. */
+        var rollups = await TimescaleSupport.DetectRollupsAsync(postgres, cancellationToken);
+        var tier = RetentionTierRouter.Resolve(DateTime.UtcNow, fromDate, rollups.QueryGrainHourly, rollups.QueryGrainDaily);
 
         var results = new List<DailySummaryReadRow>();
         await using var command = postgres.CreateCommand(DailySummarySql.RangeSqlFor(tier));

@@ -201,8 +201,10 @@ ORDER BY c.cpu_time_ms DESC";
     public async Task<List<DatabaseResourceUsageRow>> GetDatabaseResourceUsageAsync(int serverId, int hoursBack = 24, CancellationToken cancellationToken = default)
     {
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
+        var rollups = await GetRollupAvailabilityAsync(cancellationToken);
+        var tier = RetentionTierRouter.Resolve(DateTime.UtcNow, cutoff, rollups.DbGrainHourly, rollups.DbGrainDaily);
 
-        await using var command = _dataSource.CreateCommand(DatabaseResourceUsageSqlFor(RetentionTierRouter.Resolve(DateTime.UtcNow, DateTime.UtcNow.AddHours(-hoursBack))));
+        await using var command = _dataSource.CreateCommand(DatabaseResourceUsageSqlFor(tier));
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
 
@@ -355,8 +357,10 @@ LIMIT $3";
     public async Task<List<TopResourceConsumerRow>> GetTopResourceConsumersByTotalAsync(int serverId, int hoursBack = 24, int topN = 5, CancellationToken cancellationToken = default)
     {
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
+        var rollups = await GetRollupAvailabilityAsync(cancellationToken);
+        var tier = RetentionTierRouter.Resolve(DateTime.UtcNow, cutoff, rollups.QueryGrainHourly, rollups.QueryGrainDaily);
 
-        await using var command = _dataSource.CreateCommand(TopResourceConsumersByTotalSqlFor(RetentionTierRouter.Resolve(DateTime.UtcNow, DateTime.UtcNow.AddHours(-hoursBack))));
+        await using var command = _dataSource.CreateCommand(TopResourceConsumersByTotalSqlFor(tier));
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = topN });
@@ -417,8 +421,10 @@ LIMIT $3";
     public async Task<List<TopResourceConsumerRow>> GetTopResourceConsumersByAvgAsync(int serverId, int hoursBack = 24, int topN = 5, CancellationToken cancellationToken = default)
     {
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
+        var rollups = await GetRollupAvailabilityAsync(cancellationToken);
+        var tier = RetentionTierRouter.Resolve(DateTime.UtcNow, cutoff, rollups.QueryGrainHourly, rollups.QueryGrainDaily);
 
-        await using var command = _dataSource.CreateCommand(TopResourceConsumersByAvgSqlFor(RetentionTierRouter.Resolve(DateTime.UtcNow, DateTime.UtcNow.AddHours(-hoursBack))));
+        await using var command = _dataSource.CreateCommand(TopResourceConsumersByAvgSqlFor(tier));
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = topN });
