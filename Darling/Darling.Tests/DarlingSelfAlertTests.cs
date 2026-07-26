@@ -1011,9 +1011,11 @@ public sealed class DarlingSelfAlertTests
             Judge(DatabaseRow(lagSeconds: 9999, suspended: true), 300, 0));
 
         /* The other half of the asymmetry, and the reason this is not simply "judge suspended rows normally":
-           a suspended reading UNDER the threshold is not evidence of recovery. Were the documented zero-lag
-           behavior ever real, this is the row it would produce, and calling it CaughtUp would resolve a
-           standing alert at the exact moment things got worse. NotMeasurable is correct under both behaviors. */
+           a suspended reading UNDER the threshold is not evidence of recovery. This row is NOT hypothetical:
+           sampled every 15s across a 60-second suspend on an IDLE group, secondary_lag_seconds read 0 at every
+           sample while synchronization_state_desc was already NOT SYNCHRONIZING — on a quiet group it may
+           never latch at all. Calling that CaughtUp would clear a standing alarm on a replica receiving
+           nothing. (It also covers the documented flat-zero behavior, if any build really does that.) */
         Assert.Equal(
             DarlingSelfAlertEvaluator.AgSyncJudgement.NotMeasurable,
             Judge(DatabaseRow(lagSeconds: 0, suspended: true), 300, 0));

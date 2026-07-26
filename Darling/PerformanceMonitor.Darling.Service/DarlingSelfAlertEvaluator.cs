@@ -694,18 +694,42 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <para>SUSPENDED ROWS MAY RAISE AN ALARM BUT MAY NEVER CLEAR ONE. That asymmetry replaces an earlier rule
     /// that made the seconds trigger abstain entirely while suspended, which was written to MS Learn's claim
     /// that <c>secondary_lag_seconds</c> "shows as 0 if the data movement is suspended". THE DOCUMENTATION IS
-    /// WRONG. Measured against a live AG (SQL Server 2022 16.0.4265.3, clusterless AG, write load, sampled
-    /// across a SUSPEND_FROM_USER): lag ACCRUES monotonically at wall-clock rate while suspended
-    /// (…3993 → 4005 → 4017 → 4029 → 4041 over four 12-second intervals) and returns to 0 on resume. Abstaining
-    /// therefore silenced the lag alert on a suspended secondary — the single most common way a secondary falls
-    /// behind, and the case an operator most needs paged for.</para>
-    /// <para>The alarm/clear asymmetry is deliberately correct under BOTH behaviors, so this does not have to
-    /// bet on one: if lag accrues (measured), a suspended secondary crosses the threshold and fires; if it ever
-    /// did read <c>0</c> (documented), that <c>0</c> is below threshold and yields NotMeasurable rather than
-    /// CaughtUp, so it still cannot resolve a standing alert. The same rule protects the redo trigger, whose
-    /// value FREEZES at its last reading while suspended (also measured) — a frozen value over the threshold is
-    /// a real backlog worth firing on, while a frozen value under it is stale data that must not clear
-    /// anything.</para>
+    /// WRONG, and abstaining silenced the lag alert on a suspended secondary — the single most common way a
+    /// secondary falls behind, and the case an operator most needs paged for.</para>
+    /// <para>What the column actually does while suspended (measured on a live clusterless AG, SQL Server 2022
+    /// 16.0.4265.3, across a SUSPEND_FROM_USER): it reports the STALENESS OF THE LAST HARDENED LOG —
+    /// approximately <c>now - last_hardened_time</c> — which then grows at wall-clock rate. It is NOT time
+    /// since suspension, and the starting value depends on write activity: under load the last hardening is
+    /// near-now so it starts around 0 and climbs (0 → 15 → 31 → 46 → 62 across a 60-second suspend); on an IDLE
+    /// group it starts at however long since the last write and so can jump straight to a large number
+    /// (…3993 → 4005 → 4017 → 4029 → 4041 over four 12-second intervals). Both were measured; they are the same
+    /// behavior from different starting points. It returns to 0 on resume.</para>
+    /// <para>THE CONSEQUENCE the asymmetry exists to survive, and it is not hypothetical: the column does not
+    /// latch when movement stops, and ON A QUIET GROUP IT MAY NEVER LATCH AT ALL. Sampled every 15 seconds
+    /// across a 60-second suspend on an idle group, <c>secondary_lag_seconds</c> read <c>0</c> at every single
+    /// sample while <c>synchronization_state_desc</c> was already NOT SYNCHRONIZING and the last hardened log
+    /// aged from 262 to 322 seconds. So a suspended, genuinely-stopped replica can report zero lag for the
+    /// entire outage. A rule that read that zero as "caught up" would clear a standing alarm on a replica that
+    /// is receiving nothing. (The same guard also covers the documented flat-zero behavior, if any build really
+    /// does that.) The corollary is that THE LAG TRIGGER ALONE CANNOT DETECT SUSPENDED DATA MOVEMENT on a quiet
+    /// group — "AG Database Suspended" is the alert that owns that case, which is why the family has both.
+    /// The same rule protects the redo trigger, whose value FREEZES at its last reading while suspended (also
+    /// measured) — a frozen value over the threshold is a real backlog worth firing on, while a frozen value
+    /// under it is stale data that must not clear anything.</para>
+    /// <para>TREAT THIS AS A RULE ABOUT SUSPENDED ROWS, NOT ABOUT THESE TWO COLUMNS. Every measured signal on a
+    /// suspended replica is untrustworthy in the REASSURING direction, and they fail that way for different
+    /// reasons: lag can sit at 0 because it never latched, the redo queue is frozen, and the four
+    /// <c>*_time</c> columns freeze at their last pre-suspension instant — so a cross-replica commit-time delta
+    /// stops growing exactly when replication stops, i.e. it looks like it is catching up. The sharpest example
+    /// is any DRAIN-TIME measure: queue ÷ rate with both frozen holds a small, static, healthy-looking number
+    /// (measured at a flat 0.0144 minutes across an entire suspension) when the true answer is "never, movement
+    /// is stopped". A drain-time or commit-delta trigger added here would therefore fail SILENT rather than
+    /// loud, which is worse. Anything new that judges a suspended row must route through the same
+    /// may-fire-never-clear gate below rather than being trusted on its own.</para>
+    /// <para>WHAT THE NUMBER IS NOT: it measures staleness, not volume. On an idle group a large lag means
+    /// "nothing has been hardened in a while", which is not the same as "a lot of data is at risk" — the
+    /// backlog measure would be <c>log_send_queue_size</c>, and that reads NULL while suspended. Worth knowing
+    /// before tuning <c>ag_lag_alert_seconds</c> by staring at the value.</para>
     /// <para>Not clearing has to be its OWN answer rather than a <c>false</c>, or the caller reads it as
     /// recovery: a lagging database that becomes suspended (or whose columns go NULL under quorum loss) would
     /// emit "AG Sync Recovered — has caught up with the primary" in the same sweep that reports it suspended.
@@ -929,7 +953,11 @@ internal sealed class DarlingSelfAlertEvaluator
                             "secondary's redo thread (it is single-threaded per database on older versions and is " +
                             "easily starved by CPU or storage latency on the secondary), and whether something on the " +
                             "primary — an index rebuild, a bulk load, a long transaction — is generating log faster " +
-                            "than the secondary can consume it.",
+                            "than the secondary can consume it. Read the figures for what they measure: the lag " +
+                            "seconds are how STALE the secondary's last hardened log is, not how much data is queued " +
+                            "behind it, so on a quiet group a large value can simply mean nothing has been written " +
+                            "recently. While data movement is suspended the redo queue is frozen at its last reading, " +
+                            "and log_send_queue_size — the actual backlog measure — reports nothing at all.",
                         severity: AlertSeverityLevel.Warning,
                         shortMessage: behindReason, cancellationToken);
                 }
