@@ -372,10 +372,18 @@ public static class MeasureCatalog
         new ComposeDimension("query_store_stats", "query_hash", "query_hash", Likeable: false),
 
         /* #991 AG health. Only the database grain carries measures — the replica-grain table is all
-           state strings with nothing numeric to aggregate — so only its dimensions appear here. */
+           state strings with nothing numeric to aggregate — so only its dimensions appear here.
+           synchronization_state_desc / suspend_reason_desc are here for a specific reason, not for
+           completeness: secondary_lag_seconds reads 0 (not NULL) while data movement is SUSPENDED, so
+           without a way to filter on suspension a lag panel cannot tell a healthy zero from a suspended
+           one — the exact misread the measure's own comment warns about. These two are the text columns
+           that make that filterable (is_suspended cannot be a dimension: the compiler binds filter values
+           as text, which would not match a boolean column). */
         new ComposeDimension("ag_database_replica_states", "ag_name", "ag_name", Likeable: true),
         new ComposeDimension("ag_database_replica_states", "database_name", "database_name", Likeable: true),
         new ComposeDimension("ag_database_replica_states", "replica_server_name", "replica_server_name", Likeable: true),
+        new ComposeDimension("ag_database_replica_states", "synchronization_state_desc", "synchronization_state_desc", Likeable: true),
+        new ComposeDimension("ag_database_replica_states", "suspend_reason_desc", "suspend_reason_desc", Likeable: true),
     };
 
     private static readonly Dictionary<(string Source, string Name), ComposeDimension> s_dimByKey =
@@ -465,7 +473,7 @@ public static class MeasureCatalog
     private static readonly string[] JobHistoryDims = { "job_name", "step_name", "run_status_desc", "category_name" };
     private static readonly string[] PerfmonDims = { "object_name", "counter_name", "instance_name" };
     private static readonly string[] QueryStoreDims = { "database_name", "module_name", "query_hash" };
-    private static readonly string[] AgDatabaseDims = { "ag_name", "database_name", "replica_server_name" };
+    private static readonly string[] AgDatabaseDims = { "ag_name", "database_name", "replica_server_name", "synchronization_state_desc", "suspend_reason_desc" };
 
     /// <summary>The catalog. Every measure's SourceTable is a real collector; every Column/DeltaColumn is a
     /// real payload column of that collector (pinned by test).</summary>
@@ -1046,8 +1054,10 @@ public static class MeasureCatalog
              render as a plain size.
 
              Lag trap worth knowing when reading these: secondary_lag_seconds reads 0, not NULL, while data
-             movement is SUSPENDED, so a suspended replica charts as zero lag. is_suspended is collected
-             alongside it (as a dimension-free column) precisely so a reader can tell the two apart. ── */
+             movement is SUSPENDED, so a suspended replica charts as zero lag. The two state columns are
+             exposed as DIMENSIONS so that is actionable rather than merely documented — filter a lag panel
+             to synchronization_state_desc <> 'NOT SYNCHRONIZING', or group by suspend_reason_desc, and a
+             suspended replica stops masquerading as a healthy one. ── */
         new ComposeMeasure
         {
             Key = "ag_log_send_queue", DisplayName = "AG log send queue", Category = CatAvailabilityGroups, SourceTable = "ag_database_replica_states",

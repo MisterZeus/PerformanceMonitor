@@ -390,9 +390,15 @@ public sealed class PgSchemaGeneratorTests
     [Fact]
     public void Migrations_JobHistoryAndAgentStatus_MatchGeneratedFreshShape()
     {
-        /* The additive V24/V25 upgrade bodies MUST be the collect.-qualified twin of the fresh (V1
-           GenerateFullSchema) table, or a fresh store and an upgraded store would drift and the positional
-           binary COPY would mis-bind. Pin each migration's CREATE TABLE against the generator's output. */
+        /* The additive upgrade bodies MUST be the collect.-qualified twin of the fresh (V1
+           GenerateFullSchema) table, or a fresh store and an upgraded store drift apart. What breaks is
+           NAMES and TYPES first: PgCollectorRowWriter.CopyCommandFor emits an explicit column list
+           ("COPY t (a, b, ...)") built from PayloadColumns, so Postgres binds by name — a renamed or
+           missing column fails the COPY outright and a retyped one mis-stores or throws. Column ORDER is
+           not a COPY hazard on this side (it is on Lite's, whose DuckDB appender is genuinely positional),
+           but it is pinned anyway so the two provenances stay physically comparable — a store's shape
+           should not reveal whether it was installed fresh or upgraded. Pin each migration's CREATE TABLE
+           against the generator's output. */
         /* Normalize line endings: CreateTable emits '\n'; the verbatim-string V##Sql consts carry the
            source file's CRLF, so compare on a common newline. */
         static string Lf(string s) => s.Replace("\r\n", "\n", StringComparison.Ordinal);
@@ -413,6 +419,18 @@ public sealed class PgSchemaGeneratorTests
         Assert.Contains("CREATE INDEX IF NOT EXISTS idx_job_history_time ON collect.job_history(server_id, collection_time);", v24, StringComparison.Ordinal);
         Assert.Contains(CollectQualified(AgentStatusCollector.Instance), v25, StringComparison.Ordinal);
         Assert.Contains("CREATE INDEX IF NOT EXISTS idx_agent_status_time ON collect.agent_status(server_id, collection_time);", v25, StringComparison.Ordinal);
+
+        /* V34 (#991) creates BOTH Availability Group tables in one migration body — same contract, so it
+           is pinned here rather than by a name-presence check. The weaker `Assert.Contains(column.Name)`
+           sweep this replaces would have passed a V34 with the columns reordered, is_local typed text, or
+           a spurious NOT NULL: exactly the drifts that make an upgraded store's physical shape differ from
+           a fresh one. Compares the WHOLE generated CREATE TABLE, so shape is pinned, not vocabulary. */
+        var v34 = Lf(PgMigrations.Scripts.Single(m => m.Version == 34).Sql);
+
+        Assert.Contains(CollectQualified(AgReplicaStatesCollector.Instance), v34, StringComparison.Ordinal);
+        Assert.Contains("CREATE INDEX IF NOT EXISTS idx_ag_replica_states_time ON collect.ag_replica_states(server_id, collection_time);", v34, StringComparison.Ordinal);
+        Assert.Contains(CollectQualified(AgDatabaseReplicaStatesCollector.Instance), v34, StringComparison.Ordinal);
+        Assert.Contains("CREATE INDEX IF NOT EXISTS idx_ag_database_replica_states_time ON collect.ag_database_replica_states(server_id, collection_time);", v34, StringComparison.Ordinal);
     }
 
     [Fact]

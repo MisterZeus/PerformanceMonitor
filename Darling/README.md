@@ -158,6 +158,9 @@ CREATE LOGIN [DarlingMonitor] WITH PASSWORD = N'YourStrongPassword';
 GRANT VIEW SERVER STATE TO [DarlingMonitor];
 GRANT ALTER ANY EVENT SESSION TO [DarlingMonitor];
 
+-- Only if the instance hosts Availability Groups (see the table below)
+GRANT VIEW ANY DEFINITION TO [DarlingMonitor];
+
 -- Optional: SQL Agent job monitoring + failed-job alerts
 USE [msdb];
 CREATE USER [DarlingMonitor] FOR LOGIN [DarlingMonitor];
@@ -171,6 +174,7 @@ ALTER ROLE [SQLAgentReaderRole] ADD MEMBER [DarlingMonitor];
 | `ALTER SETTINGS` | The `sp_configure` blocked-process-threshold bootstrap | Logged; set the threshold yourself (or via RDS Parameter Group) |
 | `SQLAgentReaderRole` on msdb | `running_jobs` collector and the failed/long-running-job alerts | Skipped gracefully — logged as a permissions skip, alerts return no jobs |
 | `DBCC TRACESTATUS` permission | `trace_flags` snapshot | Degrades to zero rows with a warning |
+| `VIEW ANY DEFINITION` | The AG catalog views (`sys.availability_groups`, `sys.availability_replicas`) the `ag_replica_states` / `ag_database_replica_states` collectors join to the `sys.dm_hadr_*` DMVs | **Silently zero rows** — catalog views hide rows rather than erroring, so a real AG cluster looks identical to a server with no AGs. Not needed on an instance without Availability Groups |
 
 **Azure SQL Database:** connect to the one database you monitor (set the server entry's `"database"`), using a contained user with `VIEW DATABASE STATE`, matching the product's existing Azure guidance. The XE sessions are created database-scoped there (`ALTER ANY DATABASE EVENT SESSION`); SQL Agent collectors are skipped automatically.
 

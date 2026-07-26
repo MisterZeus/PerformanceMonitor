@@ -904,9 +904,9 @@ public sealed class DarlingComposeTests
     }
 
     [Fact]
-    public void Ag_Dimensions_AreTheThreeGrainColumns()
+    public void Ag_Dimensions_AreTheGrainColumnsPlusTheSuspensionState()
     {
-        foreach (var name in new[] { "ag_name", "database_name", "replica_server_name" })
+        foreach (var name in new[] { "ag_name", "database_name", "replica_server_name", "synchronization_state_desc", "suspend_reason_desc" })
         {
             var dimension = MeasureCatalog.Dimension("ag_database_replica_states", name);
             Assert.NotNull(dimension);
@@ -914,11 +914,11 @@ public sealed class DarlingComposeTests
             Assert.True(dimension.Likeable);
         }
 
-        /* Every AG measure allows all three, so any of them can slice or group a panel. */
+        /* Every AG measure allows all five, so any of them can slice or group a panel. */
         foreach (var measure in MeasureCatalog.Measures.Where(m => m.SourceTable == "ag_database_replica_states"))
         {
             Assert.Equal(
-                new[] { "ag_name", "database_name", "replica_server_name" },
+                new[] { "ag_name", "database_name", "replica_server_name", "synchronization_state_desc", "suspend_reason_desc" },
                 measure.AllowedDimensions);
         }
 
@@ -928,6 +928,21 @@ public sealed class DarlingComposeTests
         /* The replica-grain table is all state strings — no numeric column worth aggregating — so it
            deliberately contributes no measures and therefore no dimensions. */
         Assert.False(MeasureCatalog.IsKnownSource("ag_replica_states"));
+    }
+
+    [Fact]
+    public void Ag_LagPanel_CanExcludeSuspendedReplicas()
+    {
+        /* The reason synchronization_state_desc is a dimension at all: secondary_lag_seconds reads 0 while
+           data movement is suspended, so an unfiltered lag panel shows a suspended replica as perfectly
+           healthy. Filtering it out has to actually compile, or the trap is documented but unavoidable. */
+        var sql = Compile(ValidPlan("{\"source\":\"ag_database_replica_states\",\"measure\":\"ag_secondary_lag\",\"aggregate\":\"max\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"filters\":[{\"dimension\":\"synchronization_state_desc\",\"op\":\"neq\",\"value\":\"NOT SYNCHRONIZING\"}]}"));
+
+        Assert.Contains("collect.ag_database_replica_states", sql, StringComparison.Ordinal);
+        Assert.Contains("synchronization_state_desc", sql, StringComparison.Ordinal);
+
+        /* The filter value is a bound parameter, never inlined. */
+        Assert.DoesNotContain("NOT SYNCHRONIZING", sql, StringComparison.Ordinal);
     }
 
     [Fact]

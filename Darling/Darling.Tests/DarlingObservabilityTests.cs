@@ -81,29 +81,16 @@ public sealed class DarlingObservabilityTests
 
         /* V34 (#991) creates the two Availability Group collector tables. Schema-qualified collect.* and
            CREATE TABLE IF NOT EXISTS, per the file's additive-create idiom (V29): a no-op on a fresh store
-           whose V1 schema was generated from the collector catalog, the real create on an upgrade. Column
-           order/types must equal PgSchemaGenerator.CreateTable's output for the two catalog entries — that
-           equality is what PgSchemaGeneratorTests pins, so a divergent hand-written DDL here would give an
-           upgraded store a different physical column order than a fresh one and break the binary COPY. */
+           whose V1 schema was generated from the collector catalog, the real create on an upgrade.
+           The full column-for-column equality against PgSchemaGenerator.CreateTable is pinned by
+           PgSchemaGeneratorTests.Migrations_JobHistoryAndAgentStatus_MatchGeneratedFreshShape — this test
+           only pins the migration's IDENTITY (version, name) and the two traits worth stating in prose. */
         var v34 = PgMigrations.Scripts[33].Sql;
         Assert.Equal("availability-group-collectors", PgMigrations.Scripts[33].Name);
-        Assert.Contains("CREATE TABLE IF NOT EXISTS collect.ag_replica_states (", v34, StringComparison.Ordinal);
-        Assert.Contains("CREATE TABLE IF NOT EXISTS collect.ag_database_replica_states (", v34, StringComparison.Ordinal);
-        Assert.Contains("CREATE INDEX IF NOT EXISTS idx_ag_replica_states_time ON collect.ag_replica_states(server_id, collection_time);", v34, StringComparison.Ordinal);
-        Assert.Contains("CREATE INDEX IF NOT EXISTS idx_ag_database_replica_states_time ON collect.ag_database_replica_states(server_id, collection_time);", v34, StringComparison.Ordinal);
 
         /* The LSNs are numeric(25,0) at the source — wider than bigint — so they land as text. */
         Assert.Contains("last_hardened_lsn text", v34, StringComparison.Ordinal);
         Assert.Contains("last_commit_lsn text", v34, StringComparison.Ordinal);
-
-        /* The migration DDL and the generated DDL must agree column-for-column, both directions. */
-        foreach (var schema in new[] { AgReplicaStatesCollector.Instance, (ICollectorSchemaInfo)AgDatabaseReplicaStatesCollector.Instance })
-        {
-            foreach (var column in schema.PayloadColumns)
-            {
-                Assert.Contains($"    {column.Name} ", v34, StringComparison.Ordinal);
-            }
-        }
 
         /* V26 (#1506) adds the generic webhook channel's four columns to the V17 control-plane table.
            Schema-qualified config.* and IF NOT EXISTS, per the file's additive-ALTER idiom. */
