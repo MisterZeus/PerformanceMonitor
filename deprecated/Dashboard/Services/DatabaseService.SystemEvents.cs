@@ -466,8 +466,14 @@ ORDER BY bucket_hour;";
                         {
                             ChangeTime = reader.GetDateTime(0),
                             TraceFlag = reader.GetInt32(1),
-                            PreviousStatus = reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
-                            NewStatus = reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
+                            /* #1660: previous_status / new_status are BIT in report.trace_flag_changes — the
+                               view's column shape is a public contract (external consumers query it directly),
+                               so the READER formats, matching the shared ConfigChangeDiff.StatusText wording
+                               (ON / OFF / empty-when-null). GetString on a bit column throws InvalidCastException,
+                               which is what took this grid (and the get_trace_flag_changes MCP tool) down the
+                               moment #1635 let the view return rows. */
+                            PreviousStatus = reader.IsDBNull(2) ? string.Empty : (reader.GetBoolean(2) ? "ON" : "OFF"),
+                            NewStatus = reader.IsDBNull(3) ? string.Empty : (reader.GetBoolean(3) ? "ON" : "OFF"),
                             Scope = reader.IsDBNull(4) ? string.Empty : reader.GetString(4),
                             ChangeDescription = reader.IsDBNull(5) ? string.Empty : reader.GetString(5),
                             IsGlobal = reader.GetBoolean(6),
