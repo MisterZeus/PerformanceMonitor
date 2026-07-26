@@ -377,7 +377,44 @@ internal sealed class DarlingStoreUpgrade
     /// upgrade window is wanted anyway — the jobs it would run operate on data being copied out from under
     /// them — so it is turned off for the duration and comes back with the normal start afterwards.</para>
     /// </summary>
-    internal const string QuiesceTimescaleServerOptions = "-c timescaledb.max_background_workers=0";
+    /// <summary>
+    /// Server options pg_upgrade passes to BOTH clusters it starts, for the upgrade window only. The
+    /// store's own postgresql.conf is never edited; <c>-c</c> on the command line simply outranks it, the
+    /// same mechanism <see cref="DarlingManagedPostgres.BuildServerRuntimeOptions"/> already uses to force
+    /// loopback at a normal start.
+    ///
+    /// <para><b>timescaledb.max_background_workers=0</b> — deadlock avoidance, not tuning. TimescaleDB's
+    /// scheduler background worker connects to databases and takes locks on its own schedule, including on
+    /// <c>template0</c>, which timescale/timescaledb#1593 documents deadlocking against a restore needing
+    /// the same lock, in a cycle PostgreSQL's deadlock detector does not break. pg_upgrade is exactly that
+    /// workload. Nothing the scheduler could do during an upgrade is wanted anyway — its jobs would operate
+    /// on data being copied out from under them.</para>
+    ///
+    /// <para><b>listen_addresses=localhost</b> — the IPv4/IPv6 loopback trap, caught in pg_upgrade's own
+    /// diagnostics: <c>connection to server at "localhost" (::1), port 50432 failed</c>. pg_upgrade has no
+    /// Unix sockets on Windows, so it connects to its clusters BY NAME, and Windows resolves
+    /// <c>localhost</c> to <c>::1</c> first. The managed v1 conf block pins
+    /// <c>listen_addresses = '127.0.0.1'</c> — IPv4 ONLY — so on a real managed store there is nothing on
+    /// <c>::1</c> for it to reach. Restoring the stock <c>localhost</c> value for the upgrade window binds
+    /// both families, which is what pg_upgrade expects. This is the same trap
+    /// <see cref="DarlingManagedPostgres.BuildConnectionString"/> already documents and dodges by using the
+    /// literal <c>127.0.0.1</c> rather than the name — the lesson simply had never been applied to a tool
+    /// that dials on our behalf.</para>
+    /// </summary>
+    internal const string QuiesceTimescaleServerOptions =
+        "-c timescaledb.max_background_workers=0 -c listen_addresses=localhost";
+
+    /// <summary>
+    /// The ports pg_upgrade runs its throwaway old/new postmasters on. pg_upgrade defaults BOTH to
+    /// <c>50432</c>, a fixed well-known value — so two upgrades on one host, or any leftover postmaster from
+    /// an interrupted one, land on the same port and pg_upgrade silently talks to a STRANGER'S cluster. That
+    /// is not hypothetical: it was caught here as <c>FATAL: role "darling" does not exist</c> coming back
+    /// from a postmaster this service never started. These are deliberately obscure and distinct from each
+    /// other, and from the store's own configured port. They are internal to the upgrade window — nothing
+    /// connects to them but pg_upgrade itself.
+    /// </summary>
+    internal const int UpgradeOldClusterPort = 55432;
+    internal const int UpgradeNewClusterPort = 55433;
 
     /// <summary>
     /// The pg_upgrade command line. <c>--check</c> first as a dry run (it validates locale/encoding/
@@ -402,6 +439,10 @@ internal sealed class DarlingStoreUpgrade
         builder.Append(" --old-datadir \"").Append(oldDataDirectory).Append('"');
         builder.Append(" --new-datadir \"").Append(newDataDirectory).Append('"');
         builder.Append(" --username ").Append(userName);
+
+        /* Never the default 50432 — see UpgradeOldClusterPort. */
+        builder.Append(" --old-port ").Append(UpgradeOldClusterPort.ToString(CultureInfo.InvariantCulture));
+        builder.Append(" --new-port ").Append(UpgradeNewClusterPort.ToString(CultureInfo.InvariantCulture));
 
         if (mode == FileTransferMode.Link)
         {

@@ -177,8 +177,44 @@ public sealed class DarlingStoreUpgradeTests
             DarlingStoreUpgrade.FileTransferMode.Copy, checkOnly: false, jobs: 1,
             DarlingStoreUpgrade.QuiesceTimescaleServerOptions);
 
-        Assert.Contains(@"-o ""-c timescaledb.max_background_workers=0""", arguments, StringComparison.Ordinal);
-        Assert.Contains(@"-O ""-c timescaledb.max_background_workers=0""", arguments, StringComparison.Ordinal);
+        Assert.Contains(@"-o ""-c timescaledb.max_background_workers=0", arguments, StringComparison.Ordinal);
+        Assert.Contains(@"-O ""-c timescaledb.max_background_workers=0", arguments, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildPgUpgradeArguments_RestoresDualStackLoopbackForTheUpgradeWindow()
+    {
+        /* pg_upgrade has no Unix sockets on Windows, so it dials its own clusters BY NAME, and Windows
+           resolves "localhost" to ::1 first. The managed v1 conf block pins listen_addresses to '127.0.0.1'
+           — IPv4 only — leaving nothing on ::1 for it to reach. Caught verbatim in pg_upgrade's own log:
+           connection to server at "localhost" (::1), port 50432 failed. The override is scoped to the two
+           throwaway postmasters; the store's conf is never edited. */
+        var arguments = DarlingStoreUpgrade.BuildPgUpgradeArguments(
+            @"C:\pg\old\bin", @"C:\pg\new\bin", @"C:\data\pg", @"C:\data\pg-upgrade-18", "darling",
+            DarlingStoreUpgrade.FileTransferMode.Copy, checkOnly: false, jobs: 1,
+            DarlingStoreUpgrade.QuiesceTimescaleServerOptions);
+
+        Assert.Contains("-c listen_addresses=localhost", arguments, StringComparison.Ordinal);
+        /* Both clusters, because pg_upgrade connects to each in turn. */
+        Assert.Equal(2, CountOccurrences(arguments, "-c listen_addresses=localhost"));
+    }
+
+    [Fact]
+    public void BuildPgUpgradeArguments_NeverUsesTheWellKnownDefaultPort()
+    {
+        /* pg_upgrade defaults BOTH throwaway postmasters to 50432, so two upgrades on one host — or one
+           leftover postmaster from an interrupted run — collide and pg_upgrade talks to a stranger's
+           cluster. Observed here as FATAL: role "darling" does not exist, answered by a postmaster this
+           service never started. */
+        var arguments = DarlingStoreUpgrade.BuildPgUpgradeArguments(
+            @"C:\pg\old\bin", @"C:\pg\new\bin", @"C:\data\pg", @"C:\data\pg-upgrade-18", "darling",
+            DarlingStoreUpgrade.FileTransferMode.Copy, checkOnly: true, jobs: 1);
+
+        Assert.Contains("--old-port ", arguments, StringComparison.Ordinal);
+        Assert.Contains("--new-port ", arguments, StringComparison.Ordinal);
+        Assert.DoesNotContain("50432", arguments, StringComparison.Ordinal);
+        /* The two must differ: pg_upgrade has both clusters up at once during the dump/restore. */
+        Assert.NotEqual(DarlingStoreUpgrade.UpgradeOldClusterPort, DarlingStoreUpgrade.UpgradeNewClusterPort);
     }
 
     [Fact]
