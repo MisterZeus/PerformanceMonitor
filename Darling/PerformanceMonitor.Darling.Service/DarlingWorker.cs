@@ -2933,11 +2933,17 @@ LIMIT 1";
         }
         catch (SqlException ex) when (ex.Number is 229 or 297 or 300)
         {
+            /* Same Azure explanation Lite appends (#1631): error 300 on Azure SQL Database is a service
+               objective limit phrased as a permission denied on 'master', which reads as a missing GRANT
+               and sends people looking for one that cannot be issued. Appended, so the raw error stays
+               searchable. Parity is the point — a Darling operator gets the identical sentence Lite gives. */
+            var message = ex.Message + AzureDmvPermissionHint.For(ex.Number, server.Runtime?.Target.IsAzureSqlDb == true);
+
             _logger.LogWarning("  [{Server}] {Collector} => insufficient permissions ({Number}): {Message}",
-                server.Config.DisplayName, collectorName, ex.Number, ex.Message);
+                server.Config.DisplayName, collectorName, ex.Number, message);
 
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, 0, ex.Message, _logger, cancellationToken);
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, 0, message, _logger, cancellationToken);
             return 0;
         }
         catch (Exception ex)

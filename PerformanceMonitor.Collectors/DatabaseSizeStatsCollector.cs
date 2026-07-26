@@ -20,8 +20,21 @@ namespace PerformanceMonitor.Collectors;
 /// Lite's RemoteCollectorService.DatabaseSize.cs. On-prem: one batch stages per-database
 /// FILEPROPERTY(SpaceUsed) via a server-side cursor + nested sp_executesql into #file_space, then
 /// joins sys.master_files + sys.dm_os_volume_stats (the exclusion filter splices at BOTH the
-/// cursor and outer SELECT — same parameters referenced twice). Azure SQL DB: per-database
-/// connections (RunsPerDatabase), no volume stats, NULL compatibility_level — as before.
+/// cursor and outer SELECT — same parameters referenced twice).
+///
+/// <para>Azure SQL DB takes an entirely database-scoped query on the EXISTING connection: the
+/// connected database's own <c>sys.database_files</c> and <c>FILEPROPERTY(SpaceUsed)</c>, which MS
+/// Learn documents as the canonical way to read file space on that platform and which need only the
+/// <c>public</c> role. Nothing on that path reads <c>master</c>, <c>sys.master_files</c> (not
+/// documented for Azure SQL DB at all) or <c>sys.dm_os_volume_stats</c> (SQL Server only) — see
+/// <see cref="RunsPerDatabase"/> for why the enumeration that used to precede it was the actual
+/// bug.</para>
+///
+/// <para>Deliberately NOT <c>sys.dm_db_file_space_usage</c>, which looks like the natural Azure
+/// choice: on Basic/S0/S1 service objectives AND on any database in an elastic pool it requires
+/// server-admin, Entra-admin or <c>##MS_ServerStateReader##</c> rather than
+/// <c>VIEW DATABASE STATE</c>, so it would fail for exactly the reporter's configuration while
+/// appearing to work everywhere else.</para>
 /// </summary>
 public sealed class DatabaseSizeStatsCollector : CollectorDefinitionBase<DatabaseSizeStatsCollector.Row>
 {
@@ -215,8 +228,22 @@ OPTION(RECOMPILE);";
 
     public override string TargetTable => "database_size_stats";
 
-    /// <summary>Azure SQL DB databases are isolated — one connection per database.</summary>
-    public override bool RunsPerDatabase(CollectorTargetInfo target) => target.IsAzureSqlDb;
+    /// <summary>
+    /// Never per-database. On Azure SQL DB this used to be true, which made the host ENUMERATE
+    /// databases first — and that enumeration connects to <c>master</c>, which is the one database an
+    /// Azure login reaching the server through a DATABASE-level firewall rule cannot open (#1631,
+    /// TrudAX's error 40615). The enumeration bought nothing here: the query below is entirely
+    /// database-scoped (<c>sys.database_files</c> + <c>FILEPROPERTY</c>, both satisfied by the
+    /// <c>public</c> role), the connection already points at the database being monitored, and on Azure
+    /// SQL DB a contained user can only see its own database anyway — so the sibling databases the
+    /// enumeration went to <c>master</c> to discover were never readable from this connection.
+    ///
+    /// <para>Running once on the existing connection removes <c>master</c> from this collector's path
+    /// completely, rather than relying on the enumeration's fallback to recover from an error it did not
+    /// need to provoke. #1634's fallback still protects the collectors that genuinely must enumerate
+    /// (the per-database XE readers); this one simply stops asking.</para>
+    /// </summary>
+    public override bool RunsPerDatabase(CollectorTargetInfo target) => false;
 
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
