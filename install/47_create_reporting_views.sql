@@ -863,7 +863,7 @@ WITH
     SELECT
         sort_order = 70,
         metric_name = N'worst_query_hash',
-        metric_value = CONVERT(sql_variant, wq.query_hash)
+        metric_value = CONVERT(sql_variant, CONVERT(nvarchar(20), wq.query_hash, 1))
     FROM worst_query AS wq
 
     UNION ALL

@@ -160,6 +160,15 @@ public sealed class DarlingManagedPostgres
     public const string ConfMarkerV5 = "# Managed by PerformanceMonitor Darling (v5 co-located sizing) -- do not remove this block";
 
     /// <summary>
+    /// Marker for the v6 log-rotation block (#1652). Before this block the server's ONLY log was the single
+    /// <c>pg.log</c> pg_ctl appends to — no rotation of any kind, growing unbounded across restarts on the
+    /// same volume as the data directory. Same heal discipline as v2-v5: existing clusters gain the block on
+    /// their next service-owned start (<c>logging_collector</c> is restart-only, so it applies right then —
+    /// the append happens before pg_ctl start).
+    /// </summary>
+    public const string ConfMarkerV6 = "# Managed by PerformanceMonitor Darling (v6 log rotation) -- do not remove this block";
+
+    /// <summary>
     /// Markers delimiting the Darling-managed network access block in pg_hba.conf
     /// (darling-network-endpoints, D5). <see cref="ReconcilePgHba"/> replaces exactly the lines
     /// between them and preserves every non-marked line, so the opt-in <c>hostssl</c> rule is
@@ -343,6 +352,34 @@ public sealed class DarlingManagedPostgres
         builder.Append('\n');
         builder.Append(ConfMarkerV5).Append('\n');
         builder.Append("shared_buffers = ").Append(settings.SharedBuffersMb).Append("MB\n");
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// The v6 log-rotation block (#1652): hand server logging to PostgreSQL's own logging collector as a
+    /// SELF-CAPPING weekday ring — <c>log_filename = 'postgresql-%a.log'</c> names files by weekday
+    /// (postgresql-Mon.log … postgresql-Sun.log), <c>log_rotation_age = 1d</c> rolls daily, and
+    /// <c>log_truncate_on_rotation = on</c> truncates each file when its weekday comes around again. Hard
+    /// cap of seven files, one week of history, ZERO sweep code — the ring is the retention policy.
+    /// <c>log_rotation_size = 0</c> disables size-based rotation on purpose: a size roll appends (the
+    /// truncate applies only to age-based rotation), and the age ring already bounds the set.
+    ///
+    /// <para><c>pg.log</c> (the pg_ctl <c>-l</c> file) stays exactly where it is and keeps its job: pg_ctl's
+    /// own chatter plus anything the server says BEFORE the collector starts — which is precisely the
+    /// startup-failure window the diagnostics tail exists for. With the collector owning steady-state
+    /// logging, pg.log gains only a few lines per restart instead of the entire server log.</para>
+    /// </summary>
+    public static string BuildLogRotationConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV6).Append('\n');
+        builder.Append("logging_collector = on\n");
+        builder.Append("log_directory = 'log'\n");
+        builder.Append("log_filename = 'postgresql-%a.log'\n");
+        builder.Append("log_rotation_age = 1d\n");
+        builder.Append("log_rotation_size = 0\n");
+        builder.Append("log_truncate_on_rotation = on\n");
         return builder.ToString();
     }
 
@@ -785,6 +822,17 @@ public sealed class DarlingManagedPostgres
                 "Appended v5 co-located sizing to postgresql.conf (shared_buffers = {SharedBuffers}MB, capped at min(25% RAM, 1GB); effective from the next PostgreSQL restart)",
                 DeriveMemorySettings(v5RamBytes).SharedBuffersMb);
         }
+
+        /* Checked independently of v1-v5: an existing cluster heals by GAINING the log-rotation block
+           (#1652). logging_collector is restart-only, and this append runs before pg_ctl start, so it is
+           effective immediately on this very start. */
+        if (!conf.Contains(ConfMarkerV6, StringComparison.Ordinal))
+        {
+            File.AppendAllText(confPath, BuildLogRotationConfAppend());
+            _logger.LogInformation(
+                "Appended v6 log rotation to postgresql.conf (logging collector, 7-file weekday ring under {LogDir}; pg.log keeps only pg_ctl and pre-collector startup lines)",
+                Path.Combine(_dataDirectory, "log"));
+        }
     }
 
     /// <summary>
@@ -879,6 +927,12 @@ public sealed class DarlingManagedPostgres
             exposed ? "on" : "off",
             _config.Port, _serverLogPath);
 
+        /* #1652: on clusters that grew a large pre-rotation pg.log, roll it aside ONCE so the
+           legacy file stays bounded too. Going forward the v6 logging collector owns the server
+           log and pg.log gains only pg_ctl chatter + pre-collector startup lines. Runs while the
+           server is down (this method only runs when nothing is listening), so nothing holds the file. */
+        CapLegacyServerLog(_serverLogPath, LegacyServerLogCapBytes, _logger);
+
         var exitCode = await RunDetachingToolAsync(
             Path.Combine(binDirectory, "pg_ctl.exe"),
             $"-D \"{_dataDirectory}\" -o \"{runtimeOptions}\" -l \"{_serverLogPath}\" -w -t {PgCtlWaitSeconds} start",
@@ -889,29 +943,110 @@ public sealed class DarlingManagedPostgres
         {
             throw new InvalidOperationException(
                 $"pg_ctl start failed (exit code {exitCode}) for {_dataDirectory}.\n" +
-                $"Server log tail ({_serverLogPath}):\n{ReadServerLogTail()}");
+                $"Server log tail:\n{ReadServerLogTail()}");
         }
 
         _logger.LogInformation("Managed Postgres started");
     }
 
-    private string ReadServerLogTail()
+    /// <summary>The one-time cap on the legacy pre-rotation <c>pg.log</c> (#1652): past this size it is
+    /// rolled to <c>pg.log.old</c> (replacing any previous roll) before the next start. Two files, bounded
+    /// forever; small files are left alone so a healthy post-rotation pg.log is never churned.</summary>
+    internal const long LegacyServerLogCapBytes = 10L * 1024 * 1024;
+
+    /// <summary>
+    /// Rolls an oversized <c>pg.log</c> to <c>pg.log.old</c> (replace-existing, so the pair can never grow
+    /// past two files). Static and failure-tolerant: a locked or missing file logs a warning and never
+    /// blocks the server start — the cap is hygiene, not a precondition.
+    /// </summary>
+    internal static void CapLegacyServerLog(string serverLogPath, long capBytes, ILogger? logger)
     {
         try
         {
-            if (!File.Exists(_serverLogPath))
+            var info = new FileInfo(serverLogPath);
+            if (!info.Exists || info.Length <= capBytes)
             {
-                return "(no server log written)";
+                return;
             }
 
-            var lines = File.ReadAllLines(_serverLogPath);
+            File.Move(serverLogPath, serverLogPath + ".old", overwrite: true);
+            logger?.LogInformation(
+                "Rolled the {Size:N0}-byte pre-rotation pg.log to pg.log.old (one-time cap; the v6 logging collector owns the server log now)",
+                info.Length);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger?.LogWarning("Could not roll the oversized pg.log aside — it stays in place until the next start retries: {Message}", ex.Message);
+        }
+    }
+
+    private string ReadServerLogTail()
+    {
+        var newest = PickNewestServerLog(_serverLogPath, _dataDirectory);
+        if (newest is null)
+        {
+            return "(no server log written)";
+        }
+
+        try
+        {
+            var lines = File.ReadAllLines(newest);
             var take = Math.Min(40, lines.Length);
-            return string.Join('\n', lines[^take..]);
+            return $"({newest})\n" + string.Join('\n', lines[^take..]);
         }
         catch (IOException ex)
         {
-            return $"(could not read server log: {ex.Message})";
+            return $"(could not read server log {newest}: {ex.Message})";
         }
+    }
+
+    /// <summary>
+    /// The file that best answers "what did Postgres just say?" — the NEWEST-modified of the pg_ctl
+    /// <c>pg.log</c> and the v6 logging collector's ring files (<c>&lt;data&gt;\log\*.log</c>). A start that
+    /// fails before the collector comes up wrote its reason to pg.log (the newest by definition); a server
+    /// that started and then complained wrote to the ring. Null when nothing exists yet. Static for tests.
+    /// </summary>
+    internal static string? PickNewestServerLog(string serverLogPath, string dataDirectory)
+    {
+        string? newest = null;
+        var newestWrite = DateTime.MinValue;
+
+        void Consider(string path)
+        {
+            try
+            {
+                var info = new FileInfo(path);
+                if (info.Exists && info.LastWriteTimeUtc > newestWrite)
+                {
+                    newest = path;
+                    newestWrite = info.LastWriteTimeUtc;
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                /* An unreadable candidate just isn't chosen. */
+            }
+        }
+
+        Consider(serverLogPath);
+
+        try
+        {
+            var ringDirectory = Path.Combine(dataDirectory, "log");
+            if (Directory.Exists(ringDirectory))
+            {
+                foreach (var file in Directory.GetFiles(ringDirectory, "*.log"))
+                {
+                    Consider(file);
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            /* Ring directory unreadable — pg.log (if any) still answers. */
+        }
+
+        return newest;
     }
 
     /// <summary>
