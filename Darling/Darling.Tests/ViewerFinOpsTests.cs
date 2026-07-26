@@ -350,4 +350,57 @@ public sealed class ViewerFinOpsSqlTests
         Assert.DoesNotContain("now(", sql.ToLowerInvariant());
         Assert.Contains("$1", sql, StringComparison.Ordinal);
     }
+
+    /* ── #1591: the Hardware Note ── */
+
+    /// <summary>
+    /// A collector that could not read <c>sys.dm_os_sys_info</c> stores NULL hardware, and the grid's
+    /// <c>IsDBNull ? 0</c> coalesce would otherwise render that as a literal 0 — indistinguishable from a real
+    /// zero, and reading as "this server has no CPUs" rather than "we were not allowed to look".
+    /// </summary>
+    [Fact]
+    public void HardwareNote_ExplainsAbsentHardware_WhenBothColumnsAreNull()
+    {
+        var note = ViewerDataService.HardwareNoteFor(cpuCountIsNull: true, physicalMemoryIsNull: true);
+
+        Assert.NotNull(note);
+        Assert.Contains("VIEW SERVER STATE", note, StringComparison.Ordinal);
+        Assert.Contains("VIEW DATABASE STATE", note, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Present hardware must produce no note — the column stays empty for the normal case, which is what makes it
+    /// non-alarming rather than noise on every row.
+    /// </summary>
+    [Fact]
+    public void HardwareNote_IsNull_WhenHardwareIsPresent() =>
+        Assert.Null(ViewerDataService.HardwareNoteFor(cpuCountIsNull: false, physicalMemoryIsNull: false));
+
+    /// <summary>
+    /// Both columns come from the SAME guarded DMV read, so a single odd NULL is not a permission failure and must
+    /// not be annotated as one.
+    /// </summary>
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void HardwareNote_IsNull_WhenOnlyOneColumnIsMissing(bool cpuNull, bool memNull) =>
+        Assert.Null(ViewerDataService.HardwareNoteFor(cpuNull, memNull));
+
+    /// <summary>
+    /// The note is only reachable because #1663 made the hardware columns nullable. Before it, a login without the
+    /// grant lost the ENTIRE server_properties row, so there was no row left to annotate — pin that the collector
+    /// still types them nullable.
+    /// </summary>
+    [Fact]
+    public void HardwareColumns_AreStillNullable_WhichIsWhatMakesTheNoteReachable()
+    {
+        foreach (var name in new[] { "CpuCount", "PhysicalMemoryMb" })
+        {
+            var property = typeof(PerformanceMonitor.Collectors.ServerPropertiesCollector.Row).GetProperty(name);
+            Assert.NotNull(property);
+            Assert.True(
+                Nullable.GetUnderlyingType(property!.PropertyType) is not null,
+                $"{name} must stay nullable — the Hardware Note depends on distinguishing unknown from zero (#1591/#1663).");
+        }
+    }
 }
