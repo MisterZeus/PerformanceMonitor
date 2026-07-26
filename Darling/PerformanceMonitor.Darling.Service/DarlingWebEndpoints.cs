@@ -47,7 +47,8 @@ namespace PerformanceMonitor.Darling.Service;
 ///
 /// <para><b>The pre-banded fleet.</b> <c>GET /api/fleet</c> and the <c>get_fleet_overview</c> MCP tool both read
 /// through <see cref="DarlingFleetReader"/> — the enriched per-server cards and the cross-server rollup, banded
-/// once by the shared <c>ServerHealthClassifier</c>.</para>
+/// once by the shared <c>ServerHealthClassifier</c>. <c>GET /api/ag</c> and <c>get_ag_health</c> pair the same way
+/// over <see cref="DarlingAgReader"/> for the Availability Group topology (#991).</para>
 /// </summary>
 public static class DarlingWebEndpoints
 {
@@ -110,6 +111,18 @@ public static class DarlingWebEndpoints
             var result = await DarlingFleetReader.GetFleetOverviewAsync(
                 postgres, now.AddHours(-hours), now, now, worstCount, context.RequestAborted);
             return Results.Json(result, DarlingFleetReader.JsonOptions);
+        });
+
+        /* The Availability Group topology (#991, also surfaced as the get_ag_health MCP tool). Fleet-wide, exactly
+           like /api/fleet — the per-server view is reachable through the /api/read/get_ag_health mirror, which
+           owns the name-resolution error path. Unlike that mirror this returns the DTO directly: an AG-less store
+           answers with an empty groups array rather than the tool's {status:"empty"} envelope, so the page renders
+           its own empty state and the nav gate can read the count off the same response. */
+        app.MapGet("/api/ag", async (HttpContext context) =>
+        {
+            var result = await DarlingAgReader.GetAgHealthAsync(
+                postgres, null, DateTime.UtcNow, context.RequestAborted);
+            return Results.Json(result, DarlingAgReader.JsonOptions);
         });
 
         /* One GET per read-only tool, calling the tool method directly (no SQL/projection re-implementation). */
@@ -1108,6 +1121,7 @@ public static class DarlingWebEndpoints
             ["get_server_summary"] = R(CatOverview, "A one-shot health summary for a server.", PServer()),
             ["get_daily_summary"] = R(CatOverview, "The daily health summary (optionally for a specific date).", PServer(), PText("summary_date")),
             ["get_fleet_overview"] = R(CatOverview, "The banded cross-server fleet roll-up.", PHours(DefaultFleetHours)),
+            ["get_ag_health"] = R(CatOverview, "Availability Group topology: replicas and per-database secondary state.", PServer()),
 
             /* ── latch / spinlock (DarlingMcpLatchSpinlockTools) ── */
             ["get_latch_stats"] = R(CatLatch, "Top latch waits in the window.", PServer(), PHours(24), PTop(10)),
@@ -1537,6 +1551,7 @@ public static class DarlingWebEndpoints
             ["get_server_summary"] = (c, pg, an) => DarlingMcpHealthTools.GetServerSummary(pg, Server(c)),
             ["get_daily_summary"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummary(pg, Server(c), Str(c, "summary_date")),
             ["get_fleet_overview"] = (c, pg, an) => DarlingMcpFleetTools.GetFleetOverview(pg, Hours(c, DefaultFleetHours)),
+            ["get_ag_health"] = (c, pg, an) => DarlingMcpAgTools.GetAgHealth(pg, Server(c)),
 
             /* ── latch / spinlock ── */
             ["get_latch_stats"] = (c, pg, an) => DarlingMcpLatchSpinlockTools.GetLatchStats(pg, Server(c), Hours(c, 24), Rows(c, "top", 10)),

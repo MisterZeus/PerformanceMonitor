@@ -22,6 +22,9 @@
         </div>
         <nav class="nav">
           <a data-route="fleet" href="#/fleet">Fleet Overview</a>
+          <!-- Revealed by js/app.js only once the store has Availability Group data (#991); the #/ag route works
+               regardless, so a deep link is never broken by the entry being hidden. -->
+          <a data-route="ag" href="#/ag" hidden>Availability Groups</a>
           <a data-route="alerts" href="#/alerts">Alert History</a>
           <a data-route="views" href="#/views">Custom Views</a>
         </nav>
