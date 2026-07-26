@@ -592,6 +592,44 @@ internal sealed class DarlingStoreUpgrade
             return new RuntimeAdvance(false, null, zipHash);
         }
 
+        if (stamp is null)
+        {
+            /* NO STAMP: this runtime was extracted before stamping existed (every install in the field
+               today) or staged by hand. "No stamp" must NOT be read as "the zip is different" — on that
+               reading, the first start after upgrading the service would swap the runtime on every host,
+               including the overwhelming majority whose runtime already matches the zip byte for byte.
+               Compare the actual PostgreSQL majors instead, and ADOPT a runtime that already matches by
+               recording the stamp without touching anything. Costs one small extract, once per host,
+               because from then on the stamp answers. */
+            var installedMajor = await ReadRuntimeMajorFromBinariesAsync(binDirectory, cancellationToken);
+            var zipMajor = TryReadZipPostgresMajor(runtimeZipPath);
+
+            if (installedMajor is not null && zipMajor is not null && installedMajor == zipMajor)
+            {
+                _logger.LogInformation(
+                    "Adopting the already-extracted PostgreSQL {Major} runtime: it matches the shipped package, so nothing is swapped. Recording its stamp so future package changes are detectable.",
+                    installedMajor);
+                TryWriteStamp(stampPath, zipHash);
+                return new RuntimeAdvance(false, null, zipHash);
+            }
+
+            if (installedMajor is null || zipMajor is null)
+            {
+                /* Cannot tell them apart — do NOT swap on a guess. Stamp it so this is decided once, and
+                   let the data-directory-vs-runtime major check be the authority on any real upgrade. */
+                _logger.LogWarning(
+                    "Could not determine whether the extracted runtime matches the shipped package (installed major {Installed}, package major {Package}) — leaving the runtime alone rather than swapping on a guess.",
+                    installedMajor?.ToString(CultureInfo.InvariantCulture) ?? "unreadable",
+                    zipMajor?.ToString(CultureInfo.InvariantCulture) ?? "unreadable");
+                TryWriteStamp(stampPath, zipHash);
+                return new RuntimeAdvance(false, null, zipHash);
+            }
+
+            _logger.LogWarning(
+                "The extracted runtime is PostgreSQL {Installed} and the shipped package is PostgreSQL {Package} — this host has never had its runtime updated, and the update proceeds.",
+                installedMajor, zipMajor);
+        }
+
         var blocked = ReadTrimmedOrNull(blockedPath);
         if (string.Equals(blocked, zipHash, StringComparison.OrdinalIgnoreCase))
         {
@@ -622,7 +660,24 @@ internal sealed class DarlingStoreUpgrade
         }
 
         Directory.CreateDirectory(previousRoot);
-        Directory.Move(pgsqlDirectory, previousPgsql);
+
+        try
+        {
+            Directory.Move(pgsqlDirectory, previousPgsql);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            /* Something holds the runtime open (a postmaster mid-exit, an antivirus scan, a developer's
+               shell sitting in bin\). A runtime we cannot rescue is a reason to SKIP the update, never a
+               reason to refuse to start — the store runs perfectly well on the runtime already there.
+               EnsureRuntimeAsync's contract is throw => the service exits, and a deferred runtime update
+               must never spend that. */
+            _logger.LogWarning(
+                "Could not rescue the current runtime to {Previous} ({Message}) — something is holding it open. The store starts on its existing runtime and the update is retried on the next start.",
+                previousPgsql, ex.Message);
+            TryDeleteDirectory(previousRoot);
+            return new RuntimeAdvance(false, null, zipHash);
+        }
 
         try
         {
@@ -710,6 +765,79 @@ internal sealed class DarlingStoreUpgrade
             _logger.LogCritical(
                 "Could not revert the store runtime ({Message}). Restore {Previous} over {Current} by hand before restarting the service.",
                 ex.Message, previousPgsql, pgsqlDirectory);
+        }
+    }
+
+    /// <summary>
+    /// The PostgreSQL major inside a runtime zip, WITHOUT extracting the whole thing: pull just
+    /// <c>pgsql/bin/pg_ctl.exe</c> to a temp file and read its Windows file-version resource. Reading a
+    /// version resource does not execute anything, which matters — the alternative (extract and run
+    /// <c>--version</c>) would launch a binary purely to identify it. Null when the entry is missing or
+    /// carries no usable version, and the caller then refuses to act on a guess.
+    /// </summary>
+    internal static int? TryReadZipPostgresMajor(string zipPath)
+    {
+        var temp = Path.Combine(Path.GetTempPath(), $"pm-runtime-probe-{Guid.NewGuid():N}.exe");
+        try
+        {
+            using (var archive = System.IO.Compression.ZipFile.OpenRead(zipPath))
+            {
+                var entry = archive.GetEntry("pgsql/bin/pg_ctl.exe")
+                    ?? archive.GetEntry("pgsql\\bin\\pg_ctl.exe");
+                if (entry is null)
+                {
+                    return null;
+                }
+
+                using var source = entry.Open();
+                using var destination = File.Create(temp);
+                source.CopyTo(destination);
+            }
+
+            var info = System.Diagnostics.FileVersionInfo.GetVersionInfo(temp);
+            return info.FileMajorPart > 0
+                ? info.FileMajorPart
+                : ParsePostgresMajor(info.ProductVersion ?? info.FileVersion);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or NotSupportedException)
+        {
+            return null;
+        }
+        finally
+        {
+            TryDeleteFile(temp);
+        }
+    }
+
+    /// <summary>The extracted runtime's PostgreSQL major, from <c>pg_ctl --version</c>.</summary>
+    private static async Task<int?> ReadRuntimeMajorFromBinariesAsync(string binDirectory, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var (exitCode, output) = await DarlingManagedPostgres.RunToolAsync(
+                Path.Combine(binDirectory, "pg_ctl.exe"), "--version", s_toolTimeout, cancellationToken);
+            return exitCode == 0 ? ParsePostgresMajor(output) : null;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private void TryWriteStamp(string stampPath, string zipHash)
+    {
+        try
+        {
+            File.WriteAllText(stampPath, zipHash);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            /* An unwritable stamp only costs this probe again next start. */
+            _logger.LogWarning("Could not record the runtime stamp at {Path} ({Message}).", stampPath, ex.Message);
         }
     }
 
