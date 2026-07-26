@@ -8,9 +8,20 @@ on:
     branches: [dev]
     paths: ['install/**', '.github/sql/**', '.github/workflows/sql-validation.yml']
 
+# A re-push to a PR cancels that PR's superseded in-flight matrix — four SQL Server
+# containers per run on the shared runner pool, validating code that is no longer the
+# PR's head. Push runs get a unique per-run group (run_id) and are never cancelled.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('sql-validation-pr-{0}', github.event.pull_request.number) || format('sql-validation-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   validate-sql:
     runs-on: ubuntu-latest
+    # Container pull + install scripts + seeded view execution runs in well under 15
+    # minutes per version; a SQL Server container that never reaches healthy is the hang
+    # this bounds, and there are four of these jobs per run on the shared pool.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       # SQL Server 2016 is the documented minimum but cannot appear here: SQL Server on Linux

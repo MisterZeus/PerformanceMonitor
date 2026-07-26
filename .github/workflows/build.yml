@@ -13,6 +13,17 @@ permissions:
   id-token: write
   actions: read
 
+# A re-push to a PR cancels that PR's superseded in-flight run: finishing a build of code
+# that is no longer the PR's head helps nobody, and the shared Windows runner pool is what
+# serializes everyone's CI (#1697 sat queued behind two dev builds), so a cancelled stale
+# run is reclaimed capacity for whatever is queued. Push and release runs deliberately get
+# a UNIQUE group per run (run_id): dev/main integration builds and release builds are never
+# queued behind, replaced by, or cancelled through this mechanism — every push commit keeps
+# its own reported check result, which release cuts and merge gating read.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('build-pr-{0}', github.event.pull_request.number) || format('build-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build:
     runs-on: windows-latest
@@ -46,37 +57,44 @@ jobs:
             # The shared PerformanceMonitor.* core libraries feed Lite, the Full Dashboard, AND
             # Darling (verified via ProjectReference), so a change here fans out to all three.
             # NOT the CLI Installer — it references only Installer.Core.
+            #
+            # Every area pattern says `dir/**/!(*.md)` — any non-markdown file under the
+            # area — instead of the old `dir/**` include plus a bare `!**/*.md` exclude.
+            # That is not style: dorny v4 evaluates each pattern as an INDEPENDENT
+            # predicate under the default predicate-quantifier 'some' (a filter is true
+            # when any changed file matches at least one rule), so a bare `!**/*.md` line
+            # is not a subtraction — it is its own rule meaning "any file that is not
+            # markdown", which silently made every area filter true for ANY non-markdown
+            # change anywhere in the repo. Measured proof: a single root .gitignore edit
+            # built and tested all four products and ran the full Darling PG suite
+            # (PR #1714, run 30219202642, filter log: "Filter darling = true, Matching
+            # files: .gitignore"). The extglob keeps the markdown carve-out INSIDE the
+            # include, where quantifier semantics cannot detach it.
             core:
-              - 'PerformanceMonitor.Alerting/**'
-              - 'PerformanceMonitor.Analysis/**'
-              - 'PerformanceMonitor.Collectors/**'
-              - 'PerformanceMonitor.Common/**'
-              - 'PerformanceMonitor.Notifications/**'
-              - 'PerformanceMonitor.PlanAnalysis/**'
-              - 'PerformanceMonitor.Ui/**'
-              - '!**/*.md'
+              - 'PerformanceMonitor.Alerting/**/!(*.md)'
+              - 'PerformanceMonitor.Analysis/**/!(*.md)'
+              - 'PerformanceMonitor.Collectors/**/!(*.md)'
+              - 'PerformanceMonitor.Common/**/!(*.md)'
+              - 'PerformanceMonitor.Notifications/**/!(*.md)'
+              - 'PerformanceMonitor.PlanAnalysis/**/!(*.md)'
+              - 'PerformanceMonitor.Ui/**/!(*.md)'
             # Installer.Core is shared by the CLI Installer AND the Full Dashboard's integrated
             # installer — a change rebuilds both, and nothing else.
             installer_core:
-              - 'deprecated/Installer.Core/**'
-              - '!**/*.md'
+              - 'deprecated/Installer.Core/**/!(*.md)'
             dashboard:
-              - 'deprecated/Dashboard/**'
-              - 'deprecated/Dashboard.Tests/**'
-              - '!**/*.md'
+              - 'deprecated/Dashboard/**/!(*.md)'
+              - 'deprecated/Dashboard.Tests/**/!(*.md)'
             lite:
-              - 'Lite/**'
-              - 'Lite.Tests/**'
-              - '!**/*.md'
+              - 'Lite/**/!(*.md)'
+              - 'Lite.Tests/**/!(*.md)'
             installer:
-              - 'deprecated/Installer/**'
-              - 'deprecated/Installer.Tests/**'
-              - 'install/**'
-              - 'upgrades/**'
-              - '!**/*.md'
+              - 'deprecated/Installer/**/!(*.md)'
+              - 'deprecated/Installer.Tests/**/!(*.md)'
+              - 'install/**/!(*.md)'
+              - 'upgrades/**/!(*.md)'
             darling:
-              - 'Darling/**'
-              - '!**/*.md'
+              - 'Darling/**/!(*.md)'
             # The DOCUMENTATION allowlist: files that cannot affect a build under any
             # job in this workflow. Deliberately an allowlist of non-executable content,
             # not a "everything that isn't code" subtraction — a new file type defaults
@@ -86,50 +104,55 @@ jobs:
             # *.yml (workflows), *.csproj / *.props / packages.lock.json (build inputs),
             # and *.cs regardless of how comment-only the change looks — an XML doc
             # comment still recompiles, and the compiler is what proves it still builds.
+            #
+            # The docs/ and Screenshots/ entries are extension-explicit rather than bare
+            # directory globs for the same reason: everything in them today is markdown,
+            # SVG, or a screenshot image, and a .sql or script dropped into either
+            # directory tomorrow should default to being code, not inherit a free pass
+            # from its parent directory.
             docs:
               - '**/*.md'
               - 'LICENSE'
               - 'CITATION.cff'
               - '.gitignore'
               - '.gitattributes'
-              - 'docs/**'
-              - 'Screenshots/**'
-            # True when any file OUTSIDE the documentation allowlist changed. A docs-only
-            # change skips .NET setup, restore and versioning below — there is nothing to
-            # compile — while the job itself still runs, so the required 'build' check
-            # reports a result rather than going missing and blocking the merge.
-            #
-            # The exclusions MIRROR the docs filter above; they are the same list stated
-            # negatively because paths-filter has no "not in that other filter" operator.
-            # Keep the two in step: a path added to docs: but not here still forces a
-            # restore, and a path excluded here but absent from docs: makes the fast-path
-            # log under-report what it classified.
-            code:
+              - 'docs/**/*.{md,svg,png,jpg,jpeg,gif}'
+              - 'Screenshots/**/*.{md,svg,png,jpg,jpeg,gif}'
+            # Catch-all COUNTER, not a boolean gate: the classify step below decides
+            # "documentation-only" by comparing all_count to docs_count — they are equal
+            # exactly when every changed file sits on the docs allowlist. Stated as a
+            # count comparison because the previous shape ('**' plus '!' exclusions,
+            # a code: filter) could never be false under predicate-quantifier 'some' —
+            # every file matches '**', so the #1712 fast path shipped unable to engage
+            # (throwaway PR #1714: a .gitignore-only diff still paid setup + restore and,
+            # via the predicate bug above, a full build).
+            all:
               - '**'
-              - '!**/*.md'
-              - '!LICENSE'
-              - '!CITATION.cff'
-              - '!.gitignore'
-              - '!.gitattributes'
-              - '!docs/**'
-              - '!Screenshots/**'
 
-      # Decides the docs fast path ONCE, in one place, and says so out loud. Two guards
-      # keep it off the paths where a skipped restore would be a real loss:
+      # Decides the docs fast path ONCE, in one place, and says so out loud. Guards keep
+      # it off every path where a skipped restore would be a real loss:
       #   release  — the filter step does not even run there, and a release must always
       #              compile and publish from a cold, fully restored tree.
       #   push     — dev/main pushes are the integration signal for what just merged, so
       #              they restore unconditionally even for a docs-only commit. Cheap
       #              insurance: this only forces the restore back on, it does not force
       #              the per-product build/test steps, which stay path-gated as before.
-      # Everything else (pull_request) is eligible, and engages only when NOTHING outside
-      # the documentation allowlist changed.
+      #   areas    — belt and suspenders: even when the counts say docs-only, any lit
+      #              area filter vetoes the fast path, because an area=true with restore
+      #              skipped would run `dotnet build --no-restore` against nothing. The
+      #              two classifications are built from the same allowlist so they cannot
+      #              disagree today; this guard is for the day someone edits one and not
+      #              the other.
+      # Everything else (pull_request) is eligible, and engages only when EVERY changed
+      # file is on the documentation allowlist (all_count == docs_count).
       - name: Classify change for the docs fast path
         id: fastpath
         shell: bash
         env:
-          CODE_CHANGED: ${{ steps.filter.outputs.code }}
+          ALL_COUNT: ${{ steps.filter.outputs.all_count }}
+          DOCS_COUNT: ${{ steps.filter.outputs.docs_count }}
           DOCS_FILES: ${{ steps.filter.outputs.docs_files }}
+          AREAS: 'root=${{ steps.filter.outputs.root }} core=${{ steps.filter.outputs.core }} installer_core=${{ steps.filter.outputs.installer_core }} dashboard=${{ steps.filter.outputs.dashboard }} lite=${{ steps.filter.outputs.lite }} installer=${{ steps.filter.outputs.installer }} darling=${{ steps.filter.outputs.darling }}'
         run: |
           set -euo pipefail
 
@@ -145,14 +168,16 @@ jobs:
             exit 0
           fi
 
-          if [ "${CODE_CHANGED}" = "false" ]; then
+          echo "Changed files: ${ALL_COUNT:-0} total, ${DOCS_COUNT:-0} on the documentation allowlist. Areas: ${AREAS}"
+
+          if [ "${ALL_COUNT:-0}" -gt 0 ] && [ "${ALL_COUNT:-0}" -eq "${DOCS_COUNT:-0}" ] && [[ "${AREAS}" != *"=true"* ]]; then
             echo "engaged=true" >> "$GITHUB_OUTPUT"
-            echo "::notice title=DOCS FAST PATH ENGAGED::No file outside the documentation allowlist changed, so .NET setup, restore and versioning are skipped. This job still reports its result."
+            echo "::notice title=DOCS FAST PATH ENGAGED::All ${ALL_COUNT} changed files are on the documentation allowlist, so .NET setup, restore and versioning are skipped. This job still reports its result."
             echo "Documentation files classified in this change:"
             for f in ${DOCS_FILES}; do echo "  - ${f}"; done
           else
             echo "engaged=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=Full build::At least one file outside the documentation allowlist changed."
+            echo "::notice title=Full build::At least one changed file is off the documentation allowlist (${DOCS_COUNT:-0} of ${ALL_COUNT:-0} classified as documentation)."
           fi
 
       - name: Setup .NET 10.0
@@ -487,6 +512,13 @@ jobs:
   darling-pg:
     name: Darling PostgreSQL tests
     runs-on: windows-latest
+    # Max observed on a warm cache is ~3m40s; a cold pg-runtime cache adds a ~340MB fetch.
+    # 30 minutes is 3x headroom over the cold path — past that, something is hung (pg_ctl -w
+    # waiting on a cluster that will never come up), and the default 6h timeout would hold a
+    # shared-pool Windows runner hostage for the duration. The build job above deliberately
+    # has NO timeout: on release it waits on SignPath's manual approval gate, which can
+    # legitimately take hours.
+    timeout-minutes: 30
     permissions:
       contents: read
 
@@ -506,10 +538,14 @@ jobs:
           # On push, compare against the previous commit on this branch (mirrors the build job);
           # on pull_request, an empty base makes the action diff against the PR base branch.
           base: ${{ github.event_name == 'push' && github.event.before || '' }}
+          # `Darling/**/!(*.md)` instead of a `Darling/**` include plus a `!Darling/**/*.md`
+          # exclude: dorny v4 treats each pattern as an independent predicate under the
+          # default quantifier, so the old bare negation was itself a match-all-non-Darling-md
+          # rule — this job ran the full TimescaleDB suite on every PR, including md-only
+          # ones (run 30218459544: "Filter darling = true, Matching files: CHANGELOG.md").
           filters: |
             darling:
-              - 'Darling/**'
-              - '!Darling/**/*.md'
+              - 'Darling/**/!(*.md)'
               - '.github/workflows/build.yml'
 
       # This job's gate was already correct for documentation — a docs-only change leaves
