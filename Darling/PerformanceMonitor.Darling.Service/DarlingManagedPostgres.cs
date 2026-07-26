@@ -615,6 +615,11 @@ public sealed class DarlingManagedPostgres
         Directory.CreateDirectory(ParentOf(_dataDirectory));
         TryHardenDirectory(ParentOf(_dataDirectory));
 
+        /* Age out any pre-upgrade rollback copy BEFORE this start's own upgrade can create a new one.
+           Running it afterwards would bump the brand-new copy's counter on the very start that produced
+           it, costing it one of the two starts it is supposed to survive. */
+        _storeUpgrade.SweepRetainedDataDirectories(_dataDirectory);
+
         if (!File.Exists(Path.Combine(_dataDirectory, "PG_VERSION")))
         {
             await InitializeClusterAsync(binDirectory, cancellationToken);
@@ -627,10 +632,6 @@ public sealed class DarlingManagedPostgres
                reverts and leaves the store exactly as it was. */
             await EnsureDataDirectoryMajorAsync(binDirectory, cancellationToken);
         }
-
-        /* Age out the pre-upgrade rollback copy; runs every start, because that is what advances its
-           countdown (see SweepRetainedDataDirectories). */
-        _storeUpgrade.SweepRetainedDataDirectories(_dataDirectory);
 
         EnsureConfAppended(_dataDirectory);
 
@@ -1289,6 +1290,33 @@ public sealed class DarlingManagedPostgres
     /// </summary>
     private async Task EnsureDatabaseAsync(string connectionString, CancellationToken cancellationToken)
     {
+        /* The whole unit retries, not just the connect. A backend that loses the post-start race dies
+           AFTER authenticating, so the Open succeeds and the first QUERY is what fails — retrying only the
+           Open would never have helped. Each attempt gets a fresh connection because the old one's
+           connector is dead. */
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await EnsureDatabaseOnceAsync(connectionString, cancellationToken);
+                return;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex) when (attempt < FirstConnectionAttempts && IsTransientConnectionFault(ex))
+            {
+                _logger.LogWarning(
+                    "The store dropped the first connection after start ({Message}) — attempt {Attempt} of {Total}. A backend that loses the shared-memory reservation race just after start does this; retrying.",
+                    ex.Message, attempt, FirstConnectionAttempts);
+                await Task.Delay(s_firstConnectionRetryDelay, cancellationToken);
+            }
+        }
+    }
+
+    private async Task EnsureDatabaseOnceAsync(string connectionString, CancellationToken cancellationToken)
+    {
         var builder = new NpgsqlConnectionStringBuilder(connectionString) { Database = "postgres" };
         await using var connection = new NpgsqlConnection(builder.ConnectionString);
         await connection.OpenAsync(cancellationToken);
@@ -1308,6 +1336,44 @@ public sealed class DarlingManagedPostgres
            plain ExecuteNonQuery is the correct shape. */
         using var create = new NpgsqlCommand($"CREATE DATABASE {DatabaseName}", connection);
         await create.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Attempts for the first store interaction after a server start, and the pause between them.
+    ///
+    /// <para><c>pg_ctl -w</c> returns when the postmaster reports it is accepting connections, but on
+    /// Windows that is not quite the same as "the next backend will spawn and survive". Every backend is
+    /// its own process that must re-reserve the shared-memory region at the postmaster's base address —
+    /// the error-487 surface this class already documents at length behind the 1 GB <c>shared_buffers</c>
+    /// cap (#1559). Losing that race presents to Npgsql not as a refused connection but as one that
+    /// authenticates and then dies on its first query (<c>Exception while writing to stream</c>), which is
+    /// exactly what a freshly upgraded cluster produced here while the server itself was demonstrably
+    /// healthy and stayed up for minutes afterwards.</para>
+    /// </summary>
+    private const int FirstConnectionAttempts = 6;
+    private static readonly TimeSpan s_firstConnectionRetryDelay = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// Whether an exception is a transport-level fault worth retrying (socket reset, stream write failure,
+    /// timeout) rather than a definitive answer from a working server (bad password, missing role).
+    /// <see cref="PostgresException"/> means the server replied, so it is never transient by this test.
+    /// </summary>
+    private static bool IsTransientConnectionFault(Exception exception)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is PostgresException)
+            {
+                return false;
+            }
+
+            if (current is SocketException or IOException or TimeoutException)
+            {
+                return true;
+            }
+        }
+
+        return exception is NpgsqlException;
     }
 
     private string ReadStoredPassword()

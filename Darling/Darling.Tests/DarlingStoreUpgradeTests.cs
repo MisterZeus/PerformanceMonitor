@@ -374,7 +374,14 @@ public sealed class DarlingStoreUpgradeTests
         }
         finally
         {
-            TryDeleteTree(root.FullName);
+            /* DARLING_TEST_KEEP leaves the whole fixture — both data directories, both runtimes, the
+               server logs and pg_upgrade's own output tree — on disk. A failure here is almost always
+               explained by a file this test would otherwise delete on its way out, and re-running to
+               reproduce costs minutes each time. Off by default so ordinary runs leave nothing behind. */
+            if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_KEEP")))
+            {
+                TryDeleteTree(root.FullName);
+            }
         }
     }
 
