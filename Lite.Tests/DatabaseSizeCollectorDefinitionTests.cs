@@ -47,15 +47,51 @@ public sealed class DatabaseSizeCollectorDefinitionTests
     }
 
     [Fact]
-    public void BuildQuery_Azure_PerDatabase_NoVolumeStats()
+    public void AzureDmvPermissionHint_ExplainsError300_OnAzureOnly()
+    {
+        /* The other half of #1631: TrudAX asked whether waiting_tasks "really requires master DB
+           access". It does not — and the raw error is what makes it look like it does, because Azure
+           phrases a service-objective limit as a permission denied on 'master'. */
+        var azure300 = PerformanceMonitor.Common.AzureDmvPermissionHint.For(300, isAzureSqlDb: true);
+
+        Assert.NotEmpty(azure300);
+        Assert.Contains("SERVICE OBJECTIVE", azure300, StringComparison.Ordinal);
+        Assert.Contains("elastic pool", azure300, StringComparison.Ordinal);
+        Assert.Contains("##MS_ServerStateReader##", azure300, StringComparison.Ordinal);
+        Assert.Contains("VIEW DATABASE STATE", azure300, StringComparison.Ordinal);
+
+        /* On-prem 300 IS a missing grant, and saying otherwise there would send people down the wrong
+           path entirely — so the hint is Azure-only. */
+        Assert.Empty(PerformanceMonitor.Common.AzureDmvPermissionHint.For(300, isAzureSqlDb: false));
+
+        /* And it is scoped to the one error it explains. */
+        Assert.Empty(PerformanceMonitor.Common.AzureDmvPermissionHint.For(229, isAzureSqlDb: true));
+        Assert.Empty(PerformanceMonitor.Common.AzureDmvPermissionHint.For(40615, isAzureSqlDb: true));
+    }
+
+    [Fact]
+    public void BuildQuery_Azure_IsDatabaseScoped_AndNeverEnumerates()
     {
         var plan = DatabaseSizeStatsCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas, isAzureSqlDb: true));
 
-        Assert.True(DatabaseSizeStatsCollector.Instance.RunsPerDatabase(new CollectorTargetInfo { IsAzureSqlDb = true }));
+        /* #1631: NOT per-database on Azure any more. RunsPerDatabase=true made the host enumerate
+           databases first, and that enumeration connects to master — the one database an Azure login
+           admitted by a DATABASE-level firewall rule cannot open (error 40615). The enumeration bought
+           nothing: the query is database-scoped and the connection already points at the right database. */
+        Assert.False(DatabaseSizeStatsCollector.Instance.RunsPerDatabase(new CollectorTargetInfo { IsAzureSqlDb = true }));
         Assert.False(DatabaseSizeStatsCollector.Instance.RunsPerDatabase(new CollectorTargetInfo()));
+
         Assert.Contains("FROM sys.database_files AS df", plan.Text, StringComparison.Ordinal);
-        Assert.DoesNotContain("dm_os_volume_stats", plan.Text, StringComparison.Ordinal);
         Assert.Empty(plan.Parameters);
+
+        /* Nothing on the Azure path may reach outside the connected database. sys.master_files is not
+           documented for Azure SQL DB at all, dm_os_volume_stats is SQL Server only, and
+           dm_db_file_space_usage carries the same Basic/S0/S1/elastic-pool trap that broke the DMV in
+           the sibling half of this issue — so it must not creep in as an "obvious" improvement. */
+        foreach (var forbidden in new[] { "master_files", "dm_os_volume_stats", "dm_db_file_space_usage", "sys.databases" })
+        {
+            Assert.DoesNotContain(forbidden, plan.Text, StringComparison.Ordinal);
+        }
     }
 
     [Fact]
