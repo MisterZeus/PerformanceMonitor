@@ -10,7 +10,6 @@ using System;
 using System.Linq;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Viewer;
-using PerformanceMonitor.Common;
 using Xunit;
 
 namespace Darling.Tests;
