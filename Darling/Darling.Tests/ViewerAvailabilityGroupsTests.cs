@@ -10,6 +10,7 @@ using System;
 using System.Linq;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Viewer;
+using PerformanceMonitor.Common;
 using Xunit;
 
 namespace Darling.Tests;
@@ -23,7 +24,7 @@ namespace Darling.Tests;
 /// viewer reader is a COPY of the service reader (no ProjectReference exists), so the pins are what keep the two
 /// from drifting into disagreeing about whether an AG is healthy.</para>
 /// </summary>
-public sealed class ViewerAvailabilityGroupsTests
+public sealed class AgTopologyCardsTests
 {
     /* ─────────────────────────── SQL pins ─────────────────────────── */
 
@@ -77,7 +78,7 @@ public sealed class ViewerAvailabilityGroupsTests
     [InlineData(null, HealthSeverity.Unknown)]
     public void SynchronizationHealth_BandsHealthyPartiallyNot(string? desc, HealthSeverity expected)
     {
-        Assert.Equal(expected, ViewerDataService.AgSynchronizationHealthSeverity(desc));
+        Assert.Equal(expected, AgTopology.SynchronizationHealthSeverity(desc));
     }
 
     [Fact]
@@ -86,9 +87,9 @@ public sealed class ViewerAvailabilityGroupsTests
         /* operational_state_desc is reported for the LOCAL replica only, so every remote replica's row carries
            NULL — banding that Critical would paint a healthy AG red from every secondary's perspective. And
            ONLINE_IN_PROGRESS belongs to recovery_health_desc, not this column. */
-        Assert.Equal(HealthSeverity.Unknown, ViewerDataService.AgOperationalStateSeverity(null));
-        Assert.Equal(HealthSeverity.Unknown, ViewerDataService.AgOperationalStateSeverity("ONLINE_IN_PROGRESS"));
-        Assert.Equal(HealthSeverity.Warning, ViewerDataService.AgRecoveryHealthSeverity("ONLINE_IN_PROGRESS"));
+        Assert.Equal(HealthSeverity.Unknown, AgTopology.OperationalStateSeverity(null));
+        Assert.Equal(HealthSeverity.Unknown, AgTopology.OperationalStateSeverity("ONLINE_IN_PROGRESS"));
+        Assert.Equal(HealthSeverity.Warning, AgTopology.RecoveryHealthSeverity("ONLINE_IN_PROGRESS"));
     }
 
     [Fact]
@@ -97,8 +98,8 @@ public sealed class ViewerAvailabilityGroupsTests
         /* The load-bearing distinction: an ASYNCHRONOUS_COMMIT replica never reaches SYNCHRONIZED, so
            SYNCHRONIZING is its correct steady state; on SYNCHRONOUS_COMMIT the same text means the replica is
            not currently protecting a commit. A flat state map necessarily gets one of these wrong. */
-        Assert.Equal(HealthSeverity.Healthy, ViewerDataService.AgDatabaseSyncSeverity("SYNCHRONIZING", "ASYNCHRONOUS_COMMIT", false));
-        Assert.Equal(HealthSeverity.Warning, ViewerDataService.AgDatabaseSyncSeverity("SYNCHRONIZING", "SYNCHRONOUS_COMMIT", false));
+        Assert.Equal(HealthSeverity.Healthy, AgTopology.DatabaseSyncSeverity("SYNCHRONIZING", "ASYNCHRONOUS_COMMIT", false));
+        Assert.Equal(HealthSeverity.Warning, AgTopology.DatabaseSyncSeverity("SYNCHRONIZING", "SYNCHRONOUS_COMMIT", false));
     }
 
     [Theory]
@@ -108,7 +109,7 @@ public sealed class ViewerAvailabilityGroupsTests
     {
         /* The database grain reports states space-separated where the replica grain uses underscores; both are
            stored verbatim, so the banding must normalize. */
-        Assert.Equal(HealthSeverity.Critical, ViewerDataService.AgDatabaseSyncSeverity(state, "SYNCHRONOUS_COMMIT", false));
+        Assert.Equal(HealthSeverity.Critical, AgTopology.DatabaseSyncSeverity(state, "SYNCHRONOUS_COMMIT", false));
     }
 
     [Fact]
@@ -116,21 +117,21 @@ public sealed class ViewerAvailabilityGroupsTests
     {
         /* secondary_lag_seconds reads 0 — not null — while data movement is suspended, so a suspended replica
            otherwise presents as perfectly caught up. Suspension outranks the state text. */
-        Assert.Equal(HealthSeverity.Critical, ViewerDataService.AgDatabaseSyncSeverity("SYNCHRONIZED", "SYNCHRONOUS_COMMIT", true));
+        Assert.Equal(HealthSeverity.Critical, AgTopology.DatabaseSyncSeverity("SYNCHRONIZED", "SYNCHRONOUS_COMMIT", true));
     }
 
     [Fact]
     public void DrainMinutes_EmptyQueueIsZero_StalledQueueHasNoEstimate()
     {
-        Assert.Equal<double?>(0, ViewerDataService.AgDrainMinutes(0, 0));
-        Assert.Equal<double?>(1.0, ViewerDataService.AgDrainMinutes(6000, 100));
-        Assert.Null(ViewerDataService.AgDrainMinutes(5000, 0));
-        Assert.Null(ViewerDataService.AgDrainMinutes(null, 100));
+        Assert.Equal<double?>(0, AgTopology.DrainMinutes(0, 0));
+        Assert.Equal<double?>(1.0, AgTopology.DrainMinutes(6000, 100));
+        Assert.Null(AgTopology.DrainMinutes(5000, 0));
+        Assert.Null(AgTopology.DrainMinutes(null, 100));
     }
 
     /* ─────────────────────────── card projection ─────────────────────────── */
 
-    private static ViewerAgReplicaRow Replica(
+    private static AgTopologyReplicaRow Replica(
         int serverId, string serverName, string agName, string replicaName, string role,
         string syncHealth = "HEALTHY", string? connected = "CONNECTED", string? operational = "ONLINE") =>
         new()
@@ -149,7 +150,7 @@ public sealed class ViewerAvailabilityGroupsTests
             FailoverModeDesc = "AUTOMATIC",
         };
 
-    private static ViewerAgDatabaseRow Database(
+    private static AgTopologyDatabaseRow Database(
         int serverId, string serverName, string agName, string db, string replicaName,
         string state = "SYNCHRONIZED", bool suspended = false) =>
         new()
@@ -180,7 +181,7 @@ public sealed class ViewerAvailabilityGroupsTests
             Replica(2, "NODE2", "AG1", "NODE2", "SECONDARY"),
         };
 
-        var cards = ViewerDataService.BuildAvailabilityGroups(replicas, Array.Empty<ViewerAgDatabaseRow>());
+        var cards = AgTopology.BuildCards(replicas, Array.Empty<AgTopologyDatabaseRow>());
 
         Assert.Equal(2, cards.Count);
         var fromPrimary = Assert.Single(cards, c => c.ServerName == "NODE1");
@@ -203,7 +204,7 @@ public sealed class ViewerAvailabilityGroupsTests
             Replica(1, "NODE1", "AG1", "NODE2", "SECONDARY", connected: null, operational: null),
         };
 
-        var card = Assert.Single(ViewerDataService.BuildAvailabilityGroups(replicas, Array.Empty<ViewerAgDatabaseRow>()));
+        var card = Assert.Single(AgTopology.BuildCards(replicas, Array.Empty<AgTopologyDatabaseRow>()));
         Assert.Equal(HealthSeverity.Healthy, card.Severity);
         Assert.Equal("Healthy", card.SeverityLabel);
     }
@@ -214,7 +215,7 @@ public sealed class ViewerAvailabilityGroupsTests
         var replicas = new[] { Replica(1, "NODE1", "AG1", "NODE1", "PRIMARY") };
         var databases = new[] { Database(1, "NODE1", "AG1", "Sales", "NODE2", suspended: true) };
 
-        var card = Assert.Single(ViewerDataService.BuildAvailabilityGroups(replicas, databases));
+        var card = Assert.Single(AgTopology.BuildCards(replicas, databases));
 
         Assert.Equal(HealthSeverity.Critical, card.Severity);
         Assert.Equal(HealthSeverity.Healthy, card.Replicas[0].Severity);
@@ -231,7 +232,7 @@ public sealed class ViewerAvailabilityGroupsTests
         };
         var databases = new[] { Database(1, "NODE1", "AG1", "Sales", "NODE2") };
 
-        var cards = ViewerDataService.BuildAvailabilityGroups(replicas, databases);
+        var cards = AgTopology.BuildCards(replicas, databases);
 
         Assert.Single(Assert.Single(cards, c => c.ServerName == "NODE1").Databases);
         Assert.Empty(Assert.Single(cards, c => c.ServerName == "NODE2").Databases);
@@ -249,13 +250,13 @@ public sealed class ViewerAvailabilityGroupsTests
 
         Assert.Equal(
             new[] { "AG_BROKEN", "AG_SHAKY", "AG_CALM" },
-            ViewerDataService.BuildAvailabilityGroups(replicas, Array.Empty<ViewerAgDatabaseRow>()).Select(c => c.AgName).ToArray());
+            AgTopology.BuildCards(replicas, Array.Empty<AgTopologyDatabaseRow>()).Select(c => c.AgName).ToArray());
     }
 
     [Fact]
     public void Build_EmptyInputYieldsNoCards()
     {
-        Assert.Empty(ViewerDataService.BuildAvailabilityGroups(Array.Empty<ViewerAgReplicaRow>(), Array.Empty<ViewerAgDatabaseRow>()));
+        Assert.Empty(AgTopology.BuildCards(Array.Empty<AgTopologyReplicaRow>(), Array.Empty<AgTopologyDatabaseRow>()));
     }
 
     /* ─────────────────────────── header summary ─────────────────────────── */
@@ -270,7 +271,7 @@ public sealed class ViewerAvailabilityGroupsTests
             Replica(2, "NODE2", "AG1", "NODE2", "SECONDARY"),
         };
 
-        var summary = AvailabilityGroupsTab.BuildSummary(ViewerDataService.BuildAvailabilityGroups(replicas, Array.Empty<ViewerAgDatabaseRow>()));
+        var summary = AvailabilityGroupsTab.BuildSummary(AgTopology.BuildCards(replicas, Array.Empty<AgTopologyDatabaseRow>()));
 
         Assert.Equal("1 group · 2 reporting servers · 2 views", summary);
     }
@@ -278,6 +279,6 @@ public sealed class ViewerAvailabilityGroupsTests
     [Fact]
     public void Summary_EmptyFleetSaysSo()
     {
-        Assert.Equal("none observed", AvailabilityGroupsTab.BuildSummary(Array.Empty<ViewerAvailabilityGroup>()));
+        Assert.Equal("none observed", AvailabilityGroupsTab.BuildSummary(Array.Empty<AgTopologyCard>()));
     }
 }
