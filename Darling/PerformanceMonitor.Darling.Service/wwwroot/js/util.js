@@ -108,6 +108,10 @@ export function errorStrip(message) {
 export function emptyStrip(message) {
   return el("div", { class: "strip empty" }, [message]);
 }
+/** A non-fatal caveat about otherwise-good data (e.g. the #1665 partial-window notice). */
+export function noticeStrip(message) {
+  return el("div", { class: "strip notice", role: "status" }, [message]);
+}
 export function loadingStrip(label) {
   return el("div", { class: "strip loading" }, [label || "Loading…"]);
 }

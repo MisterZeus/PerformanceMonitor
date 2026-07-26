@@ -20,7 +20,7 @@
  * inert. The chart SVG lives entirely in charts.js (one SVG_NS occurrence, the air-gap allowlist); this file has no SVG.
  */
 
-import { el, mount, loadingStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, apiSend } from "./util.js";
+import { el, mount, loadingStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, apiSend, noticeStrip } from "./util.js";
 import { renderLineChart, renderBarChart, renderPieChart, CATEGORICAL_COLORS } from "./charts.js";
 import { navigateServer } from "./panels.js";
 import { getCatalog } from "./views-api.js";
@@ -92,7 +92,11 @@ export async function renderComposedInto(body, panelSpec, scope, opts = {}) {
     annotationMeta = await annotationMetaMap().catch(() => null);
   }
   try {
-    mount(body, renderComposedResult(data, panelSpec, { ...opts, annotationMeta }));
+    const nodes = [renderComposedResult(data, panelSpec, { ...opts, annotationMeta })];
+    /* The run endpoint's partial-window notice (#1665): the chosen tier could not retain the whole
+       requested window on this store — good data, honestly caveated, above the chart. */
+    if (typeof data.notice === "string" && data.notice) nodes.unshift(noticeStrip(data.notice));
+    mount(body, nodes);
   } catch (e) {
     mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
   }

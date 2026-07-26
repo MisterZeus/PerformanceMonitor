@@ -119,12 +119,16 @@ public static class ComposeSourceRouter
 
     /// <summary>
     /// The tier for <paramref name="plan"/> given the window's oldest point (<paramref name="windowStartUtc"/>)
-    /// relative to <paramref name="nowUtc"/>. Falls through to <see cref="ComposeRoute.Raw"/> — the compiler's
+    /// relative to <paramref name="nowUtc"/>, gated by which rollups the store actually HAS
+    /// (<paramref name="rollups"/>, #1665 — the composer's arm of the #1664 availability guard: the CAGGs are
+    /// runtime TimescaleDB setup, so a plain-PostgreSQL store has none and routing there by age alone compiled
+    /// SQL against missing relations). Falls through to <see cref="ComposeRoute.Raw"/> — the compiler's
     /// unchanged path — whenever the table has no CAGG, a grouped/filtered dimension is outside the CAGG's coverage
-    /// (object_name IS covered on query_stats, via the module_map join), or the window is recent enough that raw
-    /// still holds it.
+    /// (object_name IS covered on query_stats, via the module_map join), the window is recent enough that raw
+    /// still holds it, or the age-resolved tier's view is absent (per-table degrade: daily missing → hourly,
+    /// hourly missing → raw — the same shared ladder the viewer's built-in tabs use).
     /// </summary>
-    public static ComposeRoute Resolve(PanelPlan plan, DateTime nowUtc, DateTime windowStartUtc)
+    public static ComposeRoute Resolve(PanelPlan plan, DateTime nowUtc, DateTime windowStartUtc, RollupAvailability rollups)
     {
         ArgumentNullException.ThrowIfNull(plan);
 
@@ -157,21 +161,27 @@ public static class ComposeSourceRouter
             }
         }
 
-        /* The age decision itself is shared with the viewer's built-in tabs (#1661) — one definition in
-           RetentionTierRouter, so the two readers can never drift into disagreeing about which tier still
-           retains a window. The coverage gates above stay composer-specific. */
-        var tier = RetentionTierRouter.Resolve(nowUtc, windowStartUtc);
+        /* The age decision AND the availability degrade are shared with the viewer's built-in tabs
+           (#1661/#1664) — one ladder in RetentionTierRouter, so the two readers can never drift into
+           disagreeing about which tier still retains (or exists for) a window. The coverage gates above stay
+           composer-specific; the flags are per-TABLE (#1665), because a failure-isolated ensure sweep can
+           build one table's pair and not another's. A catalog entry with no daily view feeds
+           dailyAvailable=false through the same ladder — identical to the old null-DailyView fallback. */
+        var tier = RetentionTierRouter.Resolve(
+            nowUtc, windowStartUtc,
+            hourlyAvailable: rollups.Has(cagg.HourlyView),
+            dailyAvailable: cagg.DailyView is not null && rollups.Has(cagg.DailyView));
 
         if (tier == RetentionTier.Raw)
         {
             return ComposeRoute.Raw;
         }
 
-        if (tier == RetentionTier.Hourly || cagg.DailyView is null)
+        if (tier == RetentionTier.Hourly)
         {
             return new ComposeRoute(ComposeSourceTier.Hourly, cagg.HourlyView);
         }
 
-        return new ComposeRoute(ComposeSourceTier.Daily, cagg.DailyView);
+        return new ComposeRoute(ComposeSourceTier.Daily, cagg.DailyView!);
     }
 }

@@ -28,14 +28,18 @@ public sealed record ComposeRunContext(
     IReadOnlyList<string>? Servers,
     DateTime StartUtc,
     DateTime EndUtc,
-    IReadOnlyDictionary<string, string?> Variables)
+    IReadOnlyDictionary<string, string?> Variables,
+    RollupAvailability Rollups)
 {
     public static readonly IReadOnlyDictionary<string, string?> NoVariables =
         new Dictionary<string, string?>(StringComparer.Ordinal);
 }
 
-/// <summary>The compiled SQL + its bound parameters (in <c>$1..$n</c> order).</summary>
-public sealed record ComposeCompiled(string Sql, IReadOnlyList<NpgsqlParameter> Parameters);
+/// <summary>The compiled SQL + its bound parameters (in <c>$1..$n</c> order), and the source route the
+/// compiler actually took (<see cref="ComposeRoute.Raw"/> for annotation queries, whose event tables have no
+/// rollups) — the runner reads the route to tell the user when a raw/hourly fallback cannot retain the whole
+/// requested window on a retention-active store (#1665).</summary>
+public sealed record ComposeCompiled(string Sql, IReadOnlyList<NpgsqlParameter> Parameters, ComposeRoute Route);
 
 /// <summary>
 /// Compiles a validated <see cref="PanelPlan"/> into a parameterized Postgres query. IRON RULES, all
@@ -91,7 +95,7 @@ public static class ComposeCompiler
         /* Source routing: read a CAGG rollup instead of raw when the window's oldest point is past the raw
            horizon (ComposeSourceRouter). EndUtc is "now" — the endpoint always sets end = DateTime.UtcNow. Fall
            back to raw when the measure's value expression can't be remapped to the CAGG columns (CanRemap). */
-        var route = ComposeSourceRouter.Resolve(plan, context.EndUtc, context.StartUtc);
+        var route = ComposeSourceRouter.Resolve(plan, context.EndUtc, context.StartUtc, context.Rollups);
         if (route.IsCagg && !ComposeCaggValueMapper.CanRemap(plan.Measure, plan.Aggregate))
         {
             route = ComposeRoute.Raw;
@@ -238,7 +242,7 @@ public static class ComposeCompiler
                 break;
         }
 
-        return (new ComposeCompiled(sql.ToString(), p.Parameters), null);
+        return (new ComposeCompiled(sql.ToString(), p.Parameters, route), null);
     }
 
     /// <summary>
@@ -303,7 +307,7 @@ public static class ComposeCompiler
         sql.Append("ORDER BY ts\n");
         sql.Append("LIMIT ").Append(ComposeLimits.MaxAnnotationEvents);
 
-        return new ComposeCompiled(sql.ToString(), p.Parameters);
+        return new ComposeCompiled(sql.ToString(), p.Parameters, ComposeRoute.Raw);
     }
 
     /// <summary>The qualified reference for a dimension column: <c>m.</c> for a module-join dimension,
