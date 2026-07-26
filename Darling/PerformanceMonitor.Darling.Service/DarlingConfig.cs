@@ -319,6 +319,27 @@ public sealed class AlertsConfig
     /// under the SAME "Server Unreachable" metric name so webhook-driven automation keyed on it re-triggers.</summary>
     public int ConnectionRefireMinutes { get; set; }
 
+    /// <summary>#991 (V35): the master switch for the Availability Group alert family — failover, replica
+    /// disconnect/reconnect, sync fell behind, database suspended. Default true, matching the sibling
+    /// <see cref="NotifyConnectionChanges"/> gate: a fleet with no AGs collects no AG rows, so the alerts are
+    /// silent anyway, and an operator who DOES run AGs should not have to discover a switch to be told about a
+    /// failover. Turning it off also skips the per-server AG store read entirely.</summary>
+    [JsonPropertyName("notifyAgHealth")]
+    public bool NotifyAgHealth { get; set; } = true;
+
+    /// <summary>#991 (V35): "AG Sync Fell Behind" fires when a secondary's <c>secondary_lag_seconds</c> reaches
+    /// this (0 = off). Default 300 — five minutes of lag is well past a healthy synchronous or asynchronous
+    /// replica on a working network, and short enough to matter before a failover decision.</summary>
+    [JsonPropertyName("agLagAlertSeconds")]
+    public int AgLagAlertSeconds { get; set; } = 300;
+
+    /// <summary>#991 (V35): the second, independent "AG Sync Fell Behind" trigger — the secondary's
+    /// <c>redo_queue_size</c> in KILOBYTES (0 = off, the default). Off by default because a healthy redo queue
+    /// size is entirely workload-dependent: it is the knob to reach for once you know your own baseline, and a
+    /// shipped guess would page half the fleet on day one.</summary>
+    [JsonPropertyName("agRedoQueueAlertKb")]
+    public long AgRedoQueueAlertKb { get; set; }
+
     [JsonPropertyName("cpuEnabled")]
     public bool CpuEnabled { get; set; } = true;
 

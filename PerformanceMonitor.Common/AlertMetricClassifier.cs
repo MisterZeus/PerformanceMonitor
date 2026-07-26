@@ -27,7 +27,19 @@ namespace PerformanceMonitor.Common
         /// True when the metric name denotes a resolution / good-news notice — a condition that
         /// previously alerted has cleared — rather than an actionable alert. Recognizes every
         /// resolution suffix the alert engines emit: "&#8230; Cleared", "&#8230; Resolved",
-        /// "&#8230; Restored" (e.g. Blocking Cleared, CPU Resolved, Capture Restored, Server Restored).
+        /// "&#8230; Restored" (e.g. Blocking Cleared, CPU Resolved, Capture Restored, Server Restored),
+        /// plus "&#8230; Resumed", "&#8230; Restarted", "&#8230; Recovered" and "&#8230; Reconnected".
+        ///
+        /// Those last four were the same #1225 drift one layer down: Darling's self-alert recoveries have
+        /// been emitting "Collection Resumed", "Agent Restarted" and "Compression Job Recovered" — genuine
+        /// resolution rows, written by the very same <c>RecordResolutionAsync</c> path as the recognized
+        /// "Capture Restored" — and every one of them was landing in the history grids styled as a live
+        /// actionable alert, because the suffix list had never caught up with the alerts. The AG family
+        /// (#991) adds "AG Replica Reconnected", "AG Sync Recovered" and "AG Data Movement Resumed", so
+        /// the list is completed here rather than adding a fifth unrecognized suffix.
+        ///
+        /// No actionable metric name in either app contains any of these words, so widening the match
+        /// cannot turn a real alert green.
         /// </summary>
         public static bool IsResolution(string? metricName)
         {
@@ -36,7 +48,11 @@ namespace PerformanceMonitor.Common
 
             return metricName.Contains("Cleared", StringComparison.Ordinal)
                 || metricName.Contains("Resolved", StringComparison.Ordinal)
-                || metricName.Contains("Restored", StringComparison.Ordinal);
+                || metricName.Contains("Restored", StringComparison.Ordinal)
+                || metricName.Contains("Resumed", StringComparison.Ordinal)
+                || metricName.Contains("Restarted", StringComparison.Ordinal)
+                || metricName.Contains("Recovered", StringComparison.Ordinal)
+                || metricName.Contains("Reconnected", StringComparison.Ordinal);
         }
 
         /// <summary>

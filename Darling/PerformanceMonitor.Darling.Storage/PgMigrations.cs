@@ -78,6 +78,7 @@ public static class PgMigrations
         new Migration(32, "server-tags", V32Sql),
         new Migration(33, "connection-alert-refire", V33Sql),
         new Migration(34, "availability-group-collectors", V34Sql),
+        new Migration(35, "availability-group-alerts", V35Sql),
         new Migration(36, "ag-latency-columns", V36Sql),
     };
 
@@ -547,6 +548,21 @@ CREATE TABLE IF NOT EXISTS collect.ag_database_replica_states (
 CREATE INDEX IF NOT EXISTS idx_ag_database_replica_states_time ON collect.ag_database_replica_states(server_id, collection_time);";
 
     /// <summary>
+    /// V35 — the #991 Availability Group alert knobs on the singleton config_alert_settings row: the master
+    /// switch for the AG alert family plus the two "AG Sync Fell Behind" triggers. The lag trigger ships ON at
+    /// 300 seconds (a secondary five minutes behind is worth knowing about on any AG); the redo-queue trigger
+    /// ships OFF at 0, because a healthy queue size is workload-specific and a shipped guess would page half
+    /// the fleet. Same shape as V33: ADD COLUMN IF NOT EXISTS keeps it idempotent, and NOT NULL DEFAULT means a
+    /// pre-V35 row reads correctly with no backfill. No ACL/provisioning change — config_alert_settings carries
+    /// table-level grants (no column carve).
+    /// </summary>
+    private const string V35Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS notify_ag_health boolean NOT NULL DEFAULT true,
+    ADD COLUMN IF NOT EXISTS ag_lag_alert_seconds integer NOT NULL DEFAULT 300,
+    ADD COLUMN IF NOT EXISTS ag_redo_queue_alert_kb bigint NOT NULL DEFAULT 0;";
+
+    /// <summary>
     /// V36 — the AG latency columns (#991 addendum): the four commit/hardened/redone/received timestamps
     /// the reference project's query skips, plus the two server-computed drain-time estimates
     /// (queue ÷ rate ÷ 60, guarded against BIGINT integer division and a zero rate).
@@ -558,7 +574,8 @@ CREATE INDEX IF NOT EXISTS idx_ag_database_replica_states_time ON collect.ag_dat
     /// <see cref="PgSchemaGenerator.CreateTable"/> emits for a fresh store, so both provenances end up
     /// column-for-column identical (pinned by PgSchemaGeneratorTests, which reconstructs the current
     /// shape from V34 + V36 and compares it to the generator).</para>
-    /// <para>Version 36, not 35: 35 is claimed by the concurrent AG-alerts work.</para>
+    /// <para>Version 36 because 35 was taken by the concurrent AG-alerts work; both are now on dev, so the
+    /// ladder is dense again.</para>
     /// </summary>
     private const string V36Sql = @"
 ALTER TABLE collect.ag_database_replica_states
