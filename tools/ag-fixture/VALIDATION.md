@@ -232,16 +232,56 @@ active/caught up  0            SYNCHRONIZED      0
 after resume      0            SYNCHRONIZED      0
 ```
 
-It accrues monotonically with suspension time - the inverse of the documented behavior. It reads 0
-when movement is *active and caught up*, not when suspended.
+It accrues while suspended - the inverse of the documented behavior. It reads 0 when movement is
+*active and caught up*, not when suspended.
 
 So the blind spot the documentation implies does not exist here: a suspended secondary reports
 growing lag, and a lag threshold fires on it unaided. Reading `is_suspended` alongside lag is still
 the right thing to do, but to explain why lag is climbing rather than to catch lag that is being
 masked.
 
-Scope of this claim: one build (`16.0.4265.3`), clusterless AG only. A WSFC-based AG was not
-tested, and the fixture cannot test one.
+### What the number actually measures, and why it is not "time since suspension"
+
+The run above was under continuous write load, and started from 0. An independent reproduction on
+this same fixture measured the identical accrual but starting near **3993**, on an AG that had been
+idle (`redo_queue_size` 0 throughout). Re-testing the idle case explicitly reconciles the two:
+
+```
+sample                        is_suspended sync_state         lag  last_hardened  secs_since_hardened
+----------------------------- ------------ ------------------ ---- -------------- -------------------
+idle, not suspended           0            SYNCHRONIZED       0    19:00:29       373
+idle, not suspended (+20s)    0            SYNCHRONIZED       0    19:00:29       393
+idle, suspended +15s          1            NOT SYNCHRONIZING  0    19:00:29       409
+idle, suspended +30s          1            NOT SYNCHRONIZING  450  19:00:29       424
+idle, suspended +45s          1            NOT SYNCHRONIZING  465  19:00:29       440
+after resume                  0            SYNCHRONIZED       0    19:07:49       15
+```
+
+While movement is **active**, lag reads 0 no matter how long the AG has been idle - 373 seconds
+since the last hardening, still 0. Once **suspended**, the value latches onto roughly *how stale
+the secondary's last hardened log is* (`now - last_hardened_time`, here ~450 against a measured 424)
+and climbs from there second by second.
+
+So the base is not zero in general. Under write load `last_hardened_time` is always near-now, so
+lag starts at ~0 and looks like time-since-suspension; on an idle AG it starts at however long it
+has been since the last write and can be thousands of seconds immediately. Both runs are the same
+behavior seen from different starting points.
+
+Two consequences for anything thresholding on this column:
+
+- On an idle AG a lag rule can fire **instantly** on suspension with a large number that reflects
+  idleness rather than data at risk. The magnitude is staleness of the last hardening, not a
+  measure of how much data is behind - `log_send_queue_size` would be that, and it is NULL here
+  (finding 2).
+- The column does **not** update the moment movement stops. At +15s suspended it still read `0`
+  while already `NOT SYNCHRONIZING`, only latching at the +30s sample. A rule that treats a `0`
+  from a suspended row as "caught up" will therefore clear an alarm during that window. Treating a
+  suspended row as never able to *clear* an alarm - only raise one - is correct under both the
+  measured and the documented behavior.
+
+Scope of these claims: one build (`16.0.4265.3`), clusterless AG only. A WSFC-based AG was not
+tested, and the fixture cannot test one. The accrual itself has now been reproduced independently
+by a second party on this fixture, in both the loaded and idle cases.
 
 Source: [sys.dm_hadr_database_replica_states (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-hadr-database-replica-states-transact-sql)
 
