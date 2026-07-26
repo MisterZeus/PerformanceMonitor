@@ -25,7 +25,6 @@ const W = 1000;
 const H = 320;
 /* Top margin leaves headroom for the y-axis unit caption to sit fully clear of the top tick's label. */
 const M = { l: 58, r: 16, t: 26, b: 30 };
-const PLOT_W = W - M.l - M.r;
 const PLOT_H = H - M.t - M.b;
 const Y_TICKS = 4;
 
@@ -52,9 +51,15 @@ function svg(tag, attrs) {
  *                title (source · label · local time) and an entry in a small annotation key below the chart.
  *   onSelect   — optional drill callback (design D6): a legend entry for a grouped series calls onSelect(series.drill)
  *                — [{dimension, value}] — so the caller can re-run the panel filtered to that series' group value.
+ *   series2    — optional dual-axis overlay series (#1606): { key, label, color, formatValue?, unit? }. Drawn
+ *                against its OWN right-hand y-axis (own nice scale, own unit caption) so two measures with
+ *                different magnitudes read together. Only line/area modes carry one (validation upstream).
+ *   onZoom     — optional brush-zoom callback (#1606): a pointer drag across ≥8px of plot selects a time
+ *                range and calls onZoom(fromMs, toMs) so the caller can RE-RUN the panel on that window
+ *                (server-side re-run keeps bucket resolution + tier routing + the partial-window notice honest).
  */
 export function renderLineChart(spec) {
-  const { points, xKey, series, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null } = spec;
+  const { points, xKey, series, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2 = null, onZoom = null } = spec;
   const stacked = mode === "stacked";
   const stackedBar = mode === "stacked-bar";
   /* Both stacked modes share the cumulative pre-pass, the sum-based y-domain, and the hover-at-stack-top dots. */
@@ -74,6 +79,11 @@ export function renderLineChart(spec) {
   const tMin = rows[0].t.getTime();
   const tMax = rows[rows.length - 1].t.getTime();
   const spanMs = tMax - tMin;
+
+  /* A dual-axis overlay reserves a right gutter for its own tick labels + unit caption (#1606); without
+     one the geometry is byte-for-byte the original. All right-edge math below uses these, never M.r. */
+  const plotRight = series2 ? W - 56 : W - M.r;
+  const plotW = plotRight - M.l;
 
   /* A numeric reader: null/NaN reads as null for line/area (a gap), or 0 for a stacked mode (a continuous baseline). */
   const readVal = (r, key) => {
@@ -118,7 +128,7 @@ export function renderLineChart(spec) {
   const yMin = scale.min;
   const yMax = scale.max;
 
-  const scaleX = (t) => M.l + ((t - tMin) / (spanMs || 1)) * PLOT_W;
+  const scaleX = (t) => M.l + ((t - tMin) / (spanMs || 1)) * plotW;
   const scaleY = (v) => M.t + (1 - (v - yMin) / (yMax - yMin)) * PLOT_H;
   /* Plotted points clamp into the plot box so a value above a clamped (pct) domain can't draw outside it. */
   const plotY = (v) => Math.max(M.t, Math.min(M.t + PLOT_H, scaleY(v)));
@@ -130,7 +140,7 @@ export function renderLineChart(spec) {
   const axis = svg("g", { class: "axis" });
   for (const val of scale.ticks) {
     const y = scaleY(val);
-    axis.appendChild(svg("line", { class: "grid-line", x1: M.l, y1: y, x2: W - M.r, y2: y }));
+    axis.appendChild(svg("line", { class: "grid-line", x1: M.l, y1: y, x2: plotRight, y2: y }));
     const label = svg("text", { x: M.l - 8, y: y + 4, "text-anchor": "end" });
     label.textContent = formatValue(val);
     axis.appendChild(label);
@@ -154,13 +164,46 @@ export function renderLineChart(spec) {
     const x = scaleX(t);
     axis.appendChild(svg("line", { class: "grid-line", x1: x, y1: M.t, x2: x, y2: M.t + PLOT_H }));
     const label = svg("text", {
-      x: Math.min(Math.max(x, M.l + 2), W - M.r - 2),
+      x: Math.min(Math.max(x, M.l + 2), plotRight - 2),
       y: H - 8,
       "text-anchor": i === 0 ? "start" : i === X_TICKS ? "end" : "middle",
     });
     label.textContent = axisTime(new Date(t), crossesDay);
     axis.appendChild(label);
   }
+  /* Dual-axis overlay (#1606): the series2 values get their OWN nice scale on a right-hand axis — tick
+     labels + unit caption in the reserved right gutter, so two measures of different magnitudes read
+     together without either flattening the other. */
+  let scaleY2 = null;
+  if (series2) {
+    let m2 = -Infinity;
+    let n2 = Infinity;
+    for (const { r } of rows) {
+      const v = r[series2.key];
+      if (v == null || isNaN(v)) continue;
+      const num = Number(v);
+      if (num > m2) m2 = num;
+      if (num < n2) n2 = num;
+    }
+    if (m2 === -Infinity) { m2 = 1; n2 = 0; }
+    n2 = Math.min(0, n2);
+    if (m2 === n2) m2 = n2 + 1;
+    const s2 = niceScale(n2, m2, Y_TICKS, null);
+    scaleY2 = (v) => M.t + (1 - (v - s2.min) / (s2.max - s2.min)) * PLOT_H;
+    const fmt2 = series2.formatValue || ((v) => String(v));
+    for (const val of s2.ticks) {
+      const y = scaleY2(val);
+      const label = svg("text", { x: plotRight + 8, y: y + 4, "text-anchor": "start", fill: normalizeColor(series2.color) });
+      label.textContent = fmt2(val);
+      axis.appendChild(label);
+    }
+    if (series2.unit && series2.unit !== "%") {
+      const cap2 = svg("text", { class: "axis-unit", x: plotRight + 8, y: 11, "text-anchor": "start", fill: normalizeColor(series2.color) });
+      cap2.textContent = series2.unit;
+      axis.appendChild(cap2);
+    }
+  }
+
   root.appendChild(axis);
 
   const xs = rows.map((p) => scaleX(p.t.getTime()));
@@ -169,9 +212,9 @@ export function renderLineChart(spec) {
     /* Time-series stacked BAR: one vertical bar per bucket, segmented bottom-up by series using the same cumulative
        tops as the stacked area. Bar width is a fraction of the per-bucket spacing, centered on the bucket and clamped
        into the plot; a sub-pixel segment is dropped so a dense window degrades cleanly toward a filled band. */
-    const barW = Math.max(1, (PLOT_W / rows.length) * 0.7);
+    const barW = Math.max(1, (plotW / rows.length) * 0.7);
     for (let i = 0; i < rows.length; i++) {
-      const bx = Math.max(M.l, Math.min(M.l + PLOT_W - barW, xs[i] - barW / 2));
+      const bx = Math.max(M.l, Math.min(M.l + plotW - barW, xs[i] - barW / 2));
       for (let k = 0; k < series.length; k++) {
         const yTop = plotY(stackTops[i][k]);
         const yBot = plotY(k === 0 ? 0 : stackTops[i][k - 1]);
@@ -228,6 +271,21 @@ export function renderLineChart(spec) {
     }
   }
 
+  /* The dual-axis overlay line (#1606): plotted against ITS axis (scaleY2), clamped into the plot box,
+     nulls dropped as gaps — same discipline as a primary line. Always a plain line (never filled/stacked). */
+  if (series2 && scaleY2) {
+    const pts2 = [];
+    for (let i = 0; i < rows.length; i++) {
+      const v = rows[i].r[series2.key];
+      if (v == null || isNaN(v)) continue;
+      const y2 = Math.max(M.t, Math.min(M.t + PLOT_H, scaleY2(Number(v))));
+      pts2.push(xs[i] + "," + y2);
+    }
+    if (pts2.length >= 2) {
+      root.appendChild(svg("polyline", { class: "series-line series-line-overlay", points: pts2.join(" "), stroke: normalizeColor(series2.color) }));
+    }
+  }
+
   /* Render-only threshold reference lines (design D3): a horizontal dashed guide at each in-domain value (the value
      runs along the y axis here). An out-of-domain threshold is skipped, never clamped onto an edge — a clamped line
      would read as a real reference at the wrong value. Drawn above the series, below the hover overlay. */
@@ -235,7 +293,7 @@ export function renderLineChart(spec) {
     for (const tv of thresholds) {
       if (tv == null || isNaN(tv) || tv < yMin || tv > yMax) continue;
       const ty = scaleY(tv);
-      root.appendChild(thresholdLine(M.l, ty, W - M.r, ty, W - M.r - 4, ty - 4, "end", formatValue(tv)));
+      root.appendChild(thresholdLine(M.l, ty, plotRight, ty, plotRight - 4, ty - 4, "end", formatValue(tv)));
     }
   }
 
@@ -244,7 +302,7 @@ export function renderLineChart(spec) {
   root.appendChild(hoverLine);
   const hoverDots = svg("g", { style: "display:none" });
   root.appendChild(hoverDots);
-  const overlay = svg("rect", { x: M.l, y: M.t, width: PLOT_W, height: PLOT_H, fill: "transparent" });
+  const overlay = svg("rect", { x: M.l, y: M.t, width: plotW, height: PLOT_H, fill: "transparent" });
   root.appendChild(overlay);
 
   /* Event-annotation overlays (design D5): a vertical marker at each event's time, one color per source (drawn ON
@@ -281,10 +339,55 @@ export function renderLineChart(spec) {
   const chart = el("div", { class: "chart" }, [root]);
   const tooltip = el("div", { class: "chart-tooltip" });
   chart.appendChild(tooltip);
-  chart.appendChild(buildLegend(series, onSelect));
+  chart.appendChild(buildLegend(series2 ? series.concat([{ label: series2.label, color: series2.color }]) : series, onSelect));
   if (annotationKey.length) chart.appendChild(buildAnnotationLegend(annotationKey));
 
+  /* Brush-zoom (#1606): pointerdown + setPointerCapture on the overlay (capture keeps the drag alive across
+     the annotation hit-lines drawn above, and off-plot release still lands here). A drag ≥ 8 viewBox px draws
+     a selection band and calls onZoom(fromMs, toMs); anything shorter is a click, ignored. The mousemove
+     tooltip suppresses while a drag is live so it never repaints under the band. */
+  let dragFromX = null;
+  const brushRect = svg("rect", { class: "brush-rect", y: M.t, height: PLOT_H, style: "display:none" });
+  root.appendChild(brushRect);
+  const toVbX = (clientX) => {
+    const rect = root.getBoundingClientRect();
+    return ((clientX - rect.left) / rect.width) * W;
+  };
+  const vbToTime = (vbX) => tMin + (Math.max(0, Math.min(1, (vbX - M.l) / (plotW || 1))) * spanMs);
+  if (onZoom) {
+    overlay.addEventListener("pointerdown", (ev) => {
+      if (ev.button !== 0) return;
+      dragFromX = toVbX(ev.clientX);
+      overlay.setPointerCapture(ev.pointerId);
+    });
+    overlay.addEventListener("pointermove", (ev) => {
+      if (dragFromX == null) return;
+      const x = toVbX(ev.clientX);
+      const left = Math.max(M.l, Math.min(dragFromX, x));
+      const right = Math.min(plotRight, Math.max(dragFromX, x));
+      brushRect.setAttribute("x", left);
+      brushRect.setAttribute("width", Math.max(0, right - left));
+      brushRect.style.display = "";
+    });
+    overlay.addEventListener("pointerup", (ev) => {
+      if (dragFromX == null) return;
+      const from = dragFromX;
+      dragFromX = null;
+      brushRect.style.display = "none";
+      const to = toVbX(ev.clientX);
+      if (Math.abs(to - from) < 8) return; /* a click, not a brush */
+      const t1 = vbToTime(Math.min(from, to));
+      const t2 = vbToTime(Math.max(from, to));
+      if (t2 > t1) onZoom(t1, t2);
+    });
+    overlay.addEventListener("pointercancel", () => {
+      dragFromX = null;
+      brushRect.style.display = "none";
+    });
+  }
+
   overlay.addEventListener("mousemove", (ev) => {
+    if (dragFromX != null) return; /* brushing — the band owns the pointer */
     const rect = root.getBoundingClientRect();
     const vbX = ((ev.clientX - rect.left) / rect.width) * W;
     let idx = 0;
@@ -311,6 +414,13 @@ export function renderLineChart(spec) {
       const cy = usesStack ? plotY(stackTops[idx][k]) : plotY(v);
       hoverDots.appendChild(svg("circle", { class: "hover-dot", cx: px, cy, r: 3.5, fill: normalizeColor(series[k].color) }));
     }
+    if (series2 && scaleY2) {
+      const v2 = r[series2.key];
+      if (v2 != null && !isNaN(v2)) {
+        const cy2 = Math.max(M.t, Math.min(M.t + PLOT_H, scaleY2(Number(v2))));
+        hoverDots.appendChild(svg("circle", { class: "hover-dot", cx: px, cy: cy2, r: 3.5, fill: normalizeColor(series2.color) }));
+      }
+    }
     hoverDots.style.display = "";
 
     /* Tooltip is built with textContent only (values may include untrusted series labels). */
@@ -323,6 +433,17 @@ export function renderLineChart(spec) {
           el("span", { class: "swatch", style: "background:" + normalizeColor(s.color) }),
           el("span", { text: s.label }),
           el("span", { class: "t-val", text: v == null || isNaN(v) ? "—" : formatValue(v) }),
+        ])
+      );
+    }
+    if (series2) {
+      const v2 = r[series2.key];
+      const fmt2 = series2.formatValue || ((x) => String(x));
+      tooltip.appendChild(
+        el("div", { class: "t-row" }, [
+          el("span", { class: "swatch", style: "background:" + normalizeColor(series2.color) }),
+          el("span", { text: series2.label }),
+          el("span", { class: "t-val", text: v2 == null || isNaN(v2) ? "—" : fmt2(v2) }),
         ])
       );
     }
@@ -488,6 +609,77 @@ export function renderPieChart(spec) {
   );
 
   return el("div", { class: "chart chart-pie" }, [el("div", { class: "pie-wrap" }, [root]), legend]);
+}
+
+/**
+ * Render a two-measure SCATTER into a returned `.chart` node (#1606 — the compose "scatter" viz): one point
+ * per ranked group, x = the primary measure's value, y = the overlay's. Both axes get nice scales + unit
+ * captions; each point carries a native <title> (label · x · y) and an optional drill click (design D6).
+ * spec: { items:[{label, x, y, drill?}], formatX?, formatY?, unitX?, unitY?, onSelect? }
+ */
+export function renderScatterChart(spec) {
+  const { items, formatX = (v) => String(v), formatY = (v) => String(v), unitX = null, unitY = null, onSelect = null } = spec;
+  const pts = (items || []).filter((d) => d && d.x != null && !isNaN(d.x) && d.y != null && !isNaN(d.y));
+  if (!pts.length) return el("div", { class: "chart" }, [emptyStrip("No paired values to plot.")]);
+
+  const xMax = Math.max(...pts.map((d) => Number(d.x)));
+  const yMax = Math.max(...pts.map((d) => Number(d.y)));
+  const sx = niceScale(0, xMax > 0 ? xMax : 1, Y_TICKS, null);
+  const sy = niceScale(0, yMax > 0 ? yMax : 1, Y_TICKS, null);
+  const plotRight = W - M.r;
+  const plotW = plotRight - M.l;
+  const scaleX = (v) => M.l + ((v - sx.min) / (sx.max - sx.min)) * plotW;
+  const scaleY = (v) => M.t + (1 - (v - sy.min) / (sy.max - sy.min)) * PLOT_H;
+
+  const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", role: "img" });
+  const axis = svg("g", { class: "axis" });
+  for (const val of sy.ticks) {
+    const y = scaleY(val);
+    axis.appendChild(svg("line", { class: "grid-line", x1: M.l, y1: y, x2: plotRight, y2: y }));
+    const label = svg("text", { x: M.l - 8, y: y + 4, "text-anchor": "end" });
+    label.textContent = formatY(val);
+    axis.appendChild(label);
+  }
+  for (const val of sx.ticks) {
+    const x = scaleX(val);
+    axis.appendChild(svg("line", { class: "grid-line", x1: x, y1: M.t, x2: x, y2: M.t + PLOT_H }));
+    const label = svg("text", { x: Math.min(Math.max(x, M.l + 2), plotRight - 2), y: H - 8, "text-anchor": "middle" });
+    label.textContent = formatX(val);
+    axis.appendChild(label);
+  }
+  if (unitY && unitY !== "%") {
+    const cap = svg("text", { class: "axis-unit", x: M.l - 8, y: 11, "text-anchor": "end" });
+    cap.textContent = unitY;
+    axis.appendChild(cap);
+  }
+  if (unitX) {
+    const cap = svg("text", { class: "axis-unit", x: plotRight, y: H - 8, "text-anchor": "end" });
+    cap.textContent = unitX;
+    axis.appendChild(cap);
+  }
+  root.appendChild(axis);
+
+  for (const d of pts) {
+    const drillable = !!(onSelect && d.drill);
+    const dot = svg("circle", {
+      class: drillable ? "scatter-dot drillable" : "scatter-dot",
+      cx: scaleX(Number(d.x)),
+      cy: Math.max(M.t, Math.min(M.t + PLOT_H, scaleY(Number(d.y)))),
+      r: 5,
+      fill: normalizeColor(d.color || CATEGORICAL_COLORS[0]),
+      "fill-opacity": "0.75",
+    });
+    const title = svg("title");
+    title.textContent =
+      (d.label == null || d.label === "" ? "—" : String(d.label)) +
+      " · " + formatX(Number(d.x)) + " · " + formatY(Number(d.y)) +
+      (drillable ? " · click to filter" : "");
+    dot.appendChild(title);
+    if (drillable) dot.addEventListener("click", () => onSelect(d.drill));
+    root.appendChild(dot);
+  }
+
+  return el("div", { class: "chart chart-scatter" }, [root]);
 }
 
 /** Bounds on how much a ranked chart draws before it stops reading (the container scrolls a bar list; a pie pools). */

@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json.Nodes;
+using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
@@ -305,7 +306,7 @@ public sealed class DarlingComposeTests
     private static string Compile(PanelPlan plan, IReadOnlyList<string>? servers = null, IReadOnlyDictionary<string, string?>? variables = null)
     {
         var (compiled, error) = ComposeCompiler.Compile(
-            plan, new ComposeRunContext(servers, WindowStart, WindowEnd, variables ?? ComposeRunContext.NoVariables, RollupAvailability.All));
+            plan, new ComposeRunContext(servers, WindowStart, WindowEnd, variables ?? ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd));
         Assert.True(error is null, error);
         Assert.NotNull(compiled);
         return compiled!.Sql;
@@ -395,7 +396,7 @@ public sealed class DarlingComposeTests
         var plan = ValidPlan("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"auto\",\"viz\":\"line\"}");
         var end = WindowEnd;
         var start = end.AddHours(-windowHours);
-        var (compiled, error) = ComposeCompiler.Compile(plan, new ComposeRunContext(null, start, end, ComposeRunContext.NoVariables, RollupAvailability.All));
+        var (compiled, error) = ComposeCompiler.Compile(plan, new ComposeRunContext(null, start, end, ComposeRunContext.NoVariables, RollupAvailability.All, end));
         Assert.True(error is null, error);
         Assert.Contains(expectedTrunc, compiled!.Sql, StringComparison.Ordinal);
     }
@@ -444,7 +445,7 @@ public sealed class DarlingComposeTests
         var plan = ValidPlan("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"minute\",\"viz\":\"line\"}");
         var start = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
         var end = start.AddDays(60); /* 60 days of minutes >> MaxBuckets */
-        var (compiled, error) = ComposeCompiler.Compile(plan, new ComposeRunContext(null, start, end, ComposeRunContext.NoVariables, RollupAvailability.All));
+        var (compiled, error) = ComposeCompiler.Compile(plan, new ComposeRunContext(null, start, end, ComposeRunContext.NoVariables, RollupAvailability.All, end));
         Assert.Null(compiled);
         Assert.Contains("points", error!, StringComparison.OrdinalIgnoreCase);
     }
@@ -456,7 +457,8 @@ public sealed class DarlingComposeTests
         var plan = ValidPlan(planJson);
         var end = WindowEnd;                 /* EndUtc serves as "now" in the compiler */
         var start = end.AddDays(-daysOld);
-        return ComposeCompiler.Compile(plan, new ComposeRunContext(servers, start, end, ComposeRunContext.NoVariables, RollupAvailability.All));
+        /* NowUtc = end here on purpose: these pins predate #1606 and reason about age relative to the window end. */
+        return ComposeCompiler.Compile(plan, new ComposeRunContext(servers, start, end, ComposeRunContext.NoVariables, RollupAvailability.All, end));
     }
 
     [Fact]
@@ -1093,7 +1095,7 @@ public sealed class DarlingComposeTests
 
     private static IReadOnlyList<(string Source, ComposeCompiled Compiled)> CompileAnnotations(
         PanelPlan plan, IReadOnlyList<string>? servers = null) =>
-        ComposeCompiler.CompileAnnotations(plan, new ComposeRunContext(servers, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All));
+        ComposeCompiler.CompileAnnotations(plan, new ComposeRunContext(servers, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd));
 
     [Fact]
     public void CompileAnnotations_ReturnsEmpty_WhenNoneRequested()
@@ -1455,7 +1457,7 @@ public sealed class DarlingComposeTests
         var plan = ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"day\",\"viz\":\"line\"}");
         var end = WindowEnd;
         var (compiled, error) = ComposeCompiler.Compile(
-            plan, new ComposeRunContext(null, end.AddDays(-10), end, ComposeRunContext.NoVariables, RollupAvailability.None));
+            plan, new ComposeRunContext(null, end.AddDays(-10), end, ComposeRunContext.NoVariables, RollupAvailability.None, end));
         Assert.True(error is null, error);
         Assert.Contains("FROM collect.query_stats AS f", compiled!.Sql, StringComparison.Ordinal);
         Assert.DoesNotContain("_hourly", compiled.Sql, StringComparison.Ordinal);
@@ -1514,6 +1516,126 @@ public sealed class DarlingComposeTests
            30-day collector purge, not the 4-day tier — a 7-day wait_stats window is complete on raw, so
            a notice would be a false alarm even on a fully-built TimescaleDB store. */
         Assert.Null(ComposeStoreAvailability.BuildRetentionNotice("wait_stats", rawRoute, now.AddDays(-7), now, RollupAvailability.All));
+    }
+
+
+    /* ─────────────── #1606 reporting layer: overlay (second measure), scatter, absolute windows ─────────────── */
+
+    /// <summary>The overlay validation matrix: same-source only, coherent with viz/mode/groupBy, the same
+    /// aggregate/unit rulebook as the primary, and scatter REQUIRES one.</summary>
+    [Theory]
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"overlay\":{\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\"}}", "must share the panel's source")]
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"scatter\"}", "needs an 'overlay'")]
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"groupBy\":[\"database_name\"],\"viz\":\"line\",\"overlay\":{\"measure\":\"query_elapsed_us\",\"aggregate\":\"sum\"}}", "cannot also group")]
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"groupBy\":[\"database_name\"],\"viz\":\"stacked\",\"overlay\":{\"measure\":\"query_elapsed_us\",\"aggregate\":\"sum\"}}", "cannot carry an overlay")]
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"bar\",\"overlay\":{\"measure\":\"query_elapsed_us\",\"aggregate\":\"sum\"}}", "cannot carry an overlay")]
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"scatter\",\"overlay\":{\"measure\":\"query_avg_elapsed_us\",\"aggregate\":\"sum\"}}", "aggregation is fixed")]
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"scatter\",\"overlay\":{\"measure\":\"query_elapsed_us\",\"aggregate\":\"percentile_cont\"}}", "not valid for measure")]
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"scatter\",\"overlay\":{\"measure\":\"nope\"}}", "unknown measure")]
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"scatter\",\"overlay\":{\"measure\":\"query_elapsed_us\",\"aggregate\":\"sum\"}}", "not a time series")]
+    public void TryParsePanel_RejectsIncoherentOverlays(string json, string expectedFragment)
+    {
+        Assert.Contains(expectedFragment, RejectReason(json), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void TryParsePanel_AcceptsAScatter_AndADualAxisLine()
+    {
+        var (scatter, scatterError) = ComposeSpec.TryParsePanel(PanelJson("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":25,\"groupBy\":[\"query_hash\"],\"viz\":\"scatter\",\"overlay\":{\"measure\":\"query_executions\",\"aggregate\":\"sum\"}}"), Array.Empty<string>());
+        Assert.True(scatterError is null, scatterError);
+        Assert.NotNull(scatter!.Overlay);
+        Assert.Equal("query_executions", scatter.Overlay!.Measure.Key);
+
+        /* A ratio overlay takes its fixed aggregation and needs no 'aggregate'. */
+        var (dual, dualError) = ComposeSpec.TryParsePanel(PanelJson("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"overlay\":{\"measure\":\"query_avg_elapsed_us\"}}"), Array.Empty<string>());
+        Assert.True(dualError is null, dualError);
+        Assert.NotNull(dual!.Overlay);
+        Assert.Equal(MeasureKind.Ratio, dual.Overlay!.Measure.Kind);
+    }
+
+    /// <summary>The overlay compiles as ONE more select expression over the same fact rows — never a join,
+    /// never a parameter (the param-order pin: identical $n count with and without the overlay).</summary>
+    [Fact]
+    public void Compile_Overlay_EmitsValue2_AndBindsNoExtraParameters()
+    {
+        var with = ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"overlay\":{\"measure\":\"query_elapsed_us\",\"aggregate\":\"sum\"}}");
+        var without = ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}");
+        var context = new ComposeRunContext(null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd);
+
+        var (compiledWith, e1) = ComposeCompiler.Compile(with, context);
+        var (compiledWithout, e2) = ComposeCompiler.Compile(without, context);
+        Assert.True(e1 is null, e1);
+        Assert.True(e2 is null, e2);
+
+        Assert.Contains("AS value2", compiledWith!.Sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(f.delta_elapsed_time)", compiledWith.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("value2", compiledWithout!.Sql, StringComparison.Ordinal);
+        Assert.Equal(compiledWithout.Parameters.Count, compiledWith.Parameters.Count);
+    }
+
+    [Fact]
+    public void Compile_Scatter_RanksByPrimary_AndCarriesValue2()
+    {
+        var plan = ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":25,\"groupBy\":[\"query_hash\"],\"viz\":\"scatter\",\"overlay\":{\"measure\":\"query_executions\",\"aggregate\":\"sum\"}}");
+        var context = new ComposeRunContext(null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd);
+        var (compiled, error) = ComposeCompiler.Compile(plan, context);
+        Assert.True(error is null, error);
+        Assert.Contains("AS value2", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY value DESC", compiled.Sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>The CAGG gate with an overlay (#1606): one route serves both value expressions, and a
+    /// remappable pair rides the rollup with BOTH expressions remapped to the pre-aggregated columns.</summary>
+    [Fact]
+    public void Compile_OverlayCaggGate_RemappablePairRidesTheRollup()
+    {
+        var context = new ComposeRunContext(
+            null, WindowEnd.AddDays(-10), WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd);
+
+        var both = ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"overlay\":{\"measure\":\"query_elapsed_us\",\"aggregate\":\"sum\"}}");
+        var (compiledBoth, e1) = ComposeCompiler.Compile(both, context);
+        Assert.True(e1 is null, e1);
+        Assert.Contains("query_stats_hourly", compiledBoth!.Sql, StringComparison.Ordinal);
+        Assert.Contains("AS value2", compiledBoth.Sql, StringComparison.Ordinal);
+        Assert.Contains("_sum", compiledBoth.Sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>#1606 NowUtc decoupling: a purely-historical absolute window (30→25 days ago) must route by
+    /// age from NOW — the daily rollup — never by age from the window's end (which would claim recency the
+    /// retention tiers no longer have). This is the pin that keeps zoomed/historical windows honest.</summary>
+    [Fact]
+    public void Compile_HistoricalAbsoluteWindow_RoutesByAgeFromNow()
+    {
+        var now = WindowEnd;
+        var plan = ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"day\",\"viz\":\"line\"}");
+        var context = new ComposeRunContext(
+            null, now.AddDays(-30), now.AddDays(-25), ComposeRunContext.NoVariables, RollupAvailability.All, now);
+        var (compiled, error) = ComposeCompiler.Compile(plan, context);
+        Assert.True(error is null, error);
+        Assert.Contains("query_stats_daily", compiled!.Sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>The absolute-window request validation (#1606): both-or-neither, parseable ISO, start
+    /// strictly before end, span under the 90-day ceiling. All reject BEFORE any store round trip, so no
+    /// live database is needed.</summary>
+    [Theory]
+    [InlineData("{\"windowStart\":\"2026-07-01T00:00:00Z\"}", "together")]
+    [InlineData("{\"windowStart\":\"not-a-date\",\"windowEnd\":\"2026-07-02T00:00:00Z\"}", "ISO-8601")]
+    [InlineData("{\"windowStart\":\"2026-07-02T00:00:00Z\",\"windowEnd\":\"2026-07-01T00:00:00Z\"}", "earlier than")]
+    [InlineData("{\"windowStart\":\"2025-01-01T00:00:00Z\",\"windowEnd\":\"2026-07-01T00:00:00Z\"}", "ceiling")]
+    public async Task RunComposedPanel_RejectsBadAbsoluteWindows(string windowJson, string expectedFragment)
+    {
+        var body = (JsonObject)JsonNode.Parse("{\"panel\":{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"day\",\"viz\":\"line\"}}")!;
+        foreach (var kv in (JsonObject)JsonNode.Parse(windowJson)!)
+        {
+            body[kv.Key] = kv.Value!.DeepClone();
+        }
+
+        await using var postgres = NpgsqlDataSource.Create("Host=localhost;Port=1;Database=never_reached;Username=x");
+        var outcome = await DarlingWebEndpoints.RunComposedPanelAsync(postgres, body, CancellationToken.None);
+        Assert.NotNull(outcome.Error);
+        Assert.Contains(expectedFragment, outcome.Error!, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

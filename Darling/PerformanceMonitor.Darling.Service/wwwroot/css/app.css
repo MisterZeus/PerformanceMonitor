@@ -357,6 +357,11 @@ table.data td.sev-Healthy { color: var(--ok); }
 .chart .axis .axis-unit { fill: var(--dim); font-size: 10px; }
 .chart .grid-line { stroke: var(--border); stroke-width: 1; }
 .chart .series-line { fill: none; stroke-width: 2; }
+.chart .series-line-overlay { stroke-dasharray: 6 3; } /* the dual-axis overlay reads as its own kind of line */
+.chart .brush-rect { fill: rgba(46, 174, 241, 0.18); stroke: rgba(46, 174, 241, 0.55); stroke-width: 1; pointer-events: none; }
+.chart .scatter-dot { cursor: default; }
+.chart .scatter-dot.drillable { cursor: pointer; }
+.chart .scatter-dot.drillable:hover { fill-opacity: 1; }
 .chart .hover-line { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; }
 .chart .hover-dot { stroke: var(--bg-dark); stroke-width: 1.5; }
 
