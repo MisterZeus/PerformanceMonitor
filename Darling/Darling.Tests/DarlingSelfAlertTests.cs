@@ -119,13 +119,19 @@ public sealed class DarlingSelfAlertTests
         /// <summary>The V20 connection-change notify gate, read live by the evaluator's connect edge (default on).</summary>
         public bool NotifyConnectionChanges { get; set; } = true;
 
+        /// <summary>#1659 opt-ins (V33), read live like the V20 gate. Defaults off = classic edge-only.</summary>
+        public bool NotifyConnectionDownAtStartup { get; set; }
+        public int ConnectionRefireMinutes { get; set; }
+
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
         public DarlingSelfAlertEvaluator Build() => new(
             Settings, Deliverer, History,
             _ => MuteThrows ? throw new InvalidOperationException("mute check boom") : Muted,
             logger: null, utcNow: () => Now,
-            notifyConnectionChanges: () => NotifyConnectionChanges);
+            notifyConnectionChanges: () => NotifyConnectionChanges,
+            notifyConnectionDownAtStartup: () => NotifyConnectionDownAtStartup,
+            connectionRefireMinutes: () => ConnectionRefireMinutes);
     }
 
     /* ---------------- collection-stopped detection (pure) ---------------- */
@@ -376,6 +382,73 @@ public sealed class DarlingSelfAlertTests
     }
 
     /* ---------------- connection lost / restored edge ---------------- */
+
+    /* ---------------- #1659: already-down-at-first-sight + standing-outage re-fire ---------------- */
+
+    [Fact]
+    public async Task Connection_AlreadyDownAtFirstSight_OptIn_FiresOnTheFirstOutcome()
+    {
+        var h = new Harness { NotifyConnectionDownAtStartup = true };
+        var e = h.Build();
+
+        /* Unknown -> Offline with the opt-in: the outage is announced at first sight instead of being a
+           silent baseline — the case where the service starts mid-outage and would otherwise never alert. */
+        await e.ApplyConnectionOutcomeAsync(ServerId, Name, online: false, error: "no route", Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Server Unreachable", fired.MetricName);
+        Assert.Contains("Already unreachable when monitoring started", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Connection_Refire_FiresAfterTheInterval_NotBefore_AndUnderTheSameMetricName()
+    {
+        var h = new Harness { ConnectionRefireMinutes = 10 };
+        var e = h.Build();
+
+        /* Establish online, then lose it: the classic edge fires once. */
+        await e.ApplyConnectionOutcomeAsync(ServerId, Name, online: true, error: null, Ct);
+        await e.ApplyConnectionOutcomeAsync(ServerId, Name, online: false, error: "no route", Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Inside the window: offline->offline stays quiet. */
+        h.Now = h.Now.AddMinutes(5);
+        await e.ApplyConnectionOutcomeAsync(ServerId, Name, online: false, error: "no route", Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Past the window: the standing outage re-announces — SAME metric name, so webhook automation
+           keyed on "Server Unreachable" re-triggers; the detail says it is a re-fire. */
+        h.Now = h.Now.AddMinutes(6);
+        await e.ApplyConnectionOutcomeAsync(ServerId, Name, online: false, error: "no route", Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Equal("Server Unreachable", h.Deliverer.Outcomes[1].MetricName);
+        Assert.Contains("Still unreachable", h.Deliverer.Outcomes[1].DetailText, StringComparison.Ordinal);
+
+        /* Restore clears the re-fire clock and fires the classic restore. */
+        h.Now = h.Now.AddMinutes(1);
+        await e.ApplyConnectionOutcomeAsync(ServerId, Name, online: true, error: null, Ct);
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+        Assert.Equal("Server Restored", h.Deliverer.Outcomes[2].MetricName);
+    }
+
+    [Fact]
+    public async Task Connection_Refire_ClockStampsOnDeliveryOnly_SoASuppressedDecisionDoesNotConsumeTheWindow()
+    {
+        var h = new Harness { ConnectionRefireMinutes = 10, NotifyConnectionChanges = false };
+        var e = h.Build();
+
+        /* Down while the notify toggle is OFF: state advances, nothing delivers, nothing stamps. */
+        await e.ApplyConnectionOutcomeAsync(ServerId, Name, online: true, error: null, Ct);
+        await e.ApplyConnectionOutcomeAsync(ServerId, Name, online: false, error: "no route", Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* Toggle on mid-outage: the very next offline->offline poll is due immediately (no recorded down
+           alert to measure the window from), so the outage is announced rather than silently aged. */
+        h.NotifyConnectionChanges = true;
+        await e.ApplyConnectionOutcomeAsync(ServerId, Name, online: false, error: "no route", Ct);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Server Unreachable", fired.MetricName);
+    }
 
     [Fact]
     public async Task Connection_FirstConnect_IsSilentBaseline()

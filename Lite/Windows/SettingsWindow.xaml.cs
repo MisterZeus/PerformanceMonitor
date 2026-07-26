@@ -474,6 +474,8 @@ public partial class SettingsWindow : Window
         MinimizeToTrayCheckBox.IsChecked = App.MinimizeToTray;
         AlertsEnabledCheckBox.IsChecked = App.AlertsEnabled;
         NotifyConnectionCheckBox.IsChecked = App.NotifyConnectionChanges;
+        NotifyConnectionDownAtStartupCheckBox.IsChecked = App.NotifyConnectionDownAtStartup;
+        ConnectionRefireMinutesBox.Text = App.ConnectionRefireMinutes.ToString();
         AlertCpuCheckBox.IsChecked = App.AlertCpuEnabled;
         AlertCpuThresholdBox.Text = App.AlertCpuThreshold.ToString();
         AlertCpuModeBox.SelectedIndex = App.AlertCpuMode == CpuAlertMode.SqlOnly ? 1 : 0;
@@ -525,6 +527,9 @@ public partial class SettingsWindow : Window
         App.MinimizeToTray = MinimizeToTrayCheckBox.IsChecked == true;
         App.AlertsEnabled = AlertsEnabledCheckBox.IsChecked == true;
         App.NotifyConnectionChanges = NotifyConnectionCheckBox.IsChecked == true;
+        App.NotifyConnectionDownAtStartup = NotifyConnectionDownAtStartupCheckBox.IsChecked == true;
+        if (int.TryParse(ConnectionRefireMinutesBox.Text, out var refire))
+            App.ConnectionRefireMinutes = Math.Clamp(refire, 0, 1440);
         App.AlertCpuEnabled = AlertCpuCheckBox.IsChecked == true;
         if (int.TryParse(AlertCpuThresholdBox.Text, out var cpu) && cpu > 0 && cpu <= 100)
             App.AlertCpuThreshold = cpu;
@@ -612,6 +617,8 @@ public partial class SettingsWindow : Window
             root["minimize_to_tray"] = App.MinimizeToTray;
             root["alerts_enabled"] = App.AlertsEnabled;
             root["notify_connection_changes"] = App.NotifyConnectionChanges;
+            root["notify_connection_down_at_startup"] = App.NotifyConnectionDownAtStartup;
+            root["connection_refire_minutes"] = App.ConnectionRefireMinutes;
             root["alert_cpu_enabled"] = App.AlertCpuEnabled;
             root["alert_cpu_threshold"] = App.AlertCpuThreshold;
             root["alert_cpu_mode"] = App.AlertCpuMode.ToString();

@@ -53,7 +53,8 @@ public sealed partial class ViewerDataService
         "analysis_notifications_enabled, analysis_notify_severity, delivery_mode, per_event_max, " +
         "long_running_query_max_results, long_running_query_exclude_sp_server_diagnostics, " +
         "long_running_query_exclude_wait_for, long_running_query_exclude_backups, " +
-        "long_running_query_exclude_misc_waits, long_running_query_exclude_cdc, notify_connection_changes";
+        "long_running_query_exclude_misc_waits, long_running_query_exclude_cdc, notify_connection_changes, " +
+        "notify_connection_down_at_startup, connection_refire_minutes";
 
     /// <summary>The single global alert-settings row (id=1), for the Settings window prefill + the migrate-in
     /// defaults check. Column order matches <see cref="AlertSettingsColumns"/>.</summary>
@@ -62,11 +63,11 @@ public sealed partial class ViewerDataService
 
     /// <summary>Upserts the single global alert-settings row (Settings window Save). ON CONFLICT rewrites every
     /// column and bumps <c>modified_at</c> (and, via the V17 statement trigger, <c>config_version</c> — the
-    /// service reloads on its next sweep). $1..$36 bind the columns in <see cref="AlertSettingsColumns"/> order.</summary>
+    /// service reloads on its next sweep). $1..$38 bind the columns in <see cref="AlertSettingsColumns"/> order.</summary>
     public const string AlertSettingsUpsertSql = @"
 INSERT INTO config_alert_settings (id, " + AlertSettingsColumns + @", modified_at)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
-        $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, (now() AT TIME ZONE 'UTC'))
+        $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     enabled = EXCLUDED.enabled,
     cpu_enabled = EXCLUDED.cpu_enabled,
@@ -104,6 +105,8 @@ ON CONFLICT (id) DO UPDATE SET
     long_running_query_exclude_misc_waits = EXCLUDED.long_running_query_exclude_misc_waits,
     long_running_query_exclude_cdc = EXCLUDED.long_running_query_exclude_cdc,
     notify_connection_changes = EXCLUDED.notify_connection_changes,
+    notify_connection_down_at_startup = EXCLUDED.notify_connection_down_at_startup,
+    connection_refire_minutes = EXCLUDED.connection_refire_minutes,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>The two <c>cpu_mode</c> values the service honors (it compares case-insensitively against
@@ -169,6 +172,8 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.LongRunningQueryExcludeMiscWaits });  // $34
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.LongRunningQueryExcludeCdc });       // $35
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.NotifyConnectionChanges });          // $36
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.NotifyConnectionDownAtStartup });   // $37 (#1659, V33)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.ConnectionRefireMinutes });          // $38 (#1659, V33)
     }
 
     private static AlertSettingsRow ReadAlertSettingsRow(NpgsqlDataReader reader) => new()
@@ -209,6 +214,9 @@ ON CONFLICT (id) DO UPDATE SET
         LongRunningQueryExcludeMiscWaits = reader.GetBoolean(33),
         LongRunningQueryExcludeCdc = reader.GetBoolean(34),
         NotifyConnectionChanges = reader.GetBoolean(35),
+        /* #1659 opt-ins appended (V33) at ordinals 36-37. */
+        NotifyConnectionDownAtStartup = reader.GetBoolean(36),
+        ConnectionRefireMinutes = reader.GetInt32(37),
     };
 
     /// <summary>Maps the Settings window's CPU-mode combo tag ("Total"/"SqlOnly") to the store value.</summary>
@@ -238,6 +246,12 @@ public sealed class AlertSettingsRow
 
     /// <summary>Whether the service delivers the Server-Unreachable/Restored connect-edge alerts (V20 DDL default true).</summary>
     public bool NotifyConnectionChanges { get; set; } = true;
+
+    /// <summary>#1659 opt-in (V33): announce a server already down on the service's first-ever connect attempt.</summary>
+    public bool NotifyConnectionDownAtStartup { get; set; }
+
+    /// <summary>#1659 opt-in (V33): re-announce a standing outage every N minutes (0 = off).</summary>
+    public int ConnectionRefireMinutes { get; set; }
 
     public bool CpuEnabled { get; set; } = true;
     public int CpuThresholdPercent { get; set; } = 80;
@@ -309,6 +323,8 @@ public sealed class AlertSettingsRow
         ArgumentNullException.ThrowIfNull(other);
         return Enabled == other.Enabled
             && NotifyConnectionChanges == other.NotifyConnectionChanges
+            && NotifyConnectionDownAtStartup == other.NotifyConnectionDownAtStartup
+            && ConnectionRefireMinutes == other.ConnectionRefireMinutes
             && CpuEnabled == other.CpuEnabled
             && CpuThresholdPercent == other.CpuThresholdPercent
             && string.Equals(CpuMode, other.CpuMode, StringComparison.OrdinalIgnoreCase)

@@ -81,6 +81,15 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     /// </summary>
     public bool NotifyConnectionChanges => _config.Alerts.NotifyConnectionChanges;
 
+    /// <summary>#1659 opt-in (V33), read live like <see cref="NotifyConnectionChanges"/>: announce a server
+    /// already down on its first-ever connect attempt. Default false.</summary>
+    public bool NotifyConnectionDownAtStartup => _config.Alerts.NotifyConnectionDownAtStartup;
+
+    /// <summary>#1659 opt-in (V33), read live: re-announce a standing outage every N minutes (0 = off).
+    /// Clamped 0–1440 like the other store-fed numerics, so a hand-edited row can't drive a per-sweep spam
+    /// loop or a never-fires interval.</summary>
+    public int ConnectionRefireMinutes => Math.Clamp(_config.Alerts.ConnectionRefireMinutes, 0, 1440);
+
     /// <summary>"sql" → SqlProcess; anything else (incl. Lite's default "total") → TotalServer.</summary>
     public CpuAlertMode CpuAlertMode =>
         string.Equals(_config.Alerts.CpuMode, "sql", StringComparison.OrdinalIgnoreCase)

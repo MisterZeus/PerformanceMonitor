@@ -23,13 +23,21 @@ public sealed class DarlingServerTagsTests
         PgMigrations.Scripts.Single(s => s.Version == 32).Sql;
 
     [Fact]
-    public void V32_IsRegisteredLast_AndSchemaQualified_AndIdempotent()
+    public void V32_IsSchemaQualified_AndV33_IsRegisteredLast()
     {
         var v32 = PgMigrations.Scripts.Single(s => s.Version == 32);
 
         Assert.Equal("server-tags", v32.Name);
-        Assert.Equal(32, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, v32.Version);
+
+        /* V33 (#1659 connection-alert opt-ins) is the newest migration and tracks the build version;
+           its ALTERs are config.-qualified like every additive control-plane migration. */
+        var v33 = PgMigrations.Scripts.Single(s => s.Version == 33);
+        Assert.Equal("connection-alert-refire", v33.Name);
+        Assert.Equal(33, PgMigrations.Scripts[^1].Version);
+        Assert.Equal(StorageVersion.SchemaVersion, v33.Version);
+        Assert.Contains("ALTER TABLE config.config_alert_settings", v33.Sql, StringComparison.Ordinal);
+        Assert.Contains("notify_connection_down_at_startup boolean NOT NULL DEFAULT false", v33.Sql, StringComparison.Ordinal);
+        Assert.Contains("connection_refire_minutes integer NOT NULL DEFAULT 0", v33.Sql, StringComparison.Ordinal);
 
         /* config.-QUALIFIED: the migrate session runs under search_path = collect, config, public, so an
            unqualified CREATE TABLE would land in collect — the wrong schema AND the wrong ACL. */

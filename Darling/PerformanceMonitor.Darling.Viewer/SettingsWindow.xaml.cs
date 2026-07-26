@@ -657,6 +657,9 @@ public partial class SettingsWindow : Window
         AlertsEnabledCheckBox.IsChecked = r.Enabled;
         /* V20: connection-change notify is store-backed now (the service gates the connect edge on it). */
         NotifyConnectionCheckBox.IsChecked = r.NotifyConnectionChanges;
+        /* #1659 (V33): the two connection opt-ins ride the same row. */
+        NotifyConnectionDownAtStartupCheckBox.IsChecked = r.NotifyConnectionDownAtStartup;
+        ConnectionRefireMinutesBox.Text = r.ConnectionRefireMinutes.ToString(CultureInfo.InvariantCulture);
         AlertCpuCheckBox.IsChecked = r.CpuEnabled;
         AlertCpuThresholdBox.Text = r.CpuThresholdPercent.ToString(CultureInfo.InvariantCulture);
         AlertCpuModeBox.SelectedIndex = ViewerDataService.MapCpuModeFromStore(r.CpuMode) == "SqlOnly" ? 1 : 0;
@@ -705,6 +708,9 @@ public partial class SettingsWindow : Window
         {
             Enabled = AlertsEnabledCheckBox.IsChecked == true,
             NotifyConnectionChanges = NotifyConnectionCheckBox.IsChecked == true,
+            NotifyConnectionDownAtStartup = NotifyConnectionDownAtStartupCheckBox.IsChecked == true,
+            ConnectionRefireMinutes = int.TryParse(ConnectionRefireMinutesBox.Text, out var refire)
+                ? Math.Clamp(refire, 0, 1440) : 0,
             CpuEnabled = AlertCpuCheckBox.IsChecked == true,
             CpuMode = ViewerDataService.MapCpuModeToStore((AlertCpuModeBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "Total"),
             BlockingEnabled = AlertBlockingCheckBox.IsChecked == true,
@@ -869,6 +875,8 @@ public partial class SettingsWindow : Window
     {
         var enabled = AlertsEnabledCheckBox.IsChecked == true;
         NotifyConnectionCheckBox.IsEnabled = enabled;
+        NotifyConnectionDownAtStartupCheckBox.IsEnabled = enabled;
+        ConnectionRefireMinutesBox.IsEnabled = enabled;
         AlertCpuCheckBox.IsEnabled = enabled;
         AlertCpuThresholdBox.IsEnabled = enabled;
         AlertCpuModeBox.IsEnabled = enabled;
