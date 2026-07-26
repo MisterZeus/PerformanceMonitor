@@ -1645,8 +1645,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#1661]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1661
 [#1667]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1667
 [#1666]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1666
-<<<<<<< HEAD
 [#1681]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1681
-=======
 [#1680]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1680
->>>>>>> origin/dev
