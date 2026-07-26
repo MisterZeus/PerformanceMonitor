@@ -16,7 +16,10 @@ jobs:
       # version. The workflow still runs so the required check reports a result
       # — using paths-ignore would skip the run entirely and leave the check
       # stuck pending. Instead, the version comparison below is gated on whether
-      # any non-*.md file changed.
+      # any non-documentation file changed. The exclusions MIRROR build.yml's
+      # documentation allowlist (its docs: filter) — keep the two in step, or a
+      # LICENSE-only correction will demand a version bump here while build.yml
+      # calls it documentation.
       - name: Detect non-documentation changes
         id: changes
         uses: dorny/paths-filter@v4
@@ -25,6 +28,12 @@ jobs:
             code:
               - '**'
               - '!**/*.md'
+              - '!LICENSE'
+              - '!CITATION.cff'
+              - '!.gitignore'
+              - '!.gitattributes'
+              - '!docs/**/*.{md,svg,png,jpg,jpeg,gif}'
+              - '!Screenshots/**/*.{md,svg,png,jpg,jpeg,gif}'
 
       - name: Get PR version
         if: steps.changes.outputs.code == 'true'
@@ -67,4 +76,4 @@ jobs:
 
       - name: Skip notice
         if: steps.changes.outputs.code != 'true'
-        run: echo "Only documentation (*.md) files changed — version bump check skipped."
+        run: echo "Only documentation files changed — version bump check skipped."

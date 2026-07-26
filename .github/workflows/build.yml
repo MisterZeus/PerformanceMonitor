@@ -97,14 +97,20 @@ jobs:
             # *.yml (workflows), *.csproj / *.props / packages.lock.json (build inputs),
             # and *.cs regardless of how comment-only the change looks — an XML doc
             # comment still recompiles, and the compiler is what proves it still builds.
+            #
+            # The docs/ and Screenshots/ entries are extension-explicit rather than bare
+            # directory globs for the same reason: everything in them today is markdown,
+            # SVG, or a screenshot image, and a .sql or script dropped into either
+            # directory tomorrow should default to being code, not inherit a free pass
+            # from its parent directory.
             docs:
               - '**/*.md'
               - 'LICENSE'
               - 'CITATION.cff'
               - '.gitignore'
               - '.gitattributes'
-              - 'docs/**'
-              - 'Screenshots/**'
+              - 'docs/**/*.{md,svg,png,jpg,jpeg,gif}'
+              - 'Screenshots/**/*.{md,svg,png,jpg,jpeg,gif}'
             # True when any file OUTSIDE the documentation allowlist changed. A docs-only
             # change skips .NET setup, restore and versioning below — there is nothing to
             # compile — while the job itself still runs, so the required 'build' check
@@ -122,8 +128,8 @@ jobs:
               - '!CITATION.cff'
               - '!.gitignore'
               - '!.gitattributes'
-              - '!docs/**'
-              - '!Screenshots/**'
+              - '!docs/**/*.{md,svg,png,jpg,jpeg,gif}'
+              - '!Screenshots/**/*.{md,svg,png,jpg,jpeg,gif}'
 
       # Decides the docs fast path ONCE, in one place, and says so out loud. Two guards
       # keep it off the paths where a skipped restore would be a real loss:
