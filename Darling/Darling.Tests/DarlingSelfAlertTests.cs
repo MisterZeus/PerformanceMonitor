@@ -145,6 +145,12 @@ public sealed class DarlingSelfAlertTests
         public bool NotifyConnectionDownAtStartup { get; set; }
         public int ConnectionRefireMinutes { get; set; }
 
+        /// <summary>#991 Availability Group knobs (V35), read live like the V20 gate. Defaults are the shipped
+        /// V35 DDL defaults: family on, lag trigger at 300s, redo-queue trigger off.</summary>
+        public bool NotifyAgHealth { get; set; } = true;
+        public int AgLagAlertSeconds { get; set; } = 300;
+        public long AgRedoQueueAlertKb { get; set; }
+
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
         /// <summary>#1681: captures what the evaluator writes to the service log, so the firing/recovery pair
@@ -157,8 +163,31 @@ public sealed class DarlingSelfAlertTests
             logger: Log, utcNow: () => Now,
             notifyConnectionChanges: () => NotifyConnectionChanges,
             notifyConnectionDownAtStartup: () => NotifyConnectionDownAtStartup,
-            connectionRefireMinutes: () => ConnectionRefireMinutes);
+            connectionRefireMinutes: () => ConnectionRefireMinutes,
+            notifyAgHealth: () => NotifyAgHealth,
+            agLagAlertSeconds: () => AgLagAlertSeconds,
+            agRedoQueueAlertKb: () => AgRedoQueueAlertKb);
     }
+
+    /* ---------------- #991 Availability Group fixtures ---------------- */
+
+    private const string Ag = "AG1";
+    private const string Replica = "NODE2";
+    private const string Db = "Sales";
+
+    private static DarlingSelfAlertEvaluator.AgReplicaReading ReplicaRow(
+        string? role = "SECONDARY", string? connected = "CONNECTED", string replica = Replica, string ag = Ag) =>
+        new(ag, replica, role, connected);
+
+    private static DarlingSelfAlertEvaluator.AgDatabaseReading DatabaseRow(
+        long? lagSeconds = 0,
+        long? redoKb = 0,
+        bool? suspended = false,
+        string? suspendReason = null,
+        string database = Db,
+        string replica = Replica,
+        string ag = Ag) =>
+        new(ag, database, replica, lagSeconds, redoKb, suspended, suspendReason);
 
     /* ---------------- collection-stopped detection (pure) ---------------- */
 
@@ -935,6 +964,514 @@ public sealed class DarlingSelfAlertTests
         /* A throwing re-arm delegate is isolated too. */
         var e2 = new Harness().Build();
         await e2.EvaluateCompressionJobsAsync(Stuck(1002), _ => throw new InvalidOperationException("boom"), Ct);
+    }
+
+    /* ---------------- #991 Availability Groups: sync-behind decision (pure) ---------------- */
+
+    private static DarlingSelfAlertEvaluator.AgSyncJudgement Judge(
+        DarlingSelfAlertEvaluator.AgDatabaseReading reading, int lagSeconds, long redoKb) =>
+        DarlingSelfAlertEvaluator.JudgeAgSync(reading, lagSeconds, redoKb, out _);
+
+    [Fact]
+    public void JudgeAgSync_LagAtOrOverThreshold_IsBehind()
+    {
+        Assert.Equal(
+            DarlingSelfAlertEvaluator.AgSyncJudgement.Behind,
+            DarlingSelfAlertEvaluator.JudgeAgSync(DatabaseRow(lagSeconds: 300), 300, 0, out var reason));
+        Assert.Contains("300 seconds behind", reason, StringComparison.Ordinal);
+        Assert.Equal(DarlingSelfAlertEvaluator.AgSyncJudgement.Behind, Judge(DatabaseRow(lagSeconds: 301), 300, 0));
+        Assert.Equal(DarlingSelfAlertEvaluator.AgSyncJudgement.CaughtUp, Judge(DatabaseRow(lagSeconds: 299), 300, 0));
+    }
+
+    [Fact]
+    public void JudgeAgSync_ZeroThreshold_DisablesThatTrigger()
+    {
+        /* Both off: a wildly lagging, hugely queued secondary is NOT MEASURABLE — not "caught up". The
+           distinction matters because only a measured CaughtUp resolves a standing alert. */
+        Assert.Equal(
+            DarlingSelfAlertEvaluator.AgSyncJudgement.NotMeasurable,
+            Judge(DatabaseRow(lagSeconds: 99999, redoKb: 99999999), 0, 0));
+
+        /* Redo alone: the seconds trigger stays off, the KB trigger fires. */
+        Assert.Equal(
+            DarlingSelfAlertEvaluator.AgSyncJudgement.Behind,
+            DarlingSelfAlertEvaluator.JudgeAgSync(DatabaseRow(lagSeconds: 99999, redoKb: 5000), 0, 4096, out var reason));
+        Assert.Contains("redo queue", reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void JudgeAgSync_SuspendedDatabase_AbstainsOnSeconds_ButStillJudgesTheRedoQueue()
+    {
+        /* THE TRAP: MS Learn documents secondary_lag_seconds reading 0 — not NULL — while movement is
+           SUSPENDED, so the database that is furthest behind reports as caught up. The seconds trigger
+           therefore abstains, and with only that trigger enabled the row is NOT MEASURABLE — emphatically not
+           CaughtUp, which would resolve the standing alert at the exact moment things got worse. */
+        Assert.Equal(
+            DarlingSelfAlertEvaluator.AgSyncJudgement.NotMeasurable,
+            Judge(DatabaseRow(lagSeconds: 0, suspended: true), 300, 0));
+
+        /* Even a NON-zero lag reading is ignored while suspended — the column is not trustworthy in that
+           state at all, so the rule is "suspended means the seconds trigger abstains", not "suspended plus
+           zero". */
+        Assert.Equal(
+            DarlingSelfAlertEvaluator.AgSyncJudgement.NotMeasurable,
+            Judge(DatabaseRow(lagSeconds: 9999, suspended: true), 300, 0));
+
+        /* The redo queue keeps judging while suspended: that backlog is real and still growing. */
+        Assert.Equal(
+            DarlingSelfAlertEvaluator.AgSyncJudgement.Behind,
+            Judge(DatabaseRow(lagSeconds: 0, redoKb: 8192, suspended: true), 300, 4096));
+
+        /* ...and a suspended row with a SMALL redo queue is genuinely measured, so it may resolve. */
+        Assert.Equal(
+            DarlingSelfAlertEvaluator.AgSyncJudgement.CaughtUp,
+            Judge(DatabaseRow(lagSeconds: 0, redoKb: 8, suspended: true), 300, 4096));
+    }
+
+    [Fact]
+    public void JudgeAgSync_NullReadings_AreNotMeasurable_NotCaughtUp()
+    {
+        /* The PRIMARY's own row, and every row under WSFC quorum loss, reads NULL. Reporting that as CaughtUp
+           would resolve every standing lag alert on the fleet the moment the cluster lost quorum. */
+        Assert.Equal(
+            DarlingSelfAlertEvaluator.AgSyncJudgement.NotMeasurable,
+            Judge(DatabaseRow(lagSeconds: null, redoKb: null, suspended: null), 300, 4096));
+
+        /* One usable arm is enough to judge, even when the other reads NULL. */
+        Assert.Equal(
+            DarlingSelfAlertEvaluator.AgSyncJudgement.CaughtUp,
+            Judge(DatabaseRow(lagSeconds: 5, redoKb: null), 300, 4096));
+    }
+
+    /* ---------------- #991: failover edge ---------------- */
+
+    [Fact]
+    public async Task AgFailover_FirstSighting_IsSilentBaseline_ThenARoleChangeFires()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* First sighting of this replica: baseline only. A service starting up must not page "failover"
+           merely because it has never seen the role before. */
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(role: "SECONDARY") }, Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* Same role again: steady state, still silent. */
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(role: "SECONDARY") }, Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* SECONDARY -> PRIMARY: a genuine change from a known state. */
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(role: "PRIMARY") }, Ct);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("AG Failover", fired.MetricName);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
+        Assert.Equal("PRIMARY", fired.CurrentValue);
+        Assert.Equal("SECONDARY", fired.ThresholdValue);
+        Assert.Contains("from SECONDARY to PRIMARY", fired.DetailText, StringComparison.Ordinal);
+
+        /* And back: the reverse edge is just as much a failover. */
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(role: "SECONDARY") }, Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task AgFailover_NullRole_IsSkipped_NotTreatedAsAChange()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(role: "PRIMARY") }, Ct);
+
+        /* WSFC quorum loss nulls the AG catalog views wholesale. Treating NULL as a transition would spray a
+           failover alert for every replica in the fleet at the exact moment the cluster is already in trouble. */
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(role: null) }, Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* The remembered role survives the null, so recovering to the SAME role is still not a failover. */
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(role: "PRIMARY") }, Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task AgFailover_TracksEachReplicaSeparately()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[]
+        {
+            ReplicaRow(role: "PRIMARY", replica: "NODE1"),
+            ReplicaRow(role: "SECONDARY", replica: "NODE2"),
+        }, Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* A failover swaps both — two independent edges, two alerts. */
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[]
+        {
+            ReplicaRow(role: "SECONDARY", replica: "NODE1"),
+            ReplicaRow(role: "PRIMARY", replica: "NODE2"),
+        }, Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.All(h.Deliverer.Outcomes, o => Assert.Equal("AG Failover", o.MetricName));
+    }
+
+    /* ---------------- #991: replica disconnected / reconnected ---------------- */
+
+    [Fact]
+    public async Task AgReplicaDisconnected_FiresOnTheEdge_ThenReconnectResolvesIt()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* Baseline CONNECTED. */
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(connected: "CONNECTED") }, Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* CONNECTED -> DISCONNECTED. */
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(connected: "DISCONNECTED") }, Ct);
+        var lost = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("AG Replica Disconnected", lost.MetricName);
+        Assert.Equal(AlertSeverityLevel.Critical, lost.Severity);
+
+        /* Still disconnected: edge-triggered, so no re-fire. */
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(connected: "DISCONNECTED") }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Back to CONNECTED: the informational reconnect, severity null so the shared severity map renders
+           it green/RESOLVED like "Server Restored". */
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(connected: "CONNECTED") }, Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Equal("AG Replica Reconnected", h.Deliverer.Outcomes[1].MetricName);
+        Assert.Null(h.Deliverer.Outcomes[1].Severity);
+    }
+
+    [Fact]
+    public async Task AgReplicaDisconnected_AlreadyDisconnectedAtFirstSighting_IsASilentBaseline()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* The ConnectionAlertPolicy discipline: a replica that was already down when monitoring started is a
+           baseline, not an edge — only a transition from a KNOWN state pages. */
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(connected: "DISCONNECTED") }, Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* ...and the recovery from that baseline still reports, so the operator learns the AG is whole. */
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(connected: "CONNECTED") }, Ct);
+        var reconnected = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("AG Replica Reconnected", reconnected.MetricName);
+    }
+
+    [Fact]
+    public async Task AgReplicaDisconnected_UnrecognizedState_IsTreatedAsConnected_NotAsAPage()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(connected: "CONNECTED") }, Ct);
+
+        /* Only an exact DISCONNECTED pages. A value we do not recognize must not wake somebody up at 3am for
+           a state the product never learned to interpret. */
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(connected: "SOMETHING_NEW") }, Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    /* ---------------- #991: sync fell behind ---------------- */
+
+    [Fact]
+    public async Task AgSyncFellBehind_FiresOnce_ReFiresOnlyOnCooldown_ThenRecovers()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(lagSeconds: 600) }, Ct);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("AG Sync Fell Behind", fired.MetricName);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
+
+        /* Inside the 5-minute cooldown: a standing condition, so it stays quiet. */
+        h.Now = h.Now.AddMinutes(2);
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(lagSeconds: 600) }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Past the cooldown: still behind, so re-fire. */
+        h.Now = h.Now.AddMinutes(4);
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(lagSeconds: 600) }, Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* Caught up: one resolution row, no new delivery. */
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(lagSeconds: 1) }, Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal("AG Sync Recovered", resolution.MetricName);
+        Assert.Contains(Db, resolution.DetailText, StringComparison.Ordinal);
+
+        /* Recovered state is dropped, so falling behind again fires cleanly rather than being swallowed by
+           the previous episode's cooldown stamp. */
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(lagSeconds: 600) }, Ct);
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task AgSyncFellBehind_TracksEachDatabaseIndependently()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[]
+        {
+            DatabaseRow(lagSeconds: 600, database: "Sales"),
+            DatabaseRow(lagSeconds: 0, database: "Orders"),
+        }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Orders now falls behind INSIDE Sales's cooldown window. Per-database keying is the whole point: a
+           second database going bad must not hide behind the first one's cooldown. */
+        h.Now = h.Now.AddMinutes(1);
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[]
+        {
+            DatabaseRow(lagSeconds: 600, database: "Sales"),
+            DatabaseRow(lagSeconds: 600, database: "Orders"),
+        }, Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Contains("Orders", h.Deliverer.Outcomes[1].DetailText, StringComparison.Ordinal);
+
+        /* Sales recovers while Orders stays behind: exactly one resolution, and Orders keeps its state. */
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[]
+        {
+            DatabaseRow(lagSeconds: 0, database: "Sales"),
+            DatabaseRow(lagSeconds: 600, database: "Orders"),
+        }, Ct);
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal("AG Sync Recovered", resolution.MetricName);
+        Assert.Contains("Sales", resolution.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AgSyncFellBehind_LaggingDatabaseThatBecomesSuspended_IsNotAnnouncedAsCaughtUp()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* Baseline healthy, then it falls behind. */
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(lagSeconds: 0) }, Ct);
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(lagSeconds: 600) }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Now data movement is SUSPENDED. secondary_lag_seconds reads 0 in that state, so a recovery sweep
+           driven off "stopped breaching" would emit "AG Sync Recovered — has caught up with the primary" in
+           the SAME sweep that reports the suspension. It got worse, not better: the only rows written here
+           must be the suspend alert, and no resolution. */
+        await e.ApplyAgDatabaseHealthAsync(
+            ServerId, Name, new[] { DatabaseRow(lagSeconds: 0, suspended: true, suspendReason: "SUSPEND_FROM_USER") }, Ct);
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Equal("AG Database Suspended", h.Deliverer.Outcomes[1].MetricName);
+        Assert.DoesNotContain(h.History.Records, r => r.MetricName == "AG Sync Recovered");
+
+        /* Resuming with real lag still standing keeps the alert live; it re-fires past the cooldown rather
+           than starting a fresh episode from a phantom recovery. The resume itself is a history row (the
+           evaluator's recovery shape), not a third delivery. */
+        h.Now = h.Now.AddMinutes(6);
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(lagSeconds: 600) }, Ct);
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+        Assert.Equal("AG Sync Fell Behind", h.Deliverer.Outcomes[2].MetricName);
+        Assert.Equal("AG Data Movement Resumed", Assert.Single(h.History.Records).MetricName);
+    }
+
+    [Fact]
+    public async Task AgSyncFellBehind_NullReadingsUnderQuorumLoss_DoNotResolveTheStandingAlert()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(lagSeconds: 600) }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* WSFC quorum loss nulls the columns. That is no signal — the alert must stand, not be declared
+           recovered at the worst possible moment. */
+        await e.ApplyAgDatabaseHealthAsync(
+            ServerId, Name, new[] { DatabaseRow(lagSeconds: null, redoKb: null, suspended: null) }, Ct);
+        Assert.Empty(h.History.Records);
+
+        /* A genuine measured recovery still resolves it. */
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(lagSeconds: 0) }, Ct);
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal("AG Sync Recovered", resolution.MetricName);
+    }
+
+    [Fact]
+    public async Task AgSyncFellBehind_BothTriggersOff_NeitherFiresNorResolves()
+    {
+        var h = new Harness { AgLagAlertSeconds = 0, AgRedoQueueAlertKb = 0 };
+        var e = h.Build();
+
+        /* Nothing to measure against: a hugely lagging secondary is simply not judged. */
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(lagSeconds: 99999, redoKb: 99999999) }, Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task AgSyncFellBehind_RecoverySweep_IsScopedToTheServerBeingEvaluated()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        const int otherServerId = 515151;
+
+        /* Two servers each have a lagging database. */
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(lagSeconds: 600) }, Ct);
+        await e.ApplyAgDatabaseHealthAsync(otherServerId, "OTHER-SRV", new[] { DatabaseRow(lagSeconds: 600) }, Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* The FIRST server catches up. Its snapshot says nothing about the second server, so a recovery sweep
+           that walked every tracked key would silently resolve the other server's live alert. */
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(lagSeconds: 0) }, Ct);
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(Key, resolution.ServerId);
+
+        /* Proof the other server's state survived: it is still inside its cooldown, so it stays quiet rather
+           than re-firing as a fresh episode. */
+        await e.ApplyAgDatabaseHealthAsync(otherServerId, "OTHER-SRV", new[] { DatabaseRow(lagSeconds: 600) }, Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    /* ---------------- #991: database suspended ---------------- */
+
+    [Fact]
+    public async Task AgDatabaseSuspended_FiresOnTheEdgeWithTheReason_ThenResumeResolves()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* Baseline healthy. */
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(suspended: false) }, Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* false -> true, carrying suspend_reason_desc. */
+        await e.ApplyAgDatabaseHealthAsync(
+            ServerId, Name, new[] { DatabaseRow(suspended: true, suspendReason: "SUSPEND_FROM_USER") }, Ct);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("AG Database Suspended", fired.MetricName);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
+        Assert.Equal("SUSPEND_FROM_USER", fired.CurrentValue);
+        Assert.Contains("SET HADR RESUME", fired.DetailText, StringComparison.Ordinal);
+
+        /* Still suspended: edge-triggered, no re-fire. */
+        await e.ApplyAgDatabaseHealthAsync(
+            ServerId, Name, new[] { DatabaseRow(suspended: true, suspendReason: "SUSPEND_FROM_USER") }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Resumed: one resolution row, no second delivery. */
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(suspended: false) }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal("AG Data Movement Resumed", resolution.MetricName);
+    }
+
+    [Fact]
+    public async Task AgDatabaseSuspended_AlreadySuspendedAtFirstSighting_IsASilentBaseline_AndNullIsNoSignal()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(suspended: true) }, Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* A NULL is_suspended (quorum loss) is no signal at all: it must neither fire nor clobber the
+           remembered state, so the later genuine false->true edge still reads as an edge. */
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(suspended: null) }, Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(suspended: false) }, Ct);
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(suspended: true) }, Ct);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("AG Database Suspended", fired.MetricName);
+        Assert.Equal("no reason reported", fired.CurrentValue);
+    }
+
+    /* ---------------- #991: gating and forget ---------------- */
+
+    [Fact]
+    public async Task AgAlerts_MasterSwitchOff_FiresNothing_AndTheAlertsSwitchGatesThemToo()
+    {
+        var h = new Harness { NotifyAgHealth = false };
+        var e = h.Build();
+
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(role: "SECONDARY") }, Ct);
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(role: "PRIMARY", connected: "DISCONNECTED") }, Ct);
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(lagSeconds: 9999, suspended: true) }, Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+
+        /* The master alerts switch gates the family as well, independently of the AG toggle. */
+        var h2 = new Harness();
+        h2.Settings.AlertsEnabled = false;
+        var e2 = h2.Build();
+        await e2.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(role: "SECONDARY") }, Ct);
+        await e2.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(role: "PRIMARY") }, Ct);
+        Assert.Empty(h2.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task AgAlerts_ThresholdsAreReadLive_SoAStoreEditTakesEffectOnTheNextSweep()
+    {
+        var h = new Harness { AgLagAlertSeconds = 300 };
+        var e = h.Build();
+
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(lagSeconds: 120) }, Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* Operator tightens the threshold in the viewer; the service re-reads it by reference, no restart. */
+        h.AgLagAlertSeconds = 60;
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(lagSeconds: 120) }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task AgAlerts_Forget_DropsCompositeKeyedState_SoAReAddedServerReBaselines()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* Establish a role baseline and a standing sync-behind alert. */
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(role: "PRIMARY") }, Ct);
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(lagSeconds: 600) }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Removed from the monitored set. AG state is keyed by a COMPOSITE, so the per-server TryRemove that
+           clears the other conditions cannot reach it — Forget has to sweep the prefix. */
+        e.Forget(ServerId);
+
+        /* Re-added: the role is a fresh baseline (no phantom failover) ... */
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(role: "SECONDARY") }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* ... and the sync-behind episode starts over rather than sitting inside the dropped cooldown stamp. */
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(lagSeconds: 600) }, Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* Nothing lingered to resolve, so no stray recovery row was written for the forgotten episode. */
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task AgAlerts_FireUnderTheRealServerKey_SoPerServerDeliveryAndHistoryStillCorrelate()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(role: "SECONDARY") }, Ct);
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(role: "PRIMARY") }, Ct);
+
+        /* The AG grain lives in the alert TEXT; the serverKey stays the real server_id so the deliverer's
+           per-server delivery-mode override (#1236) and the history correlation keep working. */
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(Key, fired.ServerKey);
+        Assert.Equal(Name, fired.ServerName);
+        Assert.Contains(Ag, fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains(Replica, fired.DetailText, StringComparison.Ordinal);
     }
 
     /* ---------------- master switch ---------------- */

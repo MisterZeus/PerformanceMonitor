@@ -39,7 +39,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 public sealed partial class ViewerDataService
 {
-    /* The 36 AlertsConfig + AnalysisConfig columns in the SAME order the service reads them
+    /* The 41 AlertsConfig + AnalysisConfig columns in the SAME order the service reads them
        (StoreConfigProvider.ReadAlertSettingsAsync), so the parity test pins one list against both ends.
        delivery_mode/per_event_max (V18, #1141) then the six long-running-query read knobs + the connection-change
        notify toggle (V20) are appended so the existing ordinals stay pinned. */
@@ -54,7 +54,8 @@ public sealed partial class ViewerDataService
         "long_running_query_max_results, long_running_query_exclude_sp_server_diagnostics, " +
         "long_running_query_exclude_wait_for, long_running_query_exclude_backups, " +
         "long_running_query_exclude_misc_waits, long_running_query_exclude_cdc, notify_connection_changes, " +
-        "notify_connection_down_at_startup, connection_refire_minutes";
+        "notify_connection_down_at_startup, connection_refire_minutes, " +
+        "notify_ag_health, ag_lag_alert_seconds, ag_redo_queue_alert_kb";
 
     /// <summary>The single global alert-settings row (id=1), for the Settings window prefill + the migrate-in
     /// defaults check. Column order matches <see cref="AlertSettingsColumns"/>.</summary>
@@ -63,11 +64,12 @@ public sealed partial class ViewerDataService
 
     /// <summary>Upserts the single global alert-settings row (Settings window Save). ON CONFLICT rewrites every
     /// column and bumps <c>modified_at</c> (and, via the V17 statement trigger, <c>config_version</c> — the
-    /// service reloads on its next sweep). $1..$38 bind the columns in <see cref="AlertSettingsColumns"/> order.</summary>
+    /// service reloads on its next sweep). $1..$41 bind the columns in <see cref="AlertSettingsColumns"/> order.</summary>
     public const string AlertSettingsUpsertSql = @"
 INSERT INTO config_alert_settings (id, " + AlertSettingsColumns + @", modified_at)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
-        $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, (now() AT TIME ZONE 'UTC'))
+        $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41,
+        (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     enabled = EXCLUDED.enabled,
     cpu_enabled = EXCLUDED.cpu_enabled,
@@ -107,6 +109,9 @@ ON CONFLICT (id) DO UPDATE SET
     notify_connection_changes = EXCLUDED.notify_connection_changes,
     notify_connection_down_at_startup = EXCLUDED.notify_connection_down_at_startup,
     connection_refire_minutes = EXCLUDED.connection_refire_minutes,
+    notify_ag_health = EXCLUDED.notify_ag_health,
+    ag_lag_alert_seconds = EXCLUDED.ag_lag_alert_seconds,
+    ag_redo_queue_alert_kb = EXCLUDED.ag_redo_queue_alert_kb,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>The two <c>cpu_mode</c> values the service honors (it compares case-insensitively against
@@ -174,6 +179,9 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.NotifyConnectionChanges });          // $36
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.NotifyConnectionDownAtStartup });   // $37 (#1659, V33)
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.ConnectionRefireMinutes });          // $38 (#1659, V33)
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.NotifyAgHealth });                  // $39 (#991, V35)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.AgLagAlertSeconds });                // $40 (#991, V35)
+        command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = r.AgRedoQueueAlertKb });              // $41 (#991, V35)
     }
 
     private static AlertSettingsRow ReadAlertSettingsRow(NpgsqlDataReader reader) => new()
@@ -217,6 +225,10 @@ ON CONFLICT (id) DO UPDATE SET
         /* #1659 opt-ins appended (V33) at ordinals 36-37. */
         NotifyConnectionDownAtStartup = reader.GetBoolean(36),
         ConnectionRefireMinutes = reader.GetInt32(37),
+        /* #991 AG knobs appended (V35) at ordinals 38-40. */
+        NotifyAgHealth = reader.GetBoolean(38),
+        AgLagAlertSeconds = reader.GetInt32(39),
+        AgRedoQueueAlertKb = reader.GetInt64(40),
     };
 
     /// <summary>Maps the Settings window's CPU-mode combo tag ("Total"/"SqlOnly") to the store value.</summary>
@@ -252,6 +264,15 @@ public sealed class AlertSettingsRow
 
     /// <summary>#1659 opt-in (V33): re-announce a standing outage every N minutes (0 = off).</summary>
     public int ConnectionRefireMinutes { get; set; }
+
+    /// <summary>#991 (V35): the master switch for the Availability Group alert family (DDL default true).</summary>
+    public bool NotifyAgHealth { get; set; } = true;
+
+    /// <summary>#991 (V35): "AG Sync Fell Behind" lag trigger in seconds (0 = off).</summary>
+    public int AgLagAlertSeconds { get; set; } = 300;
+
+    /// <summary>#991 (V35): "AG Sync Fell Behind" redo-queue trigger in KB (0 = off).</summary>
+    public long AgRedoQueueAlertKb { get; set; }
 
     public bool CpuEnabled { get; set; } = true;
     public int CpuThresholdPercent { get; set; } = 80;
@@ -325,6 +346,9 @@ public sealed class AlertSettingsRow
             && NotifyConnectionChanges == other.NotifyConnectionChanges
             && NotifyConnectionDownAtStartup == other.NotifyConnectionDownAtStartup
             && ConnectionRefireMinutes == other.ConnectionRefireMinutes
+            && NotifyAgHealth == other.NotifyAgHealth
+            && AgLagAlertSeconds == other.AgLagAlertSeconds
+            && AgRedoQueueAlertKb == other.AgRedoQueueAlertKb
             && CpuEnabled == other.CpuEnabled
             && CpuThresholdPercent == other.CpuThresholdPercent
             && string.Equals(CpuMode, other.CpuMode, StringComparison.OrdinalIgnoreCase)
