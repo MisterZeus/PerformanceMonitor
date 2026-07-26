@@ -723,9 +723,32 @@ internal sealed class DarlingSelfAlertEvaluator
     /// stops growing exactly when replication stops, i.e. it looks like it is catching up. The sharpest example
     /// is any DRAIN-TIME measure: queue ÷ rate with both frozen holds a small, static, healthy-looking number
     /// (measured at a flat 0.0144 minutes across an entire suspension) when the true answer is "never, movement
-    /// is stopped". A drain-time or commit-delta trigger added here would therefore fail SILENT rather than
-    /// loud, which is worse. Anything new that judges a suspended row must route through the same
-    /// may-fire-never-clear gate below rather than being trusted on its own.</para>
+    /// is stopped". A drain-time trigger added here would therefore fail SILENT rather than loud, which is the
+    /// worse half. Anything new that judges a suspended row must route through the same may-fire-never-clear
+    /// gate below rather than being trusted on its own.</para>
+    /// <para>DO NOT DERIVE LAG FROM COMMIT TIMES AT ALL — <c>now - last_commit_time</c> is not a lag measure and
+    /// it is not a heartbeat. It fails in BOTH directions, so guarding only the suspended one is not enough.
+    /// On a suspended row it stops growing (the silent half above); on a QUIET BUT PERFECTLY HEALTHY replica it
+    /// grows without bound, because nothing has committed — measured at 1757 seconds, and separately at ~7
+    /// minutes, on secondaries that were SYNCHRONIZED, not suspended, and reporting
+    /// <c>secondary_lag_seconds = 0</c>. A trigger built on it would page about idle databases, which is the
+    /// loud half and the one more likely to actually ship. <c>secondary_lag_seconds</c> is the lag measure;
+    /// the commit times are useful for showing an operator WHEN something last happened, not for judging it.</para>
+    /// <para>WHICH OF THE TWO TREATMENTS ABOVE APPLIES TO A NEW MEASURE — they look superficially alike and get
+    /// opposite prescriptions, so the discriminator is the failure DIRECTION, not the column:
+    /// <list type="bullet">
+    /// <item>Fails in ONE direction (drain-time: reassuring only, and only while suspended) → GATE it. The
+    /// may-fire-never-clear rule below neutralizes a one-directional failure, because the direction it
+    /// suppresses is exactly the one that would clear an alarm wrongly.</item>
+    /// <item>Fails in BOTH directions under different conditions (commit deltas: silent while suspended, loud
+    /// on a quiet healthy replica) → DO NOT USE IT. No directional gate can help: suppressing the reassuring
+    /// half leaves the false-alarm half, so gating converts a silent failure into a noisy one rather than into
+    /// a correct one.</item>
+    /// </list>
+    /// Ask which way a reading can lie before deciding how to handle it. Every measured VALUE in this file's
+    /// history moved at least once — the documented lag behavior, the latch timing, the drain estimate, the lag
+    /// baseline under load versus idle — while the direction-based rules did not move at all. Reason about
+    /// direction; the magnitudes are what keep turning out to be wrong.</para>
     /// <para>WHAT THE NUMBER IS NOT: it measures staleness, not volume. On an idle group a large lag means
     /// "nothing has been hardened in a while", which is not the same as "a lot of data is at risk" — the
     /// backlog measure would be <c>log_send_queue_size</c>, and that reads NULL while suspended. Worth knowing
