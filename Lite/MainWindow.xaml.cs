@@ -72,6 +72,13 @@ public partial class MainWindow : Window
        gate) and the #1145 restart-surviving watermark seed/persist through LiteAlertStateStore;
        Lite-specific delivery (tray/badges/#1141 split) lives behind LiteAlertDeliverer. */
     private AlertEngine? _alertEngine;
+
+    /// <summary>#1696: Availability Group alert state, per AG grain. Not part of the shared AlertEngine
+    /// because AG health is judged off the COLLECTED ag_* snapshots rather than the engine's live
+    /// per-server snapshot — the same reason Darling keeps it in its self-alert evaluator rather than the
+    /// engine. The decisions themselves are the shared PerformanceMonitor.Common.AgAlertPolicy, so both apps
+    /// fire on identical rules under identical metric names.</summary>
+    private readonly Services.AgAlertEvaluator _agAlertEvaluator = new();
     private McpHostService? _mcpService;
     private readonly AlertStateService _alertStateService = new();
     private readonly IAlertSettings _alertSettings = new AppAlertSettings();
@@ -1472,9 +1479,13 @@ public partial class MainWindow : Window
         if (result == MessageBoxResult.Yes)
         {
             CloseServerTab(server.Id);
-            _collectorService?.ClearHealthForServer(
-                RemoteCollectorService.GetDeterministicHashCode(
-                    RemoteCollectorService.GetServerNameForStorage(server)));
+            var removedServerId = RemoteCollectorService.GetDeterministicHashCode(
+                RemoteCollectorService.GetServerNameForStorage(server));
+            _collectorService?.ClearHealthForServer(removedServerId);
+            /* #1696: drop this server's AG edge state, or a remove-then-re-add would compare the new first
+               sighting against the OLD role and page a phantom failover. The storage name hashes
+               deterministically, so a re-added server really does get the same id back. */
+            _agAlertEvaluator.Forget(removedServerId);
             _serverManager.DeleteServer(server.Id);
             RefreshServerList();
             StatusText.Text = $"Removed server: {server.DisplayNameWithIntent}";
