@@ -24,6 +24,13 @@ USE PerformanceMonitor;
 GO
 
 /*
+#1673: RETURN only exits the CURRENT batch -- under sqlcmd (and the CLI Installer, which splits on GO
+and runs each batch as its own SqlCommand on one connection), the migration batches below still ran
+after a guard "skipped," double-COMPRESSing query text on a re-run and stranding rows on the run after
+that. SET NOEXEC ON persists for the session across GO, so the remaining batches parse but do not
+execute; the final batch resets it.
+*/
+/*
 Skip if already migrated (query_plan_text is already varbinary)
 */
 IF EXISTS
@@ -37,7 +44,7 @@ IF EXISTS
 )
 BEGIN
     PRINT 'collect.procedure_stats already migrated to compressed storage — skipping.';
-    RETURN;
+    SET NOEXEC ON;
 END;
 GO
 
@@ -47,7 +54,7 @@ Skip if source table doesn't exist
 IF OBJECT_ID(N'collect.procedure_stats', N'U') IS NULL
 BEGIN
     PRINT 'collect.procedure_stats does not exist — skipping.';
-    RETURN;
+    SET NOEXEC ON;
 END;
 GO
 
@@ -322,4 +329,7 @@ BEGIN CATCH
     PRINT 'If collect.procedure_stats_new exists, it contains partial data.';
     PRINT 'Review and resolve the error, then re-run this script.';
 END CATCH;
+GO
+
+SET NOEXEC OFF;
 GO
