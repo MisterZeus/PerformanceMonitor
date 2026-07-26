@@ -898,6 +898,20 @@
                                     <DataGridTextColumn Binding="{Binding PhysicalMemoryMb, StringFormat=N0}" Width="100" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PhysicalMemoryMb" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Memory MB" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding SocketCount}" Width="70" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SocketCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Sockets" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding CoresPerSocket}" Width="100" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CoresPerSocket" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Cores/Socket" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
+                                    <!-- #1591: non-alarming note when the collector's sys.dm_os_sys_info read was denied
+                                         (e.g. an Azure SQL DB login without VIEW DATABASE STATE). Empty for servers whose
+                                         hardware inventory is available. Mirrors Lite's Hardware Note column. -->
+                                    <DataGridTextColumn Binding="{Binding HardwareUnavailableReason}" Width="220">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="HardwareUnavailableReason" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Hardware Note" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Foreground" Value="#F39C12"/>
+                                                <Setter Property="FontWeight" Value="SemiBold"/>
+                                                <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                                                <Setter Property="ToolTip" Value="{Binding HardwareUnavailableReason}"/>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding ProvisioningDisplay}" Width="130">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ProvisioningDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Status" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         <DataGridTextColumn.ElementStyle>

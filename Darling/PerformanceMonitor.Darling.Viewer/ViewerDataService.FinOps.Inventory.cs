@@ -128,6 +128,22 @@ LEFT JOIN idle_dbs id ON true";
     /// Latest collected properties per server joined to the registry — the Server Inventory base rows (metrics
     /// overlaid per row by the loader). DISTINCT ON keeps each server's newest server_properties row.
     /// </summary>
+    /// <summary>
+    /// #1591: the Hardware Note for one inventory row, or null when hardware is present.
+    ///
+    /// <para>PURE so the rule is testable without a store — the codebase's pattern for read-path decisions. Keyed
+    /// on cpu_count AND physical_memory_mb both being absent, because they come from the same guarded
+    /// <c>sys.dm_os_sys_info</c> read in the collector: either that read succeeded and both are populated, or it
+    /// was denied and both are NULL. Requiring both guards against annotating a server over a single odd NULL.</para>
+    ///
+    /// <para>Without this the grid renders the <c>IsDBNull ? 0</c> coalesce as a literal 0, which reads as "this
+    /// server has no CPUs and no memory" rather than "we were not allowed to look".</para>
+    /// </summary>
+    internal static string? HardwareNoteFor(bool cpuCountIsNull, bool physicalMemoryIsNull) =>
+        cpuCountIsNull && physicalMemoryIsNull
+            ? "Hardware inventory (CPU, memory, sockets) unavailable - the monitoring login likely lacks VIEW SERVER STATE (VIEW DATABASE STATE on Azure SQL DB) on this server."
+            : null;
+
     public const string ServerInventorySql = @"
 SELECT
     sp.server_id,
@@ -184,6 +200,7 @@ ORDER BY server_name";
                 EngineEdition = reader.IsDBNull(6) ? 0 : Convert.ToInt32(reader.GetValue(6)),
                 CpuCount = reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7)),
                 PhysicalMemoryMb = reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8)),
+                HardwareUnavailableReason = HardwareNoteFor(reader.IsDBNull(7), reader.IsDBNull(8)),
                 SocketCount = reader.IsDBNull(9) ? null : Convert.ToInt32(reader.GetValue(9)),
                 CoresPerSocket = reader.IsDBNull(10) ? null : Convert.ToInt32(reader.GetValue(10)),
                 IsHadrEnabled = reader.IsDBNull(11) ? null : reader.GetBoolean(11),
