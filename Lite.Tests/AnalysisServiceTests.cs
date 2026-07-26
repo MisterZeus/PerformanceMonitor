@@ -24,7 +24,7 @@ public class AnalysisServiceTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task AnalyzeAsync_MemoryStarved_ProducesFindings()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedMemoryStarvedServerAsync();
 
         var service = CreateTestService();
@@ -48,7 +48,7 @@ public class AnalysisServiceTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task AnalyzeAsync_CleanServer_ProducesNoFindings()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedCleanServerAsync();
 
         var service = CreateTestService();
@@ -62,7 +62,7 @@ public class AnalysisServiceTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task AnalyzeAsync_SetsLastAnalysisTime()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedCleanServerAsync();
 
         var service = CreateTestService();
@@ -76,7 +76,7 @@ public class AnalysisServiceTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task AnalyzeAsync_RaisesAnalysisCompletedEvent()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedMemoryStarvedServerAsync();
 
         var service = CreateTestService();
@@ -94,7 +94,7 @@ public class AnalysisServiceTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task GetLatestFindings_ReturnsPersistedResults()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedLockContentionServerAsync();
 
         var service = CreateTestService();
@@ -112,7 +112,7 @@ public class AnalysisServiceTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task MuteFinding_ExcludesFromNextRun()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedLogWritePressureServerAsync();
 
         var service = CreateTestService();
@@ -136,7 +136,7 @@ public class AnalysisServiceTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task AnalyzeAsync_InsufficientData_ReturnsEmptyWithMessage()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedMemoryStarvedServerAsync();
 
         // Set 72h minimum — test data is only 4h, so this should be rejected
@@ -152,7 +152,7 @@ public class AnalysisServiceTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task AnalyzeAsync_BlockingScenario_IncludesBlockingFindings()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedBlockingThreadExhaustionServerAsync();
 
         var service = CreateTestService();

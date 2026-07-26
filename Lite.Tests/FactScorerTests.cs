@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using PerformanceMonitor.Analysis;
@@ -14,28 +13,14 @@ namespace PerformanceMonitorLite.Tests;
 /// Tests FactScorer Layer 1 (base severity) and Layer 2 (amplifiers).
 /// Validates threshold formulas, amplifier firing, and severity capping.
 /// </summary>
-public class FactScorerTests : IDisposable
+public class FactScorerTests : IClassFixture<SharedDuckDbFixture>
 {
-    private readonly string _tempDir;
-    private readonly string _dbPath;
     private readonly DuckDbInitializer _duckDb;
 
-    public FactScorerTests()
+    public FactScorerTests(SharedDuckDbFixture fixture)
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "LiteTests_" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(_tempDir);
-        _dbPath = Path.Combine(_tempDir, "test.duckdb");
-        _duckDb = new DuckDbInitializer(_dbPath);
-    }
-
-    public void Dispose()
-    {
-        try
-        {
-            if (Directory.Exists(_tempDir))
-                Directory.Delete(_tempDir, recursive: true);
-        }
-        catch { /* Best-effort cleanup */ }
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
     }
 
     /* ── Threshold formula unit tests ── */
@@ -1029,10 +1014,7 @@ public class FactScorerTests : IDisposable
 
     private async Task<List<Fact>> CollectAndScoreAsync(Func<TestDataSeeder, Task> seedAction)
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seedAction(seeder);
 
         var collector = new DuckDbFactCollector(_duckDb);

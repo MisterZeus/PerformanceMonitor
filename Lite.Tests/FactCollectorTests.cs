@@ -29,7 +29,7 @@ public class FactCollectorTests : IClassFixture<SharedDuckDbFixture>
     private async Task<Dictionary<string, Fact>> SeedAndCollectAsync(
         Func<TestDataSeeder, Task> seedScenario)
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seedScenario(seeder);
 
         var collector = new DuckDbFactCollector(_duckDb);
@@ -41,7 +41,7 @@ public class FactCollectorTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task CollectFacts_MemoryStarvedServer_ReturnsWaitFacts()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedMemoryStarvedServerAsync();
 
         var collector = new DuckDbFactCollector(_duckDb);
@@ -55,7 +55,7 @@ public class FactCollectorTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task CollectFacts_MemoryStarvedServer_PageioLatchHasCorrectFraction()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedMemoryStarvedServerAsync();
 
         var collector = new DuckDbFactCollector(_duckDb);
@@ -72,7 +72,7 @@ public class FactCollectorTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task CollectFacts_MemoryStarvedServer_MetadataContainsRawValues()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedMemoryStarvedServerAsync();
 
         var collector = new DuckDbFactCollector(_duckDb);
@@ -93,7 +93,7 @@ public class FactCollectorTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task CollectFacts_MemoryStarvedServer_WaitsOrderedByValue()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedMemoryStarvedServerAsync();
 
         var collector = new DuckDbFactCollector(_duckDb);
@@ -108,7 +108,7 @@ public class FactCollectorTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task CollectFacts_CleanServer_ReturnsLowFractions()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedCleanServerAsync();
 
         var collector = new DuckDbFactCollector(_duckDb);
@@ -124,7 +124,7 @@ public class FactCollectorTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task CollectFacts_BadParallelism_CxPacketDominates()
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedBadParallelismServerAsync();
 
         var collector = new DuckDbFactCollector(_duckDb);

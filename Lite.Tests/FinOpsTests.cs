@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using PerformanceMonitor.Analysis;
@@ -16,28 +15,14 @@ namespace PerformanceMonitorLite.Tests;
 /// Each test seeds a specific server profile into DuckDB, runs the recommendation or
 /// scoring engine, and validates the output (categories, findings, severity, savings).
 /// </summary>
-public class FinOpsTests : IDisposable
+public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
 {
-    private readonly string _tempDir;
-    private readonly string _dbPath;
     private readonly DuckDbInitializer _duckDb;
 
-    public FinOpsTests()
+    public FinOpsTests(SharedDuckDbFixture fixture)
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "FinOpsTests_" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(_tempDir);
-        _dbPath = Path.Combine(_tempDir, "test.duckdb");
-        _duckDb = new DuckDbInitializer(_dbPath);
-    }
-
-    public void Dispose()
-    {
-        try
-        {
-            if (Directory.Exists(_tempDir))
-                Directory.Delete(_tempDir, recursive: true);
-        }
-        catch { /* Best-effort cleanup */ }
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
     }
 
     /* ── Over-Provisioned Enterprise ── */
@@ -238,9 +223,7 @@ public class FinOpsTests : IDisposable
     private async Task<List<RecommendationRow>> RunRecommendationsAsync(
         Func<TestDataSeeder, Task> seedAction, decimal monthlyCost = 10000m)
     {
-        await _duckDb.InitializeAsync();
-
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seedAction(seeder);
 
         var dataService = new LocalDataService(_duckDb);
@@ -250,9 +233,7 @@ public class FinOpsTests : IDisposable
     private async Task<List<HighImpactQueryRow>> RunHighImpactAsync(
         Func<TestDataSeeder, Task> seedAction, int hoursBack = 24)
     {
-        await _duckDb.InitializeAsync();
-
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seedAction(seeder);
 
         var dataService = new LocalDataService(_duckDb);

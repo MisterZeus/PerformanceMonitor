@@ -16,11 +16,12 @@ namespace PerformanceMonitorLite.Tests;
 /// methods (batch requests, sessions, query duration, memory), per-metric thresholds,
 /// and baseline context metadata.
 /// </summary>
-public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>
+public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private readonly DuckDbInitializer _duckDb;
     private readonly BaselineProvider _baselineProvider;
     private readonly AnomalyDetector _detector;
+    private DuckDBConnection? _seedConn;
 
     private const int ServerId = -999;
     private const string ServerName = "TestServer";
@@ -39,6 +40,31 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>
         _baselineProvider = new BaselineProvider(_duckDb);
         _detector = new AnomalyDetector(_duckDb, _baselineProvider);
         BaselineProvider.CacheTtl = TimeSpan.FromMilliseconds(1);
+    }
+
+    public void Dispose() => _seedConn?.Dispose();
+
+    /// <summary>
+    /// One connection reused for every seeded row. Opening a fresh connection and
+    /// auto-committing a single INSERT per row measured ~90ms/row, which made this
+    /// class's 100-200-row seeds the critical path of the whole analysis-heavy filter.
+    /// </summary>
+    private async Task<DuckDBConnection> SeedConnectionAsync()
+    {
+        if (_seedConn is null)
+        {
+            _seedConn = _duckDb.CreateConnection();
+            await _seedConn.OpenAsync();
+        }
+        return _seedConn;
+    }
+
+    private async Task ExecuteSeedAsync(string sql)
+    {
+        var conn = await SeedConnectionAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        await cmd.ExecuteNonQueryAsync();
     }
 
     private AnalysisContext CreateContext() => new()
@@ -427,6 +453,7 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>
     /// </summary>
     private async Task SeedBaselineCpu(int avgCpu, int variance)
     {
+        await ExecuteSeedAsync("BEGIN TRANSACTION");
         var rng = new Random(42);
         for (int day = 1; day <= 14; day++)
         {
@@ -437,6 +464,7 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>
                 await SeedCpuAsync(baseDay.AddMinutes(i * 3), cpu);
             }
         }
+        await ExecuteSeedAsync("COMMIT");
     }
 
     /// <summary>
@@ -447,6 +475,7 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>
     /// </summary>
     private async Task SeedThinBaselineCpu(int avgCpu, int variance)
     {
+        await ExecuteSeedAsync("BEGIN TRANSACTION");
         var rng = new Random(42);
         foreach (var day in new[] { 7, 14 })
         {
@@ -457,10 +486,12 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>
                 await SeedCpuAsync(baseDay.AddMinutes(i * 3), cpu);
             }
         }
+        await ExecuteSeedAsync("COMMIT");
     }
 
     private async Task SeedBaselinePerfmon(string counterName, long avgValue, int variance)
     {
+        await ExecuteSeedAsync("BEGIN TRANSACTION");
         var rng = new Random(42);
         for (int day = 1; day <= 14; day++)
         {
@@ -471,10 +502,12 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>
                 await SeedPerfmonAsync(baseDay.AddMinutes(i * 3), counterName, value);
             }
         }
+        await ExecuteSeedAsync("COMMIT");
     }
 
     private async Task SeedBaselineSessions(int avgConnections, int variance)
     {
+        await ExecuteSeedAsync("BEGIN TRANSACTION");
         var rng = new Random(42);
         for (int day = 1; day <= 14; day++)
         {
@@ -485,10 +518,12 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>
                 await SeedSessionStatAsync(baseDay.AddMinutes(i * 3), "App1", count);
             }
         }
+        await ExecuteSeedAsync("COMMIT");
     }
 
     private async Task SeedBaselineQueryStats(long avgElapsed, int variance)
     {
+        await ExecuteSeedAsync("BEGIN TRANSACTION");
         var rng = new Random(42);
         for (int day = 1; day <= 14; day++)
         {
@@ -499,26 +534,31 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>
                 await SeedQueryStatAsync(baseDay.AddMinutes(i * 3), elapsed, 100);
             }
         }
+        await ExecuteSeedAsync("COMMIT");
     }
 
     private async Task SeedBaselineWaits()
     {
+        await ExecuteSeedAsync("BEGIN TRANSACTION");
         for (int day = 1; day <= 14; day++)
         {
             var baseDay = _analysisStart.AddDays(-day);
             for (int i = 0; i < 4; i++)
                 await SeedWaitStatAsync(baseDay.AddMinutes(i * 3), "SOS_SCHEDULER_YIELD", 100);
         }
+        await ExecuteSeedAsync("COMMIT");
     }
 
     private async Task SeedBaselineMemory(double avgTotalServerMb, double targetMb)
     {
+        await ExecuteSeedAsync("BEGIN TRANSACTION");
         for (int day = 1; day <= 14; day++)
         {
             var baseDay = _analysisStart.AddDays(-day);
             for (int i = 0; i < 4; i++)
                 await SeedMemoryStatAsync(baseDay.AddMinutes(i * 3), avgTotalServerMb, targetMb);
         }
+        await ExecuteSeedAsync("COMMIT");
     }
 
     // ── Helpers: seed individual rows ──
@@ -526,8 +566,7 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>
     private async Task SeedCpuAsync(DateTime time, int cpuValue)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var conn = _duckDb.CreateConnection();
-        await conn.OpenAsync();
+        var conn = await SeedConnectionAsync();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"INSERT INTO cpu_utilization_stats
             (collection_id, collection_time, server_id, server_name, sample_time,
@@ -544,8 +583,7 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>
     private async Task SeedPerfmonAsync(DateTime time, string counterName, long deltaValue)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var conn = _duckDb.CreateConnection();
-        await conn.OpenAsync();
+        var conn = await SeedConnectionAsync();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"INSERT INTO perfmon_stats
             (collection_id, collection_time, server_id, server_name,
@@ -562,8 +600,7 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>
     private async Task SeedWaitStatAsync(DateTime time, string waitType, long deltaWaitMs)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var conn = _duckDb.CreateConnection();
-        await conn.OpenAsync();
+        var conn = await SeedConnectionAsync();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"INSERT INTO wait_stats
             (collection_id, collection_time, server_id, server_name, wait_type,
@@ -581,8 +618,7 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>
     private async Task SeedSessionStatAsync(DateTime time, string programName, long connectionCount)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var conn = _duckDb.CreateConnection();
-        await conn.OpenAsync();
+        var conn = await SeedConnectionAsync();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"INSERT INTO session_stats
             (collection_id, collection_time, server_id, server_name, program_name,
@@ -599,8 +635,7 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>
     private async Task SeedQueryStatAsync(DateTime time, long deltaElapsed, long deltaExecCount)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var conn = _duckDb.CreateConnection();
-        await conn.OpenAsync();
+        var conn = await SeedConnectionAsync();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"INSERT INTO query_stats
             (collection_id, collection_time, server_id, server_name,
@@ -620,8 +655,7 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>
     private async Task SeedMemoryStatAsync(DateTime time, double totalServerMb, double targetMb)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var conn = _duckDb.CreateConnection();
-        await conn.OpenAsync();
+        var conn = await SeedConnectionAsync();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"INSERT INTO memory_stats
             (collection_id, collection_time, server_id, server_name,

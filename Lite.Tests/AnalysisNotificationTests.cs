@@ -1,8 +1,8 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using DuckDB.NET.Data;
 using PerformanceMonitorLite;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Notifications;
@@ -17,28 +17,33 @@ namespace PerformanceMonitorLite.Tests;
 /// (message composition + DrillDown mapping) and the AnalysisNotificationService
 /// severity filter + per-finding cooldown.
 /// </summary>
-public class AnalysisNotificationTests : IDisposable
+public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
-    private readonly string _tempDir;
     private readonly DuckDbInitializer _duckDb;
     private readonly IAlertSettings _settings = new AppAlertSettings();
+    private DuckDBConnection? _seedConn;
 
-    public AnalysisNotificationTests()
+    public AnalysisNotificationTests(SharedDuckDbFixture fixture)
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "LiteNotifyTests_" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(_tempDir);
-        _duckDb = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
     }
 
-    public void Dispose()
+    /// <summary>
+    /// One connection reused for every seeded row — opening a fresh connection per
+    /// single-row INSERT measured ~90ms/row and dominated this class's runtime.
+    /// </summary>
+    private async Task<DuckDBConnection> SeedConnectionAsync()
     {
-        try
+        if (_seedConn is null)
         {
-            if (Directory.Exists(_tempDir))
-                Directory.Delete(_tempDir, recursive: true);
+            _seedConn = _duckDb.CreateConnection();
+            await _seedConn.OpenAsync();
         }
-        catch { /* Best-effort cleanup */ }
+        return _seedConn;
     }
+
+    public void Dispose() => _seedConn?.Dispose();
 
     /// <summary>
     /// Builds the shared AnalysisNotificationService wired to a real Lite EmailAlertService
@@ -455,7 +460,6 @@ public class AnalysisNotificationTests : IDisposable
     [Fact]
     public async Task NotifyAsync_SameFinding_NotifiesOnceWithinCooldown()
     {
-        await _duckDb.InitializeAsync();
         App.AnalysisNotifySeverity = 1.5;
         App.AnalysisNotifyCooldownMinutes = 360;
 
@@ -471,7 +475,6 @@ public class AnalysisNotificationTests : IDisposable
     [Fact]
     public async Task NotifyAsync_DistinctFindings_EachNotifies()
     {
-        await _duckDb.InitializeAsync();
         App.AnalysisNotifySeverity = 1.5;
         App.AnalysisNotifyCooldownMinutes = 360;
 
@@ -495,7 +498,6 @@ public class AnalysisNotificationTests : IDisposable
     [Fact]
     public async Task NotifyAsync_BelowSeverityThreshold_DoesNotNotify()
     {
-        await _duckDb.InitializeAsync();
         App.AnalysisNotifySeverity = 1.5;
 
         var notifier = MakeNotifier();
@@ -509,7 +511,6 @@ public class AnalysisNotificationTests : IDisposable
     {
         // Issue #1035: a server silenced via "Silence All Alerts" must not produce
         // analysis-finding emails. The predicate is keyed by resolved serverId ("1").
-        await _duckDb.InitializeAsync();
         App.AnalysisNotifySeverity = 1.5;
         App.AnalysisNotifyCooldownMinutes = 360;
 
@@ -525,7 +526,6 @@ public class AnalysisNotificationTests : IDisposable
         // The predicate is per-server: a finding for an unsilenced server still notifies
         // even while another server is silenced, and a silenced server consuming no
         // cooldown means unsilencing resumes immediately on the next cycle.
-        await _duckDb.InitializeAsync();
         App.AnalysisNotifySeverity = 1.5;
         App.AnalysisNotifyCooldownMinutes = 360;
 
@@ -763,7 +763,6 @@ public class AnalysisNotificationTests : IDisposable
     [Fact]
     public async Task NotifyAsync_NotifyWorthyFinding_RaisesTrayBalloon()
     {
-        await _duckDb.InitializeAsync();
         App.AnalysisNotifySeverity = 1.5;
         App.AnalysisNotifyCooldownMinutes = 360;
 
@@ -781,7 +780,6 @@ public class AnalysisNotificationTests : IDisposable
     [Fact]
     public async Task NotifyAsync_BelowThreshold_RaisesNoTrayBalloon()
     {
-        await _duckDb.InitializeAsync();
         App.AnalysisNotifySeverity = 1.5;
 
         var balloons = new List<(string, string)>();
@@ -795,7 +793,6 @@ public class AnalysisNotificationTests : IDisposable
     [Fact]
     public async Task NotifyAsync_SilencedServer_RaisesNoTrayBalloon()
     {
-        await _duckDb.InitializeAsync();
         App.AnalysisNotifySeverity = 1.5;
         App.AnalysisNotifyCooldownMinutes = 360;
 
@@ -823,8 +820,7 @@ public class AnalysisNotificationTests : IDisposable
     private async Task<long> CountAlertLogRowsAsync()
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = "SELECT COUNT(*) FROM config_alert_log";
         return Convert.ToInt64(await cmd.ExecuteScalarAsync());
