@@ -111,9 +111,9 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
         var catalogTables = CollectorCatalog.All.Select(c => c.TargetTable).OrderBy(t => t, StringComparer.Ordinal);
         var goldenTables = GoldenCollectorSchema.Tables.Keys.OrderBy(t => t, StringComparer.Ordinal);
 
-        /* The frozen oracle must describe exactly the 36 catalog collector tables — no more, no fewer. */
+        /* The frozen oracle must describe exactly the 38 catalog collector tables — no more, no fewer. */
         Assert.Equal(catalogTables, goldenTables);
-        Assert.Equal(36, GoldenCollectorSchema.Tables.Count);
+        Assert.Equal(38, GoldenCollectorSchema.Tables.Count);
 
         /* Only server_config and database_config lack an index (matches DuckDbSchemaGenerator.CreateIndex). */
         var goldenIndexless = CollectorCatalog.All
@@ -238,7 +238,7 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
         count.CommandText =
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_name IN (" +
             string.Join(",", CollectorCatalog.All.Select(c => $"'{c.TargetTable}'")) + ")";
-        Assert.Equal(36, Convert.ToInt32(count.ExecuteScalar()));
+        Assert.Equal(38, Convert.ToInt32(count.ExecuteScalar()));
     }
 
     private static string BuildTableDiff(string table, List<ColumnInfo> golden, List<ColumnInfo> generated)

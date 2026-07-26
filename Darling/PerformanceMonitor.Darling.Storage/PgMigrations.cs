@@ -77,6 +77,7 @@ public static class PgMigrations
         new Migration(31, "custom-views-table", V31Sql),
         new Migration(32, "server-tags", V32Sql),
         new Migration(33, "connection-alert-refire", V33Sql),
+        new Migration(34, "availability-group-collectors", V34Sql),
     };
 
     /// <summary>
@@ -489,6 +490,60 @@ ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS notify_connection_down_at_startup boolean NOT NULL DEFAULT false,
     ADD COLUMN IF NOT EXISTS connection_refire_minutes integer NOT NULL DEFAULT 0;";
 
+    /// <summary>
+    /// V34 — the two Availability Group collector tables (#991): <c>ag_replica_states</c> (replica grain)
+    /// and <c>ag_database_replica_states</c> (database grain, carrying the send/redo queues, rates and
+    /// secondary lag). Added additively exactly like V29 — a fresh store already has both (V1's
+    /// <see cref="PgSchemaGenerator.GenerateFullSchema"/> walks the collector catalog), so
+    /// <c>CREATE TABLE IF NOT EXISTS</c> is a no-op on fresh and the real create on upgrade. Column
+    /// order/types are exactly <see cref="PgSchemaGenerator.CreateTable"/>'s output for the
+    /// <see cref="AgReplicaStatesCollector"/> / <see cref="AgDatabaseReplicaStatesCollector"/> catalog
+    /// entries (prefix NOT NULL, payload nullable). No <c>v_*</c> passthrough views (post-V14 collectors);
+    /// readers use the base tables. Hypertable / compression / retention flow from the catalog at runtime.
+    /// </summary>
+    private const string V34Sql = @"
+CREATE TABLE IF NOT EXISTS collect.ag_replica_states (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    ag_name text,
+    replica_server_name text,
+    role_desc text,
+    operational_state_desc text,
+    connected_state_desc text,
+    recovery_health_desc text,
+    synchronization_health_desc text,
+    availability_mode_desc text,
+    failover_mode_desc text,
+    endpoint_url text
+);
+
+CREATE INDEX IF NOT EXISTS idx_ag_replica_states_time ON collect.ag_replica_states(server_id, collection_time);
+
+CREATE TABLE IF NOT EXISTS collect.ag_database_replica_states (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    ag_name text,
+    database_name text,
+    replica_server_name text,
+    is_local boolean,
+    synchronization_state_desc text,
+    last_hardened_lsn text,
+    last_commit_lsn text,
+    log_send_queue_size bigint,
+    redo_queue_size bigint,
+    log_send_rate bigint,
+    redo_rate bigint,
+    is_suspended boolean,
+    suspend_reason_desc text,
+    availability_mode_desc text,
+    secondary_lag_seconds bigint
+);
+
+CREATE INDEX IF NOT EXISTS idx_ag_database_replica_states_time ON collect.ag_database_replica_states(server_id, collection_time);";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

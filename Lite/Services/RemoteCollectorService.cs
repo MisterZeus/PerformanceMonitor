@@ -538,6 +538,8 @@ public partial class RemoteCollectorService
                 "default_trace_events" => await CollectDefaultTraceEventsAsync(server, cancellationToken),
                 "job_history" => await CollectJobHistoryAsync(server, cancellationToken),
                 "agent_status" => await CollectAgentStatusAsync(server, cancellationToken),
+                "ag_replica_states" => await CollectAgReplicaStatesAsync(server, cancellationToken),
+                "ag_database_replica_states" => await CollectAgDatabaseReplicaStatesAsync(server, cancellationToken),
                 _ => throw new ArgumentException($"Unknown collector: {collectorName}")
             };
 

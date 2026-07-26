@@ -370,6 +370,12 @@ public static class MeasureCatalog
         new ComposeDimension("query_store_stats", "database_name", "database_name", Likeable: true),
         new ComposeDimension("query_store_stats", "module_name", "module_name", Likeable: true),
         new ComposeDimension("query_store_stats", "query_hash", "query_hash", Likeable: false),
+
+        /* #991 AG health. Only the database grain carries measures — the replica-grain table is all
+           state strings with nothing numeric to aggregate — so only its dimensions appear here. */
+        new ComposeDimension("ag_database_replica_states", "ag_name", "ag_name", Likeable: true),
+        new ComposeDimension("ag_database_replica_states", "database_name", "database_name", Likeable: true),
+        new ComposeDimension("ag_database_replica_states", "replica_server_name", "replica_server_name", Likeable: true),
     };
 
     private static readonly Dictionary<(string Source, string Name), ComposeDimension> s_dimByKey =
@@ -432,6 +438,7 @@ public static class MeasureCatalog
     private const string CatJobs = "Agent Jobs";
     private const string CatPerfmon = "Perfmon Counters";
     private const string CatQueryStore = "Query Store";
+    private const string CatAvailabilityGroups = "Availability Groups";
 
     private static readonly string[] WaitDims = { "wait_type" };
     private static readonly string[] ProcDims = { "database_name", "schema_name", "object_name" };
@@ -458,6 +465,7 @@ public static class MeasureCatalog
     private static readonly string[] JobHistoryDims = { "job_name", "step_name", "run_status_desc", "category_name" };
     private static readonly string[] PerfmonDims = { "object_name", "counter_name", "instance_name" };
     private static readonly string[] QueryStoreDims = { "database_name", "module_name", "query_hash" };
+    private static readonly string[] AgDatabaseDims = { "ag_name", "database_name", "replica_server_name" };
 
     /// <summary>The catalog. Every measure's SourceTable is a real collector; every Column/DeltaColumn is a
     /// real payload column of that collector (pinned by test).</summary>
@@ -1024,6 +1032,56 @@ public static class MeasureCatalog
             WeightedValueColumn = "avg_cpu_time_us", WeightColumn = "execution_count",
             NativeUnit = "us", DefaultUnit = "ms", UnitFamily = FamilyDuration,
             ValidAggs = NoAggs, AllowedDimensions = QueryStoreDims,
+        },
+
+        /* ── ag_database_replica_states (#991). Every one is a Gauge: the DMV recomputes queue depth, rate
+             and lag from the CURRENT backlog each read, so none is a counter with a delta — SUM over a
+             window would be a category error, exactly the trap the cpu_utilization gauge documents. The
+             queues default to Max (the worst backlog in the bucket is the signal), the rates to Avg
+             (sustained throughput), and lag to Max (the worst lag is what an RPO conversation is about).
+
+             The two rates are KB/SECOND but the catalog has no per-second family, so they ride the bytes
+             family — correct under conversion, since kb/s → mb/s scales by the same factor — with the
+             per-second nature stated in the display name rather than implied by a unit the picker would
+             render as a plain size.
+
+             Lag trap worth knowing when reading these: secondary_lag_seconds reads 0, not NULL, while data
+             movement is SUSPENDED, so a suspended replica charts as zero lag. is_suspended is collected
+             alongside it (as a dimension-free column) precisely so a reader can tell the two apart. ── */
+        new ComposeMeasure
+        {
+            Key = "ag_log_send_queue", DisplayName = "AG log send queue", Category = CatAvailabilityGroups, SourceTable = "ag_database_replica_states",
+            Archetype = MeasureArchetype.Gauge, Column = "log_send_queue_size",
+            NativeUnit = "kb", DefaultUnit = "kb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = AgDatabaseDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "ag_redo_queue", DisplayName = "AG redo queue", Category = CatAvailabilityGroups, SourceTable = "ag_database_replica_states",
+            Archetype = MeasureArchetype.Gauge, Column = "redo_queue_size",
+            NativeUnit = "kb", DefaultUnit = "kb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = AgDatabaseDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "ag_log_send_rate", DisplayName = "AG log send rate (per second)", Category = CatAvailabilityGroups, SourceTable = "ag_database_replica_states",
+            Archetype = MeasureArchetype.Gauge, Column = "log_send_rate",
+            NativeUnit = "kb", DefaultUnit = "kb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Avg, ValidAggs = GaugeAggs, AllowedDimensions = AgDatabaseDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "ag_redo_rate", DisplayName = "AG redo rate (per second)", Category = CatAvailabilityGroups, SourceTable = "ag_database_replica_states",
+            Archetype = MeasureArchetype.Gauge, Column = "redo_rate",
+            NativeUnit = "kb", DefaultUnit = "kb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Avg, ValidAggs = GaugeAggs, AllowedDimensions = AgDatabaseDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "ag_secondary_lag", DisplayName = "AG secondary lag", Category = CatAvailabilityGroups, SourceTable = "ag_database_replica_states",
+            Archetype = MeasureArchetype.Gauge, Column = "secondary_lag_seconds",
+            NativeUnit = "s", DefaultUnit = "s", UnitFamily = FamilyDuration,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = AgDatabaseDims,
         },
 
         /* ═══════════ Same-source ratios (design §2c) — the bread-and-butter derived metrics ═══════════ */
