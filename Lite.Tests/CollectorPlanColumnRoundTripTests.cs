@@ -7,13 +7,13 @@
  */
 
 using System;
-using System.IO;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Lite.Tests.Helpers;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitorLite.Tests;
 using Xunit;
 
 namespace Lite.Tests;
@@ -28,31 +28,14 @@ namespace Lite.Tests;
 /// EndRow) against a freshly initialized schema, then reads the trailing plan column back. It also
 /// guards the append itself: an un-migrated legacy DB (fewer columns) would throw here.
 /// </summary>
-public sealed class CollectorPlanColumnRoundTripTests : IDisposable
+public sealed class CollectorPlanColumnRoundTripTests : IClassFixture<SharedDuckDbFixture>
 {
-    private readonly string _tempDir;
-    private readonly string _dbPath;
+    private readonly DuckDbInitializer _duckDb;
 
-    public CollectorPlanColumnRoundTripTests()
+    public CollectorPlanColumnRoundTripTests(SharedDuckDbFixture fixture)
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "LitePlanRt_" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(_tempDir);
-        _dbPath = Path.Combine(_tempDir, "test.duckdb");
-    }
-
-    public void Dispose()
-    {
-        try
-        {
-            if (Directory.Exists(_tempDir))
-            {
-                Directory.Delete(_tempDir, recursive: true);
-            }
-        }
-        catch
-        {
-            /* Best-effort cleanup */
-        }
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
     }
 
     [Fact]
@@ -105,12 +88,9 @@ public sealed class CollectorPlanColumnRoundTripTests : IDisposable
     private async Task AssertRoundTripsAsync<TRow>(
         ICollectorDefinition<TRow> definition, TRow row, params (string Column, string Expected)[] columns)
     {
-        var dbPath = Path.Combine(_tempDir, $"{definition.TargetTable}.duckdb");
-        await new DuckDbInitializer(dbPath).InitializeAsync();
-
         var context = CollectorTestContext.Make(new RecordingCollectorDeltaCalculator());
 
-        using var connection = new DuckDBConnection($"Data Source={dbPath}");
+        using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(TestContext.Current.CancellationToken);
 
         using (var appender = connection.CreateAppender(definition.TargetTable))

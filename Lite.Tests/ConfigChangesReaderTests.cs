@@ -7,13 +7,13 @@
  */
 
 using System;
-using System.IO;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitorLite.Tests;
 using Xunit;
 
 namespace Lite.Tests;
@@ -31,29 +31,34 @@ namespace Lite.Tests;
 /* Renders through ServerTimeHelper.FormatServerTime, which reads the process-wide offset + display mode —
    see the collection note on SystemEventsReaderTests, which MUTATES both. */
 [Collection("server-time-helper")]
-public sealed class ConfigChangesReaderTests : IDisposable
+public sealed class ConfigChangesReaderTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private const int ServerId = 8888;
 
-    private readonly string _tempDir;
     private readonly DuckDbInitializer _duckDb;
+    private DuckDBConnection? _seedConn;
     private long _nextId = 1;
 
-    public ConfigChangesReaderTests()
+    public ConfigChangesReaderTests(SharedDuckDbFixture fixture)
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "LiteConfigChgRt_" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(_tempDir);
-        _duckDb = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
     }
 
-    public void Dispose()
+    public void Dispose() => _seedConn?.Dispose();
+
+    /// <summary>
+    /// One connection reused for every seeded row — opening a fresh connection per
+    /// single-row INSERT measured ~90ms/row and dominated this class's runtime.
+    /// </summary>
+    private async Task<DuckDBConnection> SeedConnectionAsync()
     {
-        try
+        if (_seedConn is null)
         {
-            if (Directory.Exists(_tempDir))
-                Directory.Delete(_tempDir, recursive: true);
+            _seedConn = _duckDb.CreateConnection();
+            await _seedConn.OpenAsync();
         }
-        catch { /* Best-effort cleanup */ }
+        return _seedConn;
     }
 
     private static DateTime Truncate(DateTime t) =>
@@ -64,7 +69,6 @@ public sealed class ConfigChangesReaderTests : IDisposable
     [Fact]
     public async Task ServerConfigChanges_DetectsValueMove_NewestFirst_WithDerivedColumns()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         var older = Truncate(DateTime.UtcNow.AddHours(-3));
@@ -87,7 +91,6 @@ public sealed class ConfigChangesReaderTests : IDisposable
     [Fact]
     public async Task ServerConfigChanges_RequiresRestart_DerivedFromDynamicAndValueMismatch()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         var older = Truncate(DateTime.UtcNow.AddHours(-3));
@@ -106,7 +109,6 @@ public sealed class ConfigChangesReaderTests : IDisposable
     [Fact]
     public async Task ServerConfigChanges_SingleSnapshot_YieldsNothing()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         await SeedServerConfigAsync(Truncate(DateTime.UtcNow.AddHours(-2)), "max server memory (MB)", 8000, 8000, true, true);
@@ -117,7 +119,6 @@ public sealed class ConfigChangesReaderTests : IDisposable
     [Fact]
     public async Task ServerConfigChanges_PreWindowBaselineKept_ChangeOnFirstInWindowSnapshotIsDetected()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         /* Baseline BEFORE the 24h window (30h ago); the value moves to the in-window capture (1h ago). Because
@@ -133,7 +134,6 @@ public sealed class ConfigChangesReaderTests : IDisposable
     [Fact]
     public async Task ServerConfigChanges_WindowExcludesChangeOlderThanTheWindow()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         /* Both captures are OLDER than a 24h window (50h and 48h ago), so the 48h-ago change is excluded. */
@@ -148,7 +148,6 @@ public sealed class ConfigChangesReaderTests : IDisposable
     [Fact]
     public async Task DatabaseConfigChanges_UnpivotsWideRow_NamesTheChangedColumn_WithDescription()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         var older = Truncate(DateTime.UtcNow.AddHours(-3));
@@ -168,7 +167,6 @@ public sealed class ConfigChangesReaderTests : IDisposable
     [Fact]
     public async Task DatabaseConfigChanges_DatabaseFilter_1319_FiltersInSql()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         var older = Truncate(DateTime.UtcNow.AddHours(-3));
@@ -190,7 +188,6 @@ public sealed class ConfigChangesReaderTests : IDisposable
     [Fact]
     public async Task TraceFlagChanges_DetectsEnableDisableModify()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         var t0 = Truncate(DateTime.UtcNow.AddHours(-4));
@@ -241,8 +238,7 @@ public sealed class ConfigChangesReaderTests : IDisposable
         DateTime captureTimeUtc, string configurationName, long valueConfigured, long valueInUse, bool isDynamic, bool isAdvanced)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
 INSERT INTO server_config
@@ -264,8 +260,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)";
     private async Task SeedDatabaseConfigRecoveryModelAsync(DateTime captureTimeUtc, string databaseName, string recoveryModel)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
         using var cmd = connection.CreateCommand();
         /* Only the prefix + database_name + recovery_model are set; the other 26 setting columns stay NULL in
            both captures, so the wide-row diff surfaces ONLY the recovery_model move. */
@@ -285,8 +280,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     private async Task SeedTraceFlagAsync(DateTime captureTimeUtc, int traceFlag, bool status, bool isGlobal, bool isSession)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
 INSERT INTO trace_flags

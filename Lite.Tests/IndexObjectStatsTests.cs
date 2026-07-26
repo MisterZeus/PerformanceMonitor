@@ -1,5 +1,4 @@
 using System;
-using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -16,12 +15,12 @@ namespace PerformanceMonitorLite.Tests;
 /// GREATEST, LIMIT, unused-index classification) and the delta-based growth/contention
 /// anomaly detection. Seeds two daily snapshots and exercises both paths.
 /// </summary>
-public class IndexObjectStatsTests : IDisposable
+public class IndexObjectStatsTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
-    private readonly string _tempDir;
     private readonly DuckDbInitializer _duckDb;
     private readonly LocalDataService _dataService;
     private readonly AnomalyDetector _detector;
+    private DuckDBConnection? _seedConn;
 
     private const int ServerId = -777;
     private static readonly DateTime _latest = DateTime.UtcNow;
@@ -29,30 +28,36 @@ public class IndexObjectStatsTests : IDisposable
     private static readonly DateTime _startTime = _latest.AddDays(-10); // instance start (no reset)
     private long _nextId = -1;
 
-    public IndexObjectStatsTests()
+    public IndexObjectStatsTests(SharedDuckDbFixture fixture)
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "IdxObjTests_" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(_tempDir);
-        var dbPath = Path.Combine(_tempDir, "test.duckdb");
-        _duckDb = new DuckDbInitializer(dbPath);
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
         _dataService = new LocalDataService(_duckDb);
         var baselineProvider = new BaselineProvider(_duckDb);
         _detector = new AnomalyDetector(_duckDb, baselineProvider);
         BaselineProvider.CacheTtl = TimeSpan.FromMilliseconds(1);
     }
 
-    public void Dispose()
+    public void Dispose() => _seedConn?.Dispose();
+
+    /// <summary>
+    /// One connection reused for every seeded row — opening a fresh connection per
+    /// single-row INSERT measured ~90ms/row and dominated this class's runtime.
+    /// </summary>
+    private async Task<DuckDBConnection> SeedConnectionAsync()
     {
-        try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); }
-        catch { }
+        if (_seedConn is null)
+        {
+            _seedConn = _duckDb.CreateConnection();
+            await _seedConn.OpenAsync();
+        }
+        return _seedConn;
     }
 
     // ── helpers ──
 
     private async Task SeedScenarioAsync()
     {
-        await _duckDb.InitializeAsync();
-
         // BigTable (object 100): 200 MB -> 600 MB  => +400 MB / 200% growth
         await InsertObjectStat(_prior, "AppDb", 100, 1, "dbo", "BigTable", "PK_BigTable", 200m, 1_000_000, 0, 0, 0, 0, 0, 0);
         await InsertObjectStat(_latest, "AppDb", 100, 1, "dbo", "BigTable", "PK_BigTable", 600m, 3_000_000, 5000, 100, 10, 50, 0, 0);
@@ -71,8 +76,7 @@ public class IndexObjectStatsTests : IDisposable
         decimal reservedMb, long rows, long seeks, long scans, long lookups, long updates, long lockWaitMs, long escalations)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var conn = _duckDb.CreateConnection();
-        await conn.OpenAsync();
+        var conn = await SeedConnectionAsync();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"INSERT INTO index_object_stats
             (collection_id, collection_time, server_id, server_name, sqlserver_start_time, database_name, database_id,
@@ -88,8 +92,7 @@ public class IndexObjectStatsTests : IDisposable
     private async Task SeedCpuAsync(DateTime time, int cpu)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var conn = _duckDb.CreateConnection();
-        await conn.OpenAsync();
+        var conn = await SeedConnectionAsync();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"INSERT INTO cpu_utilization_stats
             (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
@@ -219,7 +222,6 @@ public class IndexObjectStatsTests : IDisposable
     [Fact]
     public async Task DetectObjectStatsAnomalies_SingleSnapshot_NoFalsePositive()
     {
-        await _duckDb.InitializeAsync();
         // Only one snapshot — growth/contention need two distinct snapshots
         await InsertObjectStat(_latest, "AppDb", 100, 1, "dbo", "BigTable", "PK_BigTable", 600m, 3_000_000, 5000, 100, 10, 50, 100_000, 3);
         for (int d = 1; d <= 5; d++)

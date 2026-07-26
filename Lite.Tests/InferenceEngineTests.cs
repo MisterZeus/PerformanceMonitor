@@ -155,7 +155,7 @@ public class InferenceEngineTests : IClassFixture<SharedDuckDbFixture>
 
     private async Task<List<AnalysisStory>> BuildStoriesAsync(Func<TestDataSeeder, Task> seedAction)
     {
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seedAction(seeder);
 
         var collector = new DuckDbFactCollector(_duckDb);

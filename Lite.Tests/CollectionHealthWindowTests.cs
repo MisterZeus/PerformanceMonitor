@@ -7,7 +7,6 @@
  */
 
 using System;
-using System.IO;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitorLite.Database;
@@ -26,35 +25,39 @@ namespace PerformanceMonitorLite.Tests;
 /* Reads the process-wide ServerTimeHelper.UtcOffsetMinutes to build its query window — see the collection
    note on SystemEventsReaderTests, which MUTATES it. */
 [Collection("server-time-helper")]
-public sealed class CollectionHealthWindowTests : IDisposable
+public sealed class CollectionHealthWindowTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private const int ServerId = 4242;
 
-    private readonly string _tempDir;
     private readonly DuckDbInitializer _duckDb;
+    private DuckDBConnection? _seedConn;
     private long _nextId = 1;
 
-    public CollectionHealthWindowTests()
+    public CollectionHealthWindowTests(SharedDuckDbFixture fixture)
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "LiteCollHealthTests_" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(_tempDir);
-        _duckDb = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
     }
 
-    public void Dispose()
+    public void Dispose() => _seedConn?.Dispose();
+
+    /// <summary>
+    /// One connection reused for every seeded row — opening a fresh connection per
+    /// single-row INSERT measured ~90ms/row and dominated this class's runtime.
+    /// </summary>
+    private async Task<DuckDBConnection> SeedConnectionAsync()
     {
-        try
+        if (_seedConn is null)
         {
-            if (Directory.Exists(_tempDir))
-                Directory.Delete(_tempDir, recursive: true);
+            _seedConn = _duckDb.CreateConnection();
+            await _seedConn.OpenAsync();
         }
-        catch { /* Best-effort cleanup */ }
+        return _seedConn;
     }
 
     [Fact]
     public async Task GetRecentCollectionLog_CustomRange_BoundsBothSides_ExcludingRowsOutsideEitherBound()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         /* A three-hour custom window [start, end] entirely in the past (end an hour ago). A row 30 min
@@ -92,7 +95,6 @@ public sealed class CollectionHealthWindowTests : IDisposable
     [Fact]
     public async Task GetRecentCollectionLog_PresetHoursBack_LowerBoundsFromNow()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         var recent = Truncate(DateTime.UtcNow.AddMinutes(-30));
@@ -113,8 +115,7 @@ public sealed class CollectionHealthWindowTests : IDisposable
     private async Task SeedLogAsync(string collector, DateTime collectionTimeUtc, string status)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
 INSERT INTO collection_log

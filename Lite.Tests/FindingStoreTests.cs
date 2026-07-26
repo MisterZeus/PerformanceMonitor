@@ -15,40 +15,36 @@ namespace PerformanceMonitorLite.Tests;
 /// <summary>
 /// Tests for FindingStore: persist, retrieve, mute, and cleanup findings.
 /// </summary>
-public class FindingStoreTests : IDisposable
+public class FindingStoreTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
-    private readonly string _tempDir;
     private readonly DuckDbInitializer _duckDb;
+    private DuckDBConnection? _seedConn;
 
-    public FindingStoreTests()
+    public FindingStoreTests(SharedDuckDbFixture fixture)
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "LiteTests_" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(_tempDir);
-        var dbPath = Path.Combine(_tempDir, "test.duckdb");
-        _duckDb = new DuckDbInitializer(dbPath);
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
     }
 
-    public void Dispose()
+    public void Dispose() => _seedConn?.Dispose();
+
+    /// <summary>
+    /// One connection reused for every seeded row — opening a fresh connection per
+    /// single-row INSERT measured ~90ms/row and dominated this class's runtime.
+    /// </summary>
+    private async Task<DuckDBConnection> SeedConnectionAsync()
     {
-        try
+        if (_seedConn is null)
         {
-            if (Directory.Exists(_tempDir))
-                Directory.Delete(_tempDir, recursive: true);
+            _seedConn = _duckDb.CreateConnection();
+            await _seedConn.OpenAsync();
         }
-        catch { /* Best-effort cleanup */ }
-    }
-
-    private async Task InitializeWithAnalysisAsync()
-    {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
+        return _seedConn;
     }
 
     [Fact]
     public async Task SaveFindings_PersistsAndReturnsFindings()
     {
-        await InitializeWithAnalysisAsync();
-
         var store = new FindingStore(_duckDb);
         var context = TestDataSeeder.CreateTestContext();
         var stories = CreateTestStories();
@@ -63,8 +59,6 @@ public class FindingStoreTests : IDisposable
     [Fact]
     public async Task GetLatestFindings_ReturnsPersistedData()
     {
-        await InitializeWithAnalysisAsync();
-
         var store = new FindingStore(_duckDb);
         var context = TestDataSeeder.CreateTestContext();
         var stories = CreateTestStories();
@@ -83,8 +77,6 @@ public class FindingStoreTests : IDisposable
     {
         // Correlate-and-focus slice 2: the incident id persists through the schema (incident_id
         // column added at analysis-schema v3) and reads back on every finding.
-        await InitializeWithAnalysisAsync();
-
         var store = new FindingStore(_duckDb);
         var context = TestDataSeeder.CreateTestContext();
         var stories = CreateTestStories();
@@ -101,8 +93,6 @@ public class FindingStoreTests : IDisposable
     [Fact]
     public async Task GetRecentFindings_RespectsTimeRange()
     {
-        await InitializeWithAnalysisAsync();
-
         var store = new FindingStore(_duckDb);
         var context = TestDataSeeder.CreateTestContext();
 
@@ -120,8 +110,6 @@ public class FindingStoreTests : IDisposable
     [Fact]
     public async Task MuteStory_ExcludesFromFutureSaves()
     {
-        await InitializeWithAnalysisAsync();
-
         var store = new FindingStore(_duckDb);
         var context = TestDataSeeder.CreateTestContext();
         var stories = CreateTestStories();
@@ -139,8 +127,6 @@ public class FindingStoreTests : IDisposable
     [Fact]
     public async Task CleanupOldFindings_RemovesExpiredData()
     {
-        await InitializeWithAnalysisAsync();
-
         var store = new FindingStore(_duckDb);
         var context = TestDataSeeder.CreateTestContext();
 
@@ -160,8 +146,6 @@ public class FindingStoreTests : IDisposable
         // AnalysisService.CleanupAsync (previously declared but never called — analysis_findings
         // grew unbounded until a size-triggered DB reset wiped it). Prove the wrapper the
         // scheduler now invokes purges through to the store.
-        await InitializeWithAnalysisAsync();
-
         var store = new FindingStore(_duckDb);
         var context = TestDataSeeder.CreateTestContext();
         await store.SaveFindingsAsync(CreateTestStories(), context);
@@ -175,10 +159,8 @@ public class FindingStoreTests : IDisposable
     [Fact]
     public async Task FullPipeline_FindingStoreIntegration()
     {
-        await InitializeWithAnalysisAsync();
-
         // Seed test data
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedMemoryStarvedServerAsync();
 
         // Run pipeline
@@ -216,8 +198,6 @@ public class FindingStoreTests : IDisposable
         // call, reused for the mute read and every insert. This exercises a batch larger
         // than the two-story helper to confirm the connection-reuse path persists every
         // surviving row (and preserves severity-desc ordering on read-back).
-        await InitializeWithAnalysisAsync();
-
         var store = new FindingStore(_duckDb);
         var context = TestDataSeeder.CreateTestContext();
 
@@ -260,8 +240,6 @@ public class FindingStoreTests : IDisposable
     {
         // The batching refactor must preserve mute filtering and the severity<=0 skip
         // within the single-connection loop.
-        await InitializeWithAnalysisAsync();
-
         var store = new FindingStore(_duckDb);
         var context = TestDataSeeder.CreateTestContext();
         var stories = CreateTestStories();
@@ -296,8 +274,6 @@ public class FindingStoreTests : IDisposable
     {
         // serverId 0 is the MCP "mute across all servers" sentinel. The store must persist it as
         // NULL (the canonical global marker), and the mute must then apply to any real server.
-        await InitializeWithAnalysisAsync();
-
         var store = new FindingStore(_duckDb);
         var stories = CreateTestStories();
 
@@ -319,8 +295,6 @@ public class FindingStoreTests : IDisposable
     {
         // Rows written by the pre-fix all-servers tool path carry a literal server_id = 0. The reader
         // must still honor them as global so those legacy mutes keep muting everywhere.
-        await InitializeWithAnalysisAsync();
-
         var store = new FindingStore(_duckDb);
         var stories = CreateTestStories();
 
@@ -337,8 +311,6 @@ public class FindingStoreTests : IDisposable
     public async Task SaveFindings_PerServerMuteForAnotherServer_DoesNotLeak()
     {
         // A mute scoped to one real server must never filter another server's findings.
-        await InitializeWithAnalysisAsync();
-
         var store = new FindingStore(_duckDb);
         var stories = CreateTestStories();
 
@@ -361,8 +333,6 @@ public class FindingStoreTests : IDisposable
         // InsertFindingsAsync persists remediation_action_json. The read-back deserializes it via the
         // shared serializer, and the shared renderer turns it into the copy-paste command — proving the
         // typed action survives the DuckDB round-trip and Lite produces a runnable command from storage.
-        await InitializeWithAnalysisAsync();
-
         var store = new FindingStore(_duckDb);
         var context = TestDataSeeder.CreateTestContext();
 
@@ -410,8 +380,6 @@ public class FindingStoreTests : IDisposable
     {
         // The single-pass SaveFindingsAsync wrapper attaches no action; the column persists NULL and
         // reads back as a null Remediation (no command) — the pre-fix behaviour for action-less rows.
-        await InitializeWithAnalysisAsync();
-
         var store = new FindingStore(_duckDb);
         var context = TestDataSeeder.CreateTestContext();
 
@@ -432,26 +400,41 @@ public class FindingStoreTests : IDisposable
         // remediation_action_json). InitializeAnalysisSchemaAsync must ALTER the column in via the
         // v4 migration WITHOUT dropping the pre-existing finding row, then a fresh finding with an
         // action persists + reads back — the real upgrade path an existing user hits.
-        await CreateLegacyV3AnalysisSchemaAsync(legacyFindingId: 4242);
+        //
+        // This test hand-creates the legacy table shape, so it needs a database WITHOUT the
+        // analysis schema — its own private file, NOT the class fixture's, whose schema is
+        // already current (CREATE TABLE analysis_findings would collide there).
+        var tempDir = Path.Combine(Path.GetTempPath(), "LiteTests_" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var legacyDb = new DuckDbInitializer(Path.Combine(tempDir, "test.duckdb"));
+            await CreateLegacyV3AnalysisSchemaAsync(legacyDb, legacyFindingId: 4242);
 
-        // Run the upgrade.
-        await _duckDb.InitializeAnalysisSchemaAsync();
+            // Run the upgrade.
+            await legacyDb.InitializeAnalysisSchemaAsync();
 
-        // The column now exists.
-        Assert.True(await ColumnExistsAsync("analysis_findings", "remediation_action_json"),
-            "v4 migration should add remediation_action_json");
-        // The schema version advanced to v4.
-        Assert.Equal(AnalysisSchema.CurrentVersion, await ReadAnalysisSchemaVersionAsync());
-        // The legacy row survived (no data loss) and reads back with a null action.
-        var store = new FindingStore(_duckDb);
-        var afterUpgrade = await store.GetLatestFindingsAsync(TestDataSeeder.TestServerId);
-        var legacy = Assert.Single(afterUpgrade);
-        Assert.Equal(4242, legacy.FindingId);
-        Assert.Null(legacy.Remediation);
+            // The column now exists.
+            Assert.True(await ColumnExistsAsync(legacyDb, "analysis_findings", "remediation_action_json"),
+                "v4 migration should add remediation_action_json");
+            // The schema version advanced to v4.
+            Assert.Equal(AnalysisSchema.CurrentVersion, await ReadAnalysisSchemaVersionAsync(legacyDb));
+            // The legacy row survived (no data loss) and reads back with a null action.
+            var store = new FindingStore(legacyDb);
+            var afterUpgrade = await store.GetLatestFindingsAsync(TestDataSeeder.TestServerId);
+            var legacy = Assert.Single(afterUpgrade);
+            Assert.Equal(4242, legacy.FindingId);
+            Assert.Null(legacy.Remediation);
 
-        // Idempotent: running the init again does not throw or regress the version.
-        await _duckDb.InitializeAnalysisSchemaAsync();
-        Assert.Equal(AnalysisSchema.CurrentVersion, await ReadAnalysisSchemaVersionAsync());
+            // Idempotent: running the init again does not throw or regress the version.
+            await legacyDb.InitializeAnalysisSchemaAsync();
+            Assert.Equal(AnalysisSchema.CurrentVersion, await ReadAnalysisSchemaVersionAsync(legacyDb));
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, recursive: true); }
+            catch { /* Best-effort cleanup */ }
+        }
     }
 
     /// <summary>
@@ -459,9 +442,9 @@ public class FindingStoreTests : IDisposable
     /// analysis_schema_version = 3 and one pre-existing finding row, exactly what an un-upgraded Lite
     /// DB looks like before this change.
     /// </summary>
-    private async Task CreateLegacyV3AnalysisSchemaAsync(long legacyFindingId)
+    private static async Task CreateLegacyV3AnalysisSchemaAsync(DuckDbInitializer legacyDb, long legacyFindingId)
     {
-        using var connection = _duckDb.CreateConnection();
+        using var connection = legacyDb.CreateConnection();
         await connection.OpenAsync();
 
         // v3 DDL: every column through incident_id, but WITHOUT remediation_action_json.
@@ -520,9 +503,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         await insert.ExecuteNonQueryAsync();
     }
 
-    private async Task<bool> ColumnExistsAsync(string table, string column)
+    private static async Task<bool> ColumnExistsAsync(DuckDbInitializer legacyDb, string table, string column)
     {
-        using var connection = _duckDb.CreateConnection();
+        using var connection = legacyDb.CreateConnection();
         await connection.OpenAsync();
         using var cmd = connection.CreateCommand();
         cmd.CommandText =
@@ -532,9 +515,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         return Convert.ToInt32(await cmd.ExecuteScalarAsync()) == 1;
     }
 
-    private async Task<int> ReadAnalysisSchemaVersionAsync()
+    private static async Task<int> ReadAnalysisSchemaVersionAsync(DuckDbInitializer legacyDb)
     {
-        using var connection = _duckDb.CreateConnection();
+        using var connection = legacyDb.CreateConnection();
         await connection.OpenAsync();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = "SELECT COALESCE(MAX(version), 0) FROM analysis_schema_version";
@@ -552,8 +535,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     private async Task<int?> ReadMutedServerIdAsync(string storyPathHash)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
 
         using var cmd = connection.CreateCommand();
         cmd.CommandText = "SELECT server_id FROM analysis_muted WHERE story_path_hash = $1";
@@ -568,8 +550,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     private async Task InsertLegacyMutedRowAsync(int serverId, string storyPathHash, string storyPath)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
 
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
