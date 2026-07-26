@@ -1658,6 +1658,141 @@ public sealed class DarlingSelfAlertTests
         }
     }
 
+    /// <summary>
+    /// EXECUTES both Availability Group reads against a real Postgres (#991). This exists because the two
+    /// grains were briefly read as two statements over a SINGLE command to save a round trip, and that is
+    /// rejected by PostgreSQL: Npgsql only splits multi-statement text into a batch when it parses the SQL for
+    /// NAMED placeholders, so with the positional ($1) parameters these reads use it sends one
+    /// extended-protocol Parse and the server answers "cannot insert multiple commands into a prepared
+    /// statement". Every AG path is failure-isolated, so that defect did not crash anything — it would have
+    /// logged one error per server per sweep with the whole alert family silently dead. No unit test can catch
+    /// that shape; only running the SQL can. Also pins the freshness signal, the newest-snapshot filter, and
+    /// the NULL-identity drop.
+    /// </summary>
+    [Fact]
+    public async Task LiveStoreReads_ExecuteBothAgQueries_AndReturnTheNewestSnapshot()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live AG store reads.");
+
+        var ct = Ct;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteLiveAgRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        try
+        {
+            var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            var older = utcNow.AddMinutes(-5);
+
+            /* An older snapshot that must be filtered out by the MAX(collection_time) predicate, a current one
+               that must come back, and a current row with a NULL identity column that must be dropped. */
+            await InsertAgReplicaAsync(connection, ct, older, "AG1", "NODE1", "PRIMARY", "CONNECTED");
+            await InsertAgReplicaAsync(connection, ct, utcNow, "AG1", "NODE1", "SECONDARY", "CONNECTED");
+            await InsertAgReplicaAsync(connection, ct, utcNow, "AG1", "NODE2", "PRIMARY", "DISCONNECTED");
+            await InsertAgReplicaAsync(connection, ct, utcNow, null, "NODE3", "SECONDARY", "CONNECTED");
+
+            var (replicaTime, replicas) =
+                await DarlingSelfAlertEvaluator.ReadLatestAgReplicaStatesAsync(postgres, LiveServerId, ct);
+
+            Assert.NotNull(replicaTime);
+            Assert.Equal(2, replicas.Count);                       /* the un-keyable NULL row is dropped */
+            Assert.DoesNotContain(replicas, r => r.RoleDesc == "PRIMARY" && r.ReplicaServerName == "NODE1");
+            Assert.Contains(replicas, r => r.ReplicaServerName == "NODE2" && r.ConnectedStateDesc == "DISCONNECTED");
+
+            await InsertAgDatabaseAsync(connection, ct, older, "AG1", "Sales", "NODE2", 10, 10, false, null);
+            await InsertAgDatabaseAsync(connection, ct, utcNow, "AG1", "Sales", "NODE2", 900, 4096, false, null);
+            await InsertAgDatabaseAsync(connection, ct, utcNow, "AG1", "Orders", "NODE2", null, null, true, "SUSPEND_FROM_USER");
+
+            var (databaseTime, databases) =
+                await DarlingSelfAlertEvaluator.ReadLatestAgDatabaseReplicaStatesAsync(postgres, LiveServerId, ct);
+
+            Assert.NotNull(databaseTime);
+            Assert.Equal(2, databases.Count);
+            var sales = Assert.Single(databases, d => d.DatabaseName == "Sales");
+            Assert.Equal(900, sales.SecondaryLagSeconds);
+            Assert.Equal(4096, sales.RedoQueueSizeKb);
+            var orders = Assert.Single(databases, d => d.DatabaseName == "Orders");
+            Assert.True(orders.IsSuspended);
+            Assert.Null(orders.SecondaryLagSeconds);
+            Assert.Equal("SUSPEND_FROM_USER", orders.SuspendReasonDesc);
+
+            /* End to end through the sweep entry point, against rows that are genuinely fresh: the disconnect
+               and the suspend are first sightings (silent baselines), and the 900-second lag is past the
+               300-second default, so exactly one alert lands. */
+            var h = new Harness { Now = DateTime.UtcNow };
+            var evaluator = h.Build();
+            await evaluator.EvaluateStoreAlertsAsync(postgres, LiveServerId, Name, connected: true, ct);
+
+            Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "AG Sync Fell Behind");
+            Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == "AG Replica Disconnected");
+        }
+        finally
+        {
+            await DeleteLiveAgRowsAsync(connection, ct);
+            await DeleteLiveRowsAsync(connection, ct);
+        }
+    }
+
+    private static async Task InsertAgReplicaAsync(
+        NpgsqlConnection connection, CancellationToken ct, DateTime time,
+        string? agName, string replicaServerName, string roleDesc, string connectedStateDesc)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO ag_replica_states (collection_id, collection_time, server_id, server_name, ag_name,
+    replica_server_name, role_desc, operational_state_desc, connected_state_desc, recovery_health_desc,
+    synchronization_health_desc, availability_mode_desc, failover_mode_desc, endpoint_url)
+VALUES (0, $1, $2, $3, $4, $5, $6, 'ONLINE', $7, 'ONLINE', 'HEALTHY', 'SYNCHRONOUS_COMMIT', 'AUTOMATIC', NULL)", connection);
+        command.Parameters.AddWithValue(time);
+        command.Parameters.AddWithValue(LiveServerId);
+        command.Parameters.AddWithValue(Name);
+        command.Parameters.AddWithValue((object?)agName ?? DBNull.Value);
+        command.Parameters.AddWithValue(replicaServerName);
+        command.Parameters.AddWithValue(roleDesc);
+        command.Parameters.AddWithValue(connectedStateDesc);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task InsertAgDatabaseAsync(
+        NpgsqlConnection connection, CancellationToken ct, DateTime time,
+        string agName, string databaseName, string replicaServerName,
+        long? secondaryLagSeconds, long? redoQueueSize, bool isSuspended, string? suspendReason)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO ag_database_replica_states (collection_id, collection_time, server_id, server_name, ag_name,
+    database_name, replica_server_name, is_local, synchronization_state_desc, last_hardened_lsn,
+    last_commit_lsn, log_send_queue_size, redo_queue_size, log_send_rate, redo_rate, is_suspended,
+    suspend_reason_desc, availability_mode_desc, secondary_lag_seconds)
+VALUES (0, $1, $2, $3, $4, $5, $6, FALSE, 'SYNCHRONIZING', NULL, NULL, 0, $7, 0, 0, $8, $9,
+    'SYNCHRONOUS_COMMIT', $10)", connection);
+        command.Parameters.AddWithValue(time);
+        command.Parameters.AddWithValue(LiveServerId);
+        command.Parameters.AddWithValue(Name);
+        command.Parameters.AddWithValue(agName);
+        command.Parameters.AddWithValue(databaseName);
+        command.Parameters.AddWithValue(replicaServerName);
+        command.Parameters.AddWithValue((object?)redoQueueSize ?? DBNull.Value);
+        command.Parameters.AddWithValue(isSuspended);
+        command.Parameters.AddWithValue((object?)suspendReason ?? DBNull.Value);
+        command.Parameters.AddWithValue((object?)secondaryLagSeconds ?? DBNull.Value);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>One command per statement, for the same reason the reads under test are: multi-statement text
+    /// is a trap worth not re-laying even in cleanup.</summary>
+    private static async Task DeleteLiveAgRowsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var id = LiveServerId.ToString(CultureInfo.InvariantCulture);
+        foreach (var table in new[] { "ag_replica_states", "ag_database_replica_states" })
+        {
+            using var cleanup = new NpgsqlCommand($"DELETE FROM {table} WHERE server_id = {id}", connection);
+            await cleanup.ExecuteNonQueryAsync(ct);
+        }
+    }
+
     private static async Task InsertLogAsync(
         NpgsqlConnection connection, CancellationToken ct, long logId, string collector, DateTime time, string status)
     {
