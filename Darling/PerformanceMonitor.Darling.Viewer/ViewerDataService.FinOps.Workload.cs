@@ -555,7 +555,13 @@ LIMIT $3";
 
     public async Task<List<ExpensiveQueryRow>> GetExpensiveQueriesAsync(int serverId, int hoursBack = 24, int topN = 20, CancellationToken cancellationToken = default)
     {
-        var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
+        /* #1661: this reader projects query_text and query_plan_xml, and NO rollup carries per-row text — the
+           CAGGs group by identity and sum deltas. So unlike the aggregate FinOps queries this one cannot be
+           routed; it is limited to whatever raw still retains, however wide a window the picker offers. Clamp to
+           that horizon so the query states the range it can actually answer. The UI labels the clamp
+           (FinOpsTab.Loaders) using the same router, rather than quietly showing a few days of a month. */
+        var now = DateTime.UtcNow;
+        var (cutoff, _) = RetentionTierRouter.ClampToTextHorizon(now, now.AddHours(-hoursBack));
 
         await using var command = _dataSource.CreateCommand(ExpensiveQueriesSql);
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
