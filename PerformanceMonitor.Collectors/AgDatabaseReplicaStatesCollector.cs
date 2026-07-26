@@ -38,13 +38,18 @@ namespace PerformanceMonitor.Collectors;
 /// measured behavior, so nothing downstream has to bet on which is true — which matters, because they
 /// disagree.</para>
 ///
-/// <para>secondary_lag_seconds is 2016+ and the repo floor IS 2016, so it is referenced directly with no
-/// version branch. MS Learn says it "shows as 0 if the data movement is suspended". Measured on a live
-/// SQL Server 2022 (16.0.4265.3) CLUSTER_TYPE = NONE AG it does the inverse — 0 while movement is ACTIVE
-/// and caught up, accruing monotonically once suspended (two independent runs: 0→15→31→46→62 s, and
-/// 30→45→60→75 s, back to 0 on resume). Under the docs a suspended replica hides as zero lag; under the
-/// measurement it announces itself. The asymmetry above covers both: a growing lag fires, a zero lag on a
-/// suspended row resolves nothing. WSFC untested, one build — hence the rule rather than a new absolute.</para>
+/// <para>secondary_lag_seconds is 2016+ and the repo floor IS 2016, so it is referenced directly
+/// with no version branch. MS Learn documents it reading <c>0</c> while data movement is SUSPENDED
+/// — DO NOT BUILD ON THAT SENTENCE, it is contradicted by measurement. On 16.0.4265.3 it reads 0
+/// while movement is ACTIVE and caught up, and ACCRUES once suspended. What it reports on a
+/// suspended row is roughly how stale the secondary's last hardened log is
+/// (<c>now - last_hardened_time</c>), NOT time since suspension: under write load that starts near
+/// zero and climbs (measured 0→15→31→46→62 s and 30→45→60→75 s on two loaded runs), but on an IDLE
+/// group it starts at however long since the last write and can be thousands of seconds immediately.
+/// It also does not latch the moment movement stops — a suspended row can still report 0 for the
+/// first sample or two. So the magnitude is STALENESS, not volume at risk (log_send_queue_size would
+/// be the volume measure, and it is NULL while suspended). is_suspended is collected alongside so
+/// that reading is possible. Evidence: tools/ag-fixture/VALIDATION.md.</para>
 ///
 /// <para>The rest of the SUSPENDED surface, all measured, all pointing the same way — STALE, NOT CURRENT:
 /// log_send_queue_size goes NULL rather than growing; redo_queue_size FREEZES at its last value; and all
