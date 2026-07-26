@@ -18,6 +18,10 @@ concurrency:
 jobs:
   validate-sql:
     runs-on: ubuntu-latest
+    # Container pull + install scripts + seeded view execution runs in well under 15
+    # minutes per version; a SQL Server container that never reaches healthy is the hang
+    # this bounds, and there are four of these jobs per run on the shared pool.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       # SQL Server 2016 is the documented minimum but cannot appear here: SQL Server on Linux

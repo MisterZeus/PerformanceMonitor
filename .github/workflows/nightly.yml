@@ -48,6 +48,7 @@ jobs:
   check:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       has_changes: ${{ steps.check.outputs.has_changes }}
     steps:
@@ -75,6 +76,10 @@ jobs:
     # 24h — the same policy the schedule applied when it ran these jobs directly.
     if: needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true
     runs-on: windows-latest
+    # Full pipeline (restore, tests, four publishes, cold pg-runtime fetch, vpk pack,
+    # release upload) is well under an hour; 90 minutes means hung-not-slow. Nightly ships
+    # unsigned, so unlike build.yml's release path there is no manual signing gate to wait on.
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v7
@@ -231,6 +236,9 @@ jobs:
     # re-dispatch (from_schedule=true) runs only when dev changed in the last 24h.
     if: needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true
     runs-on: windows-latest
+    # Cold pg-runtime fetch + build + the full live-PG suite fits well inside an hour; a
+    # cluster that never comes up (pg_ctl -w) is the hang this bounds.
+    timeout-minutes: 60
 
     steps:
       # Scheduled runs always test dev (schedules execute from the default branch, so ref_name

@@ -504,6 +504,13 @@ jobs:
   darling-pg:
     name: Darling PostgreSQL tests
     runs-on: windows-latest
+    # Max observed on a warm cache is ~3m40s; a cold pg-runtime cache adds a ~340MB fetch.
+    # 30 minutes is 3x headroom over the cold path — past that, something is hung (pg_ctl -w
+    # waiting on a cluster that will never come up), and the default 6h timeout would hold a
+    # shared-pool Windows runner hostage for the duration. The build job above deliberately
+    # has NO timeout: on release it waits on SignPath's manual approval gate, which can
+    # legitimately take hours.
+    timeout-minutes: 30
     permissions:
       contents: read
 
