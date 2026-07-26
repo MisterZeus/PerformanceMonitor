@@ -1,0 +1,263 @@
+# AG collector validation against the fixture
+
+**Date:** 2026-07-26
+**Fixture:** `tools/ag-fixture`, two-node `CLUSTER_TYPE = NONE` availability group `ag_fixture`
+**Instances:** SQL Server 2022, `16.0.4265.3` RTM, Developer Edition, `IsHadrEnabled = 1`
+**Collector source:** `feature/991-ag-health-collector` @ `530b3b66`, queries taken verbatim from
+`PerformanceMonitor.Collectors/AgReplicaStatesCollector.cs` and
+`PerformanceMonitor.Collectors/AgDatabaseReplicaStatesCollector.cs`
+
+Both collector queries were run unmodified against both replicas. Both return real rows with
+non-NULL queues and rates under load, and both track a suspend/resume fault correctly.
+
+Three behaviors turned up that are not obvious from the DMV documentation. They are recorded in
+full below because they change how the data should be read, and one of them contradicts MS Learn.
+
+## Summary
+
+| Check | Result |
+| --- | --- |
+| AG builds and reaches PRIMARY + SECONDARY, CONNECTED, HEALTHY | Pass |
+| `setup.ps1` is idempotent (full re-run against a live fixture) | Pass |
+| Replica-grain query returns rows on the primary | Pass, 2 rows |
+| Database-grain query returns rows on the primary | Pass, 2 rows |
+| Non-NULL queues and rates under write load | Pass |
+| Suspend sets `is_suspended` + `suspend_reason_desc`, resume clears | Pass |
+| Same queries from a *secondary* return the full AG | **No, 1 row - see finding 1** |
+| `log_send_queue_size` grows while suspended | **No, reads NULL - see finding 2** |
+| `secondary_lag_seconds` reads 0 while suspended, per MS Learn | **No, it accrues - see finding 3** |
+
+## 1. Fixture state after setup
+
+`sql/07_verify.sql` on ag1:
+
+```
+grain   ag_name    replica_server_name role      connected_state synchronization_health operational_state availability_mode  is_local
+------- ---------- ------------------- --------- --------------- ---------------------- ----------------- ------------------ --------
+replica ag_fixture ag1                 PRIMARY   CONNECTED       HEALTHY                ONLINE            SYNCHRONOUS_COMMIT 1
+replica ag_fixture ag2                 SECONDARY CONNECTED       HEALTHY                NULL              SYNCHRONOUS_COMMIT 0
+
+grain    ag_name    replica_server_name database_name role      synchronization_state is_suspended suspend_reason log_send_queue_kb redo_queue_kb
+-------- ---------- ------------------- ------------- --------- --------------------- ------------ -------------- ----------------- -------------
+database ag_fixture ag1                 AgFixtureDb   PRIMARY   SYNCHRONIZED          0            NULL           NULL              NULL
+database ag_fixture ag2                 AgFixtureDb   SECONDARY SYNCHRONIZED          0            NULL           60                0
+```
+
+`operational_state_desc` and `recovery_health_desc` are NULL for the remote replica. That is
+expected - those columns are only populated for the local replica - and it is worth knowing before
+someone treats a NULL operational state as a fault.
+
+Re-running `setup.ps1 -SkipCompose` against the live fixture completed with no errors and the same
+output, so the idempotency guards in the numbered scripts hold.
+
+## 2. Replica-grain query (`ag_replica_states`)
+
+Run verbatim. On **ag1 (primary)** - 2 rows:
+
+```
+ag_name|replica_server_name|role_desc|operational_state_desc|connected_state_desc|recovery_health_desc|synchronization_health_desc|availability_mode_desc|failover_mode_desc|endpoint_url
+ag_fixture|ag1|PRIMARY|ONLINE|CONNECTED|ONLINE|HEALTHY|SYNCHRONOUS_COMMIT|MANUAL|tcp://ag1:5022
+ag_fixture|ag2|SECONDARY|NULL|CONNECTED|NULL|HEALTHY|SYNCHRONOUS_COMMIT|MANUAL|tcp://ag2:5022
+
+(2 rows affected)
+```
+
+On **ag2 (secondary)** - 1 row:
+
+```
+ag_name|replica_server_name|role_desc|operational_state_desc|connected_state_desc|recovery_health_desc|synchronization_health_desc|availability_mode_desc|failover_mode_desc|endpoint_url
+ag_fixture|ag2|SECONDARY|ONLINE|CONNECTED|ONLINE|HEALTHY|SYNCHRONOUS_COMMIT|MANUAL|tcp://ag2:5022
+
+(1 rows affected)
+```
+
+### Finding 1: a secondary reports only itself
+
+Row counts of each object backing the two queries:
+
+```
+                                      ag1   ag2
+sys.availability_groups                 1     1
+sys.availability_replicas               2     2
+sys.dm_hadr_availability_replica_states 2     1
+sys.dm_hadr_database_replica_states     2     1
+```
+
+The catalog view `sys.availability_replicas` knows about both replicas on both nodes. The two
+*DMVs* only carry the local replica on the secondary, so the collectors' inner join to them narrows
+a secondary's result to its own row. A clusterless AG has no cluster metadata store through which a
+secondary could learn its partners' runtime state.
+
+Consequences: a complete AG picture requires collecting from the primary; monitoring only a
+secondary produces a one-row self-view with no primary visible in it; and after a failover the
+replica that returns the full set changes. Anything that assumes "one row per replica per AG from
+any monitored node" is wrong. This is also why the fixture README tells you to add both replicas as
+servers.
+
+## 3. Database-grain query (`ag_database_replica_states`)
+
+Run verbatim, during write load. On **ag1 (primary)** - 2 rows, queues and rates non-NULL on the
+remote row:
+
+```
+ag_name|database_name|replica_server_name|is_local|synchronization_state_desc|last_hardened_lsn|last_commit_lsn|log_send_queue_size|redo_queue_size|log_send_rate|redo_rate|is_suspended|suspend_reason_desc|availability_mode_desc|secondary_lag_seconds
+ag_fixture|AgFixtureDb|ag1|1|SYNCHRONIZED|99000005517600001|99000005565600123|NULL|NULL|NULL|NULL|0|NULL|SYNCHRONOUS_COMMIT|NULL
+ag_fixture|AgFixtureDb|ag2|0|SYNCHRONIZED|99000005517600001|99000004283200121|60|3976|484002000|95545|0|NULL|SYNCHRONOUS_COMMIT|0
+
+(2 rows affected)
+```
+
+On **ag2 (secondary)** - 1 row (finding 1 again), local redo queue and rate populated:
+
+```
+ag_name|database_name|replica_server_name|is_local|synchronization_state_desc|last_hardened_lsn|last_commit_lsn|log_send_queue_size|redo_queue_size|log_send_rate|redo_rate|is_suspended|suspend_reason_desc|availability_mode_desc|secondary_lag_seconds
+ag_fixture|AgFixtureDb|ag2|1|SYNCHRONIZED|99000007499200001|99000007275200119|60|1064|486229000|95713|0|NULL|SYNCHRONOUS_COMMIT|NULL
+
+(1 rows affected)
+```
+
+The queue and rate columns move only with traffic on the wire. The load that produced the numbers
+above was `write-load.ps1 -Seconds 130`: 5,270 batches, 2,635,000 rows.
+
+The primary's own row (`is_local = 1`) carries NULL for every queue and rate. Those columns describe
+shipping *to* a secondary, so there is nothing to report against the primary itself.
+`secondary_lag_seconds` is likewise NULL on a replica's own local row and populated only on the
+primary's view of a remote secondary.
+
+## 4. Fault: suspend and resume data movement
+
+`ALTER DATABASE [AgFixtureDb] SET HADR SUSPEND;` run **on ag2**, with write load running.
+
+### Before suspend
+
+```
+replica_server_name|is_local|synchronization_state_desc|log_send_queue_size|redo_queue_size|log_send_rate|redo_rate|is_suspended|suspend_reason_desc|secondary_lag_seconds
+ag1|1|SYNCHRONIZED|NULL|NULL|NULL|NULL|0|NULL|NULL
+ag2|0|SYNCHRONIZED|60|3976|484002000|95545|0|NULL|0
+```
+
+### After suspend (from ag1, remote row)
+
+```
+replica_server_name|is_local|synchronization_state_desc|log_send_queue_size|redo_queue_size|log_send_rate|redo_rate|is_suspended|suspend_reason_desc|secondary_lag_seconds
+ag1|1|SYNCHRONIZED|NULL|NULL|NULL|NULL|0|NULL|NULL
+ag2|0|NOT SYNCHRONIZING|NULL|3920|488409000|95783|1|SUSPEND_FROM_USER|15
+```
+
+### After suspend (from ag2, local row)
+
+```
+replica_server_name|is_local|synchronization_state_desc|log_send_queue_size|redo_queue_size|log_send_rate|redo_rate|is_suspended|suspend_reason_desc|secondary_lag_seconds
+ag2|1|NOT SYNCHRONIZING|NULL|1596|488084000|95765|1|SUSPEND_FROM_USER|NULL
+```
+
+`is_suspended` flips to 1 and `suspend_reason_desc` reads `SUSPEND_FROM_USER` on both vantage
+points, and `synchronization_state_desc` goes to `NOT SYNCHRONIZING`.
+
+### Replica grain during the same suspend (from ag1)
+
+```
+ag_name|replica_server_name|role_desc|operational_state_desc|connected_state_desc|recovery_health_desc|synchronization_health_desc|availability_mode_desc|failover_mode_desc|endpoint_url
+ag_fixture|ag1|PRIMARY|ONLINE|CONNECTED|ONLINE|HEALTHY|SYNCHRONOUS_COMMIT|MANUAL|tcp://ag1:5022
+ag_fixture|ag2|SECONDARY|NULL|CONNECTED|NULL|NOT_HEALTHY|SYNCHRONOUS_COMMIT|MANUAL|tcp://ag2:5022
+```
+
+The replica grain tracks the fault too: `synchronization_health_desc` on the ag2 row goes
+`HEALTHY` -> `NOT_HEALTHY` while the database grain is suspended. Note `connected_state_desc` stays
+`CONNECTED` - suspending data movement does not disconnect the replica, so connection state alone
+does not detect this.
+
+### After resume
+
+```
+replica_server_name|is_local|synchronization_state_desc|log_send_queue_size|redo_queue_size|log_send_rate|redo_rate|is_suspended|suspend_reason_desc|secondary_lag_seconds
+ag1|1|SYNCHRONIZED|NULL|NULL|NULL|NULL|0|NULL|NULL
+ag2|0|SYNCHRONIZED|60|4148|1123645|87487|0|NULL|0
+```
+
+`is_suspended` returns to 0, `suspend_reason_desc` to NULL, `synchronization_state_desc` to
+`SYNCHRONIZED`.
+
+## 5. Finding 2: `log_send_queue_size` reads NULL while suspended
+
+Sampled on the primary's remote row across a 60-second suspend with write load running:
+
+```
+sample            is_suspended suspend_reason    sync_state       log_send_queue_size redo_queue_size
+----------------- ------------ ----------------- ---------------- ------------------- ---------------
+active/caught up  0            -                 SYNCHRONIZED     60                  3728
++15s suspended    1            SUSPEND_FROM_USER NOT SYNCHRONIZING NULL               4036
++30s suspended    1            SUSPEND_FROM_USER NOT SYNCHRONIZING NULL               4036
++45s suspended    1            SUSPEND_FROM_USER NOT SYNCHRONIZING NULL               4036
++60s suspended    1            SUSPEND_FROM_USER NOT SYNCHRONIZING NULL               4036
+after resume      0            -                 SYNCHRONIZED     60                  388620
+```
+
+The send queue does not grow while movement is suspended - it reads NULL - and `redo_queue_size`
+freezes at its last value instead of climbing. A "log send queue over N KB" rule is therefore blind
+to a suspended secondary, which is one of the most common ways a secondary falls behind.
+`is_suspended` / `suspend_reason_desc` / `synchronization_state_desc` are the signal for that
+condition; queue thresholds only mean anything while movement is active. NULL must not be compared
+as zero-and-healthy.
+
+The `redo_queue_size` of 388,620 KB in the last row is legitimate post-resume catch-up, not a fault.
+A single-sample redo-queue threshold will fire on it.
+
+## 6. Finding 3: `secondary_lag_seconds` accrues while suspended, contradicting MS Learn
+
+MS Learn documents this column as:
+
+> The number of seconds that the secondary replica is behind the primary replica during
+> synchronization. [...] **This value shows as `0` if the data movement is suspended.** The data
+> movement needs to be in a non-suspended state in order for this value to show active lag.
+
+Observed on the primary's remote row, same 60-second suspend:
+
+```
+sample            is_suspended sync_state        secondary_lag_seconds
+----------------- ------------ ----------------- ---------------------
+active/caught up  0            SYNCHRONIZED      0
++15s suspended    1            NOT SYNCHRONIZING 15
++30s suspended    1            NOT SYNCHRONIZING 31
++45s suspended    1            NOT SYNCHRONIZING 46
++60s suspended    1            NOT SYNCHRONIZING 62
+after resume      0            SYNCHRONIZED      0
+```
+
+It accrues monotonically with suspension time - the inverse of the documented behavior. It reads 0
+when movement is *active and caught up*, not when suspended.
+
+So the blind spot the documentation implies does not exist here: a suspended secondary reports
+growing lag, and a lag threshold fires on it unaided. Reading `is_suspended` alongside lag is still
+the right thing to do, but to explain why lag is climbing rather than to catch lag that is being
+masked.
+
+Scope of this claim: one build (`16.0.4265.3`), clusterless AG only. A WSFC-based AG was not
+tested, and the fixture cannot test one.
+
+Source: [sys.dm_hadr_database_replica_states (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-hadr-database-replica-states-transact-sql)
+
+## Reproducing
+
+```
+cd tools\ag-fixture
+copy .env.example .env
+.\setup.ps1
+.\write-load.ps1 -Seconds 60
+```
+
+Then run either collector query through the container, for example:
+
+```
+docker exec -i ag1 /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "<password>" -C -W -s "|" -Q "SELECT ag_name = ag.name, replica_server_name = ar.replica_server_name, role_desc = ars.role_desc FROM sys.availability_replicas AS ar JOIN sys.availability_groups AS ag ON ar.group_id = ag.group_id JOIN sys.dm_hadr_availability_replica_states AS ars ON ar.replica_id = ars.replica_id;"
+```
+
+Suspend and resume, on ag2:
+
+```
+docker exec -i ag2 /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "<password>" -C -Q "ALTER DATABASE AgFixtureDb SET HADR SUSPEND;"
+```
+
+```
+docker exec -i ag2 /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "<password>" -C -Q "ALTER DATABASE AgFixtureDb SET HADR RESUME;"
+```

@@ -1,0 +1,64 @@
+# Two-node clusterless (read-scale) Availability Group fixture.
+#
+# Both nodes are SQL Server 2022 with HADR enabled. `hostname` is pinned so that
+# @@SERVERNAME inside each container is `ag1` / `ag2`, which is what the AG replica
+# names and the tcp://ag1:5022 endpoint URLs resolve against on the compose network.
+#
+# Start with setup.ps1, not `docker compose up` on its own - the AG itself is built
+# by the numbered scripts in sql/.
+name: ag-fixture
+
+services:
+  ag1:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: ag1
+    hostname: ag1
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD in tools/ag-fixture/.env - copy .env.example}
+      MSSQL_PID: Developer
+      MSSQL_AGENT_ENABLED: "true"
+      MSSQL_ENABLE_HADR: "1"
+    ports:
+      - "14331:1433"
+    volumes:
+      - ag1-data:/var/opt/mssql
+    networks:
+      - ag
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q 'SQL Server is now ready for client connections' /var/opt/mssql/log/errorlog || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+  ag2:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: ag2
+    hostname: ag2
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD in tools/ag-fixture/.env - copy .env.example}
+      MSSQL_PID: Developer
+      MSSQL_AGENT_ENABLED: "true"
+      MSSQL_ENABLE_HADR: "1"
+    ports:
+      - "14332:1433"
+    volumes:
+      - ag2-data:/var/opt/mssql
+    networks:
+      - ag
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q 'SQL Server is now ready for client connections' /var/opt/mssql/log/errorlog || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+networks:
+  ag:
+    name: ag-fixture-net
+
+volumes:
+  ag1-data:
+  ag2-data:
