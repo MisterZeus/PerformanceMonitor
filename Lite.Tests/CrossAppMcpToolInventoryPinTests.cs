@@ -61,6 +61,14 @@ public sealed class CrossAppMcpToolInventoryPinTests
            this entry (the ratchet only shrinks). */
         "get_fleet_overview",
 
+        /* #991: the Availability Group topology read born from the web dashboard's DarlingAgReader. Unlike the
+           Custom Views / alert-tuning / onboarding entries below this one IS a "not ported yet": the two AG
+           collectors landed in BOTH apps (#1688), so Lite already has ag_replica_states +
+           ag_database_replica_states in its local DuckDB and a Lite twin is a DuckDB reader over the SAME banding
+           rules — the per-replica and per-database severity logic lives in DarlingAgReader and would move to
+           Common on the port. Port it, then remove this entry (the ratchet only shrinks). */
+        "get_ag_health",
+
         /* #1600 + #1602: the Custom Views (CV2) tools — the Darling MCP server's write surface (the six that
            CRUD the user-authored dashboards/notebooks in the central Postgres store's config.custom_views and
            run back a composed panel's data), plus describe_custom_view_catalog (#1602, read-only), which serves

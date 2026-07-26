@@ -107,6 +107,15 @@ public sealed class DarlingWebEndpointsTests
         Assert.Contains("get_fleet_overview", DarlingWebEndpoints.BuildReadDispatch().Keys);
     }
 
+    [Fact]
+    public void ReadEndpoints_IncludeTheAgHealthTool()
+    {
+        /* get_ag_health (#991) is a read tool, so it must be in both the catalog and the web surface — its own
+           /api/read entry alongside the richer pre-banded /api/ag DTO endpoint the topology page reads. */
+        Assert.Contains("get_ag_health", ReflectToolCatalog());
+        Assert.Contains("get_ag_health", DarlingWebEndpoints.BuildReadDispatch().Keys);
+    }
+
     /* ── response-kind mapping (the '{'-sniff, error -> 500, status-envelope -> 200) ── */
 
     [Theory]
