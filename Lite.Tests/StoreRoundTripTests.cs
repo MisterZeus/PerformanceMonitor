@@ -1,8 +1,8 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using DuckDB.NET.Data;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
@@ -17,32 +17,36 @@ namespace PerformanceMonitorLite.Tests;
 /// send_error, UtcNow stamping), the cooldown-seed reads filter correctly, and
 /// mute-rule CRUD round-trips through config_mute_rules unchanged.
 /// </summary>
-public class StoreRoundTripTests : IDisposable
+public class StoreRoundTripTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
-    private readonly string _tempDir;
     private readonly DuckDbInitializer _duckDb;
+    private DuckDBConnection? _seedConn;
 
-    public StoreRoundTripTests()
+    public StoreRoundTripTests(SharedDuckDbFixture fixture)
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "LiteStoreTests_" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(_tempDir);
-        _duckDb = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
     }
 
-    public void Dispose()
+    public void Dispose() => _seedConn?.Dispose();
+
+    /// <summary>
+    /// One connection reused for every seeded row — opening a fresh connection per
+    /// single-row INSERT measured ~90ms/row and dominated this class's runtime.
+    /// </summary>
+    private async Task<DuckDBConnection> SeedConnectionAsync()
     {
-        try
+        if (_seedConn is null)
         {
-            if (Directory.Exists(_tempDir))
-                Directory.Delete(_tempDir, recursive: true);
+            _seedConn = _duckDb.CreateConnection();
+            await _seedConn.OpenAsync();
         }
-        catch { /* Best-effort cleanup */ }
+        return _seedConn;
     }
 
     [Fact]
     public async Task RecordAlert_PersistsAllColumns_WithTextNumericFallback()
     {
-        await _duckDb.InitializeAsync();
         var store = new DuckDbAlertHistoryStore(_duckDb);
         var before = DateTime.UtcNow;
 
@@ -76,7 +80,6 @@ public class StoreRoundTripTests : IDisposable
     [Fact]
     public async Task RecordAlert_PrefersSuppliedNumerics_OverText()
     {
-        await _duckDb.InitializeAsync();
         var store = new DuckDbAlertHistoryStore(_duckDb);
 
         await store.RecordAlertAsync(new AlertHistoryRecord(
@@ -97,7 +100,6 @@ public class StoreRoundTripTests : IDisposable
     [Fact]
     public async Task GetLastEmailSentUtc_FiltersToSuccessfulEmail_GetLastAlertTime_IsUnfiltered()
     {
-        await _duckDb.InitializeAsync();
         var store = new DuckDbAlertHistoryStore(_duckDb);
 
         /* A failed email and a webhook row must NOT seed the email cooldown,
@@ -128,7 +130,6 @@ public class StoreRoundTripTests : IDisposable
     [Fact]
     public async Task GetLastWebhookSentUtc_FiltersToWebhookRows_IncludingEmailWebhook()
     {
-        await _duckDb.InitializeAsync();
         var store = new DuckDbAlertHistoryStore(_duckDb);
 
         /* #1145: only rows whose notification_type implies a webhook delivered seed the webhook
@@ -160,7 +161,6 @@ public class StoreRoundTripTests : IDisposable
     [Fact]
     public async Task GetLastSentUtc_WithDedupKey_FiltersToContextJsonFingerprint()
     {
-        await _duckDb.InitializeAsync();
         var store = new DuckDbAlertHistoryStore(_duckDb);
 
         /* #1154: two distinct deadlock incidents recorded as successful email rows (AAA earlier,
@@ -193,7 +193,6 @@ public class StoreRoundTripTests : IDisposable
     [Fact]
     public async Task EdgeTriggerWatermark_SaveLoad_RoundTripsAndUpserts()
     {
-        await _duckDb.InitializeAsync();
         var store = new DuckDbAlertHistoryStore(_duckDb);
 
         /* #1145: empty table → empty load. */
@@ -225,7 +224,6 @@ public class StoreRoundTripTests : IDisposable
     [Fact]
     public async Task FailedJobWatermark_SaveLoad_RoundTripsExactValue_AndUpserts()
     {
-        await _duckDb.InitializeAsync();
         var store = new DuckDbAlertHistoryStore(_duckDb);
 
         /* Empty table → empty load. */
@@ -261,7 +259,6 @@ public class StoreRoundTripTests : IDisposable
     [Fact]
     public async Task MuteRuleStore_InsertUpdateSetEnabledDeleteExpire_RoundTrips()
     {
-        await _duckDb.InitializeAsync();
         var store = new DuckDbMuteRuleStore(_duckDb);
 
         var rule = new MuteRule
@@ -346,8 +343,7 @@ public class StoreRoundTripTests : IDisposable
     private async Task<AlertRow?> ReadSingleAlertRowAsync()
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
 SELECT alert_time, server_id, server_name, metric_name, current_value, threshold_value,

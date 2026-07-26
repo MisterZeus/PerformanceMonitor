@@ -7,7 +7,6 @@
  */
 
 using System;
-using System.IO;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitorLite.Database;
@@ -25,36 +24,43 @@ namespace PerformanceMonitorLite.Tests;
 /// would not. And other_process NULL (SQL Server on Linux, #1048) must fall back to the SQL-only
 /// figure via COALESCE(.,0), mirroring Dashboard's ISNULL(total, sqlserver) fallback.
 /// </summary>
-public class DailySummaryHighCpuTests : IDisposable
+public class DailySummaryHighCpuTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
-    private readonly string _tempDir;
     private readonly DuckDbInitializer _duckDb;
     private readonly LocalDataService _dataService;
+    private DuckDBConnection? _seedConn;
 
     private const int ServerId = -778;
     private static readonly DateTime _day = new DateTime(2026, 6, 15, 0, 0, 0, DateTimeKind.Utc);
     private long _nextId = -1;
 
-    public DailySummaryHighCpuTests()
+    public DailySummaryHighCpuTests(SharedDuckDbFixture fixture)
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "DailyCpuTests_" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(_tempDir);
-        var dbPath = Path.Combine(_tempDir, "test.duckdb");
-        _duckDb = new DuckDbInitializer(dbPath);
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
         _dataService = new LocalDataService(_duckDb);
     }
 
-    public void Dispose()
+    /// <summary>
+    /// One connection reused for every seeded row — opening a fresh connection per
+    /// single-row INSERT measured ~90ms/row and dominated this class's runtime.
+    /// </summary>
+    private async Task<DuckDBConnection> SeedConnectionAsync()
     {
-        try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); }
-        catch { }
+        if (_seedConn is null)
+        {
+            _seedConn = _duckDb.CreateConnection();
+            await _seedConn.OpenAsync();
+        }
+        return _seedConn;
     }
+
+    public void Dispose() => _seedConn?.Dispose();
 
     private async Task SeedCpuAsync(DateTime time, int sqlCpu, int? otherCpu)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var conn = _duckDb.CreateConnection();
-        await conn.OpenAsync();
+        var conn = await SeedConnectionAsync();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"INSERT INTO cpu_utilization_stats
             (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
@@ -70,8 +76,6 @@ public class DailySummaryHighCpuTests : IDisposable
     [Fact]
     public async Task HighCpuEvents_CountsTotalHostCpu_WithLinuxFallback()
     {
-        await _duckDb.InitializeAsync();
-
         // total >= 80  => counted
         await SeedCpuAsync(_day.AddHours(1), 85, 0);    // 85 from SQL alone
         await SeedCpuAsync(_day.AddHours(2), 79, 5);    // 84 total -- excluded under the old SQL-only rule

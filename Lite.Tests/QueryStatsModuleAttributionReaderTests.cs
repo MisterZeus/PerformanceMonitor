@@ -7,12 +7,12 @@
  */
 
 using System;
-using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitorLite.Tests;
 using Xunit;
 
 namespace Lite.Tests;
@@ -27,33 +27,38 @@ namespace Lite.Tests;
 /// Darling <c>ViewerQueriesLivePostgresTests</c> attribution round-trip and the Lite reader-test harness
 /// (<see cref="BlockingStatsReaderTests"/>).
 /// </summary>
-public sealed class QueryStatsModuleAttributionReaderTests : IDisposable
+public sealed class QueryStatsModuleAttributionReaderTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private const int ServerId = 8811;
 
-    private readonly string _tempDir;
     private readonly DuckDbInitializer _duckDb;
+    private DuckDBConnection? _seedConn;
     private long _nextId = 1;
 
     /* Anchor in the recent past so the default 24h window includes it; last_execution_time must be >= the
        window start (the reader's staleness filter, utc offset 0). */
     private static readonly DateTime Collected = MinuteFloor(DateTime.UtcNow.AddMinutes(-90));
 
-    public QueryStatsModuleAttributionReaderTests()
+    public QueryStatsModuleAttributionReaderTests(SharedDuckDbFixture fixture)
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "LiteQsModuleRt_" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(_tempDir);
-        _duckDb = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
     }
 
-    public void Dispose()
+    public void Dispose() => _seedConn?.Dispose();
+
+    /// <summary>
+    /// One connection reused for every seeded row — opening a fresh connection per
+    /// single-row INSERT measured ~90ms/row and dominated this class's runtime.
+    /// </summary>
+    private async Task<DuckDBConnection> SeedConnectionAsync()
     {
-        try
+        if (_seedConn is null)
         {
-            if (Directory.Exists(_tempDir))
-                Directory.Delete(_tempDir, recursive: true);
+            _seedConn = _duckDb.CreateConnection();
+            await _seedConn.OpenAsync();
         }
-        catch { /* Best-effort cleanup */ }
+        return _seedConn;
     }
 
     private static DateTime MinuteFloor(DateTime t) =>
@@ -62,7 +67,6 @@ public sealed class QueryStatsModuleAttributionReaderTests : IDisposable
     [Fact]
     public async Task TopQueries_AttributesMatchedHandleToModule_UnmatchedIsAdHoc()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         /* Attributed query: sql_handle matches a cached procedure — bigger elapsed so it ranks first. */
@@ -90,7 +94,6 @@ public sealed class QueryStatsModuleAttributionReaderTests : IDisposable
     [Fact]
     public async Task TopQueries_ModuleJoinDoesNotFanOut_LatestCollectionWins()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         await SeedQueryStatsAsync("TestDb", "0xONE", "0xMOD", deltaExec: 4, deltaElapsedUs: 200_000, "SELECT one");
@@ -112,8 +115,7 @@ public sealed class QueryStatsModuleAttributionReaderTests : IDisposable
         string databaseName, string queryHash, string sqlHandle, long deltaExec, long deltaElapsedUs, string queryText)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
 INSERT INTO query_stats
@@ -139,8 +141,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
         DateTime? collectedOverride = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
 INSERT INTO procedure_stats
