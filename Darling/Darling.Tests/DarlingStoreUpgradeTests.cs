@@ -389,6 +389,174 @@ public sealed class DarlingStoreUpgradeTests
     }
 
     [Fact]
+    public void DowngradeGuard_IsInvokedBeforeTheRuntimeIsRescued_AndOutsideTheNoStampBranch()
+    {
+        /* #1738 was a WIRING failure in the same family as the two pins above: the majors were compared, the
+           comparison was correct, and nothing checked which DIRECTION the difference went before swapping.
+           Two things have to hold and neither is visible to a logic test.
+
+           First the call must exist and precede the rescue — a guard evaluated after Directory.Move has
+           already replaced the runtime is decoration.
+
+           Second, and this is the subtle one, it must sit OUTSIDE the `if (stamp is null)` block. The stamp
+           records only that the zip CHANGED, never which way, so a stamped host receiving an older package
+           downgrades exactly as DARLING01 did. Putting the guard inside that branch would pass every
+           behavioral test — the fixture is unstamped — while leaving every already-stamped host exposed,
+           which after this release is all of them. */
+        var source = ReadUpgradeSource();
+
+        var call = source.IndexOf("IsDowngradeAgainstStore(dataDirectory, runtimeZipPath)", StringComparison.Ordinal);
+        Assert.True(call >= 0, "nothing calls IsDowngradeAgainstStore — a correct downgrade check that is never invoked is what #1738 already was");
+
+        var rescue = source.IndexOf("Directory.Move(pgsqlDirectory, previousPgsql)", StringComparison.Ordinal);
+        Assert.True(rescue > call, "the downgrade guard must run BEFORE the runtime is rescued and replaced");
+
+        var noStampBranch = source.IndexOf("if (stamp is null)", StringComparison.Ordinal);
+        Assert.True(noStampBranch >= 0, "the no-stamp branch anchor is gone — this pin can no longer locate what it guards");
+        Assert.True(call > noStampBranch,
+            "the downgrade guard appears before the no-stamp branch, so it cannot be positioned relative to it");
+
+        /* The no-stamp block closes before the guard: in correct code the guard is at method-body indent
+           (8 spaces), which is only reachable once that block has closed — AND the call is the whole
+           condition. Both halves are load-bearing, and each rules out a mutation the other misses:
+
+             if (IsDowngradeAgainstStore(dataDirectory, runtimeZipPath) && stamp is null)   <- A
+             if (stamp is null && IsDowngradeAgainstStore(dataDirectory, runtimeZipPath))   <- B
+
+           Both re-bury the guard behind the stamp semantically while leaving it at the right indent and in
+           the right position. A `Contains` on the opening text admits A — it stops at the open paren and
+           never reads the rest of the condition — while an ordering check catches B and misses A. The line
+           anchor rejects both, and still permits the guard's BODY to be reformatted freely. */
+        Assert.Matches(@"(?m)^        if \(IsDowngradeAgainstStore\(dataDirectory, runtimeZipPath\)\)\s*$", source);
+    }
+
+    [Theory]
+    /* The case #1738 is: a PostgreSQL 17 package landed beside an 18 store, the majors merely DIFFERED, the
+       runtime was swapped, and the store was down for ~7 minutes. */
+    [InlineData(18, 17, true)]
+    [InlineData(18, 16, true)]
+    /* Forward and same-major must NOT be blocked — inverting this comparison refuses every legitimate
+       upgrade while permitting every downgrade, which is the filed defect doubled. That inversion left the
+       whole suite green until this Theory existed. */
+    [InlineData(17, 18, false)]
+    [InlineData(18, 18, false)]
+    /* Unknown either side abstains: this gate blocks only what it can PROVE is backwards. */
+    [InlineData(null, 17, false)]
+    [InlineData(18, null, false)]
+    [InlineData(null, null, false)]
+    public void IsDowngrade_BlocksOnlyAProvenBackwardsMove(int? storeMajor, int? packageMajor, bool expected)
+        => Assert.Equal(expected, DarlingStoreUpgrade.IsDowngrade(storeMajor, packageMajor));
+
+    [Theory]
+    /* The DARLING01 pairing: the store's need KNOWN, the runtime unable to say what it is because its
+       binaries would not launch. Logged as "skipping the runtime version check. The store starts normally"
+       one second before the bootstrap died on STATUS_DLL_NOT_FOUND. */
+    [InlineData(18, null, true)]
+    [InlineData(17, null, true)]
+    /* An unreadable DATA DIRECTORY is not the same thing: there is no known requirement to violate, and
+       refusing would take a store down over an unreadable file. */
+    [InlineData(null, 18, false)]
+    [InlineData(null, null, false)]
+    /* Both known is the ordinary path — the caller's own comparison decides from here. */
+    [InlineData(18, 18, false)]
+    [InlineData(17, 18, false)]
+    public void MustRefuseUnidentifiableRuntime_StopsOnlyWhenTheStoreNeedsSomethingSpecific(
+        int? dataMajor, int? runtimeMajor, bool expected)
+        => Assert.Equal(expected, DarlingStoreUpgrade.MustRefuseUnidentifiableRuntime(dataMajor, runtimeMajor));
+
+    [Fact]
+    public void TryReadDataDirectoryMajor_ReadsPgVersionWithoutExecutingAnything()
+    {
+        /* The whole point of reading PG_VERSION rather than asking the binaries: on DARLING01 the extracted
+           17 binaries could not launch (STATUS_DLL_NOT_FOUND), so every check that interrogated them got
+           "unreadable" and degraded to proceeding — while this file answered 18 the entire time. */
+        var root = Directory.CreateTempSubdirectory("darling-pgver-");
+        try
+        {
+            Assert.Null(DarlingStoreUpgrade.TryReadDataDirectoryMajor(root.FullName));
+
+            File.WriteAllText(Path.Combine(root.FullName, "PG_VERSION"), "18\n");
+            Assert.Equal(18, DarlingStoreUpgrade.TryReadDataDirectoryMajor(root.FullName));
+
+            File.WriteAllText(Path.Combine(root.FullName, "PG_VERSION"), "17");
+            Assert.Equal(17, DarlingStoreUpgrade.TryReadDataDirectoryMajor(root.FullName));
+
+            /* Garbage answers "unknown", never a guess — a wrong major here would drive a wrong decision. */
+            File.WriteAllText(Path.Combine(root.FullName, "PG_VERSION"), "not a version");
+            Assert.Null(DarlingStoreUpgrade.TryReadDataDirectoryMajor(root.FullName));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public void RevertRuntime_RefusesOnceTheDataDirectoryHasMovedForward()
+    {
+        /* #1737 item 3, the deferred defence-in-depth guard. Reverting to older binaries once the data
+           directory is on a newer major produces a store that cannot start — which is precisely the outcome
+           #1738 demonstrated empirically by a different route. Today's two callers cannot reach this, so this
+           test is the only thing that will tell a future third caller it got it wrong. */
+        var root = Directory.CreateTempSubdirectory("darling-revert-");
+        try
+        {
+            var runtimeRoot = Path.Combine(root.FullName, "pg-runtime");
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            Directory.CreateDirectory(Path.Combine(runtimeRoot, "pgsql", "bin"));
+            Directory.CreateDirectory(Path.Combine(
+                DarlingStoreUpgrade.PreviousRuntimeRootFor(runtimeRoot), "pgsql", "bin"));
+            Directory.CreateDirectory(dataDirectory);
+
+            /* The store has already moved to 18; a revert that assumes 17 must refuse. */
+            File.WriteAllText(Path.Combine(dataDirectory, "PG_VERSION"), "18\n");
+
+            var log = new CapturingLogger();
+            new DarlingStoreUpgrade(log).RevertRuntime(runtimeRoot, "deadbeef", dataDirectory, expectedDataMajor: 17);
+
+            /* Refused: the rescued copy is still where it was, and the live runtime was not replaced. */
+            Assert.True(Directory.Exists(Path.Combine(
+                DarlingStoreUpgrade.PreviousRuntimeRootFor(runtimeRoot), "pgsql")));
+            Assert.True(Directory.Exists(Path.Combine(runtimeRoot, "pgsql")));
+            Assert.Contains("REFUSING to revert", log.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public void RevertRuntime_ProceedsWhenTheDataDirectoryIsStillOnTheExpectedMajor()
+    {
+        /* The guard must not block the case it exists to protect: a genuine pre-commit revert, where the data
+           directory never moved. Getting this backwards would disable the whole fail-safe. */
+        var root = Directory.CreateTempSubdirectory("darling-revert-ok-");
+        try
+        {
+            var runtimeRoot = Path.Combine(root.FullName, "pg-runtime");
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            var previousPgsql = Path.Combine(DarlingStoreUpgrade.PreviousRuntimeRootFor(runtimeRoot), "pgsql");
+            Directory.CreateDirectory(Path.Combine(runtimeRoot, "pgsql", "bin"));
+            Directory.CreateDirectory(Path.Combine(previousPgsql, "bin"));
+            Directory.CreateDirectory(dataDirectory);
+            File.WriteAllText(Path.Combine(previousPgsql, "bin", "marker.txt"), "rescued");
+            File.WriteAllText(Path.Combine(dataDirectory, "PG_VERSION"), "17\n");
+
+            var log = new CapturingLogger();
+            new DarlingStoreUpgrade(log).RevertRuntime(runtimeRoot, "deadbeef", dataDirectory, expectedDataMajor: 17);
+
+            /* The rescued tree moved back over the live path, marker and all. */
+            Assert.True(File.Exists(Path.Combine(runtimeRoot, "pgsql", "bin", "marker.txt")));
+            Assert.DoesNotContain("REFUSING to revert", log.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
     public void RetainedDataDirectory_IsNamedForTheMajorItCameFrom()
         => Assert.Equal(
             @"C:\ProgramData\PerformanceMonitorDarling\pg-old-17",
@@ -549,6 +717,122 @@ public sealed class DarlingStoreUpgradeTests
                server logs and pg_upgrade's own output tree — on disk. A failure here is almost always
                explained by a file this test would otherwise delete on its way out, and re-running to
                reproduce costs minutes each time. Off by default so ordinary runs leave nothing behind. */
+            if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_KEEP")))
+            {
+                TryDeleteTree(root.FullName);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The DARLING01 incident (#1738), reproduced with REAL packages: an 18 store, an 18 runtime extracted,
+    /// and a PostgreSQL 17 zip dropped beside the service. Before the guard the runtime was swapped because
+    /// the majors merely DIFFERED, and the store was down about seven minutes until the previous runtime was
+    /// restored by hand.
+    ///
+    /// <para>Gated on the SAME two variables as the upgrade fixture, so it costs nothing extra in CI: the
+    /// "older package" is built by zipping the old-major runtime tree, which produces a genuine archive whose
+    /// <c>pgsql/bin/pg_ctl.exe</c> version resource reads 17 — the exact thing
+    /// <see cref="DarlingStoreUpgrade.TryReadZipPostgresMajor"/> inspects.</para>
+    /// </summary>
+    [Fact]
+    public async Task RuntimeAdvance_RefusesAPackageOlderThanTheStore_AndLeavesTheRuntimeAlone_Gated()
+    {
+        var oldRuntime = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME_OLD");
+        var newZip = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME_NEWZIP");
+
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(oldRuntime) || string.IsNullOrWhiteSpace(newZip),
+            "Set DARLING_TEST_PGRUNTIME_OLD and DARLING_TEST_PGRUNTIME_NEWZIP (see new-upgraded-store-fixture.ps1).");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The bundled runtime is Windows-only.");
+        Assert.SkipUnless(File.Exists(Path.Combine(oldRuntime!, "pgsql", "bin", "pg_ctl.exe")),
+            $"DARLING_TEST_PGRUNTIME_OLD={oldRuntime} does not contain pgsql\\bin\\pg_ctl.exe.");
+        Assert.SkipUnless(File.Exists(newZip!), $"DARLING_TEST_PGRUNTIME_NEWZIP={newZip} does not exist.");
+
+        var root = Directory.CreateTempSubdirectory("darling-downgrade-");
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+
+            /* The host as DARLING01 was: the NEW major extracted and working. */
+            var deployment = Path.Combine(root.FullName, "deploy");
+            var runtimeRoot = Path.Combine(deployment, "pg-runtime");
+            Directory.CreateDirectory(deployment);
+            using (var archive = ZipFile.OpenRead(newZip!))
+            {
+                archive.ExtractToDirectory(runtimeRoot);
+            }
+
+            var newMajor = DarlingStoreUpgrade.TryReadZipPostgresMajor(newZip!);
+            Assert.NotNull(newMajor);
+
+            /* A data directory on that same new major - the store's own authority on what it needs. */
+            var dataDirectory = Path.Combine(root.FullName, "store", "pg");
+            Directory.CreateDirectory(dataDirectory);
+            await File.WriteAllTextAsync(
+                Path.Combine(dataDirectory, "PG_VERSION"),
+                newMajor!.Value.ToString(CultureInfo.InvariantCulture) + "\n", timeout.Token);
+
+            /* The bad package: a REAL older-major zip, rooted at pgsql/ exactly as the shipped one is. */
+            var olderPackage = Path.Combine(deployment, "pg-runtime.zip");
+            ZipFile.CreateFromDirectory(
+                Path.Combine(oldRuntime!, "pgsql"), olderPackage, CompressionLevel.NoCompression, includeBaseDirectory: true);
+            var packageMajor = DarlingStoreUpgrade.TryReadZipPostgresMajor(olderPackage);
+            Assert.True(packageMajor < newMajor, $"the fixture must be a downgrade; got package {packageMajor} vs store {newMajor}");
+
+            var log = new CapturingLogger();
+            var advance = await new DarlingStoreUpgrade(log).TryAdvanceRuntimeAsync(
+                runtimeRoot, olderPackage, dataDirectory,
+                /* nothing is running in this fixture */ (_, _) => Task.FromResult(false),
+                timeout.Token);
+
+            /* REFUSED: no swap, no rescue directory, and the live runtime untouched. */
+            Assert.False(advance.Swapped);
+            Assert.Null(advance.PreviousBinDirectory);
+            Assert.False(Directory.Exists(DarlingStoreUpgrade.PreviousRuntimeRootFor(runtimeRoot)),
+                "a refused package must not rescue anything — nothing is being replaced");
+            Assert.True(File.Exists(Path.Combine(runtimeRoot, "pgsql", "bin", "pg_ctl.exe")),
+                "the working runtime must still be in place; this is the store-down failure #1738 filed");
+
+            /* And it must SAY so, at Critical, naming both majors. */
+            var text = log.ToString();
+            Assert.Contains("REFUSING the shipped Postgres runtime", text, StringComparison.Ordinal);
+            Assert.Contains("[Critical]", text, StringComparison.Ordinal);
+
+            /* The stamp is deliberately NOT written: a refusal that goes quiet on the next start is one
+               nobody acts on, and the operator still has the wrong zip beside the service. */
+            var stampPath = Path.Combine(runtimeRoot, DarlingStoreUpgrade.RuntimeStampFileName);
+            Assert.False(File.Exists(stampPath),
+                "recording the stamp would silence this refusal on every subsequent start");
+
+            /* Now the same package against a STAMPED host — which, after this release, is every host. The
+               stamp says only that the zip CHANGED, never which way, so a stamped host handed an older
+               package walks past the no-stamp branch and into the swap unless the direction check sits
+               OUTSIDE that branch. Source placement is pinned above; this proves the behaviour, and it
+               costs nothing because the refusal returns before any extraction. */
+            const string PriorPackageHash = "0000000000000000000000000000000000000000000000000000000000000000";
+            await File.WriteAllTextAsync(stampPath, PriorPackageHash, timeout.Token);
+
+            var stampedLog = new CapturingLogger();
+            var stamped = await new DarlingStoreUpgrade(stampedLog).TryAdvanceRuntimeAsync(
+                runtimeRoot, olderPackage, dataDirectory,
+                (_, _) => Task.FromResult(false),
+                timeout.Token);
+
+            Assert.False(stamped.Swapped);
+            Assert.Null(stamped.PreviousBinDirectory);
+            Assert.False(Directory.Exists(DarlingStoreUpgrade.PreviousRuntimeRootFor(runtimeRoot)),
+                "a stamped host must refuse the package an unstamped one refused — the stamp is not a direction");
+            Assert.True(File.Exists(Path.Combine(runtimeRoot, "pgsql", "bin", "pg_ctl.exe")),
+                "the working runtime must still be in place on a stamped host too");
+            Assert.Contains("REFUSING the shipped Postgres runtime", stampedLog.ToString(), StringComparison.Ordinal);
+
+            /* The existing stamp is left as it was. Overwriting it with the refused package's hash would
+               read as "already seen" on the next start and go quiet with the wrong zip still sitting
+               beside the service. */
+            Assert.Equal(PriorPackageHash, (await File.ReadAllTextAsync(stampPath, timeout.Token)).Trim());
+        }
+        finally
+        {
             if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_KEEP")))
             {
                 TryDeleteTree(root.FullName);

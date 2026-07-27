@@ -623,6 +623,106 @@ internal sealed class DarlingStoreUpgrade
     internal sealed record RuntimeAdvance(bool Swapped, string? PreviousBinDirectory, string? ZipHash);
 
     /// <summary>
+    /// The store's own PostgreSQL major, read from the data directory's <c>PG_VERSION</c>. The AUTHORITY on
+    /// what the store needs, and — the reason it is used here rather than the binaries — readable without
+    /// EXECUTING anything. On DARLING01 the extracted 17 binaries could not launch at all
+    /// (<c>STATUS_DLL_NOT_FOUND</c>), so every check that asked the binaries what they were got "unreadable"
+    /// and degraded to proceeding; the data directory answered "18" the whole time.
+    /// </summary>
+    internal static int? TryReadDataDirectoryMajor(string dataDirectory)
+    {
+        try
+        {
+            var pgVersion = Path.Combine(dataDirectory, "PG_VERSION");
+            return File.Exists(pgVersion) ? ParseDataDirectoryMajor(File.ReadAllText(pgVersion)) : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Whether an unidentifiable runtime must STOP the service rather than be waved through, PURE so the
+    /// decision is pinned without needing a broken runtime to reproduce (deleting the guard inline left the
+    /// whole suite green).
+    ///
+    /// <para>TRUE for exactly one pairing: the store's need is KNOWN and the runtime cannot say what it is.
+    /// That pairing was logged verbatim on DARLING01 as "data directory: 18, bundled runtime: unreadable —
+    /// skipping the runtime version check. The store starts normally", one second before the bootstrap died
+    /// on STATUS_DLL_NOT_FOUND. The degrade was backwards: the check could not run BECAUSE the binaries
+    /// could not run, which is the strongest possible evidence they must not be used.</para>
+    ///
+    /// <para>An unreadable DATA DIRECTORY is different and does not stop anything — there is then no known
+    /// requirement to violate, and refusing would brick a store over an unreadable file.</para>
+    /// </summary>
+    internal static bool MustRefuseUnidentifiableRuntime(int? dataMajor, int? runtimeMajor)
+        => dataMajor is not null && runtimeMajor is null;
+
+    /// <summary>
+    /// The direction decision, PURE so it can be pinned without a fixture (the <see cref="DecideTransferMode"/>
+    /// / <see cref="FindOccupiedPorts"/> idiom). Extracted deliberately: with the comparison buried in the I/O
+    /// method, inverting it left the ENTIRE suite green — and that inversion refuses every legitimate upgrade
+    /// while waving through every downgrade, which is the defect #1738 filed, doubled.
+    ///
+    /// <para>TRUE only for a PROVEN downgrade. Either major unknown returns false: this gate abstains rather
+    /// than blocking an update it cannot evaluate, because the no-stamp branch already refuses to swap when it
+    /// cannot tell the runtimes apart, and the post-extraction data-directory check is the backstop.</para>
+    /// </summary>
+    internal static bool IsDowngrade(int? storeMajor, int? packageMajor)
+        => storeMajor is not null && packageMajor is not null && packageMajor < storeMajor;
+
+    /// <summary>
+    /// Whether the shipped package would take the store BACKWARDS. A package whose PostgreSQL major is lower
+    /// than the store's data directory is never a valid update: pg_upgrade only goes up, so the data
+    /// directory can never come back to meet it, and no older postmaster can open a newer cluster.
+    ///
+    /// <para>This is #1738, and it is not hypothetical — a PostgreSQL 17 package landed beside a PostgreSQL
+    /// 18 store on DARLING01, the runtime was swapped because the majors merely DIFFERED, and the store was
+    /// down for about seven minutes until the previous runtime was restored by hand. Nothing reached
+    /// pg_upgrade, so no data was at risk; the store simply could not start.</para>
+    ///
+    /// <para>Refusing leaves the store on the runtime it already has — which is, by definition, the one that
+    /// matches its data. The stamp is deliberately NOT written: recording this package as "seen" would make
+    /// the refusal silent on every subsequent start, and an operator who shipped the wrong zip should keep
+    /// hearing about it until they ship a right one.</para>
+    /// </summary>
+    private bool IsDowngradeAgainstStore(string dataDirectory, string runtimeZipPath)
+    {
+        var storeMajor = TryReadDataDirectoryMajor(dataDirectory);
+        if (storeMajor is null)
+        {
+            /* No cluster yet (a fresh install), or an unreadable PG_VERSION. Nothing to downgrade. */
+            return false;
+        }
+
+        var zipMajor = TryReadZipPostgresMajor(runtimeZipPath);
+        if (zipMajor is null)
+        {
+            /* Cannot identify the package. Not provably a downgrade, so this gate abstains rather than
+               blocking a legitimate update on a missing version resource — the no-stamp branch above already
+               refuses to swap when it cannot tell the runtimes apart, and the data-directory-vs-runtime check
+               after extraction is the backstop. */
+            _logger.LogWarning(
+                "Could not read the shipped package's PostgreSQL major from {Zip}, so it cannot be checked against the store's own major ({Store}). Proceeding, but a package whose version cannot be identified is worth verifying before it ships.",
+                runtimeZipPath, storeMajor);
+            return false;
+        }
+
+        if (!IsDowngrade(storeMajor, zipMajor))
+        {
+            return false;
+        }
+
+        _logger.LogCritical(
+            "REFUSING the shipped Postgres runtime at {Zip}: the package is PostgreSQL {Package} but this store's data directory is PostgreSQL {Store}. A lower major is never a valid update — pg_upgrade only moves forward, so the data directory can never come back to meet it, and an older postmaster cannot open a newer cluster. The runtime is left exactly as it is, so the store keeps running on the binaries that match its data. Replace that zip with one whose PostgreSQL major is at least the store's. Its hash is deliberately NOT recorded, so this repeats on every start until it is fixed.",
+            runtimeZipPath, zipMajor, storeMajor);
+
+        /* Deliberately no TryWriteStamp: see the summary. A refusal that goes quiet is a refusal nobody acts on. */
+        return true;
+    }
+
+    /// <summary>
     /// Reconciles the EXTRACTED runtime against the SHIPPED zip. When the zip's hash differs from the stamp
     /// the package carries a new runtime, so the current <c>pgsql</c> tree is rescued to
     /// <c>&lt;runtimeRoot&gt;-prev</c> (whole tree — the old postmaster resolves <c>$libdir</c> relative to
@@ -725,6 +825,14 @@ internal sealed class DarlingStoreUpgrade
             return new RuntimeAdvance(false, null, zipHash);
         }
 
+        /* DIRECTION CHECK (#1738) — deliberately outside the no-stamp branch, because the stamp only says
+           the zip CHANGED, never which way. A stamped host that later receives an older package downgrades
+           just as surely as an unstamped one did on DARLING01. */
+        if (IsDowngradeAgainstStore(dataDirectory, runtimeZipPath))
+        {
+            return new RuntimeAdvance(false, null, zipHash);
+        }
+
         var previousRoot = PreviousRuntimeRootFor(runtimeRoot);
         var previousPgsql = Path.Combine(previousRoot, "pgsql");
 
@@ -797,12 +905,34 @@ internal sealed class DarlingStoreUpgrade
     /// <see cref="TryAdvanceRuntimeAsync"/>. The path the service starts from is unchanged
     /// (<c>&lt;runtimeRoot&gt;\pgsql\bin</c>), so a caller holding that bin directory keeps working; only
     /// the binaries behind it go back to the previous major.
+    ///
+    /// <para><b>Refuses once the data directory has moved forward (#1737 item 3).</b> The two callers today
+    /// cannot reach this after the swap commits — the pre-commit handler is unreachable when <c>swapped</c>
+    /// because the filtered clause precedes it, and the cancel path is gated on <c>!swapped</c> — so this
+    /// guard is redundant RIGHT NOW and exists for the third caller that forgets the flag. It is defence in
+    /// depth against exactly one outcome, and it is the worst one available here: old binaries in front of a
+    /// new data directory is a store that cannot start. #1738 is the empirical proof that the outcome is
+    /// real rather than theoretical, reached by a different route.</para>
+    ///
+    /// <para><paramref name="expectedDataMajor"/> is the major the data directory should still be on for a
+    /// revert to make sense — the pre-upgrade major. Compared against <c>PG_VERSION</c>, which needs no
+    /// binaries to read, which matters because the situation that brings us here may be binaries that do not
+    /// run.</para>
     /// </summary>
-    internal void RevertRuntime(string runtimeRoot, string zipHash)
+    internal void RevertRuntime(string runtimeRoot, string zipHash, string dataDirectory, int expectedDataMajor)
     {
         var pgsqlDirectory = Path.Combine(runtimeRoot, "pgsql");
         var previousRoot = PreviousRuntimeRootFor(runtimeRoot);
         var previousPgsql = Path.Combine(previousRoot, "pgsql");
+
+        var actualDataMajor = TryReadDataDirectoryMajor(dataDirectory);
+        if (actualDataMajor is not null && actualDataMajor != expectedDataMajor)
+        {
+            _logger.LogCritical(
+                "REFUSING to revert the store runtime: the data directory {DataDirectory} is PostgreSQL {Actual}, not the PostgreSQL {Expected} this revert assumes. Restoring the older binaries now would leave them in front of a newer cluster and the store would not start. The current runtime is left in place. This is a bug in the caller — a revert was requested after the data directory had already moved forward.",
+                dataDirectory, actualDataMajor, expectedDataMajor);
+            return;
+        }
 
         try
         {
@@ -1368,7 +1498,7 @@ internal sealed class DarlingStoreUpgrade
 
             await TryStopAsync(context, oldStarted);
             TryDeleteDirectory(newDataDirectory);
-            RevertRuntime(context.RuntimeRoot, context.ZipHash);
+            RevertRuntime(context.RuntimeRoot, context.ZipHash, context.DataDirectory, context.OldMajor);
 
             return new StoreUpgradeOutcome(
                 StoreUpgradeStatus.Failed, context.OldMajor, context.NewMajor,
@@ -1402,7 +1532,7 @@ internal sealed class DarlingStoreUpgrade
         /* A cancelled upgrade is not a BAD package, so revert the binaries without recording the block —
            the next start should try again. */
         var blockedPath = Path.Combine(context.RuntimeRoot, RuntimeBlockedFileName);
-        RevertRuntime(context.RuntimeRoot, context.ZipHash);
+        RevertRuntime(context.RuntimeRoot, context.ZipHash, context.DataDirectory, context.OldMajor);
         TryDeleteFile(blockedPath);
     }
 
