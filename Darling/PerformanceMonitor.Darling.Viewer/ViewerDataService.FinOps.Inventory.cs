@@ -125,10 +125,6 @@ LEFT JOIN idle_dbs id ON true";
     }
 
     /// <summary>
-    /// Latest collected properties per server joined to the registry — the Server Inventory base rows (metrics
-    /// overlaid per row by the loader). DISTINCT ON keeps each server's newest server_properties row.
-    /// </summary>
-    /// <summary>
     /// #1591: the Hardware Note for one inventory row, or null when hardware is present.
     ///
     /// <para>PURE so the rule is testable without a store — the codebase's pattern for read-path decisions. Keyed
@@ -144,6 +140,10 @@ LEFT JOIN idle_dbs id ON true";
             ? "Hardware inventory (CPU, memory, sockets) unavailable - the monitoring login likely lacks VIEW SERVER STATE (VIEW DATABASE STATE on Azure SQL DB) on this server."
             : null;
 
+    /// <summary>
+    /// Latest collected properties per server joined to the registry — the Server Inventory base rows (metrics
+    /// overlaid per row by the loader). DISTINCT ON keeps each server's newest server_properties row.
+    /// </summary>
     public const string ServerInventorySql = @"
 SELECT
     sp.server_id,

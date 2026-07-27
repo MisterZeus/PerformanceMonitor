@@ -359,15 +359,6 @@ GROUP BY server_id, server_name, database_name, module_name, query_hash, bucket
 WITH NO DATA";
 
     /// <summary>
-    /// The query_stats DAILY continuous aggregate — a HIERARCHICAL CAGG sourced from <see cref="QueryStatsHourlyView"/>
-    /// (not raw). Re-aggregates the hourly rollup to 1-day buckets: SUM of the hourly sums, MIN of the hourly mins,
-    /// MAX of the hourly maxes (each composes correctly across the coarser bucket), plus SUM of the hourly
-    /// sample_counts. The GROUP BY uses the explicit <c>time_bucket('1 day', bucket)</c> expression, NOT the bare
-    /// <c>bucket</c> alias: an unqualified <c>bucket</c> in GROUP BY binds to the SOURCE column (the hourly bucket)
-    /// under Postgres's input-column-wins ambiguity rule, which would group by hour, not day. WITH NO DATA +
-    /// IF NOT EXISTS; the hourly CAGG must already exist (it is created earlier in the same sweep).
-    /// </summary>
-    /// <summary>
     /// The per-DATABASE query_stats rollup (#1661). Added rather than folded into
     /// <see cref="CreateQueryStatsHourlySql"/> deliberately: TimescaleDB cannot ALTER columns into a continuous
     /// aggregate, so widening that one would mean DROP + recreate, and now that retention is active the rebuild
@@ -419,6 +410,15 @@ FROM collect.query_stats_db_hourly
 GROUP BY server_id, server_name, database_name, time_bucket('1 day', bucket)
 WITH NO DATA";
 
+    /// <summary>
+    /// The query_stats DAILY continuous aggregate — a HIERARCHICAL CAGG sourced from <see cref="QueryStatsHourlyView"/>
+    /// (not raw). Re-aggregates the hourly rollup to 1-day buckets: SUM of the hourly sums, MIN of the hourly mins,
+    /// MAX of the hourly maxes (each composes correctly across the coarser bucket), plus SUM of the hourly
+    /// sample_counts. The GROUP BY uses the explicit <c>time_bucket('1 day', bucket)</c> expression, NOT the bare
+    /// <c>bucket</c> alias: an unqualified <c>bucket</c> in GROUP BY binds to the SOURCE column (the hourly bucket)
+    /// under Postgres's input-column-wins ambiguity rule, which would group by hour, not day. WITH NO DATA +
+    /// IF NOT EXISTS; the hourly CAGG must already exist (it is created earlier in the same sweep).
+    /// </summary>
     public const string CreateQueryStatsDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_daily
 WITH (timescaledb.continuous) AS
 SELECT

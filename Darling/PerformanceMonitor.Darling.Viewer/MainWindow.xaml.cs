@@ -760,13 +760,6 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Refreshes whichever top-level tab is visible, with the overlap guard: a per-server tab delegates
-    /// to its own inner-tab refresh; the aggregate tabs reload for the sidebar-selected server. If the
-    /// user switches tab or server while a load is in flight, the triggering event bounces off the guard
-    /// and sets <see cref="_refreshRequested"/>, so the running loop reloads once more when it finishes —
-    /// no user action is silently swallowed.
-    /// </summary>
-    /// <summary>
     /// Loads the Availability Groups tab and reveals it once the store actually has AG rows (#991). Always On is
     /// opt-in and most fleets run none, so the tab ships Collapsed rather than standing there permanently empty.
     /// The reveal is one-way within a session: a fleet that HAS AGs keeps the tab even if a later sweep reads
@@ -783,6 +776,13 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// Refreshes whichever top-level tab is visible, with the overlap guard: a per-server tab delegates
+    /// to its own inner-tab refresh; the aggregate tabs reload for the sidebar-selected server. If the
+    /// user switches tab or server while a load is in flight, the triggering event bounces off the guard
+    /// and sets <see cref="_refreshRequested"/>, so the running loop reloads once more when it finishes —
+    /// no user action is silently swallowed.
+    /// </summary>
     private async Task RefreshVisibleAsync()
     {
         if (_dataService is null)

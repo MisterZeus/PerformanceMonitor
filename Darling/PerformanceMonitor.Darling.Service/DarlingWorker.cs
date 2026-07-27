@@ -575,12 +575,6 @@ public sealed class DarlingWorker : BackgroundService
     }
 
     /// <summary>
-    /// Everything after the (optional) managed-Postgres bootstrap: store connection, migration,
-    /// Timescale adoption, delta seeding, and the collection/alert/analysis loop. Split from
-    /// <see cref="ExecuteAsync"/> so the bootstrap's finally can stop the bundled server after
-    /// this method's data source is disposed.
-    /// </summary>
-    /// <summary>
     /// Maps the Windows-only bootstrap's upgrade outcome to the platform-neutral alert payload (#1706).
     /// Null for the ordinary case where the runtime did not move, and null for an extension-only update,
     /// which is a routine maintenance step the log already records rather than something to page about.
@@ -602,6 +596,12 @@ public sealed class DarlingWorker : BackgroundService
             _ => null,
         };
 
+    /// <summary>
+    /// Everything after the (optional) managed-Postgres bootstrap: store connection, migration,
+    /// Timescale adoption, delta seeding, and the collection/alert/analysis loop. Split from
+    /// <see cref="ExecuteAsync"/> so the bootstrap's finally can stop the bundled server after
+    /// this method's data source is disposed.
+    /// </summary>
     private async Task RunCollectionLoopAsync(
         DarlingConfig config,
         string storeConnectionString,

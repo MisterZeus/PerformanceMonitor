@@ -1119,13 +1119,6 @@ internal sealed class DarlingSelfAlertEvaluator
     /* ---------------- compression-job self-heal (fleet-level, polled — #1581) ---------------- */
 
     /// <summary>
-    /// The isolating entry point the worker's hourly compression-job health sweep calls — the fleet-level twin
-    /// of <see cref="EvaluateDiskPressureAsync"/>. Wraps <see cref="ApplyCompressionJobsStuckAsync"/> in the SAME
-    /// failure isolation the sibling store-alerts use, so a throwing seam — the pre-deliver mute check, or the
-    /// caller-supplied re-arm delegate — can never propagate out of the (otherwise un-guarded) collection sweep
-    /// loop and stop collection for the whole fleet. Cancellation still propagates.
-    /// </summary>
-    /// <summary>
     /// The alert metric name the store runtime upgrade fires under (#1706). A WEBHOOK AUTOMATION KEY like
     /// its siblings, so it is a const and must stay stable across releases.
     /// </summary>
@@ -1232,6 +1225,13 @@ internal sealed class DarlingSelfAlertEvaluator
         }
     }
 
+    /// <summary>
+    /// The isolating entry point the worker's hourly compression-job health sweep calls — the fleet-level twin
+    /// of <see cref="EvaluateDiskPressureAsync"/>. Wraps <see cref="ApplyCompressionJobsStuckAsync"/> in the SAME
+    /// failure isolation the sibling store-alerts use, so a throwing seam — the pre-deliver mute check, or the
+    /// caller-supplied re-arm delegate — can never propagate out of the (otherwise un-guarded) collection sweep
+    /// loop and stop collection for the whole fleet. Cancellation still propagates.
+    /// </summary>
     public async Task EvaluateCompressionJobsAsync(
         IReadOnlyList<StuckCompressionJob> stuckJobs,
         Func<long, Task<bool>> rearmAsync,
