@@ -191,16 +191,34 @@ public static class PgSchemaGenerator
     };
 
     /// <summary>
+    /// The views that are NOT bare passthroughs because they RESOLVE a payload dimension
+    /// (<see cref="GenerateQueryStatsResolvingView"/>, #1767) — excluded from
+    /// <see cref="AllPassthroughViews"/> so the refresh-all idiom cannot silently revert them.
+    ///
+    /// <para>This exclusion is load-bearing, not bookkeeping. "ADD COLUMN, then
+    /// <c>CREATE OR REPLACE VIEW v_x AS SELECT * FROM x</c> to re-expand the frozen column list" is
+    /// the established migration idiom here (V14, V15, V27, V28). Applied to <c>v_query_stats</c> it
+    /// would overwrite the COALESCE that resolves the dimension tables, and the damage would be
+    /// invisible: every text and plan read would return NULL for rows written since #1767, which
+    /// looks exactly like a collection outage rather than a schema regression. A migration that
+    /// needs to re-expand this view must re-emit the RESOLVING definition instead, and a test pins
+    /// that the last migration defining it is the resolving one.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<string> PayloadResolvingViews = new[] { "v_query_stats" };
+
+    /// <summary>
     /// Every <c>v_*</c> passthrough view that exists in a fully-migrated store, in creation order:
     /// the V4–V6 views (<see cref="CollectViews"/>) followed by the post-V8 collector views
-    /// (<see cref="PostV8ViewCollectors"/>). The single authoritative view list —
-    /// <see cref="GenerateV14RefreshViews"/> refreshes exactly this set, and a test cross-checks it
-    /// against every <c>CREATE OR REPLACE VIEW</c> statement across all migrations so the two can
-    /// never diverge. Every entry is <c>v_&lt;table&gt;</c>; the base table is the name minus the
-    /// <c>v_</c> prefix.
+    /// (<see cref="PostV8ViewCollectors"/>), MINUS the payload-resolving views
+    /// (<see cref="PayloadResolvingViews"/>), which are no longer <c>SELECT *</c> passthroughs.
+    /// The single authoritative refresh list — <see cref="GenerateV14RefreshViews"/> refreshes
+    /// exactly this set, and a test cross-checks this set plus the resolving views against every
+    /// <c>CREATE OR REPLACE VIEW</c> statement across all migrations so the two can never diverge.
+    /// Every entry is <c>v_&lt;table&gt;</c>; the base table is the name minus the <c>v_</c> prefix.
     /// </summary>
     public static readonly IReadOnlyList<string> AllPassthroughViews =
-        CollectViews.Concat(PostV8ViewCollectors.Select(c => "v_" + c.TargetTable)).ToArray();
+        CollectViews.Concat(PostV8ViewCollectors.Select(c => "v_" + c.TargetTable))
+            .Where(v => !PayloadResolvingViews.Contains(v, StringComparer.Ordinal)).ToArray();
 
     /// <summary>
     /// The V8 schema-split migration body — creates <c>collect</c>/<c>config</c> and moves every

@@ -76,8 +76,8 @@ public sealed class DarlingObservabilityTests
         Assert.Equal(33, PgMigrations.Scripts[32].Version);
         /* The newest migration is asserted by identity rather than by ordinal: this ladder is walked by every
            stacked branch at once, and a positional pin turns each addition into a conflict for the next. */
-        Assert.Equal(37, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(37, StorageVersion.SchemaVersion);
+        Assert.Equal(38, PgMigrations.Scripts[^1].Version);
+        Assert.Equal(38, StorageVersion.SchemaVersion);
 
         /* V34 (#991) creates the two Availability Group collector tables. Schema-qualified collect.* and
            CREATE TABLE IF NOT EXISTS, per the file's additive-create idiom (V29): a no-op on a fresh store
@@ -101,6 +101,20 @@ public sealed class DarlingObservabilityTests
         Assert.Equal("ag-latency-columns", v36Script.Name);
         Assert.Contains("ALTER TABLE collect.ag_database_replica_states", v36, StringComparison.Ordinal);
         Assert.Contains("ADD COLUMN IF NOT EXISTS est_send_drain_time_min double precision", v36, StringComparison.Ordinal);
+
+        /* V38 (#1767) adds the hash-keyed payload dimensions. Identity + the three things the migration body
+           must contain; the generated shape (column list, dependency order, the resolving view) is pinned
+           column-for-column by PayloadDimensionTests. */
+        var v38Script = PgMigrations.Scripts.Single(s => s.Version == 38);
+        var v38 = v38Script.Sql;
+        Assert.Equal("query-payload-dimensions", v38Script.Name);
+        Assert.Contains("CREATE TABLE IF NOT EXISTS query_text_dim (", v38, StringComparison.Ordinal);
+        Assert.Contains("CREATE TABLE IF NOT EXISTS query_plan_dim (", v38, StringComparison.Ordinal);
+        /* ADD COLUMN IF NOT EXISTS, nullable: metadata-only, so the migration never rewrites the existing
+           ~234 GB of inline payload — the zero-rewrite contract the whole design rests on. */
+        Assert.Contains("ALTER TABLE query_stats ADD COLUMN IF NOT EXISTS query_text_digest bytea;", v38, StringComparison.Ordinal);
+        Assert.Contains("ALTER TABLE procedure_stats ADD COLUMN IF NOT EXISTS query_plan_digest bytea;", v38, StringComparison.Ordinal);
+        Assert.Contains("CREATE OR REPLACE VIEW v_query_stats AS", v38, StringComparison.Ordinal);
 
         /* V26 (#1506) adds the generic webhook channel's four columns to the V17 control-plane table.
            Schema-qualified config.* and IF NOT EXISTS, per the file's additive-ALTER idiom. */
@@ -301,9 +315,18 @@ public sealed class DarlingObservabilityTests
             }
         }
 
+        /* The passthrough set plus the payload-RESOLVING views (#1767): v_query_stats was created as
+           a passthrough by V4/V14 and rebuilt by V38 to COALESCE the dimension tables, so it is a
+           view any migration created but deliberately NOT one V14 may refresh. */
         Assert.Equal(
-            new System.Collections.Generic.SortedSet<string>(PgSchemaGenerator.AllPassthroughViews, StringComparer.Ordinal),
+            new System.Collections.Generic.SortedSet<string>(
+                PgSchemaGenerator.AllPassthroughViews.Concat(PgSchemaGenerator.PayloadResolvingViews),
+                StringComparer.Ordinal),
             viewsCreatedByAnyMigration);
+
+        /* The exclusion is the point: V14's refresh must NOT re-expand a resolving view. */
+        Assert.DoesNotContain("v_query_stats", PgSchemaGenerator.AllPassthroughViews);
+        Assert.DoesNotContain("CREATE OR REPLACE VIEW v_query_stats AS SELECT * FROM query_stats;", v14, StringComparison.Ordinal);
 
         /* V15 adds the per-index definition metadata for monitor-side UNUSED/DUPLICATE analysis
            (FinOps Index Analysis, Stage 1) additively — one ADD COLUMN IF NOT EXISTS per column so a

@@ -227,7 +227,10 @@ public sealed class ActualPlanDispatchTests
     public void ResolveStoredQuerySql_IsAReadOnlyLookupByTheStoredRowKey()
     {
         var sql = DarlingWorker.ResolveStoredQueryForActualPlanSql;
-        Assert.Contains("FROM query_stats", sql, StringComparison.Ordinal);
+        /* The RESOLVING view (#1767): this read projects query_text, and the base table's inline column is
+           NULL on every row written since the migration — resolving nothing would leave the actual-plan
+           command with no text to re-execute, silently. */
+        Assert.Contains("FROM v_query_stats", sql, StringComparison.Ordinal);
         Assert.Contains("query_text", sql, StringComparison.Ordinal);
         Assert.Contains("server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("query_hash = $2", sql, StringComparison.Ordinal);

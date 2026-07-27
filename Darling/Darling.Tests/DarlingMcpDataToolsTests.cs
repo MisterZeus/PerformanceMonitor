@@ -226,11 +226,21 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     }
 
     [Fact]
-    public void TopQueriesSql_AggregatesDeltas_OptionalDbFilter_WaitforTrim_ReadsBaseTable()
+    public void TopQueriesSql_AggregatesDeltas_OptionalDbFilter_WaitforTrim_BaseTableAggregate_ViewForText()
     {
         var sql = DarlingDataReader.TopQueriesSql;
-        Assert.Contains("FROM query_stats", sql, StringComparison.Ordinal);             /* base table, like the plan reader */
-        Assert.DoesNotContain("v_query_stats", sql, StringComparison.Ordinal);
+
+        /* Two relations, deliberately (#1767). The ranked CTE projects no text and keeps reading the BASE
+           table; the latest-text LATERAL reads v_query_stats, which resolves the payload dimension — the
+           base table's inline query_text is NULL on every row written since. ("FROM v_query_stats" does not
+           contain "FROM query_stats", so these two assertions name two different relations.) */
+        var rankedRead = sql.IndexOf("FROM query_stats", StringComparison.Ordinal);
+        var lateral = sql.IndexOf("LEFT JOIN LATERAL", StringComparison.Ordinal);
+        var textRead = sql.IndexOf("FROM v_query_stats", StringComparison.Ordinal);
+        Assert.True(rankedRead >= 0, "the ranked CTE must aggregate the base query_stats table");
+        Assert.True(textRead > lateral && lateral > rankedRead,
+            "the base-table aggregate comes first; the resolving view is read by the latest-text LATERAL");
+
         Assert.Contains("SUM(delta_worker_time)", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(delta_elapsed_time)", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY database_name, query_hash", sql, StringComparison.Ordinal);

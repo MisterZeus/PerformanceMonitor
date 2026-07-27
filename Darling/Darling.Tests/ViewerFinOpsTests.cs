@@ -155,13 +155,16 @@ public sealed class ViewerFinOpsSqlTests
     }
 
     [Fact]
-    public void HighImpactQueriesSql_ReadsBaseTableForCorrelatedSampleText()
+    public void HighImpactQueriesSql_ReadsTheResolvingViewForItsCorrelatedSampleTextAndPlan()
     {
         var sql = ViewerDataService.HighImpactQueriesSql;
-        /* Aggregates to query_hash level; the correlated sample-text subqueries read the query_stats base
-           table (as Lite does), not the view. */
-        Assert.Contains("FROM query_stats AS qs", sql, StringComparison.Ordinal);
-        Assert.Contains("FROM query_stats qs2", sql, StringComparison.Ordinal);
+        /* Aggregates to query_hash level; the correlated subqueries pull sample text, full text and the
+           stored plan, so every one of them must read v_query_stats — the #1767 resolving view. On the base
+           table their `query_text IS NOT NULL AND query_text != ''` filters match nothing on rows written
+           since the migration, and the panel just goes empty with no error anywhere. */
+        Assert.Contains("FROM v_query_stats AS qs", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM v_query_stats qs2", sql, StringComparison.Ordinal);
+        Assert.Equal(3, sql.Split("FROM v_query_stats qs2").Length - 1); /* sample text, full text, plan */
         Assert.Contains("GROUP BY query_hash", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY qs2.delta_execution_count DESC NULLS LAST", sql, StringComparison.Ordinal);
         /* The stored statement-level plan is fetched by the correlated subquery so "View Plan" opens it. */

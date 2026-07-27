@@ -35,7 +35,10 @@ public sealed class PayloadDimensionBatch
     /// <summary>True when nothing was diverted — the caller skips the flush entirely.</summary>
     public bool IsEmpty => _byDimTable.Count == 0;
 
-    /// <summary>The dimension tables this batch has content for, in first-seen order.</summary>
+    /// <summary>
+    /// The dimension tables this batch has content for. Enumeration order is unspecified and does
+    /// not matter — each table's upsert is independent, and they share a transaction.
+    /// </summary>
     public IReadOnlyCollection<string> DimTables => _byDimTable.Keys;
 
     /// <summary>

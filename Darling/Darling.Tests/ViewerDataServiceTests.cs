@@ -448,6 +448,15 @@ public sealed class ViewerSchemaVersionGateTests
     public void MapProbedSchemaVersion_AgCollectorsPresentButAlertKnobsAbsent_CapsAt34() =>
         Assert.Equal(34, ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
 
+    /// <summary>The #1767 rung: every sentinel through V37 present but query_plan_dim absent — the probe must
+    /// report 37, so the gate blocks a V38 viewer until the service migrates. Gating this matters more than
+    /// most: at V38 the collectors stop writing query_text/query_plan_xml inline, so a viewer that opened
+    /// against a store it thought was current would read NULL for every new row's text and plan and show
+    /// nothing, with no error to explain it.</summary>
+    [Fact]
+    public void MapProbedSchemaVersion_PayloadDimensionsAbsent_CapsAt37() =>
+        Assert.Equal(37, ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+
     [Fact]
     public void MapProbedSchemaVersion_V23CompositeIsGatedBehindV22_NotAStandaloneTopArm()
     {
@@ -470,7 +479,7 @@ public sealed class ViewerSchemaVersionGateTests
            the connect-time gate refuse to open the viewer against a perfectly healthy store. */
         Assert.Equal(
             ViewerDataService.RequiredStoreSchemaVersion,
-            ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+            ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
     }
 }
 
