@@ -1785,8 +1785,10 @@ public sealed class DarlingWorker : BackgroundService
                 FetchFailedJobsAsync(servers, serverKey, lookbackMinutes, ct),
             resolutionCallback: async (resolution, _) =>
             {
-                _logger.LogInformation("[{Server}] {Title}: {Message}",
-                    resolution.ServerName, resolution.Title, resolution.Message);
+                /* #1681: same shared shape as the firing line the engine's funnel writes, so an engine
+                   alert's TRIGGERED and RESOLVED halves pair up in the log. */
+                _logger.LogInformation("{Line}",
+                    AlertFiringLog.Resolved(resolution.ServerName, resolution.Title, resolution.Message));
                 /* Stage 4 parity-gap fix: record a resolved-flavored history row so an operator reviewing
                    alert history sees the paired "Detected" then "Cleared/Resolved" entries (the Dashboard
                    records these explicitly; Darling previously only logged them). A resolution has no send
