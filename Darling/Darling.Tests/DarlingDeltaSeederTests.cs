@@ -263,6 +263,49 @@ public sealed class DarlingDeltaSeederTests
     }
 
     /// <summary>
+    /// Every seed query actually RUNS against the real store schema — all four, not just the one the
+    /// end-to-end test drives.
+    ///
+    /// <para>This closes a hole that would reproduce the exact field symptom. The memory-grant seed swallows
+    /// its own exceptions entirely (a deliberate tolerance for a table that may not exist yet after a schema
+    /// migration), so a column that is not there fails in total silence; the other three propagate to
+    /// <c>SeedFromStoreAsync</c>'s catch, which logs the one warning the field already reported. Either way a
+    /// broken query is invisible to any test that only inspects the SQL as a string — and #1772 added a
+    /// column to one SELECT list and a bound parameter to all four.</para>
+    /// </summary>
+    [Fact]
+    public async Task EverySeedQuery_RunsAgainstTheRealSchema_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live seed-query test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+
+        var queries = new (string Sql, int Columns)[]
+        {
+            (DarlingDeltaCalculator.WaitStatsSeedSql, 6),
+            (DarlingDeltaCalculator.FileIoStatsSeedSql, 12),
+            (DarlingDeltaCalculator.PerfmonStatsSeedSql, 6),
+            (DarlingDeltaCalculator.MemoryGrantStatsSeedSql, 6),
+        };
+
+        foreach (var (sql, columns) in queries)
+        {
+            using var cmd = new NpgsqlCommand(sql, connection);
+            cmd.Parameters.AddWithValue(CollectorDeltaCalculator.SeedCutoff());
+
+            /* Executing is the assertion: a missing column, a mis-bound parameter, or a renamed table throws
+               here instead of vanishing into a caller's catch. The column count then pins that the SELECT
+               list the reader indexes by ordinal is the one the store actually returns. */
+            using var reader = await cmd.ExecuteReaderAsync(TestContext.Current.CancellationToken);
+            Assert.Equal(columns, reader.FieldCount);
+        }
+    }
+
+    /// <summary>
     /// The chunk a planted row actually lives in. <c>tableoid</c> on a hypertable read resolves to the
     /// CHUNK, because the chunk is the table the row is stored in; on a plain table it resolves to the
     /// table itself, which is what lets the caller detect an unpartitioned store and skip. Returned
