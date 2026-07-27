@@ -2784,7 +2784,7 @@ LIMIT 1", connection);
     /// Public const so a test can pin its shape ($1 server_id, $2 query_hash, $3 database_name).</summary>
     public const string ResolveStoredQueryForActualPlanSql = @"
 SELECT query_text, query_plan_xml, NULL::text AS transaction_isolation_level
-FROM query_stats
+FROM v_query_stats
 WHERE server_id = $1
 AND   query_hash = $2
 AND   database_name = $3

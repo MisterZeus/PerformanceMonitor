@@ -37,7 +37,7 @@ public sealed partial class ViewerDataService
     /// </summary>
     public const string QueryStatsPlanXmlSql = """
         SELECT query_plan_xml
-        FROM query_stats
+        FROM v_query_stats
         WHERE server_id = $1
         AND   database_name = $2
         AND   query_hash = $3
@@ -107,18 +107,24 @@ public sealed partial class ViewerDataService
     /// cached plan (dm_exec_procedure_stats.plan_handle → dm_exec_text_query_plan) whenever the host sets
     /// CapturePlanXml — Darling does, Lite always writes NULL. Read from the base <c>procedure_stats</c>
     /// table (there is no v_procedure_stats view; TopProceduresSql already reads the base table), which also
-    /// avoids the V7-column / pinned-view issue the blocked/deadlock reads sidestep. $1 server_id, $2
+    /// avoids the V7-column / pinned-view issue the blocked/deadlock reads sidestep — so unlike the
+    /// query_stats twin above, this read resolves the #1767 plan dimension itself. $1 server_id, $2
     /// database_name, $3 schema_name, $4 object_name.
     /// </summary>
     public const string ProcedureStatsPlanXmlSql = """
-        SELECT query_plan_xml
-        FROM procedure_stats
-        WHERE server_id = $1
-        AND   database_name = $2
-        AND   schema_name = $3
-        AND   object_name = $4
-        AND   query_plan_xml IS NOT NULL
-        ORDER BY collection_time DESC
+        SELECT COALESCE(ps.query_plan_xml, qpd.query_plan_xml)
+        FROM procedure_stats AS ps
+        LEFT JOIN query_plan_dim AS qpd
+          ON qpd.digest = ps.query_plan_digest
+        WHERE ps.server_id = $1
+        AND   ps.database_name = $2
+        AND   ps.schema_name = $3
+        AND   ps.object_name = $4
+        /* The guard rides the COALESCED expression, not the bare inline column: rows written since
+           #1767 leave query_plan_xml NULL and carry the plan in the dimension, so testing the inline
+           column would discard every new row before the join could resolve it. */
+        AND   COALESCE(ps.query_plan_xml, qpd.query_plan_xml) IS NOT NULL
+        ORDER BY ps.collection_time DESC
         LIMIT 1
         """;
 

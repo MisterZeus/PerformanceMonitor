@@ -1,0 +1,105 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+
+namespace PerformanceMonitor.Darling.Storage;
+
+/// <summary>
+/// Accumulates the distinct payloads diverted out of ONE collection batch, ready to be flushed into
+/// the dimension tables (#1767). The write path hands every diverted value here as it streams the
+/// binary COPY; this collapses them by digest so a 200-row batch that shares a handful of cached
+/// plans presents each plan once.
+///
+/// <para>The dedup is not only a size optimization — it is REQUIRED for correctness of the upsert.
+/// Postgres raises 21000 ("ON CONFLICT DO UPDATE command cannot affect row a second time") when a
+/// single statement presents the same conflict key twice, which a raw per-row array would do on
+/// essentially every batch.</para>
+///
+/// <para>Keyed by the digest's hex string rather than the <c>byte[]</c> itself: array keys hash by
+/// REFERENCE in .NET, so a <c>Dictionary&lt;byte[], …&gt;</c> would silently never dedup — every
+/// row would look distinct and the batch would fail the moment two rows shared a plan.</para>
+/// </summary>
+public sealed class PayloadDimensionBatch
+{
+    private readonly Dictionary<string, Dictionary<string, Entry>> _byDimTable = new(StringComparer.Ordinal);
+
+    private readonly record struct Entry(byte[] Digest, string Payload);
+
+    /// <summary>True when nothing was diverted — the caller skips the flush entirely.</summary>
+    public bool IsEmpty => _byDimTable.Count == 0;
+
+    /// <summary>
+    /// The dimension tables this batch has content for. Enumeration order is unspecified and does
+    /// not matter — each table's upsert is independent, and they share a transaction.
+    /// </summary>
+    public IReadOnlyCollection<string> DimTables => _byDimTable.Keys;
+
+    /// <summary>
+    /// Records one diverted payload. Repeat sightings of the same content within the batch collapse
+    /// onto the first, which is what makes the flush arrays conflict-free.
+    /// </summary>
+    public void Add(string dimTable, byte[] digest, string payload)
+    {
+        if (dimTable is null)
+        {
+            throw new ArgumentNullException(nameof(dimTable));
+        }
+
+        if (digest is null)
+        {
+            throw new ArgumentNullException(nameof(digest));
+        }
+
+        if (payload is null)
+        {
+            throw new ArgumentNullException(nameof(payload));
+        }
+
+        if (!_byDimTable.TryGetValue(dimTable, out var entries))
+        {
+            entries = new Dictionary<string, Entry>(StringComparer.Ordinal);
+            _byDimTable[dimTable] = entries;
+        }
+
+        var key = Convert.ToHexString(digest);
+        if (!entries.ContainsKey(key))
+        {
+            entries[key] = new Entry(digest, payload);
+        }
+    }
+
+    /// <summary>How many distinct payloads this batch holds for one dimension table.</summary>
+    public int DistinctCount(string dimTable)
+        => _byDimTable.TryGetValue(dimTable, out var entries) ? entries.Count : 0;
+
+    /// <summary>
+    /// The two parallel arrays the upsert's <c>unnest($1::bytea[], $2::text[])</c> consumes. Index
+    /// alignment between them is the contract, so they are built in one pass over the same source.
+    /// </summary>
+    public (byte[][] Digests, string[] Payloads) ToArrays(string dimTable)
+    {
+        if (!_byDimTable.TryGetValue(dimTable, out var entries))
+        {
+            return (Array.Empty<byte[]>(), Array.Empty<string>());
+        }
+
+        var digests = new byte[entries.Count][];
+        var payloads = new string[entries.Count];
+        var i = 0;
+        foreach (var entry in entries.Values)
+        {
+            digests[i] = entry.Digest;
+            payloads[i] = entry.Payload;
+            i++;
+        }
+
+        return (digests, payloads);
+    }
+}

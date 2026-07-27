@@ -126,7 +126,10 @@ public sealed class ViewerQueryHeatmapSqlTests
     public void HeatmapSql_KeepsLitesMagnitudeBuckets_Filters_And_Preview()
     {
         var sql = ViewerDataService.BuildQueryHeatmapSql(HeatmapMetric.Duration);
-        Assert.Contains("FROM query_stats", sql, StringComparison.Ordinal);
+        /* v_query_stats, not the base table (#1767): the cell preview is LEFT(query_text, 120), and the
+           base table's inline query_text is NULL on every row written since the migration — the heatmap
+           would render with blank previews rather than fail. */
+        Assert.Contains("FROM v_query_stats", sql, StringComparison.Ordinal);
         Assert.Contains("delta_execution_count > 0", sql, StringComparison.Ordinal);
         Assert.Contains("LEFT(query_text, 120) AS query_preview", sql, StringComparison.Ordinal);
         /* The 7-way log-magnitude CASE (only the boundaries are pinned). */

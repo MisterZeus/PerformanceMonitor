@@ -32,10 +32,12 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// (<see cref="Storage.PgSchemaGenerator"/>) — the same reason the existing
 /// <see cref="DarlingMcpTools"/> mirror Lite's analysis tools. Every SQL string is a public const so
 /// Darling.Tests can pin the dialect + columns without a live Postgres. Where a view exists the read
-/// uses the <c>v_*</c> passthrough (the Darling-analysis convention); <c>server_properties</c> and the
-/// three query-perf tables have NO <c>v_*</c> view (they are not in
+/// uses the <c>v_*</c> passthrough (the Darling-analysis convention); <c>server_properties</c> and
+/// <c>procedure_stats</c> have NO <c>v_*</c> view (they are not in
 /// <see cref="Storage.PgSchemaGenerator.AllPassthroughViews"/>) so those reads hit the base table, exactly
-/// like the viewer's twins and the merged <see cref="DarlingStoredPlanReader"/>.
+/// like the viewer's twins and the merged <see cref="DarlingStoredPlanReader"/>. Any read that projects
+/// <c>query_text</c> or <c>query_plan_xml</c> MUST go through <c>v_query_stats</c>, which resolves the
+/// #1767 payload dimensions — the base table's inline columns are NULL on every row written since.
 /// </para>
 /// </summary>
 internal static class DarlingDataReader
@@ -504,8 +506,9 @@ internal static class DarlingDataReader
     /// (the columns Lite's get_top_queries_by_cpu returns): group by (database, query_hash), sum the
     /// deltas + carry min/max spreads, rank by summed <c>delta_elapsed_time</c> descending, over-fetch by
     /// 5 to drop WAITFOR shells via the latest-text LATERAL, cap at top. Summed bigints CAST back to bigint
-    /// for the typed reader. Reads the base <c>query_stats</c> table (no v_ view — the plan tools read it
-    /// the same way). $1 server_id, $2/$3 window (naive UTC), $4 top.
+    /// for the typed reader. The aggregate reads the base <c>query_stats</c> table (it projects no text);
+    /// the text LATERAL reads <c>v_query_stats</c>, which resolves the #1767 payload dimension — the plan
+    /// tools read it the same way. $1 server_id, $2/$3 window (naive UTC), $4 top.
     /// </summary>
     public const string TopQueriesSql = """
         WITH ranked AS (
@@ -563,7 +566,7 @@ internal static class DarlingDataReader
         FROM ranked AS r
         LEFT JOIN LATERAL (
             SELECT query_text
-            FROM query_stats
+            FROM v_query_stats
             WHERE server_id = $1
             AND   query_hash = r.query_hash
             AND   database_name = r.database_name

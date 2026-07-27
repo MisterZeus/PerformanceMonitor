@@ -409,9 +409,15 @@ public sealed class DarlingCollectorRunner
     /// Writes ONE batch (one enumerated item / one database, or the whole result set for a plain
     /// collector) to Postgres as a single binary COPY on the caller's already-open connection (#1556).
     /// The three collection paths route through here so the storage logic — the prefix columns, the
-    /// naive-UTC stamp, the positional payload — lives once. Completing the importer COMMITS the batch,
-    /// so on a mid-run abort the batches already written stay committed (commit-1..N-1). An empty batch
-    /// opens no COPY and returns 0 (rows_collected = Σ non-empty batch counts).
+    /// naive-UTC stamp, the positional payload — lives once. A batch is atomic and independent: on a
+    /// mid-run abort the batches already written stay committed (commit-1..N-1). An empty batch opens
+    /// no COPY and returns 0 (rows_collected = Σ non-empty batch counts).
+    ///
+    /// <para>Collectors that divert large text payloads into the hash-keyed dimension tables (#1767 —
+    /// query_stats, procedure_stats) wrap the COPY and the dimension upsert in ONE explicit
+    /// transaction, so no reader can observe a fact row whose digest has no dimension row. Every
+    /// other collector keeps the pre-#1767 path exactly, where completing the importer is itself the
+    /// commit.</para>
     /// </summary>
     private async Task<int> WriteBatchAsync<TRow>(
         NpgsqlConnection pgConnection,
@@ -429,31 +435,60 @@ public sealed class DarlingCollectorRunner
 
         var rowsWritten = 0;
         var writer = new PgCollectorRowWriter();
-        using var importer = await pgConnection.BeginBinaryImportAsync(
-            PgCollectorRowWriter.CopyCommandFor(definition), cancellationToken);
-        writer.Importer = importer;
+
+        /* #1767: which payload columns (if any) store a content digest and send their text to a
+           dimension table instead of inline onto every row. Derived from the same schema
+           CopyCommandFor derives its column list from, so the two cannot disagree. */
+        var diversionPlan = PayloadDimensions.DiversionPlanFor(definition);
+        var dimensions = new PayloadDimensionBatch();
+        if (diversionPlan.Count > 0)
+        {
+            writer.UseDimensions(diversionPlan, dimensions);
+        }
+
+        /* Only the diverting collectors need a transaction; everything else keeps the pre-#1767
+           single-COPY commit and pays nothing. */
+        await using var transaction = diversionPlan.Count > 0
+            ? await pgConnection.BeginTransactionAsync(cancellationToken)
+            : null;
 
         /* Naive-UTC storage — see PgCollectorRowWriter. */
         var storedCollectionTime = DateTime.SpecifyKind(collectionTime, DateTimeKind.Unspecified);
 
-        foreach (var row in rows)
+        using (var importer = await pgConnection.BeginBinaryImportAsync(
+            PgCollectorRowWriter.CopyCommandFor(definition), cancellationToken))
         {
-            await importer.StartRowAsync(cancellationToken);
+            writer.Importer = importer;
 
-            if (definition.IncludesCollectionId)
+            foreach (var row in rows)
             {
-                writer.Value(CollectionIdGenerator.Next());
+                await importer.StartRowAsync(cancellationToken);
+
+                if (definition.IncludesCollectionId)
+                {
+                    writer.Value(CollectionIdGenerator.Next());
+                }
+
+                writer.Value(storedCollectionTime)
+                      .Value(server.ServerId)
+                      .Value(server.StorageName);
+
+                writer.BeginPayload();
+                definition.WritePayload(row, writer, context);
+                writer.EndPayload(definition.PayloadColumns.Count);
+                rowsWritten++;
             }
 
-            writer.Value(storedCollectionTime)
-                  .Value(server.ServerId)
-                  .Value(server.StorageName);
-
-            definition.WritePayload(row, writer, context);
-            rowsWritten++;
+            await importer.CompleteAsync(cancellationToken);
         }
 
-        await importer.CompleteAsync(cancellationToken);
+        if (transaction is not null)
+        {
+            await PayloadDimensionWriter.FlushAsync(
+                pgConnection, transaction, dimensions, storedCollectionTime, cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+        }
+
         return rowsWritten;
     }
 

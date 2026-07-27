@@ -249,8 +249,10 @@ internal static class DarlingTrendReader
     /// <c>delta_execution_count</c> divided by the seconds since the previous collection (the truncate-then-
     /// diff LAG epoch idiom proven value-identical DuckDB↔Postgres) for an elapsed-ms/sec + executions/sec
     /// rate. The first row's LAG is NULL → interval NULL → the CASE yields 0 (Lite's behaviour). Reads the
-    /// base <c>query_stats</c> table (no v_ view — the merged data reader reads it the same way). Summed
-    /// bigints come back as numeric, so the reads Convert tolerantly. $1 server_id, $2/$3 window (naive UTC).
+    /// base <c>query_stats</c> table because it projects no text — a read that wanted <c>query_text</c> or
+    /// <c>query_plan_xml</c> would have to go through <c>v_query_stats</c> to resolve the #1767 payload
+    /// dimensions. Summed bigints come back as numeric, so the reads Convert tolerantly. $1 server_id,
+    /// $2/$3 window (naive UTC).
     /// </summary>
     public const string QueryDurationTrendSql = """
         WITH raw AS
@@ -297,8 +299,9 @@ internal static class DarlingTrendReader
     /// <summary>
     /// A single query's per-collection history — Lite's <c>GetQueryStatsHistoryAsync</c>, focused to the
     /// columns get_query_trend surfaces: the interval deltas + DOP spread + plan hash for one
-    /// (database, query_hash) over the window, oldest first. Reads the base <c>query_stats</c> table (no v_
-    /// view — the merged data reader / plan reader read it the same way). $1 server_id, $2 database_name,
+    /// (database, query_hash) over the window, oldest first. Reads the base <c>query_stats</c> table because
+    /// it projects no text — a read that wanted <c>query_text</c> or <c>query_plan_xml</c> would have to go
+    /// through <c>v_query_stats</c> to resolve the #1767 payload dimensions. $1 server_id, $2 database_name,
     /// $3 query_hash, $4/$5 window (naive UTC).
     /// </summary>
     public const string QueryHistorySql = """

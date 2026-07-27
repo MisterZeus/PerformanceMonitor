@@ -21,20 +21,36 @@ namespace Darling.Tests;
 /// Pins the W1f-1 Queries-tab SQL against the Darling store contract (no live Postgres): the three grid
 /// reads (Top Queries / Top Procedures / Query Store), their comparison reads, and their slicer bucket
 /// reads. The pins guard the load-bearing clauses the string-only tests can catch — the ranking clause,
-/// the LATERAL latest-text shape, the WAITFOR trim, the over-fetch + cap, the base-table names, the
-/// CAST-back-to-bigint on summed aggregates, and the FULL OUTER JOIN / IS NOT DISTINCT FROM comparison
-/// shape. Ordinal correctness + PG execution are covered by the gated live round-trips below.
+/// the LATERAL latest-text shape, the WAITFOR trim, the over-fetch + cap, WHICH RELATION each part reads
+/// (since #1767 the text reads must go through <c>v_query_stats</c> to resolve the payload dimensions,
+/// while the window aggregates deliberately stay on the base table), the CAST-back-to-bigint on summed
+/// aggregates, and the FULL OUTER JOIN / IS NOT DISTINCT FROM comparison shape. Ordinal correctness + PG
+/// execution are covered by the gated live round-trips below.
 /// </summary>
 public sealed class ViewerQueriesSqlTests
 {
     // ── Top Queries ──
 
     [Fact]
-    public void TopQueriesSql_GroupsQueryStatsByDatabaseAndHash_OverTheWindow_BaseTable()
+    public void TopQueriesSql_AggregatesTheBaseTable_ButResolvesTextThroughTheView()
     {
         var sql = ViewerDataService.TopQueriesSql;
-        Assert.Contains("FROM query_stats", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("v_query_stats", sql, StringComparison.Ordinal); /* viewer reads base tables */
+
+        /* TWO relations on purpose, and the split is the load-bearing part (#1767).
+
+           The ranked CTE aggregates the whole window and projects NO text, so it deliberately keeps reading
+           the BASE table: through v_query_stats Postgres would join the plan dimension per row merely to
+           evaluate the presence flag (it can drop an unreferenced unique join, but the view's COALESCE
+           references it). The LATERAL below needs the actual text, so that one reads the VIEW — which is
+           what resolves the payload dimension. Note "FROM v_query_stats" does not contain
+           "FROM query_stats", so these two assertions really are about two different relations. */
+        var rankedRead = sql.IndexOf("FROM query_stats", StringComparison.Ordinal);
+        var lateral = sql.IndexOf("LEFT JOIN LATERAL", StringComparison.Ordinal);
+        var textRead = sql.IndexOf("FROM v_query_stats", StringComparison.Ordinal);
+        Assert.True(rankedRead >= 0, "the ranked CTE must aggregate the base query_stats table");
+        Assert.True(textRead > lateral && lateral > rankedRead,
+            "the base-table aggregate comes first; the resolving view is read by the latest-text LATERAL");
+
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal); /* end bound for the slicer */
@@ -61,10 +77,17 @@ public sealed class ViewerQueriesSqlTests
         Assert.Contains("query_text IS NOT NULL", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY collection_time DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
-        /* The LATERAL still fetches only query_text (never the multi-KB plan). The plan is surfaced by a
-           cheap group-level presence flag — bool_or(query_plan_xml IS NOT NULL) — that gates the grid's
+        /* The LATERAL still fetches only query_text (never the multi-KB plan), and it reads v_query_stats so
+           the #1767 payload dimension is resolved — the base table's inline query_text is NULL on every row
+           written since. The plan is surfaced by a cheap group-level presence flag that gates the grid's
            Query Plan column; the plan XML itself is read on demand (GetQueryStatsPlanXmlAsync). */
-        Assert.Contains("bool_or(query_plan_xml IS NOT NULL) AS has_query_plan", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM v_query_stats", sql, StringComparison.Ordinal);
+
+        /* The flag now has a digest arm: since #1767 the plan lives in query_plan_dim and the fact row
+           carries only the key, so a bare `query_plan_xml IS NOT NULL` would report "no plan captured" for
+           every new row — and silently, since the grid just stops offering the download. A digest is enough
+           to answer presence without resolving the dimension. */
+        Assert.Contains("bool_or(query_plan_xml IS NOT NULL OR query_plan_digest IS NOT NULL) AS has_query_plan", sql, StringComparison.Ordinal);
         Assert.Contains("r.has_query_plan", sql, StringComparison.Ordinal); /* the flag rides from the ranked CTE, not the LATERAL */
     }
 
@@ -133,8 +156,11 @@ public sealed class ViewerQueriesSqlTests
         /* avg_spills is the one derived double in the proc read. */
         Assert.Contains("CAST(SUM(delta_spills) AS double precision) / NULLIF(SUM(delta_execution_count), 0)", sql, StringComparison.Ordinal);
         /* Item 7: whether the collector stored a plan for the object — gates the grid's Download button on the
-           same query_plan_xml IS NOT NULL filter GetProcedureStatsPlanXmlAsync fetches on. */
-        Assert.Contains("bool_or(query_plan_xml IS NOT NULL) AS has_query_plan", sql, StringComparison.Ordinal);
+           same presence test GetProcedureStatsPlanXmlAsync fetches on. Since #1767 the plan itself lives in
+           query_plan_dim and the fact row carries only the digest, so the flag needs the digest arm: without
+           it every row written since the migration reports "no plan captured" and the Download button
+           silently disappears, with nothing anywhere reporting an error. */
+        Assert.Contains("bool_or(query_plan_xml IS NOT NULL OR query_plan_digest IS NOT NULL) AS has_query_plan", sql, StringComparison.Ordinal);
     }
 
     // ── Query Store ──

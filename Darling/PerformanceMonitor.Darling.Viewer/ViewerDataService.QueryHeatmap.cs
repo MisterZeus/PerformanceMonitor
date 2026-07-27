@@ -100,7 +100,7 @@ public sealed partial class ViewerDataService
                     query_hash,
                     LEFT(query_text, 120) AS query_preview,
                     delta_execution_count
-                FROM query_stats
+                FROM v_query_stats
                 WHERE server_id = $1
                 AND   collection_time >= $2
                 AND   collection_time <= $3

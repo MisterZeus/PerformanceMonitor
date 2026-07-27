@@ -49,7 +49,7 @@ internal static class DarlingStoredPlanReader
     /// </summary>
     public const string QueryStatsPlanXmlByHashSql = """
         SELECT query_plan_xml
-        FROM query_stats
+        FROM v_query_stats
         WHERE server_id = $1
         AND   query_hash = $2
         AND   ($3::text IS NULL OR database_name = $3)
@@ -62,15 +62,21 @@ internal static class DarlingStoredPlanReader
     /// The latest captured procedure_stats plan for a procedure, keyed by (server, sql_handle) — the
     /// Dashboard's GetProcedurePlanXmlBySqlHandleAsync key. procedure_stats carries sql_handle as the
     /// '0x...' hex string the collector stamps (CONVERT(varchar(130), ..., 1)), so the match is a direct
-    /// text compare (no varbinary CONVERT the SQL-Server side needs). $1 server_id, $2 sql_handle.
+    /// text compare (no varbinary CONVERT the SQL-Server side needs). There is no v_procedure_stats to
+    /// resolve the #1767 plan dimension, so this read joins it itself. $1 server_id, $2 sql_handle.
     /// </summary>
     public const string ProcedurePlanXmlBySqlHandleSql = """
-        SELECT query_plan_xml
-        FROM procedure_stats
-        WHERE server_id = $1
-        AND   sql_handle = $2
-        AND   query_plan_xml IS NOT NULL
-        ORDER BY collection_time DESC
+        SELECT COALESCE(ps.query_plan_xml, qpd.query_plan_xml)
+        FROM procedure_stats AS ps
+        LEFT JOIN query_plan_dim AS qpd
+          ON qpd.digest = ps.query_plan_digest
+        WHERE ps.server_id = $1
+        AND   ps.sql_handle = $2
+        /* The guard rides the COALESCED expression, not the bare inline column: rows written since
+           #1767 leave query_plan_xml NULL and carry the plan in the dimension, so testing the inline
+           column would discard every new row before the join could resolve it. */
+        AND   COALESCE(ps.query_plan_xml, qpd.query_plan_xml) IS NOT NULL
+        ORDER BY ps.collection_time DESC
         LIMIT 1
         """;
 
