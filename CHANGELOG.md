@@ -125,6 +125,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **A second stale doc comment describing behaviour that no longer exists** ([#1744]) - `QuiesceTimescaleServerOptions` carried two stacked `<summary>` elements, the first left by an earlier edit. XML docs take the LAST summary, so tooling rendered the correct one and only a human reading the file was misled - invisible to the build, the tests and the analyzers, which is why it survived several re-reads and was found by pattern-matching the file instead. Same defect as [#1739]'s, in a second place. The surviving summary keeps both rationales that matter: the timescale/timescaledb#1593 `template0` deadlock behind quiescing the scheduler for the upgrade window, and the IPv4/IPv6 loopback trap behind restoring `listen_addresses=localhost` for it.
 - Darling README: added a "verify it's actually reachable" recipe for the opt-in LAN MCP/web endpoints — confirm the listener is on the LAN address (not loopback), the scoped firewall rule covers the client, and the client connects to the box IP rather than `localhost` — plus what to re-run after a reinstall. Enabling an endpoint is not the same as reaching it. ([#1616])
 
 ## [3.2.0] - 2026-07-21
@@ -1733,6 +1734,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#1725]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1725
 [#1730]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1730
 [#1739]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1739
+[#1744]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1744
 [#1727]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1727
 [#1690]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1690
 [#1693]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1693
