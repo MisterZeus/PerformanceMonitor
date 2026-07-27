@@ -417,8 +417,17 @@ public sealed class DarlingStoreUpgradeTests
             "the downgrade guard appears before the no-stamp branch, so it cannot be positioned relative to it");
 
         /* The no-stamp block closes before the guard: in correct code the guard is at method-body indent
-           (8 spaces), which is only reachable once that block has closed. */
-        Assert.Contains("\n        if (IsDowngradeAgainstStore(", source, StringComparison.Ordinal);
+           (8 spaces), which is only reachable once that block has closed — AND the call is the whole
+           condition. Both halves are load-bearing, and each rules out a mutation the other misses:
+
+             if (IsDowngradeAgainstStore(dataDirectory, runtimeZipPath) && stamp is null)   <- A
+             if (stamp is null && IsDowngradeAgainstStore(dataDirectory, runtimeZipPath))   <- B
+
+           Both re-bury the guard behind the stamp semantically while leaving it at the right indent and in
+           the right position. A `Contains` on the opening text admits A — it stops at the open paren and
+           never reads the rest of the condition — while an ordering check catches B and misses A. The line
+           anchor rejects both, and still permits the guard's BODY to be reformatted freely. */
+        Assert.Matches(@"(?m)^        if \(IsDowngradeAgainstStore\(dataDirectory, runtimeZipPath\)\)\s*$", source);
     }
 
     [Theory]
@@ -791,8 +800,36 @@ public sealed class DarlingStoreUpgradeTests
 
             /* The stamp is deliberately NOT written: a refusal that goes quiet on the next start is one
                nobody acts on, and the operator still has the wrong zip beside the service. */
-            Assert.False(File.Exists(Path.Combine(runtimeRoot, DarlingStoreUpgrade.RuntimeStampFileName)),
+            var stampPath = Path.Combine(runtimeRoot, DarlingStoreUpgrade.RuntimeStampFileName);
+            Assert.False(File.Exists(stampPath),
                 "recording the stamp would silence this refusal on every subsequent start");
+
+            /* Now the same package against a STAMPED host — which, after this release, is every host. The
+               stamp says only that the zip CHANGED, never which way, so a stamped host handed an older
+               package walks past the no-stamp branch and into the swap unless the direction check sits
+               OUTSIDE that branch. Source placement is pinned above; this proves the behaviour, and it
+               costs nothing because the refusal returns before any extraction. */
+            const string PriorPackageHash = "0000000000000000000000000000000000000000000000000000000000000000";
+            await File.WriteAllTextAsync(stampPath, PriorPackageHash, timeout.Token);
+
+            var stampedLog = new CapturingLogger();
+            var stamped = await new DarlingStoreUpgrade(stampedLog).TryAdvanceRuntimeAsync(
+                runtimeRoot, olderPackage, dataDirectory,
+                (_, _) => Task.FromResult(false),
+                timeout.Token);
+
+            Assert.False(stamped.Swapped);
+            Assert.Null(stamped.PreviousBinDirectory);
+            Assert.False(Directory.Exists(DarlingStoreUpgrade.PreviousRuntimeRootFor(runtimeRoot)),
+                "a stamped host must refuse the package an unstamped one refused — the stamp is not a direction");
+            Assert.True(File.Exists(Path.Combine(runtimeRoot, "pgsql", "bin", "pg_ctl.exe")),
+                "the working runtime must still be in place on a stamped host too");
+            Assert.Contains("REFUSING the shipped Postgres runtime", stampedLog.ToString(), StringComparison.Ordinal);
+
+            /* The existing stamp is left as it was. Overwriting it with the refused package's hash would
+               read as "already seen" on the next start and go quiet with the wrong zip still sitting
+               beside the service. */
+            Assert.Equal(PriorPackageHash, (await File.ReadAllTextAsync(stampPath, timeout.Token)).Trim());
         }
         finally
         {
