@@ -266,6 +266,15 @@ public partial class MainWindow : Window
     /// </summary>
     private async Task EvaluateAvailabilityGroupAlertsAsync(int serverId, string serverName, bool suppressed)
     {
+        /* _dataService is nullable and is not assigned until the local store opens, so an alert sweep can
+           reach here first. Same guard the rest of MainWindow uses; without it this method is the only
+           caller in the file that dereferences it unchecked (CS8602, and a NullReferenceException on the
+           unlucky ordering rather than a quiet no-alerts pass). */
+        if (_dataService == null)
+        {
+            return;
+        }
+
         try
         {
             var alerts = new List<AgAlert>();
