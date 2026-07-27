@@ -724,6 +724,27 @@ public sealed class DarlingWorker : BackgroundService
             _logger.LogWarning("TimescaleDB setup failed — continuing in plain-PostgreSQL mode: {Message}", ex.Message);
         }
 
+        /* #1757: on a store with no TimescaleDB the baseline aggregates cannot exist, and the provider reads
+           those relations BY NAME — a missing one throws, ComputeBaselinesAsync swallows it, and every family
+           silently returns an empty baseline. So plain-PostgreSQL mode gets the same nine relations as
+           ordinary views over the same selects. Deliberately OUTSIDE the block above, covering both routes
+           into this mode: TimescaleDB absent, and TimescaleDB setup having failed partway. Its own connection,
+           because the block's connection is already disposed by here. */
+        if (!_timescaleAvailable)
+        {
+            try
+            {
+                await using var fallbackConnection = await postgres.OpenConnectionAsync(stoppingToken);
+                await TimescaleSupport.EnsureBaselineFallbackViewsAsync(fallbackConnection, _logger, stoppingToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(
+                    "Baseline fallback views could not be created — anomaly baselines will not compute on this store: {Message}",
+                    ex.Message);
+            }
+        }
+
         /* Composer + analyze_*_plan performance tuning (covering indexes + per-table autovacuum-insert override) —
            idempotent RUNTIME setup, NOT a versioned migration: results-invariant perf, so it must not bump
            StorageVersion and gate the Viewer's schema check on indexes it does not need (the role-GUC provisioning

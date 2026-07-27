@@ -198,6 +198,61 @@ public class BaselineSupplyTests
         Assert.Contains("await baselineBackfill;", worker, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// THE PLAIN-POSTGRESQL HALF OF THE SAME STATISTIC. Darling runs without TimescaleDB whenever the
+    /// extension is absent or its setup fails, and the provider reads the baseline relations BY NAME — so
+    /// without these views every family throws, <c>ComputeBaselinesAsync</c> swallows it, and the anomaly
+    /// baselines silently return empty. The fallback is DERIVED from the aggregate's own select body rather
+    /// than written out again, which is what makes "same statistic, different supply" true by construction;
+    /// these assertions pin that the derivation stays faithful and drops every TimescaleDB-only construct.
+    /// </summary>
+    [Fact]
+    public void EveryBaselineAggregate_DerivesAPlainPostgresFallbackView_ComputingTheSameStatistic()
+    {
+        foreach (var (createSql, view) in TimescaleSupport.BaselineAggregates)
+        {
+            var fallback = TimescaleSupport.CreateBaselineFallbackViewSql(view, createSql);
+
+            Assert.StartsWith($"CREATE OR REPLACE VIEW collect.{view} AS", fallback, StringComparison.Ordinal);
+
+            /* time_bucket is the ONE TimescaleDB-only construct in the body; for a 1-hour bucket date_trunc is
+               the same value. Nothing else may survive, or the view cannot be created without the extension. */
+            Assert.DoesNotContain("time_bucket", fallback, StringComparison.Ordinal);
+            Assert.DoesNotContain("timescaledb", fallback, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("WITH NO DATA", fallback, StringComparison.Ordinal);
+            Assert.DoesNotContain("MATERIALIZED", fallback, StringComparison.Ordinal);
+            Assert.Contains("date_trunc('hour', collection_time) AS bucket", fallback, StringComparison.Ordinal);
+
+            /* The grain and the source survive the derivation — a fallback that grouped differently, or read a
+               different table, would be a different number wearing the same column names. */
+            Assert.Contains("GROUP BY server_id, bucket, collection_time", fallback, StringComparison.Ordinal);
+            Assert.Contains("FROM collect." + TimescaleSupport.SourceTableFor(view), fallback, StringComparison.Ordinal);
+        }
+
+        /* Row-level filters are part of the statistic, so they must survive too. */
+        var waits = TimescaleSupport.CreateBaselineFallbackViewSql(
+            TimescaleSupport.WaitStatsBaselineView, TimescaleSupport.CreateWaitStatsBaselineSql);
+        Assert.Contains("delta_wait_time_ms >= 0", waits, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A continuous aggregate IS a <c>relkind='v'</c> view, so an unguarded <c>DROP VIEW</c> by these names
+    /// would silently destroy a materialized tier rather than clearing a fallback. The guard is the whole
+    /// point of the statement, and it has to survive without TimescaleDB installed too — reaching
+    /// <c>timescaledb_information</c> unconditionally raises 42P01 on a store that never created the
+    /// extension, which is exactly the store the fallback exists for.
+    /// </summary>
+    [Fact]
+    public void DroppingAFallbackView_RefusesToTouchAContinuousAggregate_AndSurvivesWithoutTheExtension()
+    {
+        var sql = TimescaleSupport.DropBaselineFallbackViewSql(TimescaleSupport.WaitStatsBaselineView);
+
+        Assert.Contains("continuous_aggregates", sql, StringComparison.Ordinal);
+        Assert.Contains("relkind = 'v'", sql, StringComparison.Ordinal);
+        /* Probed, not assumed: to_regclass yields NULL instead of erroring when the extension is absent. */
+        Assert.Contains("to_regclass('timescaledb_information.continuous_aggregates') IS NOT NULL", sql, StringComparison.Ordinal);
+    }
+
     private static string ReadWorkerSource([CallerFilePath] string thisFile = "")
     {
         /* Locate the repo from this file, the AlertFiringLogTests idiom - no build-output copying. */

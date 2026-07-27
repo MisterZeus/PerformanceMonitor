@@ -593,8 +593,136 @@ SELECT
         return await probe.ExecuteScalarAsync(cancellationToken) is DateTime oldest ? oldest : null;
     }
 
+    /// <summary>
+    /// The marker that separates a baseline aggregate's CREATE header from its SELECT body. Both the
+    /// continuous aggregate and the plain-PostgreSQL fallback view are built from that ONE body, so the two
+    /// cannot drift into computing different statistics — which is the whole reason the fallback is derived
+    /// rather than written out a second time.
+    /// </summary>
+    private const string BaselineBodyMarker = "timescaledb.materialized_only = false) AS";
+
+    /// <summary>
+    /// The plain-PostgreSQL fallback for a baseline aggregate: the SAME select, as an ordinary view.
+    ///
+    /// <para>WITHOUT THIS, #1757's fix is a REGRESSION on any store without TimescaleDB. The provider reads
+    /// the baseline relations by name; if they do not exist it throws, <c>ComputeBaselinesAsync</c> swallows
+    /// it and logs "Failed to compute baselines for {metric}" — the exact line #1757 was reported on — and
+    /// every family silently returns an empty baseline. Darling supports plain-PostgreSQL stores (the worker
+    /// degrades to that mode whenever the TimescaleDB block fails), so this is a real deployment, not a
+    /// theoretical one.</para>
+    ///
+    /// <para><c>time_bucket</c> is the one TimescaleDB-only construct in the body, and for a 1-hour bucket
+    /// <c>date_trunc('hour', ...)</c> is the same value, so the view presents an identical column set. Nothing
+    /// reads <c>bucket</c> off these relations outside the TimescaleDB-only backfill and retention paths, but
+    /// it is kept so the two shapes stay column-for-column identical.</para>
+    /// </summary>
+    public static string CreateBaselineFallbackViewSql(string view, string createSql)
+    {
+        if (createSql is null)
+        {
+            throw new ArgumentNullException(nameof(createSql));
+        }
+
+        var bodyAt = createSql.IndexOf(BaselineBodyMarker, StringComparison.Ordinal);
+        var endAt = createSql.LastIndexOf("WITH NO DATA", StringComparison.Ordinal);
+        if (bodyAt < 0 || endAt < 0 || endAt <= bodyAt)
+        {
+            throw new ArgumentException(
+                $"'{view}' does not have the expected baseline-aggregate shape, so its plain-PostgreSQL fallback cannot be derived",
+                nameof(createSql));
+        }
+
+        var body = createSql[(bodyAt + BaselineBodyMarker.Length)..endAt]
+            .Replace("time_bucket('1 hour', collection_time)", "date_trunc('hour', collection_time)", StringComparison.Ordinal)
+            .Trim();
+
+        return $"CREATE OR REPLACE VIEW collect.{view} AS{Environment.NewLine}{body}";
+    }
+
+    /// <summary>
+    /// Creates the nine baseline relations as ordinary views, for a store WITHOUT TimescaleDB. Idempotent
+    /// (<c>CREATE OR REPLACE</c>) and failure-isolated per view. Returns how many are in place.
+    ///
+    /// <para>MUST NOT run when TimescaleDB is available: a continuous aggregate is itself a <c>relkind='v'</c>
+    /// view, so replacing one by this name would destroy the materialization. The worker calls this only on
+    /// the plain-PostgreSQL branch, and <see cref="DropBaselineFallbackViewSql"/> handles the reverse
+    /// transition.</para>
+    /// </summary>
+    public static async Task<int> EnsureBaselineFallbackViewsAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var ready = 0;
+
+        foreach (var (createSql, view) in BaselineAggregates)
+        {
+            try
+            {
+                using var create = new NpgsqlCommand(CreateBaselineFallbackViewSql(view, createSql), connection)
+                {
+                    CommandTimeout = SetupTimeoutSeconds,
+                };
+                await create.ExecuteNonQueryAsync(cancellationToken);
+                ready++;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Baseline fallback view {View} could not be created — that metric's anomaly baseline will not compute on this store: {Message}",
+                    view, ex.Message);
+            }
+        }
+
+        logger?.LogInformation(
+            "Plain-PostgreSQL mode: {Ready}/{Total} baseline views in place (no TimescaleDB, so the baselines read raw directly).",
+            ready, BaselineAggregates.Length);
+
+        return ready;
+    }
+
+    /// <summary>
+    /// Drops a baseline relation ONLY when it is a plain fallback view and NOT a continuous aggregate — the
+    /// store gained TimescaleDB after running without it, and the fallback now stands in the way of the real
+    /// aggregate. The `continuous_aggregates` half of the guard is what makes this safe: a CAGG is also a
+    /// <c>relkind='v'</c> view, so an unguarded DROP VIEW here would silently destroy a materialized tier.
+    /// </summary>
+    public static string DropBaselineFallbackViewSql(string view)
+        => $@"DO $do$
+DECLARE
+    is_continuous_aggregate boolean := false;
+BEGIN
+    IF NOT EXISTS (
+            SELECT 1
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'collect' AND c.relname = '{view}' AND c.relkind = 'v')
+    THEN
+        RETURN;
+    END IF;
+
+    /* timescaledb_information only exists once the extension has been created, and this runs on stores where
+       it never was -- reaching it unconditionally raises 42P01. Probed with to_regclass (NULL rather than an
+       error when absent) and read through EXECUTE so the reference is parsed only when it resolves. No
+       extension means nothing can be a continuous aggregate, so the guard is simply false. */
+    IF to_regclass('timescaledb_information.continuous_aggregates') IS NOT NULL
+    THEN
+        EXECUTE 'SELECT EXISTS (SELECT 1 FROM timescaledb_information.continuous_aggregates WHERE view_schema = ''collect'' AND view_name = ''{view}'')'
+        INTO is_continuous_aggregate;
+    END IF;
+
+    IF NOT is_continuous_aggregate
+    THEN
+        EXECUTE 'DROP VIEW collect.{view}';
+    END IF;
+END
+$do$";
+
     /// <summary>The raw table each baseline aggregate is sourced from, for the backfill's coverage probe.</summary>
-    private static string SourceTableFor(string view) => view switch
+    public static string SourceTableFor(string view) => view switch
     {
         CpuBaselineView => "cpu_utilization_stats",
         PerfmonBaselineView => "perfmon_stats",
@@ -1001,6 +1129,26 @@ WITH NO DATA";
            and the retention list cannot drift apart. */
         .Concat(BaselineAggregates.Select(a => (CreateSql: a.CreateSql, View: a.View, PolicySql: AddContinuousAggregatePolicySql(a.View))))
         .ToArray();
+
+        /* A store that ran WITHOUT TimescaleDB and has now gained it is carrying the plain fallback views
+           under the exact names the baseline aggregates need (#1757). CREATE MATERIALIZED VIEW IF NOT EXISTS
+           would quietly do nothing against them, leaving the store permanently on raw scans, so the stale
+           fallback is dropped first. Guarded to never touch a real continuous aggregate, and isolated per
+           view — this is a transition path, and failing it must not stop the sweep. */
+        foreach (var (_, view) in BaselineAggregates)
+        {
+            try
+            {
+                using var drop = new NpgsqlCommand(DropBaselineFallbackViewSql(view), connection) { CommandTimeout = SetupTimeoutSeconds };
+                await drop.ExecuteNonQueryAsync(cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Could not drop the plain-PostgreSQL fallback view {View} — its continuous aggregate cannot be created while it stands: {Message}",
+                    view, ex.Message);
+            }
+        }
 
         var ready = 0;
         foreach (var (createSql, view, policySql) in aggregates)

@@ -383,6 +383,19 @@ public sealed class DarlingAnomalyBaselineTests
                     TestWaitType, 10L, delta);
             }
 
+            /* #1757 moved the baseline supply off the raw v_* views and onto named baseline relations, so
+               those relations have to EXIST for any of the assertions below to mean anything — a missing one
+               throws inside ComputeBaselinesAsync, which swallows it and hands back an empty baseline, and
+               every Assert below would then be comparing against zeroes.
+
+               Deliberately the PLAIN-POSTGRESQL fallback views rather than the continuous aggregates: both
+               are built from the same select body (that is the point of deriving one from the other), so they
+               compute the identical statistic, and an ordinary view is isolated — creating the aggregates here
+               would create all seventeen and change compose's tier routing for the live test that asserts a
+               10-day window lands on RAW. The continuous-aggregate half of this invariant is proven in
+               TimescaleSupportTests, which already owns the snapshot/restore machinery for that. */
+            Assert.Equal(9, await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct));
+
             /* The FOLLOWING Monday 10:00 UTC — same (hour, dow) bucket, 1-7 days back, still
                in the past. Both baseline reads and the detector window anchor here. */
             var analysisTime = historyStart.AddDays(7);
@@ -455,6 +468,7 @@ public sealed class DarlingAnomalyBaselineTests
         finally
         {
             await DeleteTestRowsAsync(connection);
+            await DropBaselineFallbackViewsAsync(connection);
         }
     }
 
@@ -473,5 +487,19 @@ public sealed class DarlingAnomalyBaselineTests
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM wait_stats WHERE server_id = {TestServerId};", connection);
         await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    /// <summary>
+    /// Restores the shared fixture by removing the plain baseline views this class creates. Uses the same
+    /// continuous-aggregate guard the product does, so it can never drop a real aggregate another live test
+    /// planted — a bare DROP VIEW would, because a continuous aggregate is also a relkind='v' view.
+    /// </summary>
+    private static async Task DropBaselineFallbackViewsAsync(NpgsqlConnection connection)
+    {
+        foreach (var (_, view) in TimescaleSupport.BaselineAggregates)
+        {
+            using var drop = new NpgsqlCommand(TimescaleSupport.DropBaselineFallbackViewSql(view), connection);
+            await drop.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
     }
 }
