@@ -81,6 +81,7 @@ public static class PgMigrations
         new Migration(35, "availability-group-alerts", V35Sql),
         new Migration(36, "ag-latency-columns", V36Sql),
         new Migration(37, "ag-local-replica-and-disconnect-refire", V37Sql),
+        new Migration(38, "query-payload-dimensions", PgSchemaGenerator.GenerateV38PayloadDimensions()),
     };
 
     /// <summary>

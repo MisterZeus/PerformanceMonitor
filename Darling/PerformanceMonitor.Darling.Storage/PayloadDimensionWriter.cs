@@ -1,0 +1,91 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+using Npgsql;
+using NpgsqlTypes;
+
+namespace PerformanceMonitor.Darling.Storage;
+
+/// <summary>
+/// Flushes one collection batch's diverted payloads into the dimension tables (#1767).
+///
+/// <para>Runs inside the SAME transaction as the batch's fact COPY. That is the ordering guarantee
+/// the design actually needs: not "dims are inserted before facts" as a statement sequence, but
+/// "no session ever observes a fact row whose digest has no dim row". A transaction gives the
+/// stronger property, and gives it even though the digests are only KNOWN after the COPY has
+/// streamed them — the payloads are discovered while writing the rows that reference them, so a
+/// literal dims-first pass would mean calling the definition's WritePayload twice, which is not
+/// safe: WritePayload computes and CONSUMES the delta state (context.Deltas.CalculateDelta), so a
+/// second pass would report every delta as zero.</para>
+/// </summary>
+public static class PayloadDimensionWriter
+{
+    /// <summary>
+    /// Upserts every distinct payload the batch accumulated. One statement per dimension table,
+    /// each carrying the batch as two parallel arrays, so a 200-row batch costs two round trips
+    /// rather than 400. Callers pass the batch's own collection time as the last-seen watermark so
+    /// it matches the fact rows exactly (and so a backfilled/replayed batch cannot stamp content as
+    /// fresher than the rows referencing it).
+    /// </summary>
+    public static async Task FlushAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        PayloadDimensionBatch batch,
+        DateTime collectionTime,
+        CancellationToken cancellationToken)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        if (batch is null)
+        {
+            throw new ArgumentNullException(nameof(batch));
+        }
+
+        if (batch.IsEmpty)
+        {
+            return;
+        }
+
+        /* Naive-UTC storage: Npgsql 6+ rejects Kind=Utc against `timestamp` — see PgCollectorRowWriter. */
+        var lastSeen = DateTime.SpecifyKind(collectionTime, DateTimeKind.Unspecified);
+
+        foreach (var dimTable in batch.DimTables)
+        {
+            var (digests, payloads) = batch.ToArrays(dimTable);
+            if (digests.Length == 0)
+            {
+                continue;
+            }
+
+            await using var command = new NpgsqlCommand(PayloadDimensions.UpsertSql(dimTable), connection, transaction);
+            command.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea,
+                Value = digests,
+            });
+            command.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text,
+                Value = payloads,
+            });
+            command.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlDbType.Timestamp,
+                Value = lastSeen,
+            });
+
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+    }
+}

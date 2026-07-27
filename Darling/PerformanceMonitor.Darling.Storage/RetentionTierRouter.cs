@@ -42,6 +42,11 @@ public enum RetentionTier
 /// no <c>query_text</c> and no <c>query_plan</c>. A reader that projects either is limited to the raw horizon no
 /// matter how wide the requested window is, which is what <see cref="RawTextHorizon"/> is for: clamp the window and
 /// tell the user, rather than silently returning a short slice of what they asked for.</para>
+///
+/// <para>#1767 moved that text out of the fact row and into the <c>query_text_dim</c> / <c>query_plan_dim</c>
+/// dimension tables, which changes nothing here: the CAGGs still carry no payload, and the dimension GC is pinned
+/// to the FACT tables' horizon so a dim row never outlives the facts referencing it. The horizon therefore still
+/// tracks the fact tables, not the dims.</para>
 /// </summary>
 public static class RetentionTierRouter
 {
@@ -60,9 +65,10 @@ public static class RetentionTierRouter
 
     /// <summary>
     /// How far back per-row text (<c>query_text</c>, <c>query_plan</c>) actually exists. Identical to
-    /// <see cref="RawMaxAge"/> — text lives only in raw — but named separately because it means something
-    /// different to a caller: not "which relation do I read" but "how much of the user's requested window can I
-    /// honestly answer at all".
+    /// <see cref="RawMaxAge"/> — text is reachable only from raw, whether stored inline or resolved through
+    /// the #1767 dimension tables — but named separately because it means something different to a caller:
+    /// not "which relation do I read" but "how much of the user's requested window can I honestly answer at
+    /// all".
     /// </summary>
     public static TimeSpan RawTextHorizon => RawMaxAge;
 

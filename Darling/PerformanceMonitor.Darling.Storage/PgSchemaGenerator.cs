@@ -476,4 +476,129 @@ public static class PgSchemaGenerator
 
         return sb.ToString();
     }
+
+    /// <summary>
+    /// The dimension-table alias each payload dimension gets in the resolving view — stable and
+    /// readable, because this view is something a DBA will read in <c>\d+</c> output.
+    /// </summary>
+    private static string AliasFor(string dimTable)
+        => dimTable switch
+        {
+            PayloadDimensions.QueryTextDimTable => "qtd",
+            PayloadDimensions.QueryPlanDimTable => "qpd",
+            _ => throw new ArgumentOutOfRangeException(nameof(dimTable), dimTable, "No alias for dimension table"),
+        };
+
+    /// <summary>
+    /// The V38 migration body — the #1767 payload dimensions.
+    ///
+    /// <para>Three parts, in dependency order: the two dimension tables; the digest columns APPENDED
+    /// to the two fact tables (nullable, so every existing row is untouched and the migration is
+    /// metadata-only — no rewrite of a ~234 GB payload, the trap recorded and rejected in #1759);
+    /// and the rebuilt <c>v_query_stats</c>.</para>
+    ///
+    /// <para>The digest columns are NOT in the collector definitions' PayloadColumns, deliberately:
+    /// they are a Darling STORAGE concern, and Lite — which shares those definitions and never
+    /// captures plans at all — must not grow two columns it has no use for. That means, unlike the
+    /// V7 plan columns, a fresh V1 store does NOT already have them and this ADD COLUMN is the only
+    /// thing that creates them. They land at the end on fresh and upgraded stores alike, and the
+    /// binary COPY names its columns explicitly, so physical order never matters.</para>
+    /// </summary>
+    public static string GenerateV38PayloadDimensions()
+    {
+        var sb = new StringBuilder();
+        sb.Append("/* V38: hash-keyed dimension tables for query_stats / procedure_stats payloads (#1767).\n");
+        sb.Append("   query_text/query_plan_xml stored inline per row were 94% of a 250 GB field store;\n");
+        sb.Append("   a measured 1-hour window held 3,166 MB of payload across 23 MB of distinct content.\n");
+        sb.Append("   ZERO-REWRITE: the inline columns stay, new rows leave them NULL, readers coalesce,\n");
+        sb.Append("   and raw retention ages the inline copies out on its own. */\n\n");
+
+        foreach (var dimTable in PayloadDimensions.DimTables)
+        {
+            sb.Append(PayloadDimensions.CreateDimTable(dimTable)).Append("\n\n");
+        }
+
+        foreach (var dimension in PayloadDimensions.All)
+        {
+            sb.Append("ALTER TABLE ").Append(dimension.TargetTable)
+              .Append(" ADD COLUMN IF NOT EXISTS ").Append(dimension.DigestColumn).Append(" bytea;\n");
+        }
+
+        sb.Append('\n').Append(GenerateQueryStatsResolvingView());
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// <c>v_query_stats</c>, rebuilt to RESOLVE each row's payload: the inline column when the row
+    /// predates #1767, the dimension row when it does not.
+    ///
+    /// <para>This is the one <c>v_*</c> view that is not a bare passthrough, and the exception is
+    /// deliberate. Six analysis/viewer readers reach query_text through this view; resolving it here
+    /// fixes all six at one site AND makes every FUTURE reader correct by default — which is the
+    /// actual risk in this change, since a consumer that keeps selecting the raw column does not
+    /// error, it silently returns NULL for every new row.</para>
+    ///
+    /// <para>The column list is GENERATED from the collector definition rather than hand-written,
+    /// so it cannot go stale the way an explicit list normally would — the exact failure V14 exists
+    /// to fix. A payload column added to the collector appears here automatically. The two digest
+    /// columns are appended last, keeping this a legal <c>CREATE OR REPLACE</c> over the previous
+    /// <c>SELECT *</c> definition (same names, same types, same order, additions only at the end).</para>
+    ///
+    /// <para>There is deliberately no <c>v_procedure_stats</c> to match — that view has never
+    /// existed (pinned by test), so procedure_stats' two plan readers resolve the dimension inline
+    /// in their own SQL.</para>
+    /// </summary>
+    public static string GenerateQueryStatsResolvingView()
+    {
+        var schema = QueryStatsCollector.Instance;
+        var dimensions = PayloadDimensions.ForTable(schema.TargetTable);
+        var byColumn = dimensions.ToDictionary(d => d.PayloadColumn, StringComparer.Ordinal);
+        /* char, not string: a one-character StringBuilder.Append(string) is a CA1834 warning, and the
+           repo builds warnings-as-errors. */
+        const char Fact = 'f';
+
+        var sb = new StringBuilder();
+        sb.Append("/* v_query_stats resolves each row's payload: the inline column for rows written before\n");
+        sb.Append("   the dimension tables existed, the dimension row for every row written since (#1767).\n");
+        sb.Append("   Column list generated from the collector definition so it can never go stale. */\n");
+        sb.Append("CREATE OR REPLACE VIEW v_").Append(schema.TargetTable).Append(" AS\nSELECT\n");
+
+        var columns = new List<string>();
+
+        if (schema.IncludesCollectionId)
+        {
+            columns.Add($"    {Fact}.{schema.PrefixIdColumnName}");
+        }
+
+        columns.Add($"    {Fact}.{schema.PrefixTimeColumnName}");
+        columns.Add($"    {Fact}.server_id");
+        columns.Add($"    {Fact}.server_name");
+
+        foreach (var column in schema.PayloadColumns)
+        {
+            columns.Add(byColumn.TryGetValue(column.Name, out var dimension)
+                ? $"    COALESCE({Fact}.{column.Name}, {AliasFor(dimension.DimTable)}.{column.Name}) AS {column.Name}"
+                : $"    {Fact}.{column.Name}");
+        }
+
+        /* Appended last: additions at the end are the only alteration CREATE OR REPLACE VIEW permits. */
+        foreach (var dimension in dimensions)
+        {
+            columns.Add($"    {Fact}.{dimension.DigestColumn}");
+        }
+
+        sb.Append(string.Join(",\n", columns)).Append('\n');
+        sb.Append("FROM ").Append(schema.TargetTable).Append(" AS ").Append(Fact).Append('\n');
+
+        foreach (var dimension in dimensions)
+        {
+            var alias = AliasFor(dimension.DimTable);
+            sb.Append("LEFT JOIN ").Append(dimension.DimTable).Append(" AS ").Append(alias)
+              .Append(" ON ").Append(alias).Append('.').Append(PayloadDimensions.DigestColumn)
+              .Append(" = ").Append(Fact).Append('.').Append(dimension.DigestColumn).Append('\n');
+        }
+
+        sb.Append(";\n");
+        return sb.ToString();
+    }
 }

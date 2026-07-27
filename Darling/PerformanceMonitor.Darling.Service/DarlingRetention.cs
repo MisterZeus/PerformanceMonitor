@@ -188,6 +188,52 @@ public static class DarlingRetention
                 }
             }
 
+            /* #1767 payload dimensions. query_text_dim / query_plan_dim are plain tables holding one copy
+               of each distinct query text / plan XML; the fact rows carry only a digest. They must be
+               bounded or they re-create the very problem they solve — ~23 MB/hour of distinct plans on the
+               measured field instance is ~200 GB/year if nothing ever expires.
+
+               The obvious sweep (delete dim rows no live fact references) is an anti-join against two
+               hypertables per dim row and is not affordable at this size. Instead the write path stamps
+               last_seen on every cycle that references a digest, so last_seen is never older than the newest
+               fact row pointing at it, and the GC is an index range scan on last_seen.
+
+               The horizon is the WIDEST effective fact retention of the two tables — resolved through the
+               same resolver the fact purge above uses, so a raised per-collector override can never outlive
+               the dims and orphan a reader — plus a margin covering the two ways a fact can outlive its
+               nominal horizon: drop_chunks only drops a chunk once its WHOLE range is past the cutoff (up to
+               one ChunkIntervalDays of extra rows), and the upsert refreshes last_seen at most hourly. */
+            var widestFactRetentionDays = 1;
+            foreach (var definition in CollectorCatalog.All)
+            {
+                if (PayloadDimensions.ForTable(definition.TargetTable).Count == 0)
+                {
+                    continue;
+                }
+
+                var factRetentionDays = Math.Max(1, retentionDaysFor?.Invoke(definition.Name)
+                    ?? (CollectorScheduleDefaults.All.TryGetValue(definition.Name, out var dimSchedule)
+                        ? dimSchedule.RetentionDays
+                        : 1));
+                widestFactRetentionDays = Math.Max(widestFactRetentionDays, factRetentionDays);
+            }
+
+            var dimensionCutoff = utcNow.AddDays(-(widestFactRetentionDays + TimescaleSupport.ChunkIntervalDays + 1));
+            foreach (var dimTable in PayloadDimensions.DimTables)
+            {
+                var dimDeleted = await PurgeOneAsync(
+                    postgres, dimTable, PayloadDimensions.GcSql(dimTable), dimensionCutoff, logger, cancellationToken);
+                if (dimDeleted is not null)
+                {
+                    tablesPurged++;
+                    totalRowsDeleted += dimDeleted.Value;
+                }
+                else
+                {
+                    tablesFailed++;
+                }
+            }
+
             /* collection_log retention. Since V23 it is a TimescaleDB hypertable (converted DIRECTLY by the V23
                migration — it is NOT in CollectorCatalog.All, so the loop above skips it), so with Timescale it
                purges via drop_chunks in O(1) — no DELETE churn — at its own 2x horizon (CollectionLogRetentionDays).
