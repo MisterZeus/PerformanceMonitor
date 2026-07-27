@@ -1593,9 +1593,6 @@ internal sealed class DarlingStoreUpgrade
         return observedBefore;
     }
 
-    /// <summary>libpq's password file, so pg_upgrade's internal connections authenticate without an
-    /// environment variable carrying the superuser password through the process table. Same
-    /// hardened-temp-file discipline as initdb's <c>--pwfile</c>, deleted in the caller's finally.</summary>
     /// <summary>
     /// The credential every libpq tool in the upgrade authenticates with, handed over as <c>PGPASSWORD</c>
     /// in the child's environment.
@@ -1614,6 +1611,16 @@ internal sealed class DarlingStoreUpgrade
     /// <para>So: one mechanism, no file, nothing persisted, and the same exposure set. libpq reads
     /// <c>PGPASSWORD</c> ahead of any password file, and every tool the upgrade spawns (pg_upgrade and the
     /// pg_dump/pg_restore/psql it spawns in turn) inherits it.</para>
+    ///
+    /// <para><b>This deliberately departs from libpq's documented advice, and the licence for that is in the
+    /// advice itself.</b> The docs say <c>PGPASSWORD</c> "is not recommended for security reasons, as some
+    /// operating systems allow non-root users to see process environment variables via ps" — a warning
+    /// conditioned on the OS exposing environments to other unprivileged users. Windows does not: reading
+    /// another process's environment block needs PROCESS_VM_READ + PROCESS_QUERY_INFORMATION, which across a
+    /// user boundary requires SeDebugPrivilege, i.e. administrator. The bundled runtime is Windows-only, so
+    /// the premise of that warning never holds here. The value is also set on the CHILD's
+    /// <c>ProcessStartInfo.Environment</c>, never via <c>Environment.SetEnvironmentVariable</c> — so the
+    /// service's own environment never carries it, and it dies with the process tree that needed it.</para>
     /// </summary>
     private static Dictionary<string, string> BuildLibpqCredentialEnvironment(string password)
         => new(StringComparer.OrdinalIgnoreCase) { ["PGPASSWORD"] = password };
@@ -1890,9 +1897,6 @@ internal sealed class DarlingStoreUpgrade
         catch (Exception ex)
         {
             _logger.LogWarning("Post-upgrade analyze could not run ({Message}); autovacuum will build the statistics.", ex.Message);
-        }
-        finally
-        {
         }
     }
 }
