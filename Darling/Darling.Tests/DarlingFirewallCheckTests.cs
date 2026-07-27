@@ -380,9 +380,62 @@ public class DarlingFirewallCheckTests
         var script = ReadRepoFile(Path.Combine("Darling", "tools", "install-darling.ps1"));
 
         Assert.Contains("& $serviceExe --configure-firewall", script, StringComparison.Ordinal);
+    }
 
-        var mentions = script.Split("Invoke-FirewallReconcile", StringSplitOptions.None).Length - 1;
-        Assert.True(mentions >= 2, $"Invoke-FirewallReconcile is defined but never called (found {mentions} occurrence(s))");
+    [Fact]
+    public void InstallScript_ReconcilesTheFirewallBeforeTheFirstStart()
+    {
+        /* The pre-start call. Rules must exist before the service ever binds, so the very first start already
+           sees them - otherwise a fresh networked install spends its first start reporting a missing rule. */
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", "install-darling.ps1"));
+
+        var call = script.IndexOf("\nInvoke-FirewallReconcile", StringComparison.Ordinal);
+        var start = script.IndexOf("Start-Service -Name $serviceName", StringComparison.Ordinal);
+
+        Assert.True(call >= 0, "install-darling.ps1 never calls Invoke-FirewallReconcile at top level");
+        Assert.True(start >= 0, "install-darling.ps1 no longer starts the service");
+        Assert.True(call < start, "the firewall reconcile must run BEFORE Start-Service, not after");
+    }
+
+    [Fact]
+    public void InstallScript_ReReconcilesInsideTheNetworkWizardBranch()
+    {
+        /* The SECOND call, pinned by its REASON rather than by counting occurrences. -Network runs
+           --configure-network AFTER the pre-start reconcile, and the wizard rewrites the very exposure that
+           reconcile acted on: a newly exposed endpoint has no rule yet, and one turned back off has a stale
+           one. Losing this call silently reproduces a subset of #1771 on every networked install.
+           A count-based pin does not hold here. The design carries a definition plus TWO calls, so "at least
+           two occurrences" stays GREEN with this one deleted - the exact hole a reviewer caught, and the same
+           vacuous-pin shape as the earlier Contains() that matched the help text. */
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", "install-darling.ps1"));
+        var branch = ExtractBracedBlock(script, "if ($Network) {");
+
+        Assert.Contains("--configure-network", branch, StringComparison.Ordinal);
+        Assert.Contains("Invoke-FirewallReconcile", branch, StringComparison.Ordinal);
+    }
+
+    /// <summary>Returns the body of the first brace-balanced block introduced by <paramref name="header"/>.</summary>
+    private static string ExtractBracedBlock(string script, string header)
+    {
+        var start = script.IndexOf(header, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"expected '{header}' in the script");
+
+        var open = script.IndexOf('{', start);
+        var depth = 0;
+        for (var i = open; i < script.Length; i++)
+        {
+            if (script[i] == '{')
+            {
+                depth++;
+            }
+            else if (script[i] == '}' && --depth == 0)
+            {
+                return script[(open + 1)..i];
+            }
+        }
+
+        Assert.Fail($"unbalanced braces after '{header}'");
+        return "";
     }
 
     [Theory]
