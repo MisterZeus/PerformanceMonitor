@@ -329,10 +329,16 @@ public sealed class DarlingStoreUpgradeTests
             general = source.IndexOf("catch (Exception ex)\n", filtered, StringComparison.Ordinal);
         }
 
+        /* Belt-and-braces, and worth being honest about why: reordering these two clauses does NOT compile
+           (CS0160, "a previous catch clause already catches all exceptions of this or of a super type"), so
+           the compiler — not this assertion — is what actually prevents that specific mutation. This test
+           earns its place on the two assertions around this one: that the filtered clause exists at all, and
+           that nothing inside it reverts. Both of those mutations compile silently. */
         Assert.True(general > filtered,
-            "the unfiltered catch now precedes the post-commit one, so the filtered clause is unreachable. " +
-            "C# takes the first matching handler, the compiler does not warn, and the result is a runtime " +
-            "revert over an already-swapped data directory — an unbootable store.");
+            "the unfiltered catch now precedes the post-commit one, so the filtered clause would be " +
+            "unreachable — a runtime revert over an already-swapped data directory, which is an unbootable " +
+            "store. If this ever fails rather than failing to compile, the structure has changed in a way " +
+            "that needs a human to look at it.");
 
         /* And within the post-commit handler, nothing may revert. */
         var body = source[filtered..general];
@@ -352,6 +358,14 @@ public sealed class DarlingStoreUpgradeTests
         var revert = source.IndexOf("RevertRuntimeForCancel", cancel, StringComparison.Ordinal);
         Assert.True(guard >= 0 && revert > guard,
             "the cancellation path reverts the runtime without checking whether the swap already committed");
+
+        /* ORDER is not CONTAINMENT, and the difference is the whole bug. Moving the revert call OUT of the
+           guarded block leaves it textually after `if (!swapped)` — so the assertion above still passes —
+           while making it run unconditionally, which is precisely the store-bricking path: a shutdown after
+           the swap reverts the runtime and leaves PostgreSQL 17 binaries in front of an 18 data directory.
+           That mutation compiles, and it passed this test green until this line existed. Correct code has no
+           closing brace between the guard and the call; relocating the call introduces two. */
+        Assert.DoesNotContain("}", source[guard..revert], StringComparison.Ordinal);
     }
 
     [Fact]
