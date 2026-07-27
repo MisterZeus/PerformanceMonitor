@@ -1697,8 +1697,9 @@ ORDER BY ag_name, database_name, replica_server_name", connection);
            Information-level recovery it will eventually pair with. Muted alerts are logged too — muting
            suppresses the notification channels, not the operator's ability to find it in the log afterwards. */
         _logger?.LogWarning(
-            "[{Server}] {Metric}: {Detail} (current {Current}, threshold {Threshold}){MutedSuffix}",
-            serverName, metricName, shortMessage, currentValue, thresholdValue, muted ? " [muted]" : "");
+            "{Line}",
+            AlertFiringLog.Fired(
+                serverName, metricName, severity?.ToString() ?? "Warning", shortMessage, muted));
 
         await _deliverer.DeliverAsync(new AlertOutcome(
             serverKey, serverName, metricName, currentValue, thresholdValue,
@@ -1709,8 +1710,11 @@ ORDER BY ag_name, database_name, replica_server_name", connection);
 
     private async Task RecordResolutionAsync(AlertResolution resolution, CancellationToken cancellationToken)
     {
-        _logger?.LogInformation("[{Server}] {Title}: {Message}",
-            resolution.ServerName, resolution.Title, resolution.Message);
+        /* #1681: the RESOLVED half, in the shared shape so it greps together with the TRIGGERED line the
+           firing wrote. resolution.Title is the recovery's own name ("Capture Restored"); the metric it
+           clears is carried separately, and the pair is readable either way. */
+        _logger?.LogInformation("{Line}",
+            AlertFiringLog.Resolved(resolution.ServerName, resolution.Title, resolution.Message));
         try
         {
             await _historyStore.RecordAlertAsync(BuildResolutionRecord(resolution));
