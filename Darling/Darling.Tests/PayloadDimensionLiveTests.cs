@@ -650,9 +650,23 @@ public sealed class PayloadDimensionLiveTests
 
         /* The OBSERVER's session. Deliberately a separate NpgsqlConnection and deliberately NOT migrated:
            only the writer touches DDL, so nothing here can serialize behind the writer's own work and
-           accidentally turn "sees nothing" into "was blocked from looking". */
+           accidentally turn "sees nothing" into "was blocked from looking".
+
+           It still needs the search_path, and it must SET it rather than inherit one. MigrateAsync
+           SETs the path on whatever session it is handed; the store-wide default comes from
+           ALTER DATABASE, which reaches only sessions established AFTER it commits — and Npgsql
+           POOLS sessions, so a physical connection opened before the first migration keeps the
+           default "$user", public for its whole life and resolves bare `query_stats` to nothing
+           (42P01). On a long-lived store every session postdates that ALTER by days, which is why
+           this passes locally and failed on CI's fresh cluster, where the pool is full of
+           connections older than the migration. Setting it here makes the observer independent of
+           both the ALTER's timing and the pool's reuse. */
         await using var observer = new NpgsqlConnection(connectionString!);
         await observer.OpenAsync(ct);
+        await using (var setPath = new NpgsqlCommand("SET search_path = " + PgSchemaGenerator.SearchPath, observer))
+        {
+            await setPath.ExecuteNonQueryAsync(ct);
+        }
 
         async Task<long> ObservedFactRowsAsync()
             => (long)(await ScalarAsync(
