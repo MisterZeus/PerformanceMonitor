@@ -188,13 +188,13 @@ public class ThemeParityTests
         return h.Length == 8 ? "#" + h : c.ToUpperInvariant();
     }
 
+    /// <summary>Repo-relative path to the Dashboard's theme folder — under deprecated/ since #1612.</summary>
+    private static readonly string DashboardThemesPath = Path.Combine("deprecated", "Dashboard", "Themes");
+
     /// <summary>
     /// Walks up from the test output directory to the repo root — the directory that contains both
     /// Dashboard\Themes and Lite\Themes. Mirrors Installer.Tests' FindInstallDirectory walk-up.
     /// </summary>
-    /// <summary>Repo-relative path to the Dashboard's theme folder — under deprecated/ since #1612.</summary>
-    private static readonly string DashboardThemesPath = Path.Combine("deprecated", "Dashboard", "Themes");
-
     private static string? FindRepoRoot()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);

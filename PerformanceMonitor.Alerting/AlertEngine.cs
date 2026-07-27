@@ -300,7 +300,7 @@ public sealed class AlertEngine
 
                 /* :91-98 — CPU passes no context and no numerics, exactly Lite.
                    ShortMessage = the toast body of :84 minus the server-name prefix. */
-                await _deliverer.DeliverAsync(new AlertOutcome(
+                await FireAsync(new AlertOutcome(
                     key, serverName, "High CPU",
                     $"{alertCpuValue:F0}% ({cpuMetricLabel})",
                     $"{_settings.CpuThresholdPercent}%",
@@ -402,7 +402,7 @@ public sealed class AlertEngine
             /* :175-183 — SendDetectedAlertAsync's #1141/#1236 delivery-mode fan-out is an
                IAlertDeliverer concern; the engine emits one outcome. No numerics, exactly Lite.
                ShortMessage = the toast body of :167. */
-            await _deliverer.DeliverAsync(new AlertOutcome(
+            await FireAsync(new AlertOutcome(
                 key, serverName, "Blocking Detected",
                 effectiveBlockingCount.ToString(),
                 _settings.BlockingCountThreshold.ToString(),
@@ -487,7 +487,7 @@ public sealed class AlertEngine
             var detailText = AlertContextBuilders.ContextToDetailText(deadlockContext);
 
             /* :252-260 — no numerics, exactly Lite. ShortMessage = the toast body of :244. */
-            await _deliverer.DeliverAsync(new AlertOutcome(
+            await FireAsync(new AlertOutcome(
                 key, serverName, "Deadlocks Detected",
                 effectiveDeadlockCount.ToString(),
                 _settings.DeadlockCountThreshold.ToString(),
@@ -540,7 +540,7 @@ public sealed class AlertEngine
                     var detailText = AlertContextBuilders.ContextToDetailText(poisonContext);   /* :308 */
 
                     /* :310-320. ShortMessage = the toast body of :302. */
-                    await _deliverer.DeliverAsync(new AlertOutcome(
+                    await FireAsync(new AlertOutcome(
                         key, serverName, "Poison Wait",
                         allWaitNames,
                         $"{_settings.PoisonWaitThresholdMs}ms avg",
@@ -622,7 +622,7 @@ public sealed class AlertEngine
                     var detailText = AlertContextBuilders.ContextToDetailText(lrqContext);                       /* :380 */
 
                     /* :382-392. ShortMessage = the toast body of :374. */
-                    await _deliverer.DeliverAsync(new AlertOutcome(
+                    await FireAsync(new AlertOutcome(
                         key, serverName, "Long-Running Query",
                         $"{longRunning.Count} query(s), longest {elapsedMinutes}m",
                         $"{_settings.LongRunningQueryThresholdMinutes}m",
@@ -682,7 +682,7 @@ public sealed class AlertEngine
                     var detailText = AlertContextBuilders.ContextToDetailText(tempDbContext); /* :441 */
 
                     /* :443-453. ShortMessage = the toast body of :435. */
-                    await _deliverer.DeliverAsync(new AlertOutcome(
+                    await FireAsync(new AlertOutcome(
                         key, serverName, "tempdb Space",
                         $"{tempDb.UsedPercent:F0}% used ({tempDb.TotalReservedMb:F0} MB)",
                         $"{_settings.TempDbSpaceThresholdPercent}%",
@@ -763,7 +763,7 @@ public sealed class AlertEngine
                     var detailText = AlertContextBuilders.ContextToDetailText(lowDiskContext); /* :523 */
 
                     /* :525-535. ShortMessage = the toast body of :510. */
-                    await _deliverer.DeliverAsync(new AlertOutcome(
+                    await FireAsync(new AlertOutcome(
                         key, serverName, "Volume Free Space",
                         $"{worst.MountPoint} {worst.FreePercent:F0}% free ({worst.FreeGb:F1} GB)",
                         AlertContextBuilders.FormatLowDiskThreshold(_settings.LowDiskThresholdPercent, _settings.LowDiskThresholdGb),
@@ -840,7 +840,7 @@ public sealed class AlertEngine
                     var detailText = AlertContextBuilders.ContextToDetailText(jobContext);                     /* :601 */
 
                     /* :603-613. ShortMessage = the toast body of :595. */
-                    await _deliverer.DeliverAsync(new AlertOutcome(
+                    await FireAsync(new AlertOutcome(
                         key, serverName, "Long-Running Job",
                         $"{anomalousJobs.Count} job(s) exceeding {_settings.LongRunningJobMultiplier}x average",
                         $"{_settings.LongRunningJobMultiplier}x historical avg",
@@ -929,7 +929,7 @@ public sealed class AlertEngine
                     var detailText = AlertContextBuilders.ContextToDetailText(failedJobContext);               /* :696 */
 
                     /* :698-708. ShortMessage = the toast body of :690. */
-                    await _deliverer.DeliverAsync(new AlertOutcome(
+                    await FireAsync(new AlertOutcome(
                         key, serverName, "Failed Agent Job",
                         $"{failedJobs.Count} job failure(s) in last {_settings.FailedJobLookbackMinutes}m — {jobNames}",
                         $"last {_settings.FailedJobLookbackMinutes}m",
@@ -959,6 +959,35 @@ public sealed class AlertEngine
     private static bool CooldownElapsed(
         ConcurrentDictionary<string, DateTime> lastFired, string key, DateTime now, TimeSpan cooldown) =>
         !lastFired.TryGetValue(key, out var last) || now - last >= cooldown;
+
+    /// <summary>
+    /// Delivers one fired alert AND logs it (#1681). Every family routes through here rather than calling
+    /// the deliverer directly, so a tenth family cannot be added that silently skips the log — which is
+    /// exactly how the nine below ended up firing silently while their RESOLUTIONS were logged, leaving an
+    /// operator's log showing "… Cleared" with nothing before it.
+    ///
+    /// <para>Logged at Warning: a fired alert is by definition something wrong on a monitored server, and it
+    /// has to stand out from the Information-level resolution it will eventually pair with. The wording comes
+    /// from the shared <see cref="AlertFiringLog"/> so the engine, Darling's self-alerts and Lite's direct
+    /// senders all read identically.</para>
+    ///
+    /// <para>The log happens BEFORE delivery on purpose. Delivery does I/O (SMTP, webhooks, a history-row
+    /// write) and swallows its own failures, so logging afterwards would lose the record of an alert whose
+    /// delivery hung or failed — and that alert is precisely the one an operator later goes looking for.</para>
+    /// </summary>
+    private async Task FireAsync(AlertOutcome outcome, CancellationToken ct)
+    {
+        _logger?.LogWarning(
+            "{Line}",
+            AlertFiringLog.Fired(
+                outcome.ServerName,
+                outcome.MetricName,
+                outcome.Severity?.ToString() ?? "Warning",
+                outcome.ShortMessage,
+                outcome.Muted));
+
+        await _deliverer.DeliverAsync(outcome, ct);
+    }
 
     /// <summary>
     /// Reports a condition-recovered transition to the optional host callback. Callback failures
