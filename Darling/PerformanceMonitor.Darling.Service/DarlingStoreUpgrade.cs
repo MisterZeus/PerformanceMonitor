@@ -1158,50 +1158,175 @@ internal sealed class DarlingStoreUpgrade
         => Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory)) + "-old-" + oldMajor.ToString(CultureInfo.InvariantCulture);
 
     /// <summary>
-    /// Ages out the pre-upgrade data directory kept for rollback: each service start bumps its counter, and
-    /// the copy is deleted once it has survived <see cref="RollbackRetentionStarts"/> starts — with a log
-    /// line naming the space reclaimed, because a silently vanishing multi-GB directory is its own support
-    /// call. Runs on EVERY start, not only upgrade starts, since that is what makes the countdown advance.
+    /// Ages out the pre-upgrade data directories kept for rollback: each service start bumps a copy's
+    /// counter, and the copy is deleted once it has survived <see cref="RollbackRetentionStarts"/> starts —
+    /// with a log line naming the space reclaimed, because a silently vanishing multi-GB directory is its
+    /// own support call. Runs on EVERY start, not only upgrade starts, since that is what makes the
+    /// countdown advance.
+    ///
+    /// <para><b>Every retained copy is considered independently (#1770).</b> The failure handling used to sit
+    /// outside the loop, so ONE copy that could not be measured or deleted — a file a not-yet-exited
+    /// postmaster or an antivirus scan still holds, an ACL the service account lost — abandoned the sweep for
+    /// every other copy as well, and kept abandoning it for as long as the condition lasted. Their counters
+    /// stopped advancing too, so nothing aged out and multi-GB directories accumulated on exactly the hosts
+    /// that can least afford them. A failure now costs that one directory its turn and nothing else.</para>
     /// </summary>
     internal void SweepRetainedDataDirectories(string dataDirectory)
     {
+        string liveDataDirectory;
+        string parent;
+        string prefix;
+        string[] retained;
+
         try
         {
-            var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory)));
-            var prefix = Path.GetFileName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory))) + "-old-";
+            liveDataDirectory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory));
+            parent = Path.GetDirectoryName(liveDataDirectory) ?? string.Empty;
+            prefix = Path.GetFileName(liveDataDirectory) + "-old-";
             if (string.IsNullOrEmpty(parent) || !Directory.Exists(parent))
             {
                 return;
             }
 
-            foreach (var retained in Directory.GetDirectories(parent, prefix + "*"))
-            {
-                var counterPath = retained + ".starts";
-                var starts = int.TryParse(ReadTrimmedOrNull(counterPath), NumberStyles.None, CultureInfo.InvariantCulture, out var parsed)
-                    ? parsed + 1
-                    : 1;
+            retained = Directory.GetDirectories(parent, prefix + "*");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                "Could not look for retained pre-upgrade data directories ({Message}) — any that exist are safe to delete by hand.",
+                ex.Message);
+            return;
+        }
 
-                if (starts < RollbackRetentionStarts)
+        foreach (var copy in retained)
+        {
+            /* A wildcard is not what a delete should be trusting. Directory.GetDirectories' pattern also
+               matches a directory's Windows 8.3 SHORT name, so the real name is re-checked against the
+               prefix before this touches anything: the only directories this deletes are the ones
+               RetainedDataDirectoryFor names. */
+            if (!Path.GetFileName(copy).StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            try
+            {
+                AgeOutRetainedDataDirectory(copy);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    "Could not age out the retained pre-upgrade store data directory {Path} ({Message}). The other retained copies were still swept, and this one is retried on the next service start — it is safe to delete by hand.",
+                    copy, ex.Message);
+            }
+        }
+
+        ReportUnmanagedStoreCopies(parent, liveDataDirectory, retained);
+    }
+
+    /// <summary>
+    /// One retained copy's turn: bump its counter, or delete it once it has outlived
+    /// <see cref="RollbackRetentionStarts"/> starts. Throws on I/O trouble so the caller can report THIS
+    /// directory and carry on with the rest.
+    /// </summary>
+    private void AgeOutRetainedDataDirectory(string retained)
+    {
+        var counterPath = retained + ".starts";
+        var starts = int.TryParse(ReadTrimmedOrNull(counterPath), NumberStyles.None, CultureInfo.InvariantCulture, out var parsed)
+            ? parsed + 1
+            : 1;
+
+        if (starts < RollbackRetentionStarts)
+        {
+            File.WriteAllText(counterPath, starts.ToString(CultureInfo.InvariantCulture));
+            _logger.LogInformation(
+                "Keeping the pre-upgrade store data directory {Path} for {Remaining} more service start(s) as a rollback copy.",
+                retained, RollbackRetentionStarts - starts);
+            return;
+        }
+
+        var reclaimed = MeasureDirectoryBytes(retained);
+        Directory.Delete(retained, recursive: true);
+        TryDeleteFile(counterPath);
+        _logger.LogInformation(
+            "Deleted the pre-upgrade store data directory {Path} after {Starts} service starts on the upgraded store, reclaiming {Size}.",
+            retained, RollbackRetentionStarts, FormatBytes(reclaimed));
+    }
+
+    /// <summary>
+    /// Names the store-shaped directories sitting beside the live data directory that this service did not
+    /// create, with what they are costing in disk — and deletes none of them.
+    ///
+    /// <para>A production field instance was found carrying seven hand-made copies from a week of upgrade
+    /// rehearsals, on a volume with roughly 175 GB free against a 286 GB data directory — far under the 2x a
+    /// future major upgrade in copy mode needs — and nothing had ever mentioned they were there. Deleting
+    /// them is not this service's call: a copy someone made by hand is a decision, and a product that
+    /// silently reverses its operator's decisions is worse than one that wastes disk. But staying silent
+    /// about tens of gigabytes is how a volume gets to that state unnoticed, so the copies are reported every
+    /// start, by name and size, until someone removes them.</para>
+    ///
+    /// <para>Identified STRUCTURALLY — a directory holding a <c>PG_VERSION</c> file — and never by a name
+    /// pattern. That file is what makes a directory a PostgreSQL data directory, so this cannot mistake an
+    /// unrelated folder for a store copy however it happens to be named, and a report is in any case the one
+    /// verdict that stays harmless if it is ever wrong.</para>
+    /// </summary>
+    private void ReportUnmanagedStoreCopies(string parent, string liveDataDirectory, string[] managed)
+    {
+        try
+        {
+            var found = new List<(string Path, long Bytes)>();
+            foreach (var candidate in Directory.GetDirectories(parent))
+            {
+                if (string.Equals(candidate, liveDataDirectory, StringComparison.OrdinalIgnoreCase)
+                    || IsOneOf(managed, candidate)
+                    || !File.Exists(Path.Combine(candidate, "PG_VERSION")))
                 {
-                    File.WriteAllText(counterPath, starts.ToString(CultureInfo.InvariantCulture));
-                    _logger.LogInformation(
-                        "Keeping the pre-upgrade store data directory {Path} for {Remaining} more service start(s) as a rollback copy.",
-                        retained, RollbackRetentionStarts - starts);
                     continue;
                 }
 
-                var reclaimed = MeasureDirectoryBytes(retained);
-                Directory.Delete(retained, recursive: true);
-                TryDeleteFile(counterPath);
-                _logger.LogInformation(
-                    "Deleted the pre-upgrade store data directory {Path} after {Starts} service starts on the upgraded store, reclaiming {Size}.",
-                    retained, RollbackRetentionStarts, FormatBytes(reclaimed));
+                found.Add((candidate, MeasureDirectoryBytes(candidate)));
+            }
+
+            if (found.Count == 0)
+            {
+                return;
+            }
+
+            long total = 0;
+            foreach (var (_, bytes) in found)
+            {
+                total += bytes;
+            }
+
+            found.Sort(static (left, right) => right.Bytes.CompareTo(left.Bytes));
+
+            _logger.LogWarning(
+                "{Count} store data director(ies) beside {Live} were not created by this service, and are holding {Size}. They are NOT deleted automatically — a copy made by hand is someone's decision to reverse, not this service's. Remove the ones you no longer need: a major store upgrade in copy mode needs roughly twice the data directory in free space.",
+                found.Count, liveDataDirectory, FormatBytes(total));
+
+            foreach (var (path, bytes) in found)
+            {
+                _logger.LogWarning("Unmanaged store data directory: {Path} ({Size}).", path, FormatBytes(bytes));
             }
         }
         catch (Exception ex)
         {
-            _logger.LogWarning("Could not sweep retained pre-upgrade data directories ({Message}) — they are safe to delete by hand.", ex.Message);
+            _logger.LogWarning(
+                "Could not check for store data directories beside {Live} ({Message}).", liveDataDirectory, ex.Message);
         }
+    }
+
+    private static bool IsOneOf(string[] paths, string candidate)
+    {
+        foreach (var path in paths)
+        {
+            if (string.Equals(path, candidate, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /* ============================ the upgrade ============================ */
