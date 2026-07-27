@@ -169,6 +169,12 @@ public partial class MainWindow : Window
                 MetricName = metricName
             });
 
+            /* #1681: log the FIRING. Connection alerts bypass both the shared engine and its logging funnel
+               (they fire from the connect edge, not the sweep), so without this they were invisible in the
+               log while their resolution toast was not. */
+            AppLogger.Warn("Alerts", AlertFiringLog.Fired(
+                serverName, metricName, "Critical", currentValue, isMuted));
+
             _ = _emailAlertService.TrySendAlertEmailAsync(
                 metricName,
                 serverName,
@@ -224,6 +230,12 @@ public partial class MainWindow : Window
     /// </summary>
     private Task ShowAlertResolutionToastAsync(AlertResolution resolution, CancellationToken cancellationToken)
     {
+        /* #1681: Lite logged NEITHER half — the toast is transient and nothing reached the log file, so an
+           operator reading logs after the fact saw no alert history at all. Now the engine's funnel logs the
+           firing and this logs the clear, in the shared shape, so the pair greps together. */
+        AppLogger.Info("Alerts", AlertFiringLog.Resolved(
+            resolution.ServerName, resolution.MetricName, resolution.Message));
+
         var tray = _trayService;
         if (tray != null)
         {
@@ -320,6 +332,19 @@ public partial class MainWindow : Window
                 ServerName = serverName,
                 MetricName = alert.MetricName
             });
+
+            /* #1681: AG alerts also bypass the engine funnel, so they log here. A resolution notice logs as
+               RESOLVED rather than TRIGGERED, which is what makes the pair readable — an "AG Replica
+               Reconnected" with no preceding "AG Replica Disconnected" is the exact half-story this fixes. */
+            if (alert.IsResolution)
+            {
+                AppLogger.Info("Alerts", AlertFiringLog.Resolved(serverName, alert.MetricName, alert.DetailText));
+            }
+            else
+            {
+                AppLogger.Warn("Alerts", AlertFiringLog.Fired(
+                    serverName, alert.MetricName, "Warning", alert.CurrentValue, isMuted));
+            }
 
             _ = _emailAlertService.TrySendAlertEmailAsync(
                 alert.MetricName,
