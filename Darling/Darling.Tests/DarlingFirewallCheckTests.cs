@@ -171,6 +171,72 @@ public class DarlingFirewallCheckTests
             FirewallRuleVerdict.ExposedRuleMissing, "PerformanceMonitor Darling MCP (port 5152)", 5152, "   "));
     }
 
+    /* ---- the per-surface sweep: a port change strands the OLD rule, and only a wildcard reaches it ---- */
+
+    [Theory]
+    [InlineData("PerformanceMonitor Darling MCP (port 5152)", "PerformanceMonitor Darling MCP (port *)")]
+    [InlineData("PerformanceMonitor Darling Web (port 5153)", "PerformanceMonitor Darling Web (port *)")]
+    [InlineData("PerformanceMonitor Darling store (port 5641)", "PerformanceMonitor Darling store (port *)")]
+    public void SurfaceRuleWildcard_CoversEveryPortOfOneSurface(string ruleName, string expected)
+        => Assert.Equal(expected, DarlingFirewallCheck.SurfaceRuleWildcard(ruleName));
+
+    [Fact]
+    public void SurfaceRuleWildcard_KeepsSurfacesApart()
+    {
+        /* The sweep must not reach across surfaces: clearing MCP's old ports must never touch the web rule. */
+        var mcp = DarlingFirewallCheck.SurfaceRuleWildcard(DarlingMcpHostService.McpFirewallRuleName(5152));
+
+        Assert.DoesNotContain("Web", mcp, StringComparison.Ordinal);
+        Assert.DoesNotContain("store", mcp, StringComparison.Ordinal);
+        Assert.NotEqual(mcp, DarlingFirewallCheck.SurfaceRuleWildcard(DarlingWebHostService.WebFirewallRuleName(5153)));
+    }
+
+    [Theory]
+    [InlineData("PerformanceMonitor Darling MCP")]
+    [InlineData("")]
+    [InlineData("something else entirely")]
+    public void SurfaceRuleWildcard_NeverInventsAWildcardFromAnUnrecognizedName(string ruleName)
+    {
+        /* Safety, not formality: a wildcard derived from a name with no port suffix would broaden the sweep to
+           whatever else happened to share the prefix — rules this product does not own and must not delete. */
+        Assert.Equal(ruleName, DarlingFirewallCheck.SurfaceRuleWildcard(ruleName));
+        Assert.DoesNotContain("*", DarlingFirewallCheck.SurfaceRuleWildcard(ruleName), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildFirewallSweepCommand_IsStandalone_AndReportsRealFailuresLoudly()
+    {
+        var cmd = DarlingManagedPostgres.BuildFirewallSweepCommand("PerformanceMonitor Darling MCP (port *)");
+
+        Assert.Contains("Remove-NetFirewallRule -DisplayName 'PerformanceMonitor Darling MCP (port *)'", cmd, StringComparison.Ordinal);
+        Assert.DoesNotContain("New-NetFirewallRule", cmd, StringComparison.Ordinal);
+
+        /* SilentlyContinue would hide the error TEXT but still exit 1, so access denied would surface as
+           "exit 1:" with an empty message — the trap BuildFirewallDisableCommand documents. */
+        Assert.DoesNotContain("-ErrorAction SilentlyContinue", cmd, StringComparison.Ordinal);
+        Assert.Contains("-ErrorAction Stop", cmd, StringComparison.Ordinal);
+        Assert.Contains("ObjectNotFound", cmd, StringComparison.Ordinal);
+        Assert.Contains("throw", cmd, StringComparison.Ordinal);
+
+        /* It ends in `exit 0`, which makes it a COMPLETE command: concatenating it ahead of another would
+           terminate the shell before that command ran. The verb must run it as its own step. */
+        Assert.EndsWith("exit 0", cmd, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ConfigureFirewall_RunsTheSweepAsItsOwnStep_NeverConcatenatedAheadOfTheOpen()
+    {
+        /* Pins the call shape, because the failure is silent and total: `sweep + "; " + enable` exits at the
+           sweep's `exit 0` and the rule is never created, while the verb still reports success. I wrote that
+           bug and caught it before it ran. */
+        var source = ReadRepoFile(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs"));
+
+        Assert.DoesNotContain("BuildFirewallSweepCommand(wildcard) + ", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("sweep + \"; \"", source, StringComparison.Ordinal);
+        Assert.Contains("BuildFirewallSweepCommand(wildcard)", source, StringComparison.Ordinal);
+    }
+
     /* ---- no retry spam: report once per state, not once per supervisor tick ---- */
 
     [Fact]

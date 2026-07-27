@@ -78,6 +78,26 @@ internal static class DarlingFirewallCheck
     /// </summary>
     internal const string RuleNamePrefix = "PerformanceMonitor Darling ";
 
+    /// <summary>The separator every scoped rule name puts before its port, and the seam this class derives a
+    /// per-surface wildcard from.</summary>
+    private const string PortSuffixSeparator = " (port ";
+
+    /// <summary>
+    /// PURE: the DisplayName wildcard covering EVERY port of one surface — <c>"PerformanceMonitor Darling MCP
+    /// (port *)"</c> for any MCP rule. The port is part of the rule NAME, so changing a port does not update a
+    /// rule, it makes a DIFFERENT one and strands the old: an inbound allow rule left open on a port the
+    /// service no longer listens on. Reconciling by exact name alone could never clean that up, so the
+    /// elevated verb sweeps this wildcard per surface before ensuring the desired rule.
+    /// <para>An unrecognized name (no port suffix) returns UNCHANGED rather than gaining a wildcard. That is
+    /// the safety property, not a formality: a wildcard derived from a malformed name could match — and
+    /// therefore delete — rules this product does not own.</para>
+    /// </summary>
+    internal static string SurfaceRuleWildcard(string ruleName)
+    {
+        var separator = ruleName.IndexOf(PortSuffixSeparator, StringComparison.Ordinal);
+        return separator < 0 ? ruleName : ruleName[..separator] + PortSuffixSeparator + "*)";
+    }
+
     /// <summary>
     /// PURE probe command: count the rules with this DisplayName and print the count behind
     /// <see cref="ProbeSentinel"/>. Deliberately shaped to ALWAYS exit 0 and never throw:

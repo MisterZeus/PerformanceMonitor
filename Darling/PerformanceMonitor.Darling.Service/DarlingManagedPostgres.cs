@@ -2145,6 +2145,27 @@ public sealed class DarlingManagedPostgres
         => $"try {{ Remove-NetFirewallRule -DisplayName {SingleQuotedPowerShell(ruleName)} -ErrorAction Stop }} " +
            $"catch {{ if ($_.CategoryInfo.Category -ne 'ObjectNotFound') {{ throw }} }}; exit 0";
 
+    /// <summary>
+    /// Removes EVERY rule matching a DisplayName wildcard — how the elevated verb clears one surface's rules
+    /// for ALL ports before ensuring the current one (#1771). The port lives in the rule NAME, so a port change
+    /// does not update a rule, it strands the old one as an inbound allow rule on a port nothing serves; only a
+    /// wildcard sweep can reach it.
+    /// <para>Shaped exactly like <see cref="BuildFirewallDisableCommand"/> rather than with
+    /// <c>-ErrorAction SilentlyContinue</c>, and for the same reason: SilentlyContinue hides the error TEXT but
+    /// still exits 1, so a genuine failure (access denied, leaving a stale allow rule behind) would report as
+    /// "exit 1:" with an EMPTY message — the trap that builder documents. Catching ObjectNotFound and
+    /// rethrowing anything else keeps a real failure loud and a no-op quiet. A wildcard matching nothing is not
+    /// an error here anyway (verified on Windows 11 26200, where the exact-name form DOES raise
+    /// ObjectNotFound), but the shape costs nothing and does not depend on that.</para>
+    /// <para>This is a COMPLETE command, not a fragment: the trailing <c>exit 0</c> means it must be run as its
+    /// own step and never string-concatenated ahead of another command, which would terminate the shell before
+    /// that command ran. Callers MUST pass a wildcard from
+    /// <see cref="DarlingFirewallCheck.SurfaceRuleWildcard"/>, never an operator-supplied string.</para>
+    /// </summary>
+    internal static string BuildFirewallSweepCommand(string displayNameWildcard)
+        => $"try {{ Remove-NetFirewallRule -DisplayName {SingleQuotedPowerShell(displayNameWildcard)} -ErrorAction Stop }} " +
+           $"catch {{ if ($_.CategoryInfo.Category -ne 'ObjectNotFound') {{ throw }} }}; exit 0";
+
     /// <summary>Last (rule, verdict) reported, so a repeated network reconcile restates a steady firewall
     /// state at most once (<see cref="DarlingFirewallCheck.ShouldReport"/>).</summary>
     private string? _lastFirewallRule;

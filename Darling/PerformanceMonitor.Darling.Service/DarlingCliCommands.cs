@@ -1970,19 +1970,26 @@ public static class DarlingCliCommands
                 output.WriteLine($"{plan.Surface}: {plan.Note}.");
             }
 
+            /* Sweep this surface's rules for EVERY port FIRST, as its own step. The port is part of the rule
+               name, so changing a port does not update a rule — it makes a different one and strands the old as
+               an inbound allow rule on a port nothing serves. Reconciling by exact name could never reach that.
+               Its own step, not concatenated ahead of the open below, because the sweep command ends in exit 0
+               and would otherwise terminate the shell before the rule was created. */
+            var wildcard = DarlingFirewallCheck.SurfaceRuleWildcard(plan.RuleName);
+            if (!await TryRunFirewallStepAsync(
+                DarlingManagedPostgres.BuildFirewallSweepCommand(wildcard),
+                plan.Action == FirewallRuleAction.Remove
+                    ? $"{plan.Surface}: loopback-only — no rule needed (removed any '{wildcard}')."
+                    : $"{plan.Surface}: cleared any previous rule matching '{wildcard}'.",
+                $"{plan.Surface}: could not remove the rule(s) matching '{wildcard}'",
+                output, error, cancellationToken))
+            {
+                failures++;
+            }
+
             if (plan.Action == FirewallRuleAction.Remove)
             {
-                /* Loopback-only: the desired state is no rule. Removal is idempotent (an absent rule exits 0),
-                   so this both cleans up after an exposure that was turned off and no-ops on a fresh install. */
-                if (!await TryRunFirewallStepAsync(
-                    DarlingManagedPostgres.BuildFirewallDisableCommand(plan.RuleName),
-                    $"{plan.Surface}: loopback-only — no rule needed (removed '{plan.RuleName}' if it existed).",
-                    $"{plan.Surface}: could not remove the rule '{plan.RuleName}'",
-                    output, error, cancellationToken))
-                {
-                    failures++;
-                }
-
+                /* Loopback-only: the desired state is no rule at all, on any port — the sweep WAS the work. */
                 continue;
             }
 
