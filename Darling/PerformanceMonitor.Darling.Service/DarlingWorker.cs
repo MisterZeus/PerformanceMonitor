@@ -586,13 +586,16 @@ public sealed class DarlingWorker : BackgroundService
     /// which is a routine maintenance step the log already records rather than something to page about.
     /// </summary>
     [SupportedOSPlatform("windows")]
-    private static DarlingSelfAlertEvaluator.StoreUpgradeReport? BuildStoreUpgradeReport(
+    internal static DarlingSelfAlertEvaluator.StoreUpgradeReport? BuildStoreUpgradeReport(
         DarlingStoreUpgrade.StoreUpgradeOutcome outcome)
         => outcome.Status switch
         {
+            /* outcome.Message is carried through on SUCCESS too, not just failure: a post-commit bookkeeping
+               failure returns Succeeded with the warning there, and dropping it here would leave the alert
+               reassuring while the log alarms. The alert is the surface an operator actually receives. */
             DarlingStoreUpgrade.StoreUpgradeStatus.Succeeded => new DarlingSelfAlertEvaluator.StoreUpgradeReport(
                 true, outcome.FromMajor, outcome.ToMajor, outcome.FromTimescale, outcome.ToTimescale,
-                null, null, outcome.UsedLinkMode),
+                null, outcome.Message, outcome.UsedLinkMode),
             DarlingStoreUpgrade.StoreUpgradeStatus.Failed => new DarlingSelfAlertEvaluator.StoreUpgradeReport(
                 false, outcome.FromMajor, outcome.ToMajor, outcome.FromTimescale, outcome.ToTimescale,
                 outcome.FailedStep, outcome.Message, false),

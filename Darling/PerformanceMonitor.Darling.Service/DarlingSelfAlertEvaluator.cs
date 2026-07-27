@@ -1174,22 +1174,35 @@ internal sealed class DarlingSelfAlertEvaluator
 
             if (report.Succeeded)
             {
-                var rollback = report.WithoutRollbackCopy
-                    ? " The upgrade ran in hard-link mode, so there is NO rollback copy of the pre-upgrade store — the only way back is a restore from backup."
-                    : " The pre-upgrade data directory is kept as a rollback copy for the next couple of service starts, then deleted automatically.";
+                /* A post-commit bookkeeping failure arrives as Succeeded WITH a message. When it is present
+                   the reassuring rollback sentence is not merely incomplete, it is wrong — the retention
+                   marker is the very thing that failed — so it is replaced rather than appended to, and the
+                   severity escalates to Critical. An operator receiving "upgraded, all tidy" while the log
+                   says otherwise is the failure this whole review round was about. */
+                var degraded = !string.IsNullOrWhiteSpace(report.FailureMessage);
+
+                var rollback = degraded
+                    ? $" BUT post-upgrade bookkeeping did NOT complete: {report.FailureMessage}. The store itself is fine and running on PostgreSQL {report.ToMajor} — this is about cleanup, not data. Check free disk space on the store volume, and remove the pre-upgrade data directory by hand once you are satisfied with the upgraded store, because it will not age out on its own."
+                    : report.WithoutRollbackCopy
+                        ? " The upgrade ran in hard-link mode, so there is NO rollback copy of the pre-upgrade store — the only way back is a restore from backup."
+                        : " The pre-upgrade data directory is kept as a rollback copy for the next couple of service starts, then deleted automatically.";
 
                 await FireAsync(
                     StoreUpgradeKey, "Monitor Store", StoreUpgradeMetric,
-                    $"PostgreSQL {report.ToMajor}", $"PostgreSQL {report.FromMajor}",
+                    degraded ? $"PostgreSQL {report.ToMajor} (cleanup incomplete)" : $"PostgreSQL {report.ToMajor}",
+                    $"PostgreSQL {report.FromMajor}",
                     detail: $"The monitor's own store was upgraded in place from PostgreSQL {report.FromMajor} to {report.ToMajor}.{timescale} " +
                         "Collection was paused for the duration and has resumed. The upgraded store was verified before this alert: server version, " +
                         "TimescaleDB extension version, and a real read of a collector table." + rollback,
-                    /* Warning, not a quieter level, and the enum has only Warning/Critical anyway: a
-                       successful major upgrade still means the store was OFFLINE for minutes and there is a
-                       corresponding hole in every collector's history. That is worth an operator's attention
-                       even though nothing went wrong. */
-                    severity: AlertSeverityLevel.Warning,
-                    shortMessage: $"store upgraded to PostgreSQL {report.ToMajor}", cancellationToken);
+                    /* Warning for a clean upgrade — the store was still OFFLINE for minutes and there is a
+                       corresponding hole in every collector's history, which is worth attention even though
+                       nothing went wrong. CRITICAL when bookkeeping failed, because that one needs somebody
+                       to actually go and look. */
+                    severity: degraded ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
+                    shortMessage: degraded
+                        ? $"store upgraded to PostgreSQL {report.ToMajor}, but post-upgrade cleanup did NOT complete"
+                        : $"store upgraded to PostgreSQL {report.ToMajor}",
+                    cancellationToken);
                 return;
             }
 

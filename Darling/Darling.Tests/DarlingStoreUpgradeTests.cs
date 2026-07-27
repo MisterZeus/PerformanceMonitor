@@ -256,6 +256,41 @@ public sealed class DarlingStoreUpgradeTests
         => Assert.Equal(expected, DarlingStoreUpgrade.ParseTimescaleLibraryVersion(fileName));
 
     [Fact]
+    public void BuildStoreUpgradeReport_CarriesAPostCommitWarningThroughOnSuccess()
+    {
+        /* THE SEAM THE DEFECT LIVED IN. A post-commit bookkeeping failure returns Succeeded with the reason
+           in Message, and this mapping is what hands it to the alert engine. It previously hardcoded null
+           here, so the reason was dropped between the orchestration and the operator: the log alarmed and the
+           alert reassured. Pinned at the MAPPING rather than at the evaluator, because an evaluator test
+           passes its own report in and cannot see this hop at all — verified by re-introducing the bug and
+           watching the evaluator test stay green. */
+        var outcome = new DarlingStoreUpgrade.StoreUpgradeOutcome(
+            DarlingStoreUpgrade.StoreUpgradeStatus.Succeeded, 17, 18, "2.28.1", "2.28.1",
+            FailedStep: null, Message: "the retention marker could not be written (disk full)", UsedLinkMode: false);
+
+        var report = DarlingWorker.BuildStoreUpgradeReport(outcome);
+
+        Assert.NotNull(report);
+        Assert.True(report!.Succeeded);
+        Assert.Equal("the retention marker could not be written (disk full)", report.FailureMessage);
+    }
+
+    [Fact]
+    public void BuildStoreUpgradeReport_CleanSuccessCarriesNoWarning_AndExtensionOnlyIsLogOnly()
+    {
+        var clean = DarlingWorker.BuildStoreUpgradeReport(new DarlingStoreUpgrade.StoreUpgradeOutcome(
+            DarlingStoreUpgrade.StoreUpgradeStatus.Succeeded, 17, 18, "2.28.1", "2.28.1", null, null, false));
+        Assert.NotNull(clean);
+        Assert.Null(clean!.FailureMessage);
+
+        /* An extension-only update is routine maintenance the log already records — not something to page
+           about, so it maps to no report at all. */
+        Assert.Null(DarlingWorker.BuildStoreUpgradeReport(new DarlingStoreUpgrade.StoreUpgradeOutcome(
+            DarlingStoreUpgrade.StoreUpgradeStatus.ExtensionUpdated, 18, 18, "2.24.0", "2.28.1", null, null, false)));
+        Assert.Null(DarlingWorker.BuildStoreUpgradeReport(DarlingStoreUpgrade.StoreUpgradeOutcome.None));
+    }
+
+    [Fact]
     public void RetainedDataDirectory_IsNamedForTheMajorItCameFrom()
         => Assert.Equal(
             @"C:\ProgramData\PerformanceMonitorDarling\pg-old-17",

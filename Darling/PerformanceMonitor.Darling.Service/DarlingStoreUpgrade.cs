@@ -1124,6 +1124,11 @@ internal sealed class DarlingStoreUpgrade
            holds the new major and no failure path may revert the runtime, because old binaries in front of a
            new data directory is an unbootable store. See the commit point below. */
         var swapped = false;
+
+        /* Set when the upgrade SUCCEEDS but some post-commit bookkeeping did not. Carried out on the outcome
+           so the operator's ALERT says so too — a log line that alarms while the alert reassures is worse
+           than either alone, because the alert is the surface someone actually receives. */
+        string? postCommitWarning = null;
         string? fromTimescale = null;
         var mode = FileTransferMode.Copy;
 
@@ -1287,10 +1292,29 @@ internal sealed class DarlingStoreUpgrade
             }
             else
             {
-                File.WriteAllText(retained + ".starts", "0");
-                _logger.LogInformation(
-                    "Pre-upgrade data directory kept at {Path} as a rollback copy for {Starts} service starts.",
-                    retained, RollbackRetentionStarts);
+                /* Non-fatal on purpose, and belt-and-braces with the post-commit catch below. The upgrade is
+                   already COMMITTED by the time this runs, so a marker file that will not write must not
+                   divert out of the happy path — doing so would skip the STORE UPGRADE COMPLETE line the
+                   operator looks for, over a countdown file. A missing marker is safe:
+                   SweepRetainedDataDirectories parses an absent counter as 1, so the copy is simply kept one
+                   start longer and is never deleted early. This is also the likeliest throw site in the whole
+                   post-swap window — copy mode just doubled the store's footprint, so free space is at its
+                   lowest right here. */
+                try
+                {
+                    File.WriteAllText(retained + ".starts", "0");
+                    _logger.LogInformation(
+                        "Pre-upgrade data directory kept at {Path} as a rollback copy for {Starts} service starts.",
+                        retained, RollbackRetentionStarts);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    postCommitWarning =
+                        $"the rollback copy's retention marker could not be written ({ex.Message}), so the pre-upgrade data directory at {retained} will not age out on its own";
+                    _logger.LogWarning(
+                        "The upgrade is complete, but the rollback copy's retention marker could not be written at {Path} ({Message}). The pre-upgrade data directory is KEPT and will not be deleted automatically — check free disk space and remove it by hand when you are satisfied with the upgraded store.",
+                        retained + ".starts", ex.Message);
+                }
             }
 
             _logger.LogWarning(
@@ -1299,7 +1323,7 @@ internal sealed class DarlingStoreUpgrade
 
             return new StoreUpgradeOutcome(
                 StoreUpgradeStatus.Succeeded, context.OldMajor, context.NewMajor,
-                fromTimescale, context.BundledTimescaleVersion, null, null, mode == FileTransferMode.Link);
+                fromTimescale, context.BundledTimescaleVersion, null, postCommitWarning, mode == FileTransferMode.Link);
         }
         catch (OperationCanceledException)
         {

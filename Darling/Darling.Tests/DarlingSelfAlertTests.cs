@@ -925,6 +925,38 @@ public sealed class DarlingSelfAlertTests
     }
 
     [Fact]
+    public async Task StoreUpgrade_SucceededWithABookkeepingWarning_AlarmsInsteadOfReassuring()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* A post-commit bookkeeping failure arrives as Succeeded WITH a message: the store IS upgraded and
+           verified, but cleanup did not finish. The alert must say so — an operator receiving "upgraded, the
+           rollback copy ages out automatically" while the service log says the retention marker could not be
+           written is worse than either surface alone, because the alert is the one that reaches them. */
+        await e.EvaluateStoreUpgradeAsync(
+            new DarlingSelfAlertEvaluator.StoreUpgradeReport(
+                Succeeded: true, FromMajor: 17, ToMajor: 18,
+                FromTimescale: "2.28.1", ToTimescale: "2.28.1",
+                FailedStep: null,
+                FailureMessage: "the rollback copy's retention marker could not be written (There is not enough space on the disk.)",
+                WithoutRollbackCopy: false),
+            Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Store Runtime Upgrade", fired.MetricName);
+        /* Escalated: this one needs somebody to go and look. */
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        Assert.Contains("did NOT complete", fired.ShortMessage, StringComparison.Ordinal);
+        /* The actual reason has to survive the hop from the orchestration through the worker's mapping. */
+        Assert.Contains("not enough space on the disk", fired.DetailText, StringComparison.Ordinal);
+        /* And the reassuring sentence must be REPLACED, not merely appended to — the retention marker is
+           precisely what failed, so promising it ages out automatically would be actively wrong. */
+        Assert.DoesNotContain("then deleted automatically", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("remove the pre-upgrade data directory by hand", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task StoreUpgrade_HardLinkMode_SaysThereIsNoRollback()
     {
         var h = new Harness();
