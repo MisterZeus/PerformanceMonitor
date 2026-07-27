@@ -414,9 +414,6 @@ FULL OUTER JOIN baseline_period b
     }
 
     /// <summary>
-    /// Gets collection-level history for a specific Query Store query (for drilldown).
-    /// </summary>
-    /// <summary>
     /// Gets collection-level history for ALL plans of a Query Store query (query-scoped, matching
     /// the Dashboard drilldown) so plan switches and regressions are visible over time.
     /// </summary>

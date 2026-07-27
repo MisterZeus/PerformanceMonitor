@@ -25,10 +25,6 @@ using PerformanceMonitor.Common;
 namespace PerformanceMonitorLite.Services;
 
 /// <summary>
-/// Base service for collecting performance data from remote SQL Servers.
-/// Partial class - individual collectors are in separate files.
-/// </summary>
-/// <summary>
 /// Tracks the health state of an individual collector.
 /// </summary>
 public class CollectorHealthEntry
@@ -96,6 +92,10 @@ public class CollectorHealthSummary
     public List<CollectorHealthEntry> XeSessionFailures { get; set; } = new();
 }
 
+/// <summary>
+/// Base service for collecting performance data from remote SQL Servers.
+/// Partial class - individual collectors are in separate files.
+/// </summary>
 public partial class RemoteCollectorService
 {
     private readonly DuckDbInitializer _duckDb;
