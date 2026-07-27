@@ -8,7 +8,9 @@
 
 using System;
 using System.ComponentModel;
+using System.Globalization;
 using System.Linq;
+using System.Text.Json;
 using System.Reflection;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
@@ -197,6 +199,69 @@ public sealed class DarlingMcpHealthToolsLivePostgresTests
     private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
+    /// <summary>
+    /// The #1736 boundary, simulated rather than waited for. The sibling test above only exercises the
+    /// midnight case if CI happens to run between 00:00 and 00:05 UTC — which is precisely why the bug
+    /// survived: it was unobservable 99.7% of the day. This plants at an ABSOLUTE timestamp three minutes
+    /// before a UTC midnight, so the "row is on the previous day" condition holds on every run at every
+    /// hour, and asserts the explicit-date call still finds it.
+    ///
+    /// <para>It also pins the mechanism, not just the fix: the same rows queried WITHOUT a date return the
+    /// empty envelope, because "today" is not the day they belong to. That asymmetry is the bug, and a
+    /// regression that reintroduced an implicit-today call would fail here on any run rather than on the
+    /// 0.3% of runs that straddle midnight.</para>
+    /// </summary>
+    [Fact]
+    public async Task DailySummary_ExplicitDate_FindsRowsPlantedJustBeforeUtcMidnight()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live health-tools test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+            /* 23:57 on a fixed past day: the 00:02-equivalent, reachable on demand. Past and absolute so it
+               never collides with the sibling test's UtcNow-relative rows. */
+            var boundary = new DateTime(2026, 7, 20, 23, 57, 0, DateTimeKind.Utc);
+
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, victim_process_id, victim_sql_text, deadlock_graph_xml)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(boundary), ServerId, ServerName,
+                DarlingMcpTestData.Naive(boundary), "process9z9z", "DELETE FROM dbo.Boundary", "<deadlock/>");
+
+            /* The fix: ask for the day the rows carry. */
+            var onItsOwnDay = await DarlingMcpHealthTools.GetDailySummary(
+                postgres, ServerName, boundary.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+
+            DarlingMcpTestData.AssertEnvelope(onItsOwnDay, ServerName, "overall_health");
+            Assert.Contains("Critical", onItsOwnDay, StringComparison.Ordinal);
+            Assert.Contains("2026-07-20", onItsOwnDay, StringComparison.Ordinal);
+
+            /* The bug: the same rows are invisible to an implicit "today", which is what the sibling test
+               used to do and what made it fail only in the five minutes after midnight. */
+            var onToday = await DarlingMcpHealthTools.GetDailySummary(postgres, ServerName);
+            using (var doc = JsonDocument.Parse(onToday))
+            {
+                Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+            }
+
+            Assert.DoesNotContain("2026-07-20", onToday, StringComparison.Ordinal);
+        }
+        finally
+        {
+            await DeleteRowsAsync(connection, ct);
+        }
+    }
+
     [Fact]
     public async Task HealthTools_ReadPlantedRows_AgainstDevPostgres()
     {
@@ -246,7 +311,14 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
             Assert.Contains("deadlock_count", summary, StringComparison.Ordinal);
             Assert.Contains("last_collection", summary, StringComparison.Ordinal);
 
-            var daily = await DarlingMcpHealthTools.GetDailySummary(postgres, ServerName);
+            /* Ask for the day the rows were actually PLANTED on, not the implicit "today" (#1736). The rows
+               land at UtcNow-5min, so between 00:00 and 00:05 UTC they carry yesterday's date while "today"
+               has already rolled over — the tool then correctly returns its empty envelope and this test
+               failed deterministically in that five-minute window, turning any darling-pg run that landed
+               there into a red required check that looked like a regression. The product default is right
+               and is deliberately NOT widened; the test just stops assuming the two dates agree. */
+            var daily = await DarlingMcpHealthTools.GetDailySummary(
+                postgres, ServerName, when.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
             DarlingMcpTestData.AssertEnvelope(daily, ServerName, "overall_health");
             Assert.Contains("Critical", daily, StringComparison.Ordinal);   /* the deadlock makes the day Critical */
         }
