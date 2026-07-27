@@ -1212,11 +1212,46 @@ public sealed class DarlingStoreUpgradeTests
             Assert.True(Directory.Exists(dataDirectory));
 
             /* It was reported rather than left to be discovered when the volume filled. */
-            Assert.Contains("were not created by this service", log.ToString(), StringComparison.Ordinal);
-            Assert.Contains("Unmanaged store data directory: " + manual, log.ToString(), StringComparison.Ordinal);
+            Assert.Contains("are not part of the running store", log.ToString(), StringComparison.Ordinal);
+            Assert.Contains("Store data directory this service did not create: " + manual, log.ToString(), StringComparison.Ordinal);
 
             /* A directory with no PG_VERSION is not a store copy and is never named. */
             Assert.DoesNotContain(notAStore, log.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// A half-built cluster left by an interrupted upgrade is OURS, and the report has to say so — telling
+    /// an operator that the product did not create a directory the product plainly created is how a
+    /// diagnostic stops being believed. It is still not deleted, and the line says why: the commit point is
+    /// two directory moves, so a process that died between them leaves the UPGRADED cluster under this name.
+    /// </summary>
+    [Fact]
+    public void Sweep_NamesAnInterruptedUpgradeLeftoverAsOurs_NotAsAStrangers()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-sweep-leftover-");
+        try
+        {
+            var dataDirectory = PlantLiveDataDirectory(root.FullName);
+
+            /* What UpgradeDataDirectoryAsync builds and only best-effort deletes. */
+            var leftover = dataDirectory + "-upgrade-18";
+            Directory.CreateDirectory(leftover);
+            File.WriteAllText(Path.Combine(leftover, "PG_VERSION"), "18\n");
+
+            var log = new CapturingLogger();
+            new DarlingStoreUpgrade(log).SweepRetainedDataDirectories(dataDirectory);
+
+            Assert.True(Directory.Exists(leftover));
+            Assert.Contains("Leftover store data directory from an interrupted upgrade: " + leftover,
+                log.ToString(), StringComparison.Ordinal);
+
+            /* ...and it must NOT be blamed on someone else. */
+            Assert.DoesNotContain("this service did not create: " + leftover, log.ToString(), StringComparison.Ordinal);
         }
         finally
         {

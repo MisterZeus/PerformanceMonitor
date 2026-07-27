@@ -1283,7 +1283,13 @@ internal sealed class DarlingStoreUpgrade
     {
         try
         {
-            var found = new List<(string Path, long Bytes)>();
+            /* An upgrade's half-built cluster is OURS, not a stranger's, and saying otherwise in a
+               diagnostic is how a diagnostic stops being believed. UpgradeDataDirectoryAsync deletes it on
+               every failure path, but only best-effort — so a held file, or a machine that lost power
+               mid-upgrade, leaves one behind and this is the next thing to see it. */
+            var upgradePrefix = Path.GetFileName(liveDataDirectory) + "-upgrade-";
+
+            var found = new List<(string Path, long Bytes, bool Ours)>();
             foreach (var candidate in Directory.GetDirectories(parent))
             {
                 if (string.Equals(candidate, liveDataDirectory, StringComparison.OrdinalIgnoreCase)
@@ -1293,7 +1299,8 @@ internal sealed class DarlingStoreUpgrade
                     continue;
                 }
 
-                found.Add((candidate, MeasureDirectoryBytes(candidate)));
+                var ours = Path.GetFileName(candidate).StartsWith(upgradePrefix, StringComparison.OrdinalIgnoreCase);
+                found.Add((candidate, MeasureDirectoryBytes(candidate), ours));
             }
 
             if (found.Count == 0)
@@ -1302,7 +1309,7 @@ internal sealed class DarlingStoreUpgrade
             }
 
             long total = 0;
-            foreach (var (_, bytes) in found)
+            foreach (var (_, bytes, _) in found)
             {
                 total += bytes;
             }
@@ -1310,12 +1317,29 @@ internal sealed class DarlingStoreUpgrade
             found.Sort(static (left, right) => right.Bytes.CompareTo(left.Bytes));
 
             _logger.LogWarning(
-                "{Count} store data director(ies) beside {Live} were not created by this service, and are holding {Size}. They are NOT deleted automatically — a copy made by hand is someone's decision to reverse, not this service's. Remove the ones you no longer need: a major store upgrade in copy mode needs roughly twice the data directory in free space.",
+                "{Count} store data director(ies) beside {Live} are not part of the running store, and are holding {Size}. NONE of them is deleted automatically. Remove the ones you no longer need: a major store upgrade in copy mode needs roughly twice the data directory in free space.",
                 found.Count, liveDataDirectory, FormatBytes(total));
 
-            foreach (var (path, bytes) in found)
+            foreach (var (path, bytes, ours) in found)
             {
-                _logger.LogWarning("Unmanaged store data directory: {Path} ({Size}).", path, FormatBytes(bytes));
+                if (ours)
+                {
+                    /* Deliberately NOT deleted, and this is the reason. The commit point is two moves — the
+                       live directory aside, then the upgraded one into its place — so a process that died
+                       between them leaves the UPGRADED cluster under this name with nothing at the live
+                       path. Deleting it there would destroy the only good copy, and in hard-link mode the
+                       pre-upgrade directory beside it is not a usable fallback either (pg_upgrade's linked
+                       old cluster must not be started). A human can tell those apart from the log; a sweep
+                       running before the store is up cannot. */
+                    _logger.LogWarning(
+                        "Leftover store data directory from an interrupted upgrade: {Path} ({Size}). Check that {Live} is the cluster you want BEFORE removing it — if a previous upgrade died between swapping the directories, this one is the upgraded store.",
+                        path, FormatBytes(bytes), liveDataDirectory);
+                    continue;
+                }
+
+                _logger.LogWarning(
+                    "Store data directory this service did not create: {Path} ({Size}). It is left alone — a copy made by hand is someone's decision to reverse, not this service's.",
+                    path, FormatBytes(bytes));
             }
         }
         catch (Exception ex)
