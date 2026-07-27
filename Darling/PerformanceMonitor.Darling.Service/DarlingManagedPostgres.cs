@@ -1931,17 +1931,11 @@ public sealed class DarlingManagedPostgres
                 await GuardAdoptedListenAsync(ownerConnectionString, plan, cancellationToken);
             }
 
-            /* Defense-in-depth firewall rule (the boundary is pg_hba + TLS). Best-effort, never fatal. Enable
-               when exposed; on a disable EDGE (we just removed the block) also remove the rule. A store that
-               was never exposed touches the firewall not at all (the early return above). */
-            if (exposed)
-            {
-                await TryConfigureStoreFirewallAsync(enable: true, plan.Cidr!, cancellationToken);
-            }
-            else
-            {
-                await TryConfigureStoreFirewallAsync(enable: false, cidr: null, cancellationToken);
-            }
+            /* Defense-in-depth firewall rule (the boundary is pg_hba + TLS). CHECKED, never written (#1771):
+               an exposed store reports a missing rule, and a disable EDGE (we just removed the block) reports
+               the now-stale rule, each naming the elevated command. A store that was never exposed touches the
+               firewall not at all (the early return above). */
+            await CheckStoreFirewallAsync(exposed, exposed ? plan.Cidr : null, cancellationToken);
         }
         catch (OperationCanceledException)
         {
@@ -2112,8 +2106,10 @@ public sealed class DarlingManagedPostgres
         return false;
     }
 
-    /// <summary>The scoped store firewall rule name (idempotent by DisplayName), port-specific.</summary>
-    private string StoreFirewallRuleName => $"PerformanceMonitor Darling store (port {_config.Port})";
+    /// <summary>The scoped store firewall rule name (idempotent by DisplayName), port-specific.
+    /// <c>internal static</c> so the elevated <c>--configure-firewall</c> verb creates the SAME rule this
+    /// checks for, from darling.json alone and without a running store (#1771).</summary>
+    internal static string StoreFirewallRuleName(int port) => $"PerformanceMonitor Darling store (port {port})";
 
     /// <summary>
     /// PowerShell single-quoted literal. Inside <c>'…'</c> PowerShell expands nothing — no <c>$</c>, no
@@ -2122,15 +2118,17 @@ public sealed class DarlingManagedPostgres
     /// are then safe no matter what a caller hands them, INDEPENDENT of the caller-side CIDR parse that is
     /// the primary fix. The rule names are internally generated and contain no quotes, so quoting them
     /// leaves the emitted command byte-for-byte what it has always been.
+    /// <para><c>internal</c> so <see cref="DarlingFirewallCheck.BuildProbeCommand"/> escapes the rule name
+    /// through this same one helper rather than growing a second, subtly different quoting rule (#1771).</para>
     /// </summary>
-    private static string SingleQuoted(string value)
+    internal static string SingleQuotedPowerShell(string value)
         => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
 
     /// <summary>Idempotent-named enable command (remove-by-name then add) — the exact scoped command the docs
     /// lead with (D1). Pure + testable.</summary>
     internal static string BuildFirewallEnableCommand(string ruleName, int port, string remoteCidr)
-        => $"Remove-NetFirewallRule -DisplayName {SingleQuoted(ruleName)} -ErrorAction SilentlyContinue; " +
-           $"New-NetFirewallRule -DisplayName {SingleQuoted(ruleName)} -Direction Inbound -Action Allow -Protocol TCP -LocalPort {port} -RemoteAddress {SingleQuoted(remoteCidr)} | Out-Null";
+        => $"Remove-NetFirewallRule -DisplayName {SingleQuotedPowerShell(ruleName)} -ErrorAction SilentlyContinue; " +
+           $"New-NetFirewallRule -DisplayName {SingleQuotedPowerShell(ruleName)} -Direction Inbound -Action Allow -Protocol TCP -LocalPort {port} -RemoteAddress {SingleQuotedPowerShell(remoteCidr)} | Out-Null";
 
     /// <summary>
     /// Idempotent-named disable command (remove-by-name). Pure + testable.
@@ -2144,64 +2142,33 @@ public sealed class DarlingManagedPostgres
     /// The catch alone is not enough: a caught error leaves the exit state non-zero, hence the exit 0.
     /// </summary>
     internal static string BuildFirewallDisableCommand(string ruleName)
-        => $"try {{ Remove-NetFirewallRule -DisplayName {SingleQuoted(ruleName)} -ErrorAction Stop }} " +
+        => $"try {{ Remove-NetFirewallRule -DisplayName {SingleQuotedPowerShell(ruleName)} -ErrorAction Stop }} " +
            $"catch {{ if ($_.CategoryInfo.Category -ne 'ObjectNotFound') {{ throw }} }}; exit 0";
 
-    /// <summary>
-    /// Best-effort firewall reconcile (D1): add/remove the scoped, idempotent-named inbound rule via
-    /// PowerShell. The firewall is defense-in-depth, NOT the boundary (pg_hba + TLS are), so a failure (no
-    /// elevation, PowerShell missing) logs the exact scoped command for the operator to run by hand and
-    /// NEVER fails startup.
-    /// </summary>
-    private async Task TryConfigureStoreFirewallAsync(bool enable, string? cidr, CancellationToken cancellationToken)
-    {
-        var ruleName = StoreFirewallRuleName;
-        var command = enable
-            ? BuildFirewallEnableCommand(ruleName, _config.Port, cidr!)
-            : BuildFirewallDisableCommand(ruleName);
+    /// <summary>Last (rule, verdict) reported, so a repeated network reconcile restates a steady firewall
+    /// state at most once (<see cref="DarlingFirewallCheck.ShouldReport"/>).</summary>
+    private string? _lastFirewallRule;
+    private FirewallRuleVerdict? _lastFirewallVerdict;
 
-        try
-        {
-            var (exitCode, output) = await RunPowerShellAsync(command, cancellationToken);
-            if (exitCode == 0)
-            {
-                _logger.LogInformation("Firewall rule '{Rule}' {Verb}.", ruleName, enable ? "ensured" : "removed");
-            }
-            else if (enable)
-            {
-                _logger.LogWarning(
-                    "Could not configure the firewall automatically (exit {ExitCode}: {Output}). Run this in an elevated PowerShell:\n{Command}",
-                    exitCode, output, command);
-            }
-            else
-            {
-                _logger.LogWarning("Could not remove the firewall rule automatically (exit {ExitCode}: {Output}).", exitCode, output);
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            if (enable)
-            {
-                _logger.LogWarning(
-                    "Could not configure the firewall automatically ({Message}). Run this in an elevated PowerShell:\n{Command}",
-                    ex.Message, command);
-            }
-            else
-            {
-                _logger.LogWarning("Could not remove the firewall rule automatically ({Message}).", ex.Message);
-            }
-        }
-    }
+    /// <summary>
+    /// Read-only firewall VERIFICATION for the store's scoped rule (#1771). This used to add/remove the rule
+    /// itself, which the service account cannot do — the identical structural bug the MCP and web hosts had,
+    /// fixed the same way: the elevated installer creates the rule, and the running service only reports what
+    /// it finds. The firewall is defense-in-depth, NOT the boundary (pg_hba + TLS are), so a check that cannot
+    /// run NEVER fails startup.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private async Task CheckStoreFirewallAsync(bool exposed, string? cidr, CancellationToken cancellationToken)
+        => (_lastFirewallRule, _lastFirewallVerdict) = await DarlingFirewallCheck.CheckAsync(
+            StoreFirewallRuleName(_config.Port), _config.Port, exposed, cidr,
+            _lastFirewallRule, _lastFirewallVerdict, _logger, cancellationToken);
 
     /// <summary>
     /// Runs a PowerShell command with captured, interleaved stdout+stderr and a timeout. <c>internal</c>
-    /// so the (separate) MCP host can reuse it for its own best-effort firewall reconcile
-    /// (darling-network-endpoints) instead of duplicating it — the firewall command shape is shared via the
-    /// pure <see cref="BuildFirewallEnableCommand"/>/<see cref="BuildFirewallDisableCommand"/> builders.
+    /// so the elevated <c>--configure-firewall</c> verb and the runtime firewall CHECK
+    /// (<see cref="DarlingFirewallCheck"/>) reuse it instead of duplicating it — the command shapes are shared
+    /// via the pure <see cref="BuildFirewallEnableCommand"/>/<see cref="BuildFirewallDisableCommand"/>
+    /// builders.
     /// <paramref name="timeout"/> is optional and defaults to the shared status timeout
     /// (<see cref="s_statusTimeout"/>); the <c>--configure-network</c> wizard passes a longer one for a
     /// service restart, which routinely exceeds the status budget. Existing callers are unaffected.

@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
@@ -76,6 +77,12 @@ public static class DarlingCliCommands
     public static bool IsConfigureNetworkVerb(string arg) =>
         string.Equals(arg, "--configure-network", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The verb <see cref="ConfigureFirewallAsync"/> handles — reconcile every scoped Darling firewall
+    /// rule from darling.json, elevated (#1771). This is the ONLY place rules are created; the service itself
+    /// only verifies them.</summary>
+    public static bool IsConfigureFirewallVerb(string arg) =>
+        string.Equals(arg, "--configure-firewall", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The verb <see cref="EnableMcpAsync"/> handles — enable the MCP endpoint in the store (+ firewall).</summary>
     public static bool IsEnableMcpVerb(string arg) =>
         string.Equals(arg, "--enable-mcp", StringComparison.OrdinalIgnoreCase);
@@ -114,6 +121,7 @@ public static class DarlingCliCommands
         || IsValidateConfigVerb(arg)
         || IsPrintViewerConnectionVerb(arg)
         || IsConfigureNetworkVerb(arg)
+        || IsConfigureFirewallVerb(arg)
         || IsEnableMcpVerb(arg)
         || IsDisableMcpVerb(arg)
         || IsEnableWebVerb(arg)
@@ -181,6 +189,7 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --encrypt-password  Encrypt a SQL-auth password for darling.json (reads stdin)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --print-viewer-connection   Print a remote-viewer connection string (managed store)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --configure-network Interactive LAN-exposure wizard." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --configure-firewall  Create/remove the scoped firewall rules to match darling.json (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-mcp        Enable the MCP endpoint in the store and open its firewall (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-mcp       Disable the MCP endpoint in the store and remove its firewall rule (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-web        Enable the web dashboard in the store and open its firewall (run elevated)." + Environment.NewLine +
@@ -1424,7 +1433,7 @@ public static class DarlingCliCommands
        --enable-mcp / --disable-mcp / --enable-web / --disable-web: headless endpoint bring-up.
 
        Two gaps these close on a headless box (no WPF Viewer, and the service runs as a virtual service
-       account that CANNOT modify Windows Firewall, so its best-effort self-reconcile silently fails):
+       account that CANNOT modify Windows Firewall, so the running service only VERIFIES its rules):
          (a) ENABLE/DISABLE an endpoint. After the first run mcp.enabled/web.enabled in darling.json are only
              a SEED; the store (config.config_service.mcp_enabled/web_enabled) is authoritative and is normally
              toggled only by the Viewer's Settings. These verbs write the store directly — a TARGETED UPDATE
@@ -1691,7 +1700,7 @@ public static class DarlingCliCommands
     /// The firewall half of a toggle (defense-in-depth, never the boundary — pg_hba/token + the in-app CIDR
     /// check are). Only acts when the endpoint's darling.json network block opts into LAN exposure (a non-loopback
     /// listen, via the shared <see cref="DarlingNetwork.IsExposedListenAddress"/>). Uses the SAME scoped,
-    /// idempotent-by-DisplayName rule name the host's self-reconcile uses
+    /// idempotent-by-DisplayName rule name the host's start-up check looks for
     /// (<see cref="DarlingMcpHostService.McpFirewallRuleName"/> / <see cref="DarlingWebHostService.WebFirewallRuleName"/>)
     /// and the SAME pure command builders. Elevated -> runs the rule; otherwise prints the exact elevated command
     /// — the store toggle already succeeded, so a non-elevated shell is a handoff, never a failure. A firewall
@@ -1793,6 +1802,241 @@ public static class DarlingCliCommands
         {
             error.WriteLine($"Firewall rule {(enable ? "open" : "removal")} failed ({ex.Message}). Run this in an elevated PowerShell:");
             error.WriteLine("  " + command);
+        }
+    }
+
+    /* ================================================================================================
+       --configure-firewall: the ELEVATED owner of every scoped Darling firewall rule (#1771).
+
+       The service runs as an unprivileged virtual account and CANNOT create firewall rules. It used to try
+       on every start anyway, failing "Access is denied" each time; on a fresh networked install — the normal
+       deployment mode — that meant the rule was never created at all and remote clients were simply blocked.
+       Rule management therefore belongs to the elevated context that already exists: install-darling.ps1
+       calls this verb, uninstall-darling.ps1 removes the rules, and the running service only VERIFIES
+       (DarlingFirewallCheck).
+
+       It reconciles all THREE surfaces (store, MCP, web) in one pass, from darling.json alone: no store
+       connection, no credentials, so it is safe to run at install time before the store has ever booted —
+       unlike --enable-mcp/--enable-web, which write the control-plane store and therefore need it running.
+       ================================================================================================ */
+
+    /// <summary>What <c>--configure-firewall</c> will do to one surface's rule.</summary>
+    public enum FirewallRuleAction
+    {
+        /// <summary>The config exposes this surface on the LAN — create/refresh the scoped allow rule.</summary>
+        Open,
+
+        /// <summary>The surface is loopback-only (by config, or fail-closed by its own resolver) — the desired
+        /// state is NO rule. Removal is idempotent, so this is also the no-op for a rule that never existed.</summary>
+        Remove,
+    }
+
+    /// <summary>One surface's desired firewall state. <paramref name="Note"/> is a human explanation printed
+    /// alongside, non-null only where the reason is not self-evident (a fail-closed exposure).</summary>
+    public readonly record struct FirewallRulePlan(
+        string Surface, string RuleName, int Port, FirewallRuleAction Action, string? Cidr, string? Note);
+
+    /// <summary>
+    /// PURE desired-state for all three rules, so the whole decision pins without a live firewall.
+    /// <para>Every surface is resolved by the SAME resolver the RUNNING service fail-closes on
+    /// (<see cref="DarlingManagedPostgres.ResolveNetworkExposure"/>,
+    /// <see cref="DarlingMcpHostService.ResolveMcpBind"/>, <see cref="DarlingWebHostService.ResolveWebBind"/>)
+    /// rather than by re-reading <c>listen</c>/<c>allowFrom</c> here. That is the load-bearing choice: a config
+    /// the service degrades to loopback (an unparseable listen, a mismatched address family, a missing CIDR)
+    /// must NOT get an open port, and the service's own start-up check must reach the same verdict this did —
+    /// otherwise every start would report a rule this verb had just deliberately created.</para>
+    /// <para>BYO mode resolves loopback for MCP/web (their resolvers take <c>managed</c> and refuse exposure
+    /// without it) and skips the store entirely, whose exposure the operator's own PostgreSQL governs.</para>
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public static IReadOnlyList<FirewallRulePlan> PlanFirewallRules(DarlingConfig config)
+    {
+        var plans = new List<FirewallRulePlan>();
+        var managed = config.Postgres?.Managed ?? false;
+
+        if (managed && config.Postgres is not null)
+        {
+            var (certPath, keyPath) = ResolveStoreCertPaths(config.Postgres);
+            var store = DarlingManagedPostgres.ResolveNetworkExposure(config.Postgres.Network, certPath, keyPath);
+            plans.Add(new FirewallRulePlan(
+                "store",
+                DarlingManagedPostgres.StoreFirewallRuleName(config.Postgres.Port),
+                config.Postgres.Port,
+                store.Exposed ? FirewallRuleAction.Open : FirewallRuleAction.Remove,
+                store.Exposed ? store.Cidr : null,
+                store.DegradeReason));
+        }
+
+        var mcpBind = DarlingMcpHostService.ResolveMcpBind(config.Mcp, managed);
+        var mcpExposed = mcpBind.Mode == DarlingMcpHostService.McpBindMode.NetworkAndLoopback;
+        plans.Add(new FirewallRulePlan(
+            "MCP",
+            DarlingMcpHostService.McpFirewallRuleName(config.Mcp.Port),
+            config.Mcp.Port,
+            mcpExposed ? FirewallRuleAction.Open : FirewallRuleAction.Remove,
+            mcpExposed ? CanonicalCidrOrNull(config.Mcp.Network?.AllowFrom) : null,
+            mcpExposed ? null : DescribeLoopbackReason(mcpBind.Reason, "mcp")));
+
+        var webBind = DarlingWebHostService.ResolveWebBind(config.Web, managed);
+        var webExposed = webBind.Mode == DarlingHostBinding.BindMode.NetworkAndLoopback;
+        plans.Add(new FirewallRulePlan(
+            "web dashboard",
+            DarlingWebHostService.WebFirewallRuleName(config.Web.Port),
+            config.Web.Port,
+            webExposed ? FirewallRuleAction.Open : FirewallRuleAction.Remove,
+            webExposed ? CanonicalCidrOrNull(config.Web.Network?.AllowFrom) : null,
+            webExposed ? null : DescribeLoopbackReason((DarlingMcpHostService.McpBindReason)webBind.Reason, "web")));
+
+        return plans;
+    }
+
+    /// <summary>The parser's canonical CIDR, or null when it will not parse. The bind resolvers have already
+    /// refused exposure in the null case, so an Open plan always carries a real CIDR; this never forwards the
+    /// caller's raw string into a PowerShell command (#1646).</summary>
+    private static string? CanonicalCidrOrNull(string? allowFrom) =>
+        ClassifyAllowFrom(allowFrom, out var canonical) == EndpointAllowFromVerdict.Valid ? canonical : null;
+
+    /// <summary>Why a surface is loopback-only, when the reason is a DEGRADE worth printing. A plain
+    /// loopback-by-default config is the normal case and gets no note.</summary>
+    private static string? DescribeLoopbackReason(DarlingMcpHostService.McpBindReason reason, string section) =>
+        reason switch
+        {
+            DarlingMcpHostService.McpBindReason.TokenMissing =>
+                $"{section}.network is set but its token is missing or unreadable, so the service fail-closes this endpoint to loopback",
+            DarlingMcpHostService.McpBindReason.AllowFromInvalid =>
+                $"{section}.network.allowFrom is missing or not a valid CIDR, so the service fail-closes this endpoint to loopback",
+            DarlingMcpHostService.McpBindReason.ManagedModeRequired =>
+                $"{section}.network is set but postgres.managed = false; LAN exposure is managed-mode only and is ignored",
+            _ => null,
+        };
+
+    /// <summary>
+    /// Creates or removes every scoped Darling firewall rule so the live firewall matches darling.json.
+    /// Requires elevation (that is the entire point of the verb) and is idempotent — safe to re-run on every
+    /// upgrade, which is exactly how install-darling.ps1 uses it. Returns 0 when the firewall ends up matching
+    /// the config, 1 when it could not be made to.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public static async Task<int> ConfigureFirewallAsync(
+        string? configPath, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        DarlingConfig config;
+        try
+        {
+            config = DarlingConfig.Load(configPath);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not load configuration: {ex.Message}");
+            return 1;
+        }
+
+        var plans = PlanFirewallRules(config);
+        var toOpen = plans.Count(p => p.Action == FirewallRuleAction.Open);
+
+        output.WriteLine("Reconciling the scoped Windows Firewall rules to match darling.json.");
+        output.WriteLine(
+            "These rules are managed HERE, elevated. The service account cannot create them by design, so the " +
+            "running service only verifies them and reports what it finds.");
+        output.WriteLine();
+
+        if (!IsElevated())
+        {
+            /* Not elevated. When nothing is exposed there is genuinely nothing to do and a hard failure would
+               be a lie (and would fail an otherwise fine loopback install); when something IS exposed this is a
+               real, actionable failure, so exit non-zero AND print every command to run by hand. */
+            if (toOpen == 0)
+            {
+                output.WriteLine(
+                    "Every endpoint is loopback-only, so no firewall rule is needed and none was changed. " +
+                    "(This shell is not elevated, but there was nothing to do.)");
+                return 0;
+            }
+
+            error.WriteLine("This shell is not elevated, so NO firewall rule was changed. Run these in an ELEVATED PowerShell:");
+            foreach (var plan in plans.Where(p => p.Action == FirewallRuleAction.Open))
+            {
+                error.WriteLine("  " + DarlingManagedPostgres.BuildFirewallEnableCommand(plan.RuleName, plan.Port, plan.Cidr!));
+            }
+
+            return 1;
+        }
+
+        var failures = 0;
+        foreach (var plan in plans)
+        {
+            if (plan.Note is not null)
+            {
+                output.WriteLine($"{plan.Surface}: {plan.Note}.");
+            }
+
+            if (plan.Action == FirewallRuleAction.Remove)
+            {
+                /* Loopback-only: the desired state is no rule. Removal is idempotent (an absent rule exits 0),
+                   so this both cleans up after an exposure that was turned off and no-ops on a fresh install. */
+                if (!await TryRunFirewallStepAsync(
+                    DarlingManagedPostgres.BuildFirewallDisableCommand(plan.RuleName),
+                    $"{plan.Surface}: loopback-only — no rule needed (removed '{plan.RuleName}' if it existed).",
+                    $"{plan.Surface}: could not remove the rule '{plan.RuleName}'",
+                    output, error, cancellationToken))
+                {
+                    failures++;
+                }
+
+                continue;
+            }
+
+            if (!await TryRunFirewallStepAsync(
+                DarlingManagedPostgres.BuildFirewallEnableCommand(plan.RuleName, plan.Port, plan.Cidr!),
+                $"{plan.Surface}: opened '{plan.RuleName}' (TCP {plan.Port}, inbound, from {plan.Cidr}).",
+                $"{plan.Surface}: could not open the rule '{plan.RuleName}'",
+                output, error, cancellationToken))
+            {
+                failures++;
+            }
+        }
+
+        output.WriteLine();
+        if (failures > 0)
+        {
+            error.WriteLine($"{failures} firewall rule(s) could not be reconciled — see the commands above.");
+            return 1;
+        }
+
+        output.WriteLine(toOpen == 0
+            ? "Done. Every endpoint is loopback-only, so no port was opened."
+            : $"Done. {toOpen} endpoint(s) exposed on the LAN; their scoped rules are in place.");
+        return 0;
+    }
+
+    /// <summary>Runs one reconcile step and reports it. Returns false on failure, after printing the exact
+    /// command so an operator can finish by hand. Never throws except on cancellation.</summary>
+    [SupportedOSPlatform("windows")]
+    private static async Task<bool> TryRunFirewallStepAsync(
+        string command, string successLine, string failurePrefix, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var (exitCode, psOutput) = await DarlingManagedPostgres.RunPowerShellAsync(command, cancellationToken);
+            if (exitCode == 0)
+            {
+                output.WriteLine(successLine);
+                return true;
+            }
+
+            error.WriteLine($"{failurePrefix} (exit {exitCode}: {psOutput}). Run this by hand:");
+            error.WriteLine("  " + command);
+            return false;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"{failurePrefix} ({ex.Message}). Run this by hand:");
+            error.WriteLine("  " + command);
+            return false;
         }
     }
 }

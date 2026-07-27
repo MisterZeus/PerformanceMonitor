@@ -37,7 +37,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <para><b>Shape mirrors the MCP host</b> (5s supervisor poll, a pure <see cref="DecideWebAction"/> decision
 /// table, 30s failed-start backoff, <c>StartAsync</c> not <c>RunAsync</c> so the supervisor owns the wait) and
 /// reuses the shared <see cref="DarlingHostBinding"/> for the LAN-exposure ladder, the in-app CIDR check, the
-/// loopback-listener guard, the constant-time token compare, and the firewall reconcile. The live
+/// loopback-listener guard, and the constant-time token compare. The live
 /// enable/port state arrives via <see cref="WebRuntimeState"/> (the worker publishes it), so the viewer's
 /// Settings toggle starts/stops/rebinds the dashboard with no service restart.</para>
 ///
@@ -62,7 +62,6 @@ public sealed class DarlingWebHostService : BackgroundService
     private WebApplication? _app;
     private NpgsqlDataSource? _appDataSource;
     private int _runningPort;
-    private bool _runningNetworkMode;
 
     /// <summary>How often the supervisor re-reads the live control-plane state (#1562, mirrors the MCP host).</summary>
     internal static readonly TimeSpan SupervisorPollInterval = TimeSpan.FromSeconds(5);
@@ -166,9 +165,11 @@ public sealed class DarlingWebHostService : BackgroundService
         }
     }
 
-    /// <summary>Stops and disposes the running app + its data source; in managed network mode also reconciles
-    /// the firewall rule off (symmetric with the start-side reconcile — disabling closes the box). Safe to call
-    /// when nothing is running.</summary>
+    /// <summary>Stops and disposes the running app + its data source. Safe to call when nothing is running.
+    /// <para>It used to also remove the firewall rule here, mirroring the start-side reconcile. That write
+    /// could never succeed from this account (#1771) and the rule is now install-managed, so a stop leaves it
+    /// alone: it is scoped to a port nothing is listening on, an admin removes it with --configure-firewall or
+    /// uninstall-darling.ps1, and the start-side check reports it as stale until then.</para></summary>
     private async Task StopServerAsync(CancellationToken cancellationToken)
     {
         if (_app is null)
@@ -194,12 +195,6 @@ public sealed class DarlingWebHostService : BackgroundService
             _appDataSource = null;
         }
 
-        if (_runningNetworkMode && OperatingSystem.IsWindows())
-        {
-            await ReconcileWebFirewallAsync(_runningPort, enable: false, null, cancellationToken);
-        }
-
-        _runningNetworkMode = false;
         _runningPort = 0;
     }
 
@@ -303,18 +298,20 @@ public sealed class DarlingWebHostService : BackgroundService
             var primaryBind = networkMode ? networkListenIp! : IPAddress.Loopback;
 
             /* Port-in-use pre-check via the shared utility against the REAL bind address. Done before the
-               firewall reconcile so a bail here leaves the firewall untouched. */
+               firewall check so a bail here reports nothing about the firewall. */
             if (await PortUtilityService.IsTcpPortListeningAsync(effectivePort, primaryBind, stoppingToken))
             {
                 _logger.LogError("Port {Port} is already in use — web dashboard not started this attempt; will retry", effectivePort);
                 return false;
             }
 
-            /* Firewall reconcile (managed mode only; best-effort, never fatal): ensure the scoped rule when
-               exposed, remove it when not. The in-app CIDR is the boundary; the firewall is defense-in-depth. */
+            /* Firewall CHECK (managed mode only; read-only, never fatal) — #1771. Reports a missing rule when
+               exposed and a stale one when not, naming the elevated command either way; the rule itself is
+               created by the installer, because this process cannot create it. The in-app CIDR is the
+               boundary; the firewall is defense-in-depth. */
             if (config.Postgres.Managed && OperatingSystem.IsWindows())
             {
-                await ReconcileWebFirewallAsync(
+                await CheckWebFirewallAsync(
                     effectivePort, networkMode, networkMode ? allowedCidr.ToString() : null, stoppingToken);
             }
 
@@ -469,7 +466,6 @@ public sealed class DarlingWebHostService : BackgroundService
                StopServerAsync (toggle-off, port change, or shutdown). */
             await _app.StartAsync(stoppingToken);
             _runningPort = effectivePort;
-            _runningNetworkMode = networkMode;
             return true;
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -742,7 +738,7 @@ public sealed class DarlingWebHostService : BackgroundService
     }
 
     /* ---------------------------------------------------------------------------------------------------
-       Bind-reason logging + managed-store credential wait + firewall reconcile (mirrors the MCP host).
+       Bind-reason logging + managed-store credential wait + firewall check (mirrors the MCP host).
        --------------------------------------------------------------------------------------------------- */
 
     /// <summary>Emits the <see cref="DarlingHostBinding.ResolveBind"/> reason at its mapped severity. Silent for
@@ -790,13 +786,22 @@ public sealed class DarlingWebHostService : BackgroundService
     }
 
     /// <summary>The scoped web firewall rule name (idempotent by DisplayName), port-specific and distinct from
-    /// the store's and MCP's rules so the endpoints reconcile independently. <c>internal</c> so the headless
-    /// endpoint-toggle CLI verbs (--enable-web/--disable-web) reconcile the SAME rule by DisplayName.</summary>
+    /// the store's and MCP's rules so the endpoints are managed independently. <c>internal</c> so the headless
+    /// endpoint-toggle CLI verbs (--enable-web/--disable-web) and --configure-firewall act on the SAME rule by
+    /// DisplayName.</summary>
     internal static string WebFirewallRuleName(int port) => $"PerformanceMonitor Darling Web (port {port})";
 
+    /// <summary>Last (rule, verdict) this host reported, so a supervisor retry loop restates a steady
+    /// firewall state at most once (<see cref="DarlingFirewallCheck.ShouldReport"/>).</summary>
+    private string? _lastFirewallRule;
+    private FirewallRuleVerdict? _lastFirewallVerdict;
+
+    /// <summary>Read-only firewall verification (#1771) — see <see cref="DarlingFirewallCheck"/> for why this
+    /// no longer writes the rule.</summary>
     [SupportedOSPlatform("windows")]
-    private Task ReconcileWebFirewallAsync(int port, bool enable, string? cidr, CancellationToken cancellationToken)
-        => DarlingHostBinding.ReconcileFirewallAsync(WebFirewallRuleName(port), port, enable, cidr, _logger, cancellationToken);
+    private async Task CheckWebFirewallAsync(int port, bool exposed, string? cidr, CancellationToken cancellationToken)
+        => (_lastFirewallRule, _lastFirewallVerdict) = await DarlingFirewallCheck.CheckAsync(
+            WebFirewallRuleName(port), port, exposed, cidr, _lastFirewallRule, _lastFirewallVerdict, _logger, cancellationToken);
 
     /// <summary>
     /// Managed mode's first-boot race, handled: the VIEWER-role credential appears only after the worker's
