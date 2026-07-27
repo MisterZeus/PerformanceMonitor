@@ -41,13 +41,14 @@ public sealed class DarlingConfig
     public List<MonitoredServer> Servers { get; set; } = new();
 
     /// <summary>
-    /// Capture execution-plan text into query_stats.query_plan_xml and
-    /// query_store_stats.query_plan_text. Default TRUE for Darling: PostgreSQL TOAST compresses the
-    /// plan text transparently (pglz), and TimescaleDB chunk compression squeezes it further, so
-    /// plans are cheap to keep — unlike Lite, which stores to DuckDB/parquet and deliberately never
-    /// captures them. Set false to skip plan capture (e.g. to shave storage across a very large
-    /// fleet). Feeds <see cref="CollectorContext.CapturePlanXml"/> in the shared query_stats /
-    /// query_store collectors.
+    /// Capture execution-plan text. Default TRUE for Darling. Since #1767 a query_stats plan is
+    /// stored ONCE per distinct plan in <c>query_plan_dim</c> and the fact row carries only its
+    /// content digest (<c>query_plan_digest</c>), so re-collecting the same cached plan every cycle
+    /// costs a hash rather than another copy of the XML — which is what makes keeping plans cheap.
+    /// (query_store_stats.query_plan_text is still stored inline; it is not deduplicated yet.)
+    /// Unlike Lite, which stores to DuckDB/parquet and deliberately never captures plans. Set false
+    /// to skip plan capture entirely. Feeds <see cref="CollectorContext.CapturePlanXml"/> in the
+    /// shared query_stats / query_store collectors.
     /// </summary>
     [JsonPropertyName("capturePlans")]
     public bool CapturePlans { get; set; } = true;
