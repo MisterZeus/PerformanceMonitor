@@ -899,6 +899,124 @@ public sealed class DarlingSelfAlertTests
     }
 
     [Fact]
+    public async Task StoreUpgrade_Succeeded_FiresOnceNamingBothVersions()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.EvaluateStoreUpgradeAsync(
+            new DarlingSelfAlertEvaluator.StoreUpgradeReport(
+                Succeeded: true, FromMajor: 17, ToMajor: 18,
+                FromTimescale: "2.17.2", ToTimescale: "2.28.1",
+                FailedStep: null, FailureMessage: null, WithoutRollbackCopy: false),
+            Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Store Runtime Upgrade", fired.MetricName);
+        Assert.Equal("storeupgrade", fired.ServerKey);   /* fleet-level, never parses as a server_id */
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
+        Assert.Contains("PostgreSQL 18", fired.ShortMessage, StringComparison.Ordinal);
+        /* Both extension versions belong in the detail: "which TimescaleDB am I on now" is the first thing
+           asked after an upgrade, and #1705 happened because nobody could answer it. */
+        Assert.Contains("2.17.2", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("2.28.1", fired.DetailText, StringComparison.Ordinal);
+        /* A copy-mode upgrade keeps a rollback copy, and the alert says so. */
+        Assert.Contains("rollback copy", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task StoreUpgrade_SucceededWithABookkeepingWarning_AlarmsInsteadOfReassuring()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* A post-commit bookkeeping failure arrives as Succeeded WITH a message: the store IS upgraded and
+           verified, but cleanup did not finish. The alert must say so — an operator receiving "upgraded, the
+           rollback copy ages out automatically" while the service log says the retention marker could not be
+           written is worse than either surface alone, because the alert is the one that reaches them. */
+        await e.EvaluateStoreUpgradeAsync(
+            new DarlingSelfAlertEvaluator.StoreUpgradeReport(
+                Succeeded: true, FromMajor: 17, ToMajor: 18,
+                FromTimescale: "2.28.1", ToTimescale: "2.28.1",
+                FailedStep: null,
+                FailureMessage: "the rollback copy's retention marker could not be written (There is not enough space on the disk.)",
+                WithoutRollbackCopy: false),
+            Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Store Runtime Upgrade", fired.MetricName);
+        /* Escalated: this one needs somebody to go and look. */
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        Assert.Contains("did NOT complete", fired.ShortMessage, StringComparison.Ordinal);
+        /* The actual reason has to survive the hop from the orchestration through the worker's mapping. */
+        Assert.Contains("not enough space on the disk", fired.DetailText, StringComparison.Ordinal);
+        /* And the reassuring sentence must be REPLACED, not merely appended to — the retention marker is
+           precisely what failed, so promising it ages out automatically would be actively wrong. */
+        Assert.DoesNotContain("then deleted automatically", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("remove the pre-upgrade data directory by hand", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task StoreUpgrade_HardLinkMode_SaysThereIsNoRollback()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.EvaluateStoreUpgradeAsync(
+            new DarlingSelfAlertEvaluator.StoreUpgradeReport(
+                Succeeded: true, FromMajor: 17, ToMajor: 18,
+                FromTimescale: "2.28.1", ToTimescale: "2.28.1",
+                FailedStep: null, FailureMessage: null, WithoutRollbackCopy: true),
+            Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        /* The one thing an operator must know after a link-mode upgrade: the way back is a backup, and if
+           they do not have one they need to find out NOW rather than when they need it. */
+        Assert.Contains("NO rollback copy", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("restore from backup", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task StoreUpgrade_Failed_FiresCriticalNamingTheStep_AndSaysTheStoreStillRuns()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.EvaluateStoreUpgradeAsync(
+            new DarlingSelfAlertEvaluator.StoreUpgradeReport(
+                Succeeded: false, FromMajor: 17, ToMajor: 18,
+                FromTimescale: "2.28.1", ToTimescale: "2.28.1",
+                FailedStep: "pg_upgrade-check", FailureMessage: "pg_upgrade --check failed (exit 1)",
+                WithoutRollbackCopy: false),
+            Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Store Runtime Upgrade", fired.MetricName);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        /* Naming the failed step is the difference between an actionable page and "something broke". */
+        Assert.Contains("pg_upgrade-check", fired.ShortMessage, StringComparison.Ordinal);
+        Assert.Contains("pg_upgrade-check", fired.DetailText, StringComparison.Ordinal);
+        /* And the reassurance that matters at 3am: the monitor is still monitoring, and nothing was lost. */
+        Assert.Contains("collecting normally", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("no data was lost", fired.DetailText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task StoreUpgrade_RespectsTheMasterAlertsSwitch()
+    {
+        var h = new Harness();
+        h.Settings.AlertsEnabled = false;
+        var e = h.Build();
+
+        await e.EvaluateStoreUpgradeAsync(
+            new DarlingSelfAlertEvaluator.StoreUpgradeReport(
+                true, 17, 18, "2.28.1", "2.28.1", null, null, false),
+            Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
     public async Task CompressionJobs_FirstDetection_RearmsOnce_AndFiresCritical()
     {
         var h = new Harness();

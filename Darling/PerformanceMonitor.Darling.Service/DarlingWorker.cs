@@ -475,6 +475,12 @@ public sealed class DarlingWorker : BackgroundService
            A bootstrap failure is the existing no-store behavior: LogCritical + clean exit. */
         DarlingManagedPostgres? managedPostgres = null;
         var storeConnectionString = config.Postgres.ConnectionString;
+
+        /* #1706: what the store runtime reconcile did this start, carried past the bootstrap so it can be
+           raised as a real self-alert once the alert engine exists. Null when nothing happened, which is
+           every ordinary start. */
+        DarlingSelfAlertEvaluator.StoreUpgradeReport? storeUpgradeReport = null;
+
         if (config.Postgres.Managed)
         {
             if (!OperatingSystem.IsWindows())
@@ -489,6 +495,7 @@ public sealed class DarlingWorker : BackgroundService
             try
             {
                 storeConnectionString = await managedPostgres.EnsureRunningAsync(stoppingToken);
+                storeUpgradeReport = BuildStoreUpgradeReport(managedPostgres.LastUpgradeOutcome);
             }
             catch (OperationCanceledException)
             {
@@ -503,7 +510,7 @@ public sealed class DarlingWorker : BackgroundService
 
         try
         {
-            await RunCollectionLoopAsync(config, storeConnectionString, stoppingToken);
+            await RunCollectionLoopAsync(config, storeConnectionString, storeUpgradeReport, stoppingToken);
         }
         finally
         {
@@ -573,7 +580,33 @@ public sealed class DarlingWorker : BackgroundService
     /// <see cref="ExecuteAsync"/> so the bootstrap's finally can stop the bundled server after
     /// this method's data source is disposed.
     /// </summary>
-    private async Task RunCollectionLoopAsync(DarlingConfig config, string storeConnectionString, CancellationToken stoppingToken)
+    /// <summary>
+    /// Maps the Windows-only bootstrap's upgrade outcome to the platform-neutral alert payload (#1706).
+    /// Null for the ordinary case where the runtime did not move, and null for an extension-only update,
+    /// which is a routine maintenance step the log already records rather than something to page about.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static DarlingSelfAlertEvaluator.StoreUpgradeReport? BuildStoreUpgradeReport(
+        DarlingStoreUpgrade.StoreUpgradeOutcome outcome)
+        => outcome.Status switch
+        {
+            /* outcome.Message is carried through on SUCCESS too, not just failure: a post-commit bookkeeping
+               failure returns Succeeded with the warning there, and dropping it here would leave the alert
+               reassuring while the log alarms. The alert is the surface an operator actually receives. */
+            DarlingStoreUpgrade.StoreUpgradeStatus.Succeeded => new DarlingSelfAlertEvaluator.StoreUpgradeReport(
+                true, outcome.FromMajor, outcome.ToMajor, outcome.FromTimescale, outcome.ToTimescale,
+                null, outcome.Message, outcome.UsedLinkMode),
+            DarlingStoreUpgrade.StoreUpgradeStatus.Failed => new DarlingSelfAlertEvaluator.StoreUpgradeReport(
+                false, outcome.FromMajor, outcome.ToMajor, outcome.FromTimescale, outcome.ToTimescale,
+                outcome.FailedStep, outcome.Message, false),
+            _ => null,
+        };
+
+    private async Task RunCollectionLoopAsync(
+        DarlingConfig config,
+        string storeConnectionString,
+        DarlingSelfAlertEvaluator.StoreUpgradeReport? storeUpgradeReport,
+        CancellationToken stoppingToken)
     {
         /* Carry the collect/config search path on the store connection string BEFORE the data
            source (and its pool) is created, so every pooled physical connection resolves the
@@ -805,6 +838,15 @@ public sealed class DarlingWorker : BackgroundService
             agLagAlertSeconds: () => alertSettings.AgLagAlertSeconds,
             agRedoQueueAlertKb: () => alertSettings.AgRedoQueueAlertKb,
             agDisconnectRefireMinutes: () => alertSettings.AgDisconnectRefireMinutes);
+
+        /* #1706: report this start's store runtime upgrade, now that there IS an alert engine to report it
+           through. Fired once, here, and never re-evaluated — the store is down while an upgrade runs, so
+           its start could only ever be a log line, and by the time this line is reached both terminal states
+           (upgraded, or reverted and still running) have a live store to alert from. */
+        if (storeUpgradeReport is not null)
+        {
+            await _selfAlerts.EvaluateStoreUpgradeAsync(storeUpgradeReport, stoppingToken);
+        }
 
         /* Phase-5 analysis slice AN3: the analysis pipeline's shared pieces, constructed once.
            The plan fetcher resolves a finding's serverId to the CONNECTED runtime's connection

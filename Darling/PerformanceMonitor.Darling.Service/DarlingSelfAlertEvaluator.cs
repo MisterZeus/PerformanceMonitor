@@ -1125,6 +1125,107 @@ internal sealed class DarlingSelfAlertEvaluator
     /// caller-supplied re-arm delegate — can never propagate out of the (otherwise un-guarded) collection sweep
     /// loop and stop collection for the whole fleet. Cancellation still propagates.
     /// </summary>
+    /// <summary>
+    /// The alert metric name the store runtime upgrade fires under (#1706). A WEBHOOK AUTOMATION KEY like
+    /// its siblings, so it is a const and must stay stable across releases.
+    /// </summary>
+    internal const string StoreUpgradeMetric = "Store Runtime Upgrade";
+
+    /// <summary>Fleet-level key, non-numeric so it never collides with a real server_id (the DiskKey shape).</summary>
+    private const string StoreUpgradeKey = "storeupgrade";
+
+    /// <summary>
+    /// What one service start's store runtime upgrade did — a platform-neutral copy of the Windows-only
+    /// bootstrap's outcome, so the alert path does not have to reference a Windows-attributed type.
+    /// </summary>
+    internal sealed record StoreUpgradeReport(
+        bool Succeeded,
+        int FromMajor,
+        int ToMajor,
+        string? FromTimescale,
+        string? ToTimescale,
+        string? FailedStep,
+        string? FailureMessage,
+        bool WithoutRollbackCopy);
+
+    /// <summary>
+    /// Reports the outcome of a store runtime upgrade, ONCE per service start (#1706). Unlike every sibling
+    /// condition this is not an edge machine: an upgrade is a discrete event that already happened, so there
+    /// is no state to track and nothing to recover from — it is fired at the first opportunity the alert
+    /// engine exists and never re-evaluated.
+    ///
+    /// <para>The timing is forced and worth stating: the store is DOWN while an upgrade runs, so the START of
+    /// one can only ever be a log line. Both terminal states happen with a live store — a success on the new
+    /// major, a failure back on the old one — which is exactly why the outcome is carried out of the
+    /// bootstrap and raised here rather than attempted from inside it.</para>
+    /// </summary>
+    public async Task EvaluateStoreUpgradeAsync(StoreUpgradeReport report, CancellationToken cancellationToken)
+    {
+        if (report is null || !_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        try
+        {
+            var timescale = string.IsNullOrEmpty(report.ToTimescale)
+                ? string.Empty
+                : $" TimescaleDB {report.FromTimescale ?? "(none)"} -> {report.ToTimescale}.";
+
+            if (report.Succeeded)
+            {
+                /* A post-commit bookkeeping failure arrives as Succeeded WITH a message. When it is present
+                   the reassuring rollback sentence is not merely incomplete, it is wrong — the retention
+                   marker is the very thing that failed — so it is replaced rather than appended to, and the
+                   severity escalates to Critical. An operator receiving "upgraded, all tidy" while the log
+                   says otherwise is the failure this whole review round was about. */
+                var degraded = !string.IsNullOrWhiteSpace(report.FailureMessage);
+
+                var rollback = degraded
+                    ? $" BUT post-upgrade bookkeeping did NOT complete: {report.FailureMessage}. The store itself is fine and running on PostgreSQL {report.ToMajor} — this is about cleanup, not data. Check free disk space on the store volume, and remove the pre-upgrade data directory by hand once you are satisfied with the upgraded store, because it will not age out on its own."
+                    : report.WithoutRollbackCopy
+                        ? " The upgrade ran in hard-link mode, so there is NO rollback copy of the pre-upgrade store — the only way back is a restore from backup."
+                        : " The pre-upgrade data directory is kept as a rollback copy for the next couple of service starts, then deleted automatically.";
+
+                await FireAsync(
+                    StoreUpgradeKey, "Monitor Store", StoreUpgradeMetric,
+                    degraded ? $"PostgreSQL {report.ToMajor} (cleanup incomplete)" : $"PostgreSQL {report.ToMajor}",
+                    $"PostgreSQL {report.FromMajor}",
+                    detail: $"The monitor's own store was upgraded in place from PostgreSQL {report.FromMajor} to {report.ToMajor}.{timescale} " +
+                        "Collection was paused for the duration and has resumed. The upgraded store was verified before this alert: server version, " +
+                        "TimescaleDB extension version, and a real read of a collector table." + rollback,
+                    /* Warning for a clean upgrade — the store was still OFFLINE for minutes and there is a
+                       corresponding hole in every collector's history, which is worth attention even though
+                       nothing went wrong. CRITICAL when bookkeeping failed, because that one needs somebody
+                       to actually go and look. */
+                    severity: degraded ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
+                    shortMessage: degraded
+                        ? $"store upgraded to PostgreSQL {report.ToMajor}, but post-upgrade cleanup did NOT complete"
+                        : $"store upgraded to PostgreSQL {report.ToMajor}",
+                    cancellationToken);
+                return;
+            }
+
+            await FireAsync(
+                StoreUpgradeKey, "Monitor Store", StoreUpgradeMetric,
+                $"PostgreSQL {report.FromMajor} (upgrade failed)", $"PostgreSQL {report.ToMajor}",
+                detail: $"The monitor's own store FAILED to upgrade from PostgreSQL {report.FromMajor} to {report.ToMajor}, at step '{report.FailedStep}': {report.FailureMessage} " +
+                    $"The store reverted to PostgreSQL {report.FromMajor} and is collecting normally — no data was lost, because the pre-upgrade data directory is never modified until the upgrade succeeds. " +
+                    "The service will NOT retry this same package automatically, so the store stays on its current major until someone acts. " +
+                    "Investigate before the next release: a store that cannot move forward accumulates the version drift this machinery exists to end.",
+                severity: AlertSeverityLevel.Critical,
+                shortMessage: $"store upgrade to PostgreSQL {report.ToMajor} FAILED at {report.FailedStep} — reverted, still running", cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Store runtime upgrade self-alert failed: {Message}", ex.Message);
+        }
+    }
+
     public async Task EvaluateCompressionJobsAsync(
         IReadOnlyList<StuckCompressionJob> stuckJobs,
         Func<long, Task<bool>> rearmAsync,
