@@ -45,6 +45,7 @@ namespace PerformanceMonitorLite.Controls;
 public partial class RecommendationsTab : UserControl
 {
     private DuckDbInitializer? _duckDb;
+    private ScheduleManager? _scheduleManager;
     private ServerManager? _serverManager;
     private FindingStore? _findingStore;
     private LiteRecommendationsReader? _reader;
@@ -63,9 +64,12 @@ public partial class RecommendationsTab : UserControl
     /// provides the server list and connection strings (Generate now). Mirrors the FinOps/Alerts
     /// tabs' Initialize-from-MainWindow contract.
     /// </summary>
-    public void Initialize(DuckDbInitializer duckDb, ServerManager serverManager)
+    /// <param name="scheduleManager">#1757: lets the baseline provider warn when a source table is retained
+    /// for less than the 30-day baseline window. Optional — null just disables that warning.</param>
+    public void Initialize(DuckDbInitializer duckDb, ServerManager serverManager, ScheduleManager? scheduleManager = null)
     {
         _duckDb = duckDb ?? throw new ArgumentNullException(nameof(duckDb));
+        _scheduleManager = scheduleManager;
         _serverManager = serverManager ?? throw new ArgumentNullException(nameof(serverManager));
 
         _findingStore = new FindingStore(_duckDb);
@@ -184,7 +188,18 @@ public partial class RecommendationsTab : UserControl
             // Fresh per-run AnalysisService (IsAnalyzing is per-instance), mirroring the collector.
             // AnalyzeAsync persists findings AND returns them enriched with drill-down detail.
             var planFetcher = new SqlPlanFetcher(_serverManager);
-            var analysisService = new AnalysisService(_duckDb, planFetcher);
+            /* #1757: the retention accessor reads the DEFAULT schedule — baselines are a per-server
+               statistic but retention is configured per collector, and the default is what a user changes
+               when they shrink history for disk reasons. */
+            var analysisService = new AnalysisService(
+                _duckDb,
+                planFetcher,
+                _scheduleManager is null
+                    ? null
+                    : (Func<string, int?>)(collector =>
+                        _scheduleManager.GetDefaultSchedule()
+                            .FirstOrDefault(x => string.Equals(x.Name, collector, StringComparison.OrdinalIgnoreCase))
+                            ?.RetentionDays));
 
             var findings = await Task.Run(() => analysisService.AnalyzeAsync(serverId, serverName, hoursBack: 4));
 

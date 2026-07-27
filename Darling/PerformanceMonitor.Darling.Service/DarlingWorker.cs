@@ -683,6 +683,11 @@ public sealed class DarlingWorker : BackgroundService
            migration: MigrateAsync above runs BEFORE the extension exists, so a fresh store's V23
            guard skips the conversion and this heals it (collection_log is outside the collector
            catalog, so the loop calls above never touch it). */
+
+        /* Handle for the background baseline backfill launched inside the block below (#1757); stays null in
+           plain-PostgreSQL mode or if the TimescaleDB block faults before reaching it. Drained at shutdown. */
+        Task? baselineBackfill = null;
+
         try
         {
             await using var timescaleConnection = await postgres.OpenConnectionAsync(stoppingToken);
@@ -698,6 +703,17 @@ public sealed class DarlingWorker : BackgroundService
                 await TimescaleSupport.EnsureContinuousAggregatesAsync(timescaleConnection, _logger, stoppingToken);
                 // AFTER the CAGGs exist: the tiered retention (raw 4d, hourly CAGGs 21d; daily kept indefinitely).
                 await TimescaleSupport.EnsureRetentionPoliciesAsync(timescaleConnection, _logger, stoppingToken);
+
+                /* #1757: the baseline aggregates ship WITH NO DATA and their refresh policy only ever covers
+                   the trailing 3 days, so without this they would answer a 30-day question with 3 days of
+                   supply. DELIBERATELY LAUNCHED, NOT AWAITED: it is a bulk materialization whose cost scales
+                   with however much history the store already had, and every step below this block — the
+                   composer tuning, the delta re-seed, the collection loop itself — is sequenced after it.
+                   Awaiting it here would take a restarted service dark for as long as the backfill runs,
+                   which is exactly when an operator is most likely to be restarting it. Coverage-gated, so it
+                   is a no-op on every start after the first and resumes where it left off if cut short.
+                   Drained with the command loop at shutdown. */
+                baselineBackfill = RunBaselineBackfillAsync(postgres, stoppingToken);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -706,6 +722,28 @@ public sealed class DarlingWorker : BackgroundService
                too, so falling back to plain-PG mode is always safe. */
             _timescaleAvailable = false;
             _logger.LogWarning("TimescaleDB setup failed — continuing in plain-PostgreSQL mode: {Message}", ex.Message);
+        }
+
+        /* #1757: the provider reads the nine baseline relations BY NAME — a missing one throws,
+           ComputeBaselinesAsync swallows it, and that family silently returns an empty baseline. So every
+           relation is guaranteed to EXIST here, with a plain view over the same select filling any gap.
+
+           DELIBERATELY UNGATED on _timescaleAvailable. Three ways a gap appears and only one of them is "no
+           TimescaleDB": the extension is absent, the TimescaleDB block threw partway, or the block ran fine
+           and EnsureContinuousAggregatesAsync's per-aggregate failure isolation left one aggregate unbuilt.
+           That last one is the easiest to miss and would take exactly one family down on an otherwise healthy
+           store. The call is per-view and probes for an existing relation first, so it never touches a real
+           aggregate. Its own connection — the block's is already disposed by here. */
+        try
+        {
+            await using var fallbackConnection = await postgres.OpenConnectionAsync(stoppingToken);
+            await TimescaleSupport.EnsureBaselineFallbackViewsAsync(fallbackConnection, _logger, stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(
+                "Baseline relations could not be checked or backed by plain views — some anomaly baselines may silently return nothing: {Message}",
+                ex.Message);
         }
 
         /* Composer + analyze_*_plan performance tuning (covering indexes + per-table autovacuum-insert override) —
@@ -1189,6 +1227,22 @@ public sealed class DarlingWorker : BackgroundService
             /* Expected on shutdown. */
         }
 
+        /* Drain the background baseline backfill the same way (#1757). It observes the same token, and its
+           own body already swallows everything but cancellation, so this is about not leaving an unobserved
+           Task behind — a backfill still running at shutdown is fine to abandon: TimescaleDB commits it in
+           per-batch transactions and the coverage gate picks it up from there on the next start. */
+        if (baselineBackfill is not null)
+        {
+            try
+            {
+                await baselineBackfill;
+            }
+            catch (OperationCanceledException)
+            {
+                /* Expected on shutdown. */
+            }
+        }
+
         _logger.LogInformation("PerformanceMonitor Darling collection loop stopped");
     }
 
@@ -1347,6 +1401,38 @@ public sealed class DarlingWorker : BackgroundService
         {
             _logger.LogWarning("[{Server}] Failed to reconcile the long-query completion XE session: {Message}",
                 server.Config.DisplayName, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Materializes the baseline aggregates over the history the store already had (#1757), concurrently with
+    /// the collection sweep rather than ahead of it. On a fresh store the coverage gate makes this a no-op; on
+    /// an upgraded store it is the one-time pass that turns a 3-day supply into the full baseline window.
+    ///
+    /// <para>Takes its OWN connection rather than borrowing the startup one: the caller's connection is scoped
+    /// to the TimescaleDB setup block and is disposed the moment that block exits, which is long before this
+    /// finishes. Everything is swallowed but cancellation — a store that cannot be backfilled must degrade to
+    /// short baselines, never take down collection — and <see cref="TimescaleSupport.BackfillBaselineAggregatesAsync"/>
+    /// is itself failure-isolated per aggregate, so this catch is only for the connection-open path.</para>
+    /// </summary>
+    private async Task RunBaselineBackfillAsync(NpgsqlDataSource postgres, CancellationToken stoppingToken)
+    {
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(stoppingToken);
+            var backfilled = await TimescaleSupport.BackfillBaselineAggregatesAsync(connection, _logger, stoppingToken);
+            if (backfilled > 0)
+            {
+                _logger.LogInformation(
+                    "TimescaleDB: baseline backfill complete — {Backfilled} aggregate(s) materialized over pre-existing history.",
+                    backfilled);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(
+                "Baseline aggregate backfill could not run — baselines are computed from however much history the aggregates already hold: {Message}",
+                ex.Message);
         }
     }
 

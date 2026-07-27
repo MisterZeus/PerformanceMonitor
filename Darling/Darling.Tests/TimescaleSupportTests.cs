@@ -525,15 +525,22 @@ AND   ((SELECT min(bucket) FROM collect.query_stats_hourly) IS NULL
         }
     }
 
-    /// <summary>The relations EnsureRetentionPoliciesAsync attaches policies to, for teardown.</summary>
-    private static readonly string[] RetentionRelations =
+    /// <summary>
+    /// The relations EnsureRetentionPoliciesAsync attaches policies to, for teardown: the three raw tables,
+    /// the four hourly CAGGs, and the nine baseline aggregates (#1757). The last group is DERIVED from the
+    /// product's own list rather than restated, so adding a baseline aggregate cannot leave an armed retention
+    /// policy behind on this shared fixture.
+    /// </summary>
+    private static readonly string[] RetentionRelations = new[]
     {
         "query_stats", "procedure_stats", "query_store_stats",
         "query_stats_hourly", "procedure_stats_hourly", "query_store_stats_hourly", "query_stats_db_hourly",
-    };
+    }
+    .Concat(TimescaleSupport.BaselineAggregates.Select(a => a.View))
+    .ToArray();
 
-    /// <summary>The policy set EnsureRetentionPoliciesAsync attaches: three raw tables plus four hourly CAGGs.</summary>
-    private const int RetentionPolicyCount = 7;
+    /// <summary>The policy set EnsureRetentionPoliciesAsync attaches, derived so the two cannot drift.</summary>
+    private static readonly int RetentionPolicyCount = RetentionRelations.Length;
 
     [Fact]
     public async Task CompressionJobSelfHeal_DetectionQueryValid_AndRearmSucceeds_AgainstDevPostgres()

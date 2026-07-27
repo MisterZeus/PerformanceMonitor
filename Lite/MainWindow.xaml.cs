@@ -249,7 +249,7 @@ public partial class MainWindow : Window
             FinOpsContent.Initialize(_dataService, _serverManager);
 
             // Initialize Recommendations tab (advise-only)
-            RecommendationsContent.Initialize(_databaseInitializer, _serverManager);
+            RecommendationsContent.Initialize(_databaseInitializer, _serverManager, _scheduleManager);
 
             // Start MCP server if enabled
             await StartMcpServerAsync();

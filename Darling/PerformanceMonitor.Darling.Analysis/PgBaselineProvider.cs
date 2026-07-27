@@ -197,11 +197,13 @@ public class PgBaselineProvider
             MetricNames.Cpu => @"
 SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
        EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
-       AVG(sqlserver_cpu_utilization) AS mean_val,
-       STDDEV_SAMP(sqlserver_cpu_utilization) AS stddev_val,
-       COUNT(*) AS sample_count,
+       SUM(cpu_sum) / NULLIF(SUM(cpu_count), 0) AS mean_val,
+       SQRT(GREATEST(
+           (SUM(cpu_sumsq) - POWER(SUM(cpu_sum), 2) / NULLIF(SUM(cpu_count), 0))
+           / NULLIF(SUM(cpu_count) - 1, 0), 0)) AS stddev_val,
+       SUM(cpu_count) AS sample_count,
        COUNT(DISTINCT collection_time::DATE) AS distinct_days
-FROM v_cpu_utilization_stats
+FROM cpu_utilization_baseline
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 GROUP BY hour_of_day, day_of_week",
 
@@ -236,10 +238,8 @@ GROUP BY hour_of_day, day_of_week",
 WITH windowed AS (
     SELECT collection_time, delta_cntr_value,
            COALESCE(LAG(delta_cntr_value) OVER (ORDER BY collection_time), 0) AS prior_delta
-    FROM v_perfmon_stats
+    FROM perfmon_baseline
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-    AND   counter_name = 'Batch Requests/sec'
-    AND   delta_cntr_value >= 0
 )
 SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
        EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
@@ -276,12 +276,9 @@ GROUP BY hour_of_day, day_of_week",
                their LAG is 0, not >10000. Row selection is exactly the original's. */
             MetricNames.WaitStats => @"
 WITH per_collection AS (
-    SELECT collection_time,
-           SUM(delta_wait_time_ms) AS total_wait_ms
-    FROM v_wait_stats
+    SELECT collection_time, total_wait_ms
+    FROM wait_stats_baseline
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-    AND   delta_wait_time_ms >= 0
-    GROUP BY collection_time
 ),
 with_lag AS (
     SELECT collection_time, total_wait_ms,
@@ -302,11 +299,9 @@ GROUP BY hour_of_day, day_of_week",
             // aggregate to total connections per collection first
             MetricNames.SessionCount => @"
 WITH per_collection AS (
-    SELECT collection_time,
-           SUM(connection_count) AS total_connections
-    FROM v_session_stats
+    SELECT collection_time, total_connections
+    FROM session_stats_baseline
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-    GROUP BY collection_time
 )
 SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
        EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
@@ -340,13 +335,9 @@ GROUP BY hour_of_day, day_of_week",
                zeros survive. Row selection is exactly the original's. */
             MetricNames.QueryDuration => @"
 WITH per_collection AS (
-    SELECT collection_time,
-           SUM(delta_elapsed_time) AS total_elapsed
-    FROM v_query_stats
+    SELECT collection_time, total_elapsed
+    FROM query_stats_baseline
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-    AND   delta_execution_count > 0
-    AND   delta_elapsed_time >= 0
-    GROUP BY collection_time
 ),
 with_lag AS (
     SELECT collection_time, total_elapsed,
@@ -370,13 +361,14 @@ GROUP BY hour_of_day, day_of_week",
             MetricNames.IoLatency => @"
 SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
        EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
-       AVG(delta_stall_read_ms::DOUBLE PRECISION / NULLIF(delta_reads, 0)) AS mean_val,
-       STDDEV_SAMP(delta_stall_read_ms::DOUBLE PRECISION / NULLIF(delta_reads, 0)) AS stddev_val,
-       COUNT(*) AS sample_count,
+       SUM(ratio_sum) / NULLIF(SUM(ratio_count), 0) AS mean_val,
+       SQRT(GREATEST(
+           (SUM(ratio_sumsq) - POWER(SUM(ratio_sum), 2) / NULLIF(SUM(ratio_count), 0))
+           / NULLIF(SUM(ratio_count) - 1, 0), 0)) AS stddev_val,
+       SUM(row_count) AS sample_count,
        COUNT(DISTINCT collection_time::DATE) AS distinct_days
-FROM v_file_io_stats
+FROM file_io_baseline
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-AND   (delta_reads > 0 OR delta_writes > 0)
 GROUP BY hour_of_day, day_of_week",
 
             // Event-based — mean = events per day for this bucket, sample_count = distinct days observed.
@@ -384,11 +376,11 @@ GROUP BY hour_of_day, day_of_week",
             MetricNames.Blocking => @"
 SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
        EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
-       COUNT(*)::DOUBLE PRECISION / GREATEST(COUNT(DISTINCT collection_time::DATE), 1) AS mean_val,
+       SUM(event_count)::DOUBLE PRECISION / GREATEST(COUNT(DISTINCT collection_time::DATE), 1) AS mean_val,
        0::DOUBLE PRECISION AS stddev_val,
        COUNT(DISTINCT collection_time::DATE) AS sample_count,
        COUNT(DISTINCT collection_time::DATE) AS distinct_days
-FROM v_blocked_process_reports
+FROM blocked_process_baseline
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 GROUP BY hour_of_day, day_of_week",
 
@@ -396,11 +388,11 @@ GROUP BY hour_of_day, day_of_week",
             MetricNames.Deadlock => @"
 SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
        EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
-       COUNT(*)::DOUBLE PRECISION / GREATEST(COUNT(DISTINCT collection_time::DATE), 1) AS mean_val,
+       SUM(event_count)::DOUBLE PRECISION / GREATEST(COUNT(DISTINCT collection_time::DATE), 1) AS mean_val,
        0::DOUBLE PRECISION AS stddev_val,
        COUNT(DISTINCT collection_time::DATE) AS sample_count,
        COUNT(DISTINCT collection_time::DATE) AS distinct_days
-FROM v_deadlocks
+FROM deadlock_baseline
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 GROUP BY hour_of_day, day_of_week",
 
@@ -408,13 +400,12 @@ GROUP BY hour_of_day, day_of_week",
             MetricNames.Memory => @"
 SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
        EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
-       AVG(total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100) AS mean_val,
-       STDDEV_SAMP(total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100) AS stddev_val,
+       AVG(memory_pressure_pct) AS mean_val,
+       STDDEV_SAMP(memory_pressure_pct) AS stddev_val,
        COUNT(*) AS sample_count,
        COUNT(DISTINCT collection_time::DATE) AS distinct_days
-FROM v_memory_stats
+FROM memory_baseline
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-AND   target_server_memory_mb > 0
 GROUP BY hour_of_day, day_of_week",
 
             // ── Chart-unit baselines (for UI bands — units match what the chart displays) ──
@@ -455,12 +446,10 @@ GROUP BY hour_of_day, day_of_week",
             MetricNames.WaitMsPerSec => @"
 WITH per_collection AS (
     SELECT collection_time,
-           SUM(delta_wait_time_ms)::DOUBLE PRECISION AS total_wait_ms,
+           total_wait_ms::DOUBLE PRECISION AS total_wait_ms,
            extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_sec
-    FROM v_wait_stats
+    FROM wait_stats_baseline
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-    AND   delta_wait_time_ms >= 0
-    GROUP BY collection_time
 ),
 with_rate AS (
     SELECT collection_time,
@@ -487,8 +476,8 @@ GROUP BY hour_of_day, day_of_week",
             MetricNames.BlockingPerMinute => @"
 WITH per_minute AS (
     SELECT DATE_TRUNC('minute', collection_time) AS minute_bucket,
-           COUNT(*)::DOUBLE PRECISION AS event_count
-    FROM v_blocked_process_reports
+           SUM(event_count)::DOUBLE PRECISION AS event_count
+    FROM blocked_process_baseline
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     GROUP BY minute_bucket
 )
