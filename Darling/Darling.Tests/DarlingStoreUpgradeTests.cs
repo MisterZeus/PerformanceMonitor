@@ -352,6 +352,19 @@ public sealed class DarlingStoreUpgradeTests
         var revert = source.IndexOf("RevertRuntimeForCancel", cancel, StringComparison.Ordinal);
         Assert.True(guard >= 0 && revert > guard,
             "the cancellation path reverts the runtime without checking whether the swap already committed");
+
+        /* ORDER IS NOT CONTAINMENT, and the order-only version of this assertion passed with the bug
+           present. Moving the revert OUT of the guarded block leaves it textually after `if (!swapped)`
+           and green:
+
+               if (!swapped) { TryDeleteDirectory(newDataDirectory); }
+               RevertRuntimeForCancel(context);          // unguarded again
+
+           In correct code the span between the guard and the revert contains no closing brace, because the
+           revert is still inside the block. A `}` there means the block closed first. That is the cheap
+           containment check without needing a parser — and it is the same hole this very test was written
+           to close, one level in. */
+        Assert.DoesNotContain("}", source[guard..revert], StringComparison.Ordinal);
     }
 
     [Fact]

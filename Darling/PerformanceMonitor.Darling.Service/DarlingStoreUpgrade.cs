@@ -1115,7 +1115,6 @@ internal sealed class DarlingStoreUpgrade
             + "-upgrade-" + context.NewMajor.ToString(CultureInfo.InvariantCulture);
         var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(context.DataDirectory)))!;
         var passwordFile = Path.Combine(parent, "pg-upgrade-pwfile.tmp");
-        var passFile = Path.Combine(parent, "pg-upgrade-pgpass.tmp");
 
         var step = "preflight";
         var oldStarted = false;
@@ -1216,8 +1215,7 @@ internal sealed class DarlingStoreUpgrade
             AssertUpgradePortsFree();
 
             step = "pg_upgrade-check";
-            WritePgPassFile(passFile, context.UserName, context.Password);
-            var environment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PGPASSFILE"] = passFile };
+            var environment = BuildLibpqCredentialEnvironment(context.Password);
 
             var checkExit = await DarlingManagedPostgres.RunDetachingToolAsync(
                 Path.Combine(context.NewBinDirectory, "pg_upgrade.exe"),
@@ -1391,7 +1389,6 @@ internal sealed class DarlingStoreUpgrade
         finally
         {
             TryDeleteFile(passwordFile);
-            TryDeleteFile(passFile);
         }
     }
 
@@ -1599,14 +1596,27 @@ internal sealed class DarlingStoreUpgrade
     /// <summary>libpq's password file, so pg_upgrade's internal connections authenticate without an
     /// environment variable carrying the superuser password through the process table. Same
     /// hardened-temp-file discipline as initdb's <c>--pwfile</c>, deleted in the caller's finally.</summary>
-    private static void WritePgPassFile(string path, string userName, string password)
-    {
-        /* Backslash-escape the pgpass field separators. The generated password is alphanumeric, so this is
-           belt-and-braces for a hand-restored credential. */
-        var escaped = password.Replace("\\", "\\\\", StringComparison.Ordinal).Replace(":", "\\:", StringComparison.Ordinal);
-        File.WriteAllText(path, $"*:*:*:{userName}:{escaped}\n");
-        DarlingFileSecurity.HardenFile(path, allowInteractiveRead: false);
-    }
+    /// <summary>
+    /// The credential every libpq tool in the upgrade authenticates with, handed over as <c>PGPASSWORD</c>
+    /// in the child's environment.
+    ///
+    /// <para>This was a hardened <c>PGPASSFILE</c> first, on the reasoning that a file keeps the password out
+    /// of a process environment block. That was wrong on both counts. It FAILED on a CI runner —
+    /// <c>password authentication failed for user "darling"</c> from pg_upgrade's own log, while passing on a
+    /// developer box — because the file approach has to get four separate things right on every host: the
+    /// ACL (and pg_upgrade re-execs itself under a RESTRICTED token on Windows, so the reader is not quite
+    /// the writer), the encoding, a path a restricted child can reach, and cleanup. And it is not actually
+    /// safer: a process environment block is readable by the same user and by administrators, which is the
+    /// identical audience that can already read the DPAPI credential file this password comes from — except
+    /// the environment never touches disk, where a killed process could strand a cleartext temp file the
+    /// <c>finally</c> never ran for.</para>
+    ///
+    /// <para>So: one mechanism, no file, nothing persisted, and the same exposure set. libpq reads
+    /// <c>PGPASSWORD</c> ahead of any password file, and every tool the upgrade spawns (pg_upgrade and the
+    /// pg_dump/pg_restore/psql it spawns in turn) inherits it.</para>
+    /// </summary>
+    private static Dictionary<string, string> BuildLibpqCredentialEnvironment(string password)
+        => new(StringComparer.OrdinalIgnoreCase) { ["PGPASSWORD"] = password };
 
     /// <summary>
     /// pg_upgrade's own logs, which it writes under the NEW data directory and removes on success — so
@@ -1839,10 +1849,8 @@ internal sealed class DarlingStoreUpgrade
             return;
         }
 
-        var passFile = Path.Combine(Path.GetTempPath(), $"pm-darling-analyze-{Guid.NewGuid():N}.tmp");
         try
         {
-            WritePgPassFile(passFile, userName, password);
 
             var arguments = new StringBuilder();
             arguments.Append("--host 127.0.0.1 --port ").Append(port.ToString(CultureInfo.InvariantCulture));
@@ -1862,7 +1870,7 @@ internal sealed class DarlingStoreUpgrade
                 arguments.ToString(),
                 s_analyzeTimeout,
                 cancellationToken,
-                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PGPASSFILE"] = passFile });
+                BuildLibpqCredentialEnvironment(password));
 
             if (exitCode == 0)
             {
@@ -1885,7 +1893,6 @@ internal sealed class DarlingStoreUpgrade
         }
         finally
         {
-            TryDeleteFile(passFile);
         }
     }
 }
