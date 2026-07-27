@@ -555,12 +555,26 @@ public sealed class DarlingWorker : BackgroundService
         }
         catch (Exception ex)
         {
+            /* The remediation is spelled out as runnable commands, not described. This exact failure sat in
+               a field box's log once per service start for months and nobody acted on it, because knowing
+               the ACL is wrong is not the same as knowing what to type — and the service genuinely cannot
+               fix it itself: re-ACLing needs WRITE_DAC, which it does not have, and taking ownership needs
+               a privilege a virtual service account is not granted. An elevated human is the only actor
+               who can resolve this, so give them the three lines. */
+            /* Built as ONE argument rather than repeating {Path}: a structured-logging template binds
+               placeholders POSITIONALLY, so a repeated name silently consumes the next argument and the
+               tail of the message renders empty — in the one log line whose entire job is to be actionable. */
+            var remediation =
+                $"icacls \"{path}\" /inheritance:d   then   icacls \"{path}\" /remove:g \"BUILTIN\\Users\"   " +
+                $"then   icacls \"{path}\" /grant \"NT SERVICE\\PerformanceMonitor Darling:(F)\"";
+
             _logger.LogError(
                 "Could not restrict the ACL on {Path}{Detail} ({Message}). If the owner is not this service, the " +
-                "re-ACL can never succeed — it needs ownership or FullControl — so restarting will not clear this; " +
-                "grant the service account FullControl or make it the owner (SYSTEM/Administrators/the service " +
-                "account, plus INTERACTIVE read for the Viewer).",
-                path, DarlingFileSecurity.DescribeOwnerAndExposure(path), ex.Message);
+                "re-ACL can never succeed — it needs ownership or FullControl — so restarting will not clear this, " +
+                "and the service cannot fix it alone: taking ownership needs a privilege a virtual service account " +
+                "does not have. From an ELEVATED prompt: {Remediation} — after which this service re-asserts the " +
+                "full ACL by itself on the next start.",
+                path, DarlingFileSecurity.DescribeOwnerAndExposure(path), ex.Message, remediation);
         }
 
         if (DarlingFileSecurity.IsReadableByOrdinaryUsers(path))

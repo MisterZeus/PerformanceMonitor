@@ -11,6 +11,7 @@ using System.IO;
 using System.Linq;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Threading.Tasks;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
 
@@ -317,6 +318,56 @@ public sealed class DarlingFileSecurityTests
             .Where(r => r.AccessControlType == AccessControlType.Allow)
             .Select(r => ((SecurityIdentifier)r.IdentityReference, r.FileSystemRights, r.InheritanceFlags))
             .ToArray();
+    }
+
+    [Fact]
+    public async Task WriteWithBackup_HardensTheBackup_BecauseFileCopyDoesNotCarryTheDacl()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        /* The install location this reproduces is a folder created directly under C:\, whose root DACL
+           grants BUILTIN\Users an INHERITABLE read. %TEMP% is per-user and grants Users nothing, so the
+           ACE is planted here deliberately — without it the backup would be clean for the wrong reason and
+           this test would pass with the hardening removed. */
+        var directory = Path.Combine(Path.GetTempPath(), "darling-cfg-bak-" + Guid.NewGuid().ToString("N"));
+        _ = Directory.CreateDirectory(directory);
+        try
+        {
+            var directorySecurity = new DirectoryInfo(directory).GetAccessControl();
+            directorySecurity.AddAccessRule(new FileSystemAccessRule(
+                s_builtinUsers,
+                FileSystemRights.Read,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+            new DirectoryInfo(directory).SetAccessControl(directorySecurity);
+
+            var configPath = Path.Combine(directory, "darling.json");
+            await File.WriteAllTextAsync(configPath, "{\"servers\":[]}");
+
+            /* Proves the planted ACE actually flows to a new file in this directory — i.e. that the
+               scenario under test is real on this machine, not just asserted. */
+            var canary = Path.Combine(directory, "canary.json");
+            await File.WriteAllTextAsync(canary, "{}");
+            Assert.True(
+                DarlingFileSecurity.IsReadableByOrdinaryUsers(canary),
+                "a new file in this directory must inherit the Users read ACE, or the test proves nothing");
+
+            var written = await DarlingCliCommands.WriteWithBackupAsync(
+                configPath, "{\"servers\":[],\"edited\":true}", TextWriter.Null, TextWriter.Null, default);
+            Assert.True(written);
+
+            var backup = Directory.GetFiles(directory, "darling.json.bak-*").Single();
+            Assert.False(
+                DarlingFileSecurity.IsReadableByOrdinaryUsers(backup),
+                "the backup is a full copy of the encrypted passwords and access tokens — File.Copy does not " +
+                "carry the source DACL, so an unhardened backup hands every local user the credentials that " +
+                "darling.json's own ACL exists to protect");
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 
     private static void AssertProtectedAndNoWorldRead(
