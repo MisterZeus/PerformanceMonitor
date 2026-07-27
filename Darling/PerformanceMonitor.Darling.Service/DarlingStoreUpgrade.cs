@@ -591,17 +591,26 @@ internal sealed class DarlingStoreUpgrade
         }
     }
 
-    /// <summary>Total bytes of every file under <paramref name="directory"/>; unreadable entries are skipped.</summary>
+    /// <summary>
+    /// Total bytes of every file under <paramref name="directory"/>; unreadable entries are skipped.
+    ///
+    /// <para>Walks <see cref="DirectoryInfo"/> rather than paths on purpose: the <see cref="FileInfo"/>
+    /// objects it yields carry the size from the directory enumeration itself, where reading
+    /// <c>new FileInfo(path).Length</c> costs a fresh metadata call PER FILE. On a store data directory —
+    /// one relation file per chunk per index, so tens of thousands of files, and #1770 measures several
+    /// copies of one on every service start — that is the difference between a directory walk and tens of
+    /// thousands of syscalls on the startup path.</para>
+    /// </summary>
     internal static long MeasureDirectoryBytes(string directory)
     {
         long total = 0;
         try
         {
-            foreach (var file in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
+            foreach (var file in new DirectoryInfo(directory).EnumerateFiles("*", SearchOption.AllDirectories))
             {
                 try
                 {
-                    total += new FileInfo(file).Length;
+                    total += file.Length;
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                 {
