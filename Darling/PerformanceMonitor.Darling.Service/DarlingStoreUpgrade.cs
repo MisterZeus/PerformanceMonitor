@@ -1356,6 +1356,9 @@ internal sealed class DarlingStoreUpgrade
                which is precisely the class of self-inflicted damage the move-aside discipline exists to
                prevent; this is that same lesson applied past the swap. So: no revert, no deletion of the new
                data directory (it is the live store now), and no "nothing was modified" claim. */
+            /* Safe here despite pointing at the OLD binaries: oldStarted was set false when the old cluster
+               was stopped before initdb, well before the swap, so this is a no-op on every post-commit path.
+               Spelled out so a future reader does not have to re-derive it and conclude it is a bug. */
             await TryStopAsync(context, oldStarted);
 
             var warning =

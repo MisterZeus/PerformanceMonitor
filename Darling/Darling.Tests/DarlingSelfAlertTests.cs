@@ -953,7 +953,12 @@ public sealed class DarlingSelfAlertTests
         /* And the reassuring sentence must be REPLACED, not merely appended to — the retention marker is
            precisely what failed, so promising it ages out automatically would be actively wrong. */
         Assert.DoesNotContain("then deleted automatically", fired.DetailText, StringComparison.Ordinal);
-        Assert.Contains("remove the pre-upgrade data directory by hand", fired.DetailText, StringComparison.Ordinal);
+        /* The corrected wording: the copy DOES age out, one start later, because the sweep reads a
+           missing counter as 1. Telling an operator it never ages out would send them to delete a
+           multi-gigabyte directory for no reason — the same class of false operator-facing claim this
+           whole round was about, just erring toward extra work instead of false comfort. */
+        Assert.Contains("ages out one start later than usual", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("will not age out on its own", fired.DetailText, StringComparison.Ordinal);
     }
 
     [Fact]

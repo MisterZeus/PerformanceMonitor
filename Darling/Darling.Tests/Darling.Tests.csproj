@@ -46,6 +46,11 @@
          never sees them). HostHeaderGuardTests parses them to pin that the #1648 DNS-rebinding middleware is
          installed FIRST and in BOTH bind modes: the defect was a WIRING omission, not a logic bug, so the pure
          decision test alone would have passed on the broken build. -->
+    <!-- #1706: the store-upgrade orchestration is parsed as SOURCE to pin two WIRING invariants that no
+         behavioral test can reach — the post-commit catch must stay ahead of the general one, and the port
+         preflight must actually be called. Both defects are invisible to logic tests and to the happy-path
+         E2E, exactly like the #1648 middleware-ordering case these fixtures already exist for. -->
+    <None Include="..\PerformanceMonitor.Darling.Service\DarlingStoreUpgrade.cs" Link="Fixtures\DarlingStoreUpgrade.cs" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\PerformanceMonitor.Darling.Service\Mcp\DarlingMcpHostService.cs" Link="Fixtures\DarlingMcpHostService.cs" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\PerformanceMonitor.Darling.Service\Mcp\DarlingWebHostService.cs" Link="Fixtures\DarlingWebHostService.cs" CopyToOutputDirectory="PreserveNewest" />
     <!-- The runtime fetch script, copied beside the test binary so DarlingPgRuntimeVersionPinTests reads

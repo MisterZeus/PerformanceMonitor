@@ -290,6 +290,84 @@ public sealed class DarlingStoreUpgradeTests
         Assert.Null(DarlingWorker.BuildStoreUpgradeReport(DarlingStoreUpgrade.StoreUpgradeOutcome.None));
     }
 
+    /* ==================================================================================
+       WIRING pins, parsed from source.
+
+       Both defects below are invisible to every other kind of test here. The logic tests pass because the
+       logic is correct; the gated E2E passes because it is a HAPPY path that never throws after the swap and
+       never meets an occupied port. Deleting `swapped = true`, reordering the catch clauses, or deleting the
+       preflight call leaves the whole suite green — which is exactly the hole that let the original HIGH
+       reach an arming gate. Same reasoning, and the same idiom, as HostHeaderGuardTests' #1648 middleware
+       ordering pins: a WIRING omission needs a wiring test.
+       ================================================================================== */
+
+    private static string ReadUpgradeSource()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "DarlingStoreUpgrade.cs");
+        Assert.True(File.Exists(path),
+            "DarlingStoreUpgrade.cs was not copied beside the test binary — check the csproj None/Link item.");
+
+        var source = File.ReadAllText(path);
+        /* Guard the guard: if the file were restructured past recognition these assertions could pass
+           vacuously on a mismatched parse, so pin the anchors they key off. */
+        Assert.Contains("swapped = true;", source, StringComparison.Ordinal);
+        Assert.Contains("catch (Exception ex)", source, StringComparison.Ordinal);
+        return source;
+    }
+
+    [Fact]
+    public void PostCommitCatch_StaysAheadOfTheGeneralCatch_AndNeverReverts()
+    {
+        var source = ReadUpgradeSource();
+
+        var filtered = source.IndexOf("catch (Exception ex) when (swapped)", StringComparison.Ordinal);
+        Assert.True(filtered >= 0, "the post-commit catch clause is gone — a failure after the swap would revert the runtime and leave old binaries in front of a new data directory");
+
+        var general = source.IndexOf("catch (Exception ex)\r\n", filtered, StringComparison.Ordinal);
+        if (general < 0)
+        {
+            general = source.IndexOf("catch (Exception ex)\n", filtered, StringComparison.Ordinal);
+        }
+
+        Assert.True(general > filtered,
+            "the unfiltered catch now precedes the post-commit one, so the filtered clause is unreachable. " +
+            "C# takes the first matching handler, the compiler does not warn, and the result is a runtime " +
+            "revert over an already-swapped data directory — an unbootable store.");
+
+        /* And within the post-commit handler, nothing may revert. */
+        var body = source[filtered..general];
+        Assert.DoesNotContain("RevertRuntime", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CancellationPath_DoesNotRevertOnceTheSwapCommitted()
+    {
+        var source = ReadUpgradeSource();
+        var cancel = source.IndexOf("catch (OperationCanceledException)", StringComparison.Ordinal);
+        Assert.True(cancel >= 0);
+
+        /* The revert in the cancellation handler must sit behind the !swapped guard. A shutdown timed after
+           the swap is no more entitled to undo a completed upgrade than an exception is. */
+        var guard = source.IndexOf("if (!swapped)", cancel, StringComparison.Ordinal);
+        var revert = source.IndexOf("RevertRuntimeForCancel", cancel, StringComparison.Ordinal);
+        Assert.True(guard >= 0 && revert > guard,
+            "the cancellation path reverts the runtime without checking whether the swap already committed");
+    }
+
+    [Fact]
+    public void PortPreflight_IsActuallyInvokedBeforePgUpgradeRuns()
+    {
+        var source = ReadUpgradeSource();
+
+        var call = source.IndexOf("AssertUpgradePortsFree();", StringComparison.Ordinal);
+        Assert.True(call >= 0,
+            "nothing calls AssertUpgradePortsFree — FindOccupiedPorts being correct is worth nothing if the " +
+            "check never runs, and a clean CI runner has free ports so no behavioral test would notice");
+
+        var firstUpgrade = source.IndexOf("pg_upgrade.exe", StringComparison.Ordinal);
+        Assert.True(firstUpgrade > call, "the port preflight must run BEFORE pg_upgrade is invoked");
+    }
+
     [Fact]
     public void RetainedDataDirectory_IsNamedForTheMajorItCameFrom()
         => Assert.Equal(

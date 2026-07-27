@@ -1182,7 +1182,13 @@ internal sealed class DarlingSelfAlertEvaluator
                 var degraded = !string.IsNullOrWhiteSpace(report.FailureMessage);
 
                 var rollback = degraded
-                    ? $" BUT post-upgrade bookkeeping did NOT complete: {report.FailureMessage}. The store itself is fine and running on PostgreSQL {report.ToMajor} — this is about cleanup, not data. Check free disk space on the store volume, and remove the pre-upgrade data directory by hand once you are satisfied with the upgraded store, because it will not age out on its own."
+                    /* The retention counter is DESIGNED to tolerate a missing marker — the sweep reads an
+                       absent counter as 1, so the copy simply ages out one service start later than usual.
+                       Saying it never ages out would send an operator to delete a multi-gigabyte directory by
+                       hand for no reason. What IS true, and is the actual signal: the countdown cannot
+                       advance while whatever blocked the write is still blocking it, because the sweep's own
+                       counter write fails the same way. */
+                    ? $" BUT post-upgrade bookkeeping did NOT complete: {report.FailureMessage}. The store itself is fine and running on PostgreSQL {report.ToMajor} — this is about cleanup, not data. The retained copy's countdown simply starts on the next service start, so it ages out one start later than usual; it only stays put if whatever blocked the write is still blocking it. Check free disk space on the store volume, clear the underlying problem, and remove the directory by hand only if it is still there after a couple of starts."
                     : report.WithoutRollbackCopy
                         ? " The upgrade ran in hard-link mode, so there is NO rollback copy of the pre-upgrade store — the only way back is a restore from backup."
                         : " The pre-upgrade data directory is kept as a rollback copy for the next couple of service starts, then deleted automatically.";
