@@ -266,11 +266,14 @@ public partial class MainWindow : Window
     /// </summary>
     private async Task EvaluateAvailabilityGroupAlertsAsync(int serverId, string serverName, bool suppressed)
     {
-        /* _dataService is nullable and is not assigned until the local store opens, so an alert sweep can
-           reach here first. Same guard the rest of MainWindow uses; without it this method is the only
-           caller in the file that dereferences it unchecked (CS8602, and a NullReferenceException on the
-           unlucky ordering rather than a quiet no-alerts pass). */
-        if (_dataService == null)
+        /* Captured once and null-checked, the same shape as the tray capture above. _dataService is
+           nullable and unset until the local store opens, and this method runs UNAWAITED off a UI-timer
+           tick — so it can land before the service is wired, and an NRE on a fire-and-forget task is an
+           unobserved exception nobody ever sees. The symptom would have been AG alerts silently not
+           evaluating on some launches with nothing in the log. Capturing also removes the gap a bare
+           field check leaves: the field could be reassigned across either await below. */
+        var data = _dataService;
+        if (data is null)
         {
             return;
         }
@@ -280,13 +283,13 @@ public partial class MainWindow : Window
             var alerts = new List<AgAlert>();
             var now = DateTime.UtcNow;
 
-            var (replicaTimeUtc, replicas) = await _dataService.GetLatestAgReplicaStatesAsync(serverId);
+            var (replicaTimeUtc, replicas) = await data.GetLatestAgReplicaStatesAsync(serverId);
             if (IsFresh(replicaTimeUtc))
             {
                 alerts.AddRange(_agAlertEvaluator.EvaluateReplicas(serverId, replicas));
             }
 
-            var (databaseTimeUtc, databases) = await _dataService.GetLatestAgDatabaseReplicaStatesAsync(serverId);
+            var (databaseTimeUtc, databases) = await data.GetLatestAgDatabaseReplicaStatesAsync(serverId);
             if (IsFresh(databaseTimeUtc))
             {
                 alerts.AddRange(_agAlertEvaluator.EvaluateDatabases(
