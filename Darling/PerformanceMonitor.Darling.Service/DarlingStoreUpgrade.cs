@@ -368,18 +368,6 @@ internal sealed class DarlingStoreUpgrade
     }
 
     /// <summary>
-    /// Server options pg_upgrade passes to BOTH clusters it starts, quiescing TimescaleDB for the duration
-    /// of the binary upgrade.
-    ///
-    /// <para>This is not tuning, it is a deadlock avoidance. TimescaleDB's scheduler background worker
-    /// connects to databases and takes locks on its own schedule — including on <c>template0</c>, which
-    /// timescale/timescaledb#1593 documents deadlocking against a restore that needs the same lock, in a
-    /// cycle PostgreSQL's deadlock detector does not break. pg_upgrade is exactly that kind of workload: it
-    /// starts each cluster and connects database by database. Nothing the scheduler could do during an
-    /// upgrade window is wanted anyway — the jobs it would run operate on data being copied out from under
-    /// them — so it is turned off for the duration and comes back with the normal start afterwards.</para>
-    /// </summary>
-    /// <summary>
     /// Server options pg_upgrade passes to BOTH clusters it starts, for the upgrade window only. The
     /// store's own postgresql.conf is never edited; <c>-c</c> on the command line simply outranks it, the
     /// same mechanism <see cref="DarlingManagedPostgres.BuildServerRuntimeOptions"/> already uses to force
