@@ -13,6 +13,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -387,18 +388,27 @@ public sealed class PayloadDimensionTests
     }
 
     [Fact]
-    public void GcSql_IsALastSeenRangeDelete_NotAnAntiJoinAgainstTheFactTables()
+    public void DimensionGc_ReusesTheTimeSlicedDelete_NotAnAntiJoinAndNotAnUnboundedStatement()
     {
-        /* The obvious sweep — delete dim rows no live fact references — is an anti-join against two
-           hypertables per dim row and is not affordable at this size. last_seen makes it an index range
-           scan, and is equivalent because the write path stamps it on every cycle that references the
-           digest. */
-        Assert.Equal(
-            "DELETE FROM query_text_dim WHERE last_seen < $1",
-            PayloadDimensions.GcSql(PayloadDimensions.QueryTextDimTable));
-        Assert.Equal(
-            "DELETE FROM query_plan_dim WHERE last_seen < $1",
-            PayloadDimensions.GcSql(PayloadDimensions.QueryPlanDimTable));
+        /* Two properties, both load-bearing. It is a last_seen range delete rather than the obvious
+           sweep (delete dim rows no live fact references), which would be an anti-join against two
+           hypertables per dim row -- affordable only because the write path stamps last_seen on every
+           cycle that references the digest. And it goes through the SAME time-sliced DELETE every
+           sibling purge uses, so the first sweep after an upgrade -- a whole retention window of
+           expired content -- is bounded work per statement instead of one transaction holding a lock
+           and generating WAL for the entire backlog. */
+        foreach (var dimTable in PayloadDimensions.DimTables)
+        {
+            var sql = DarlingRetention.TimeSlicedDeleteSql(dimTable, PayloadDimensions.LastSeenColumn);
+
+            Assert.StartsWith($"DELETE FROM {dimTable} WHERE last_seen < $1", sql, StringComparison.Ordinal);
+            Assert.Contains($"min(last_seen) FROM {dimTable}", sql, StringComparison.Ordinal);
+            Assert.Contains("INTERVAL", sql, StringComparison.Ordinal);
+
+            /* Never the anti-join: no dim GC statement may reference a fact table. */
+            Assert.DoesNotContain("query_stats", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("procedure_stats", sql, StringComparison.Ordinal);
+        }
     }
 
     [Fact]

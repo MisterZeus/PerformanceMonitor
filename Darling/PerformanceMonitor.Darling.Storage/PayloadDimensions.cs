@@ -76,7 +76,20 @@ public static class PayloadDimensions
 
     /// <summary>
     /// The GC watermark column both dimension tables share — the newest collection that referenced
-    /// this content. See <see cref="GcSql"/> for why this, and not an orphan scan, is the sweep.
+    /// this content.
+    ///
+    /// <para>It exists because the obvious sweep (delete dim rows no live fact references) is an
+    /// anti-join against two hypertables per dim row and is not affordable at this size. The write
+    /// path stamps last_seen on every cycle that references a digest, so it is never older than the
+    /// newest fact row pointing at it: once it falls past the fact tables' own retention horizon,
+    /// every fact that could reference this content has already been purged. That turns the sweep
+    /// into an indexed range scan on this column. DarlingRetention runs it, through the same
+    /// time-sliced DELETE every other purge uses.</para>
+    ///
+    /// <para>Bounded rather than kept forever because the worst case compounds: ~23 MB/hour of
+    /// distinct plans on the measured field instance is ~552 MB/day, ~16.6 GB/month, ~200 GB/year
+    /// if nothing ever expires — a store that would eventually re-create the problem this change
+    /// exists to solve.</para>
     /// </summary>
     public const string LastSeenColumn = "last_seen";
 
@@ -210,7 +223,7 @@ public static class PayloadDimensions
     /// <para>The conflict arm refreshes <see cref="LastSeenColumn"/> only when it is more than an
     /// hour stale. Without that guard every referenced dim row would take an UPDATE every collection
     /// cycle — a dead tuple per row per minute on a hot table — for a watermark whose consumer
-    /// (<see cref="GcSql"/>) has a multi-day horizon. The guard caps it at one UPDATE per row per
+    /// (the <see cref="LastSeenColumn"/> sweep) has a multi-day horizon. The guard caps it at one UPDATE per row per
     /// hour, 60x less churn, and stays correct as long as the GC margin exceeds an hour (it is a
     /// full day).</para>
     ///
@@ -230,27 +243,4 @@ public static class PayloadDimensions
             $"WHERE {dimTable}.{LastSeenColumn} < EXCLUDED.{LastSeenColumn} - INTERVAL '1 hour'";
     }
 
-    /// <summary>
-    /// The dimension GC, run on the existing retention cadence.
-    ///
-    /// <para>The obvious sweep — delete dim rows no live fact references — is an anti-join against
-    /// two hypertables per dim row and is not affordable at this size. <see cref="LastSeenColumn"/>
-    /// makes it an index range scan instead, and is exactly equivalent: the write path stamps
-    /// last_seen on every cycle that references a digest, so last_seen is never older than the
-    /// newest fact row pointing at it. If last_seen has fallen past the fact tables' own retention
-    /// horizon, every fact that could reference this content has already been purged.</para>
-    ///
-    /// <para>The caller passes the horizon as the fact tables' effective retention plus a margin —
-    /// see DarlingRetention, which resolves the same per-collector horizon the fact purge uses, so
-    /// a raised retention override can never outrun the dim GC and orphan a reader.</para>
-    ///
-    /// <para>Bounded rather than kept forever because the worst case compounds: ~23 MB/hour of
-    /// distinct plans on the measured field instance is ~552 MB/day, ~16.6 GB/month, ~200 GB/year
-    /// if nothing ever expires — a store that would eventually re-create the problem this change
-    /// exists to solve. Bounded at the fact horizon, the dim holds only content still reachable
-    /// from a live fact row, which is ~2 GB worst case at a 4-day horizon and far less in practice
-    /// once the distinct-content set saturates.</para>
-    /// </summary>
-    public static string GcSql(string dimTable)
-        => $"DELETE FROM {dimTable} WHERE {LastSeenColumn} < $1";
 }

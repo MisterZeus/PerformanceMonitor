@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -535,13 +536,23 @@ public sealed class PayloadDimensionLiveTests
             }
 
             using (var gc = new NpgsqlCommand(
-                PayloadDimensions.GcSql(PayloadDimensions.QueryPlanDimTable), connection))
+                DarlingRetention.TimeSlicedDeleteSql(
+                    PayloadDimensions.QueryPlanDimTable, PayloadDimensions.LastSeenColumn),
+                connection))
             {
                 gc.Parameters.AddWithValue(cutoff);
+
+                /* Drained the way production drains it: the statement clears ONE time slice per
+                   execution, so a single call would only reach this test's row when it happens to sit
+                   in the oldest slice on the rig. DrainBatchesAsync is the same loop DarlingRetention
+                   runs, so this exercises the real termination condition rather than a test-only one. */
+                var swept = await DarlingRetention.DrainBatchesAsync(
+                    token => gc.ExecuteNonQueryAsync(token), batchSize: 1, ct);
+
                 /* At least this test's expired row. The GC is fleet-wide, so an exact count would be a
                    flake waiting on a rig that happens to hold another ancient row; the two scoped counts
                    below are the actual pin. */
-                Assert.True(await gc.ExecuteNonQueryAsync(ct) >= 1, "the expired dim row must be swept");
+                Assert.True(swept >= 1, "the expired dim row must be swept");
             }
 
             Assert.Equal(0L, await ScalarAsync(

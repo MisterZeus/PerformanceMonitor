@@ -196,7 +196,11 @@ public static class DarlingRetention
                The obvious sweep (delete dim rows no live fact references) is an anti-join against two
                hypertables per dim row and is not affordable at this size. Instead the write path stamps
                last_seen on every cycle that references a digest, so last_seen is never older than the newest
-               fact row pointing at it, and the GC is an index range scan on last_seen.
+               fact row pointing at it, and the GC is an index range scan on last_seen — run through the SAME
+               time-sliced DELETE every sibling purge uses, rather than one unbounded statement. That matters
+               most on the FIRST sweep after an upgrade, which is the one with a whole retention window of
+               expired content to clear: unsliced, that is a single transaction holding a lock and generating
+               WAL proportional to the entire backlog, which is exactly what the slicing exists to bound.
 
                The horizon is the WIDEST effective fact retention of the two tables — resolved through the
                same resolver the fact purge above uses, so a raised per-collector override can never outlive
@@ -222,7 +226,8 @@ public static class DarlingRetention
             foreach (var dimTable in PayloadDimensions.DimTables)
             {
                 var dimDeleted = await PurgeOneAsync(
-                    postgres, dimTable, PayloadDimensions.GcSql(dimTable), dimensionCutoff, logger, cancellationToken);
+                    postgres, dimTable, TimeSlicedDeleteSql(dimTable, PayloadDimensions.LastSeenColumn),
+                    dimensionCutoff, logger, cancellationToken);
                 if (dimDeleted is not null)
                 {
                     tablesPurged++;
