@@ -138,30 +138,83 @@ else {
 # SYSTEM / Administrators / the service account get full control, INTERACTIVE gets read (the Viewer and the
 # CLI verbs run as the interactive operator and must still read the file). Best-effort: a failure warns
 # rather than aborting an otherwise good install, and the service re-asserts this ACL at every startup.
-try {
-    $wk = [System.Security.Principal.WellKnownSidType]
-    $systemSid      = New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)
-    $adminsSid      = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)
-    $interactiveSid = New-Object System.Security.Principal.SecurityIdentifier($wk::InteractiveSid, $null)
-    $serviceSid     = (New-Object System.Security.Principal.NTAccount("NT SERVICE\$serviceName")).Translate([System.Security.Principal.SecurityIdentifier])
+#
+# Covers darling.json AND its .bak-* siblings (#1721). The CLI's config-editing verbs back the file up
+# before rewriting it, and File.Copy does NOT carry the source DACL - a backup takes the DIRECTORY's
+# inheritable ACEs instead, so on an install under C:\ every past edit left a world-readable copy of the
+# same secrets. The service hardens new backups itself now; these are the ones already on disk.
+#
+# The service account is also made the OWNER, best-effort and separately from the DACL. Ownership carries
+# WRITE_DAC implicitly, which is what lets the service re-assert this ACL at every start. Granting it
+# FullControl below achieves the same thing today; owning the file means it still holds if someone later
+# edits the DACL and drops that grant. Done AFTER the DACL and in its own try, so a SeRestorePrivilege
+# failure cannot take the DACL down with it - the failure mode we are fixing came from a permissions call
+# that silently did nothing.
+$hardened = @()
+$failed = @()
+foreach ($secretFile in @($configPath) + @(Get-ChildItem -Path $root -Filter 'darling.json.bak-*' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })) {
+    try {
+        $wk = [System.Security.Principal.WellKnownSidType]
+        $systemSid      = New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)
+        $adminsSid      = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)
+        $interactiveSid = New-Object System.Security.Principal.SecurityIdentifier($wk::InteractiveSid, $null)
+        $serviceSid     = (New-Object System.Security.Principal.NTAccount("NT SERVICE\$serviceName")).Translate([System.Security.Principal.SecurityIdentifier])
 
-    $acl = New-Object System.Security.AccessControl.FileSecurity
-    # Protect the DACL and drop every inherited ACE: access is now EXACTLY the four rules below.
-    $acl.SetAccessRuleProtection($true, $false)
-    $full = [System.Security.AccessControl.FileSystemRights]::FullControl
-    $read = [System.Security.AccessControl.FileSystemRights]::Read -bor [System.Security.AccessControl.FileSystemRights]::Synchronize
-    $allow = [System.Security.AccessControl.AccessControlType]::Allow
-    foreach ($sid in @($systemSid, $adminsSid, $serviceSid)) {
-        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, $full, $allow)))
+        $acl = New-Object System.Security.AccessControl.FileSecurity
+        # Protect the DACL and drop every inherited ACE: access is now EXACTLY the four rules below.
+        $acl.SetAccessRuleProtection($true, $false)
+        $full = [System.Security.AccessControl.FileSystemRights]::FullControl
+        $read = [System.Security.AccessControl.FileSystemRights]::Read -bor [System.Security.AccessControl.FileSystemRights]::Synchronize
+        $allow = [System.Security.AccessControl.AccessControlType]::Allow
+        foreach ($sid in @($systemSid, $adminsSid, $serviceSid)) {
+            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, $full, $allow)))
+        }
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($interactiveSid, $read, $allow)))
+        Set-Acl -Path $secretFile -AclObject $acl
+
+        try {
+            $owner = New-Object System.Security.AccessControl.FileSecurity
+            $owner.SetOwner($serviceSid)
+            Set-Acl -Path $secretFile -AclObject $owner
+        }
+        catch {
+            # Not fatal: the explicit FullControl grant above already carries WRITE_DAC.
+        }
+
+        # VERIFY rather than assume. A permissions call that appears to succeed and leaves the file
+        # readable is exactly what went unnoticed for months on a field box.
+        $after = Get-Acl -Path $secretFile
+        $exposed = $after.Access | Where-Object {
+            $_.AccessControlType -eq 'Allow' -and
+            $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).IsWellKnown($wk::BuiltinUsersSid)
+        }
+        if ($exposed -or -not $after.AreAccessRulesProtected) {
+            $failed += $secretFile
+        }
+        else {
+            $hardened += $secretFile
+        }
     }
-    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($interactiveSid, $read, $allow)))
-    Set-Acl -Path $configPath -AclObject $acl
-    Write-Host "Restricted darling.json to SYSTEM, Administrators, the service account, and INTERACTIVE (it holds encrypted passwords and access tokens)."
+    catch {
+        $failed += "$secretFile ($($_.Exception.Message))"
+    }
 }
-catch {
-    Write-Host "WARNING: could not restrict permissions on darling.json ($($_.Exception.Message))." -ForegroundColor Yellow
-    Write-Host "         It holds encrypted SQL passwords and the MCP/web access tokens, which any local user who can read the file can recover." -ForegroundColor Yellow
-    Write-Host "         Fix it by hand, or move the install out of a world-readable folder." -ForegroundColor Yellow
+
+if ($hardened.Count -gt 0) {
+    Write-Host "Restricted $($hardened.Count) credential file(s) to SYSTEM, Administrators, the service account, and INTERACTIVE (they hold encrypted passwords and access tokens)."
+}
+if ($failed.Count -gt 0) {
+    Write-Host ''
+    Write-Host 'SECURITY WARNING: these files still are not restricted:' -ForegroundColor Red
+    foreach ($f in $failed) { Write-Host "  $f" -ForegroundColor Red }
+    Write-Host '  They hold every monitored server''s encrypted SQL password plus the MCP and web access tokens.' -ForegroundColor Red
+    Write-Host '  Those are DPAPI LocalMachine blobs, so READ ACCESS IS THE SECRET - any local user who can open' -ForegroundColor Red
+    Write-Host '  the file can recover all of it. Fix each one from an elevated prompt:' -ForegroundColor Red
+    Write-Host "    icacls `"<file>`" /inheritance:d" -ForegroundColor Yellow
+    Write-Host "    icacls `"<file>`" /remove:g `"BUILTIN\Users`"" -ForegroundColor Yellow
+    Write-Host "    icacls `"<file>`" /grant `"NT SERVICE\$serviceName`:(F)`"" -ForegroundColor Yellow
+    Write-Host '  ...or move the install out of a world-readable folder such as one created directly under C:\.' -ForegroundColor Red
+    Write-Host ''
 }
 
 # -- 5. Start + confirm ---------------------------------------------------------------------------

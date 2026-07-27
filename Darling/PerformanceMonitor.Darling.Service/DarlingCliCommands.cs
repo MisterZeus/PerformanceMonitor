@@ -1295,8 +1295,27 @@ public static class DarlingCliCommands
         }
     }
 
-    /// <summary>Backs up darling.json to a timestamped sibling, then writes the new text. Returns false (with a message) on any I/O failure.</summary>
-    private static async Task<bool> WriteWithBackupAsync(
+    /// <summary>
+    /// Backs up darling.json to a timestamped sibling, then writes the new text. Returns false (with a
+    /// message) on any I/O failure.
+    ///
+    /// <para><b>The backup is hardened, because it is a second copy of the secret.</b> Every edit here
+    /// copies a file holding each monitored server's encrypted password and the MCP/web tokens, and
+    /// <c>File.Copy</c> does NOT carry the source's DACL — the new file takes the DIRECTORY's inheritable
+    /// ACEs instead. Measured, not assumed: copying a file whose DACL is protected with one ACE produces a
+    /// backup that is unprotected with three inherited ones. On the documented install location, a folder
+    /// created directly under <c>C:\</c>, those inherited ACEs include <c>BUILTIN\Users: Read</c> — so
+    /// without this every <c>--rotate-token</c> or <c>--disable</c> would drop a world-readable copy of
+    /// every credential beside a correctly hardened <c>darling.json</c>, defeating the ACL that is the
+    /// whole protection boundary for LocalMachine-scope DPAPI blobs (#1721).</para>
+    ///
+    /// <para>Copy-then-harden leaves a sub-millisecond window where the backup exists with inherited
+    /// access. That is stated rather than hidden: closing it would mean creating the file with an explicit
+    /// security descriptor, which is a bigger change than the exposure warrants for an operator-initiated,
+    /// elevated, interactive command — but it is the reason this is a mitigation of a leak rather than a
+    /// proof of its absence.</para>
+    /// </summary>
+    internal static async Task<bool> WriteWithBackupAsync(
         string resolvedPath, string newText, TextWriter output, TextWriter error, CancellationToken cancellationToken)
     {
         try
@@ -1309,6 +1328,13 @@ public static class DarlingCliCommands
             }
 
             File.Copy(resolvedPath, backupPath, overwrite: false);
+            if (OperatingSystem.IsWindows())
+            {
+                HardenConfigBackup(backupPath, error);
+            }
+
+            /* WriteAllText TRUNCATES an existing file rather than recreating it, so darling.json keeps
+               whatever DACL it already had — only the new backup needs hardening. */
             await File.WriteAllTextAsync(resolvedPath, newText, cancellationToken);
             output.WriteLine($"Wrote {resolvedPath}");
             output.WriteLine($"Backup saved: {backupPath}");
@@ -1322,6 +1348,39 @@ public static class DarlingCliCommands
         {
             error.WriteLine($"Could not write the configuration: {ex.Message}");
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Locks a freshly written config backup to the same principals as <c>darling.json</c> itself.
+    ///
+    /// <para>Never fatal — the edit that produced the backup has already been decided on and refusing to
+    /// finish it over a permissions problem would leave the operator worse off. But it is reported LOUDLY
+    /// and names the file, because a silent best-effort ACL failure is exactly how #1721 persisted
+    /// unnoticed across months of service starts: the failure was logged once per start and read by nobody
+    /// until a deploy check happened to look. An operator who just ran a command is the one person
+    /// guaranteed to be watching, so tell them while they are there.</para>
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private static void HardenConfigBackup(string backupPath, TextWriter error)
+    {
+        try
+        {
+            DarlingFileSecurity.HardenFile(backupPath, allowInteractiveRead: true);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"WARNING: could not restrict permissions on the backup {backupPath} ({ex.Message}).");
+            error.WriteLine("         It is a full copy of your encrypted passwords and access tokens. Delete it, or");
+            error.WriteLine("         restrict it by hand, before leaving this machine.");
+            return;
+        }
+
+        if (DarlingFileSecurity.IsReadableByOrdinaryUsers(backupPath))
+        {
+            error.WriteLine($"WARNING: {backupPath} is still readable by ordinary local users after hardening.");
+            error.WriteLine("         It is a full copy of your encrypted passwords and access tokens. Delete it, or");
+            error.WriteLine("         move the install out of a world-readable folder.");
         }
     }
 
