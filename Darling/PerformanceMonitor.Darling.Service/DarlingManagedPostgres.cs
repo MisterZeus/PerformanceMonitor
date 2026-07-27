@@ -1016,6 +1016,23 @@ public sealed class DarlingManagedPostgres
             await File.ReadAllTextAsync(Path.Combine(_dataDirectory, "PG_VERSION"), cancellationToken));
         var bundledMajor = await ReadRuntimeMajorAsync(binDirectory, cancellationToken);
 
+        if (DarlingStoreUpgrade.MustRefuseUnidentifiableRuntime(dataMajor, bundledMajor))
+        {
+            /* #1738: this exact pairing — the store's need KNOWN, the runtime unidentifiable — was logged on
+               DARLING01 as "skipping the runtime version check. The store starts normally." and was followed
+               one second later by the bootstrap dying on exit code -1073741515 (STATUS_DLL_NOT_FOUND). The
+               degrade was backwards: the version check could not run BECAUSE the binaries could not run, which
+               is the strongest possible evidence they must not be used, not a reason to wave them through.
+               Refusing here costs nothing that proceeding would have saved — the start was going to fail
+               regardless — and it converts a cryptic Win32 status code into a message naming the rescued
+               runtime to restore. */
+            throw new InvalidOperationException(
+                $"The store's data directory {_dataDirectory} is PostgreSQL {dataMajor}, but the runtime at {binDirectory} could not be identified — its binaries did not run. " +
+                "A runtime that cannot report its own version cannot start this store either, so the service is stopping here rather than failing deeper with a Win32 error code. " +
+                $"This usually means the wrong package was deployed. Restore the previous runtime from {PreviousRuntimeHint()} over {Path.GetDirectoryName(binDirectory)}, or redeploy a package whose PostgreSQL major is {dataMajor} or newer, then restart the service. " +
+                "The data directory has not been touched.");
+        }
+
         if (dataMajor is null || bundledMajor is null)
         {
             _logger.LogWarning(
