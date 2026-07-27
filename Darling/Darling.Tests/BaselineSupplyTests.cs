@@ -253,6 +253,66 @@ public class BaselineSupplyTests
         Assert.Contains("to_regclass('timescaledb_information.continuous_aggregates') IS NOT NULL", sql, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// MUTATION CHECK for the clamp direction — the defect class where every piece is right and one of them
+    /// faces the wrong way. Clamping the COVERAGE side (<c>LEAST</c> over coverage and the window) instead of
+    /// the NEED side inverts the gate: an empty aggregate collapses to <c>now - window</c>, the skip test
+    /// becomes "now - window &lt;= source oldest", and that is unconditionally true on any store whose raw
+    /// retention is shorter than the window — so the backfill skips precisely the tiered stores it exists for
+    /// and fires only where it is not needed. Restore <c>LEAST</c> and this goes red.
+    /// </summary>
+    [Fact]
+    public void BackfillGate_ClampsTheNeed_NotTheCoverage_OrItSkipsEveryStoreItIsFor()
+    {
+        var sql = TimescaleSupport.BaselineBackfillProbeSql(
+            TimescaleSupport.QueryStatsBaselineView, TimescaleSupport.SourceTableFor(TimescaleSupport.QueryStatsBaselineView));
+
+        /* The clamp is GREATEST, and it is applied to the NEED — source-oldest against the retention horizon. */
+        Assert.Contains("GREATEST(", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LEAST(", sql, StringComparison.Ordinal);
+
+        /* And the coverage side is read RAW, never clamped: it is the thing being measured, not a bound. */
+        Assert.Contains($"(SELECT min(bucket) FROM collect.{TimescaleSupport.QueryStatsBaselineView}) AS coverage_oldest", sql, StringComparison.Ordinal);
+
+        /* The need is bounded by this tier's own retention, not by anything shorter. */
+        Assert.Contains($"INTERVAL '{TimescaleSupport.BaselineRetentionInterval}'", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// MUTATION CHECK for the plain-PostgreSQL / partial-build gap. The provider reads these relations by
+    /// name and its catch swallows the 42P01, so a missing one is a family that silently returns nothing —
+    /// no error surfaced, thresholds worthless, which is #1757's own failure shape delivered to a store that
+    /// never had #1757. Remove the fallback call from the worker and this goes red.
+    ///
+    /// <para>The UNGATED part is the half worth pinning. Gating it on "TimescaleDB unavailable" covers the
+    /// plain-PostgreSQL store and leaves the harder case broken: the extension present, the sweep's
+    /// per-aggregate failure isolation having left one aggregate unbuilt, and exactly one family dead on an
+    /// otherwise healthy store.</para>
+    /// </summary>
+    [Fact]
+    public void BaselineRelations_AreGuaranteedToExist_AndTheGuaranteeIsNotGatedOnTimescaleDb()
+    {
+        var worker = ReadWorkerSource();
+
+        Assert.Contains("TimescaleSupport.EnsureBaselineFallbackViewsAsync(", worker, StringComparison.Ordinal);
+
+        /* Not inside `if (_timescaleAvailable)` and not inside its negation — the call site must be reachable
+           on every path. Checked by position: it has to sit AFTER the TimescaleDB block's catch, which is the
+           only place all three gap routes have converged. */
+        var callAt = worker.IndexOf("TimescaleSupport.EnsureBaselineFallbackViewsAsync(", StringComparison.Ordinal);
+        var plainModeAt = worker.IndexOf("continuing in plain-PostgreSQL mode", StringComparison.Ordinal);
+        Assert.True(plainModeAt > 0 && callAt > plainModeAt,
+            "the fallback must run after the TimescaleDB block, on every path — not inside it");
+
+        var gatedAt = worker.IndexOf("if (!_timescaleAvailable)", StringComparison.Ordinal);
+        Assert.True(gatedAt < 0 || gatedAt > callAt,
+            "the fallback must NOT be gated on !_timescaleAvailable — that leaves a partially-built store with one dead family");
+
+        /* The probe is what makes running it everywhere safe: a continuous aggregate is also a relkind='v'
+           view, so an unconditional CREATE OR REPLACE VIEW by these names would destroy a materialization. */
+        Assert.Contains("to_regclass", TimescaleSupport.BaselineRelationExistsSql(TimescaleSupport.CpuBaselineView), StringComparison.Ordinal);
+    }
+
     private static string ReadWorkerSource([CallerFilePath] string thisFile = "")
     {
         /* Locate the repo from this file, the AlertFiringLogTests idiom - no build-output copying. */

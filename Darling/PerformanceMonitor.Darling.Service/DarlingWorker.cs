@@ -724,25 +724,26 @@ public sealed class DarlingWorker : BackgroundService
             _logger.LogWarning("TimescaleDB setup failed — continuing in plain-PostgreSQL mode: {Message}", ex.Message);
         }
 
-        /* #1757: on a store with no TimescaleDB the baseline aggregates cannot exist, and the provider reads
-           those relations BY NAME — a missing one throws, ComputeBaselinesAsync swallows it, and every family
-           silently returns an empty baseline. So plain-PostgreSQL mode gets the same nine relations as
-           ordinary views over the same selects. Deliberately OUTSIDE the block above, covering both routes
-           into this mode: TimescaleDB absent, and TimescaleDB setup having failed partway. Its own connection,
-           because the block's connection is already disposed by here. */
-        if (!_timescaleAvailable)
+        /* #1757: the provider reads the nine baseline relations BY NAME — a missing one throws,
+           ComputeBaselinesAsync swallows it, and that family silently returns an empty baseline. So every
+           relation is guaranteed to EXIST here, with a plain view over the same select filling any gap.
+
+           DELIBERATELY UNGATED on _timescaleAvailable. Three ways a gap appears and only one of them is "no
+           TimescaleDB": the extension is absent, the TimescaleDB block threw partway, or the block ran fine
+           and EnsureContinuousAggregatesAsync's per-aggregate failure isolation left one aggregate unbuilt.
+           That last one is the easiest to miss and would take exactly one family down on an otherwise healthy
+           store. The call is per-view and probes for an existing relation first, so it never touches a real
+           aggregate. Its own connection — the block's is already disposed by here. */
+        try
         {
-            try
-            {
-                await using var fallbackConnection = await postgres.OpenConnectionAsync(stoppingToken);
-                await TimescaleSupport.EnsureBaselineFallbackViewsAsync(fallbackConnection, _logger, stoppingToken);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _logger.LogWarning(
-                    "Baseline fallback views could not be created — anomaly baselines will not compute on this store: {Message}",
-                    ex.Message);
-            }
+            await using var fallbackConnection = await postgres.OpenConnectionAsync(stoppingToken);
+            await TimescaleSupport.EnsureBaselineFallbackViewsAsync(fallbackConnection, _logger, stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(
+                "Baseline relations could not be checked or backed by plain views — some anomaly baselines may silently return nothing: {Message}",
+                ex.Message);
         }
 
         /* Composer + analyze_*_plan performance tuning (covering indexes + per-table autovacuum-insert override) —

@@ -466,20 +466,7 @@ WITH NO DATA";
             {
                 var source = SourceTableFor(view);
 
-                /* THE SAME PREDICATE THE RETENTION ARMING USES (IsSafeToArmRetentionAsync), against the same
-                   pair of relations -- deliberately, so "what we backfill" and "what unblocks arming" cannot
-                   drift apart. Bounded to this tier's OWN retention: materializing further back than
-                   BaselineRetentionInterval only hands the tier's own retention policy something to drop, and
-                   an unbounded refresh on a store with a year of history would materialize the year. The bound
-                   is >= the baseline window by the static relation BaselineSupplyTests pins, so the 30-day
-                   question stays fully answerable. */
-                var probeSql = $@"
-SELECT
-    (SELECT min(collection_time) FROM collect.{source}) AS source_oldest,
-    (SELECT min(bucket) FROM collect.{view}) AS coverage_oldest,
-    time_bucket('1 hour', GREATEST(
-        (SELECT min(collection_time) FROM collect.{source}),
-        now()::timestamp - INTERVAL '{BaselineRetentionInterval}')) AS need_from";
+                var probeSql = BaselineBackfillProbeSql(view, source);
 
                 DateTime? sourceOldest = null;
                 DateTime? coverageOldest = null;
@@ -640,13 +627,20 @@ SELECT
     }
 
     /// <summary>
-    /// Creates the nine baseline relations as ordinary views, for a store WITHOUT TimescaleDB. Idempotent
-    /// (<c>CREATE OR REPLACE</c>) and failure-isolated per view. Returns how many are in place.
+    /// Guarantees every baseline relation EXISTS, filling any gap with an ordinary view over the same select.
+    /// Returns how many gaps it filled.
     ///
-    /// <para>MUST NOT run when TimescaleDB is available: a continuous aggregate is itself a <c>relkind='v'</c>
-    /// view, so replacing one by this name would destroy the materialization. The worker calls this only on
-    /// the plain-PostgreSQL branch, and <see cref="DropBaselineFallbackViewSql"/> handles the reverse
-    /// transition.</para>
+    /// <para>PER VIEW AND DELIBERATELY UNGATED, because "no TimescaleDB" is not the only way a relation goes
+    /// missing. <see cref="EnsureContinuousAggregatesAsync"/> is failure-isolated per aggregate, so a store
+    /// with the extension can end up with eight aggregates and one gap — and the provider reads these
+    /// relations by name, so that one gap is one family silently returning nothing. Gating this on
+    /// "TimescaleDB unavailable" would cover the plain-PostgreSQL store and leave the partially-built one
+    /// broken, which is the harder case to notice.</para>
+    ///
+    /// <para>The existence probe is what makes it safe to run everywhere: a continuous aggregate is itself a
+    /// <c>relkind='v'</c> view, so an unconditional <c>CREATE OR REPLACE VIEW</c> by these names would destroy
+    /// a materialization. Anything already present — aggregate or view — is left strictly alone. MUST run
+    /// AFTER <see cref="EnsureContinuousAggregatesAsync"/> so a real aggregate always wins the name.</para>
     /// </summary>
     public static async Task<int> EnsureBaselineFallbackViewsAsync(
         NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
@@ -656,33 +650,72 @@ SELECT
             throw new ArgumentNullException(nameof(connection));
         }
 
-        var ready = 0;
+        var filled = 0;
 
         foreach (var (createSql, view) in BaselineAggregates)
         {
             try
             {
+                using (var probe = new NpgsqlCommand(BaselineRelationExistsSql(view), connection) { CommandTimeout = SetupTimeoutSeconds })
+                {
+                    if (await probe.ExecuteScalarAsync(cancellationToken) is true)
+                    {
+                        continue;
+                    }
+                }
+
                 using var create = new NpgsqlCommand(CreateBaselineFallbackViewSql(view, createSql), connection)
                 {
                     CommandTimeout = SetupTimeoutSeconds,
                 };
                 await create.ExecuteNonQueryAsync(cancellationToken);
-                ready++;
+                filled++;
+
+                logger?.LogInformation(
+                    "Baseline relation {View} had no continuous aggregate — created it as a plain view so its anomaly baseline still computes (reading raw directly).",
+                    view);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 logger?.LogWarning(
-                    "Baseline fallback view {View} could not be created — that metric's anomaly baseline will not compute on this store: {Message}",
+                    "Baseline relation {View} is MISSING and could not be backed by a plain view — that metric's anomaly baseline will silently return nothing: {Message}",
                     view, ex.Message);
             }
         }
 
-        logger?.LogInformation(
-            "Plain-PostgreSQL mode: {Ready}/{Total} baseline views in place (no TimescaleDB, so the baselines read raw directly).",
-            ready, BaselineAggregates.Length);
-
-        return ready;
+        return filled;
     }
+
+    /// <summary>Does this baseline relation exist under any implementation — continuous aggregate or plain view?</summary>
+    public static string BaselineRelationExistsSql(string view)
+        => $"SELECT to_regclass('collect.{view}') IS NOT NULL";
+
+    /// <summary>
+    /// The backfill's coverage gate: how far back the source reaches, how far back the aggregate covers, and
+    /// how far back we NEED it to cover. The caller backfills when the source has rows and coverage is either
+    /// empty or starts later than <c>need_from</c>.
+    ///
+    /// <para>THE CLAMP DIRECTION IS THE WHOLE THING, and it is easy to get backwards in a way that reads fine.
+    /// <c>GREATEST</c> clamps the NEED — "go back as far as the source reaches, but no further than this
+    /// tier's own retention" — because materializing past the tier's retention only hands its retention policy
+    /// something to drop. Clamping the COVERAGE side instead (<c>LEAST</c> over the coverage and the window)
+    /// inverts the gate: an empty aggregate collapses to <c>now - window</c>, the comparison becomes
+    /// "now - window &lt;= source oldest", and on every store whose raw retention is SHORTER than the window
+    /// it is unconditionally true — so the gate skips exactly the tiered stores it exists for, and fires only
+    /// on stores that do not need it. BaselineSupplyTests pins this direction.</para>
+    ///
+    /// <para>This is the same predicate shape the retention arming uses (<c>IsSafeToArmRetentionAsync</c>) over
+    /// the same pair of relations, deliberately: what we backfill and what unblocks arming cannot be allowed
+    /// to drift apart.</para>
+    /// </summary>
+    public static string BaselineBackfillProbeSql(string view, string source)
+        => $@"
+SELECT
+    (SELECT min(collection_time) FROM collect.{source}) AS source_oldest,
+    (SELECT min(bucket) FROM collect.{view}) AS coverage_oldest,
+    time_bucket('1 hour', GREATEST(
+        (SELECT min(collection_time) FROM collect.{source}),
+        now()::timestamp - INTERVAL '{BaselineRetentionInterval}')) AS need_from";
 
     /// <summary>
     /// Drops a baseline relation ONLY when it is a plain fallback view and NOT a continuous aggregate — the
