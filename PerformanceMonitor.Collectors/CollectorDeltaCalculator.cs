@@ -22,6 +22,34 @@ namespace PerformanceMonitor.Collectors;
 public class CollectorDeltaCalculator : ICollectorDeltaCalculator
 {
     /// <summary>
+    /// How far back a restart re-seed reads when restoring baselines from a host's own store.
+    ///
+    /// <para>A correctness bound before it is a performance one. Every delta call site in this
+    /// assembly passes <c>maxGapSeconds: 300</c> — all 36 of them — and the gap policy in
+    /// <see cref="CalculateDeltaWithInterval"/> discards any baseline older than that and returns 0
+    /// instead. A seed row from outside a ~5-minute window therefore cannot produce a delta no matter
+    /// what it cost to find, so reading it is work whose result is thrown away.</para>
+    ///
+    /// <para>Fifteen minutes rather than five: the seed runs at startup and the first collection lands
+    /// some seconds after it, so the window needs slack over the policy it serves, and a window that
+    /// merely errs generous costs nothing (a row the policy rejects seeds a baseline that is
+    /// immediately re-based, which is what an unseeded key does anyway). It still sits well inside one
+    /// store chunk, which is the property that matters: it lets TimescaleDB exclude the rest of a
+    /// multi-hundred-GB hypertable rather than scan every chunk on a 30-second command timeout — the
+    /// field failure in #1772.</para>
+    /// </summary>
+    public static readonly TimeSpan SeedLookback = TimeSpan.FromMinutes(15);
+
+    /// <summary>
+    /// The cutoff a seed read binds to its <c>collection_time &gt;= $1</c> bound, defined once so the
+    /// two hosts cannot drift. Naive UTC by the product-wide storage convention — Kind is stripped
+    /// deliberately, because Npgsql 6+ rejects a <c>Kind=Utc</c> value against a <c>timestamp</c>
+    /// column, and DuckDB stores the same naive-UTC values.
+    /// </summary>
+    public static DateTime SeedCutoff()
+        => DateTime.SpecifyKind(DateTime.UtcNow - SeedLookback, DateTimeKind.Unspecified);
+
+    /// <summary>
     /// Cache structure: serverId -> collectorName -> key -> (previousValue, timestamp)
     /// </summary>
     private readonly ConcurrentDictionary<int, ConcurrentDictionary<string, ConcurrentDictionary<string, (long Value, DateTime? Timestamp)>>> _cache = new();
