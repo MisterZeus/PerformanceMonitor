@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -634,9 +635,13 @@ WITH NO DATA";
             }
         }
 
+        /* The names are DERIVED from the array above, never restated (#1746). The previous line spelled out
+           "3 hourly ... 3 daily" by hand, so when #1664 added the db-grain pair the counts said 8 and the
+           text still said 6 — and an operator mid-upgrade spent real time reconciling the two before
+           concluding it was not a bug. A summary that quotes its own source cannot drift from it. */
         logger?.LogInformation(
-            "TimescaleDB: {Ready}/{Total} continuous aggregate(s) ready (3 hourly: query_stats, procedure_stats, query_store_stats; 3 daily: query_stats, procedure_stats, query_store_stats)",
-            ready, aggregates.Length);
+            "TimescaleDB: {Ready}/{Total} continuous aggregate(s) ready ({Views})",
+            ready, aggregates.Length, string.Join(", ", aggregates.Select(a => a.View)));
         return ready;
     }
 
