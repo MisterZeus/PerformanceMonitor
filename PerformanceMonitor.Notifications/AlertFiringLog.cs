@@ -35,9 +35,18 @@ public static class AlertFiringLog
     /// operator's ability to find the event afterwards — suppressing both would make a muted condition
     /// invisible everywhere at once, which is how a muted-and-forgotten alert becomes an outage.
     /// </summary>
+    /// <param name="shortMessage">
+    /// Optional, because <c>AlertOutcome.ShortMessage</c> is (<c>string? ShortMessage = null</c>) and most
+    /// conditions never set one. Handled here rather than at the call sites: a null forced through a
+    /// non-nullable parameter is a warning at every caller and an interpolated <c>": "</c> with nothing
+    /// after it in the log — so the shape a reader greps for would end in a dangling colon precisely when
+    /// there is nothing to read. When it is absent the line simply stops after the server name.
+    /// </param>
     public static string Fired(
-        string serverName, string metricName, string severity, string shortMessage, bool muted) =>
-        $"ALERT TRIGGERED [{severity}] {metricName} on {serverName}: {shortMessage}" + (muted ? " [muted]" : "");
+        string serverName, string metricName, string severity, string? shortMessage, bool muted) =>
+        $"ALERT TRIGGERED [{severity}] {metricName} on {serverName}"
+        + (string.IsNullOrWhiteSpace(shortMessage) ? string.Empty : $": {shortMessage}")
+        + (muted ? " [muted]" : "");
 
     /// <summary>
     /// The line for an alert that CLEARED — the other half of the pair, in the same shape so the two grep

@@ -26,6 +26,28 @@ namespace Lite.Tests;
 public class AlertFiringLogTests
 {
     [Fact]
+    public void Fired_OmitsTheColonWhenThereIsNoShortMessage()
+    {
+        /* AlertOutcome.ShortMessage is optional (string? ShortMessage = null) and most conditions never set
+           one, so null is a NORMAL input here, not a defect. Forcing it through a non-nullable parameter
+           produced CS8604 at the engine's call site and would have printed a line ending in a dangling
+           ": " - the greppable shape breaking exactly when there is nothing to read. */
+        var withoutMessage = AlertFiringLog.Fired("SQL01", "High CPU", "Warning", null, muted: false);
+
+        Assert.DoesNotContain("SQL01: ", withoutMessage, System.StringComparison.Ordinal);
+        Assert.EndsWith("on SQL01", withoutMessage, System.StringComparison.Ordinal);
+
+        /* Whitespace is the same case - a message that renders as nothing must not earn a colon either. */
+        Assert.EndsWith("on SQL01", AlertFiringLog.Fired("SQL01", "High CPU", "Warning", "   ", muted: false), System.StringComparison.Ordinal);
+
+        /* Muted still flags, with no colon in between. */
+        Assert.EndsWith("on SQL01 [muted]", AlertFiringLog.Fired("SQL01", "High CPU", "Warning", null, muted: true), System.StringComparison.Ordinal);
+
+        /* And the ordinary case is untouched. */
+        Assert.Contains("on SQL01: CPU at 95%", AlertFiringLog.Fired("SQL01", "High CPU", "Warning", "CPU at 95%", muted: false), System.StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void FiredAndResolved_AreSymmetric_AndBothNameTheServerAndMetric()
     {
         var fired = AlertFiringLog.Fired("SQL01", "High CPU", "Warning", "CPU at 95% (threshold: 80%)", muted: false);
