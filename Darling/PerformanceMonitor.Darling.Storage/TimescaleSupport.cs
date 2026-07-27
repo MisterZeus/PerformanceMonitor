@@ -82,6 +82,17 @@ public static class TimescaleSupport
     private const int SetupTimeoutSeconds = 300;
 
     /// <summary>
+    /// Timeout for a one-time bulk aggregate materialization, as opposed to the setup statements
+    /// <see cref="SetupTimeoutSeconds"/> covers. NOT a timeout bump papering over a slow query: this is a
+    /// deliberate bulk backfill whose duration scales with how much history the store already had, and the
+    /// 5-minute setup budget would abort it mid-way on any store large enough to need it. Bounded rather than
+    /// infinite so a wedged connection still fails eventually, and safe to hit: TimescaleDB commits the
+    /// refresh in per-batch transactions, so an abort keeps the progress made and the coverage gate resumes
+    /// from there on the next start.
+    /// </summary>
+    private const int BackfillTimeoutSeconds = 6 * 60 * 60;
+
+    /// <summary>
     /// The tables converted to hypertables — exactly the shared collector catalog, pinned by
     /// test so scope can never silently widen to the registry/config/analysis tables (see the
     /// class remarks for why those stay plain).
@@ -237,6 +248,381 @@ public static class TimescaleSupport
     /// dimension; these pre-materialize exactly that shape so anything older than the ~2-day hot window reads the
     /// rollup instead of scanning raw per-sweep rows. NOT retention (raw still exists for the hot window; dropping
     /// old raw chunks is a separate, unmade decision).</summary>
+    /* -- Baseline tier (#1757) ---------------------------------------------------------------------
+       The anomaly baseline asks for BaselineWindowDays (30) of history bucketed by hour-of-day x
+       day-of-week; tiered retention shrank raw to 4 days. That is a CORRECTNESS regression, not a speed
+       one: seven day-of-week buckets cannot be filled from four days, so on every tiered store the
+       thresholds still compute, just on a fraction of the intended history and with no error at all.
+
+       These aggregates are the baseline's own supply. THE HOURLY BUCKET IS PURELY A PARTITIONING AND
+       RETENTION KEY; collection_time CARRIES THE GRAIN -- which is why every one of them groups by
+       time_bucket AND collection_time. Do not "simplify" the double GROUP BY away: collapsing to the
+       hourly bucket changes the unit of observation from one collection snapshot to one hour, which is a
+       different statistic at a different scale, and STDDEV_SAMP cannot be reconstructed from hourly sums
+       at all (the hourly tier stores no sum-of-squares). Preserving collection_time is exactly what makes
+       the provider's AVG / STDDEV_SAMP / restart-exclusion LAG numerically identical to the raw path.
+
+       Each aggregate materializes its families' per-collection collapse with their row-level filters
+       INSIDE. Baking is safe because every baseline filter is a literal constant or an immutable sanity
+       bound -- the provider takes no settings dependency at all, so nothing here can freeze a configurable
+       behavior. The restart-exclusion prior_* predicates deliberately stay in the provider: they apply
+       AFTER the collapse, over the collapsed series.
+
+       file_io is the one family whose unit is NOT the collection: IoLatency averages a per-FILE ratio
+       across file rows, so a per-collection total would be a different statistic. It stores that ratio's
+       SUFFICIENT STATISTICS instead (sum, sum of squares, count), from which AVG and STDDEV_SAMP
+       reconstruct exactly. */
+
+    /// <summary>Baseline-tier retention horizon. MUST stay at or above <c>BaselineMath.BaselineWindowDays</c>
+    /// (30) or #1757 silently returns; Darling.Tests pins that relation, because Storage cannot reference
+    /// Analysis. 35 days gives the window five days of headroom so a drop can never eat its edge.</summary>
+    public const string BaselineRetentionInterval = "35 days";
+
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="BaselineRetentionInterval"/>, pinned equal by test.</summary>
+    public static readonly TimeSpan BaselineRetentionSpan = TimeSpan.FromDays(35);
+
+    public const string CpuBaselineView = "cpu_utilization_baseline";
+    public const string PerfmonBaselineView = "perfmon_baseline";
+    public const string WaitStatsBaselineView = "wait_stats_baseline";
+    public const string SessionStatsBaselineView = "session_stats_baseline";
+    public const string QueryStatsBaselineView = "query_stats_baseline";
+    public const string FileIoBaselineView = "file_io_baseline";
+    public const string BlockedProcessBaselineView = "blocked_process_baseline";
+    public const string DeadlockBaselineView = "deadlock_baseline";
+    public const string MemoryBaselineView = "memory_baseline";
+
+    /// <summary>Cpu baseline supply. NOT one row per collection, despite how a point-in-time metric reads:
+    /// CpuUtilizationCollector issues SELECT TOP (60) over RING_BUFFER_SCHEDULER_MONITOR and appends every
+    /// row, so the first collection after a start or a gap writes up to 60 samples under a SINGLE
+    /// collection_time. Averaging those to one value per collection would change the statistic (mean of
+    /// per-collection means, not mean of samples) and silently redefine sample_count from samples to
+    /// collections. Stores the sufficient statistics instead, exactly as file_io does.</summary>
+    public const string CreateCpuBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.cpu_utilization_baseline
+WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+SELECT
+    server_id,
+    time_bucket('1 hour', collection_time) AS bucket,
+    collection_time,
+    sum(sqlserver_cpu_utilization) AS cpu_sum,
+    sum(power(sqlserver_cpu_utilization, 2)) AS cpu_sumsq,
+    count(sqlserver_cpu_utilization) AS cpu_count
+FROM collect.cpu_utilization_stats
+GROUP BY server_id, bucket, collection_time
+WITH NO DATA";
+
+    /// <summary>BatchRequests baseline supply -- the counter_name and non-negative filters bake in. Unlike
+    /// cpu, one row per collection here is a property of the DMV (Batch Requests/sec is a single instance)
+    /// rather than something the collector guarantees -- it applies no object_name/instance_name predicate.
+    /// sum() over a one-row group is that row, so this stays exact either way.</summary>
+    public const string CreatePerfmonBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.perfmon_baseline
+WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+SELECT
+    server_id,
+    time_bucket('1 hour', collection_time) AS bucket,
+    collection_time,
+    sum(delta_cntr_value) AS delta_cntr_value
+FROM collect.perfmon_stats
+WHERE counter_name = 'Batch Requests/sec'
+AND   delta_cntr_value >= 0
+GROUP BY server_id, bucket, collection_time
+WITH NO DATA";
+
+    /// <summary>WaitStats AND WaitMsPerSec baseline supply. Both families share this source and share the
+    /// identical row-level filter (delta_wait_time_ms >= 0), which is what lets one aggregate serve both;
+    /// Darling.Tests pins that sharing so a future family-specific filter cannot silently poison its
+    /// sibling's supply. WaitMsPerSec's interval_sec comes from LAG(collection_time) over the COLLAPSED
+    /// series, so the provider computes it and nothing extra is stored here.</summary>
+    public const string CreateWaitStatsBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.wait_stats_baseline
+WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+SELECT
+    server_id,
+    time_bucket('1 hour', collection_time) AS bucket,
+    collection_time,
+    sum(delta_wait_time_ms) AS total_wait_ms
+FROM collect.wait_stats
+WHERE delta_wait_time_ms >= 0
+GROUP BY server_id, bucket, collection_time
+WITH NO DATA";
+
+    /// <summary>SessionCount baseline supply -- total connections per collection.</summary>
+    public const string CreateSessionStatsBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.session_stats_baseline
+WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+SELECT
+    server_id,
+    time_bucket('1 hour', collection_time) AS bucket,
+    collection_time,
+    sum(connection_count) AS total_connections
+FROM collect.session_stats
+GROUP BY server_id, bucket, collection_time
+WITH NO DATA";
+
+    /// <summary>QueryDuration baseline supply -- the family that reported #1757, and the expensive collapse:
+    /// millions of per-query rows become one row per collection_time.</summary>
+    public const string CreateQueryStatsBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_baseline
+WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+SELECT
+    server_id,
+    time_bucket('1 hour', collection_time) AS bucket,
+    collection_time,
+    sum(delta_elapsed_time) AS total_elapsed
+FROM collect.query_stats
+WHERE delta_execution_count > 0
+AND   delta_elapsed_time >= 0
+GROUP BY server_id, bucket, collection_time
+WITH NO DATA";
+
+    /// <summary>IoLatency baseline supply. THE ONE FAMILY WHOSE UNIT IS NOT THE COLLECTION: it averages a
+    /// per-FILE stall/reads ratio across file rows, so a per-collection total would be a different statistic.
+    /// Stores that ratio's sufficient statistics instead, from which the provider reconstructs AVG and
+    /// STDDEV_SAMP exactly (var_samp = (sumsq - sum*sum/n) / (n-1)). row_count is kept SEPARATELY from
+    /// ratio_count because the raw path's sample_count is COUNT(*), which counts rows whose ratio is NULL --
+    /// a file with writes but no reads passes the filter and contributes to the count but not the average.</summary>
+    public const string CreateFileIoBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.file_io_baseline
+WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+SELECT
+    server_id,
+    time_bucket('1 hour', collection_time) AS bucket,
+    collection_time,
+    sum(delta_stall_read_ms::DOUBLE PRECISION / NULLIF(delta_reads, 0)) AS ratio_sum,
+    sum(power(delta_stall_read_ms::DOUBLE PRECISION / NULLIF(delta_reads, 0), 2)) AS ratio_sumsq,
+    count(delta_stall_read_ms::DOUBLE PRECISION / NULLIF(delta_reads, 0)) AS ratio_count,
+    count(*) AS row_count
+FROM collect.file_io_stats
+WHERE delta_reads > 0 OR delta_writes > 0
+GROUP BY server_id, bucket, collection_time
+WITH NO DATA";
+
+    /// <summary>Blocking AND BlockingPerMinute baseline supply -- both families share this source and both
+    /// have NO row-level filter, so one aggregate serves both. Event counts per collection re-aggregate to
+    /// either shape: Blocking sums them per hour/dow bucket, BlockingPerMinute re-buckets by minute.</summary>
+    public const string CreateBlockedProcessBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.blocked_process_baseline
+WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+SELECT
+    server_id,
+    time_bucket('1 hour', collection_time) AS bucket,
+    collection_time,
+    count(*) AS event_count
+FROM collect.blocked_process_reports
+GROUP BY server_id, bucket, collection_time
+WITH NO DATA";
+
+    /// <summary>Deadlock baseline supply -- event counts per collection, same shape as blocking.</summary>
+    public const string CreateDeadlockBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.deadlock_baseline
+WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+SELECT
+    server_id,
+    time_bucket('1 hour', collection_time) AS bucket,
+    collection_time,
+    count(*) AS event_count
+FROM collect.deadlocks
+GROUP BY server_id, bucket, collection_time
+WITH NO DATA";
+
+    /// <summary>Memory baseline supply -- the pressure ratio, server-level so one row per collection. The
+    /// target > 0 filter bakes in, and the ratio is computed here so the provider averages the same numbers
+    /// the raw path averaged.</summary>
+    public const string CreateMemoryBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.memory_baseline
+WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+SELECT
+    server_id,
+    time_bucket('1 hour', collection_time) AS bucket,
+    collection_time,
+    avg(total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100) AS memory_pressure_pct
+FROM collect.memory_stats
+WHERE target_server_memory_mb > 0
+GROUP BY server_id, bucket, collection_time
+WITH NO DATA";
+
+    /// <summary>
+    /// One-time backfill of the baseline aggregates (#1757). WITHOUT THIS THE WHOLE CHANGE IS A REGRESSION:
+    /// the aggregates are created WITH NO DATA and their refresh policy has a 3-day start_offset, so left
+    /// alone they would hold roughly three days for a thirty-day question -- less than the four-day raw
+    /// horizon the change exists to escape. The provider is repointed at them, so an un-backfilled deploy
+    /// loses every baseline rather than improving it.
+    ///
+    /// <para>COVERAGE-GATED and self-healing, the shape the reshape sweep already uses: it compares the
+    /// oldest bucket the aggregate holds against the oldest row raw still has and refreshes only the gap,
+    /// so it converges to a no-op on every subsequent start rather than re-running a full refresh forever.
+    /// A fresh store has nothing to backfill and skips immediately.</para>
+    ///
+    /// <para>Runs OUTSIDE a transaction on purpose -- refresh_continuous_aggregate cannot run inside one --
+    /// and is failure-isolated per aggregate: a backfill that fails leaves that family reading a short
+    /// window (logged loudly) rather than taking down startup. MUST run after
+    /// <see cref="EnsureContinuousAggregatesAsync"/>.</para>
+    /// </summary>
+    public static async Task<int> BackfillBaselineAggregatesAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var backfilled = 0;
+
+        foreach (var (_, view) in BaselineAggregates)
+        {
+            try
+            {
+                var source = SourceTableFor(view);
+
+                /* THE SAME PREDICATE THE RETENTION ARMING USES (IsSafeToArmRetentionAsync), against the same
+                   pair of relations -- deliberately, so "what we backfill" and "what unblocks arming" cannot
+                   drift apart. Bounded to this tier's OWN retention: materializing further back than
+                   BaselineRetentionInterval only hands the tier's own retention policy something to drop, and
+                   an unbounded refresh on a store with a year of history would materialize the year. The bound
+                   is >= the baseline window by the static relation BaselineSupplyTests pins, so the 30-day
+                   question stays fully answerable. */
+                var probeSql = $@"
+SELECT
+    (SELECT min(collection_time) FROM collect.{source}) AS source_oldest,
+    (SELECT min(bucket) FROM collect.{view}) AS coverage_oldest,
+    time_bucket('1 hour', GREATEST(
+        (SELECT min(collection_time) FROM collect.{source}),
+        now()::timestamp - INTERVAL '{BaselineRetentionInterval}')) AS need_from";
+
+                DateTime? sourceOldest = null;
+                DateTime? coverageOldest = null;
+                DateTime? needFrom = null;
+                using (var probe = new NpgsqlCommand(probeSql, connection) { CommandTimeout = SetupTimeoutSeconds })
+                await using (var reader = await probe.ExecuteReaderAsync(cancellationToken))
+                {
+                    if (await reader.ReadAsync(cancellationToken))
+                    {
+                        sourceOldest = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
+                        coverageOldest = reader.IsDBNull(1) ? null : reader.GetDateTime(1);
+                        needFrom = reader.IsDBNull(2) ? null : reader.GetDateTime(2);
+                    }
+                }
+
+                /* Nothing in the source: a fresh store has no history to materialize. */
+                if (sourceOldest is null || needFrom is null)
+                {
+                    continue;
+                }
+
+                /* Already reaches at least as far back as we need. This is what makes the pass converge to a
+                   no-op instead of re-refreshing on every start. */
+                if (coverageOldest is not null && coverageOldest <= needFrom)
+                {
+                    continue;
+                }
+
+                var after = await RefreshFromAsync(connection, view, needFrom.Value, force: false, cancellationToken);
+
+                /* VERIFY, DO NOT ASSUME -- the failure this guards is SILENT. On a CAGG that has just been
+                   created the plain refresh is enough: creation writes an infinite [-infinity, +infinity]
+                   invalidation ("initially, everything is invalid") and WITH NO DATA does not skip it, so the
+                   whole pre-existing history is materialized on the first pass. What the plain refresh cannot
+                   be trusted to repair is the SECOND pass: a refresh CONSUMES invalidations as it goes, so an
+                   earlier backfill cut short by a shutdown can leave a region un-materialized whose
+                   invalidation entries are already gone, and a later plain refresh then no-ops over the hole
+                   and reports success. The forced form ignores the invalidation log and batches every bucket
+                   in range, which is what actually repairs that. Escalate only on evidence: it is strictly
+                   more work, and `force` only exists from TimescaleDB 2.18 (an older bring-your-own store
+                   raises 42883 here, which the per-aggregate catch reports rather than crashing the pass). */
+                if (after is null || after > needFrom)
+                {
+                    logger?.LogInformation(
+                        "TimescaleDB: {View} still starts at {After} after a plain refresh from {NeedFrom}; escalating to a forced refresh.",
+                        view, after, needFrom);
+                    after = await RefreshFromAsync(connection, view, needFrom.Value, force: true, cancellationToken);
+                }
+
+                backfilled++;
+                logger?.LogInformation(
+                    "TimescaleDB: backfilled baseline aggregate {View} from {NeedFrom} (now starts at {After}) -- it covered from {CoverageOldest} but {Source} reaches back to {SourceOldest}.",
+                    view, needFrom, after, coverageOldest, source, sourceOldest);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                /* Worse than it sounds, which is why it logs loudly: with real-time aggregation the watermark
+                   is a HARD PARTITION (materialized WHERE time < watermark UNION ALL raw WHERE time >=
+                   watermark), so an un-materialized region older than the watermark returns nothing from
+                   EITHER branch -- raw is excluded by construction. A failed backfill is not "reads raw
+                   instead", it is a hole. Still isolated per aggregate: one failure must not take down the
+                   pass, and the coverage gate retries it on the next start. */
+                logger?.LogWarning(
+                    "Baseline aggregate {View} backfill FAILED -- its baselines are computed from a short window until this succeeds, and history older than its watermark reads as absent rather than falling back to raw: {Message}",
+                    view, ex.Message);
+            }
+        }
+
+        return backfilled;
+    }
+
+    /// <summary>
+    /// The backfill's refresh statement. The bounds are BOUND parameters and explicitly cast, not
+    /// interpolated: <c>window_start</c>/<c>window_end</c> are declared <c>"any"</c>, so an untyped literal
+    /// leaves PostgreSQL without a type to resolve the polymorphic argument against.
+    ///
+    /// <para><paramref name="force"/> maps to the 4th argument of the 2.28.1 signature
+    /// <c>refresh_continuous_aggregate(cagg REGCLASS, window_start "any", window_end "any", force BOOLEAN =
+    /// FALSE, options JSONB = NULL)</c>. NOTE that the tunables the published API page documents as named
+    /// arguments (<c>buckets_per_batch</c>, <c>refresh_newest_first</c>) are NOT parameters of this
+    /// procedure — they live inside <c>options</c>, and only the POLICY takes them by name. The defaults are
+    /// what we want anyway: a manual refresh already batches internally, so this needs no hand-rolled
+    /// slicing.</para>
+    /// </summary>
+    public static string RefreshContinuousAggregateSql(string view, bool force = false)
+        => force
+            ? $"CALL refresh_continuous_aggregate('collect.{view}'::regclass, $1::timestamp, NULL::timestamp, true)"
+            : $"CALL refresh_continuous_aggregate('collect.{view}'::regclass, $1::timestamp, NULL::timestamp)";
+
+    /// <summary>
+    /// Refreshes <paramref name="view"/> from <paramref name="from"/> forward and returns the aggregate's
+    /// oldest bucket AFTERWARDS, so the caller can check the refresh actually materialized the range instead
+    /// of trusting that a successful CALL means a filled aggregate.
+    /// </summary>
+    private static async Task<DateTime?> RefreshFromAsync(
+        NpgsqlConnection connection, string view, DateTime from, bool force, CancellationToken cancellationToken)
+    {
+        using (var refresh = new NpgsqlCommand(RefreshContinuousAggregateSql(view, force), connection)
+        {
+            CommandTimeout = BackfillTimeoutSeconds,
+        })
+        {
+            refresh.Parameters.AddWithValue(from);
+            await refresh.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        using var probe = new NpgsqlCommand($"SELECT min(bucket) FROM collect.{view}", connection)
+        {
+            CommandTimeout = SetupTimeoutSeconds,
+        };
+        return await probe.ExecuteScalarAsync(cancellationToken) is DateTime oldest ? oldest : null;
+    }
+
+    /// <summary>The raw table each baseline aggregate is sourced from, for the backfill's coverage probe.</summary>
+    private static string SourceTableFor(string view) => view switch
+    {
+        CpuBaselineView => "cpu_utilization_stats",
+        PerfmonBaselineView => "perfmon_stats",
+        WaitStatsBaselineView => "wait_stats",
+        SessionStatsBaselineView => "session_stats",
+        QueryStatsBaselineView => "query_stats",
+        FileIoBaselineView => "file_io_stats",
+        BlockedProcessBaselineView => "blocked_process_reports",
+        DeadlockBaselineView => "deadlocks",
+        MemoryBaselineView => "memory_stats",
+        _ => throw new ArgumentOutOfRangeException(nameof(view), view, "not a baseline aggregate"),
+    };
+
+    /// <summary>The nine baseline-tier aggregates in creation order. Named ONCE so the ensure sweep, the
+    /// retention list and the tests read one list rather than three hand-kept copies.</summary>
+    public static readonly (string CreateSql, string View)[] BaselineAggregates =
+    {
+        (CreateCpuBaselineSql,            CpuBaselineView),
+        (CreatePerfmonBaselineSql,        PerfmonBaselineView),
+        (CreateWaitStatsBaselineSql,      WaitStatsBaselineView),
+        (CreateSessionStatsBaselineSql,   SessionStatsBaselineView),
+        (CreateQueryStatsBaselineSql,     QueryStatsBaselineView),
+        (CreateFileIoBaselineSql,         FileIoBaselineView),
+        (CreateBlockedProcessBaselineSql, BlockedProcessBaselineView),
+        (CreateDeadlockBaselineSql,       DeadlockBaselineView),
+        (CreateMemoryBaselineSql,         MemoryBaselineView),
+    };
+
     public const string QueryStatsHourlyView = "query_stats_hourly";
 
     /// <summary><see cref="QueryStatsHourlyView"/>'s procedure_stats sibling.</summary>
@@ -275,7 +661,7 @@ public static class TimescaleSupport
     /// correctly; a materialized average would not) plus a <c>sample_count</c>. Summing the deltas is
     /// double-count-safe: they are Darling's own per-interval deltas, not raw cumulative DMV counters. Created
     /// WITH NO DATA — a full historical refresh over 145 GB is heavy I/O, a deliberate off-hours manual op, NEVER
-    /// startup work; real-time aggregation stays ON (the default — no <c>materialized_only</c>), so the view is
+    /// startup work; real-time aggregation is opted INTO explicitly (NOT the default — no <c>materialized_only</c>), so the view is
     /// correct to query for any window immediately, just un-accelerated for old windows until the policy + a
     /// manual backfill materialize them. IF NOT EXISTS so a restart re-converges. A SINGLE statement: a CAGG
     /// CREATE cannot run inside a transaction, so it must never be batched with the policy call.
@@ -608,7 +994,13 @@ WITH NO DATA";
             (CreateSql: CreateProcedureStatsDailySql,   View: ProcedureStatsDailyView,   PolicySql: AddContinuousAggregatePolicySql(ProcedureStatsDailyView, "1 day", "1 day")),
             (CreateSql: CreateQueryStoreStatsDailySql,  View: QueryStoreStatsDailyView,  PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsDailyView, "1 day", "1 day")),
             (CreateSql: CreateQueryStatsDbDailySql,     View: QueryStatsDbDailyView,     PolicySql: AddContinuousAggregatePolicySql(QueryStatsDbDailyView, "1 day", "1 day")),
-        };
+        }
+        /* The nine baseline-tier aggregates (#1757) take the helper's hourly defaults: they are sourced from
+           raw like the hourly tier, not hierarchically from another CAGG, so they carry no ordering
+           requirement against the daily tier. Appended from the single BaselineAggregates list so this sweep
+           and the retention list cannot drift apart. */
+        .Concat(BaselineAggregates.Select(a => (CreateSql: a.CreateSql, View: a.View, PolicySql: AddContinuousAggregatePolicySql(a.View))))
+        .ToArray();
 
         var ready = 0;
         foreach (var (createSql, view, policySql) in aggregates)
@@ -777,9 +1169,20 @@ AND   j.hypertable_name = '{relation}'";
             throw new ArgumentNullException(nameof(connection));
         }
 
-        /* Each policy names the tier that must already cover it before arming is safe (#1680). Raw tables are
-           covered by their hourly CAGG; hourly CAGGs by their daily one. Every policy has a coverage tier - a
-           policy with nothing below it would have no safe arming condition and does not belong in this list. */
+        /* Each policy names the tier that must already cover it before arming is safe (#1680). The rule this
+           list enforces is: NEVER DROP WHAT YOUR CONSUMER HAS NOT CAPTURED YET.
+
+           For the raw and hourly tiers the consumer is the next aggregate down the ladder -- raw tables are
+           covered by their hourly CAGG, hourly CAGGs by their daily one -- so "coverage" names that tier.
+
+           THE LEAF RULE (#1757): a tier with nothing below it is not exempt, it just has a different consumer.
+           The baseline aggregates are leaves; their consumer is the baseline COMPUTATION, whose capture
+           requirement is BaselineMath.BaselineWindowDays (30). Their arming condition is therefore "the tier
+           holds at least the baseline window of buckets" -- the same rule with the consumer named honestly,
+           still runtime-evaluable like the other seven rather than a degenerate always-open gate. It is
+           belt-and-braces by construction: BaselineRetentionSpan (35d) already exceeds the window, so even an
+           immediately-armed policy could not eat it, and Darling.Tests pins that static relation. A policy
+           with no identifiable consumer at all still does not belong in this list. */
         var policies = new[]
         {
             (Relation: "query_stats",             DropAfter: RawRetentionInterval,    TimeColumn: "collection_time", Coverage: QueryStatsHourlyView),
@@ -789,7 +1192,13 @@ AND   j.hypertable_name = '{relation}'";
             (Relation: ProcedureStatsHourlyView,  DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: ProcedureStatsDailyView),
             (Relation: QueryStoreStatsHourlyView, DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: QueryStoreStatsDailyView),
             (Relation: QueryStatsDbHourlyView,    DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: QueryStatsDbDailyView),
-        };
+        }
+        /* The nine baseline-tier policies (#1757). Coverage is the tier ITSELF: see the leaf rule in the
+           comment above -- their consumer is the baseline computation, whose capture requirement is the
+           30-day window, and BaselineRetentionSpan (35d) exceeds it by construction. */
+        .Concat(BaselineAggregates.Select(a =>
+            (Relation: a.View, DropAfter: BaselineRetentionInterval, TimeColumn: "bucket", Coverage: a.View)))
+        .ToArray();
 
         var applied = 0;
         var armed = 0;
