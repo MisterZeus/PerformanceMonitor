@@ -27,6 +27,11 @@ namespace Darling.Tests;
 /// live test (gated on DARLING_TEST_PG) proves the enable/disable store-writes flip the flag AND self-bump
 /// <c>config_version</c>, transaction-rolled-back so it never clobbers a shared dev store's singleton config row.
 /// </summary>
+/* #1776: the rollback protects the DATA, not the CONCURRENCY — the uncommitted write still holds its row lock on
+   the singleton config row and still fires the self-bump trigger, so unserialized it raced the 63 classes that do
+   carry this attribute (measured: this class failed in the first of three consecutive full-suite runs against one
+   long-lived database). CI creates a throwaway cluster per run and so never sees it. */
+[Collection("live-postgres")]
 public sealed class DarlingEndpointToggleCliTests
 {
     /* ---------------- pure: the four targeted store-write SQL strings ---------------- */
