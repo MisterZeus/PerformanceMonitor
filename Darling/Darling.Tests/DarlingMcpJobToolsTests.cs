@@ -159,6 +159,7 @@ public sealed class DarlingMcpJobToolsLivePostgresTests
         await DeleteRowsAsync(connection, ct);
         await using var postgres = NpgsqlDataSource.Create(cs!);
 
+        var bodySucceeded = false;
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
@@ -177,10 +178,18 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
 
             await DeleteRowsAsync(connection, ct, keepServer: true);
             Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpJobTools.GetRunningJobs(postgres, ServerName)));
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, ct);
+            /* Fresh connection + body-aware masking (#1794): this class failed twice on a reused local
+               store with "Connection is not open" thrown from cleanup — the body's connection is the one
+               thing the reported failure may have destroyed. */
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteRowsAsync(cleanup, cleanupCt);
+            });
         }
     }
 

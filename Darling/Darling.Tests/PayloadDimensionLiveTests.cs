@@ -306,6 +306,7 @@ public sealed class PayloadDimensionLiveTests
         var planDigest = PayloadDimensions.Digest(planXml);
 
         await using var connection = await OpenMigratedStoreAsync(connectionString!, ct);
+        var bodySucceeded = false;
         try
         {
             await WriteQueryStatsBatchAsync(
@@ -343,12 +344,17 @@ public sealed class PayloadDimensionLiveTests
                 Assert.Equal(queryText, reader.GetString(0));
                 Assert.Equal(planXml, reader.GetString(1));
             }
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteServerRowsAsync(connection, serverId, ct);
-            await DeleteDimRowAsync(connection, PayloadDimensions.QueryTextDimTable, textDigest, ct);
-            await DeleteDimRowAsync(connection, PayloadDimensions.QueryPlanDimTable, planDigest, ct);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteServerRowsAsync(cleanup, serverId, cleanupCt);
+                await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryTextDimTable, textDigest, cleanupCt);
+                await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryPlanDimTable, planDigest, cleanupCt);
+            });
         }
     }
 
@@ -375,6 +381,7 @@ public sealed class PayloadDimensionLiveTests
         }
 
         await using var connection = await OpenMigratedStoreAsync(connectionString!, ct);
+        var bodySucceeded = false;
         try
         {
             await WriteQueryStatsBatchAsync(connection, serverId, serverName, DateTime.UtcNow, rows, ct);
@@ -394,15 +401,20 @@ public sealed class PayloadDimensionLiveTests
                 connection, "SELECT COUNT(*) FROM query_stats WHERE server_id = $1", ct, serverId));
             Assert.Equal(1L, await ScalarAsync(
                 connection, "SELECT COUNT(*) FROM query_plan_dim WHERE digest = $1", ct, planDigest));
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteServerRowsAsync(connection, serverId, ct);
-            await DeleteDimRowAsync(connection, PayloadDimensions.QueryPlanDimTable, planDigest, ct);
-            foreach (var digest in textDigests)
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
             {
-                await DeleteDimRowAsync(connection, PayloadDimensions.QueryTextDimTable, digest, ct);
-            }
+                await DeleteServerRowsAsync(cleanup, serverId, cleanupCt);
+                await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryPlanDimTable, planDigest, cleanupCt);
+                foreach (var digest in textDigests)
+                {
+                    await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryTextDimTable, digest, cleanupCt);
+                }
+            });
         }
     }
 
@@ -420,6 +432,7 @@ public sealed class PayloadDimensionLiveTests
         var planXml = $"<ShowPlanXML legacy=\"{serverName}\"/>";
 
         await using var connection = await OpenMigratedStoreAsync(connectionString!, ct);
+        var bodySucceeded = false;
         try
         {
             /* The pre-#1767 shape: payload inline, digests NULL. Migration is ZERO-REWRITE, so every row in
@@ -454,10 +467,15 @@ public sealed class PayloadDimensionLiveTests
                 Assert.True(reader.IsDBNull(2), "a pre-#1767 row carries no text digest");
                 Assert.True(reader.IsDBNull(3), "a pre-#1767 row carries no plan digest");
             }
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteServerRowsAsync(connection, serverId, ct);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteServerRowsAsync(cleanup, serverId, cleanupCt);
+            });
         }
     }
 
@@ -475,6 +493,7 @@ public sealed class PayloadDimensionLiveTests
         var t0 = new DateTime(2026, 3, 1, 12, 0, 0, DateTimeKind.Unspecified);
 
         await using var connection = await OpenMigratedStoreAsync(connectionString!, ct);
+        var bodySucceeded = false;
         try
         {
             async Task FlushAtAsync(DateTime collectionTime)
@@ -509,10 +528,15 @@ public sealed class PayloadDimensionLiveTests
                never moves backwards, because the guard's comparison is one-directional. */
             await FlushAtAsync(t0.AddMinutes(5));
             Assert.Equal(t0.AddHours(2), await LastSeenAsync());
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteDimRowAsync(connection, PayloadDimensions.QueryPlanDimTable, digest, ct);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryPlanDimTable, digest, cleanupCt);
+            });
         }
     }
 
@@ -538,6 +562,7 @@ public sealed class PayloadDimensionLiveTests
         var cutoff = new DateTime(2000, 3, 1, 0, 0, 0, DateTimeKind.Unspecified);
 
         await using var connection = await OpenMigratedStoreAsync(connectionString!, ct);
+        var bodySucceeded = false;
         try
         {
             foreach (var (digest, payload, lastSeen) in new[]
@@ -579,11 +604,16 @@ public sealed class PayloadDimensionLiveTests
                 connection, "SELECT COUNT(*) FROM query_plan_dim WHERE digest = $1", ct, expiredDigest));
             Assert.Equal(1L, await ScalarAsync(
                 connection, "SELECT COUNT(*) FROM query_plan_dim WHERE digest = $1", ct, liveDigest));
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteDimRowAsync(connection, PayloadDimensions.QueryPlanDimTable, expiredDigest, ct);
-            await DeleteDimRowAsync(connection, PayloadDimensions.QueryPlanDimTable, liveDigest, ct);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryPlanDimTable, expiredDigest, cleanupCt);
+                await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryPlanDimTable, liveDigest, cleanupCt);
+            });
         }
     }
 
@@ -608,6 +638,7 @@ public sealed class PayloadDimensionLiveTests
         Assert.NotEqual(strippedDigest, PayloadDimensions.Digest(raw));
 
         await using var connection = await OpenMigratedStoreAsync(connectionString!, ct);
+        var bodySucceeded = false;
         try
         {
             await WriteQueryStatsBatchAsync(
@@ -625,11 +656,16 @@ public sealed class PayloadDimensionLiveTests
             /* A NULL payload stays NULL — nothing to dedupe and no dim row to point at. */
             Assert.Null(await ScalarAsync(
                 connection, "SELECT query_plan_digest FROM query_stats WHERE server_id = $1", ct, serverId));
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteServerRowsAsync(connection, serverId, ct);
-            await DeleteDimRowAsync(connection, PayloadDimensions.QueryTextDimTable, strippedDigest, ct);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteServerRowsAsync(cleanup, serverId, cleanupCt);
+                await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryTextDimTable, strippedDigest, cleanupCt);
+            });
         }
     }
 
@@ -723,6 +759,7 @@ public sealed class PayloadDimensionLiveTests
                  """,
                 ct, serverId))!;
 
+        var bodySucceeded = false;
         try
         {
             await using (var transaction = await WriteQueryStatsBatchUncommittedAsync(
@@ -743,12 +780,17 @@ public sealed class PayloadDimensionLiveTests
 
             Assert.Equal(0L, await DanglingDigestsAsync("query_text_digest", PayloadDimensions.QueryTextDimTable));
             Assert.Equal(0L, await DanglingDigestsAsync("query_plan_digest", PayloadDimensions.QueryPlanDimTable));
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteServerRowsAsync(writer, serverId, ct);
-            await DeleteDimRowAsync(writer, PayloadDimensions.QueryTextDimTable, textDigest, ct);
-            await DeleteDimRowAsync(writer, PayloadDimensions.QueryPlanDimTable, planDigest, ct);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteServerRowsAsync(cleanup, serverId, cleanupCt);
+                await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryTextDimTable, textDigest, cleanupCt);
+                await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryPlanDimTable, planDigest, cleanupCt);
+            });
         }
     }
 
@@ -781,6 +823,7 @@ public sealed class PayloadDimensionLiveTests
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
         var renamed = false;
+        var bodySucceeded = false;
         /* Snapshot BEFORE the try, so the finally always has a baseline even if setup throws mid-way.
            Restoring against a snapshot when nothing was created is a no-op. */
         var coverageSnapshot = await ExistingCaggsAsync(connection, ct);
@@ -836,19 +879,28 @@ public sealed class PayloadDimensionLiveTests
 
             Assert.DoesNotContain(DeferralSignature, prunedLog.Joined, StringComparison.Ordinal);
             Assert.Equal(0L, await DimRowCountAsync(connection, digest, ct));
+
+            bodySucceeded = true;
         }
         finally
         {
-            if (renamed)
+            /* This finally is the one #1794's CI occurrence landed in — and it is also the highest-stakes
+               cleanup in the class: an abandoned rename leaves the store without collect.query_stats for
+               every later test and every later RUN on a reused database. It must not depend on the body's
+               connection having survived. */
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
             {
-                using var restore = new NpgsqlCommand(
-                    "ALTER TABLE IF EXISTS collect.query_stats_pm1782 RENAME TO query_stats", connection);
-                await restore.ExecuteNonQueryAsync(ct);
-            }
+                if (renamed)
+                {
+                    using var restore = new NpgsqlCommand(
+                        "ALTER TABLE IF EXISTS collect.query_stats_pm1782 RENAME TO query_stats", cleanup);
+                    await restore.ExecuteNonQueryAsync(cleanupCt);
+                }
 
-            await RestoreCaggsAsync(connection, coverageSnapshot, ct);
+                await RestoreCaggsAsync(cleanup, coverageSnapshot, cleanupCt);
 
-            await DeleteDimRowAsync(connection, PayloadDimensions.QueryPlanDimTable, digest, ct);
+                await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryPlanDimTable, digest, cleanupCt);
+            });
         }
     }
 
@@ -895,6 +947,7 @@ public sealed class PayloadDimensionLiveTests
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             /* INSIDE the try: creating aggregates is the shared-fixture mutation the finally restores,
@@ -950,11 +1003,16 @@ public sealed class PayloadDimensionLiveTests
 
             Assert.Equal(0L, await AncientRowCountAsync(connection, serverId, ct));
             Assert.DoesNotContain(CoverageSkipSignature, dropLog.Joined, StringComparison.Ordinal);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteServerRowsAsync(connection, serverId, ct);
-            await RestoreCaggsAsync(connection, preexistingCaggs, ct);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteServerRowsAsync(cleanup, serverId, cleanupCt);
+                await RestoreCaggsAsync(cleanup, preexistingCaggs, cleanupCt);
+            });
         }
     }
 
