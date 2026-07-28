@@ -3095,6 +3095,27 @@ LIMIT 1";
                 _postgres!, runtime, collectorName, "SESSION_MISSING", 0, 0, 0, ex.Message, _logger, cancellationToken);
             return 0;
         }
+        catch (SqlException ex) when (ex.Number == 1222 && CollectorCatalog.YieldsOnLockTimeout(collectorName))
+        {
+            /* The 1-second LOCK_TIMEOUT guard doing its job (#1805): the snapshot sweep stepped aside
+               instead of joining a blocking chain on the monitored server. Not a collection failure —
+               the next sweep sees current state — so it records as YIELDED: its own status, excluded
+               from the error counts that feed collector health, the daily health band, and the
+               collection-failure self-alerts, and readable as evidence of lock contention on the
+               TARGET rather than a monitoring fault. Same classification Lite applies — parity is the
+               point. A 1222 from a collector without the guard flag falls through to the general
+               catch below, unchanged. This filter and the permissions filter match disjoint
+               conditions, so their relative order is not load-bearing; both only need to precede the
+               general Exception catch. */
+            _logger.LogInformation("  [{Server}] {Collector} => YIELDED - 1s lock-timeout guard fired (target lock contention)",
+                server.Config.DisplayName, collectorName);
+
+            await DarlingObservability.LogCollectionAsync(
+                _postgres!, runtime, collectorName, "YIELDED", 0, 0, 0,
+                $"Lock-timeout yield (SQL error #{ex.Number}): the 1-second LOCK_TIMEOUT guard fired rather than waiting in a blocking chain. One snapshot sweep skipped; evidence of lock contention on the monitored server, not a monitoring failure.",
+                _logger, cancellationToken);
+            return 0;
+        }
         catch (SqlException ex) when (ex.Number is 229 or 297 or 300)
         {
             /* Same Azure explanation Lite appends (#1631): error 300 on Azure SQL Database is a service

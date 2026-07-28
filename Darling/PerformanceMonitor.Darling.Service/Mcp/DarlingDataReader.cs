@@ -850,7 +850,8 @@ internal static class DarlingDataReader
             MAX(collection_time) AS last_run_time,
             MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN error_message END) AS last_error,
             MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN collection_time END) AS last_error_time,
-            SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count
+            SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
+            SUM(CASE WHEN status = 'YIELDED' THEN 1 ELSE 0 END) AS yield_count
         FROM v_collection_log
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -880,6 +881,7 @@ internal static class DarlingDataReader
                 LastError = reader.IsDBNull(7) ? null : reader.GetString(7),
                 LastErrorTime = reader.IsDBNull(8) ? null : reader.GetDateTime(8),
                 PermissionDeniedCount = reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9)),
+                YieldCount = reader.IsDBNull(10) ? 0 : Convert.ToInt64(reader.GetValue(10)),
             });
         }
 
@@ -992,6 +994,8 @@ internal sealed class CollectorHealth
     public string? LastError { get; set; }
     public DateTime? LastErrorTime { get; set; }
     public long PermissionDeniedCount { get; set; }
+    /// <summary>1s lock-timeout yields (#1805) — deliberate, benign, counted apart from errors.</summary>
+    public long YieldCount { get; set; }
 
     public double FailureRatePercent => TotalRuns > 0 ? (double)ErrorCount / TotalRuns * 100 : 0;
 

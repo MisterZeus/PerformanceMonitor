@@ -683,6 +683,9 @@ public sealed class DarlingMcpDataTools
                 status = r.HealthStatus,
                 total_runs = r.TotalRuns,
                 errors = r.ErrorCount,
+                /* Deliberate 1s lock-timeout yields (#1805) — benign, distinct from errors; clustering
+                   here is a lock-contention signal about the monitored server. */
+                yields = r.YieldCount,
                 failure_rate_pct = Math.Round(r.FailureRatePercent, 1),
                 avg_duration_ms = Math.Round(r.AvgDurationMs, 0),
                 last_success = r.LastSuccessTime?.ToString("o"),

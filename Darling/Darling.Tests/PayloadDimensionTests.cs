@@ -164,6 +164,8 @@ public sealed class PayloadDimensionTests
         public string PrefixTimeColumnName => "collection_time";
         public IReadOnlyList<CollectorColumn> PayloadColumns { get; }
         public bool AppliesTo(CollectorTargetInfo target) => true;
+
+        public bool YieldsOnLockTimeout => false;
     }
 
     // ── the COPY column list ──

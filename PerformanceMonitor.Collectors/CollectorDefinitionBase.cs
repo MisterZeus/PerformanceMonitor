@@ -47,6 +47,8 @@ public abstract class CollectorDefinitionBase<TRow> : ICollectorDefinition<TRow>
 
     public virtual bool AppliesTo(CollectorTargetInfo target) => true;
 
+    public virtual bool YieldsOnLockTimeout => false;
+
     public virtual bool RunsPerDatabase(CollectorTargetInfo target) => false;
 
     public abstract CollectorQuery BuildQuery(CollectorContext context);

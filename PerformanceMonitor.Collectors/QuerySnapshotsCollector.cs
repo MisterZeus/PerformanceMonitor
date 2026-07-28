@@ -408,6 +408,15 @@ DROP TABLE #req;
 
     public override string TargetTable => "query_snapshots";
 
+    /// <summary>
+    /// Both query variants open with <c>SET LOCK_TIMEOUT 1000</c>: a point-in-time snapshot sweep
+    /// must never join a blocking chain, so after 1 second it yields instead. The data cost is
+    /// near zero (the next sweep sees current state; nothing cumulative or watermarked is lost),
+    /// which is why hosts record the resulting 1222 as a <c>YIELDED</c> row rather than an error —
+    /// a 1222 here is evidence about the TARGET's lock contention, not a monitoring failure (#1805).
+    /// </summary>
+    public override bool YieldsOnLockTimeout => true;
+
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
         var query = BuildSnapshotQuery(SupportsLiveQueryPlan(context.Target), context.Target.IsAzureSqlDb);
