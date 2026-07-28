@@ -771,7 +771,9 @@ public sealed class PayloadDimensionLiveTests
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
         var renamed = false;
-        string[]? coverageSnapshot = null;
+        /* Snapshot BEFORE the try, so the finally always has a baseline even if setup throws mid-way.
+           Restoring against a snapshot when nothing was created is a no-op. */
+        var coverageSnapshot = await ExistingCaggsAsync(connection, ct);
 
         try
         {
@@ -815,7 +817,7 @@ public sealed class PayloadDimensionLiveTests
                same dim-feeding-purge-failed flag this test is about — so a "healthy purge" now means covered as
                well as succeeding. Satisfy coverage before the control phase, or the GC defers for the OTHER
                reason and the control proves nothing. */
-            coverageSnapshot = await SatisfyRollupCoverageAsync(connection, ct);
+            await SatisfyRollupCoverageAsync(connection, ct);
 
             /* Control: with the purge healthy again the guard opens and the same row is pruned, so the test
                cannot pass merely because the GC never runs. */
@@ -834,10 +836,7 @@ public sealed class PayloadDimensionLiveTests
                 await restore.ExecuteNonQueryAsync(ct);
             }
 
-            if (coverageSnapshot is not null)
-            {
-                await RestoreCaggsAsync(connection, coverageSnapshot, ct);
-            }
+            await RestoreCaggsAsync(connection, coverageSnapshot, ct);
 
             await DeleteDimRowAsync(connection, PayloadDimensions.QueryPlanDimTable, digest, ct);
         }
@@ -878,7 +877,6 @@ public sealed class PayloadDimensionLiveTests
         /* Creating aggregates is GLOBAL state on the shared fixture, so snapshot and restore only what this
            test adds — see ExistingCaggsAsync. */
         var preexistingCaggs = await ExistingCaggsAsync(connection, ct);
-        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
         var (serverId, serverName) = NewServer();
 
@@ -889,6 +887,10 @@ public sealed class PayloadDimensionLiveTests
 
         try
         {
+            /* INSIDE the try: creating aggregates is the shared-fixture mutation the finally restores,
+               so it must not happen where a throw would skip that restore. */
+            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
             using (var seed = new NpgsqlCommand(
                 "INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash) " +
                 "VALUES ($1, $2, $3, $4, 'pm1784', '0xPM1784')", connection))
@@ -983,11 +985,15 @@ public sealed class PayloadDimensionLiveTests
 
     /// <summary>
     /// Makes the raw tier's rollup coverage reach back over everything raw holds, so the #1784 gate judges a
-    /// drop SAFE. Returns the aggregates that already existed, for the caller's finally to restore against.
+    /// drop SAFE.
+    ///
+    /// <para>Deliberately does NOT capture the restore snapshot: the caller must take it BEFORE calling this,
+    /// outside its try, so a throw part-way through creation still leaves the finally a baseline to restore
+    /// against. Owning the snapshot here made the restore conditional on this method RETURNING, which is
+    /// exactly the window in which it leaks aggregates into the shared fixture.</para>
     /// </summary>
-    private static async Task<string[]> SatisfyRollupCoverageAsync(NpgsqlConnection connection, CancellationToken ct)
+    private static async Task SatisfyRollupCoverageAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        var preexisting = await ExistingCaggsAsync(connection, ct);
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
         foreach (var (relation, _, coverage) in TimescaleSupport.RawTierCoverage)
@@ -998,8 +1004,6 @@ public sealed class PayloadDimensionLiveTests
             refresh.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-3650), DateTimeKind.Unspecified));
             await refresh.ExecuteNonQueryAsync(ct);
         }
-
-        return preexisting;
     }
 
     private static async Task RestoreCaggsAsync(NpgsqlConnection connection, string[] preexisting, CancellationToken ct)

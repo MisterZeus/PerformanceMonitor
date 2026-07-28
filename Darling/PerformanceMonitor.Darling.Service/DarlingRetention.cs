@@ -568,6 +568,14 @@ public static class DarlingRetention
         ILogger? logger,
         CancellationToken cancellationToken)
     {
+        /* Membership first: the sweep calls this for EVERY catalog table, and only the three raw tiers are
+           gated. Opening a pooled connection just to have the predicate return true for the other thirty is
+           avoidable work on a path that already runs per table per day. */
+        if (!TimescaleSupport.IsCoverageGatedRelation(tableName))
+        {
+            return true;
+        }
+
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);

@@ -1304,6 +1304,24 @@ AND   j.hypertable_name = '{relation}'";
     };
 
     /// <summary>
+    /// Is <paramref name="relation"/> one of the coverage-gated raw tiers? Lets a caller skip the cost of a
+    /// connection for the many tables the gate does not apply to, without duplicating the membership rule --
+    /// it reads the same <see cref="RawTierCoverage"/> map the gate itself does.
+    /// </summary>
+    public static bool IsCoverageGatedRelation(string relation)
+    {
+        foreach (var (tierRelation, _, _) in RawTierCoverage)
+        {
+            if (string.Equals(tierRelation, relation, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// May <paramref name="relation"/>'s expired chunks be dropped right now without destroying history no
     /// aggregate holds (#1784)? True for any table that is not coverage-gated — the gate is a property of the
     /// raw tier, not of retention in general.
