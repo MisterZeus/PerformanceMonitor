@@ -620,6 +620,12 @@ public sealed class DarlingManagedPostgres
            it, costing it one of the two starts it is supposed to survive. */
         _storeUpgrade.SweepRetainedDataDirectories(_dataDirectory);
 
+        /* The install directory's own housekeeping report, beside the store's. Deliberately adjacent: the
+           two answer the same operator question about two different parents, and a field instance proved
+           that reporting only the data directory's siblings leaves directories under the install directory
+           completely unmentioned. Never throws, never deletes. */
+        DarlingInstallDirectoryReport.Report(AppContext.BaseDirectory, _logger);
+
         if (!File.Exists(Path.Combine(_dataDirectory, "PG_VERSION")))
         {
             await InitializeClusterAsync(binDirectory, cancellationToken);
