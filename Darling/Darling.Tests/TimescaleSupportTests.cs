@@ -728,6 +728,19 @@ LIMIT 1", connection))
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(ct);
 
+        /* Migrate first, as every other gated test in this class does. It is not the schema this test wants —
+           it is the search_path: the migration sets the database to collect, config, public, and WITHOUT public
+           on the path TimescaleDB's own by_range is unresolvable, so create_hypertable fails to resolve its
+           argument and the whole statement dies as 42883 by_range(unknown, interval) does not exist. Skipping
+           this line is what made the test pass on a rig whose search_path a previous run had already set, and
+           fail on CI's throwaway cluster. */
+        /* Migrate first, as every other gated test in this class does. It is not the schema this test wants -
+           it is the search_path. TimescaleDB'''s by_range lives in PUBLIC, so a session whose search_path omits
+           public cannot resolve it, create_hypertable never resolves its argument, and the statement dies as
+           42883 by_range(unknown, interval) does not exist. Skipping this line passed on a rig whose connection
+           carried the default "$user", public and failed on CI, whose connection pins collect,config. */
+        await PgMigrations.MigrateAsync(connection, ct);
+
         Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
             "the dev fixture is expected to have TimescaleDB installed");
 
