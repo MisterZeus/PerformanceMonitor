@@ -45,10 +45,12 @@ public sealed class DarlingPgRuntimeVersionPinTests
     /// </summary>
     private const int ExpectedPostgresMajor = 18;
 
-    private static string FetchScriptText =>
+    /* Internal, not private: DarlingLiveStoreExtensionParityTests (#1787) reads the same pins, so both
+       guards can never disagree on what "the pinned version" means. */
+    internal static string FetchScriptText =>
         File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "fetch-pg-runtime.ps1"));
 
-    private static string PinnedValue(string script, string variableName)
+    internal static string PinnedValue(string script, string variableName)
     {
         var match = Regex.Match(script, @"^\$" + Regex.Escape(variableName) + @"\s*=\s*'([^']+)'",
             RegexOptions.Multiline);
