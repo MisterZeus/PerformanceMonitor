@@ -280,9 +280,13 @@ public static class DarlingRetention
                silently. */
             if (dimFeedingPurgeFailed)
             {
-                /* One line, deliberately a fixed string: it is the field signature an operator greps for when
-                   the dimensions stop shrinking, so it must not vary by store. */
-                logger?.LogWarning("dimension GC deferred: raw purges held, facts may outlive their policy window");
+                /* One line, deliberately a fixed string never interpolated: it is the field signature an
+                   operator greps for when the dimensions stop shrinking, so it must not vary by store. It
+                   names what actually happened -- a fact purge that did not complete -- rather than any
+                   particular CAUSE of that: the preceding per-table warning already says which table and why
+                   (a failed statement, or a coverage skip once #1784 lands). Naming a cause here would send
+                   the reader after the wrong remedy, which is the one thing a diagnostic line must not do. */
+                logger?.LogWarning("dimension GC deferred: a dim-feeding fact purge did not complete this cycle; facts may outlive their retention until a sweep succeeds");
             }
             else
             {
