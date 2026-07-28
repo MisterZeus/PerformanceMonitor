@@ -1885,7 +1885,11 @@ public sealed class DarlingWorker : BackgroundService
 
         return new AlertEngine(
             alertSettings,
-            new DarlingAlertReadAdapter(postgres),
+            /* #1812: the adapter's snapshot-freshness bound needs the server's EFFECTIVE running_jobs
+               cadence — the same resolution the sweep schedules by, reading the live overrides field so
+               a control-plane reload reaches the very next check. */
+            new DarlingAlertReadAdapter(postgres, serverId =>
+                StoreConfigProvider.ResolveSchedule("running_jobs", serverId, _scheduleOverrides).FrequencyMinutes),
             stateStore,
             deliverer,
             muteRuleService.IsAlertMuted,

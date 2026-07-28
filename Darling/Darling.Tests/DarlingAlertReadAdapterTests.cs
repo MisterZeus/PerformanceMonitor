@@ -313,10 +313,28 @@ public sealed class DarlingAlertReadAdapterTests
 
             /* --- anomalous jobs: threshold + the 60-second average noise floor --- */
             var jobs = await adapter.GetAnomalousJobsAsync(TestServerKey, multiplier: 3, ct);
-            var job = Assert.Single(jobs);
+            Assert.True(jobs.SnapshotIsFresh);
+            var job = Assert.Single(jobs.Jobs);
             Assert.Equal("Nightly ETL", job.JobName);
             Assert.Equal(3661L, job.CurrentDurationSeconds);
             Assert.Equal(350.0m, job.PercentOfAverage);
+
+            /* #1812: age the SAME snapshot past the freshness bound (default 2-minute cadence → 10
+               minutes) — the read becomes no evidence: not fresh, rows skipped, exactly the state that
+               used to re-alert a historical run every cooldown forever. */
+            await InsertAsync(connection,
+                $"UPDATE running_jobs SET collection_time = $1 WHERE server_id = {TestServerId}",
+                DateTime.SpecifyKind(DateTime.UtcNow.AddHours(-2), DateTimeKind.Unspecified));
+            var stale = await adapter.GetAnomalousJobsAsync(TestServerKey, multiplier: 3, ct);
+            Assert.False(stale.SnapshotIsFresh);
+            Assert.Empty(stale.Jobs);
+
+            /* And the cadence hook genuinely widens the bound: a relaxed profile's 60-minute cadence
+               makes the same 2-hour-old snapshot CURRENT (bound 180 minutes). */
+            var relaxed = new DarlingAlertReadAdapter(postgres, _ => 60);
+            var slowProfile = await relaxed.GetAnomalousJobsAsync(TestServerKey, multiplier: 3, ct);
+            Assert.True(slowProfile.SnapshotIsFresh);
+            Assert.Single(slowProfile.Jobs);
         }
         finally
         {

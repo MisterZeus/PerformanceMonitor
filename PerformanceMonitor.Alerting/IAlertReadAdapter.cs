@@ -106,7 +106,13 @@ public interface IAlertReadAdapter
     /// their historical average, worst (highest % of average) first, capped at 5, from the LATEST
     /// running_jobs snapshot only. Jobs averaging under 60 seconds are excluded (noise floor) —
     /// mirroring Lite's read exactly.
+    ///
+    /// <para>#1812: the latest snapshot is only evidence when it is FRESH. Implementations compare
+    /// MAX(collection_time) against <see cref="AnomalousJobsResult.MaxSnapshotAge"/> at the server's
+    /// effective running_jobs cadence, and return <see cref="AnomalousJobsResult.Stale"/> (no rows,
+    /// not fresh) when the snapshot is older — a stopped collector, missed cycles, lost msdb access,
+    /// or a store reset must not let a historical snapshot read as NOW.</para>
     /// </summary>
-    Task<List<AnomalousJobInfo>> GetAnomalousJobsAsync(
+    Task<AnomalousJobsResult> GetAnomalousJobsAsync(
         string serverKey, int multiplier, CancellationToken cancellationToken = default);
 }

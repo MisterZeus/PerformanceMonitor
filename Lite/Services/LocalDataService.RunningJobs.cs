@@ -71,6 +71,23 @@ ORDER BY current_duration_seconds DESC";
     }
 
     /// <summary>
+    /// The newest running_jobs snapshot time for a server, or null when the store holds none — the
+    /// #1812 freshness input. Reads the archive-aware view deliberately: after the 512 MB reset the
+    /// newest snapshot can live only in parquet, and a stale-but-archived snapshot must read as STALE
+    /// (its true age), not as absent.
+    /// </summary>
+    public async Task<DateTime?> GetLatestRunningJobsSnapshotTimeAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT MAX(collection_time) FROM v_running_jobs WHERE server_id = $1";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+
+        var result = await command.ExecuteScalarAsync();
+        return result is null or DBNull ? null : Convert.ToDateTime(result);
+    }
+
+    /// <summary>
     /// Gets running jobs that exceed the anomaly threshold (multiplier x average duration).
     /// Excludes jobs with avg < 60s to avoid noise from very short jobs.
     /// </summary>

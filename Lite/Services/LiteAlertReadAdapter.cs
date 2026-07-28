@@ -32,10 +32,18 @@ namespace PerformanceMonitorLite.Services;
 public sealed class LiteAlertReadAdapter : IAlertReadAdapter
 {
     private readonly LocalDataService _dataService;
+    private readonly Func<int, int>? _runningJobsCadenceMinutes;
 
-    public LiteAlertReadAdapter(LocalDataService dataService)
+    /// <param name="runningJobsCadenceMinutes">
+    /// Resolves a server's EFFECTIVE running_jobs collection cadence (minutes) for the #1812
+    /// snapshot-freshness bound — MainWindow supplies the ScheduleManager lookup. Null (test
+    /// call sites) or a non-positive answer falls back to the shared
+    /// <see cref="CollectorScheduleDefaults"/> cadence.
+    /// </param>
+    public LiteAlertReadAdapter(LocalDataService dataService, Func<int, int>? runningJobsCadenceMinutes = null)
     {
         _dataService = dataService ?? throw new ArgumentNullException(nameof(dataService));
+        _runningJobsCadenceMinutes = runningJobsCadenceMinutes;
     }
 
     /// <summary>
@@ -112,11 +120,38 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         return await Task.Run(() => _dataService.GetLatestTempDbSpaceAsync(serverId), cancellationToken);
     }
 
-    public async Task<List<AnomalousJobInfo>> GetAnomalousJobsAsync(
+    public async Task<AnomalousJobsResult> GetAnomalousJobsAsync(
         string serverKey, int multiplier, CancellationToken cancellationToken = default)
     {
         var serverId = ParseServerKey(serverKey);
-        return await Task.Run(() => _dataService.GetAnomalousJobsAsync(serverId, multiplier), cancellationToken);
+
+        /* #1812: the latest snapshot is only evidence when fresh. A stopped collector, missed cycles,
+           lost msdb access, or the 512 MB reset (with parquet still serving the newest rows through
+           v_running_jobs) all leave a stale "latest" that would otherwise read as NOW — and the engine's
+           per-run cooldown key expires each pass, so a stale snapshot re-fires the same historical run
+           every cooldown, forever. Stale => no evidence: skip the row read entirely. */
+        var snapshotTime = await Task.Run(() => _dataService.GetLatestRunningJobsSnapshotTimeAsync(serverId), cancellationToken);
+        var cadence = ResolveRunningJobsCadence(serverId);
+        if (snapshotTime is null || DateTime.UtcNow - snapshotTime.Value > AnomalousJobsResult.MaxSnapshotAge(cadence))
+        {
+            return AnomalousJobsResult.Stale;
+        }
+
+        var jobs = await Task.Run(() => _dataService.GetAnomalousJobsAsync(serverId, multiplier), cancellationToken);
+        return new AnomalousJobsResult(SnapshotIsFresh: true, jobs);
+    }
+
+    private int ResolveRunningJobsCadence(int serverId)
+    {
+        var resolved = _runningJobsCadenceMinutes?.Invoke(serverId) ?? 0;
+        if (resolved > 0)
+        {
+            return resolved;
+        }
+
+        return PerformanceMonitor.Collectors.CollectorScheduleDefaults.All.TryGetValue("running_jobs", out var schedule)
+            ? schedule.FrequencyMinutes
+            : 2;
     }
 
     private static int ParseServerKey(string serverKey) =>

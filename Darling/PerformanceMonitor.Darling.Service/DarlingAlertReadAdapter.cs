@@ -39,10 +39,18 @@ namespace PerformanceMonitor.Darling.Service;
 public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
 {
     private readonly NpgsqlDataSource _postgres;
+    private readonly Func<int, int>? _runningJobsCadenceMinutes;
 
-    public DarlingAlertReadAdapter(NpgsqlDataSource postgres)
+    /// <param name="runningJobsCadenceMinutes">
+    /// Resolves a server's EFFECTIVE running_jobs collection cadence (minutes) for the #1812
+    /// snapshot-freshness bound — the worker supplies its own schedule resolution (the same
+    /// <c>StoreConfigProvider.ResolveSchedule</c> the sweep runs on). Null (test call sites) or a
+    /// non-positive answer falls back to the shared <see cref="CollectorScheduleDefaults"/> cadence.
+    /// </param>
+    public DarlingAlertReadAdapter(NpgsqlDataSource postgres, Func<int, int>? runningJobsCadenceMinutes = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
+        _runningJobsCadenceMinutes = runningJobsCadenceMinutes;
     }
 
     /* ---------------- blocking (XE-preferred + DMV fallback) ---------------- */
@@ -482,7 +490,7 @@ AND percent_of_average >= $2
 ORDER BY percent_of_average DESC
 LIMIT 5";
 
-    public async Task<List<AnomalousJobInfo>> GetAnomalousJobsAsync(
+    public async Task<AnomalousJobsResult> GetAnomalousJobsAsync(
         string serverKey, int multiplier, CancellationToken cancellationToken = default)
     {
         var serverId = ParseServerKey(serverKey);
@@ -490,6 +498,24 @@ LIMIT 5";
 
         var items = new List<AnomalousJobInfo>();
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+
+        /* #1812: the latest snapshot is only evidence when fresh — a stopped collector, missed cycles,
+           or lost msdb access leaves a stale "latest" that would otherwise read as NOW, and the engine's
+           per-run cooldown key expires each pass, so a stale snapshot re-fires the same historical run
+           every cooldown, forever. Same rule as Lite's adapter; parity is the point. */
+        using (var snapshotProbe = new NpgsqlCommand(
+            "SELECT MAX(collection_time) FROM running_jobs WHERE server_id = $1", connection))
+        {
+            snapshotProbe.Parameters.AddWithValue(serverId);
+            var snapshot = await snapshotProbe.ExecuteScalarAsync(cancellationToken);
+            var cadence = ResolveRunningJobsCadence(serverId);
+            if (snapshot is not DateTime snapshotTime
+                || DateTime.UtcNow - snapshotTime > AnomalousJobsResult.MaxSnapshotAge(cadence))
+            {
+                return AnomalousJobsResult.Stale;
+            }
+        }
+
         using var command = new NpgsqlCommand(AnomalousJobsSql, connection);
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(thresholdPercent);
@@ -509,7 +535,20 @@ LIMIT 5";
             });
         }
 
-        return items;
+        return new AnomalousJobsResult(SnapshotIsFresh: true, items);
+    }
+
+    private int ResolveRunningJobsCadence(int serverId)
+    {
+        var resolved = _runningJobsCadenceMinutes?.Invoke(serverId) ?? 0;
+        if (resolved > 0)
+        {
+            return resolved;
+        }
+
+        return PerformanceMonitor.Collectors.CollectorScheduleDefaults.All.TryGetValue("running_jobs", out var schedule)
+            ? schedule.FrequencyMinutes
+            : 2;
     }
 
     /* ---------------- helpers ---------------- */
