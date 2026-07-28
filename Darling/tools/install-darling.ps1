@@ -137,10 +137,11 @@ else {
 # BUILTIN\Users: Read & Execute from the root DACL, which hands every local user the lot.
 #
 # Runs AFTER service creation on purpose: the NT SERVICE virtual account has no SID to grant until sc.exe
-# create has made it. Mirrors DarlingFileSecurity.HardenFile(path, allowInteractiveRead: true) exactly -
-# SYSTEM / Administrators / the service account get full control, INTERACTIVE gets read (the Viewer and the
-# CLI verbs run as the interactive operator and must still read the file). Best-effort: a failure warns
-# rather than aborting an otherwise good install, and the service re-asserts this ACL at every startup.
+# create has made it. Mirrors DarlingFileSecurity.HardenFile exactly - SYSTEM / Administrators / the service
+# account get full control on both, and INTERACTIVE gets read on the LIVE CONFIG ONLY (the Viewer and the CLI
+# verbs run as the interactive operator and must still read darling.json; nothing reads a backup, #1769).
+# Best-effort: a failure warns rather than aborting an otherwise good install, and the service re-asserts the
+# live config's ACL at every startup.
 #
 # Covers darling.json AND its .bak-* siblings (#1721). The CLI's config-editing verbs back the file up
 # before rewriting it, and File.Copy does NOT carry the source DACL - a backup takes the DIRECTORY's
@@ -172,7 +173,15 @@ foreach ($secretFile in @($configPath) + @(Get-ChildItem -Path $root -Filter 'da
         foreach ($sid in @($systemSid, $adminsSid, $serviceSid)) {
             $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, $full, $allow)))
         }
-        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($interactiveSid, $read, $allow)))
+        # INTERACTIVE read goes to the LIVE config only. darling.json is read as the interactive operator by the
+        # Viewer and the CLI verbs; a .bak-* copy is read by nothing (#1769) - the only code that knows the name
+        # is the code that creates it, and restoring one already needs elevation because writing darling.json
+        # does. So a backup granting INTERACTIVE was a second copy of every encrypted password and access token,
+        # readable by any interactively-logged-on user, buying nothing. Mirrors
+        # DarlingFileSecurity.HardenFile(path, allowInteractiveRead: false) for backups.
+        if ($secretFile -eq $configPath) {
+            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($interactiveSid, $read, $allow)))
+        }
         Set-Acl -Path $secretFile -AclObject $acl
 
         try {
@@ -204,7 +213,7 @@ foreach ($secretFile in @($configPath) + @(Get-ChildItem -Path $root -Filter 'da
 }
 
 if ($hardened.Count -gt 0) {
-    Write-Host "Restricted $($hardened.Count) credential file(s) to SYSTEM, Administrators, the service account, and INTERACTIVE (they hold encrypted passwords and access tokens)."
+    Write-Host "Restricted $($hardened.Count) credential file(s) to SYSTEM, Administrators, and the service account (they hold encrypted passwords and access tokens). darling.json additionally allows INTERACTIVE read, which the Viewer and the CLI verbs need; its .bak-* copies do not."
 }
 if ($failed.Count -gt 0) {
     Write-Host ''
