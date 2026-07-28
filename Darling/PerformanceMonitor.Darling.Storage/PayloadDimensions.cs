@@ -231,6 +231,14 @@ public static class PayloadDimensions
     /// UPDATE command cannot affect row a second time") when one statement presents the same key
     /// twice, and a 200-row batch sharing a handful of plans presents duplicates constantly. The
     /// write path accumulates into a digest-keyed dictionary, which dedups structurally.</para>
+    ///
+    /// <para>They must ALSO pass them in digest ORDER, which is a separate requirement dedup does not
+    /// supply: dedup makes a batch conflict-free with ITSELF, ordering makes it conflict-free with its
+    /// SIBLINGS. This statement takes one row lock per conflict key, so two concurrent sessions whose
+    /// batches share two digests in opposite relative order each hold the lock the other needs next and
+    /// deadlock (40P01, #1801). <c>PayloadDimensionBatch.ToArrays</c> is the single point that imposes
+    /// it -- deliberately client-side rather than an ORDER BY here, so the lock order is a property of
+    /// the values bound and owes nothing to how the planner chooses to execute this statement.</para>
     /// </summary>
     public static string UpsertSql(string dimTable)
     {
