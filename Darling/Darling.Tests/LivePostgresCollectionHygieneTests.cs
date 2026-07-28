@@ -74,8 +74,19 @@ public sealed class LivePostgresCollectionHygieneTests
 
         var offenders = new List<string>();
 
-        foreach (var file in Directory.EnumerateFiles(directory!, "*.cs", SearchOption.TopDirectoryOnly))
+        /* Recurse, and skip build output. The project is flat today, so TopDirectoryOnly would be equivalent —
+           but it would also mean the first test file someone puts in a subfolder escapes the rule silently, which
+           is the failure mode this whole test exists to prevent. Scoping to THIS project is correct rather than
+           lazy: [Collection] groups classes within an assembly, so a class elsewhere could not join the live
+           collection even if it wanted to, and the quoted literal appears nowhere else in the repo. */
+        foreach (var file in Directory.EnumerateFiles(directory!, "*.cs", SearchOption.AllDirectories))
         {
+            if (file.Contains(@"\bin\", StringComparison.OrdinalIgnoreCase)
+                || file.Contains(@"\obj\", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
             var text = File.ReadAllText(file);
             if (!text.Contains(SharedStoreVariable, StringComparison.Ordinal))
             {
