@@ -928,6 +928,122 @@ public sealed class PayloadDimensionLiveTests
     }
 
     /// <summary>
+    /// #1815: the floor measurement must survive COMPRESSED history — the exact shape the first field
+    /// run of #1795 died on. Compressed chunks carry no btree indexes, so the V39 partial index cannot
+    /// serve them and the exact min() probe was a full decompress-scan that hit the driver's timeout;
+    /// on a hypertable the floor now comes from chunk catalog metadata instead (instant,
+    /// compression-immune, conservative in the safe direction). This test compresses the chunk holding
+    /// the digest-carrying fact with the PRODUCT's own compression settings, then proves the sweep
+    /// measures (no unmeasurable deferral), bounds (the bounded signature), reclaims the ancient
+    /// orphan, keeps the referenced content — and, the path discriminator, keeps a dim row that sits
+    /// BETWEEN the chunk floor and the exact digest floor: the conservative catalog bound retains it
+    /// where the exact probe's bound would have taken it. Its survival is the proof the catalog path
+    /// (not the row probe) set the cutoff.
+    /// </summary>
+    [Fact]
+    public async Task DimensionGc_MeasuresTheFloorFromChunkMetadata_EvenWithCompressedHistory()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), SkipReason);
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = await OpenMigratedStoreAsync(connectionString!, ct);
+
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct), "the rig is expected to have TimescaleDB");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        var (serverId, serverName) = NewServer();
+
+        var heldFactTime = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-45), DateTimeKind.Unspecified);
+        var referencedDigest = PayloadDimensions.Digest("pm1815-referenced-" + Guid.NewGuid().ToString("N"));
+        var betweenDigest = PayloadDimensions.Digest("pm1815-between-" + Guid.NewGuid().ToString("N"));
+        var orphanDigest = PayloadDimensions.Digest("pm1815-orphan-" + Guid.NewGuid().ToString("N"));
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* The held digest-carrying fact, mid-chunk (12:00) so a gap exists between its chunk's
+               range_start and the row itself — the discriminator dim lives in that gap. */
+            var midChunk = new DateTime(heldFactTime.Year, heldFactTime.Month, heldFactTime.Day, 12, 0, 0);
+            using (var seed = new NpgsqlCommand(
+                "INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_digest) " +
+                "VALUES ($1, $2, $3, $4, 'pm1815', '0xPM1815', $5)", connection))
+            {
+                seed.Parameters.AddWithValue(CollectionIdGenerator.Next());
+                seed.Parameters.AddWithValue(midChunk);
+                seed.Parameters.AddWithValue(serverId);
+                seed.Parameters.AddWithValue(serverName);
+                seed.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bytea, Value = referencedDigest });
+                await seed.ExecuteNonQueryAsync(ct);
+            }
+
+            /* Compress that chunk with the product's own settings — the field shape the exact probe
+               died on. */
+            await ExecAsync(connection, TimescaleSupport.EnableCompressionSql("query_stats"), ct);
+            await ExecAsync(connection,
+                "SELECT compress_chunk(c, true) FROM show_chunks('collect.query_stats') AS c", ct);
+
+            /* Dims: referenced (last_seen at the fact) survives; the between-dim sits inside the
+               chunk-floor .. exact-floor gap and survives ONLY under the catalog bound; the ancient
+               orphan goes either way. */
+            foreach (var (digest, seen, tag) in new[]
+            {
+                (referencedDigest, midChunk, "referenced"),
+                /* 30 hours below the 12:00 fact = 06:00 the previous day — inside
+                   [chunk range_start - 1d, exact digest floor - 1d), the band only the catalog
+                   bound retains. */
+                (betweenDigest, midChunk.AddHours(-30), "between"),
+                (orphanDigest, DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-500), DateTimeKind.Unspecified), "orphan"),
+            })
+            {
+                using var seed = new NpgsqlCommand(
+                    $"INSERT INTO {PayloadDimensions.QueryPlanDimTable} (digest, query_plan_xml, last_seen) " +
+                    "VALUES ($1, $2, $3) ON CONFLICT (digest) DO NOTHING", connection);
+                seed.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bytea, Value = digest });
+                seed.Parameters.AddWithValue($"<ShowPlanXML pm1815=\"{tag}\"/>");
+                seed.Parameters.AddWithValue(seen);
+                await seed.ExecuteNonQueryAsync(ct);
+            }
+
+            var log = new CapturingTestLogger();
+            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, log, ct, PurgeDimFeeding(30));
+
+            /* Measured, not deferred — the unmeasurable path and its per-table warning must be absent. */
+            Assert.DoesNotContain(DeferralSignature, log.Joined, StringComparison.Ordinal);
+            Assert.DoesNotContain("could not measure", log.Joined, StringComparison.Ordinal);
+            Assert.Contains(BoundedSignature, log.Joined, StringComparison.Ordinal);
+
+            /* The substantive trio. The between-dim is the path discriminator: the chunk's range_start
+               (midnight) minus the one-day margin retains it; the exact digest floor (12:00) minus the
+               margin would have taken it. */
+            Assert.Equal(0L, await DimRowCountAsync(connection, orphanDigest, ct));
+            Assert.Equal(1L, await DimRowCountAsync(connection, referencedDigest, ct));
+            Assert.Equal(1L, await DimRowCountAsync(connection, betweenDigest, ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await ExecAsync(cleanup, "SELECT decompress_chunk(c, true) FROM show_chunks('collect.query_stats') AS c", cleanupCt);
+                await DeleteServerRowsAsync(cleanup, serverId, cleanupCt);
+                await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryPlanDimTable, referencedDigest, cleanupCt);
+                await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryPlanDimTable, betweenDigest, cleanupCt);
+                await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryPlanDimTable, orphanDigest, cleanupCt);
+            });
+        }
+    }
+
+    private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(sql, connection);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
     /// The #1795 property, in the exact field shape that motivated it: on a coverage-lagging store the
     /// #1784 clamp holds query_stats' drop EVERY sweep, and before this change that set the #1782 defer
     /// flag — so the dimension GC stood down every cycle and a 400-day orphan survived with nothing
