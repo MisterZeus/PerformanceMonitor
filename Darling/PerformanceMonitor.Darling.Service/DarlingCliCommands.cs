@@ -1370,7 +1370,18 @@ public static class DarlingCliCommands
     }
 
     /// <summary>
-    /// Locks a freshly written config backup to the same principals as <c>darling.json</c> itself.
+    /// Locks a freshly written config backup to SYSTEM, Administrators and the service account — and,
+    /// unlike <c>darling.json</c> itself, NOT to <c>NT AUTHORITY\INTERACTIVE</c> (#1769).
+    ///
+    /// <para>A backup is a byte-for-byte copy of the config: every monitored server's
+    /// <c>encryptedPassword</c>, the MCP bearer token, the web access token. Those are DPAPI
+    /// <b>LocalMachine</b> blobs with an entropy constant that ships in an open-source repo, so READ access
+    /// IS the secret. The live config grants INTERACTIVE read because things genuinely read it as the
+    /// interactive operator — the Viewer (<c>ViewerSettings.TryLoad</c>) and the CLI verbs. <b>Nothing reads
+    /// a backup.</b> The only references to the <c>.bak-</c> name in non-test code are the two lines above
+    /// that CONSTRUCT it, and restoring one is a hand operation that already requires elevation, because
+    /// writing <c>darling.json</c> does — INTERACTIVE only ever had Read here, never Write. So the grant
+    /// bought nothing and cost a second copy of every secret, readable by any interactively-logged-on user.</para>
     ///
     /// <para>Never fatal — the edit that produced the backup has already been decided on and refusing to
     /// finish it over a permissions problem would leave the operator worse off. But it is reported LOUDLY
@@ -1384,7 +1395,7 @@ public static class DarlingCliCommands
     {
         try
         {
-            DarlingFileSecurity.HardenFile(backupPath, allowInteractiveRead: true);
+            DarlingFileSecurity.HardenFile(backupPath, allowInteractiveRead: false);
         }
         catch (Exception ex)
         {
