@@ -75,6 +75,20 @@ internal sealed class DarlingStoreUpgrade
     /// <summary>Suffix on the runtime root holding the rescued previous runtime (pg_upgrade's --old-bindir).</summary>
     public const string PreviousRuntimeSuffix = "-prev";
 
+    /* Every directory naming this class can put BESIDE the data directory lives here, because
+       ReportUnmanagedStoreCopies decides what is a stranger's by elimination — anything store-shaped that is
+       not one of ours. A new sibling naming that forgets to register here does not fail loudly; it gets
+       reported to the operator as something the product did not create, which is the one way that diagnostic
+       can lie. DarlingStoreUpgradeSiblingNamesTests pins the pair against the source. The runtime namings
+       (PreviousRuntimeSuffix, and the ".failed" move-aside) are deliberately NOT here: they hold binaries,
+       never a PG_VERSION, so the structural test cannot reach them. */
+
+    /// <summary>Suffix on the data directory holding a retained pre-upgrade copy, kept for rollback.</summary>
+    public const string RetainedDataDirectorySuffix = "-old-";
+
+    /// <summary>Suffix on the data directory holding the new cluster an in-place upgrade builds into.</summary>
+    public const string UpgradeStagingDirectorySuffix = "-upgrade-";
+
     /// <summary>
     /// How many service starts the pre-upgrade data directory is kept before deletion. TWO, not one: the
     /// first start after the upgrade is the one that proves the new cluster serves real collection, and a
@@ -84,6 +98,15 @@ internal sealed class DarlingStoreUpgrade
 
     /// <summary>Slack above the measured 2x requirement for copy mode, so a copy never fills the volume dead.</summary>
     private const long CopyHeadroomSlackBytes = 1L * 1024 * 1024 * 1024;
+
+    /// <summary>
+    /// Wall-clock ceiling on measuring the store-shaped directories reported at every service start. Five
+    /// seconds for the whole report, not per directory: what needs bounding is the delay before the store
+    /// comes up. An ordinary cluster of a few thousand files walks in well under it, so this only engages on
+    /// the pathological directory it exists to survive — and when it does, the log says the number is a lower
+    /// bound rather than pretending otherwise.
+    /// </summary>
+    private static readonly TimeSpan s_sizeProbeBudget = TimeSpan.FromSeconds(5);
 
     /* pg_upgrade on a large field store is genuinely long-running in copy mode, and the store is offline
        for the duration — but a partial copy is worse than a slow one, so the budget is generous rather
@@ -602,12 +625,36 @@ internal sealed class DarlingStoreUpgrade
     /// thousands of syscalls on the startup path.</para>
     /// </summary>
     internal static long MeasureDirectoryBytes(string directory)
+        => MeasureDirectoryBytes(directory, deadline: null, out _);
+
+    /// <summary>
+    /// <see cref="MeasureDirectoryBytes(string)"/> with a wall-clock ceiling. Returns what it managed to add
+    /// up and sets <paramref name="complete"/> false when <paramref name="deadline"/> cut the walk short, so
+    /// a caller can say "at least" instead of stating a number it did not finish computing.
+    ///
+    /// <para>The report path needs this because it measures foreign data directories on EVERY service start,
+    /// before the store is up, on exactly the low-headroom hosts the feature exists for. A budget is the
+    /// right shape rather than caching by mtime: it bounds the cost directly and needs no state that can go
+    /// stale, and in the ordinary case — a few thousand files per cluster — the walk finishes far inside it,
+    /// so the ceiling only ever engages on the pathological directory it exists to survive.</para>
+    /// </summary>
+    internal static long MeasureDirectoryBytes(string directory, DateTime? deadline, out bool complete)
     {
         long total = 0;
+        complete = true;
+        var checkedFiles = 0;
         try
         {
             foreach (var file in new DirectoryInfo(directory).EnumerateFiles("*", SearchOption.AllDirectories))
             {
+                /* DateTime.UtcNow per file would itself be a cost on a walk this size; every 512 entries is
+                   often enough to bound the overrun to a fraction of the budget. */
+                if (deadline is not null && ++checkedFiles % 512 == 0 && DateTime.UtcNow > deadline.Value)
+                {
+                    complete = false;
+                    break;
+                }
+
                 try
                 {
                     total += file.Length;
@@ -1164,7 +1211,7 @@ internal sealed class DarlingStoreUpgrade
     /* ============================ retained rollback copies ============================ */
 
     internal static string RetainedDataDirectoryFor(string dataDirectory, int oldMajor)
-        => Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory)) + "-old-" + oldMajor.ToString(CultureInfo.InvariantCulture);
+        => Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory)) + RetainedDataDirectorySuffix + oldMajor.ToString(CultureInfo.InvariantCulture);
 
     /// <summary>
     /// Ages out the pre-upgrade data directories kept for rollback: each service start bumps a copy's
@@ -1191,7 +1238,7 @@ internal sealed class DarlingStoreUpgrade
         {
             liveDataDirectory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory));
             parent = Path.GetDirectoryName(liveDataDirectory) ?? string.Empty;
-            prefix = Path.GetFileName(liveDataDirectory) + "-old-";
+            prefix = Path.GetFileName(liveDataDirectory) + RetainedDataDirectorySuffix;
             if (string.IsNullOrEmpty(parent) || !Directory.Exists(parent))
             {
                 return;
@@ -1287,9 +1334,15 @@ internal sealed class DarlingStoreUpgrade
                diagnostic is how a diagnostic stops being believed. UpgradeDataDirectoryAsync deletes it on
                every failure path, but only best-effort — so a held file, or a machine that lost power
                mid-upgrade, leaves one behind and this is the next thing to see it. */
-            var upgradePrefix = Path.GetFileName(liveDataDirectory) + "-upgrade-";
+            var upgradePrefix = Path.GetFileName(liveDataDirectory) + UpgradeStagingDirectorySuffix;
 
-            var found = new List<(string Path, long Bytes, bool Ours)>();
+            /* ONE budget for the whole report, not one per directory: what has to be bounded is the delay
+               this adds to a service start, and seven directories each given their own ceiling would multiply
+               it by seven. Whatever is left when the budget runs out is reported without a size rather than
+               with a wrong one. */
+            var deadline = DateTime.UtcNow + s_sizeProbeBudget;
+
+            var found = new List<(string Path, long Bytes, bool Measured, bool Ours)>();
             foreach (var candidate in Directory.GetDirectories(parent))
             {
                 if (string.Equals(candidate, liveDataDirectory, StringComparison.OrdinalIgnoreCase)
@@ -1300,7 +1353,8 @@ internal sealed class DarlingStoreUpgrade
                 }
 
                 var ours = Path.GetFileName(candidate).StartsWith(upgradePrefix, StringComparison.OrdinalIgnoreCase);
-                found.Add((candidate, MeasureDirectoryBytes(candidate), ours));
+                var bytes = MeasureDirectoryBytes(candidate, deadline, out var measured);
+                found.Add((candidate, bytes, measured, ours));
             }
 
             if (found.Count == 0)
@@ -1309,19 +1363,32 @@ internal sealed class DarlingStoreUpgrade
             }
 
             long total = 0;
-            foreach (var (_, bytes, _) in found)
+            var allMeasured = true;
+            foreach (var (_, bytes, measured, _) in found)
             {
                 total += bytes;
+                allMeasured &= measured;
             }
 
             found.Sort(static (left, right) => right.Bytes.CompareTo(left.Bytes));
 
             _logger.LogWarning(
-                "{Count} store data director(ies) beside {Live} are not part of the running store, and are holding {Size}. NONE of them is deleted automatically. Remove the ones you no longer need: a major store upgrade in copy mode needs roughly twice the data directory in free space.",
-                found.Count, liveDataDirectory, FormatBytes(total));
+                "{Count} store data director(ies) beside {Live} are not part of the running store, and are holding {Approximately}{Size}. NONE of them is deleted automatically. Remove the ones you no longer need: a major store upgrade in copy mode needs roughly twice the data directory in free space.",
+                found.Count, liveDataDirectory, allMeasured ? string.Empty : "at least ", FormatBytes(total));
 
-            foreach (var (path, bytes, ours) in found)
+            foreach (var (path, bytes, measured, ours) in found)
             {
+                if (!measured)
+                {
+                    /* Say what was actually established. A size probe that ran out of budget knows a lower
+                       bound and nothing more, and rounding that up to a stated total is how a diagnostic
+                       teaches people to distrust its numbers. */
+                    _logger.LogWarning(
+                        "Store data directory not part of the running store: {Path} (at least {Size}; the {Budget}-second size probe did not finish walking it).",
+                        path, FormatBytes(bytes), (int)s_sizeProbeBudget.TotalSeconds);
+                    continue;
+                }
+
                 if (ours)
                 {
                     /* Deliberately NOT deleted, and this is the reason. The commit point is two moves — the
@@ -1388,7 +1455,7 @@ internal sealed class DarlingStoreUpgrade
     internal async Task<StoreUpgradeOutcome> UpgradeDataDirectoryAsync(UpgradeContext context, CancellationToken cancellationToken)
     {
         var newDataDirectory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(context.DataDirectory))
-            + "-upgrade-" + context.NewMajor.ToString(CultureInfo.InvariantCulture);
+            + UpgradeStagingDirectorySuffix + context.NewMajor.ToString(CultureInfo.InvariantCulture);
         var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(context.DataDirectory)))!;
         var passwordFile = Path.Combine(parent, "pg-upgrade-pwfile.tmp");
 

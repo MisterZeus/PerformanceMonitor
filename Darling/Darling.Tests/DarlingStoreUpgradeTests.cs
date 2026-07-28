@@ -1259,6 +1259,84 @@ public sealed class DarlingStoreUpgradeTests
         }
     }
 
+    /// <summary>
+    /// NO directory naming the upgrade orchestration can create beside the data directory is ever reported as
+    /// something the product did not create. The report decides foreign-ness by ELIMINATION — store-shaped and
+    /// not one of ours — so a sibling naming that nobody remembered to register does not fail loudly, it
+    /// quietly tells an operator the product did not create a directory the product created. That is the one
+    /// way this diagnostic can lie, so every naming is planted here at once.
+    ///
+    /// <para>The runtime namings are planted too, and for the opposite reason: they must be reported as
+    /// NOTHING, because they hold binaries rather than a cluster and the structural <c>PG_VERSION</c> test
+    /// should never reach them. Planting them proves that claim instead of assuming it.</para>
+    /// </summary>
+    [Fact]
+    public void Sweep_NeverCallsAProductOwnedSiblingForeign()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-sweep-owned-");
+        try
+        {
+            var dataDirectory = PlantLiveDataDirectory(root.FullName);
+
+            /* Every naming this class can put beside the data directory. */
+            var retained = PlantRetainedCopy(dataDirectory, 17);
+            var staging = dataDirectory + DarlingStoreUpgrade.UpgradeStagingDirectorySuffix + "18";
+            Directory.CreateDirectory(staging);
+            File.WriteAllText(Path.Combine(staging, "PG_VERSION"), "18\n");
+
+            /* ...and the runtime namings, which carry binaries and must stay invisible to a PG_VERSION test. */
+            var runtimeRoot = Path.Combine(root.FullName, "pg-runtime");
+            var previousRuntime = DarlingStoreUpgrade.PreviousRuntimeRootFor(runtimeRoot);
+            var failedRuntime = Path.Combine(runtimeRoot, "pgsql") + ".failed";
+            foreach (var directory in new[] { Path.Combine(runtimeRoot, "pgsql", "bin"), Path.Combine(previousRuntime, "pgsql", "bin"), failedRuntime })
+            {
+                Directory.CreateDirectory(directory);
+                File.WriteAllText(Path.Combine(directory, "pg_ctl.exe"), "binary");
+            }
+
+            var log = new CapturingLogger();
+            new DarlingStoreUpgrade(log).SweepRetainedDataDirectories(dataDirectory);
+            var lines = log.ToString();
+
+            /* The retained copy is the sweep's own business and never reaches the report; the staging cluster
+               is reported, but AS OURS. */
+            Assert.DoesNotContain("did not create: " + retained, lines, StringComparison.Ordinal);
+            Assert.DoesNotContain("did not create: " + staging, lines, StringComparison.Ordinal);
+            Assert.Contains("Leftover store data directory from an interrupted upgrade: " + staging, lines, StringComparison.Ordinal);
+
+            /* No runtime directory is mentioned at all — none of them is a cluster. */
+            Assert.DoesNotContain(previousRuntime, lines, StringComparison.Ordinal);
+            Assert.DoesNotContain(failedRuntime, lines, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// The two data-directory sibling suffixes are DEFINED once and used everywhere, so the enumeration the
+    /// report relies on cannot drift from the names the upgrade actually creates. Source-parsed, because the
+    /// staging name is computed inside the upgrade's orchestration where a unit test cannot reach it — the
+    /// point is that no second copy of either literal exists to fall out of step.
+    /// </summary>
+    [Fact]
+    public void SiblingDirectorySuffixes_HaveExactlyOneDefinitionEach()
+    {
+        var source = ReadUpgradeSource();
+
+        Assert.Equal("-old-", DarlingStoreUpgrade.RetainedDataDirectorySuffix);
+        Assert.Equal("-upgrade-", DarlingStoreUpgrade.UpgradeStagingDirectorySuffix);
+
+        /* One occurrence each: the const declaration. Every other site names the constant. */
+        Assert.Equal(1, CountOccurrences(source, "\"-old-\""));
+        Assert.Equal(1, CountOccurrences(source, "\"-upgrade-\""));
+
+        /* ...and the staging directory the upgrade builds into is one of those sites. */
+        Assert.Contains("+ UpgradeStagingDirectorySuffix + context.NewMajor", source, StringComparison.Ordinal);
+        Assert.Contains("+ RetainedDataDirectorySuffix + oldMajor", source, StringComparison.Ordinal);
+    }
+
     /// <summary>A live data directory with the one file that makes a directory a cluster.</summary>
     private static string PlantLiveDataDirectory(string root)
     {
