@@ -92,7 +92,7 @@ SELECT
     MAX(wait_time_ms) AS max_wait_time_ms,
     COUNT(DISTINCT blocking_spid) AS distinct_head_blockers,
     COUNT(CASE WHEN blocking_status = 'sleeping' THEN 1 END) AS sleeping_blocker_count
-FROM blocked_process_reports
+FROM v_blocked_process_reports
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3";
@@ -148,7 +148,7 @@ AND   collection_time <= $3";
         using var command = connection.CreateCommand();
         command.CommandText = @"
 SELECT COUNT(*) AS deadlock_count
-FROM deadlocks
+FROM v_deadlocks
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3";

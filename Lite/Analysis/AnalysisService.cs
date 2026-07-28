@@ -335,7 +335,9 @@ public class AnalysisService
     /// the analysis window. A server with 100 hours of total history can safely
     /// be analyzed over a 4-hour window without dilution.
     /// </summary>
-    private async Task<double> GetTotalDataSpanHoursAsync(int serverId)
+    /* Internal for AnalysisDataSpanTests (#1809): the span must survive an archive/reset, which is
+       only observable with a real DuckDB + parquet fixture. */
+    internal async Task<double> GetTotalDataSpanHoursAsync(int serverId)
     {
         try
         {
@@ -346,7 +348,7 @@ public class AnalysisService
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
 SELECT EXTRACT(EPOCH FROM (MAX(collection_time) - MIN(collection_time))) / 3600.0
-FROM wait_stats
+FROM v_wait_stats
 WHERE server_id = $1";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
