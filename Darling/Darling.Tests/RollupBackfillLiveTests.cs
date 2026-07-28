@@ -29,8 +29,11 @@ namespace Darling.Tests;
 /// materialized floor really does come back EMPTY while raw holds the rows, and that the backfill really does
 /// make it stop.</para>
 ///
-/// <para>Mints its own scratch database: it creates continuous aggregates and retention policies, which the
-/// shared live-fixture store must not inherit from a test.</para>
+/// <para><b>#1776 own-store</b> — mints its own scratch database rather than sharing the live fixture, so it
+/// is deliberately NOT in the <c>live-postgres</c> collection: it cannot race the shared store, and
+/// serializing it against classes it cannot collide with would be pure slowdown. It has to own its store
+/// anyway, because it creates continuous aggregates and retention policies that the shared fixture must never
+/// inherit from a test.</para>
 /// </summary>
 public sealed class RollupBackfillLiveTests
 {
