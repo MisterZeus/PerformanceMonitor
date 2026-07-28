@@ -203,7 +203,7 @@ jobs:
         if: steps.fastpath.outputs.engaged != 'true'
         uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: 10.0.x
+          global-json-file: global.json
           cache: true
           cache-dependency-path: '**/packages.lock.json'
 
@@ -589,7 +589,7 @@ jobs:
         if: steps.filter.outputs.darling == 'true'
         uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: 10.0.x
+          global-json-file: global.json
           cache: true
           cache-dependency-path: '**/packages.lock.json'
 
