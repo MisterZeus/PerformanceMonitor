@@ -909,9 +909,12 @@ public sealed class PayloadDimensionLiveTests
                     await restore.ExecuteNonQueryAsync(cleanupCt);
                 }
 
-                await RestoreCaggsAsync(cleanup, coverageSnapshot, cleanupCt);
-
                 await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryPlanDimTable, digest, cleanupCt);
+
+                /* LAST, deliberately: the CAGG drops are the one step that can break the session (a
+                   drop colliding with a still-running background job — the CI-proven shape), and a
+                   break here has no cleanup statements left to strand. */
+                await RestoreCaggsAsync(cleanup, coverageSnapshot, cleanupCt);
             });
         }
     }
@@ -1173,12 +1176,25 @@ public sealed class PayloadDimensionLiveTests
     {
         try
         {
+            /* A PRIOR best-effort statement may have swallowed a failure that BROKE this connection
+               (proven on CI: a RestoreCaggs drop died, the swallow hid it, and the next helper threw
+               "Connection is not open" out of an otherwise-green test). Reopening the same
+               NpgsqlConnection object checks out a fresh pooled session, so one broken statement
+               cannot cascade into every cleanup statement after it. */
+            if (connection.State != System.Data.ConnectionState.Open)
+            {
+                await connection.OpenAsync(ct);
+            }
+
             using var command = new NpgsqlCommand(sql, connection);
             await command.ExecuteNonQueryAsync(ct);
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            /* Cleanup is best-effort: a restore step that throws must not mask the test's own failure. */
+            /* Cleanup is best-effort: a restore step that throws must not mask the test's own failure.
+               But say WHAT was swallowed — xUnit captures console per test, so on the next mystery this
+               line is the diagnosis instead of a silent hole. */
+            Console.WriteLine($"[cleanup best-effort] {ex.GetType().Name} ({(ex as PostgresException)?.SqlState}): {ex.Message} — {sql}");
         }
     }
 
