@@ -30,10 +30,17 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <para><b>Slicing is supervision, not re-implementation.</b> A manual <c>refresh_continuous_aggregate</c>
 /// already batches internally (2.28.1 defaults: 10 buckets per batch, each committing via
 /// <c>SPI_commit_and_chain</c>), so the memory and lock-duration arguments for hand-rolled slicing are already
-/// handled upstream. The outer slices here exist for four things the engine's batching does not give: progress
-/// an operator can see on a multi-hour run, a resume point, a lock window bounded to ONE source chunk (the
-/// concurrent-compression deadlock watch from #1778), and a per-slice DATA-based convergence check. A batch cap
-/// hit is LOG-only and silent to the client, so a returned success proves nothing.</para>
+/// handled upstream. The outer slices here exist for three things the engine's batching does not give: progress
+/// an operator can see on a multi-hour run, a resume point, and a lock window bounded to ONE source chunk (the
+/// concurrent-compression deadlock watch from #1778). A batch cap hit is LOG-only and silent to the client, so
+/// a returned success proves nothing — convergence is judged from data, once, at the end.</para>
+///
+/// <para><b>Slices run NEWEST-FIRST, and that direction is a data-safety property.</b> See
+/// <see cref="Slices"/>: <c>min(bucket)</c> is the resume point, the completion verdict, AND what the #1680
+/// arming gate reads before it lets a raw purge drop chunks. Oldest-first drove that one number to its final
+/// value on the first slice, so an interrupted run left holes that were invisible to all three — the next run
+/// reported DONE and the gate armed over a window raw held the only copy of. Descending makes
+/// <c>floor &lt;= raw_oldest</c> imply completeness by construction.</para>
 /// </summary>
 public static class RollupBackfill
 {
@@ -93,12 +100,20 @@ public static class RollupBackfill
     /// hypertable's parent reports almost nothing — the chunks are separate relations. Reached through a
     /// scalar subquery over the information view rather than a direct reference, so a store without the
     /// extension fails the whole probe cleanly instead of erroring halfway.</para>
+    ///
+    /// <para><b><c>count(DISTINCT bucket)</c>, NOT <c>count(*)</c>, and the difference is the whole estimate.</b>
+    /// This column is divided into <c>materialized_bytes</c> to get bytes-per-BUCKET, which is then multiplied
+    /// by a count of TIME BUCKETS. A plain <c>count(*)</c> counts ROWS, and a rollup holds one row per
+    /// (server, database, query_hash, sql_handle, BUCKET) — so the two units differ by the number of distinct
+    /// queries seen per hour, and the estimate comes out under by exactly that factor. Measured 205x under on a
+    /// 200-row/hour store; a real fleet box is far worse. Under-estimating is the one direction this whole
+    /// preflight exists to prevent, so the units have to match here or the refusal never fires.</para>
     /// </summary>
     public static string ProbeSql(string view, string rawTable) => $@"
 SELECT
     (SELECT min(collection_time) FROM collect.{rawTable}) AS raw_oldest,
     (SELECT min(bucket) FROM collect.{view}) AS coverage_oldest,
-    (SELECT count(*) FROM collect.{view}) AS materialized_buckets,
+    (SELECT count(DISTINCT bucket) FROM collect.{view}) AS materialized_buckets,
     (SELECT hypertable_size(format('%I.%I', c.materialization_hypertable_schema, c.materialization_hypertable_name)::regclass)
      FROM timescaledb_information.continuous_aggregates AS c
      WHERE c.view_schema = 'collect' AND c.view_name = '{view}') AS materialized_bytes";
@@ -183,6 +198,20 @@ SELECT
         var bucketsToAdd = (long)Math.Ceiling(span / bucketWidth);
         var slices = (long)Math.Ceiling(span / SliceWidth);
 
+        /* SANITY CLAMP. min(collection_time) is data, and data can be garbage: one row with an epoch-era or
+           otherwise absurd timestamp stretches the plan across the whole interval between it and now. Observed
+           live — a single stray value produced a 739,825-slice plan spanning 3.7 days of pure planning CPU
+           before anything was materialized. Refusing beats spanning: a timestamp that old is corruption worth
+           NAMING so someone goes and looks at the row, not a history to back fill. */
+        if (slices > MaxPlannedSlices)
+        {
+            return RollupBackfillPlan.Absurd(
+                view,
+                string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{rawOldest:yyyy-MM-dd HH:mm} is the oldest timestamp in the source, which would plan {slices:N0} slices ({span.TotalDays:N0} days). That is past the {MaxPlannedSlices:N0}-slice ceiling and almost certainly a corrupt row rather than real history — find and fix that row, then re-run."));
+        }
+
         long estimatedBytes;
         bool calibrated;
         if (materializedBuckets > 0 && materializedBytes > 0)
@@ -211,6 +240,11 @@ SELECT
     /// fills a production volume. Those two mistakes are not symmetric.
     /// </summary>
     public const double UncalibratedFractionOfRaw = 0.5;
+
+    /// <summary>The most slices a single rollup's plan may span before it is treated as corruption rather than
+    /// history. 3,660 slices is ten years at one day each — well past any real store's life, and far short of
+    /// what one epoch-era row produces.</summary>
+    public const long MaxPlannedSlices = 3_660;
 
     /// <summary>
     /// Is there room? Requires the estimate plus <see cref="SafetyFactor"/> headroom AND
@@ -412,21 +446,44 @@ SELECT
         }
     }
 
-    /// <summary>The midnight-aligned slices of [from, to), oldest first — the order that makes a partial run
-    /// resumable, since every completed slice moves the measured floor backwards and the next run re-plans from
-    /// it.</summary>
+    /// <summary>
+    /// The bucket-aligned slices of [from, to), <b>NEWEST FIRST</b> — walking DOWN from the current coverage
+    /// floor toward raw's oldest row.
+    ///
+    /// <para><b>The direction is a data-safety property, not a preference, and oldest-first was actively
+    /// dangerous.</b> <c>min(bucket)</c> is this verb's resume point AND its completion verdict, and it is also
+    /// what the #1680 arming gate reads to decide a raw purge is safe. Running oldest-first drove that floor to
+    /// its FINAL value on the very first slice, which made every later slice invisible to all three: an
+    /// interrupted run left holes in the un-run region, the next run re-planned from a floor that already
+    /// looked complete and reported "nothing to do — DONE", and the arming gate then armed the 4-day raw purge
+    /// over a window whose only remaining copy was the raw rows about to be dropped. Proven by execution on a
+    /// live store: killed at slice 32 of 43, 47 of 264 buckets missing, re-run exited 0 claiming success.</para>
+    ///
+    /// <para>Descending inverts that into a guarantee. The floor can only reach raw's oldest row once the
+    /// LAST, oldest slice has run, so <c>floor &lt;= raw_oldest</c> implies completeness BY CONSTRUCTION — in
+    /// any interleaving, under any interruption. A run that stops early leaves the floor visibly above the
+    /// target, which is a truthful SHORT rather than a false DONE, and the gate stays closed because it reads
+    /// the same honest number. The slice-failure path lands in the same safe state for the same reason, where
+    /// oldest-first would have reported success over a hole.</para>
+    ///
+    /// <para>Mid-slice interruption needs no extra bookkeeping, because a refresh commits per batch and
+    /// <c>refresh_newest_first</c> is on: a killed slice leaves its NEWER portion materialized and the floor
+    /// somewhere inside it, so re-planning from the measured floor makes the next run's top slice re-cover that
+    /// remainder. Re-refreshing an already-materialized range is near-free, and the overlap is what closes the
+    /// partial-slice seam.</para>
+    /// </summary>
     public static IEnumerable<(DateTime FromUtc, DateTime ToUtc)> Slices(DateTime fromUtc, DateTime toUtc)
     {
-        for (var start = fromUtc; start < toUtc;)
+        for (var end = toUtc; end > fromUtc;)
         {
-            var end = start + SliceWidth;
-            if (end > toUtc)
+            var start = end - SliceWidth;
+            if (start < fromUtc)
             {
-                end = toUtc;
+                start = fromUtc;
             }
 
             yield return (start, end);
-            start = end;
+            end = start;
         }
     }
 
@@ -459,10 +516,20 @@ public sealed record RollupBackfillPlan(
     long EstimatedBytes,
     bool Calibrated,
     bool IsComplete,
-    string? SkipReason)
+    string? SkipReason,
+    string? Refusal = null)
 {
     public static RollupBackfillPlan Complete(string view, string reason) =>
         new(view, default, default, 0, 0, 0, Calibrated: true, IsComplete: true, SkipReason: reason);
+
+    /// <summary>
+    /// A plan the store's own data makes nonsense of — today, a source timestamp so old that the span is
+    /// corruption rather than history. Distinct from <see cref="Complete"/> on purpose: "nothing to do" is a
+    /// success an operator can ignore, this is a REFUSAL that names a row someone has to go and look at, and
+    /// collapsing the two would bury it in the [OK] lines.
+    /// </summary>
+    public static RollupBackfillPlan Absurd(string view, string refusal) =>
+        new(view, default, default, 0, 0, 0, Calibrated: true, IsComplete: true, SkipReason: null, Refusal: refusal);
 
     /// <summary>Human size for the estimate, e.g. "12.4 GB".</summary>
     public string EstimatedSize => FormatBytes(EstimatedBytes);

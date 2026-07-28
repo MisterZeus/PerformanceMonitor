@@ -2157,6 +2157,7 @@ public static class DarlingCliCommands
            reads an empty source, materializes nothing, reports success, and CONSUMES the invalidations that
            covered the range, so a later correct-order pass no-ops over the hole. */
         var plans = new List<(RollupBackfillTarget Target, RollupBackfillPlan Plan)>();
+        var refusedPlans = new List<string>();
         var rawBytesCache = new Dictionary<string, long>(StringComparer.Ordinal);
         foreach (var target in RollupBackfill.Targets)
         {
@@ -2189,12 +2190,37 @@ public static class DarlingCliCommands
         var work = plans.Where(p => !p.Plan.IsComplete).ToList();
         foreach (var (_, done) in plans.Where(p => p.Plan.IsComplete))
         {
-            output.WriteLine($"  [OK]   {done.View}: nothing to do — {done.SkipReason}.");
+            /* A refusal is NOT a skip. "Nothing to do" is a success an operator can scroll past; a plan the
+               store's own data makes nonsense of names a row someone has to go and look at, and printing it as
+               an [OK] line would bury it. */
+            if (done.Refusal is string refusal)
+            {
+                error.WriteLine($"  [REFUSED] {done.View}: {refusal}");
+                refusedPlans.Add($"{done.View}: {refusal}");
+            }
+            else
+            {
+                output.WriteLine($"  [OK]   {done.View}: nothing to do — {done.SkipReason}.");
+            }
         }
 
         if (work.Count == 0)
         {
             output.WriteLine();
+            if (refusedPlans.Count > 0)
+            {
+                /* Never "all covered, you are done" when a rollup was refused: that rollup is NOT covered, its
+                   retention policy will stay held, and saying otherwise sends the operator away from a corrupt
+                   row they need to fix. */
+                error.WriteLine("REFUSED. Nothing was materialized for these rollups, and their retention policies stay held:");
+                foreach (var refusal in refusedPlans)
+                {
+                    error.WriteLine("  - " + refusal);
+                }
+
+                return 1;
+            }
+
             output.WriteLine("Every rollup already covers its raw table. Any retention policy still held will arm itself on the next service start.");
             return 0;
         }
@@ -2254,7 +2280,12 @@ public static class DarlingCliCommands
         }
 
         output.WriteLine();
-        output.WriteLine("Backfilling. Safe to interrupt — every completed slice is committed, and re-running resumes from the measured floor.");
+        /* Slices run NEWEST-FIRST (see RollupBackfill.Slices), so coverage extends DOWNWARD toward raw's oldest
+           row and the measured floor is a truthful progress cursor rather than a value the first slice pins.
+           That is what makes this claim safe to make: an interrupted run reports SHORT, not DONE. */
+        output.WriteLine("Backfilling, newest-first, so coverage extends downward toward the oldest raw row.");
+        output.WriteLine("Safe to interrupt: every completed slice is committed, an interrupted run reports SHORT rather");
+        output.WriteLine("than claiming success, and re-running resumes from the measured floor.");
 
         var shortfalls = new List<string>();
         foreach (var (target, plan) in work)
@@ -2327,6 +2358,10 @@ public static class DarlingCliCommands
         }
 
         output.WriteLine();
+        /* A refusal from the planning pass counts as a shortfall here too: those rollups were never attempted,
+           so DONE would be a lie about them even when every rollup that DID run reached coverage. */
+        shortfalls.AddRange(refusedPlans);
+
         if (shortfalls.Count > 0)
         {
             error.WriteLine("INCOMPLETE. These rollups do not yet cover their raw tables, so their retention policies stay held:");

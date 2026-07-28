@@ -8,6 +8,7 @@
 
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -113,7 +114,7 @@ public sealed class RollupBackfillLiveTests
             RetentionTier.Raw,
             RetentionTierRouter.Resolve(now, windowStart, rollups.QueryGrainHourly, rollups.QueryGrainDaily, coverageLadder));
 
-        /* ── 5. PHASE 2: back fill in slices, oldest first, exactly as the verb does. ── */
+        /* ── 5. PHASE 2: back fill in slices, newest-first, exactly as the verb does. ── */
         var plan = RollupBackfill.Plan(
             TimescaleSupport.QueryStatsHourlyView, rawFloor, floorBefore,
             materializedBuckets: 48, materializedBytes: 48 * 1024,
@@ -359,8 +360,269 @@ AND   j.scheduled", ct);
         }
     }
 
-    /// <summary>One query_stats row per hour across [from, to) — enough shape for the CAGG to have something to
-    /// group, and cheap enough that a 12-day history is a few hundred rows.</summary>
+    /// <summary>
+    /// THE ESTIMATOR'S CALIBRATION SAMPLE IS BUCKETS, NOT ROWS — proven against a live rollup rather than a
+    /// string pin, because the defect was a UNIT mismatch and only real data shows the two diverging.
+    ///
+    /// <para>The probe's count is divided into the materialized byte size to get bytes-per-BUCKET, then
+    /// multiplied by a BUCKET count. <c>count(*)</c> returns ROWS, and a rollup holds one row per
+    /// (server, database, query_hash, sql_handle, bucket), so the estimate came out under by the number of
+    /// distinct queries per hour — 205x on a 200-row/hour store, worse on a real fleet box, in the one
+    /// direction the preflight exists to prevent.</para>
+    ///
+    /// <para>This is also the mutation: restore <c>count(*)</c> in <c>RollupBackfill.ProbeSql</c> and this goes
+    /// red, because the fixture now seeds <see cref="QueriesPerBucket"/> queries per bucket. Against the
+    /// original one-row-per-bucket fixture the two counts were identical and nothing could have caught it.</para>
+    /// </summary>
+    [Fact]
+    public async Task Probe_CalibrationSampleCountsBuckets_NotRows()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live estimator-units test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct));
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        await SeedHourlyQueryStatsAsync(connection, now.AddDays(-HistoryDays), now, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var view = TimescaleSupport.QueryStatsHourlyView;
+        await RollupBackfill.RunSliceAsync(connection, view, now.Date.AddDays(-2), now.Date.AddDays(1), ct);
+
+        var probe = await RollupBackfill.ProbeAsync(connection, view, "query_stats", ct);
+
+        /* Both counts in ONE statement, and compared as a RATIO rather than against a separately-timed read:
+           the aggregate's refresh policy is live and materializes more buckets between any two round trips,
+           which made an equality assertion flake (56 vs 76 on the first run). The ratio is what carries the
+           meaning anyway — a bucket count must be far smaller than a row count. */
+        await using var counts = new NpgsqlCommand(
+            $"SELECT count(*), count(DISTINCT bucket) FROM collect.{view}", connection);
+        await using var reader = await counts.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct));
+        var rows = reader.GetInt64(0);
+        var buckets = reader.GetInt64(1);
+
+        /* The fixture must actually exercise the distinction, or this test is as blind as the one it replaces. */
+        Assert.True(buckets > 0);
+        Assert.True(rows >= buckets * (QueriesPerBucket - 1),
+            $"fixture is too degenerate to catch the units bug: {rows} rows over {buckets} buckets");
+
+        /* THE ASSERTION: what the probe returned is a BUCKET count, so the store's row count must dwarf it.
+           Under count(*) the probe returns the row count itself and this fails by a factor of ~12. */
+        Assert.True(probe.MaterializedBuckets > 0);
+        Assert.True(rows >= probe.MaterializedBuckets * (QueriesPerBucket - 1),
+            $"the probe returned {probe.MaterializedBuckets} against {rows} rows / {buckets} buckets — that is a ROW count, not a bucket count, and the disk estimate is under by the queries-per-bucket factor");
+    }
+
+    /// <summary>
+    /// THE INTERRUPTED-BACKFILL ACCEPTANCE — the reviewer's data-loss proof, inverted.
+    ///
+    /// <para>What was proven against a live store before the fix: slices ran oldest-first, so the FIRST slice
+    /// drove <c>min(bucket)</c> to its final value. Killing the run at slice 32 of 43 left 47 of 264 buckets
+    /// missing in the un-run region; the re-run re-planned from that already-bottomed floor, printed "nothing
+    /// to do — DONE" and exited 0; and the #1680 arming gate, reading the very same floor, then ARMED the
+    /// 4-day raw purge over a window whose only surviving copy was the raw rows it was about to drop.</para>
+    ///
+    /// <para>This test asserts the inverse at every step: a partial run must NOT look complete, the gate must
+    /// REFUSE while it is partial, and a resumed run must finish with ZERO missing buckets across the whole
+    /// originally-planned range. It is also the mutation — restore ascending order in
+    /// <c>RollupBackfill.Slices</c> and the partial-run assertions go red.</para>
+    /// </summary>
+    [Fact]
+    public async Task InterruptedBackfill_DoesNotLookComplete_AndTheArmingGateRefusesUntilItGenuinelyIs()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live interrupted-backfill test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct));
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        await SeedHourlyQueryStatsAsync(connection, now.AddDays(-HistoryDays), now, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var view = TimescaleSupport.QueryStatsHourlyView;
+        var probe = await RollupBackfill.ProbeAsync(connection, view, "query_stats", ct);
+        var plan = RollupBackfill.Plan(
+            view, probe.RawOldestUtc, probe.CoverageOldestUtc,
+            probe.MaterializedBuckets, probe.MaterializedBytes, rawBytes: 0, bucketWidth: TimeSpan.FromHours(1));
+
+        Assert.False(plan.IsComplete);
+        var allSlices = RollupBackfill.Slices(plan.FromUtc, plan.ToUtc).ToArray();
+        Assert.True(allSlices.Length >= 4, $"need several slices to interrupt meaningfully, planned {allSlices.Length}");
+
+        /* ── THE KILL: run only the first two-thirds of the slices, then stop dead. ── */
+        var killAt = (allSlices.Length * 2) / 3;
+        foreach (var (from, to) in allSlices.Take(killAt))
+        {
+            await RollupBackfill.RunSliceAsync(connection, view, from, to, ct);
+        }
+
+        /* (1) The partial run must not LOOK complete. This is the assertion that was false before: under
+               oldest-first the floor had already reached the bottom after slice one. */
+        var partialFloor = await RollupBackfill.ReadCoverageFloorAsync(connection, view, ct);
+        Assert.NotNull(partialFloor);
+        Assert.True(partialFloor > probe.RawOldestUtc,
+            $"an interrupted backfill reports coverage {partialFloor:O} at or below raw's oldest {probe.RawOldestUtc:O} — it looks COMPLETE, which is the false-DONE that lets the arming gate destroy data");
+
+        /* (2) A re-plan from the measured floor must still have work to do — not "nothing to do". */
+        var partialProbe = await RollupBackfill.ProbeAsync(connection, view, "query_stats", ct);
+        var resumePlan = RollupBackfill.Plan(
+            view, partialProbe.RawOldestUtc, partialProbe.CoverageOldestUtc,
+            partialProbe.MaterializedBuckets, partialProbe.MaterializedBytes, rawBytes: 0, bucketWidth: TimeSpan.FromHours(1));
+
+        Assert.False(resumePlan.IsComplete, "the resumed plan reported nothing to do while buckets were still missing");
+
+        /* (3) THE ARMING GATE MUST REFUSE while coverage is partial — the step that turns a hole into data
+               loss. Run the REAL policy sweep, not its predicate, and read the job's scheduled flag. */
+        await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct);
+        Assert.Equal(0L, await CountAsync(connection, ArmedRawPolicySql, ct));
+
+        /* ── THE RESUME: finish the remaining slices from the measured floor. ── */
+        foreach (var (from, to) in RollupBackfill.Slices(resumePlan.FromUtc, resumePlan.ToUtc))
+        {
+            await RollupBackfill.RunSliceAsync(connection, view, from, to, ct);
+        }
+
+        /* (4) ZERO missing buckets across the WHOLE originally-planned range — measured against raw itself,
+               not against our own arithmetic about what we intended to do. */
+        var missing = await CountAsync(connection, $@"
+SELECT count(*)
+FROM (
+    SELECT DISTINCT time_bucket('1 hour', collection_time) AS b
+    FROM collect.query_stats
+    WHERE collection_time >= $1 AND collection_time < $2
+) AS src
+WHERE NOT EXISTS (SELECT 1 FROM collect.{view} AS h WHERE h.bucket = src.b)",
+            plan.FromUtc, plan.ToUtc, ct);
+
+        Assert.True(missing == 0, $"{missing} bucket(s) raw holds are still missing from {view} after a resumed backfill");
+
+        /* (5) And only NOW does the gate arm — coverage genuinely reaches raw. */
+        Assert.True(await RollupBackfill.ReadCoverageFloorAsync(connection, view, ct) <= probe.RawOldestUtc);
+        await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct);
+        Assert.Equal(1L, await CountAsync(connection, ArmedRawPolicySql, ct));
+    }
+
+    /// <summary>
+    /// THE VERB'S REFUSAL BRANCH, end to end. Until now only the pure <c>HasRoom</c> arithmetic and the
+    /// refusal TEXT were covered — never the wiring that has to carry a refusal out of the planner, onto
+    /// stderr, and into a non-zero exit without ever printing DONE.
+    ///
+    /// <para>Driven through the sanity clamp because it is the one refusal reachable from real data: a single
+    /// stray ancient timestamp. Observed live producing a 739,825-slice plan that burned CPU for days before
+    /// materializing anything. The properties under test are the wiring's, not the clamp's — a refusal must
+    /// not be reported as a skip, must not leave the operator believing every rollup is covered, and must
+    /// exit non-zero.</para>
+    /// </summary>
+    [Fact]
+    public async Task BackfillRollupsVerb_RefusesAnAbsurdPlan_WithoutClaimingSuccess()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live verb-refusal test.");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "--backfill-rollups is Windows-only (DPAPI store credential in managed mode).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using (var setup = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await setup.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(setup, ct);
+            Assert.True(await TimescaleSupport.TryEnableAsync(setup, null, ct));
+            await TimescaleSupport.ConvertToHypertablesAsync(setup, null, ct);
+
+            var seedNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            await SeedHourlyQueryStatsAsync(setup, seedNow.AddDays(-2), seedNow, ct);
+
+            /* ONE corrupt row, which is all it takes. */
+            await using var poison = new NpgsqlCommand(@"
+INSERT INTO collect.query_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
+     delta_worker_time, delta_elapsed_time, delta_execution_count)
+VALUES ($1, $2, $3, 'backfill-e2e', 'TestDb', decode(md5('poison'), 'hex'), decode(md5('h'), 'hex'), 1, 1, 1)", setup);
+            poison.Parameters.AddWithValue(1L);
+            poison.Parameters.AddWithValue(new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Unspecified));
+            poison.Parameters.AddWithValue(TestServerId);
+            await poison.ExecuteNonQueryAsync(ct);
+
+            await TimescaleSupport.EnsureContinuousAggregatesAsync(setup, null, ct);
+        }
+
+        var configPath = Path.Combine(Path.GetTempPath(), $"darling-1759-refuse-{Guid.NewGuid():N}.json");
+        await File.WriteAllTextAsync(
+            configPath,
+            $$"""{"postgres":{"managed":false,"connectionString":{{System.Text.Json.JsonSerializer.Serialize(scratch.ConnectionString)}}},"servers":[]}""",
+            ct);
+
+        try
+        {
+            var output = new StringWriter();
+            var error = new StringWriter();
+            var exit = await DarlingCliCommands.BackfillRollupsAsync(configPath, dryRun: false, output, error, ct);
+
+            var combined = output + error.ToString();
+
+            Assert.True(exit == 1, $"a refused plan must exit non-zero.\nSTDOUT:\n{output}\nSTDERR:\n{error}");
+            Assert.Contains("[REFUSED]", combined, StringComparison.Ordinal);
+            Assert.Contains("1970-01-01", combined, StringComparison.Ordinal);
+            Assert.Contains("corrupt row", combined, StringComparison.Ordinal);
+
+            /* The properties that make it a refusal rather than a skip. */
+            Assert.DoesNotContain("DONE. Every rollup now covers its raw table.", combined, StringComparison.Ordinal);
+            Assert.DoesNotContain("Every rollup already covers its raw table", combined, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (File.Exists(configPath))
+            {
+                File.Delete(configPath);
+            }
+        }
+    }
+
+    /// <summary>Is query_stats' raw retention policy ARMED? The gate's real observable, read from the job
+    /// catalog rather than by re-evaluating its predicate.</summary>
+    private const string ArmedRawPolicySql = @"
+SELECT count(*)
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = 'query_stats'
+AND   j.scheduled";
+
+    /// <summary>
+    /// Distinct queries per hourly bucket. <b>MUST stay above 1.</b>
+    ///
+    /// <para>Both fixtures originally seeded ONE row per bucket, which made rows and buckets the same number
+    /// and rendered the whole suite blind to the estimator defect it should have caught: the probe counted
+    /// ROWS and the arithmetic multiplied BUCKETS, an error factor of exactly this constant, and at 1 it is
+    /// invisible. A degenerate fixture is not a small test, it is a test of a shape the product never
+    /// meets.</para>
+    /// </summary>
+    private const int QueriesPerBucket = 12;
+
+    /// <summary><see cref="QueriesPerBucket"/> query_stats rows per hour across [from, to), each a distinct
+    /// query_hash so the rollup materializes one row per (query, bucket) — the real shape, where rows far
+    /// outnumber buckets.</summary>
     private static async Task SeedHourlyQueryStatsAsync(
         NpgsqlConnection connection, DateTime from, DateTime to, CancellationToken cancellationToken)
     {
@@ -369,21 +631,23 @@ INSERT INTO collect.query_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
      delta_worker_time, delta_elapsed_time, delta_execution_count)
 SELECT
-    (extract(epoch FROM g)::bigint),
+    (extract(epoch FROM g)::bigint * 100 + q),
     g,
     $3,
     'backfill-e2e',
     'TestDb',
-    decode(md5((extract(epoch FROM g)::bigint % 5)::text), 'hex'),
-    decode(md5('handle'), 'hex'),
+    decode(md5('q' || q::text), 'hex'),
+    decode(md5('handle' || q::text), 'hex'),
     1000,
     2000,
     10
-FROM generate_series($1::timestamp, $2::timestamp, INTERVAL '1 hour') AS g", connection);
+FROM generate_series($1::timestamp, $2::timestamp, INTERVAL '1 hour') AS g
+CROSS JOIN generate_series(1, $4::int) AS q", connection);
 
         insert.Parameters.AddWithValue(from);
         insert.Parameters.AddWithValue(to);
         insert.Parameters.AddWithValue(TestServerId);
+        insert.Parameters.AddWithValue(QueriesPerBucket);
         await insert.ExecuteNonQueryAsync(cancellationToken);
     }
 

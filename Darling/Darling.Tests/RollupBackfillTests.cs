@@ -249,6 +249,82 @@ public sealed class RollupBackfillTests
         }
     }
 
+    /// <summary>
+    /// THE ESTIMATOR'S UNITS MUST MATCH. The calibration divides <c>materialized_bytes</c> by the sample's
+    /// bucket count to get bytes-per-BUCKET, then multiplies by a count of BUCKETS. Feeding it a ROW count
+    /// instead — which is what <c>count(*)</c> returns, and what shipped — divides by a number inflated by the
+    /// distinct queries seen per hour, so the estimate comes out under by exactly that factor. Measured 205x
+    /// under on a 200-row/hour store; a real fleet box is far worse.
+    ///
+    /// <para>This is the direction the whole preflight exists to prevent: guessing high refuses a backfill that
+    /// would have fit (recoverable), guessing low fills a production volume (not). So the probe is pinned to
+    /// <c>count(DISTINCT bucket)</c> and the arithmetic is pinned against a sample where rows and buckets
+    /// differ — a 1:1 fixture cannot tell the two apart, which is precisely why the bug shipped.</para>
+    /// </summary>
+    [Fact]
+    public void Estimate_IsPerBucket_NotPerRow()
+    {
+        /* A sample of 10 BUCKETS occupying 100 MB → 10 MB per bucket. On a store holding 20 rows per bucket
+           the row count would be 200, and a row-fed estimator would compute 0.5 MB per bucket — 20x under. */
+        const long sampleBuckets = 10;
+        const long sampleBytes = 100L * 1024 * 1024;
+
+        var plan = RollupBackfill.Plan(
+            TimescaleSupport.QueryStatsHourlyView,
+            rawOldestUtc: Now.AddHours(-100), coverageOldestUtc: Now,
+            materializedBuckets: sampleBuckets, materializedBytes: sampleBytes,
+            rawBytes: 500 * Gb, bucketWidth: TimeSpan.FromHours(1));
+
+        Assert.True(plan.Calibrated);
+
+        /* bytes-per-bucket x buckets-to-add, within a bucket's rounding. */
+        var expectedPerBucket = (double)sampleBytes / sampleBuckets;
+        Assert.Equal(expectedPerBucket * plan.BucketsToAdd, plan.EstimatedBytes, expectedPerBucket);
+
+        /* And the pin that makes the fix visible in the SQL: a ROW count here is the shipped defect. */
+        var probe = RollupBackfill.ProbeSql(TimescaleSupport.QueryStatsHourlyView, "query_stats");
+        Assert.Contains($"count(DISTINCT bucket) FROM collect.{TimescaleSupport.QueryStatsHourlyView}", probe, StringComparison.Ordinal);
+        Assert.DoesNotContain("count(*)", probe, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A source timestamp can be garbage, and one garbage row must not become a plan. Observed live: a single
+    /// stray ancient value produced a 739,825-slice plan spanning 3.7 days of pure planning CPU before anything
+    /// was materialized. Refusing beats spanning, and the refusal has to NAME the timestamp — a row that old is
+    /// corruption someone has to go and look at, not history to back fill.
+    /// </summary>
+    [Fact]
+    public void Plan_RefusesAnAbsurdSpan_AndNamesTheOffendingTimestamp()
+    {
+        var epochGarbage = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
+
+        var plan = RollupBackfill.Plan(
+            TimescaleSupport.QueryStatsHourlyView,
+            rawOldestUtc: epochGarbage, coverageOldestUtc: Now,
+            materializedBuckets: 10, materializedBytes: 10 * 1024 * 1024,
+            rawBytes: Gb, bucketWidth: TimeSpan.FromHours(1));
+
+        Assert.True(plan.IsComplete, "a refused plan must not be handed to the slice runner");
+        Assert.Equal(0, plan.Slices);
+        Assert.NotNull(plan.Refusal);
+        Assert.Contains("1970-01-01", plan.Refusal, StringComparison.Ordinal);
+        Assert.Contains("corrupt row", plan.Refusal, StringComparison.Ordinal);
+
+        /* A refusal is NOT a skip: "nothing to do" is a success an operator scrolls past, and collapsing the
+           two would bury the one line that needs acting on. */
+        Assert.Null(plan.SkipReason);
+
+        /* Ten years of real history still plans normally — the clamp must not refuse a long-lived store. */
+        var longLived = RollupBackfill.Plan(
+            TimescaleSupport.QueryStatsHourlyView,
+            rawOldestUtc: Now.AddDays(-3_000), coverageOldestUtc: Now,
+            materializedBuckets: 10, materializedBytes: 10 * 1024 * 1024,
+            rawBytes: Gb, bucketWidth: TimeSpan.FromHours(1));
+
+        Assert.False(longLived.IsComplete);
+        Assert.Null(longLived.Refusal);
+    }
+
     /// <summary>The time budget uses the throughput actually measured on the field host class, so an operator can
     /// decide whether this fits tonight's window before starting it.</summary>
     [Fact]
@@ -262,36 +338,72 @@ public sealed class RollupBackfillTests
     /* ─────────────────────────── slicing ─────────────────────────── */
 
     /// <summary>
-    /// Slices are oldest-first, contiguous, and cover the range exactly. Oldest-first is what makes a partial
-    /// run useful: every completed slice moves the measured floor BACKWARDS, which is the direction coverage has
-    /// to travel, so an interrupted run has made real progress rather than a hole in the middle.
+    /// Slices run NEWEST-FIRST, contiguously, covering the range exactly.
+    ///
+    /// <para>The direction is the data-safety property, not a preference. <c>min(bucket)</c> is the resume
+    /// point, the completion verdict, and what the #1680 arming gate reads before letting a raw purge drop
+    /// chunks. Oldest-first drove that single number to its FINAL value on the first slice, so every later
+    /// slice was invisible to all three — an interrupted run left holes, the next run said "nothing to do,
+    /// DONE", and the gate armed the 4-day purge over a window raw held the only copy of. Descending makes
+    /// the floor a true cursor: it reaches the bottom only when the last slice has run.</para>
     /// </summary>
     [Fact]
-    public void Slices_AreOldestFirst_Contiguous_AndCoverTheRangeExactly()
+    public void Slices_AreNewestFirst_Contiguous_AndCoverTheRangeExactly()
     {
         var from = DaysAgo(10);
         var to = DaysAgo(3);
         var slices = RollupBackfill.Slices(from, to).ToArray();
 
         Assert.Equal(7, slices.Length);
-        Assert.Equal(from, slices[0].FromUtc);
-        Assert.Equal(to, slices[^1].ToUtc);
+
+        /* Starts at the TOP (the current coverage floor) and ends at the BOTTOM (raw's oldest). */
+        Assert.Equal(to, slices[0].ToUtc);
+        Assert.Equal(from, slices[^1].FromUtc);
 
         for (var i = 1; i < slices.Length; i++)
         {
-            Assert.Equal(slices[i - 1].ToUtc, slices[i].FromUtc);
-            Assert.True(slices[i].FromUtc > slices[i - 1].FromUtc, "slices must run oldest-first");
+            Assert.Equal(slices[i - 1].FromUtc, slices[i].ToUtc);
+            Assert.True(slices[i].FromUtc < slices[i - 1].FromUtc, "slices must run newest-first");
         }
 
-        /* A ragged tail is truncated, never overshot — materializing past the target is wasted disk on the
-           exact operation whose whole risk is disk. */
+        /* No gaps and no overlap: the slices tile [from, to) exactly. */
+        Assert.Equal(to - from, slices.Aggregate(TimeSpan.Zero, (total, s) => total + (s.ToUtc - s.FromUtc)));
+
+        /* A ragged remainder lands at the BOTTOM now (the last slice run), never overshooting the target —
+           materializing past it is wasted disk on the one operation whose whole risk is disk. */
         var ragged = RollupBackfill.Slices(from, from.AddHours(30)).ToArray();
         Assert.Equal(2, ragged.Length);
-        Assert.Equal(from.AddHours(30), ragged[^1].ToUtc);
+        Assert.Equal(from.AddHours(30), ragged[0].ToUtc);
+        Assert.Equal(from, ragged[^1].FromUtc);
+        Assert.Equal(TimeSpan.FromHours(6), ragged[^1].ToUtc - ragged[^1].FromUtc);
 
         /* An empty or inverted range yields nothing rather than looping. */
         Assert.Empty(RollupBackfill.Slices(to, to));
         Assert.Empty(RollupBackfill.Slices(to, from));
+    }
+
+    /// <summary>
+    /// THE INVARIANT THE ORDER BUYS, stated as arithmetic: after running the first N slices of a plan, the
+    /// lowest bucket touched equals the bottom of the range ONLY when N is every slice. That is why
+    /// <c>floor &lt;= raw_oldest</c> can be trusted as a completion verdict — under oldest-first it was true
+    /// after the FIRST slice, which is exactly how an interrupted run reported success over a hole.
+    /// </summary>
+    [Fact]
+    public void PartialRun_NeverReachesTheBottomOfTheRange_UntilTheLastSlice()
+    {
+        var from = DaysAgo(10);
+        var to = DaysAgo(3);
+        var slices = RollupBackfill.Slices(from, to).ToArray();
+
+        for (var completed = 1; completed < slices.Length; completed++)
+        {
+            var lowestTouched = slices.Take(completed).Min(s => s.FromUtc);
+            Assert.True(lowestTouched > from,
+                $"after {completed} of {slices.Length} slices the plan's bottom was already reached — an " +
+                "interrupted run would be indistinguishable from a complete one, which is #1759's data-loss path");
+        }
+
+        Assert.Equal(from, slices.Min(s => s.FromUtc));
     }
 
     /// <summary>One slice is ONE source chunk. That is what bounds the lock window: a wider slice would sit
