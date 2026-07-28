@@ -77,7 +77,7 @@ public sealed class RollupBackfillLiveTests
         /* Materialize only the recent window, which is all the 3-day refresh policy would ever have done on a
            store that existed before its rollups. This is what makes the floor shallow. */
         await RollupBackfill.RunSliceAsync(
-            connection, TimescaleSupport.QueryStatsHourlyView, now.Date.AddDays(-2), now.Date.AddDays(1), ct);
+            connection, TimescaleSupport.QueryStatsHourlyView, now.Date.AddDays(-2), now.Date.AddDays(1), SilentDisclosure(), ct);
 
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
         var rollups = await TimescaleSupport.DetectRollupsAsync(dataSource, ct);
@@ -127,7 +127,7 @@ public sealed class RollupBackfillLiveTests
         var previousFloor = floorBefore;
         foreach (var (from, to) in RollupBackfill.Slices(plan.FromUtc, plan.ToUtc))
         {
-            var floorDuring = await RollupBackfill.RunSliceAsync(connection, TimescaleSupport.QueryStatsHourlyView, from, to, ct);
+            var floorDuring = await RollupBackfill.RunSliceAsync(connection, TimescaleSupport.QueryStatsHourlyView, from, to, SilentDisclosure(), ct);
             slicesRun++;
 
             /* Progress only ever goes BACKWARDS. Deliberately NOT "the floor reached this slice's start": a
@@ -217,7 +217,7 @@ AND   j.scheduled", ct);
         await SeedHourlyQueryStatsAsync(connection, now.AddDays(-HistoryDays), now, ct);
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
         await RollupBackfill.RunSliceAsync(
-            connection, TimescaleSupport.QueryStatsHourlyView, now.Date.AddDays(-HistoryDays - 1), now.Date.AddDays(1), ct);
+            connection, TimescaleSupport.QueryStatsHourlyView, now.Date.AddDays(-HistoryDays - 1), now.Date.AddDays(1), SilentDisclosure(), ct);
 
         await using (var purge = new NpgsqlCommand("DELETE FROM collect.query_stats WHERE collection_time < $1", connection))
         {
@@ -399,7 +399,7 @@ AND   j.scheduled", ct);
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
         var view = TimescaleSupport.QueryStatsHourlyView;
-        await RollupBackfill.RunSliceAsync(connection, view, now.Date.AddDays(-2), now.Date.AddDays(1), ct);
+        await RollupBackfill.RunSliceAsync(connection, view, now.Date.AddDays(-2), now.Date.AddDays(1), SilentDisclosure(), ct);
 
         var probe = await RollupBackfill.ProbeAsync(connection, view, "query_stats", ct);
 
@@ -492,7 +492,7 @@ AND   j.scheduled", ct);
             {
                 try
                 {
-                    await RollupBackfill.RunSliceAsync(refreshConnection, view, rangeFrom, rangeTo, cancellation.Token);
+                    await RollupBackfill.RunSliceAsync(refreshConnection, view, rangeFrom, rangeTo, SilentDisclosure(), cancellation.Token);
                 }
                 catch (Exception ex) when (ex is OperationCanceledException or PostgresException or NpgsqlException)
                 {
@@ -607,7 +607,7 @@ WHERE NOT EXISTS (SELECT 1 FROM collect.{view} AS h WHERE h.bucket = src.b)",
         var killAt = (allSlices.Length * 2) / 3;
         foreach (var (from, to) in allSlices.Take(killAt))
         {
-            await RollupBackfill.RunSliceAsync(connection, view, from, to, ct);
+            await RollupBackfill.RunSliceAsync(connection, view, from, to, SilentDisclosure(), ct);
         }
 
         /* (1) The partial run must not LOOK complete. This is the assertion that was false before: under
@@ -633,7 +633,7 @@ WHERE NOT EXISTS (SELECT 1 FROM collect.{view} AS h WHERE h.bucket = src.b)",
         /* ── THE RESUME: finish the remaining slices from the measured floor. ── */
         foreach (var (from, to) in RollupBackfill.Slices(resumePlan.FromUtc, resumePlan.ToUtc))
         {
-            await RollupBackfill.RunSliceAsync(connection, view, from, to, ct);
+            await RollupBackfill.RunSliceAsync(connection, view, from, to, SilentDisclosure(), ct);
         }
 
         /* (4) ZERO missing buckets across the WHOLE originally-planned range — measured against raw itself,
@@ -767,6 +767,15 @@ VALUES ($1, $2, $3, 'backfill-e2e', 'TestDb', decode(md5('poison'), 'hex'), deco
             _ = ex;
         }
     }
+
+
+    /// <summary>
+    /// A disclosure sink for tests that are not exercising the pre-2.21 degrade. It FAILS if it ever fires:
+    /// on the bundled 2.28.1 these tests must take the explicit-options path, so a disclosure here means the
+    /// store silently fell back and every "the option is carried" claim in this file would be hollow.
+    /// </summary>
+    private static RefreshDisclosure SilentDisclosure() =>
+        new(message => Assert.Fail($"the refresh degraded unexpectedly on a 2.28.1 store: {message}"));
 
     /// <summary>Is query_stats' raw retention policy ARMED? The gate's real observable, read from the job
     /// catalog rather than by re-evaluating its predicate.</summary>
