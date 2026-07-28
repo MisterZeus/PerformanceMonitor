@@ -1981,6 +1981,7 @@ public sealed class DarlingSelfAlertTests
         await DeleteLiveRowsAsync(connection, ct);
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
         try
         {
             var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
@@ -2025,10 +2026,18 @@ public sealed class DarlingSelfAlertTests
 
             await evaluator.EvaluateStoreAlertsAsync(postgres, LiveServerId, Name, connected: true, ct);
             Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Capture Down");
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteLiveRowsAsync(connection, ct);
+            /* Fresh connection + body-aware masking (#1794): this class showed the "Connection is not
+               open" signature on a reused local store, and cleanup on the body's connection is exactly
+               how that masks the real failure and strands the seeded rows. */
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteLiveRowsAsync(cleanup, cleanupCt);
+            });
         }
     }
 
@@ -2057,6 +2066,7 @@ public sealed class DarlingSelfAlertTests
         await DeleteLiveAgRowsAsync(connection, ct);
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
         try
         {
             var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
@@ -2103,11 +2113,16 @@ public sealed class DarlingSelfAlertTests
 
             Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "AG Sync Fell Behind");
             Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == "AG Replica Disconnected");
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteLiveAgRowsAsync(connection, ct);
-            await DeleteLiveRowsAsync(connection, ct);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteLiveAgRowsAsync(cleanup, cleanupCt);
+                await DeleteLiveRowsAsync(cleanup, cleanupCt);
+            });
         }
     }
 
