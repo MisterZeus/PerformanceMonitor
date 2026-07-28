@@ -531,6 +531,15 @@ AND   j.scheduled", ct);
         await cancellation.CancelAsync();
         await refresh;
 
+        /* Release the cancelled backend BEFORE anything else touches this store. `await refresh` returns when
+           the client-side task completes, which is not the same instant the server-side backend finishes
+           unwinding an aborted CALL — and ScratchPostgres ends this test with DROP DATABASE ... WITH (FORCE).
+           Closing explicitly removes that window rather than relying on disposal order to close it. This is
+           the same lifecycle-hardening the arming tests got: the shared-store flake class on this rig is
+           connection-level, so a test that deliberately aborts a statement should not leave the cleanup to
+           chance. */
+        await refreshConnection.CloseAsync();
+
         var floor = await RollupBackfill.ReadCoverageFloorAsync(connection, view, ct);
 
         Assert.True(floor is not null,
