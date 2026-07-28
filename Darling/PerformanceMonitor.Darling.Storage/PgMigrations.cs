@@ -82,6 +82,7 @@ public static class PgMigrations
         new Migration(36, "ag-latency-columns", V36Sql),
         new Migration(37, "ag-local-replica-and-disconnect-refire", V37Sql),
         new Migration(38, "query-payload-dimensions", PgSchemaGenerator.GenerateV38PayloadDimensions()),
+        new Migration(39, "dim-feeding-fact-floor-indexes", V39Sql),
     };
 
     /// <summary>
@@ -613,6 +614,29 @@ ALTER TABLE collect.ag_replica_states
 
 ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS ag_disconnect_refire_minutes integer NOT NULL DEFAULT 0;";
+
+    /// <summary>
+    /// V39 — the partial indexes behind the dimension GC's MEASURED bound (#1795). The GC prunes
+    /// dimension content against the oldest SURVIVING digest-carrying fact row rather than an assumed
+    /// horizon, which requires a <c>min(collection_time)</c> probe per dim-feeding table every sweep.
+    /// Unindexed, that is an ordered walk from each hypertable's oldest chunk filtering out NULL-digest
+    /// rows (every pre-#1767 row); with a partial index whose predicate EXACTLY matches the probe's
+    /// WHERE clause, it is an index-edge read. One index per dim-feeding fact table, predicate =
+    /// "carries any digest" (the OR of that table's digest columns from <c>PayloadDimensions.All</c> —
+    /// pinned against the map by test, since a new dimension column would silently fall out of both the
+    /// index and the probe together or neither). TimescaleDB propagates the index to existing and
+    /// future chunks; <c>IF NOT EXISTS</c> keeps the migration idempotent; plain-PostgreSQL stores take
+    /// the same DDL unchanged. Bare names resolve through the migrate session's
+    /// <c>search_path = collect, config, public</c>.
+    /// </summary>
+    private const string V39Sql = @"
+CREATE INDEX IF NOT EXISTS ix_query_stats_digest_floor
+    ON query_stats (collection_time)
+    WHERE query_text_digest IS NOT NULL OR query_plan_digest IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS ix_procedure_stats_digest_floor
+    ON procedure_stats (collection_time)
+    WHERE query_plan_digest IS NOT NULL;";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

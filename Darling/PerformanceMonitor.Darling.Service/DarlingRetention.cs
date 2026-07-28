@@ -140,12 +140,6 @@ public static class DarlingRetention
         /* Naive-UTC storage: Npgsql 6+ rejects Kind=Utc against `timestamp` — see PgCollectorRowWriter. */
         var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
 
-        /* Set when a table that feeds a payload dimension could not be purged this cycle, which invalidates
-           the dimension GC's cutoff (#1782). Tracked here rather than inferred later because the sweep is the
-           only thing that knows: a failed purge is warned and skipped, leaving no state a later query could
-           read back. */
-        var dimFeedingPurgeFailed = false;
-
         try
         {
             foreach (var definition in CollectorCatalog.All)
@@ -157,7 +151,6 @@ public static class DarlingRetention
                     logger?.LogWarning("Retention purge: no schedule entry for '{Collector}' — {Table} was not purged",
                         definition.Name, definition.TargetTable);
                     tablesFailed++;
-                    dimFeedingPurgeFailed |= PayloadDimensions.ForTable(definition.TargetTable).Count > 0;
                     continue;
                 }
 
@@ -184,9 +177,9 @@ public static class DarlingRetention
                         "Retention purge SKIPPED for {Table}: its rollup does not yet cover the oldest rows, so dropping would delete history no aggregate holds. Resumes by itself once a backfill extends coverage.",
                         definition.TargetTable);
 
-                    /* Those rows are still there past their horizon, which is the dimension GC's hazard
-                       (#1782) exactly as a failed purge is — the GC's cutoff assumes they are gone. */
-                    dimFeedingPurgeFailed |= PayloadDimensions.ForTable(definition.TargetTable).Count > 0;
+                    /* Those rows are still there past their horizon — which is fine for the dimension GC
+                       below (#1795): its cutoff is MEASURED from the oldest surviving digest-carrying fact
+                       row, so held history bounds the GC instead of deferring it. */
                     continue;
                 }
 
@@ -219,10 +212,9 @@ public static class DarlingRetention
                 {
                     tablesFailed++;
 
-                    /* Both paths failed for this table, so its rows are still there past their horizon. If it
-                       feeds a payload dimension, that invalidates the dimension GC's cutoff for this cycle
-                       (#1782) — see the guard below. */
-                    dimFeedingPurgeFailed |= PayloadDimensions.ForTable(definition.TargetTable).Count > 0;
+                    /* Both paths failed for this table, so its rows are still there past their horizon.
+                       The dimension GC below stays safe anyway (#1795): its cutoff is measured from the
+                       oldest surviving digest-carrying fact row, which those rows ARE. */
                 }
             }
 
@@ -260,40 +252,67 @@ public static class DarlingRetention
                 widestFactRetentionDays = Math.Max(widestFactRetentionDays, factRetentionDays);
             }
 
-            /* That whole cutoff embeds one assumption: facts older than their retention are GONE. It holds
-               while the fact purge SUCCEEDS — and the loop above is failure-isolated, so a table whose
-               drop_chunks fails AND whose DELETE fallback then also fails is warned, skipped, and the sweep
-               continues straight into this GC. Those facts persist past the cutoff while their dimension rows
-               are pruned on schedule: the digests dangle, and the resolving view serves NULL payload with no
-               error raised anywhere (#1782).
+            /* That assumed cutoff embeds one assumption: facts older than their retention are GONE. Two
+               legitimate mechanisms break it — a dim-feeding table whose purge FAILED (#1782), and one the
+               coverage clamp above deliberately SKIPPED (#1784). The old response deferred the whole GC
+               whenever either happened, which was correct but blunt: on a coverage-lagging store the clamp
+               holds every sweep until a backfill lands, so the GC deferred every sweep and a 400-day-old
+               orphan survived with nothing failed anywhere (#1795).
 
-               So a dim-feeding table failing its purge defers the GC for that cycle. It is keyed to the
-               failure rather than to the retention POLICY's held state, because a held policy cannot cause
-               this: the catalog sweep above drops these tables at their own 30-day horizon regardless of the
-               policy, two days inside this 32-day cutoff, and the ordering survives any override since both
-               sides resolve through the same retentionDaysFor. Deferring on a held policy would stall the GC
-               indefinitely on a store whose policies are held for entirely unrelated reasons.
+               The true safety boundary is MEASURED instead: content older than the oldest SURVIVING
+               digest-carrying fact row cannot be referenced by anything, whatever the reason those facts
+               are still there. Probe each dim-feeding table's floor — an index-edge read through its V39
+               partial index, once per sweep, the bounded shape the last_seen watermark design (#1768)
+               demands — take the MINIMUM across tables (same reasoning as the widest retention above), and
+               clamp the assumed cutoff to it. The blunt guard becomes unnecessary rather than dormant: a
+               store whose purges are blocked for weeks still reclaims dimension content for queries that
+               stopped running long before, and held history bounds the GC instead of stopping it.
 
-               Self-ending by construction: the next sweep that purges cleanly runs the GC, and nothing needs
-               an operator. And it fails toward the recoverable side — deferring costs bounded dimension
-               growth, visible and reclaimed by the next cycle, where pruning early corrupts the read path
-               silently. */
-            if (dimFeedingPurgeFailed)
+               A floor that cannot be MEASURED (the table missing/renamed/unreachable) is different: the
+               safety boundary is then unknown, so the GC defers for the cycle — fail toward the recoverable
+               side, exactly as the old guard did. Bounded growth beats silently dangled digests. */
+            DateTime? oldestSurvivingDigestFact = null;
+            var floorUnmeasurable = false;
+            foreach (var (factTable, digestPredicate) in PayloadDimensions.DigestPredicateByTable)
             {
-                /* One line, deliberately a fixed string never interpolated: it is the field signature an
-                   operator greps for when the dimensions stop shrinking, so it must not vary by store. It
-                   names the observable STATE -- a table still holding rows past its horizon -- and not any
-                   cause of it. Two different things produce that state: a purge statement that failed, and a
-                   purge deliberately skipped because its rollup does not cover the table (#1784). Naming
-                   either one here would be a lie in the other case and would send the reader after the wrong
-                   remedy, which is the one thing a diagnostic line must not do. The preceding per-table
-                   warning already says which table and which of the two it was, so the cause is one line
-                   above, owned by the code that actually knows it. */
-                logger?.LogWarning("dimension GC deferred: a dim-feeding table kept rows past its horizon this cycle; dimension content is retained until its purge completes");
+                try
+                {
+                    await using var floorConnection = await postgres.OpenConnectionAsync(cancellationToken);
+                    await using var probe = new NpgsqlCommand(
+                        $"SELECT min({PrefixTimeColumn(factTable)}) FROM {factTable} WHERE {digestPredicate}", floorConnection);
+                    var floor = await probe.ExecuteScalarAsync(cancellationToken);
+                    if (floor is DateTime floorTime
+                        && (oldestSurvivingDigestFact is null || floorTime < oldestSurvivingDigestFact.Value))
+                    {
+                        oldestSurvivingDigestFact = floorTime;
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    floorUnmeasurable = true;
+                    logger?.LogWarning("Retention purge: could not measure {Table}'s digest-carrying fact floor: {Message}",
+                        factTable, ex.Message);
+                }
+            }
+
+            if (floorUnmeasurable)
+            {
+                /* One line, deliberately a fixed string never interpolated: the field signature an operator
+                   greps for when the dimensions stop shrinking. The per-table warning above names which
+                   table and why. */
+                logger?.LogWarning("dimension GC deferred: a dim-feeding table's fact floor was unmeasurable this cycle; dimension content is retained until it can be measured");
             }
             else
             {
-                var dimensionCutoff = utcNow.AddDays(-(widestFactRetentionDays + TimescaleSupport.ChunkIntervalDays + 1));
+                var dimensionCutoff = ComputeDimensionCutoff(utcNow, widestFactRetentionDays, oldestSurvivingDigestFact);
+                if (dimensionCutoff < utcNow.AddDays(-(widestFactRetentionDays + TimescaleSupport.ChunkIntervalDays + 1)))
+                {
+                    /* Fixed string, same reasoning as the defer line: the greppable signature of a store
+                       whose GC is bounded by held history (clamped or failed purges) rather than by the
+                       nominal horizon. Informational — this state is the fix working, not a problem. */
+                    logger?.LogInformation("dimension GC bounded by surviving facts: dimension content newer than the oldest digest-carrying fact row is retained");
+                }
+
                 foreach (var dimTable in PayloadDimensions.DimTables)
                 {
                     var dimDeleted = await PurgeOneAsync(
@@ -493,6 +512,37 @@ public static class DarlingRetention
              + $" AND {timeColumn} >= (SELECT min({timeColumn}) FROM {table} WHERE {expired})"
              + $" AND {timeColumn} < (SELECT min({timeColumn}) FROM {table} WHERE {expired}) + INTERVAL '{TimescaleSupport.ChunkIntervalDays} days'";
     }
+
+    /// <summary>
+    /// The dimension GC's cutoff (#1795): the ASSUMED horizon (widest dim-feeding fact retention +
+    /// <see cref="TimescaleSupport.ChunkIntervalDays"/> drop_chunks granularity + 1 day for the hourly
+    /// <c>last_seen</c> refresh guard), CLAMPED to one day before the oldest surviving digest-carrying
+    /// fact row when that measured floor reaches further back — held history bounds the GC instead of
+    /// deferring it. The measured side carries the SAME one-day margin, for the same reason: a dim row's
+    /// <c>last_seen</c> can trail its newest referencing fact by up to the hourly refresh guard, so
+    /// pruning right AT the floor could take content the floor row still references. A null floor (no
+    /// digest-carrying facts anywhere — a fresh or fully-aged store) leaves the assumed horizon alone:
+    /// with no facts, nothing can dangle, and last_seen still bounds what is old enough to take.
+    /// </summary>
+    internal static DateTime ComputeDimensionCutoff(DateTime utcNow, int widestFactRetentionDays, DateTime? oldestSurvivingDigestFact)
+    {
+        var assumed = utcNow.AddDays(-(widestFactRetentionDays + TimescaleSupport.ChunkIntervalDays + 1));
+        if (oldestSurvivingDigestFact is null)
+        {
+            return assumed;
+        }
+
+        var measured = oldestSurvivingDigestFact.Value.AddDays(-1);
+        return measured < assumed ? measured : assumed;
+    }
+
+    /// <summary>
+    /// The prefix time column of a dim-feeding fact table, resolved from the catalog so the floor probe
+    /// can never disagree with the table's actual schema (both current dim-feeding tables use
+    /// <c>collection_time</c>; the resolver keeps that true by construction rather than by assertion).
+    /// </summary>
+    private static string PrefixTimeColumn(string factTable) =>
+        CollectorCatalog.All.First(c => string.Equals(c.TargetTable, factTable, StringComparison.Ordinal)).PrefixTimeColumnName;
 
     /// <summary>
     /// The Timescale purge statement for one collector table — <c>drop_chunks</c> detaches every
