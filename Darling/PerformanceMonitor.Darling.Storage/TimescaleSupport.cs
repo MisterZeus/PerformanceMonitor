@@ -1838,6 +1838,12 @@ AND   j.schedule_interval IS DISTINCT FROM INTERVAL '{CompressScheduleInterval}'
     /// </list>
     /// A job with neither condition is healthy and is NOT flagged. No I/O, so it pins directly with a
     /// controllable clock. Scoping to compression jobs happens in the query — this decides only "stuck".
+    ///
+    /// <para>A <paramref name="lastRunStartedAtUtc"/> of <see cref="DateTime.MinValue"/> counts as NEVER RAN,
+    /// not as "started in year 1" (#1760). <see cref="StuckCompressionJobsSql"/> already NULLIFs TimescaleDB's
+    /// <c>-infinity</c> never-ran sentinel, so this is the second line of defence: the sentinel maps to
+    /// MinValue through Npgsql, and any future caller reading the column un-guarded would otherwise compute a
+    /// ~739,000-day elapsed that clears every bound and flag a healthy job on its very first run.</para>
     /// </summary>
     public static bool IsCompressionJobStuck(
         bool nextStartIsNegativeInfinity,
@@ -1854,7 +1860,8 @@ AND   j.schedule_interval IS DISTINCT FROM INTERVAL '{CompressScheduleInterval}'
         }
 
         if (string.Equals(jobStatus, "Running", StringComparison.OrdinalIgnoreCase)
-            && lastRunStartedAtUtc is DateTime startedUtc)
+            && lastRunStartedAtUtc is DateTime startedUtc
+            && startedUtc != DateTime.MinValue)
         {
             var bound = StuckRunningBound(scheduleInterval);
             var elapsed = nowUtc - startedUtc;
@@ -1873,14 +1880,46 @@ AND   j.schedule_interval IS DISTINCT FROM INTERVAL '{CompressScheduleInterval}'
     }
 
     /// <summary>
+    /// The stuck-compression-job detection query, exposed as a const (like <see cref="RearmJobSql"/>) so the
+    /// gated live test can settle on and pin THIS text rather than a hand-copied paraphrase that drifts.
+    ///
+    /// <para>Both <c>-infinity</c> tests run IN SQL, never through Npgsql's infinity-to-DateTime mapping.
+    /// For <c>next_start</c> that is a correctness guard on the comparison. For <c>last_run_started_at</c> it
+    /// is load-bearing (#1760): TimescaleDB stores <b>-infinity</b>, not NULL, as the never-ran sentinel in
+    /// <c>_timescaledb_internal.bgw_job_stat.last_start</c>, and Npgsql maps that to
+    /// <see cref="DateTime.MinValue"/> — so an un-guarded read turned "this job has never run" into "this run
+    /// started in year 1", i.e. an elapsed of ~739,000 days that clears every <see cref="StuckRunningBound"/>.
+    /// <c>NULLIF</c> restores the intended meaning: no start time, so the stuck-Running arm cannot fire.</para>
+    ///
+    /// <para>Why that was reachable at all: <c>job_status</c> and <c>last_run_started_at</c> come from
+    /// INDEPENDENT sources in TimescaleDB's own view — <c>job_status</c> is
+    /// <c>CASE WHEN pg_stat_activity.state = 'active' THEN 'Running'</c>, joined on <c>application_name</c>,
+    /// while <c>last_run_started_at</c> is <c>bgw_job_stat.last_start</c>. A job's FIRST run therefore reads
+    /// <c>Running</c> while its start time is still the sentinel, and that window flagged a perfectly healthy
+    /// job as stuck — which the self-heal then "fixed" by re-arming a job that was running fine.</para>
+    /// </summary>
+    public const string StuckCompressionJobsSql = @"
+SELECT
+    js.job_id,
+    (js.next_start = '-infinity'::timestamptz)  AS next_start_neg_infinity,
+    js.job_status,
+    NULLIF(js.last_run_started_at, '-infinity'::timestamptz) AS last_run_started_at,
+    EXTRACT(EPOCH FROM j.schedule_interval)     AS schedule_interval_seconds,
+    j.hypertable_name
+FROM timescaledb_information.job_stats AS js
+JOIN timescaledb_information.jobs      AS j USING (job_id)
+WHERE j.proc_name LIKE '%compression%'
+   OR j.proc_name LIKE '%columnstore%'";
+
+    /// <summary>
     /// Reads every COMPRESSION-policy background job (<c>proc_name</c> is <c>policy_compression</c>, or the
     /// 2.18+ columnstore rebrand's name — the same tolerant LIKE the compression test uses) and returns the
-    /// ones the pure <see cref="IsCompressionJobStuck"/> predicate flags as stuck. The <c>-infinity</c> test
-    /// runs IN SQL (so it never depends on Npgsql's infinity-to-DateTime conversion setting); the
-    /// stuck-Running bound is computed in C# from the raw fields. Scoped to compression jobs ONLY — retention,
-    /// continuous-aggregate refresh, reorder, and every other job type are untouched. Failure-isolated: a
-    /// store hiccup, or the views being absent (a plain-PostgreSQL store — the caller also gates on the
-    /// extension), yields an empty list and a Debug line, never a throw.
+    /// ones the pure <see cref="IsCompressionJobStuck"/> predicate flags as stuck. The <c>-infinity</c> tests
+    /// run IN SQL (see <see cref="StuckCompressionJobsSql"/>); the stuck-Running bound is computed in C# from
+    /// the raw fields. Scoped to compression jobs ONLY — retention, continuous-aggregate refresh, reorder, and
+    /// every other job type are untouched. Failure-isolated: a store hiccup, or the views being absent (a
+    /// plain-PostgreSQL store — the caller also gates on the extension), yields an empty list and a Debug line,
+    /// never a throw.
     /// </summary>
     public static async Task<IReadOnlyList<StuckCompressionJob>> ReadStuckCompressionJobsAsync(
         NpgsqlConnection connection, DateTime nowUtc, ILogger? logger, CancellationToken cancellationToken = default)
@@ -1893,18 +1932,7 @@ AND   j.schedule_interval IS DISTINCT FROM INTERVAL '{CompressScheduleInterval}'
         var stuck = new List<StuckCompressionJob>();
         try
         {
-            using var command = new NpgsqlCommand(@"
-SELECT
-    js.job_id,
-    (js.next_start = '-infinity'::timestamptz)  AS next_start_neg_infinity,
-    js.job_status,
-    js.last_run_started_at,
-    EXTRACT(EPOCH FROM j.schedule_interval)     AS schedule_interval_seconds,
-    j.hypertable_name
-FROM timescaledb_information.job_stats AS js
-JOIN timescaledb_information.jobs      AS j USING (job_id)
-WHERE j.proc_name LIKE '%compression%'
-   OR j.proc_name LIKE '%columnstore%'", connection);
+            using var command = new NpgsqlCommand(StuckCompressionJobsSql, connection);
 
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
@@ -1953,13 +1981,21 @@ WHERE j.proc_name LIKE '%compression%'
     /// <see cref="CompressScheduleInterval"/> tick this is 0 almost always and briefly 1 after a chunk ages in;
     /// a number that stays high is the store falling behind, which is exactly what went unseen while the tick
     /// was half a day.</para>
+    ///
+    /// <para><c>last_run_started_at</c> is <c>NULLIF</c>'d against <c>-infinity</c> for the SAME reason
+    /// <see cref="StuckCompressionJobsSql"/> does it (#1760): TimescaleDB stores <b>-infinity</b>, not NULL, as
+    /// the never-ran sentinel, Npgsql maps that to <see cref="DateTime.MinValue"/>, and <c>job_status</c> comes
+    /// from an INDEPENDENT source (<c>pg_stat_activity</c>) than the start time — so a policy's very FIRST run
+    /// reads <c>Running</c> while its start is still the sentinel. Un-guarded, this observability path would
+    /// report that healthy first run as having been going for ~739,000 days. The two queries were written in
+    /// parallel branches and each was green on its own; this is the seam between them, not either side.</para>
     /// </summary>
     public static string CompressionActivitySql =>
         $@"
 SELECT
     j.hypertable_name,
     js.job_status,
-    js.last_run_started_at,
+    NULLIF(js.last_run_started_at, '-infinity'::timestamptz) AS last_run_started_at,
     CASE
         WHEN js.last_successful_finish > js.last_run_started_at
         THEN EXTRACT(EPOCH FROM (js.last_successful_finish - js.last_run_started_at))
@@ -2125,10 +2161,17 @@ public sealed record CompressionActivity(
     /// How long the in-progress run has been going, or null when nothing is running (or the store never
     /// recorded a start). Clamped at zero so clock skew between the store and the service cannot report a
     /// negative elapsed time.
+    ///
+    /// <para>A <see cref="LastRunStartedAtUtc"/> of <see cref="DateTime.MinValue"/> counts as NEVER RAN, not as
+    /// "started in year 1" (#1760's lesson, applied to the query #1778 added).
+    /// <see cref="TimescaleSupport.CompressionActivitySql"/> already NULLIFs TimescaleDB's <c>-infinity</c>
+    /// never-ran sentinel, so this is the second line of defence — and note the zero-clamp above does NOT cover
+    /// it: the sentinel produces a huge POSITIVE elapsed, which sails straight through a guard aimed at
+    /// negatives.</para>
     /// </summary>
     public TimeSpan? RunningFor(DateTime nowUtc)
     {
-        if (!IsRunning || LastRunStartedAtUtc is not DateTime startedUtc)
+        if (!IsRunning || LastRunStartedAtUtc is not DateTime startedUtc || startedUtc == DateTime.MinValue)
         {
             return null;
         }

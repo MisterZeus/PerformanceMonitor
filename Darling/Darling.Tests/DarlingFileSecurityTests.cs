@@ -58,6 +58,65 @@ public sealed class DarlingFileSecurityTests
         }
     }
 
+    /// <summary>
+    /// #1769: the non-interactive posture emits EXACTLY three identities — SYSTEM, Administrators and the
+    /// service identity — and nothing else. Presence/absence assertions alone cannot say that: they pass
+    /// happily while a fourth principal rides along, which is precisely the shape of the defect that prompted
+    /// this (an unintended <c>NT AUTHORITY\INTERACTIVE</c> re-added on every service start). This is the
+    /// posture the superuser credential, the transient init pwfile, and the config BACKUPS all take.
+    /// </summary>
+    [Fact]
+    public void HardenFile_NonInteractive_EmitsExactlyTheThreeIntendedIdentities()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        var path = Path.Combine(Path.GetTempPath(), "darling-acl-exact-" + Guid.NewGuid().ToString("N") + ".bak");
+        File.WriteAllText(path, "blob");
+        try
+        {
+            DarlingFileSecurity.HardenFile(path, allowInteractiveRead: false);
+
+            var security = new FileInfo(path).GetAccessControl();
+            var rules = ReadRules(security);
+            AssertProtectedAndNoWorldRead(security, rules);
+
+            /* The service identity is whoever this process runs as — the same resolution HardenFile uses. */
+            var serviceIdentity = WindowsIdentity.GetCurrent().User;
+            Assert.NotNull(serviceIdentity);
+
+            var expected = new[] { s_system, s_administrators, serviceIdentity! };
+            var actual = rules.Select(r => r.sid).Distinct().ToList();
+
+            /* No more, no less. The failure names the unexpected principals rather than just a count, because
+               "expected 3, got 4" tells whoever hits this nothing about which grant crept in. */
+            var unexpected = actual.Where(sid => !expected.Any(sid.Equals)).Select(TranslateOrRaw).ToList();
+            Assert.True(unexpected.Count == 0,
+                "The non-interactive DACL granted principals beyond SYSTEM, Administrators and the service "
+                + "identity: " + string.Join(", ", unexpected));
+
+            var missing = expected.Where(sid => !actual.Any(sid.Equals)).Select(TranslateOrRaw).ToList();
+            Assert.True(missing.Count == 0,
+                "The non-interactive DACL is missing intended principals: " + string.Join(", ", missing));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    /// <summary>A SID's friendly name for a failure message, falling back to the raw SID when it does not map.</summary>
+    private static string TranslateOrRaw(SecurityIdentifier sid)
+    {
+        try
+        {
+            return ((NTAccount)sid.Translate(typeof(NTAccount))).Value;
+        }
+        catch (IdentityNotMappedException)
+        {
+            return sid.Value;
+        }
+    }
+
     [Fact]
     public void HardenFile_RoleCredential_GrantsInteractiveRead()
     {
@@ -363,6 +422,17 @@ public sealed class DarlingFileSecurityTests
                 "the backup is a full copy of the encrypted passwords and access tokens — File.Copy does not " +
                 "carry the source DACL, so an unhardened backup hands every local user the credentials that " +
                 "darling.json's own ACL exists to protect");
+
+            /* #1769: and NOT to INTERACTIVE either. The live darling.json grants it because things genuinely
+               read the config as the interactive operator — the Viewer and the CLI verbs. Nothing reads a
+               backup: the only code that knows the .bak- name is the code that creates it, and restoring one
+               already needs elevation because writing darling.json does. So the grant bought nothing and left
+               a second readable copy of every secret. Asserted end to end through the real WriteWithBackupAsync
+               path rather than against HardenFile directly, because the defect this closes was a CALL SITE
+               passing the wrong argument, which a test of the shape alone cannot see. */
+            Assert.DoesNotContain(
+                ReadRules(new FileInfo(backup).GetAccessControl()),
+                r => r.Item1.Equals(s_interactive));
         }
         finally
         {

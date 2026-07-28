@@ -35,6 +35,11 @@ namespace Darling.Tests;
 /// its continuous aggregate. That is the UPGRADED-IN-PLACE fixture #1705 proved CI could not see: a store
 /// that has been through a version change behaves differently from the fresh ones darling-pg creates.</para>
 /// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")], and NOT for the reason a sweep might assume.
+   This class never reads DARLING_TEST_PG at all — it reads DARLING_TEST_PGRUNTIME_OLD / DARLING_TEST_PGRUNTIME_NEWZIP, which merely shares that
+   prefix, and it stands up its OWN throwaway cluster from the bundled runtime. A substring search for
+   "DARLING_TEST_PG" matches it anyway (that is how #1776's original sweep came to list it), so this note is here to
+   stop the next one serializing a class that touches no shared store. */
 public sealed class DarlingStoreUpgradeTests
 {
     [Theory]
@@ -705,6 +710,7 @@ public sealed class DarlingStoreUpgradeTests
                 Assert.Contains("shared_preload_libraries = 'timescaledb'", conf, StringComparison.Ordinal);
                 Assert.Equal(1, CountOccurrences(conf, DarlingManagedPostgres.ConfMarker));
                 Assert.Equal(1, CountOccurrences(conf, DarlingManagedPostgres.ConfMarkerV6));
+                Assert.Equal(1, CountOccurrences(conf, DarlingManagedPostgres.ConfMarkerV7));
             }
             finally
             {
