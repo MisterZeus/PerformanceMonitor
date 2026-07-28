@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -40,7 +41,17 @@ namespace PerformanceMonitor.Darling.Storage;
 /// arming gate reads before it lets a raw purge drop chunks. Oldest-first drove that one number to its final
 /// value on the first slice, so an interrupted run left holes that were invisible to all three — the next run
 /// reported DONE and the gate armed over a window raw held the only copy of. Descending makes
-/// <c>floor &lt;= raw_oldest</c> imply completeness by construction.</para>
+/// <c>floor &lt;= source_oldest</c> imply completeness by construction.</para>
+///
+/// <para><b>Convergence is SOURCE-relative, not raw-relative (#1798).</b> Each rollup is backfilled down to
+/// the oldest row its own SOURCE holds — raw for the hourlies, the HOURLY VIEW for every daily, since all four
+/// dailies are hierarchical. Converging the dailies to raw instead looked equivalent and is not: the #1680
+/// gate for an hourly-tier policy asks whether the daily covers what the HOURLY holds, and on a store whose
+/// raw purges are already armed the hourlies hold weeks while raw holds days. A daily converged "to raw" stops
+/// short, the gate correctly refuses, and the verb reported DONE over it. Worse, a hierarchical daily added
+/// after its hourly on such a store enters a hold nothing can clear, because the pre-raw region exists only in
+/// the hourly and a verb aiming at raw never targets it. Aiming at the source makes the DONE contract's
+/// promise of zero held policies true on every store shape rather than only on the held-purge one.</para>
 /// </summary>
 public static class RollupBackfill
 {
@@ -75,18 +86,23 @@ public static class RollupBackfill
     /// materializes nothing — while REPORTING success, and while CONSUMING the invalidation records that
     /// covered the range. A later correct-order pass then no-ops over the hole. Inverting this list does not
     /// merely reorder work; it can leave permanent under-coverage that looks like completion.</para>
+    ///
+    /// <para>DERIVED from <see cref="TimescaleSupport.RollupViews"/> rather than restated. That list already
+    /// carries every rollup's raw table, source relation and source time column; a second hand-kept copy here
+    /// is a drift surface, and #1798 is what drift between two notions of "covered" costs. A rollup is
+    /// hierarchical exactly when its source is keyed on <c>bucket</c> — i.e. it reads another rollup — which is
+    /// also what makes its own grain a day, so the ordering and the bucket width both fall out of one fact.</para>
     /// </summary>
     public static readonly RollupBackfillTarget[] Targets =
-    {
-        new(TimescaleSupport.QueryStatsHourlyView, "query_stats", IsDaily: false),
-        new(TimescaleSupport.QueryStatsDbHourlyView, "query_stats", IsDaily: false),
-        new(TimescaleSupport.ProcedureStatsHourlyView, "procedure_stats", IsDaily: false),
-        new(TimescaleSupport.QueryStoreStatsHourlyView, "query_store_stats", IsDaily: false),
-        new(TimescaleSupport.QueryStatsDailyView, "query_stats", IsDaily: true),
-        new(TimescaleSupport.QueryStatsDbDailyView, "query_stats", IsDaily: true),
-        new(TimescaleSupport.ProcedureStatsDailyView, "procedure_stats", IsDaily: true),
-        new(TimescaleSupport.QueryStoreStatsDailyView, "query_store_stats", IsDaily: true),
-    };
+        TimescaleSupport.RollupViews
+            .Select(r => new RollupBackfillTarget(
+                r.View,
+                r.RawTable,
+                r.Source,
+                r.SourceTimeColumn,
+                IsDaily: string.Equals(r.SourceTimeColumn, "bucket", StringComparison.Ordinal)))
+            .OrderBy(t => t.IsDaily)
+            .ToArray();
 
     /* ─────────────────────────── the probe ─────────────────────────── */
 
@@ -109,9 +125,9 @@ public static class RollupBackfill
     /// 200-row/hour store; a real fleet box is far worse. Under-estimating is the one direction this whole
     /// preflight exists to prevent, so the units have to match here or the refusal never fires.</para>
     /// </summary>
-    public static string ProbeSql(string view, string rawTable) => $@"
+    public static string ProbeSql(string view, string source, string sourceTimeColumn) => $@"
 SELECT
-    (SELECT min(collection_time) FROM collect.{rawTable}) AS raw_oldest,
+    (SELECT min({sourceTimeColumn}) FROM collect.{source}) AS source_oldest,
     (SELECT min(bucket) FROM collect.{view}) AS coverage_oldest,
     (SELECT count(DISTINCT bucket) FROM collect.{view}) AS materialized_buckets,
     (SELECT hypertable_size(format('%I.%I', c.materialization_hypertable_schema, c.materialization_hypertable_name)::regclass)
@@ -192,23 +208,23 @@ SELECT
     /// </summary>
     public static RollupBackfillPlan Plan(
         string view,
-        DateTime? rawOldestUtc,
+        DateTime? sourceOldestUtc,
         DateTime? coverageOldestUtc,
         long materializedBuckets,
         long materializedBytes,
         long rawBytes,
         TimeSpan bucketWidth)
     {
-        if (rawOldestUtc is not DateTime rawOldest)
+        if (sourceOldestUtc is not DateTime sourceOldest)
         {
             return RollupBackfillPlan.Complete(view, "raw holds no rows, so there is nothing to materialize");
         }
 
         /* Slices start at midnight so every window opens on a bucket boundary for both grains. */
-        var from = rawOldest.Date;
-        var to = coverageOldestUtc ?? DateTime.SpecifyKind(DateTime.UtcNow, rawOldest.Kind);
+        var from = sourceOldest.Date;
+        var to = coverageOldestUtc ?? DateTime.SpecifyKind(DateTime.UtcNow, sourceOldest.Kind);
 
-        if (coverageOldestUtc is DateTime coverage && coverage <= rawOldest)
+        if (coverageOldestUtc is DateTime coverage && coverage <= sourceOldest)
         {
             return RollupBackfillPlan.Complete(view, "coverage already reaches raw's oldest row");
         }
@@ -245,7 +261,7 @@ SELECT
                 view,
                 string.Create(
                     CultureInfo.InvariantCulture,
-                    $"{rawOldest:yyyy-MM-dd HH:mm} is the oldest timestamp in the source, which would plan {slices:N0} slices ({span.TotalDays:N0} days). That is past the {MaxPlannedSlices:N0}-slice ceiling and almost certainly a corrupt row rather than real history — find and fix that row, then re-run."));
+                    $"{sourceOldest:yyyy-MM-dd HH:mm} is the oldest timestamp in the source, which would plan {slices:N0} slices ({span.TotalDays:N0} days). That is past the {MaxPlannedSlices:N0}-slice ceiling and almost certainly a corrupt row rather than real history — find and fix that row, then re-run."));
         }
 
         long estimatedBytes;
@@ -431,14 +447,14 @@ SELECT
 
     /// <summary>Reads one rollup's probe row (<see cref="ProbeSql"/>).</summary>
     public static async Task<RollupBackfillProbe> ProbeAsync(
-        NpgsqlConnection connection, string view, string rawTable, CancellationToken cancellationToken)
+        NpgsqlConnection connection, string view, string source, string sourceTimeColumn, CancellationToken cancellationToken)
     {
         if (connection is null)
         {
             throw new ArgumentNullException(nameof(connection));
         }
 
-        using var command = new NpgsqlCommand(ProbeSql(view, rawTable), connection) { CommandTimeout = ProbeTimeoutSeconds };
+        using var command = new NpgsqlCommand(ProbeSql(view, source, sourceTimeColumn), connection) { CommandTimeout = ProbeTimeoutSeconds };
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
@@ -595,11 +611,11 @@ public sealed class RefreshDisclosure
 
 /// <summary>One rollup to backfill: the view, the RAW table whose oldest row is the coverage target, and whether
 /// it is a hierarchical daily (sourced from its hourly, so it must be refreshed after one).</summary>
-public sealed record RollupBackfillTarget(string View, string RawTable, bool IsDaily);
+public sealed record RollupBackfillTarget(string View, string RawTable, string Source, string SourceTimeColumn, bool IsDaily);
 
 /// <summary>One rollup's measured state (<see cref="RollupBackfill.ProbeSql"/>).</summary>
 public sealed record RollupBackfillProbe(
-    DateTime? RawOldestUtc, DateTime? CoverageOldestUtc, long MaterializedBuckets, long MaterializedBytes);
+    DateTime? SourceOldestUtc, DateTime? CoverageOldestUtc, long MaterializedBuckets, long MaterializedBytes);
 
 /// <summary>
 /// What one rollup's backfill will do: the window, its size in buckets and slices, and the disk it is estimated

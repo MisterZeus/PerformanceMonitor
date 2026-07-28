@@ -1617,19 +1617,39 @@ AND   j.hypertable_name = '{relation}'";
 
     /* ─────────────── rollup COVERAGE (the un-materialized-history guard, #1759) ─────────────── */
 
-    /// <summary>Every rollup view in probe order, paired with the RAW table its tier ladder falls back to.
-    /// One list so the coverage probe's column order, <see cref="RollupCoverage"/>'s constructor and
-    /// <see cref="RollupCoverage.RawTableFor"/> cannot drift into disagreeing.</summary>
-    public static readonly (string View, string RawTable)[] RollupViews =
+    /// <summary>
+    /// Every rollup view in probe order, with the two DIFFERENT relations it is measured against. One list, so
+    /// the coverage probe's column order, <see cref="RollupCoverage"/>'s constructor and
+    /// <see cref="RollupCoverage.RawTableFor"/> cannot drift into disagreeing.
+    ///
+    /// <para><b><c>RawTable</c> and <c>Source</c> are not the same question, and conflating them was #1798.</b>
+    /// <c>RawTable</c> is where a READ falls back to when this rollup cannot answer a window — always the raw
+    /// hypertable, because that is the only relation holding per-sweep rows. <c>Source</c> is what this rollup
+    /// is BUILT FROM, and therefore the most history it can ever contain: raw for the hourlies, but the HOURLY
+    /// VIEW for every daily, since all four dailies are hierarchical continuous aggregates
+    /// (<c>time_bucket('1 day', bucket) FROM collect.&lt;x&gt;_hourly</c>).</para>
+    ///
+    /// <para>The distinction decides whether a backfill can ever finish. The #1680 arming gate for an
+    /// HOURLY-tier retention policy is SOURCE-relative — the daily must cover what the hourly holds — while the
+    /// backfill verb converged every rollup to RAW's oldest row. On a store whose raw purges are armed, raw is
+    /// a few days deep and the hourlies legitimately hold weeks, so a daily converged "to raw" stops well short
+    /// of its hourly and the gate stays correctly held while the verb reports DONE. Worse, a hierarchical daily
+    /// added AFTER its hourly on such a store enters a hold NOTHING can clear: the pre-raw region exists only
+    /// in the hourly, and a verb aiming at raw never targets it.</para>
+    ///
+    /// <para><c>SourceTimeColumn</c> follows from that: raw tables are keyed on <c>collection_time</c>,
+    /// rollup views on <c>bucket</c>.</para>
+    /// </summary>
+    public static readonly (string View, string RawTable, string Source, string SourceTimeColumn)[] RollupViews =
     {
-        (QueryStatsHourlyView, "query_stats"),
-        (QueryStatsDailyView, "query_stats"),
-        (QueryStatsDbHourlyView, "query_stats"),
-        (QueryStatsDbDailyView, "query_stats"),
-        (ProcedureStatsHourlyView, "procedure_stats"),
-        (ProcedureStatsDailyView, "procedure_stats"),
-        (QueryStoreStatsHourlyView, "query_store_stats"),
-        (QueryStoreStatsDailyView, "query_store_stats"),
+        (QueryStatsHourlyView, "query_stats", "query_stats", "collection_time"),
+        (QueryStatsDailyView, "query_stats", QueryStatsHourlyView, "bucket"),
+        (QueryStatsDbHourlyView, "query_stats", "query_stats", "collection_time"),
+        (QueryStatsDbDailyView, "query_stats", QueryStatsDbHourlyView, "bucket"),
+        (ProcedureStatsHourlyView, "procedure_stats", "procedure_stats", "collection_time"),
+        (ProcedureStatsDailyView, "procedure_stats", ProcedureStatsHourlyView, "bucket"),
+        (QueryStoreStatsHourlyView, "query_store_stats", "query_store_stats", "collection_time"),
+        (QueryStoreStatsDailyView, "query_store_stats", QueryStoreStatsHourlyView, "bucket"),
     };
 
     /// <summary>The three raw tables the rollups roll up, in coverage-probe order (deduplicated
@@ -2511,10 +2531,15 @@ public sealed class RollupCoverage
     }
 
     /// <summary>The raw table a rollup view's tier ladder falls back TO, or null for a name outside
-    /// <see cref="TimescaleSupport.RollupViews"/> (which answers "no evidence" rather than guessing).</summary>
+    /// <see cref="TimescaleSupport.RollupViews"/> (which answers "no evidence" rather than guessing).
+    ///
+    /// <para>Deliberately still RAW for every rollup, dailies included, and NOT the source relation #1798
+    /// added alongside it. This answers a READ question — where does a window go when this rollup cannot serve
+    /// it — and the answer is always the relation holding per-sweep rows. Only the BACKFILL's convergence
+    /// target became source-relative.</para></summary>
     public static string? RawTableFor(string caggView)
     {
-        foreach (var (view, rawTable) in TimescaleSupport.RollupViews)
+        foreach (var (view, rawTable, _, _) in TimescaleSupport.RollupViews)
         {
             if (string.Equals(view, caggView, StringComparison.Ordinal))
             {

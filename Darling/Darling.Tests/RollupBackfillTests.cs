@@ -117,7 +117,7 @@ public sealed class RollupBackfillTests
         /* A fresh #1759 store: raw reaches back a year, the rollup only to the policy's 3-day window. */
         var initial = RollupBackfill.Plan(
             TimescaleSupport.QueryStatsHourlyView,
-            rawOldestUtc: DaysAgo(365), coverageOldestUtc: DaysAgo(3),
+            sourceOldestUtc: DaysAgo(365), coverageOldestUtc: DaysAgo(3),
             materializedBuckets: 72, materializedBytes: 72 * 1024 * 1024,
             rawBytes: 145 * Gb, bucketWidth: TimeSpan.FromHours(1));
 
@@ -128,7 +128,7 @@ public sealed class RollupBackfillTests
         /* Interrupted half way: the next pass plans only the REMAINING span, not the whole thing again. */
         var resumed = RollupBackfill.Plan(
             TimescaleSupport.QueryStatsHourlyView,
-            rawOldestUtc: DaysAgo(365), coverageOldestUtc: DaysAgo(180),
+            sourceOldestUtc: DaysAgo(365), coverageOldestUtc: DaysAgo(180),
             materializedBuckets: 4_500, materializedBytes: 4_500L * 1024 * 1024,
             rawBytes: 145 * Gb, bucketWidth: TimeSpan.FromHours(1));
 
@@ -139,7 +139,7 @@ public sealed class RollupBackfillTests
         /* Complete: coverage reaches raw, so there is nothing to do and the verb says so rather than working. */
         var complete = RollupBackfill.Plan(
             TimescaleSupport.QueryStatsHourlyView,
-            rawOldestUtc: DaysAgo(365), coverageOldestUtc: DaysAgo(365),
+            sourceOldestUtc: DaysAgo(365), coverageOldestUtc: DaysAgo(365),
             materializedBuckets: 8_760, materializedBytes: 9 * Gb,
             rawBytes: 145 * Gb, bucketWidth: TimeSpan.FromHours(1));
 
@@ -150,7 +150,7 @@ public sealed class RollupBackfillTests
         /* Coverage DEEPER than raw (raw has already been purged past it) is also complete — not negative work. */
         var deeper = RollupBackfill.Plan(
             TimescaleSupport.QueryStatsHourlyView,
-            rawOldestUtc: DaysAgo(4), coverageOldestUtc: DaysAgo(21),
+            sourceOldestUtc: DaysAgo(4), coverageOldestUtc: DaysAgo(21),
             materializedBuckets: 500, materializedBytes: Gb, rawBytes: 145 * Gb, bucketWidth: TimeSpan.FromHours(1));
 
         Assert.True(deeper.IsComplete);
@@ -162,7 +162,7 @@ public sealed class RollupBackfillTests
     public void Plan_EmptyRawTable_IsComplete()
     {
         var plan = RollupBackfill.Plan(
-            TimescaleSupport.QueryStatsHourlyView, rawOldestUtc: null, coverageOldestUtc: null,
+            TimescaleSupport.QueryStatsHourlyView, sourceOldestUtc: null, coverageOldestUtc: null,
             materializedBuckets: 0, materializedBytes: 0, rawBytes: 0, bucketWidth: TimeSpan.FromHours(1));
 
         Assert.True(plan.IsComplete);
@@ -181,7 +181,7 @@ public sealed class RollupBackfillTests
         /* 72 buckets occupying 72 MB → 1 MB/bucket. A year of hourly buckets is 8,760 of them. */
         var calibrated = RollupBackfill.Plan(
             TimescaleSupport.QueryStatsHourlyView,
-            rawOldestUtc: DaysAgo(365), coverageOldestUtc: DaysAgo(3),
+            sourceOldestUtc: DaysAgo(365), coverageOldestUtc: DaysAgo(3),
             materializedBuckets: 72, materializedBytes: 72 * 1024 * 1024,
             rawBytes: 145 * Gb, bucketWidth: TimeSpan.FromHours(1));
 
@@ -192,7 +192,7 @@ public sealed class RollupBackfillTests
         /* Nothing materialized: no sample, so the estimate is an upper bound and says so. */
         var uncalibrated = RollupBackfill.Plan(
             TimescaleSupport.QueryStatsHourlyView,
-            rawOldestUtc: DaysAgo(365), coverageOldestUtc: null,
+            sourceOldestUtc: DaysAgo(365), coverageOldestUtc: null,
             materializedBuckets: 0, materializedBytes: 0,
             rawBytes: 145 * Gb, bucketWidth: TimeSpan.FromHours(1));
 
@@ -224,7 +224,7 @@ public sealed class RollupBackfillTests
     {
         var plan = RollupBackfill.Plan(
             TimescaleSupport.QueryStatsDailyView,
-            rawOldestUtc: Now.Date.AddDays(-10), coverageOldestUtc: Now.Date.AddDays(-10 + coverageDaysAgo),
+            sourceOldestUtc: Now.Date.AddDays(-10), coverageOldestUtc: Now.Date.AddDays(-10 + coverageDaysAgo),
             materializedBuckets: 10, materializedBytes: 10 * 1024 * 1024,
             rawBytes: Gb, bucketWidth: TimeSpan.FromHours(bucketHours));
 
@@ -288,7 +288,7 @@ public sealed class RollupBackfillTests
 
         var plan = RollupBackfill.Plan(
             TimescaleSupport.QueryStatsHourlyView,
-            rawOldestUtc: Now.AddHours(-100), coverageOldestUtc: Now,
+            sourceOldestUtc: Now.AddHours(-100), coverageOldestUtc: Now,
             materializedBuckets: sampleBuckets, materializedBytes: sampleBytes,
             rawBytes: 500 * Gb, bucketWidth: TimeSpan.FromHours(1));
 
@@ -299,7 +299,7 @@ public sealed class RollupBackfillTests
         Assert.Equal(expectedPerBucket * plan.BucketsToAdd, plan.EstimatedBytes, expectedPerBucket);
 
         /* And the pin that makes the fix visible in the SQL: a ROW count here is the shipped defect. */
-        var probe = RollupBackfill.ProbeSql(TimescaleSupport.QueryStatsHourlyView, "query_stats");
+        var probe = RollupBackfill.ProbeSql(TimescaleSupport.QueryStatsHourlyView, "query_stats", "collection_time");
         Assert.Contains($"count(DISTINCT bucket) FROM collect.{TimescaleSupport.QueryStatsHourlyView}", probe, StringComparison.Ordinal);
         Assert.DoesNotContain("count(*)", probe, StringComparison.Ordinal);
     }
@@ -317,7 +317,7 @@ public sealed class RollupBackfillTests
 
         var plan = RollupBackfill.Plan(
             TimescaleSupport.QueryStatsHourlyView,
-            rawOldestUtc: epochGarbage, coverageOldestUtc: Now,
+            sourceOldestUtc: epochGarbage, coverageOldestUtc: Now,
             materializedBuckets: 10, materializedBytes: 10 * 1024 * 1024,
             rawBytes: Gb, bucketWidth: TimeSpan.FromHours(1));
 
@@ -334,7 +334,7 @@ public sealed class RollupBackfillTests
         /* Ten years of real history still plans normally — the clamp must not refuse a long-lived store. */
         var longLived = RollupBackfill.Plan(
             TimescaleSupport.QueryStatsHourlyView,
-            rawOldestUtc: Now.AddDays(-3_000), coverageOldestUtc: Now,
+            sourceOldestUtc: Now.AddDays(-3_000), coverageOldestUtc: Now,
             materializedBuckets: 10, materializedBytes: 10 * 1024 * 1024,
             rawBytes: Gb, bucketWidth: TimeSpan.FromHours(1));
 
@@ -592,7 +592,7 @@ public sealed class RollupBackfillTests
     [Fact]
     public void ProbeSql_SizesTheMaterializationHypertable_NotTheViewsParent()
     {
-        var sql = RollupBackfill.ProbeSql(TimescaleSupport.QueryStatsHourlyView, "query_stats");
+        var sql = RollupBackfill.ProbeSql(TimescaleSupport.QueryStatsHourlyView, "query_stats", "collection_time");
 
         Assert.Contains("hypertable_size(", sql, StringComparison.Ordinal);
         Assert.Contains("materialization_hypertable_name", sql, StringComparison.Ordinal);
