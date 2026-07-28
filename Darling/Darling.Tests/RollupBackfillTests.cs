@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
@@ -493,30 +494,19 @@ public sealed class RollupBackfillTests
     public void RefreshSliceSql_BindsAndCastsBothBounds_AndForcesOnlyOnDemand()
     {
         var plain = RollupBackfill.RefreshSliceSql(TimescaleSupport.QueryStatsHourlyView);
-        Assert.Contains("CALL refresh_continuous_aggregate('collect.query_stats_hourly'::regclass, $1::timestamp, $2::timestamp)", plain, StringComparison.Ordinal);
+        Assert.Contains("CALL refresh_continuous_aggregate('collect.query_stats_hourly'::regclass, $1::timestamp, $2::timestamp, false, $3::jsonb)", plain, StringComparison.Ordinal);
         Assert.DoesNotContain("true", plain, StringComparison.Ordinal);
 
         var forced = RollupBackfill.RefreshSliceSql(TimescaleSupport.QueryStatsHourlyView, force: true);
-        Assert.Contains("$1::timestamp, $2::timestamp, true)", forced, StringComparison.Ordinal);
+        Assert.Contains("$1::timestamp, $2::timestamp, true, $3::jsonb)", forced, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// NO <c>options</c> ARGUMENT, on compatibility grounds — the premise it would have asserted is guarded
-    /// BEHAVIOURALLY instead, by
-    /// <c>RollupBackfillLiveTests.MidSliceCancellation_LeavesTheFloorInsideTheRange_WithNoGapsAbove</c>.
-    ///
-    /// <para>The resume story depends on newest-first batching, which is not a GUC — it rides the
-    /// <c>options</c> jsonb, so the product inherits an ENGINE DEFAULT here. Passing it explicitly was tried
-    /// and reverted: <c>options</c> arrived in 2.21, nothing gates a bring-your-own store's version, and the
-    /// 5-argument call raises 42883 on 2.18–2.20 — regressing stores that work today to guard a flip that has
-    /// not happened. The live pin tests the PROPERTY rather than the mechanism, so it holds on any engine
-    /// including BYO stores that would reject the option outright.</para>
-    ///
-    /// <para>This pin therefore guards the compatibility floor: adding <c>options</c> here is a decision with
-    /// a version cost, and it should have to break a test and be argued rather than slip in as a tidy-up.</para>
+    /// <c>refresh_newest_first</c> is DECLARED on any engine that accepts it, and the degraded shape exists
+    /// only for the 2.18–2.20 window where <c>options</c> does not.
     /// </summary>
     [Fact]
-    public void RefreshSliceSql_PassesNoOptions_BecauseTheBehaviourPinGuardsThePremiseInstead()
+    public void RefreshSliceSql_DeclaresNewestFirst_AndKeepsADegradedShapeForOlderStores()
     {
         foreach (var sql in new[]
         {
@@ -524,13 +514,54 @@ public sealed class RollupBackfillTests
             RollupBackfill.RefreshSliceSql(TimescaleSupport.QueryStatsHourlyView, force: true),
         })
         {
-            Assert.DoesNotContain("jsonb", sql, StringComparison.OrdinalIgnoreCase);
-            Assert.DoesNotContain("refresh_newest_first", sql, StringComparison.OrdinalIgnoreCase);
-
-            /* At most regclass + two bounds + force. A fifth argument is the 2.21 floor, not a formatting choice. */
-            var arguments = sql[(sql.IndexOf('(') + 1)..sql.LastIndexOf(')')];
-            Assert.True(arguments.Split(',').Length <= 4, $"refresh call gained an argument, which raises the TimescaleDB floor to 2.21: {sql}");
+            Assert.Contains("$3::jsonb", sql, StringComparison.Ordinal);
+            Assert.Equal(5, sql[(sql.IndexOf('(') + 1)..sql.LastIndexOf(')')].Split(',').Length);
         }
+
+        Assert.Contains("\"refresh_newest_first\": true", RollupBackfill.RefreshOptionsJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("buckets_per_batch", RollupBackfill.RefreshOptionsJson, StringComparison.Ordinal);
+
+        var degraded = RollupBackfill.RefreshSliceSql(TimescaleSupport.QueryStatsHourlyView, force: false, withOptions: false);
+        Assert.DoesNotContain("jsonb", degraded, StringComparison.Ordinal);
+        Assert.Equal(3, degraded[(degraded.IndexOf('(') + 1)..degraded.LastIndexOf(')')].Split(',').Length);
+        Assert.Equal("42883", RollupBackfill.UndefinedFunctionSqlState);
+    }
+
+    /// <summary>
+    /// THE DEGRADE MUST REACH A HUMAN, and this tests the SEAM rather than the sides.
+    ///
+    /// <para>The shipped-then-caught bug was not in the SQL and not in the SQLSTATE constant — both were
+    /// correct and both were pinned. It was that the disclosure sink was a trailing optional parameter which
+    /// both production call sites silently omitted, so the null-conditional invoke was a no-op and a pre-2.21
+    /// store degraded in total silence while the call-site doc and a passing test both asserted the contract
+    /// was carried. Green suite, green CI, and a self-review all missed it, because nothing had to acknowledge
+    /// the parameter existed.</para>
+    ///
+    /// <para>The primary fix is the compiler — the sink is now REQUIRED, so every call site must decide. This
+    /// pins the behaviour the compiler cannot: that the latch flips (one failed call per RUN, not per slice)
+    /// and that the operator is told exactly once, however many slices and rollups follow.</para>
+    /// </summary>
+    [Fact]
+    public void RefreshDisclosure_LatchesOncePerRun_AndTellsTheOperatorExactlyOnce()
+    {
+        var told = new List<string>();
+        var disclosure = new RefreshDisclosure(told.Add);
+
+        Assert.True(disclosure.OptionsSupported);
+
+        disclosure.OptionsUnavailable("this store predates the options parameter");
+
+        /* Latched: every later slice must take the degraded shape without re-attempting the 5-argument call. */
+        Assert.False(disclosure.OptionsSupported);
+
+        /* Said once, not once per slice — a 365-slice backfill must not print 365 identical notes. */
+        disclosure.OptionsUnavailable("this store predates the options parameter");
+        disclosure.OptionsUnavailable("this store predates the options parameter");
+        Assert.Single(told);
+        Assert.Contains("predates the options parameter", told[0], StringComparison.Ordinal);
+
+        /* A sink is not optional — that is exactly the shape that shipped a silent degrade. */
+        Assert.Throws<ArgumentNullException>(() => new RefreshDisclosure(null!));
     }
 
     /// <summary>
