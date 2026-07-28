@@ -44,6 +44,25 @@ public sealed class LivePostgresCollectionHygieneTests
     /// <summary>The env-var read as it appears in code — quoted, so <c>DARLING_TEST_PGRUNTIME</c> cannot match.</summary>
     private const string SharedStoreVariable = "\"DARLING_TEST_PG\"";
 
+    /// <summary>
+    /// The scratch-database helper's factory call. Reaching the store THROUGH the helper counts as reaching the
+    /// store, because that is what it does: <c>ScratchPostgres.CreateAsync</c> connects to the
+    /// <c>DARLING_TEST_PG</c> server and issues <c>CREATE DATABASE</c> on it.
+    ///
+    /// <para>Without this the guard would only work by ACCIDENT — it would be detecting the env-var read that
+    /// each consumer happens to duplicate at its own call site, not the store access. A routine DRY refactor
+    /// moving that read inside the helper would blind the rule for every consumer at once, silently, which is
+    /// exactly the failure it exists to prevent. Keying on the helper as well means the rule follows REACHING
+    /// the store rather than the spelling of how you got there, so that refactor stays legal instead of being
+    /// quietly forbidden.</para>
+    ///
+    /// <para>Matched with the trailing <c>.CreateAsync(</c> for the same reason the variable is matched quoted:
+    /// prose says "through <c>ScratchPostgres</c>" and a test method is named <c>…AgainstScratchPostgres</c>,
+    /// neither of which is a store access. The helper's own file declares <c>Task&lt;ScratchPostgres&gt;
+    /// CreateAsync(</c> and <c>new ScratchPostgres(</c>, so it does not match itself either.</para>
+    /// </summary>
+    private const string ScratchStoreFactory = "ScratchPostgres.CreateAsync(";
+
     private const string LiveCollectionAttribute = "[Collection(\"live-postgres\")]";
 
     /// <summary>The recorded-exemption marker. Prose, deliberately: the point is that a human wrote down why.</summary>
@@ -88,7 +107,7 @@ public sealed class LivePostgresCollectionHygieneTests
             }
 
             var text = File.ReadAllText(file);
-            if (!text.Contains(SharedStoreVariable, StringComparison.Ordinal))
+            if (!TouchesSharedStore(text))
             {
                 continue;
             }
@@ -100,7 +119,7 @@ public sealed class LivePostgresCollectionHygieneTests
                 var bodyEnd = i + 1 < declarations.Count ? declarations[i + 1].Index : text.Length;
                 var body = text[declaration.Index..bodyEnd];
 
-                if (!body.Contains(SharedStoreVariable, StringComparison.Ordinal))
+                if (!TouchesSharedStore(body))
                 {
                     continue;
                 }
@@ -118,8 +137,9 @@ public sealed class LivePostgresCollectionHygieneTests
         }
 
         Assert.True(offenders.Count == 0,
-            "These classes read the shared DARLING_TEST_PG store but neither serialize against the other live "
-            + "classes nor record why they do not:\n\n"
+            "These classes reach the shared DARLING_TEST_PG store — directly, or through ScratchPostgres, which "
+            + "mints its database on that server — but neither serialize against the other live classes nor "
+            + "record why they do not:\n\n"
             + string.Join("\n", offenders)
             + "\n\nPick one, deliberately:\n"
             + $"  - Add {LiveCollectionAttribute} if the class touches the SHARED database. Rolling the writes "
@@ -130,6 +150,14 @@ public sealed class LivePostgresCollectionHygieneTests
             + "...LivePostgresTests class (the shape more than forty files here already use) over serializing "
             + "every pure test alongside it.");
     }
+
+    /// <summary>
+    /// Does this source reach the shared store — directly by reading <c>DARLING_TEST_PG</c>, or through the
+    /// scratch-database helper, which mints its database ON that server? Either counts.
+    /// </summary>
+    private static bool TouchesSharedStore(string source) =>
+        source.Contains(SharedStoreVariable, StringComparison.Ordinal)
+        || source.Contains(ScratchStoreFactory, StringComparison.Ordinal);
 
     /// <summary>
     /// The class's own attribute/comment region: the <see cref="HeaderLookbackLines"/> lines immediately above the
