@@ -261,16 +261,31 @@ public static class DarlingRetention
 
                The true safety boundary is MEASURED instead: content older than the oldest SURVIVING
                digest-carrying fact row cannot be referenced by anything, whatever the reason those facts
-               are still there. Probe each dim-feeding table's floor — an index-edge read through its V39
-               partial index, once per sweep, the bounded shape the last_seen watermark design (#1768)
-               demands — take the MINIMUM across tables (same reasoning as the widest retention above), and
-               clamp the assumed cutoff to it. The blunt guard becomes unnecessary rather than dormant: a
-               store whose purges are blocked for weeks still reclaims dimension content for queries that
-               stopped running long before, and held history bounds the GC instead of stopping it.
+               are still there. Measure each dim-feeding table's floor once per sweep, take the MINIMUM
+               across tables (same reasoning as the widest retention above), and clamp the assumed cutoff
+               to it. The blunt guard becomes unnecessary rather than dormant: a store whose purges are
+               blocked for weeks still reclaims dimension content for queries that stopped running long
+               before, and held history bounds the GC instead of stopping it.
 
-               A floor that cannot be MEASURED (the table missing/renamed/unreachable) is different: the
-               safety boundary is then unknown, so the GC defers for the cycle — fail toward the recoverable
-               side, exactly as the old guard did. Bounded growth beats silently dangled digests. */
+               HOW the floor is measured differs by store shape (#1815, from the first field run):
+               - On a HYPERTABLE, the floor is the oldest surviving chunk's range_start, read from the
+                 chunk catalog — one instant metadata row, immune to compression. The exact per-row probe
+                 shipped first and timed out in the field: compressed chunks carry NO btree indexes, so
+                 the V39 partial index only serves uncompressed chunks and months of compressed history
+                 turned min() into a full decompress-scan. The chunk floor is CONSERVATIVE in the safe
+                 direction — every surviving fact row sits at or above its chunk's range_start, so the
+                 cutoff can only land older than strictly necessary: prunes less, never dangles. The
+                 ancient-orphan pathology #1795 targeted still dies (those sit far below any surviving
+                 chunk), and precision improves automatically as purges/backfill advance the chunk floor.
+               - On a PLAIN table (a plain-PostgreSQL store, or a table whose hypertable conversion
+                 failed — the catalog answers empty either way), the exact V39-indexed probe runs as
+                 designed — small, uncompressed, index-edge — now with the sweep's own generous command
+                 timeout instead of the driver's 30-second default that cancelled it in the field.
+
+               A floor that cannot be MEASURED (the table missing/renamed/unreachable) is unchanged: the
+               safety boundary is then unknown, so the GC defers for the cycle — fail toward the
+               recoverable side, exactly as the old guard did. Bounded growth beats silently dangled
+               digests. */
             DateTime? oldestSurvivingDigestFact = null;
             var floorUnmeasurable = false;
             foreach (var (factTable, digestPredicate) in PayloadDimensions.DigestPredicateByTable)
@@ -278,9 +293,34 @@ public static class DarlingRetention
                 try
                 {
                     await using var floorConnection = await postgres.OpenConnectionAsync(cancellationToken);
-                    await using var probe = new NpgsqlCommand(
-                        $"SELECT min({PrefixTimeColumn(factTable)}) FROM {factTable} WHERE {digestPredicate}", floorConnection);
-                    var floor = await probe.ExecuteScalarAsync(cancellationToken);
+
+                    DateTime? floor = null;
+                    if (timescaleAvailable)
+                    {
+                        /* AT TIME ZONE 'UTC' collapses the catalog's timestamptz to the naive-UTC
+                           discipline every stored timestamp follows (see PgCollectorRowWriter). */
+                        await using var chunkProbe = new NpgsqlCommand(
+                            "SELECT range_start AT TIME ZONE 'UTC' FROM timescaledb_information.chunks " +
+                            "WHERE hypertable_schema = 'collect' AND hypertable_name = $1 " +
+                            "ORDER BY range_start LIMIT 1", floorConnection)
+                        { CommandTimeout = DeleteTimeoutSeconds };
+                        chunkProbe.Parameters.AddWithValue(factTable);
+                        if (await chunkProbe.ExecuteScalarAsync(cancellationToken) is DateTime chunkFloor)
+                        {
+                            floor = chunkFloor;
+                        }
+                    }
+
+                    if (floor is null)
+                    {
+                        /* Plain table, failed conversion, or an empty hypertable (no chunks) — all of
+                           which the exact probe answers instantly or via the V39 partial index. */
+                        await using var probe = new NpgsqlCommand(
+                            $"SELECT min({PrefixTimeColumn(factTable)}) FROM {factTable} WHERE {digestPredicate}", floorConnection)
+                        { CommandTimeout = DeleteTimeoutSeconds };
+                        floor = await probe.ExecuteScalarAsync(cancellationToken) as DateTime?;
+                    }
+
                     if (floor is DateTime floorTime
                         && (oldestSurvivingDigestFact is null || floorTime < oldestSurvivingDigestFact.Value))
                     {
