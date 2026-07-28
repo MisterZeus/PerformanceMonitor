@@ -170,6 +170,17 @@ public sealed class DarlingManagedPostgres
     public const string ConfMarkerV6 = "# Managed by PerformanceMonitor Darling (v6 log rotation) -- do not remove this block";
 
     /// <summary>
+    /// Marker for the v7 compression-memory override (#1777). A SEVENTH independently versioned block,
+    /// same heal discipline as v5: it re-states ONLY <c>maintenance_work_mem</c>, so a store already
+    /// carrying a v3 block written under the old <c>min(5% RAM, 1 GB)</c> rule adopts the raised floor on
+    /// its next service-owned start — postgresql.conf takes the LAST occurrence of a setting, so appending
+    /// wins without rewriting v3. This is the half that reaches EXISTING stores: a formula change alone
+    /// would only ever have applied to a fresh initdb, and the boxes that need it are the ones already
+    /// collecting.
+    /// </summary>
+    public const string ConfMarkerV7 = "# Managed by PerformanceMonitor Darling (v7 compression memory) -- do not remove this block";
+
+    /// <summary>
     /// Markers delimiting the Darling-managed network access block in pg_hba.conf
     /// (darling-network-endpoints, D5). <see cref="ReconcilePgHba"/> replaces exactly the lines
     /// between them and preserves every non-marked line, so the opt-in <c>hostssl</c> rule is
@@ -452,8 +463,25 @@ public sealed class DarlingManagedPostgres
     ///   RESTART-ONLY, like max_worker_processes; it applies on the next server start.</item>
     /// <item><b>effective_cache_size</b> = 75% RAM — a PLANNER HINT (no allocation) telling the planner how
     ///   much data is likely cached (PG + OS cache), biasing it toward index scans.</item>
-    /// <item><b>maintenance_work_mem</b> = min(5% RAM, 1 GB) — headroom for VACUUM / CREATE INDEX; capped at
-    ///   1 GB because several autovacuum workers can each take up to this.</item>
+    /// <item><b>maintenance_work_mem</b> = min(max(5% RAM, 1.5 GB), 25% RAM, 2 GB) — headroom for VACUUM /
+    ///   CREATE INDEX, and the setting TimescaleDB's compression sort runs on, which is what drove the
+    ///   shape (#1777). MEASURED on a production field instance (16 GB RAM class), three points during a
+    ///   one-time catch-up of large backlog chunks: at the old formula's landing point (~800 MB) compression
+    ///   moved ~9.1 MB/s of uncompressed input; at 1536 MB it moved 15.5 MB/s (a pure-linear null hypothesis
+    ///   predicted 2833s, actual was 1657s — a real effect, not noise); at 4096 MB it moved 16.1 MB/s, so
+    ///   going 2.7x further past 1536 bought nothing measurable. Hence the terms: the <b>1.5 GB floor</b> is
+    ///   the measured capture point and is the fix itself (the old 5%-of-RAM term landed UNDER the old 1 GB
+    ///   cap on a 16 GB host, so raising the cap alone would have changed nothing); the <b>25%-of-RAM</b>
+    ///   term keeps the floor from overcommitting a small host; the <b>2 GB cap</b> concedes nothing
+    ///   measurable and bounds the big-RAM case. Honest limits, both recorded in #1777: the three points are
+    ///   different tables at different sizes rather than a controlled experiment, so the exact threshold
+    ///   between ~800 MB and 1536 MB is unknown; and the floor raises SMALL hosts more than the 16 GB host
+    ///   it was measured on (a 4 GB host goes 204 -> 1024 MB, an 8 GB host 409 -> 1536 MB). That is
+    ///   deliberate and bounded: this is a per-operation CEILING, not a reservation — PostgreSQL grows the
+    ///   sort/TidStore allocation to fit the work, and a small host's chunks are small, so the ceiling is
+    ///   simply never reached there. PG 17+ (the bundle pins 18.4) also made vacuum's dead-TID store grow
+    ///   incrementally rather than allocating the full limit up front, which is what made the old comment's
+    ///   "several autovacuum workers can each take up to this" the binding worry it no longer is.</item>
     /// <item><b>work_mem</b> = clamp(RAM/512, 16 MB, 64 MB) — the ONE with real downside (per-sort,
     ///   per-connection: worst-case ≈ max_connections × sorts × work_mem), so it is deliberately modest.
     ///   At the PG default max_connections = 100 with ~3 concurrent sort/hash nodes, the pathological
@@ -472,7 +500,12 @@ public sealed class DarlingManagedPostgres
 
         var sharedBuffers = Math.Min(ram / 4, oneGb);              /* 25% RAM, capped at 1 GB (co-located store + Windows 487 mitigation, #1559) — restart-only */
         var effectiveCache = ram / 4 * 3;                          /* 75% RAM — planner hint, not an allocation */
-        var maintenanceWorkMem = Math.Min(ram / 20, oneGb);        /* 5% RAM, capped at 1 GB */
+        /* #1777: 5% RAM with a MEASURED 1.5 GB floor (compression throughput rose ~70% reaching it and
+           plateaued there), guarded by 25% of RAM so the floor cannot overcommit a small host, and capped
+           at 2 GB where the field data showed nothing further to gain. */
+        var maintenanceWorkMem = Math.Min(
+            Math.Min(Math.Max(ram / 20, 1536 * oneMb), ram / 4),
+            2048 * oneMb);
         var workMem = Math.Clamp(ram / 512, 16 * oneMb, 64 * oneMb);
 
         return new MemorySettings(
@@ -501,6 +534,27 @@ public sealed class DarlingManagedPostgres
         builder.Append("effective_cache_size = ").Append(settings.EffectiveCacheSizeMb).Append("MB\n");
         builder.Append("maintenance_work_mem = ").Append(settings.MaintenanceWorkMemMb).Append("MB\n");
         builder.Append("work_mem = ").Append(settings.WorkMemMb).Append("MB\n");
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// The v7 compression-memory override (#1777) — the propagation half of the raised
+    /// <c>maintenance_work_mem</c> floor. Built exactly like the v5 shared_buffers override: it re-states
+    /// ONE setting so a store whose v3 block was written under the old <c>min(5% RAM, 1 GB)</c> rule heals
+    /// UP by conf last-occurrence-wins, without ever rewriting the v3 block (which
+    /// <see cref="EnsureConfAppended"/> never does). Without this block the new formula would reach fresh
+    /// initdbs only, and the stores that measurably need it are the ones already running.
+    ///
+    /// <para><c>maintenance_work_mem</c> is plain SIGHUP-reloadable rather than restart-only, but the append
+    /// happens before <c>pg_ctl start</c>, so an existing store picks it up on that very start.</para>
+    /// </summary>
+    public static string BuildCompressionMemoryConfAppend(long totalPhysicalMemoryBytes)
+    {
+        var settings = DeriveMemorySettings(totalPhysicalMemoryBytes);
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV7).Append('\n');
+        builder.Append("maintenance_work_mem = ").Append(settings.MaintenanceWorkMemMb).Append("MB\n");
         return builder.ToString();
     }
 
@@ -918,6 +972,19 @@ public sealed class DarlingManagedPostgres
             _logger.LogInformation(
                 "Appended v6 log rotation to postgresql.conf (logging collector, 7-file weekday ring under {LogDir}; pg.log keeps only pg_ctl and pre-collector startup lines)",
                 Path.Combine(dataDirectory, "log"));
+        }
+
+        /* Checked independently of v1-v6: a store whose v3 block wrote maintenance_work_mem under the old
+           min(5% RAM, 1 GB) rule heals UP to the measured 1.5 GB compression floor (last-occurrence-wins
+           override, #1777). This is what carries the fix to EXISTING stores — the formula alone would only
+           ever have reached a fresh initdb. */
+        if (!conf.Contains(ConfMarkerV7, StringComparison.Ordinal))
+        {
+            var v7RamBytes = GetTotalPhysicalMemoryBytes();
+            File.AppendAllText(confPath, BuildCompressionMemoryConfAppend(v7RamBytes));
+            _logger.LogInformation(
+                "Appended v7 compression memory to postgresql.conf (maintenance_work_mem = {Maintenance}MB from min(max(5% RAM, 1536MB), 25% RAM, 2048MB); TimescaleDB compression sorts on this setting)",
+                DeriveMemorySettings(v7RamBytes).MaintenanceWorkMemMb);
         }
     }
 
