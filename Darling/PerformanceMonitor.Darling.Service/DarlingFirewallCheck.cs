@@ -90,7 +90,10 @@ internal static class DarlingFirewallCheck
     /// elevated verb sweeps this wildcard per surface before ensuring the desired rule.
     /// <para>An unrecognized name (no port suffix) returns UNCHANGED rather than gaining a wildcard. That is
     /// the safety property, not a formality: a wildcard derived from a malformed name could match — and
-    /// therefore delete — rules this product does not own.</para>
+    /// therefore delete — rules this product does not own. The consequence is worth stating exactly, because it
+    /// is stronger than "safe" and provable from these two lines: on that path the caller's sweep degrades to
+    /// the exact-name removal it already performed, so this change is <b>strictly additive in blast radius</b> —
+    /// it can only ever widen a delete to OTHER PORTS OF THE SAME SURFACE, never to anything else.</para>
     /// </summary>
     internal static string SurfaceRuleWildcard(string ruleName)
     {

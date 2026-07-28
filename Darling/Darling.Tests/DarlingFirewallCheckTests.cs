@@ -228,14 +228,31 @@ public class DarlingFirewallCheckTests
     {
         /* Pins the call shape, because the failure is silent and total: `sweep + "; " + enable` exits at the
            sweep's `exit 0` and the rule is never created, while the verb still reports success. I wrote that
-           bug and caught it before it ran. */
-        var source = ReadRepoFile(Path.Combine(
-            "Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs"));
+           bug and caught it before it ran.
+           Asserts POSITIVELY that the sweep is the first argument of its own step, rather than blacklisting
+           the spellings of the bug. A review noted the earlier form only forbade two literal spellings, so a
+           missing space around the +, an intermediate variable, or string.Concat would each have slipped past;
+           requiring the call to sit directly in TryRunFirewallStepAsync's command position rules all of those
+           out at once. Whitespace is normalized so reformatting cannot break the pin. */
+        var source = NormalizeWhitespace(ReadRepoFile(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs")));
 
-        Assert.DoesNotContain("BuildFirewallSweepCommand(wildcard) + ", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("sweep + \"; \"", source, StringComparison.Ordinal);
-        Assert.Contains("BuildFirewallSweepCommand(wildcard)", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "TryRunFirewallStepAsync( DarlingManagedPostgres.BuildFirewallSweepCommand(wildcard),",
+            source,
+            StringComparison.Ordinal);
+
+        /* Same proof for the open: a complete argument, never folded into a larger string. */
+        Assert.Contains(
+            "TryRunFirewallStepAsync( DarlingManagedPostgres.BuildFirewallEnableCommand(plan.RuleName, plan.Port, plan.Cidr!),",
+            source,
+            StringComparison.Ordinal);
     }
+
+    /// <summary>Collapses every run of whitespace to a single space, so a source-shape pin survives
+    /// reformatting and line rewrapping while still proving the call structure.</summary>
+    private static string NormalizeWhitespace(string source)
+        => System.Text.RegularExpressions.Regex.Replace(source, @"\s+", " ");
 
     /* ---- no retry spam: report once per state, not once per supervisor tick ---- */
 
