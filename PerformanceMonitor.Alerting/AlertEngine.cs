@@ -811,7 +811,20 @@ public sealed class AlertEngine
 
         try
         {
-            var anomalousJobs = await _readAdapter.GetAnomalousJobsAsync(key, _settings.LongRunningJobMultiplier, ct); /* :562 */
+            var jobsResult = await _readAdapter.GetAnomalousJobsAsync(key, _settings.LongRunningJobMultiplier, ct); /* :562 */
+
+            /* #1812: a stale latest snapshot is NO evidence, in either direction. Firing on it re-alerts
+               a historical run every cooldown forever (the per-run cooldown key deliberately expires each
+               pass below); resolving on it fabricates "jobs cleared" out of a collector that merely
+               stopped reporting. Leave the active-state flag untouched — when a fresh snapshot returns,
+               evaluation resumes and fires or resolves from real evidence. */
+            if (!jobsResult.SnapshotIsFresh)
+            {
+                _logger?.LogDebug("Long-running-job check skipped for {Server}: the latest running_jobs snapshot is stale (no current evidence)", serverName);
+                return;
+            }
+
+            var anomalousJobs = jobsResult.Jobs;
 
             /* :564-573 — the per-run cooldown dict grows without bound; drop entries aged past
                the cooldown each pass (scans ALL servers' entries, exactly like Lite). */

@@ -111,8 +111,14 @@ public sealed class AlertEngineTests
         public Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(TempDb);
 
-        public Task<List<AnomalousJobInfo>> GetAnomalousJobsAsync(string serverKey, int multiplier, CancellationToken cancellationToken = default) =>
-            Task.FromResult(new List<AnomalousJobInfo>(AnomalousJobs));
+        /* #1812: fakes report a FRESH snapshot by default so every pre-existing scenario keeps its
+           meaning; the staleness tests flip SnapshotIsStale to model a dead collector. */
+        public bool SnapshotIsStale { get; set; }
+
+        public Task<AnomalousJobsResult> GetAnomalousJobsAsync(string serverKey, int multiplier, CancellationToken cancellationToken = default) =>
+            Task.FromResult(SnapshotIsStale
+                ? AnomalousJobsResult.Stale
+                : new AnomalousJobsResult(SnapshotIsFresh: true, new List<AnomalousJobInfo>(AnomalousJobs)));
     }
 
     private sealed class FakeStateStore : IAlertStateStore
@@ -678,6 +684,43 @@ public sealed class AlertEngineTests
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
     }
 
+    [Fact]
+    public async Task AnomalousJob_StaleSnapshotIsNoEvidence_NeitherFiresNorResolves()
+    {
+        /* #1812: a stale latest snapshot re-fired the same historical run every cooldown — the per-run
+           cooldown key deliberately expires each pass, so the stale rows re-armed it forever. And an
+           empty-on-stale read would have fabricated "jobs cleared" out of a collector that merely
+           stopped reporting. Stale = NO evidence: skip both branches, leave the active state alone;
+           fresh evidence resumes real evaluation. */
+        var h = new Harness();
+        h.Settings.LongRunningJobEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.AnomalousJobs.Add(new AnomalousJobInfo
+        {
+            JobName = "Nightly ETL", JobId = "job-1", StartTime = new DateTime(2026, 7, 1, 11, 0, 0),
+            CurrentDurationSeconds = 3600, AvgDurationSeconds = 900, PercentOfAverage = 400
+        });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);            /* the live fire — arms the active flag */
+
+        /* The collector dies; the snapshot goes stale while its rows still "match". Two cooldowns
+           elapse — the old behavior re-fired at each. */
+        h.Adapter.SnapshotIsStale = true;
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);            /* no re-fire on stale evidence */
+        Assert.Empty(h.Resolutions);                    /* and no fabricated "jobs cleared" */
+
+        /* Fresh evidence returns with the jobs genuinely gone → the REAL resolution fires. */
+        h.Adapter.SnapshotIsStale = false;
+        h.Adapter.AnomalousJobs.Clear();
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal("Long-Running Jobs Cleared", Assert.Single(h.Resolutions).Title);
+    }
+
     /* ---------------- failed jobs ---------------- */
 
     [Fact]
@@ -777,7 +820,7 @@ public sealed class AlertEngineTests
             throw new InvalidOperationException("store down");
         public Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
-        public Task<List<AnomalousJobInfo>> GetAnomalousJobsAsync(string serverKey, int multiplier, CancellationToken cancellationToken = default) =>
+        public Task<AnomalousJobsResult> GetAnomalousJobsAsync(string serverKey, int multiplier, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
     }
 

@@ -114,8 +114,13 @@ public class LiteAlertForwardingTests
         public Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(TempDb);
 
-        public Task<List<AnomalousJobInfo>> GetAnomalousJobsAsync(string serverKey, int multiplier, CancellationToken cancellationToken = default) =>
-            Task.FromResult(new List<AnomalousJobInfo>(AnomalousJobs));
+        /* #1812: fresh by default so pre-existing scenarios keep their meaning. */
+        public bool SnapshotIsStale { get; set; }
+
+        public Task<AnomalousJobsResult> GetAnomalousJobsAsync(string serverKey, int multiplier, CancellationToken cancellationToken = default) =>
+            Task.FromResult(SnapshotIsStale
+                ? AnomalousJobsResult.Stale
+                : new AnomalousJobsResult(SnapshotIsFresh: true, new List<AnomalousJobInfo>(AnomalousJobs)));
     }
 
     private sealed class InMemoryStateStore : IAlertStateStore

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 
 namespace PerformanceMonitor.Alerting;
 
@@ -25,4 +26,31 @@ public class AnomalousJobInfo
     public long P95DurationSeconds { get; set; }
     public decimal? PercentOfAverage { get; set; }
     public DateTime StartTime { get; set; }
+}
+
+/// <summary>
+/// The anomalous-jobs read with its evidence quality attached (#1812). <paramref name="SnapshotIsFresh"/>
+/// is FALSE when the newest running_jobs snapshot is older than the freshness bound (or the store has no
+/// snapshot at all): the rows describe what WAS running, not what IS, so the engine must treat the read
+/// as no evidence — neither firing (the reported defect: a historical run re-alerting every cooldown,
+/// forever, because the per-run cooldown key deliberately expires) nor fabricating a "jobs cleared"
+/// resolution off staleness. <paramref name="Jobs"/> is empty whenever the snapshot is stale — the
+/// adapters skip the row read entirely rather than hand the engine rows it must not use.
+/// </summary>
+public sealed record AnomalousJobsResult(bool SnapshotIsFresh, List<AnomalousJobInfo> Jobs)
+{
+    /// <summary>The no-evidence result: stale (or absent) snapshot, no rows.</summary>
+    public static readonly AnomalousJobsResult Stale = new(false, new List<AnomalousJobInfo>());
+
+    /// <summary>
+    /// How old the newest running_jobs snapshot may be and still count as CURRENT: three missed
+    /// collection cycles at the server's effective cadence, floored at 10 minutes so the fastest
+    /// cadences keep slack for a slow sweep. Derived from the cadence rather than a fixed constant
+    /// because the shipped profiles span 2 to 30 minutes — a fixed bound is either meaningless for
+    /// the slow profile or blind for the fast one. The construction sites supply the effective
+    /// per-server cadence (Lite's ScheduleManager, Darling's resolved schedule); adapters fall back
+    /// to the shared default when a server has no entry.
+    /// </summary>
+    public static TimeSpan MaxSnapshotAge(int cadenceMinutes)
+        => TimeSpan.FromMinutes(Math.Max(cadenceMinutes * 3, 10));
 }

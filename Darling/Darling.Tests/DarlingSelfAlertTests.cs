@@ -1951,8 +1951,8 @@ public sealed class DarlingSelfAlertTests
             Task.FromResult(new List<VolumeFreeSpaceInfo>());
         public Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult<TempDbSpaceInfo?>(null);
-        public Task<List<AnomalousJobInfo>> GetAnomalousJobsAsync(string serverKey, int multiplier, CancellationToken cancellationToken = default) =>
-            Task.FromResult(new List<AnomalousJobInfo>());
+        public Task<AnomalousJobsResult> GetAnomalousJobsAsync(string serverKey, int multiplier, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new AnomalousJobsResult(SnapshotIsFresh: true, new List<AnomalousJobInfo>()));
     }
 
     private sealed class StubStateStore : IAlertStateStore

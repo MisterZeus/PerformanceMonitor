@@ -350,7 +350,10 @@ public class BlockingDeadlockContextBuilderTests
             typeof(LiteAlertReadAdapter).GetMethod("GetVolumeFreeSpaceAsync")!.ReturnType);
         Assert.Equal(typeof(Task<TempDbSpaceInfo?>),
             typeof(LiteAlertReadAdapter).GetMethod("GetTempDbSpaceAsync")!.ReturnType);
-        Assert.Equal(typeof(Task<List<AnomalousJobInfo>>),
+        /* #1812: the jobs feed carries its evidence quality — a stale snapshot must be
+           distinguishable from genuinely-no-anomalous-jobs, or the engine either re-fires a
+           historical run forever or fabricates a resolution. */
+        Assert.Equal(typeof(Task<AnomalousJobsResult>),
             typeof(LiteAlertReadAdapter).GetMethod("GetAnomalousJobsAsync")!.ReturnType);
         Assert.Null(typeof(IAlertReadAdapter).GetMethod("GetRecentlyFailedJobsAsync"));
     }

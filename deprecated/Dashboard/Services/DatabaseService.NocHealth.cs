@@ -1029,6 +1029,12 @@ namespace PerformanceMonitorDashboard.Services
             var results = new List<AnomalousJobInfo>();
             var thresholdPercent = multiplier * 100;
 
+            /* #1812: the latest snapshot is only evidence when FRESH. Without the freshness bound a
+               stopped collection job left a stale "latest" that read as NOW, and the alert loop
+               re-fired the same historical run every cooldown, forever (Lite and Darling had the
+               identical defect; all three now bound the read). 10 minutes = the file's staleness
+               idiom (:871) and several times the collection job's cadence; SYSDATETIME matches the
+               collection's server-local stamps. */
             var query = @"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
                 SELECT TOP (5)
@@ -1041,6 +1047,7 @@ namespace PerformanceMonitorDashboard.Services
                     start_time
                 FROM collect.running_jobs
                 WHERE collection_time = (SELECT MAX(collection_time) FROM collect.running_jobs)
+                AND collection_time >= DATEADD(MINUTE, -10, SYSDATETIME())
                 AND avg_duration_seconds >= 60
                 AND percent_of_average >= @thresholdPercent
                 ORDER BY percent_of_average DESC
