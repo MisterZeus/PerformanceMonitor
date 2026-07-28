@@ -1141,6 +1141,87 @@ public sealed class PayloadDimensionTests
         return literals;
     }
 
+
+    /// <summary>
+    /// The raw-tier retention policies must be DERIVED from <see cref="TimescaleSupport.RawTierCoverage"/>,
+    /// not written out again beside it (#1784).
+    ///
+    /// <para>That map is the single source of truth for which tables are coverage-gated, and it is what makes
+    /// the tiered POLICY and the catalog SWEEP unable to judge the same drop differently. Today that property
+    /// is only structural: someone re-hardcoding the three rows in the policy list gets an identical policy set
+    /// and stays green — right up until the map gains a fourth tier, or one of the three changes its covering
+    /// aggregate, and the two paths silently disagree about the very thing the map exists to keep aligned.
+    /// A behavioural test cannot see that, because a duplicated list produces the same policies; only reading
+    /// the construction can.</para>
+    ///
+    /// <para>So this asserts the method BUILDS from the map and names none of the gated relations as literals.
+    /// It is the "enforce it, don't document it" shape: the failure it prevents is a green test suite over a
+    /// broken invariant.</para>
+    /// </summary>
+    [Fact]
+    public void RawTierRetentionPolicies_AreDerivedFromTheCoverageMap_NotRehardcodedBesideIt()
+    {
+        var root = FindRepoRoot();
+        Assert.True(root is not null, RepoRootNotFound);
+
+        var source = File.ReadAllText(Path.Combine(
+            root!, "Darling", "PerformanceMonitor.Darling.Storage", "TimescaleSupport.cs"));
+
+        var body = MethodBody(source, "public static async Task<int> EnsureRetentionPoliciesAsync");
+        Assert.False(string.IsNullOrEmpty(body),
+            "could not locate EnsureRetentionPoliciesAsync — the guard cannot silently pass on a parse miss");
+
+        Assert.Contains(nameof(TimescaleSupport.RawTierCoverage), body, StringComparison.Ordinal);
+
+        foreach (var (relation, _, _) in TimescaleSupport.RawTierCoverage)
+        {
+            Assert.False(
+                body.Contains('"' + relation + '"', StringComparison.Ordinal),
+                $"EnsureRetentionPoliciesAsync names \"{relation}\" as a literal. The coverage-gated tiers must " +
+                "come from RawTierCoverage so the retention policy and the catalog sweep (#1784) cannot drift " +
+                "apart about which tables are gated — re-hardcoding them passes every behavioural test until " +
+                "the two lists disagree.");
+        }
+    }
+
+    /// <summary>
+    /// The body of a method, by brace matching from its signature. Returns empty when the signature is not
+    /// found, so a caller can FAIL rather than silently pass on a parse miss.
+    /// </summary>
+    private static string MethodBody(string source, string signature)
+    {
+        var start = source.IndexOf(signature, StringComparison.Ordinal);
+        if (start < 0)
+        {
+            return string.Empty;
+        }
+
+        var open = source.IndexOf('{', start);
+        if (open < 0)
+        {
+            return string.Empty;
+        }
+
+        var depth = 0;
+        for (var i = open; i < source.Length; i++)
+        {
+            if (source[i] == '{')
+            {
+                depth++;
+            }
+            else if (source[i] == '}')
+            {
+                depth--;
+                if (depth == 0)
+                {
+                    return source.Substring(open, i - open + 1);
+                }
+            }
+        }
+
+        return string.Empty;
+    }
+
     /// <summary>
     /// Walks up from the test output directory to the repo root — the directory holding
     /// <c>PerformanceMonitor.sln</c>. Same walk-up idiom as <c>DocCommentHygieneTests.FindRepoRoot</c>.
