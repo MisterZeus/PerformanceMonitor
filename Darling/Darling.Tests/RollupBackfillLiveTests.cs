@@ -182,6 +182,9 @@ AND   j.hypertable_name = 'query_stats'
 AND   j.scheduled", ct);
 
         Assert.True(armed == 1, "query_stats' retention policy should have armed itself once the rollup covered it");
+
+        /* Same reason as above: no background worker left running against a database about to vanish. */
+        await UnscheduleAllJobsAsync(connection, ct);
     }
 
     /// <summary>
@@ -519,6 +522,9 @@ WHERE NOT EXISTS (SELECT 1 FROM collect.{view} AS h WHERE h.bucket = src.b)",
         Assert.True(await RollupBackfill.ReadCoverageFloorAsync(connection, view, ct) <= probe.RawOldestUtc);
         await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct);
         Assert.Equal(1L, await CountAsync(connection, ArmedRawPolicySql, ct));
+
+        /* Stand the scheduler down before this scratch database is force-dropped underneath it. */
+        await UnscheduleAllJobsAsync(connection, ct);
     }
 
     /// <summary>
@@ -596,6 +602,37 @@ VALUES ($1, $2, $3, 'backfill-e2e', 'TestDb', decode(md5('poison'), 'hex'), deco
             {
                 File.Delete(configPath);
             }
+        }
+    }
+
+    /// <summary>
+    /// Unschedules every background job in this scratch database.
+    ///
+    /// <para>These tests ARM real retention policies, because the gate's decision is the thing under test —
+    /// but an armed policy means TimescaleDB's scheduler will launch a background worker to run
+    /// <c>drop_chunks</c> against a database <see cref="ScratchPostgres"/> is about to
+    /// <c>DROP … WITH (FORCE)</c>. Leaving a worker running against a vanishing database is a hazard I
+    /// introduced with the arming assertions, and it costs one statement to remove.</para>
+    ///
+    /// <para>Called after the assertions, so it takes nothing away from them: what is under test is whether
+    /// the gate DECIDED to arm, which has already been read from the job catalog by then. Nothing here needs
+    /// the purge to actually execute.</para>
+    ///
+    /// <para>Best-effort by design — a cleanup failure must never fail a passing test, which would invert the
+    /// signal.</para>
+    /// </summary>
+    private static async Task UnscheduleAllJobsAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var command = new NpgsqlCommand(
+                "SELECT alter_job(job_id, scheduled => false) FROM timescaledb_information.jobs WHERE job_id >= 1000",
+                connection);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _ = ex;
         }
     }
 
