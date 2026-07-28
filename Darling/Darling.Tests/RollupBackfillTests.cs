@@ -1,0 +1,434 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Linq;
+using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// #1759 Phase 2: the staged, disk-preflighted rollup backfill.
+///
+/// <para>The hazard this whole verb is shaped around: the #1680 arming gate is ALL-OR-NOTHING, so a store with a
+/// year of raw must materialize the WHOLE history before the first purge arms and reclaims anything. Peak disk
+/// comes BEFORE any relief, on the exact stores worst affected. Every pin below defends one of the three things
+/// that keeps that from becoming a disk-exhaustion event: a preflight that refuses with numbers, an order that
+/// cannot silently under-cover, and a convergence check that believes DATA rather than a returned success.</para>
+/// </summary>
+public sealed class RollupBackfillTests
+{
+    private static readonly DateTime Now = new(2026, 7, 25, 0, 0, 0, DateTimeKind.Unspecified);
+
+    private static DateTime DaysAgo(double days) => Now.AddDays(-days);
+
+    private const long Gb = 1024L * 1024 * 1024;
+
+    /* ─────────────────────────── the disk preflight ─────────────────────────── */
+
+    /// <summary>
+    /// WATCHED (mutation): bypass the preflight and the verb walks into insufficient space. The refusal is the
+    /// only thing standing between "materialize a year of history" and a full volume on a production store that
+    /// was already down to ~150 GB free — and because peak disk comes before ANY reclaim, filling the volume
+    /// does not even buy the space it was trying to free.
+    /// </summary>
+    [Theory]
+    /* Comfortably clear: estimate + 25% headroom + 10 GB reserve all fit. */
+    [InlineData(10, 100, true)]
+    /* Exactly on the line (10 GB estimate needs 12.5 + 10 = 22.5 GB). */
+    [InlineData(10, 23, true)]
+    [InlineData(10, 22, false)]
+    /* The field shape: a large backfill against a nearly-full volume. */
+    [InlineData(200, 150, false)]
+    /* Free space that would cover the estimate but eat the reserve — still refused. PostgreSQL needs room for
+       WAL and temp files, and a store driven to zero is a worse outcome than a refused backfill. */
+    [InlineData(100, 110, false)]
+    public void HasRoom_RequiresTheEstimatePlusHeadroomPlusTheReserve(long estimateGb, long freeGb, bool expected) =>
+        Assert.Equal(expected, RollupBackfill.HasRoom(estimateGb * Gb, freeGb * Gb));
+
+    /// <summary>The reserve is never negotiable: even a zero-byte backfill leaves it alone, so the arithmetic
+    /// cannot degenerate into "any free space will do".</summary>
+    [Fact]
+    public void RequiredBytes_NeverDropsBelowTheReserve()
+    {
+        Assert.Equal(RollupBackfill.ReserveBytes, RollupBackfill.RequiredBytes(0));
+        Assert.True(RollupBackfill.RequiredBytes(100 * Gb) > 100 * Gb + RollupBackfill.ReserveBytes,
+            "the safety factor must add headroom ON TOP of the estimate, not replace it");
+    }
+
+    /// <summary>
+    /// The refusal has to be usable by someone at 2am who did not read this issue. It must name the SHORTFALL
+    /// (not just "insufficient space"), and it must give both real options — grow the disk, or accept waiting —
+    /// including the part that is easy to get wrong: waiting is SAFE. Nothing is being lost while the purges are
+    /// held, so an operator who cannot grow the volume today needs to know they are not in an emergency.
+    /// </summary>
+    [Fact]
+    public void FormatDiskRefusal_NamesTheShortfallAndBothOptions()
+    {
+        var refusal = DarlingCliCommands.FormatDiskRefusal(estimatedBytes: 200 * Gb, freeBytes: 150 * Gb);
+
+        Assert.Contains("REFUSING", refusal, StringComparison.Ordinal);
+        Assert.Contains("SHORT BY", refusal, StringComparison.Ordinal);
+        Assert.Contains("200 GB", refusal, StringComparison.Ordinal);
+        Assert.Contains("150 GB", refusal, StringComparison.Ordinal);
+
+        /* Option 1: grow the disk, by a NAMED amount. */
+        Assert.Contains("Grow the volume by at least", refusal, StringComparison.Ordinal);
+
+        /* Option 2: waiting is safe — and says WHY, so it does not read as a shrug. */
+        Assert.Contains("Accept waiting", refusal, StringComparison.Ordinal);
+        Assert.Contains("nothing is being lost", refusal, StringComparison.Ordinal);
+
+        /* And the honest cost of waiting, so it is not oversold either. */
+        Assert.Contains("Raw keeps growing", refusal, StringComparison.Ordinal);
+    }
+
+    /// <summary>Sizes are formatted invariantly — this text goes to an operator's console and into a refusal, so
+    /// a machine with a comma decimal separator must not render "12,5 GB" in one place and "12.5 GB" in
+    /// another.</summary>
+    [Fact]
+    public void FormatBytes_IsInvariantAndHumanReadable()
+    {
+        Assert.Equal("512 B", RollupBackfillPlan.FormatBytes(512));
+        Assert.Equal("1 KB", RollupBackfillPlan.FormatBytes(1024));
+        Assert.Equal("1.5 GB", RollupBackfillPlan.FormatBytes(Gb + (Gb / 2)));
+        Assert.Equal("2 TB", RollupBackfillPlan.FormatBytes(2L * 1024 * Gb));
+    }
+
+    /* ─────────────────────────── the plan ─────────────────────────── */
+
+    /// <summary>
+    /// IDEMPOTENT AND RESUMABLE, which is one property with two names: the plan is always computed from the
+    /// MEASURED coverage floor, so a completed run converges to a no-op and an interrupted one continues from
+    /// where it stopped. Without this the verb would either re-materialize a year of history on every
+    /// invocation, or need external state to remember where it was.
+    /// </summary>
+    [Fact]
+    public void Plan_IsComputedFromTheMeasuredFloor_SoItResumesAndConverges()
+    {
+        /* A fresh #1759 store: raw reaches back a year, the rollup only to the policy's 3-day window. */
+        var initial = RollupBackfill.Plan(
+            TimescaleSupport.QueryStatsHourlyView,
+            rawOldestUtc: DaysAgo(365), coverageOldestUtc: DaysAgo(3),
+            materializedBuckets: 72, materializedBytes: 72 * 1024 * 1024,
+            rawBytes: 145 * Gb, bucketWidth: TimeSpan.FromHours(1));
+
+        Assert.False(initial.IsComplete);
+        Assert.Equal(DaysAgo(365).Date, initial.FromUtc);
+        Assert.Equal(DaysAgo(3), initial.ToUtc);
+
+        /* Interrupted half way: the next pass plans only the REMAINING span, not the whole thing again. */
+        var resumed = RollupBackfill.Plan(
+            TimescaleSupport.QueryStatsHourlyView,
+            rawOldestUtc: DaysAgo(365), coverageOldestUtc: DaysAgo(180),
+            materializedBuckets: 4_500, materializedBytes: 4_500L * 1024 * 1024,
+            rawBytes: 145 * Gb, bucketWidth: TimeSpan.FromHours(1));
+
+        Assert.False(resumed.IsComplete);
+        Assert.True(resumed.Slices < initial.Slices, "a resumed run must plan strictly less work than the first");
+        Assert.True(resumed.EstimatedBytes < initial.EstimatedBytes);
+
+        /* Complete: coverage reaches raw, so there is nothing to do and the verb says so rather than working. */
+        var complete = RollupBackfill.Plan(
+            TimescaleSupport.QueryStatsHourlyView,
+            rawOldestUtc: DaysAgo(365), coverageOldestUtc: DaysAgo(365),
+            materializedBuckets: 8_760, materializedBytes: 9 * Gb,
+            rawBytes: 145 * Gb, bucketWidth: TimeSpan.FromHours(1));
+
+        Assert.True(complete.IsComplete);
+        Assert.Equal(0, complete.Slices);
+        Assert.NotNull(complete.SkipReason);
+
+        /* Coverage DEEPER than raw (raw has already been purged past it) is also complete — not negative work. */
+        var deeper = RollupBackfill.Plan(
+            TimescaleSupport.QueryStatsHourlyView,
+            rawOldestUtc: DaysAgo(4), coverageOldestUtc: DaysAgo(21),
+            materializedBuckets: 500, materializedBytes: Gb, rawBytes: 145 * Gb, bucketWidth: TimeSpan.FromHours(1));
+
+        Assert.True(deeper.IsComplete);
+    }
+
+    /// <summary>A fresh store has no raw rows, so there is nothing to materialize — and no plan that could
+    /// divide by an empty span.</summary>
+    [Fact]
+    public void Plan_EmptyRawTable_IsComplete()
+    {
+        var plan = RollupBackfill.Plan(
+            TimescaleSupport.QueryStatsHourlyView, rawOldestUtc: null, coverageOldestUtc: null,
+            materializedBuckets: 0, materializedBytes: 0, rawBytes: 0, bucketWidth: TimeSpan.FromHours(1));
+
+        Assert.True(plan.IsComplete);
+        Assert.Equal(0, plan.EstimatedBytes);
+    }
+
+    /// <summary>
+    /// The estimate is CALIBRATED from what the rollup has already materialized wherever a sample exists — which
+    /// on the affected stores it always does, since their refresh policies have been materializing a trailing
+    /// 3-day window all along. With no sample it falls back to a bound and FLAGS itself, because an operator
+    /// deciding whether to grow a volume needs to know which of the two numbers they are reading.
+    /// </summary>
+    [Fact]
+    public void Plan_CalibratesFromTheMaterializedSample_AndFlagsWhenItCannot()
+    {
+        /* 72 buckets occupying 72 MB → 1 MB/bucket. A year of hourly buckets is 8,760 of them. */
+        var calibrated = RollupBackfill.Plan(
+            TimescaleSupport.QueryStatsHourlyView,
+            rawOldestUtc: DaysAgo(365), coverageOldestUtc: DaysAgo(3),
+            materializedBuckets: 72, materializedBytes: 72 * 1024 * 1024,
+            rawBytes: 145 * Gb, bucketWidth: TimeSpan.FromHours(1));
+
+        Assert.True(calibrated.Calibrated);
+        /* ~362 days of hourly buckets at 1 MB each — within a bucket of 8,688. */
+        Assert.InRange(calibrated.EstimatedBytes, 8_600L * 1024 * 1024, 8_800L * 1024 * 1024);
+
+        /* Nothing materialized: no sample, so the estimate is an upper bound and says so. */
+        var uncalibrated = RollupBackfill.Plan(
+            TimescaleSupport.QueryStatsHourlyView,
+            rawOldestUtc: DaysAgo(365), coverageOldestUtc: null,
+            materializedBuckets: 0, materializedBytes: 0,
+            rawBytes: 145 * Gb, bucketWidth: TimeSpan.FromHours(1));
+
+        Assert.False(uncalibrated.Calibrated);
+
+        /* And it errs HIGH. The two mistakes are not symmetric: over-estimating refuses a backfill that would
+           have fit (recoverable — grow the disk, or re-run once the policy has left a sample); under-estimating
+           fills a production volume (not recoverable in the moment). */
+        Assert.True(uncalibrated.EstimatedBytes > calibrated.EstimatedBytes,
+            "an uncalibrated estimate must bound HIGH, since guessing low is the failure that fills the volume");
+    }
+
+    /// <summary>
+    /// The planned range must CLOSE on a bucket boundary, not just open on one. Found on the gated live leg,
+    /// not by reading: TimescaleDB rejects a refresh window narrower than one bucket outright
+    /// (<c>22023 refresh window too small</c>), and the ragged tail of a day-wide slice IS narrower than one
+    /// bucket for a DAILY rollup, whose bucket is a day. The range end is a coverage floor or "now" — an
+    /// arbitrary instant that lands mid-bucket most of the time — so this was not an edge case, it aborted the
+    /// whole daily tier of the run.
+    /// </summary>
+    [Theory]
+    /* Daily grain: the end truncates back to midnight, leaving whole days. */
+    [InlineData(24, 9.5, 9)]
+    [InlineData(24, 10.0, 10)]
+    [InlineData(24, 0.9, 0)]
+    /* Hourly grain: the same rule at a finer bucket — the tail keeps whole hours. */
+    [InlineData(1, 9.99, 9.958333)]
+    public void Plan_TruncatesTheRangeEndToAWholeNumberOfBuckets(int bucketHours, double coverageDaysAgo, double expectedSpanDays)
+    {
+        var plan = RollupBackfill.Plan(
+            TimescaleSupport.QueryStatsDailyView,
+            rawOldestUtc: Now.Date.AddDays(-10), coverageOldestUtc: Now.Date.AddDays(-10 + coverageDaysAgo),
+            materializedBuckets: 10, materializedBytes: 10 * 1024 * 1024,
+            rawBytes: Gb, bucketWidth: TimeSpan.FromHours(bucketHours));
+
+        if (expectedSpanDays == 0)
+        {
+            Assert.True(plan.IsComplete, "a range shorter than one bucket is nothing to do, never a sub-bucket refresh");
+            return;
+        }
+
+        Assert.False(plan.IsComplete);
+
+        var span = plan.ToUtc - plan.FromUtc;
+        Assert.Equal(expectedSpanDays, span.TotalDays, 4);
+
+        /* The invariant behind the arithmetic: the span is a whole number of buckets, so no slice — including
+           the last — can ever be narrower than one. */
+        Assert.Equal(0, span.Ticks % TimeSpan.FromHours(bucketHours).Ticks);
+
+        foreach (var (sliceFrom, sliceTo) in RollupBackfill.Slices(plan.FromUtc, plan.ToUtc))
+        {
+            Assert.True((sliceTo - sliceFrom) >= TimeSpan.FromHours(bucketHours),
+                $"slice {sliceFrom:O} -> {sliceTo:O} is narrower than one {bucketHours}h bucket; TimescaleDB rejects that with 22023");
+        }
+    }
+
+    /// <summary>The time budget uses the throughput actually measured on the field host class, so an operator can
+    /// decide whether this fits tonight's window before starting it.</summary>
+    [Fact]
+    public void EstimatedDuration_UsesTheMeasuredFieldThroughput()
+    {
+        /* 16 MB/s → 16 MB in one second, ~1 GB per minute, ~18 hours for a 1 TB materialization. */
+        Assert.Equal(1, RollupBackfill.EstimatedDuration(16 * 1024 * 1024).TotalSeconds, 3);
+        Assert.InRange(RollupBackfill.EstimatedDuration(1024 * Gb).TotalHours, 17, 19);
+    }
+
+    /* ─────────────────────────── slicing ─────────────────────────── */
+
+    /// <summary>
+    /// Slices are oldest-first, contiguous, and cover the range exactly. Oldest-first is what makes a partial
+    /// run useful: every completed slice moves the measured floor BACKWARDS, which is the direction coverage has
+    /// to travel, so an interrupted run has made real progress rather than a hole in the middle.
+    /// </summary>
+    [Fact]
+    public void Slices_AreOldestFirst_Contiguous_AndCoverTheRangeExactly()
+    {
+        var from = DaysAgo(10);
+        var to = DaysAgo(3);
+        var slices = RollupBackfill.Slices(from, to).ToArray();
+
+        Assert.Equal(7, slices.Length);
+        Assert.Equal(from, slices[0].FromUtc);
+        Assert.Equal(to, slices[^1].ToUtc);
+
+        for (var i = 1; i < slices.Length; i++)
+        {
+            Assert.Equal(slices[i - 1].ToUtc, slices[i].FromUtc);
+            Assert.True(slices[i].FromUtc > slices[i - 1].FromUtc, "slices must run oldest-first");
+        }
+
+        /* A ragged tail is truncated, never overshot — materializing past the target is wasted disk on the
+           exact operation whose whole risk is disk. */
+        var ragged = RollupBackfill.Slices(from, from.AddHours(30)).ToArray();
+        Assert.Equal(2, ragged.Length);
+        Assert.Equal(from.AddHours(30), ragged[^1].ToUtc);
+
+        /* An empty or inverted range yields nothing rather than looping. */
+        Assert.Empty(RollupBackfill.Slices(to, to));
+        Assert.Empty(RollupBackfill.Slices(to, from));
+    }
+
+    /// <summary>One slice is ONE source chunk. That is what bounds the lock window: a wider slice would sit
+    /// across more chunks and, on a store whose compression policy is working the same ones, hold a window long
+    /// enough to matter (the #1778 deadlock watch).</summary>
+    [Fact]
+    public void SliceWidth_IsOneSourceChunk() =>
+        Assert.Equal(TimeSpan.FromDays(TimescaleSupport.ChunkIntervalDays), RollupBackfill.SliceWidth);
+
+    /* ─────────────────────────── hierarchical order ─────────────────────────── */
+
+    /// <summary>
+    /// WATCHED (mutation): invert the target order so dailies run before their hourlies, and the failure is
+    /// SILENT rather than loud. A daily continuous aggregate reads its HOURLY one, so refreshing a daily over a
+    /// range whose hourly has not been materialized reads an empty source, materializes nothing, returns
+    /// success — and CONSUMES the invalidation records covering that range, so a later correct-order pass
+    /// no-ops over the hole and reports success too. The order is a correctness invariant, not a preference.
+    /// </summary>
+    [Fact]
+    public void Targets_RunEveryHourlyBeforeAnyDaily()
+    {
+        var firstDaily = Array.FindIndex(RollupBackfill.Targets, t => t.IsDaily);
+        var lastHourly = Array.FindLastIndex(RollupBackfill.Targets, t => !t.IsDaily);
+
+        Assert.True(firstDaily > lastHourly,
+            "every hourly rollup must be refreshed before any daily one — a daily reads its hourly, so the " +
+            "reverse order materializes nothing while reporting success AND burns the invalidations that " +
+            "would have let a later pass repair it.");
+
+        /* Each daily's hourly sibling is genuinely present in the list, or "hourlies first" would be vacuous. */
+        foreach (var daily in RollupBackfill.Targets.Where(t => t.IsDaily))
+        {
+            var hourly = daily.View.Replace("_daily", "_hourly", StringComparison.Ordinal);
+            Assert.Contains(RollupBackfill.Targets, t => !t.IsDaily && string.Equals(t.View, hourly, StringComparison.Ordinal));
+        }
+    }
+
+    /// <summary>
+    /// The backfill covers exactly the rollups the ROUTER can route to. A rollup the router uses but the
+    /// backfill skips would stay permanently un-materialized — its windows served from raw forever, and its raw
+    /// purge held forever, which is #1759 unfixed for that table.
+    /// </summary>
+    [Fact]
+    public void Targets_CoverEveryRoutedRollup_WithItsOwnRawTable()
+    {
+        Assert.Equal(
+            TimescaleSupport.RollupViews.Select(r => r.View).OrderBy(v => v, StringComparer.Ordinal).ToArray(),
+            RollupBackfill.Targets.Select(t => t.View).OrderBy(v => v, StringComparer.Ordinal).ToArray());
+
+        /* And each target names the same raw table the router falls back to, or the backfill would chase a
+           coverage target the router never compares against. */
+        foreach (var target in RollupBackfill.Targets)
+        {
+            Assert.Equal(RollupCoverage.RawTableFor(target.View), target.RawTable);
+        }
+    }
+
+    /* ─────────────────────────── the SQL ─────────────────────────── */
+
+    /// <summary>
+    /// The slice refresh must BIND and CAST both bounds. <c>window_start</c>/<c>window_end</c> are declared
+    /// <c>"any"</c> on the 2.28.1 signature, so an untyped literal leaves PostgreSQL with nothing to resolve the
+    /// polymorphic argument against. The plain form is the default and the forced form is the 4-argument one —
+    /// <c>force</c> does not exist before 2.18, so a speculative forced call would raise 42883 on an older
+    /// bring-your-own store for no benefit.
+    /// </summary>
+    [Fact]
+    public void RefreshSliceSql_BindsAndCastsBothBounds_AndForcesOnlyOnDemand()
+    {
+        var plain = RollupBackfill.RefreshSliceSql(TimescaleSupport.QueryStatsHourlyView);
+        Assert.Contains("CALL refresh_continuous_aggregate('collect.query_stats_hourly'::regclass, $1::timestamp, $2::timestamp)", plain, StringComparison.Ordinal);
+        Assert.DoesNotContain("true", plain, StringComparison.Ordinal);
+
+        var forced = RollupBackfill.RefreshSliceSql(TimescaleSupport.QueryStatsHourlyView, force: true);
+        Assert.Contains("$1::timestamp, $2::timestamp, true)", forced, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// WATCHED (mutation): make convergence CALL-based and silent under-coverage passes. A refresh that stops on
+    /// its internal batch cap logs server-side and returns success to the client, so the only honest signal is
+    /// re-reading <c>min(bucket)</c> — the same expression the arming gate reads, so "covered enough to route"
+    /// and "covered enough to purge" can never drift apart.
+    /// </summary>
+    [Fact]
+    public void ConvergenceIsReadFromData_UsingTheSameExpressionTheArmingGateUses()
+    {
+        Assert.Equal(
+            "SELECT min(bucket) FROM collect.query_stats_hourly",
+            RollupBackfill.CoverageFloorSql(TimescaleSupport.QueryStatsHourlyView));
+
+        Assert.Contains(
+            $"min(bucket) FROM collect.{TimescaleSupport.QueryStatsHourlyView}",
+            TimescaleSupport.RetentionArmSafetySql("query_stats", "collection_time", TimescaleSupport.QueryStatsHourlyView),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The probe reads the MATERIALIZATION hypertable's size, resolved through
+    /// <c>timescaledb_information.continuous_aggregates</c>. <c>pg_total_relation_size</c> on a hypertable's
+    /// parent reports almost nothing (its chunks are separate relations), so measuring the view directly would
+    /// silently calibrate every estimate at roughly zero — the worst possible direction for a disk preflight.
+    /// </summary>
+    [Fact]
+    public void ProbeSql_SizesTheMaterializationHypertable_NotTheViewsParent()
+    {
+        var sql = RollupBackfill.ProbeSql(TimescaleSupport.QueryStatsHourlyView, "query_stats");
+
+        Assert.Contains("hypertable_size(", sql, StringComparison.Ordinal);
+        Assert.Contains("materialization_hypertable_name", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_total_relation_size", sql, StringComparison.Ordinal);
+
+        /* Raw's oldest row is the coverage TARGET, and the rollup's own floor is the resume point. */
+        Assert.Contains("min(collection_time) FROM collect.query_stats", sql, StringComparison.Ordinal);
+        Assert.Contains("min(bucket) FROM collect.query_stats_hourly", sql, StringComparison.Ordinal);
+    }
+
+    /* ─────────────────────────── the verb ─────────────────────────── */
+
+    /// <summary>
+    /// The verb has to be reachable. #1581's lesson: an argument the allow-list does not recognize falls through
+    /// into a REAL service startup and spawns a second instance fighting the first over the bundled PostgreSQL —
+    /// the outage. So a new verb that is implemented but not registered is worse than one that does not exist.
+    /// </summary>
+    [Fact]
+    public void BackfillRollupsVerb_IsRegistered_AndDocumented()
+    {
+        Assert.True(DarlingCliCommands.IsBackfillRollupsVerb("--backfill-rollups"));
+        Assert.True(DarlingCliCommands.IsBackfillRollupsVerb("--BACKFILL-ROLLUPS"));
+        Assert.False(DarlingCliCommands.IsBackfillRollupsVerb("--backfill"));
+
+        Assert.True(DarlingCliCommands.IsKnownVerb("--backfill-rollups"));
+        Assert.Equal(StartupAction.RunKnownVerb, DarlingCliCommands.ClassifyStartupArgs(new[] { "--backfill-rollups" }));
+        Assert.Equal(StartupAction.RunKnownVerb, DarlingCliCommands.ClassifyStartupArgs(new[] { "--backfill-rollups", "--dry-run" }));
+
+        var usage = DarlingCliCommands.UsageText();
+        Assert.Contains("--backfill-rollups", usage, StringComparison.Ordinal);
+        Assert.Contains("--dry-run", usage, StringComparison.Ordinal);
+        Assert.All(usage, ch => Assert.True(ch < 128, $"usage text must be ASCII; found U+{(int)ch:X4}"));
+    }
+}

@@ -181,6 +181,40 @@ if (args.Length > 0 && DarlingCliCommands.IsDisableWebVerb(args[0]))
     return await DarlingCliCommands.DisableWebAsync(configPath, Console.Out, Console.Error, CancellationToken.None);
 }
 
+/* CLI verb: --backfill-rollups (#1759 Phase 2) — materialize the query-acceleration rollups back over
+   pre-existing history so the #1680 arming gate can release the held raw retention policies by itself. An
+   OPERATOR verb, deliberately not a startup step: the gate is all-or-nothing, so a store with a year of raw
+   must materialize the whole history before the first purge reclaims anything, which puts peak disk BEFORE
+   any relief. It preflights free space and refuses with numbers rather than filling the volume. Runs while the
+   service is up, is resumable, and arms nothing itself. --dry-run prints the plan + estimate and stops.
+   Windows-only in managed mode (the DPAPI owner credential), same guard shape as the verbs above. */
+if (args.Length > 0 && DarlingCliCommands.IsBackfillRollupsVerb(args[0]))
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        Console.Error.WriteLine("--backfill-rollups requires Windows (DPAPI store credential).");
+        return 1;
+    }
+
+    var rest = args.AsSpan(1);
+    var dryRun = false;
+    string? backfillConfigPath = null;
+    foreach (var arg in rest)
+    {
+        if (string.Equals(arg, "--dry-run", StringComparison.OrdinalIgnoreCase))
+        {
+            dryRun = true;
+        }
+        else
+        {
+            backfillConfigPath = arg;
+        }
+    }
+
+    return await DarlingCliCommands.BackfillRollupsAsync(
+        backfillConfigPath, dryRun, Console.Out, Console.Error, CancellationToken.None);
+}
+
 var builder = Host.CreateApplicationBuilder(args);
 
 /* Windows-service lifetime is a no-op when run from a console, so the same exe
