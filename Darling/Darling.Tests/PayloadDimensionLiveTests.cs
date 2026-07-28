@@ -48,7 +48,7 @@ public sealed class PayloadDimensionLiveTests
     /// trigger was a purge that did not complete.
     /// </summary>
     private const string DeferralSignature =
-        "dimension GC deferred: a dim-feeding fact purge did not complete this cycle; facts may outlive their retention until a sweep succeeds";
+        "dimension GC deferred: a dim-feeding table kept rows past its horizon this cycle; dimension content is retained until its purge completes";
 
     private const string SkipReason =
         "Set DARLING_TEST_PG to a Postgres connection string to run the payload-dimension store tests.";
