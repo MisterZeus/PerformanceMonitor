@@ -2287,6 +2287,13 @@ public static class DarlingCliCommands
         output.WriteLine("Safe to interrupt: every completed slice is committed, an interrupted run reports SHORT rather");
         output.WriteLine("than claiming success, and re-running resumes from the measured floor.");
 
+        /* THE DEGRADE HAS TO REACH THE OPERATOR. RefreshDisclosure carries both the run's options capability
+           (latched once, so a pre-2.21 store pays one failed call rather than one per slice) and the sink that
+           says so. It is a REQUIRED argument precisely because the first cut made it a trailing optional and
+           both call sites silently omitted it — degrade-and-be-silent, while the call-site doc claimed the
+           contract was held. Routed to stderr alongside the REFUSED/SHORT lines. */
+        var disclosure = new RefreshDisclosure(message => error.WriteLine("  NOTE: " + message));
+
         var shortfalls = new List<string>();
         foreach (var (target, plan) in work)
         {
@@ -2300,7 +2307,7 @@ public static class DarlingCliCommands
                 cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
-                    var floor = await RollupBackfill.RunSliceAsync(connection, plan.View, from, to, cancellationToken);
+                    var floor = await RollupBackfill.RunSliceAsync(connection, plan.View, from, to, disclosure, cancellationToken);
                     completed++;
                     output.WriteLine(string.Create(
                         CultureInfo.InvariantCulture,
@@ -2331,7 +2338,7 @@ public static class DarlingCliCommands
                 output.WriteLine($"    {plan.View} is still short after every slice; escalating to a forced refresh over the range.");
                 try
                 {
-                    finalFloor = await RollupBackfill.RepairAsync(connection, plan.View, plan.FromUtc, plan.ToUtc, cancellationToken);
+                    finalFloor = await RollupBackfill.RepairAsync(connection, plan.View, plan.FromUtc, plan.ToUtc, disclosure, cancellationToken);
                     reached = finalFloor is not null && finalFloor <= after.RawOldestUtc;
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
