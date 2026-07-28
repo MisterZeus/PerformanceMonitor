@@ -239,8 +239,9 @@ public sealed class DarlingEndpointToggleCliTests
     [Fact]
     public void FirewallRuleNames_MatchTheDocumentedScopedDisplayNames()
     {
-        /* The CLI toggle verbs open/close these by DisplayName; the hosts self-reconcile the SAME names, so an
-           enable followed by a service restart is idempotent (no duplicate rule). Pin the exact strings. */
+        /* The CLI toggle verbs and --configure-firewall open/close these by DisplayName, and the hosts CHECK
+           the SAME names at start-up (#1771), so an enable followed by a service restart is idempotent (no
+           duplicate rule) and the check never reports a rule the installer just created. Pin the exact strings. */
         Assert.Equal("PerformanceMonitor Darling MCP (port 5152)", DarlingMcpHostService.McpFirewallRuleName(5152));
         Assert.Equal("PerformanceMonitor Darling Web (port 5153)", DarlingWebHostService.WebFirewallRuleName(5153));
     }

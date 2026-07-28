@@ -3,8 +3,9 @@
 Uninstalls the PerformanceMonitor Darling service and removes the viewer shortcuts.
 
 .DESCRIPTION
-Run from an ELEVATED PowerShell. Stops and deletes the Windows service and removes the Desktop /
-Start Menu 'Darling Viewer' shortcuts. DELIBERATELY LEFT IN PLACE: the extracted program folder,
+Run from an ELEVATED PowerShell. Stops and deletes the Windows service, removes the scoped Windows
+Firewall rules it installed, and removes the Desktop / Start Menu 'Darling Viewer' shortcuts.
+DELIBERATELY LEFT IN PLACE: the extracted program folder,
 darling.json, and everything under %ProgramData%\PerformanceMonitorDarling (the PostgreSQL store
 with all collected history, the DPAPI credential files, and the service logs) - so an uninstall
 is reversible by simply re-running install-darling.ps1. To destroy the collected data too, pass
@@ -42,6 +43,31 @@ if ($existing) {
 }
 else {
     Write-Host "Service '$serviceName' is not installed - nothing to remove."
+}
+
+# Scoped firewall rules (#1771). Created by install-darling.ps1 because the service account cannot create
+# them; removed here for the same reason - nothing else ever will, and leaving an inbound allow rule behind
+# for a service that no longer exists is exactly the litter an uninstall should clear.
+#
+# Matched by the shared DisplayName PREFIX rather than by rebuilding each port-specific name, so a store/MCP/
+# web rule left over from a PREVIOUS port is removed too - reconstructing names from the current darling.json
+# would strand those, and darling.json may not even be readable at this point. The C# side pins this literal
+# against all three real rule-name builders (DarlingFirewallCheck.RuleNamePrefix), so a rename cannot silently
+# orphan rules here. A wildcard that matches nothing is not an error (verified), but the try/catch keeps a
+# firewall hiccup from aborting the rest of an uninstall under ErrorActionPreference = 'Stop'.
+try {
+    $rules = @(Get-NetFirewallRule -DisplayName 'PerformanceMonitor Darling *' -ErrorAction SilentlyContinue)
+    if ($rules.Count -gt 0) {
+        Remove-NetFirewallRule -DisplayName 'PerformanceMonitor Darling *' -ErrorAction Stop
+        Write-Host "Removed $($rules.Count) scoped firewall rule(s)."
+    }
+    else {
+        Write-Host 'No Darling firewall rules to remove.'
+    }
+}
+catch {
+    Write-Host "Could not remove the firewall rules ($($_.Exception.Message)). Remove them by hand:" -ForegroundColor Yellow
+    Write-Host "  Remove-NetFirewallRule -DisplayName 'PerformanceMonitor Darling *'" -ForegroundColor Yellow
 }
 
 foreach ($lnkPath in @(

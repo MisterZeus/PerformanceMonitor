@@ -22,15 +22,15 @@ namespace PerformanceMonitor.Darling.Service.Hosting;
 /// The surface-agnostic bind/auth helpers shared by the two optional Kestrel hosts — the MCP host
 /// (<see cref="Mcp.DarlingMcpHostService"/>) and the web host (<see cref="Mcp.DarlingWebHostService"/>).
 /// Extracted so the LAN-exposure decision ladder, the in-app CIDR check, the loopback-listener collision
-/// guard, the constant-time token compare, and the best-effort firewall reconcile live ONCE, with ONE test
-/// suite, instead of being copy-pasted per surface (darling-network-endpoints anti-drift). The MCP host is
-/// refactored onto this class (its behavior byte-for-byte unchanged — its pre-existing tests stay green
-/// untouched, the refactor proof); the web host is built on it from the start.
+/// guard, and the constant-time token compare live ONCE, with ONE test suite, instead of being copy-pasted
+/// per surface (darling-network-endpoints anti-drift). The MCP host is refactored onto this class (its
+/// behavior byte-for-byte unchanged — its pre-existing tests stay green untouched, the refactor proof); the
+/// web host is built on it from the start.
 ///
-/// <para>Everything here is PURE (no logger, no server) except <see cref="ReconcileFirewallAsync"/>, which is
-/// effectful but parameterized on the rule name + logger so both surfaces reconcile their own scoped rule.
-/// The (mode, reason) split lets the caller map a reason to a log severity (Round-4 #7) while the pure ladder
-/// stays free of side effects.</para>
+/// <para>Everything here is PURE (no logger, no server). It used to also host the best-effort firewall
+/// reconcile; that moved to <see cref="DarlingFirewallCheck"/> when the runtime stopped writing rules and
+/// started only verifying them (#1771). The (mode, reason) split lets the caller map a reason to a log
+/// severity (Round-4 #7) while the pure ladder stays free of side effects.</para>
 /// </summary>
 internal static class DarlingHostBinding
 {
@@ -206,58 +206,5 @@ internal static class DarlingHostBinding
         var expectedHash = SHA256.HashData(Encoding.UTF8.GetBytes(expected));
         var presentedHash = SHA256.HashData(Encoding.UTF8.GetBytes(presented));
         return CryptographicOperations.FixedTimeEquals(expectedHash, presentedHash);
-    }
-
-    /// <summary>
-    /// Best-effort firewall reconcile (defense-in-depth): add/remove the scoped, idempotent-named inbound rule
-    /// via PowerShell, reusing the store's tested pure command builders and its shared PowerShell runner (no
-    /// duplication, no timeout divergence). Parameterized on <paramref name="ruleName"/> so each surface
-    /// reconciles its own port-specific rule. NEVER fatal — a failure (no elevation, PowerShell missing) logs
-    /// the exact scoped command for the operator to run by hand. The token + in-app CIDR are the boundary; the
-    /// firewall is defense-in-depth.
-    /// </summary>
-    [SupportedOSPlatform("windows")]
-    internal static async Task ReconcileFirewallAsync(
-        string ruleName, int port, bool enable, string? cidr, ILogger logger, CancellationToken cancellationToken)
-    {
-        var command = enable
-            ? DarlingManagedPostgres.BuildFirewallEnableCommand(ruleName, port, cidr!)
-            : DarlingManagedPostgres.BuildFirewallDisableCommand(ruleName);
-
-        try
-        {
-            var (exitCode, output) = await DarlingManagedPostgres.RunPowerShellAsync(command, cancellationToken);
-            if (exitCode == 0)
-            {
-                logger.LogInformation("Firewall rule '{Rule}' {Verb}.", ruleName, enable ? "ensured" : "removed");
-            }
-            else if (enable)
-            {
-                logger.LogWarning(
-                    "Could not configure the firewall automatically (exit {ExitCode}: {Output}). Run this in an elevated PowerShell:\n{Command}",
-                    exitCode, output, command);
-            }
-            else
-            {
-                logger.LogWarning("Could not remove the firewall rule automatically (exit {ExitCode}: {Output}).", exitCode, output);
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            if (enable)
-            {
-                logger.LogWarning(
-                    "Could not configure the firewall automatically ({Message}). Run this in an elevated PowerShell:\n{Command}",
-                    ex.Message, command);
-            }
-            else
-            {
-                logger.LogWarning("Could not remove the firewall rule automatically ({Message}).", ex.Message);
-            }
-        }
     }
 }

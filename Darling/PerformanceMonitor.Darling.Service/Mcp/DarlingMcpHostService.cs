@@ -49,9 +49,10 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// either way. Fail-closed, enforced HERE (the MCP host), NEVER in the all-fatal
 /// <see cref="DarlingConfig.Validate"/> (the worker's abort would not stop this host). No TLS on MCP (a
 /// self-signed cert breaks real clients; the named MITM control is a TLS reverse proxy in front of the
-/// endpoint) — the token travels cleartext on-segment, so own that residual with the reverse proxy. A
-/// best-effort, scoped, idempotent firewall rule is added when exposed and removed when not
-/// (defense-in-depth; the token + CIDR are the boundary, not the firewall).</para>
+/// endpoint) — the token travels cleartext on-segment, so own that residual with the reverse proxy. The
+/// scoped, idempotent firewall rule is created by the ELEVATED installer (#1771 — this account cannot);
+/// here it is only CHECKED and reported (defense-in-depth; the token + CIDR are the boundary, not the
+/// firewall).</para>
 ///
 /// <para>Gated by darling.json's <c>mcp.enabled</c> (default OFF — a headless service should not open a
 /// port unless the operator asks); when disabled or when the config cannot load (the worker already logs
@@ -78,7 +79,6 @@ public sealed class DarlingMcpHostService : BackgroundService
     private WebApplication? _app;
     private NpgsqlDataSource? _appDataSource;
     private int _runningPort;
-    private bool _runningNetworkMode;
 
     /// <summary>How often the supervisor re-reads the live control-plane state (#1560).</summary>
     internal static readonly TimeSpan SupervisorPollInterval = TimeSpan.FromSeconds(5);
@@ -178,9 +178,11 @@ public sealed class DarlingMcpHostService : BackgroundService
         }
     }
 
-    /// <summary>Stops and disposes the running app + its data source; in managed network mode also
-    /// reconciles the firewall rule off (symmetric with the start-side reconcile — disabling closes the
-    /// box). Safe to call when nothing is running.</summary>
+    /// <summary>Stops and disposes the running app + its data source. Safe to call when nothing is running.
+    /// <para>It used to also remove the firewall rule here, mirroring the start-side reconcile. That write
+    /// could never succeed from this account (#1771) and the rule is now install-managed, so a stop leaves it
+    /// alone: it is scoped to a port nothing is listening on, an admin removes it with --configure-firewall or
+    /// uninstall-darling.ps1, and the start-side check reports it as stale until then.</para></summary>
     private async Task StopServerAsync(CancellationToken cancellationToken)
     {
         if (_app is null)
@@ -206,12 +208,6 @@ public sealed class DarlingMcpHostService : BackgroundService
             _appDataSource = null;
         }
 
-        if (_runningNetworkMode && OperatingSystem.IsWindows())
-        {
-            await ReconcileMcpFirewallAsync(_runningPort, enable: false, null, cancellationToken);
-        }
-
-        _runningNetworkMode = false;
         _runningPort = 0;
     }
 
@@ -295,20 +291,21 @@ public sealed class DarlingMcpHostService : BackgroundService
             var primaryBind = networkMode ? networkListenIp! : IPAddress.Loopback;
 
             /* Port-in-use pre-check — Lite's StartMcpServerAsync guard, via the shared utility, against the
-               REAL bind address (D3-e: not always IPAddress.Loopback). Done before the firewall reconcile so a
-               bail here leaves the firewall untouched. */
+               REAL bind address (D3-e: not always IPAddress.Loopback). Done before the firewall check so a
+               bail here reports nothing about the firewall. */
             if (await PortUtilityService.IsTcpPortListeningAsync(effectivePort, primaryBind, stoppingToken))
             {
                 _logger.LogError("Port {Port} is already in use — MCP server not started this attempt; will retry", effectivePort);
                 return false;
             }
 
-            /* Firewall reconcile (managed mode only; best-effort, never fatal). Symmetric like the store's D1
-               reconcile: ensure the scoped rule when exposed, remove it when not (so disabling the config
-               closes the box). The token + in-app CIDR are the boundary; the firewall is defense-in-depth. */
+            /* Firewall CHECK (managed mode only; read-only, never fatal) — #1771. Reports a missing rule when
+               exposed and a stale one when not, naming the elevated command either way; the rule itself is
+               created by the installer, because this process cannot create it. The token + in-app CIDR are the
+               boundary; the firewall is defense-in-depth. */
             if (config.Postgres.Managed && OperatingSystem.IsWindows())
             {
-                await ReconcileMcpFirewallAsync(
+                await CheckMcpFirewallAsync(
                     effectivePort, networkMode, networkMode ? allowedCidr.ToString() : null, stoppingToken);
             }
 
@@ -581,7 +578,6 @@ public sealed class DarlingMcpHostService : BackgroundService
                serving until StopServerAsync (toggle-off, port change, or shutdown). */
             await _app.StartAsync(stoppingToken);
             _runningPort = effectivePort;
-            _runningNetworkMode = networkMode;
             return true;
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -785,19 +781,27 @@ public sealed class DarlingMcpHostService : BackgroundService
     }
 
     /* ---------------------------------------------------------------------------------------------------
-       Best-effort MCP firewall reconcile (D1, defense-in-depth). Reuses the store's tested, pure command
-       builders (DarlingManagedPostgres.BuildFirewall*Command) for the exact scoped rule shape AND its shared
-       PowerShell runner (RunPowerShellAsync) — no duplication, no timeout divergence. Never fatal.
+       MCP firewall VERIFICATION (#1771). This used to reconcile the rule itself, which could never work: the
+       service runs as an unprivileged virtual account, so both halves failed "Access is denied" on every
+       start of every hardened install, and a fresh networked install got no rule at all. The rule is now
+       created by the elevated installer (--configure-firewall); this only reads and reports.
        --------------------------------------------------------------------------------------------------- */
 
     /// <summary>The scoped MCP firewall rule name (idempotent by DisplayName), port-specific and distinct
-    /// from the store's rule so the two endpoints reconcile independently. <c>internal</c> so the headless
-    /// endpoint-toggle CLI verbs (--enable-mcp/--disable-mcp) reconcile the SAME rule by DisplayName.</summary>
+    /// from the store's rule so the two endpoints are managed independently. <c>internal</c> so the headless
+    /// endpoint-toggle CLI verbs (--enable-mcp/--disable-mcp) and --configure-firewall act on the SAME rule
+    /// by DisplayName.</summary>
     internal static string McpFirewallRuleName(int port) => $"PerformanceMonitor Darling MCP (port {port})";
 
+    /// <summary>Last (rule, verdict) this host reported, so a supervisor retry loop restates a steady
+    /// firewall state at most once (<see cref="DarlingFirewallCheck.ShouldReport"/>).</summary>
+    private string? _lastFirewallRule;
+    private FirewallRuleVerdict? _lastFirewallVerdict;
+
     [SupportedOSPlatform("windows")]
-    private Task ReconcileMcpFirewallAsync(int port, bool enable, string? cidr, CancellationToken cancellationToken)
-        => DarlingHostBinding.ReconcileFirewallAsync(McpFirewallRuleName(port), port, enable, cidr, _logger, cancellationToken);
+    private async Task CheckMcpFirewallAsync(int port, bool exposed, string? cidr, CancellationToken cancellationToken)
+        => (_lastFirewallRule, _lastFirewallVerdict) = await DarlingFirewallCheck.CheckAsync(
+            McpFirewallRuleName(port), port, exposed, cidr, _lastFirewallRule, _lastFirewallVerdict, _logger, cancellationToken);
 
     /// <summary>
     /// Managed mode's first-boot race, handled: the dedicated <c>mcp</c>-role credential appears only after

@@ -22,6 +22,9 @@ C:\PerformanceMonitorDarling). What it does, in order:
   4b. Restricts darling.json to SYSTEM / Administrators / the service account, plus read for
      INTERACTIVE (the Viewer). It holds encrypted SQL passwords and the MCP/web access tokens,
      and an install folder under C:\ otherwise inherits read access for BUILTIN\Users.
+  4c. Creates (or removes) the scoped Windows Firewall rules to match darling.json, via the exe's
+     --configure-firewall verb. This requires elevation, which is why it lives here: the service's
+     own unprivileged account cannot create them, and only verifies them at runtime.
   5. Starts the service and confirms it reaches Running.
   6. Creates 'Darling Viewer' shortcuts on the Desktop and in the Start Menu pointing at
      viewer\PerformanceMonitor.Darling.Viewer.exe. (Taskbar pinning is deliberately not
@@ -217,6 +220,34 @@ if ($failed.Count -gt 0) {
     Write-Host ''
 }
 
+# -- 4c. Firewall rules (#1771) --------------------------------------------------------------------
+# The service runs as an unprivileged virtual account that CANNOT create firewall rules. It used to try on
+# every start and fail "Access is denied" each time - harmless where the rules already existed from a manual
+# setup, but on a FRESH networked install nothing ever created them, so remote MCP/web/store clients were
+# simply blocked. Networked is the normal deployment mode, so rule management belongs here, in the elevated
+# install, and the running service only verifies.
+#
+# The exe does the work (--configure-firewall) rather than this script building rules itself: the rule names,
+# the ports, and above all WHETHER a surface is really exposed come from the same resolvers the service
+# fail-closes on, so a config the service degrades to loopback never gets an open port, and the service's own
+# start-up check always reaches the same verdict the installer just acted on. Idempotent, so an upgrade
+# re-running it is a no-op, and it needs only darling.json - no store, no credentials - so it is safe here,
+# BEFORE the first start.
+#
+# Best-effort: a firewall failure warns rather than aborting an otherwise good install. Re-run it by hand.
+function Invoke-FirewallReconcile {
+    & $serviceExe --configure-firewall
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ''
+        Write-Host "Firewall rules were not fully configured (exit $LASTEXITCODE). The service will still run, and" -ForegroundColor Yellow
+        Write-Host 'will log which rule is missing on each start. Re-run from an elevated prompt:' -ForegroundColor Yellow
+        Write-Host "  & `"$serviceExe`" --configure-firewall" -ForegroundColor Yellow
+        Write-Host ''
+    }
+}
+
+Invoke-FirewallReconcile
+
 # -- 5. Start + confirm ---------------------------------------------------------------------------
 Start-Service -Name $serviceName
 (Get-Service -Name $serviceName).WaitForStatus('Running', [TimeSpan]::FromSeconds(60))
@@ -230,6 +261,12 @@ if ($Network) {
     Write-Host ''
     Write-Host 'Launching the guided network-exposure wizard (--configure-network)...' -ForegroundColor Cyan
     & $serviceExe --configure-network
+
+    # The wizard just rewrote the exposure, so the rules created above no longer match darling.json - a newly
+    # exposed endpoint has no rule yet, and one turned back off has a stale one. Re-reconcile (idempotent).
+    Write-Host ''
+    Write-Host 'Re-applying the firewall rules to match the new exposure...' -ForegroundColor Cyan
+    Invoke-FirewallReconcile
 }
 
 # -- 6. Viewer shortcuts --------------------------------------------------------------------------
