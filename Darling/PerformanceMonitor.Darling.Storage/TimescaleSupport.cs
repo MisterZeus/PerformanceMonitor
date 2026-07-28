@@ -1997,8 +1997,8 @@ SELECT
     js.job_status,
     NULLIF(js.last_run_started_at, '-infinity'::timestamptz) AS last_run_started_at,
     CASE
-        WHEN js.last_successful_finish > js.last_run_started_at
-        THEN EXTRACT(EPOCH FROM (js.last_successful_finish - js.last_run_started_at))
+        WHEN js.last_successful_finish > NULLIF(js.last_run_started_at, '-infinity'::timestamptz)
+        THEN EXTRACT(EPOCH FROM (js.last_successful_finish - NULLIF(js.last_run_started_at, '-infinity'::timestamptz)))
     END AS last_run_seconds,
     (
         SELECT count(*)

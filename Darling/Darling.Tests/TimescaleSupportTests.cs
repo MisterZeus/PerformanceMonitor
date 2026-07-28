@@ -547,14 +547,35 @@ WHERE hypertable_name = 'wait_stats'
     [Fact]
     public void CompressionActivitySql_GuardsTheNeverRanSentinel_LikeTheStuckJobQuery()
     {
-        Assert.Contains(
-            "NULLIF(js.last_run_started_at, '-infinity'::timestamptz)",
-            TimescaleSupport.CompressionActivitySql, StringComparison.Ordinal);
+        /* EVERY read of the column is guarded, not merely the first one. Asserting Contains would pass while an
+           unguarded read sat further down the statement — which is exactly the state this query was in when the
+           SELECT list had the NULLIF and the duration CASE two lines below still read the column raw. Counting
+           makes the pin cover what it looks like it covers. */
+        foreach (var (name, sql) in new[]
+        {
+            ("CompressionActivitySql", TimescaleSupport.CompressionActivitySql),
+            ("StuckCompressionJobsSql", TimescaleSupport.StuckCompressionJobsSql),
+        })
+        {
+            var reads = CountOccurrences(sql, "js.last_run_started_at");
+            var guarded = CountOccurrences(sql, "NULLIF(js.last_run_started_at, '-infinity'::timestamptz)");
 
-        /* Identical treatment to the sibling query, so neither can drift into reading the sentinel raw. */
-        Assert.Contains(
-            "NULLIF(js.last_run_started_at, '-infinity'::timestamptz)",
-            TimescaleSupport.StuckCompressionJobsSql, StringComparison.Ordinal);
+            Assert.True(reads > 0, $"{name} is expected to read last_run_started_at at all");
+            Assert.True(reads == guarded,
+                $"{name} reads js.last_run_started_at {reads} time(s) but guards it {guarded} time(s) — an unguarded read lets TimescaleDB's -infinity never-ran sentinel through as DateTime.MinValue");
+        }
+    }
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        var count = 0;
+        for (var at = haystack.IndexOf(needle, StringComparison.Ordinal); at >= 0;
+             at = haystack.IndexOf(needle, at + needle.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
     }
 
     /// <summary>
@@ -628,7 +649,22 @@ WHERE hypertable_name = 'wait_stats'
             Assert.Equal(0, await TimescaleSupport.ConvergeCompressionScheduleAsync(connection, null, ct));
 
             /* Scope: retention policies keep their own cadence. Retuning those would re-cadence the armed/paused
-               machinery #1680 depends on. */
+               machinery #1680 depends on.
+
+               The test plants its OWN retention policy rather than asserting over whatever the shared fixture
+               happens to hold: "no policy_retention job has a 1-hour cadence" is trivially satisfied on a store
+               with no retention jobs at all, so without this the scope check could pass while proving nothing. */
+            await ExecAsync(connection,
+                $"SELECT add_retention_policy('collect.{Fresh}', drop_after => INTERVAL '30 days', if_not_exists => true)", ct);
+
+            var retentionBefore = await RetentionScheduleIntervalAsync(connection, Fresh, ct);
+            Assert.NotNull(retentionBefore);
+            Assert.NotEqual(TimeSpan.FromHours(1), retentionBefore);
+
+            /* Converging again with a retention policy present must leave it exactly as it was. */
+            await TimescaleSupport.ConvergeCompressionScheduleAsync(connection, null, ct);
+            Assert.Equal(retentionBefore, await RetentionScheduleIntervalAsync(connection, Fresh, ct));
+
             using var retention = new NpgsqlCommand(@"
 SELECT COUNT(*)
 FROM timescaledb_information.jobs
@@ -942,6 +978,17 @@ SELECT schedule_interval
 FROM timescaledb_information.jobs
 WHERE hypertable_schema = 'collect' AND hypertable_name = '{table}'
 AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", connection);
+        return await command.ExecuteScalarAsync(ct) is TimeSpan interval ? interval : null;
+    }
+
+    /* The RETENTION policy's cadence on a table — the scope control for the compression converge. */
+    private static async Task<TimeSpan?> RetentionScheduleIntervalAsync(NpgsqlConnection connection, string table, System.Threading.CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand($@"
+SELECT schedule_interval
+FROM timescaledb_information.jobs
+WHERE hypertable_schema = 'collect' AND hypertable_name = '{table}'
+AND   proc_name = 'policy_retention'", connection);
         return await command.ExecuteScalarAsync(ct) is TimeSpan interval ? interval : null;
     }
 
