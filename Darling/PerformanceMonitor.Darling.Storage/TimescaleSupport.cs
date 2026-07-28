@@ -1329,6 +1329,67 @@ AND   j.hypertable_name = '{relation}'";
     (SELECT min(bucket) FROM collect.{coverageRelation}) AS coverage_oldest";
 
     /// <summary>
+    /// The raw tier and the aggregate that must already cover it — the single source of truth for which tables
+    /// are coverage-gated, shared by the policy setup (<see cref="EnsureRetentionPoliciesAsync"/>) and by the
+    /// catalog sweep's own drop (#1784). They MUST agree: two purge paths judging the same table by different
+    /// rules is precisely the defect #1784 records.
+    /// </summary>
+    public static readonly IReadOnlyList<(string Relation, string TimeColumn, string Coverage)> RawTierCoverage = new[]
+    {
+        ("query_stats", "collection_time", QueryStatsHourlyView),
+        ("procedure_stats", "collection_time", ProcedureStatsHourlyView),
+        ("query_store_stats", "collection_time", QueryStoreStatsHourlyView),
+    };
+
+    /// <summary>
+    /// Is <paramref name="relation"/> one of the coverage-gated raw tiers? Lets a caller skip the cost of a
+    /// connection for the many tables the gate does not apply to, without duplicating the membership rule --
+    /// it reads the same <see cref="RawTierCoverage"/> map the gate itself does.
+    /// </summary>
+    public static bool IsCoverageGatedRelation(string relation)
+    {
+        foreach (var (tierRelation, _, _) in RawTierCoverage)
+        {
+            if (string.Equals(tierRelation, relation, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// May <paramref name="relation"/>'s expired chunks be dropped right now without destroying history no
+    /// aggregate holds (#1784)? True for any table that is not coverage-gated — the gate is a property of the
+    /// raw tier, not of retention in general.
+    ///
+    /// <para>This is the SAME predicate the #1680 arming gate uses, reached through the same map, deliberately:
+    /// the tiered policy and the catalog sweep drop the same chunks, so they must not be able to disagree about
+    /// whether that is safe. Reusing it also inherits its fail-closed behaviour — an indeterminate coverage
+    /// state answers "not safe", which for a DROP means the data survives to be re-judged next cycle.</para>
+    ///
+    /// <para>Note this is a BINARY judgement, not a clamped cutoff, and it has to be:
+    /// <c>drop_chunks</c> can only remove the OLDEST chunks, and when coverage lags it is exactly the oldest
+    /// chunks that are uncovered. No cutoff drops the covered tail while sparing the uncovered head, so there is
+    /// no cutoff value that expresses the safe operation — only "all of it" or "none of it". See #1784 for the
+    /// worked arithmetic showing where a min(horizon, coverage-floor) clamp still deletes uncovered history.</para>
+    /// </summary>
+    public static async Task<bool> IsRawTierDropSafeAsync(
+        NpgsqlConnection connection, string relation, CancellationToken cancellationToken = default)
+    {
+        foreach (var (tierRelation, timeColumn, coverage) in RawTierCoverage)
+        {
+            if (string.Equals(tierRelation, relation, StringComparison.Ordinal))
+            {
+                return await IsSafeToArmRetentionAsync(connection, tierRelation, timeColumn, coverage, cancellationToken);
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// True when arming <paramref name="relation"/>'s retention policy cannot drop anything the tier below has
     /// not already captured (#1680): the source is empty, or <paramref name="coverageRelation"/> reaches at least
     /// as far back as the source does. Any failure to determine this returns FALSE - an unknown coverage state
@@ -1402,16 +1463,15 @@ AND   j.hypertable_name = '{relation}'";
            belt-and-braces by construction: BaselineRetentionSpan (35d) already exceeds the window, so even an
            immediately-armed policy could not eat it, and Darling.Tests pins that static relation. A policy
            with no identifiable consumer at all still does not belong in this list. */
-        var policies = new[]
+        var policies = RawTierCoverage
+            .Select(t => (Relation: t.Relation, DropAfter: RawRetentionInterval, TimeColumn: t.TimeColumn, Coverage: t.Coverage))
+            .Concat(new[]
         {
-            (Relation: "query_stats",             DropAfter: RawRetentionInterval,    TimeColumn: "collection_time", Coverage: QueryStatsHourlyView),
-            (Relation: "procedure_stats",         DropAfter: RawRetentionInterval,    TimeColumn: "collection_time", Coverage: ProcedureStatsHourlyView),
-            (Relation: "query_store_stats",       DropAfter: RawRetentionInterval,    TimeColumn: "collection_time", Coverage: QueryStoreStatsHourlyView),
             (Relation: QueryStatsHourlyView,      DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: QueryStatsDailyView),
             (Relation: ProcedureStatsHourlyView,  DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: ProcedureStatsDailyView),
             (Relation: QueryStoreStatsHourlyView, DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: QueryStoreStatsDailyView),
             (Relation: QueryStatsDbHourlyView,    DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: QueryStatsDbDailyView),
-        }
+        })
         /* The nine baseline-tier policies (#1757). Coverage is the tier ITSELF: see the leaf rule in the
            comment above -- their consumer is the baseline computation, whose capture requirement is the
            30-day window, and BaselineRetentionSpan (35d) exceeds it by construction. */

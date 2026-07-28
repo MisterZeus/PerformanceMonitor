@@ -7,8 +7,10 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -138,6 +140,12 @@ public static class DarlingRetention
         /* Naive-UTC storage: Npgsql 6+ rejects Kind=Utc against `timestamp` — see PgCollectorRowWriter. */
         var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
 
+        /* Set when a table that feeds a payload dimension could not be purged this cycle, which invalidates
+           the dimension GC's cutoff (#1782). Tracked here rather than inferred later because the sweep is the
+           only thing that knows: a failed purge is warned and skipped, leaving no state a later query could
+           read back. */
+        var dimFeedingPurgeFailed = false;
+
         try
         {
             foreach (var definition in CollectorCatalog.All)
@@ -149,6 +157,7 @@ public static class DarlingRetention
                     logger?.LogWarning("Retention purge: no schedule entry for '{Collector}' — {Table} was not purged",
                         definition.Name, definition.TargetTable);
                     tablesFailed++;
+                    dimFeedingPurgeFailed |= PayloadDimensions.ForTable(definition.TargetTable).Count > 0;
                     continue;
                 }
 
@@ -156,6 +165,30 @@ public static class DarlingRetention
                    retention of 0/negative would flip the cutoff into the present/future and drop_chunks /
                    DELETE the entire table. Never purge with a horizon under 1 day. */
                 var retentionDays = Math.Max(1, retentionDaysFor?.Invoke(definition.Name) ?? schedule.RetentionDays);
+
+                /* #1784: this sweep and the tiered retention POLICY drop the same chunks, but only the policy
+                   was coverage-gated. On a store where the #1680 gate is deliberately holding that policy —
+                   because the rollup does not reach back over raw's history — this path dropped those very
+                   chunks at the catalog horizon anyway, destroying exactly the uncovered history the gate
+                   exists to protect. The gate was not bypassed by a bug in the gate; it was bypassed by an
+                   older path that never learned the invariant.
+
+                   So the same predicate now guards both. It is binary rather than a clamped cutoff because
+                   drop_chunks can only remove the OLDEST chunks, and when coverage lags those ARE the
+                   uncovered ones — there is no cutoff that drops the covered tail while sparing the uncovered
+                   head. NOT an outright exclusion of tiered tables either: the moment coverage reaches back,
+                   the normal horizon applies again, so a never-armed policy cannot mean unbounded growth. */
+                if (timescaleAvailable && !await IsTieredDropSafeAsync(postgres, definition.TargetTable, logger, cancellationToken))
+                {
+                    logger?.LogWarning(
+                        "Retention purge SKIPPED for {Table}: its rollup does not yet cover the oldest rows, so dropping would delete history no aggregate holds. Resumes by itself once a backfill extends coverage.",
+                        definition.TargetTable);
+
+                    /* Those rows are still there past their horizon, which is the dimension GC's hazard
+                       (#1782) exactly as a failed purge is — the GC's cutoff assumes they are gone. */
+                    dimFeedingPurgeFailed |= PayloadDimensions.ForTable(definition.TargetTable).Count > 0;
+                    continue;
+                }
 
                 if (timescaleAvailable)
                 {
@@ -185,6 +218,11 @@ public static class DarlingRetention
                 else
                 {
                     tablesFailed++;
+
+                    /* Both paths failed for this table, so its rows are still there past their horizon. If it
+                       feeds a payload dimension, that invalidates the dimension GC's cutoff for this cycle
+                       (#1782) — see the guard below. */
+                    dimFeedingPurgeFailed |= PayloadDimensions.ForTable(definition.TargetTable).Count > 0;
                 }
             }
 
@@ -222,20 +260,54 @@ public static class DarlingRetention
                 widestFactRetentionDays = Math.Max(widestFactRetentionDays, factRetentionDays);
             }
 
-            var dimensionCutoff = utcNow.AddDays(-(widestFactRetentionDays + TimescaleSupport.ChunkIntervalDays + 1));
-            foreach (var dimTable in PayloadDimensions.DimTables)
+            /* That whole cutoff embeds one assumption: facts older than their retention are GONE. It holds
+               while the fact purge SUCCEEDS — and the loop above is failure-isolated, so a table whose
+               drop_chunks fails AND whose DELETE fallback then also fails is warned, skipped, and the sweep
+               continues straight into this GC. Those facts persist past the cutoff while their dimension rows
+               are pruned on schedule: the digests dangle, and the resolving view serves NULL payload with no
+               error raised anywhere (#1782).
+
+               So a dim-feeding table failing its purge defers the GC for that cycle. It is keyed to the
+               failure rather than to the retention POLICY's held state, because a held policy cannot cause
+               this: the catalog sweep above drops these tables at their own 30-day horizon regardless of the
+               policy, two days inside this 32-day cutoff, and the ordering survives any override since both
+               sides resolve through the same retentionDaysFor. Deferring on a held policy would stall the GC
+               indefinitely on a store whose policies are held for entirely unrelated reasons.
+
+               Self-ending by construction: the next sweep that purges cleanly runs the GC, and nothing needs
+               an operator. And it fails toward the recoverable side — deferring costs bounded dimension
+               growth, visible and reclaimed by the next cycle, where pruning early corrupts the read path
+               silently. */
+            if (dimFeedingPurgeFailed)
             {
-                var dimDeleted = await PurgeOneAsync(
-                    postgres, dimTable, TimeSlicedDeleteSql(dimTable, PayloadDimensions.LastSeenColumn),
-                    dimensionCutoff, logger, cancellationToken);
-                if (dimDeleted is not null)
+                /* One line, deliberately a fixed string never interpolated: it is the field signature an
+                   operator greps for when the dimensions stop shrinking, so it must not vary by store. It
+                   names the observable STATE -- a table still holding rows past its horizon -- and not any
+                   cause of it. Two different things produce that state: a purge statement that failed, and a
+                   purge deliberately skipped because its rollup does not cover the table (#1784). Naming
+                   either one here would be a lie in the other case and would send the reader after the wrong
+                   remedy, which is the one thing a diagnostic line must not do. The preceding per-table
+                   warning already says which table and which of the two it was, so the cause is one line
+                   above, owned by the code that actually knows it. */
+                logger?.LogWarning("dimension GC deferred: a dim-feeding table kept rows past its horizon this cycle; dimension content is retained until its purge completes");
+            }
+            else
+            {
+                var dimensionCutoff = utcNow.AddDays(-(widestFactRetentionDays + TimescaleSupport.ChunkIntervalDays + 1));
+                foreach (var dimTable in PayloadDimensions.DimTables)
                 {
-                    tablesPurged++;
-                    totalRowsDeleted += dimDeleted.Value;
-                }
-                else
-                {
-                    tablesFailed++;
+                    var dimDeleted = await PurgeOneAsync(
+                        postgres, dimTable, TimeSlicedDeleteSql(dimTable, PayloadDimensions.LastSeenColumn),
+                        dimensionCutoff, logger, cancellationToken);
+                    if (dimDeleted is not null)
+                    {
+                        tablesPurged++;
+                        totalRowsDeleted += dimDeleted.Value;
+                    }
+                    else
+                    {
+                        tablesFailed++;
+                    }
                 }
             }
 
@@ -477,6 +549,44 @@ public static class DarlingRetention
             logger?.LogWarning("Retention purge (drop_chunks) failed for {Table} — falling back to DELETE: {Message}",
                 tableName, ex.Message);
             return null;
+        }
+    }
+
+    /// <summary>
+    /// May this table's expired chunks be dropped, per the #1680 coverage gate (#1784)? Delegates to
+    /// <see cref="TimescaleSupport.IsRawTierDropSafeAsync"/> so the sweep and the tiered policy cannot judge
+    /// the same drop differently; non-tiered tables are always safe.
+    ///
+    /// <para>A connection failure answers "not safe" — for a DROP the fail-closed direction is to leave the
+    /// data alone and re-judge next cycle, which is the same instinct the gate itself follows. That does mean
+    /// a store that cannot reach its own catalogs stops purging these three tables; the skip is logged every
+    /// cycle, and the alternative is deleting history on a guess.</para>
+    /// </summary>
+    private static async Task<bool> IsTieredDropSafeAsync(
+        NpgsqlDataSource postgres,
+        string tableName,
+        ILogger? logger,
+        CancellationToken cancellationToken)
+    {
+        /* Membership first: the sweep calls this for EVERY catalog table, and only the three raw tiers are
+           gated. Opening a pooled connection just to have the predicate return true for the other thirty is
+           avoidable work on a path that already runs per table per day. */
+        if (!TimescaleSupport.IsCoverageGatedRelation(tableName))
+        {
+            return true;
+        }
+
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            return await TimescaleSupport.IsRawTierDropSafeAsync(connection, tableName, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "Could not establish rollup coverage for {Table} ({Message}) — skipping its drop this cycle rather than deleting history on an assumption.",
+                tableName, ex.Message);
+            return false;
         }
     }
 
