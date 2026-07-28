@@ -43,6 +43,16 @@ namespace Darling.Tests;
 public sealed class PayloadDimensionLiveTests
 {
     /// <summary>
+    /// The exact line the catalog sweep emits when the #1784 coverage gate holds a tiered drop, pinned in FULL
+    /// for the same reason its dimension-GC sibling is: it is a field signature the client's operator reads,
+    /// and its TAIL is the actionable half — "resumes by itself once a backfill extends coverage" is what tells
+    /// them this is self-correcting rather than a fault to chase. A prefix pin covers only the part that names
+    /// the table, which is exactly the shape that let a wrong line ship earlier in this work.
+    /// </summary>
+    private const string CoverageSkipSignature =
+        "Retention purge SKIPPED for query_stats: its rollup does not yet cover the oldest rows, so dropping would delete history no aggregate holds. Resumes by itself once a backfill extends coverage.";
+
+    /// <summary>
     /// The exact line the dimension GC emits when it stands down, pinned in FULL rather than by prefix: it is
     /// a field signature an operator greps for, and a partial pin would let the wording drift to name a cause
     /// the guard does not actually detect -- which is how it came to say "raw purges held" while the shipped
@@ -921,7 +931,7 @@ public sealed class PayloadDimensionLiveTests
             /* THE property: uncovered history survives the sweep. Asserted before the log line so a mutation
                lands on the data loss, not on missing text. */
             Assert.Equal(1L, await AncientRowCountAsync(connection, serverId, ct));
-            Assert.Contains("Retention purge SKIPPED for query_stats", skipLog.Joined, StringComparison.Ordinal);
+            Assert.Contains(CoverageSkipSignature, skipLog.Joined, StringComparison.Ordinal);
 
             /* Now let coverage reach back over the ancient row. force => recompute the older buckets. */
             using (var refresh = new NpgsqlCommand(
@@ -939,7 +949,7 @@ public sealed class PayloadDimensionLiveTests
             await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, dropLog, ct, OnlyPurge("query_stats", 40));
 
             Assert.Equal(0L, await AncientRowCountAsync(connection, serverId, ct));
-            Assert.DoesNotContain("Retention purge SKIPPED for query_stats", dropLog.Joined, StringComparison.Ordinal);
+            Assert.DoesNotContain(CoverageSkipSignature, dropLog.Joined, StringComparison.Ordinal);
         }
         finally
         {
