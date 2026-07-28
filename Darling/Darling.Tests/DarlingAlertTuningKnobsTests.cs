@@ -24,6 +24,10 @@ namespace Darling.Tests;
 /// the V18 delivery-mode pattern. The live test (gated on DARLING_TEST_PG) round-trips the new columns through a
 /// real seed/read against an ISOLATED scratch store.
 /// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. It reaches DARLING_TEST_PG only to CREATE and
+   DROP its own database through ScratchPostgres, then works entirely inside it — it never touches the shared
+   database's tables, so it cannot race the live collection and serializing it would be pure slowdown. Leave it
+   out; this comment is here so the next sweep does not "fix" it. */
 public sealed class DarlingAlertTuningKnobsTests
 {
     /* ---------------- pure: the long-running-query read shape through the settings seam ---------------- */
