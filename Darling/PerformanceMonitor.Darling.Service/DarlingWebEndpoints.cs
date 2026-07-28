@@ -438,9 +438,9 @@ public static class DarlingWebEndpoints
         /* Which rollups exist in THIS store (#1665) gates the source routing below — a plain-PostgreSQL
            store (or a partially-built TimescaleDB one) must route to what it HAS, never onto a missing
            relation. Probed lazily, cached per data source. */
-        var rollups = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
+        var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
 
-        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now);
+        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage);
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, runContext);
         if (compileError is not null)
         {
@@ -463,7 +463,7 @@ public static class DarlingWebEndpoints
                newest buckets — and a panel can genuinely hit both at once. Showing one and swallowing
                the other would under-report exactly the panel that is worst off. */
             if (ComposeStoreAvailability.CombineNotices(
-                    ComposeStoreAvailability.BuildRetentionNotice(plan!.Measure.SourceTable, compiled.Route, start, now, rollups),
+                    ComposeStoreAvailability.BuildRetentionNotice(plan!.Measure.SourceTable, compiled.Route, start, now, rollups, coverage),
                     ComposeStoreAvailability.BuildRowCapNotice(plan.Mode, rows.Count)) is string notice)
             {
                 payload["notice"] = notice;

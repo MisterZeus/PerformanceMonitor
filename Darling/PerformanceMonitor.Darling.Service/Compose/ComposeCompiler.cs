@@ -27,13 +27,17 @@ namespace PerformanceMonitor.Darling.Service;
 /// the WHOLE FLEET (no server predicate); one or many server names = a bound <c>server_name = ANY($n)</c>
 /// filter, never interpolated (the compile-run endpoint resolves the $server variable to this). Group-by-server
 /// and a per-panel server filter are separate and flow through the normal dimension path.</summary>
+/// <see cref="Coverage"/> is the #1759 companion to <see cref="Rollups"/>: existence is not enough, because a
+/// rollup created over pre-existing history serves only what it materialized, so the router also needs each
+/// tier's measured floor to avoid answering an old window with silence.
 public sealed record ComposeRunContext(
     IReadOnlyList<string>? Servers,
     DateTime StartUtc,
     DateTime EndUtc,
     IReadOnlyDictionary<string, string?> Variables,
     RollupAvailability Rollups,
-    DateTime NowUtc)
+    DateTime NowUtc,
+    RollupCoverage Coverage)
 {
     public static readonly IReadOnlyDictionary<string, string?> NoVariables =
         new Dictionary<string, string?>(StringComparer.Ordinal);
@@ -101,7 +105,7 @@ public static class ComposeCompiler
            window can end well in the past, and retention drops by actual wall-clock now — a purely historical
            window must reach the tier that still retains it. Fall back to raw when a value expression can't be
            remapped to the CAGG columns (CanRemap; the overlay AND-gate below). */
-        var route = ComposeSourceRouter.Resolve(plan, context.NowUtc, context.StartUtc, context.Rollups);
+        var route = ComposeSourceRouter.Resolve(plan, context.NowUtc, context.StartUtc, context.Rollups, context.Coverage);
         if (route.IsCagg
             && (!ComposeCaggValueMapper.CanRemap(plan.Measure, plan.Aggregate)
                 || (plan.Overlay is ComposeOverlay o && !ComposeCaggValueMapper.CanRemap(o.Measure, o.Aggregate))))

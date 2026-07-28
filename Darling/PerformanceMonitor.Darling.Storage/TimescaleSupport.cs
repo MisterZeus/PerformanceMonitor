@@ -821,11 +821,26 @@ $do$";
     /// pre-divided average — avg composes at query time as sum/execution_count_sum, which re-aggregates
     /// correctly; a materialized average would not) plus a <c>sample_count</c>. Summing the deltas is
     /// double-count-safe: they are Darling's own per-interval deltas, not raw cumulative DMV counters. Created
-    /// WITH NO DATA — a full historical refresh over 145 GB is heavy I/O, a deliberate off-hours manual op, NEVER
-    /// startup work; real-time aggregation is opted INTO explicitly (NOT the default — no <c>materialized_only</c>), so the view is
-    /// correct to query for any window immediately, just un-accelerated for old windows until the policy + a
-    /// manual backfill materialize them. IF NOT EXISTS so a restart re-converges. A SINGLE statement: a CAGG
-    /// CREATE cannot run inside a transaction, so it must never be batched with the policy call.
+    /// WITH NO DATA — a full historical refresh over 145 GB is heavy I/O, a deliberate off-hours operator op
+    /// (<c>--backfill-rollups</c>), NEVER startup work. IF NOT EXISTS so a restart re-converges. A SINGLE
+    /// statement: a CAGG CREATE cannot run inside a transaction, so it must never be batched with the policy call.
+    ///
+    /// <para><b>MATERIALIZED-ONLY, and that is deliberate (#1759).</b> This used to claim the opposite — that
+    /// real-time aggregation was opted into and the view was "correct to query for any window immediately, just
+    /// un-accelerated". Both halves were false. TimescaleDB 2.13+ defaults <c>materialized_only</c> to TRUE, so
+    /// naming no option means real-time aggregation is OFF; and even ON it would not help, because the watermark
+    /// is a hard partition — <c>build_union_query</c> emits materialized-below <c>UNION ALL</c> raw-at-or-above,
+    /// with no contiguity guarantee — so history below the watermark that was never materialized is served by
+    /// NEITHER branch. That premise cost this product the #1759 defect: every window older than the rollup's
+    /// materialized floor read EMPTY while raw still held the rows.</para>
+    ///
+    /// <para>Do NOT "fix" that by adding <c>materialized_only = false</c>. It cannot surface un-materialized
+    /// history (see above), and it would break the two things that now depend on materialized-only semantics:
+    /// <see cref="RollupCoverageProbeSql"/> and <see cref="RetentionArmSafetySql"/> both read
+    /// <c>min(bucket)</c> to mean "the oldest bucket this rollup has MATERIALIZED". Union in the raw branch and
+    /// an EMPTY materialization would report raw's own oldest row as the rollup's floor — coverage would look
+    /// complete when it is not, and the arming gate would arm a purge over history nothing else holds.
+    /// TimescaleContinuousAggregateTests pins the absence of the option for exactly this reason.</para>
     /// </summary>
     public const string CreateQueryStatsHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_hourly
 WITH (timescaledb.continuous) AS
@@ -1131,9 +1146,15 @@ WITH NO DATA";
     /// CREATE and the policy are SEPARATE commands
     /// per aggregate — a CAGG CREATE cannot run inside a transaction, so it is never batched with another
     /// statement. Failure-isolated per aggregate: one failure warns and the composer keeps querying raw.
-    /// Idempotent (IF NOT EXISTS on both), so it re-converges every restart. Does NOT backfill history (WITH NO
-    /// DATA + real-time aggregation keeps the view correct immediately; the heavy full refresh is a deliberate
-    /// off-hours op). Returns the number ready.
+    /// Idempotent (IF NOT EXISTS on both), so it re-converges every restart. Returns the number ready.
+    ///
+    /// <para>Does NOT backfill history, and on a store that already holds history that leaves a real gap rather
+    /// than a merely un-accelerated one (#1759): the aggregates are born WITH NO DATA and each refresh policy
+    /// starts 3 days back, so the materialized span begins at roughly creation-minus-3-days and never reaches
+    /// further back on its own. Reads stay CORRECT because <see cref="RetentionTierRouter"/> routes windows
+    /// below a rollup's measured floor to raw; the materialization itself is an operator op
+    /// (<c>--backfill-rollups</c>), which is where the disk cost is preflighted rather than incurred at
+    /// startup.</para>
     /// </summary>
     public static async Task<int> EnsureContinuousAggregatesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
     {
@@ -1338,10 +1359,13 @@ AND   j.hypertable_name = '{relation}'";
     /// failure-isolated per policy. MUST run AFTER <see cref="EnsureContinuousAggregatesAsync"/> so the hourly
     /// CAGGs the hourly policies target already exist. Returns the number of policies in place.
     ///
-    /// COLD-START CAVEAT (existing stores only): on a store that already holds raw history OLDER than the hourly
-    /// CAGG has materialized, the first raw drop can remove buckets the CAGG never captured. Fresh installs are
-    /// safe automatically — nothing is older than 4 days until the CAGG has been materializing that long. For an
-    /// EXISTING store, backfill the hourly CAGGs past the raw horizon BEFORE this policy's first run.
+    /// COLD START ON AN EXISTING STORE (#1759): a store that already holds raw history older than its hourly
+    /// CAGG has materialized does NOT lose it. <see cref="IsSafeToArmRetentionAsync"/> is fail-closed, so that
+    /// store's raw policies are created and left PAUSED, and the per-policy WARN says which rollup is short and
+    /// by how much. This used to be documented as a caveat prescribing a manual backfill "BEFORE this policy's
+    /// first run" — a step no store ever received, and a defect rather than a caveat. The backfill is now a real
+    /// operator verb (<c>--backfill-rollups</c>) with a disk preflight, and once it carries a rollup past the raw
+    /// horizon this gate arms the held policy by itself on the next start, with no manual step.
     /// </summary>
     public static async Task<int> EnsureRetentionPoliciesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
     {
@@ -1491,6 +1515,109 @@ AND   j.hypertable_name = '{relation}'";
         return new RollupAvailability(
             reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3),
             reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7));
+    }
+
+    /* ─────────────── rollup COVERAGE (the un-materialized-history guard, #1759) ─────────────── */
+
+    /// <summary>Every rollup view in probe order, paired with the RAW table its tier ladder falls back to.
+    /// One list so the coverage probe's column order, <see cref="RollupCoverage"/>'s constructor and
+    /// <see cref="RollupCoverage.RawTableFor"/> cannot drift into disagreeing.</summary>
+    public static readonly (string View, string RawTable)[] RollupViews =
+    {
+        (QueryStatsHourlyView, "query_stats"),
+        (QueryStatsDailyView, "query_stats"),
+        (QueryStatsDbHourlyView, "query_stats"),
+        (QueryStatsDbDailyView, "query_stats"),
+        (ProcedureStatsHourlyView, "procedure_stats"),
+        (ProcedureStatsDailyView, "procedure_stats"),
+        (QueryStoreStatsHourlyView, "query_store_stats"),
+        (QueryStoreStatsDailyView, "query_store_stats"),
+    };
+
+    /// <summary>The three raw tables the rollups roll up, in coverage-probe order (deduplicated
+    /// <see cref="RollupViews"/>).</summary>
+    public static readonly string[] RolledRawTables = { "query_stats", "procedure_stats", "query_store_stats" };
+
+    /// <summary>
+    /// How far back each rollup has actually MATERIALIZED, and how far back each raw table still reaches —
+    /// the input <see cref="RetentionTierRouter"/> needs to stop routing a window at a rollup that cannot
+    /// answer it (#1759).
+    ///
+    /// <para>The mechanism this exists for: a continuous aggregate created <c>WITH NO DATA</c> over
+    /// pre-existing history serves ONLY what was materialized. Real-time aggregation cannot rescue it —
+    /// the watermark is a hard partition (materialized below <c>UNION ALL</c> raw at-or-above), so raw
+    /// older than the watermark is excluded by construction, not merely un-accelerated. Every rollup's
+    /// refresh policy starts 3 days back, so on a store that existed before its rollups the materialized
+    /// span begins at roughly creation-minus-3-days and NEVER reaches further back on its own.</para>
+    ///
+    /// <para><b><c>to_regclass</c>-safe by construction, not by guard.</b> A relation named in a statement
+    /// is resolved at PARSE time, so no in-statement <c>to_regclass</c> test can keep <c>min(bucket)</c>
+    /// off a view that does not exist. Instead the SQL is BUILT from
+    /// <paramref name="availability"/> — a view the <see cref="RollupProbeSql"/> round trip just proved
+    /// absent contributes a literal <c>NULL</c> and is never named. Column count is fixed either way, so
+    /// the reader's indexing does not depend on the store's shape.</para>
+    ///
+    /// <para><c>min(bucket)</c> is deliberately the SAME expression <see cref="RetentionArmSafetySql"/>
+    /// gates arming on. Routing and arming must agree about what a rollup covers, or the router would
+    /// serve a window the arming gate considers uncovered (or worse, the reverse).</para>
+    /// </summary>
+    public static string RollupCoverageProbeSql(RollupAvailability availability)
+    {
+        var columns = RollupViews
+            .Select(r => availability.Has(r.View)
+                ? $"(SELECT min(bucket) FROM collect.{r.View})"
+                : "NULL::timestamp")
+            /* The raw tables are migration-created and always exist, so they need no availability gate. */
+            .Concat(RolledRawTables.Select(t => $"(SELECT min(collection_time) FROM collect.{t})"));
+
+        return "SELECT " + string.Join(", ", columns);
+    }
+
+    /// <summary>
+    /// Reads every rollup's materialized floor and every rolled raw table's oldest row
+    /// (<see cref="RollupCoverageProbeSql"/>). <paramref name="availability"/> comes from
+    /// <see cref="DetectRollupsAsync"/> in the same probe cycle and decides which relations are named at
+    /// all.
+    ///
+    /// <para>NOTE that a DAILY rollup's floor is the day-FLOOR of its oldest hourly bucket, so it can read
+    /// up to a day earlier than the hourly it is sourced from. That over-claims coverage by at most one
+    /// bucket, and it is exactly the semantics the arming gate already runs on — matching it is the point.</para>
+    /// </summary>
+    public static async Task<RollupCoverage> DetectRollupCoverageAsync(
+        NpgsqlDataSource dataSource, RollupAvailability availability, CancellationToken cancellationToken = default)
+    {
+        if (dataSource is null)
+        {
+            throw new ArgumentNullException(nameof(dataSource));
+        }
+
+        await using var command = dataSource.CreateCommand(RollupCoverageProbeSql(availability));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return RollupCoverage.Unknown;
+        }
+
+        var floors = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        for (var i = 0; i < RollupViews.Length; i++)
+        {
+            if (!await reader.IsDBNullAsync(i, cancellationToken))
+            {
+                floors[RollupViews[i].View] = reader.GetDateTime(i);
+            }
+        }
+
+        var rawOldest = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        for (var i = 0; i < RolledRawTables.Length; i++)
+        {
+            var ordinal = RollupViews.Length + i;
+            if (!await reader.IsDBNullAsync(ordinal, cancellationToken))
+            {
+                rawOldest[RolledRawTables[i]] = reader.GetDateTime(ordinal);
+            }
+        }
+
+        return new RollupCoverage(floors, rawOldest);
     }
 
     /// <summary>
@@ -1857,4 +1984,117 @@ public readonly record struct RollupAvailability(
         TimescaleSupport.QueryStoreStatsDailyView => QueryStoreGrainDaily,
         _ => false,
     };
+}
+
+/// <summary>
+/// One tier ladder's measured history: how far back the hourly rollup and the daily rollup have actually
+/// MATERIALIZED, and how far back the RAW table underneath them still holds rows (#1759). The unit
+/// <see cref="RetentionTierRouter.Resolve(DateTime, DateTime, bool, bool, TierCoverage)"/> routes on.
+///
+/// <para>Every field is nullable and null means EXACTLY ONE thing to the router: "no positive evidence".
+/// A floor is null when the view is empty, when it does not exist, or when the probe failed — and all
+/// three must behave identically, because the router only ever moves a window DOWN a tier on a positive
+/// measurement that the lower tier reaches further back. That makes an unknown coverage state inert: the
+/// age + availability ladder decides, exactly as it did before this existed.</para>
+/// </summary>
+public readonly record struct TierCoverage(DateTime? HourlyFloorUtc, DateTime? DailyFloorUtc, DateTime? RawOldestUtc)
+{
+    /// <summary>Nothing measured — the router falls back to the pure age + availability decision.</summary>
+    public static TierCoverage Unknown => default;
+
+    /// <summary>
+    /// Does a tier whose materialized floor is <paramref name="floorUtc"/> hold the oldest point of a window
+    /// starting at <paramref name="windowStartUtc"/>? A null floor covers NOTHING (see the type remarks) —
+    /// which is the whole #1759 defect in one line: a rollup created <c>WITH NO DATA</c> answers only what it
+    /// materialized, so a window below its floor comes back empty rather than falling through to raw.
+    /// </summary>
+    public static bool Covers(DateTime? floorUtc, DateTime windowStartUtc) =>
+        floorUtc is DateTime floor && floor <= windowStartUtc;
+
+    /// <summary>
+    /// Does <paramref name="candidateFloorUtc"/> reach STRICTLY further back than <paramref name="floorUtc"/> —
+    /// i.e. would routing there cover more of the window? A null candidate never wins (no evidence), and a null
+    /// incumbent floor is beaten by any real measurement (a tier holding nothing loses to a tier holding
+    /// something).
+    ///
+    /// <para>This asymmetry is the guard that keeps the #1759 fix from becoming its own regression. "Window
+    /// starts before the rollup's floor" ALONE is not a reason to drop to raw: on a healthy store whose purges
+    /// are armed, raw keeps ~4 days while the rollup keeps weeks, so a 30-day window on a 10-day-old store
+    /// predates every floor and dropping to raw would return LESS. The fallback fires only where the lower tier
+    /// is measurably deeper, which is precisely the held-purge shape #1759 describes.</para>
+    /// </summary>
+    public static bool ReachesFurtherBack(DateTime? candidateFloorUtc, DateTime? floorUtc) =>
+        candidateFloorUtc is DateTime candidate && candidate < (floorUtc ?? DateTime.MaxValue);
+}
+
+/// <summary>
+/// How far back every rollup in a store has actually materialized, and how far back each rolled RAW table
+/// still reaches (<see cref="TimescaleSupport.DetectRollupCoverageAsync"/>) — the #1759 companion to
+/// <see cref="RollupAvailability"/>'s "does it exist at all".
+///
+/// <para>Kept as a separate type rather than more fields on <see cref="RollupAvailability"/> for one
+/// concrete reason: availability is a value that callers compare (<c>rollups == RollupAvailability.None</c>)
+/// and cache PERMANENTLY once complete, because a created aggregate is never dropped. Coverage does the
+/// opposite — it MOVES, backwards on a backfill and forwards on a retention drop — so it must be re-probed
+/// on a cadence, and folding a mutable dictionary into a record struct would break the equality the
+/// existing caches rely on.</para>
+/// </summary>
+public sealed class RollupCoverage
+{
+    private readonly IReadOnlyDictionary<string, DateTime> _floorsByView;
+    private readonly IReadOnlyDictionary<string, DateTime> _oldestByRawTable;
+
+    public RollupCoverage(
+        IReadOnlyDictionary<string, DateTime> floorsByView,
+        IReadOnlyDictionary<string, DateTime> oldestByRawTable)
+    {
+        _floorsByView = floorsByView ?? throw new ArgumentNullException(nameof(floorsByView));
+        _oldestByRawTable = oldestByRawTable ?? throw new ArgumentNullException(nameof(oldestByRawTable));
+    }
+
+    /// <summary>Nothing measured — every lookup answers null, so the router keeps its pre-#1759 behaviour.
+    /// The safe answer for a store with no rollups AND for a probe that failed.</summary>
+    public static RollupCoverage Unknown { get; } = new(
+        new Dictionary<string, DateTime>(StringComparer.Ordinal),
+        new Dictionary<string, DateTime>(StringComparer.Ordinal));
+
+    /// <summary>The oldest bucket <paramref name="caggView"/> has materialized, or null when it holds nothing
+    /// (or was never probed). Mirrors <see cref="RollupAvailability.Has"/>: an unknown name answers null.</summary>
+    public DateTime? FloorOf(string caggView) =>
+        _floorsByView.TryGetValue(caggView, out var floor) ? floor : null;
+
+    /// <summary>The oldest row <paramref name="rawTable"/> still holds, or null when it is empty (or was never
+    /// probed).</summary>
+    public DateTime? RawOldestOf(string rawTable) =>
+        _oldestByRawTable.TryGetValue(rawTable, out var oldest) ? oldest : null;
+
+    /// <summary>
+    /// The tier ladder for one rollup pair: both floors plus the raw table underneath them, ready for
+    /// <see cref="RetentionTierRouter.Resolve(DateTime, DateTime, bool, bool, TierCoverage)"/>. A pair with no
+    /// daily view (or an unrecognized hourly view) still answers — with nulls, which the router treats as
+    /// "no evidence".
+    /// </summary>
+    public TierCoverage For(string hourlyView, string? dailyView)
+    {
+        var rawTable = RawTableFor(hourlyView);
+        return new TierCoverage(
+            FloorOf(hourlyView),
+            dailyView is null ? null : FloorOf(dailyView),
+            rawTable is null ? null : RawOldestOf(rawTable));
+    }
+
+    /// <summary>The raw table a rollup view's tier ladder falls back TO, or null for a name outside
+    /// <see cref="TimescaleSupport.RollupViews"/> (which answers "no evidence" rather than guessing).</summary>
+    public static string? RawTableFor(string caggView)
+    {
+        foreach (var (view, rawTable) in TimescaleSupport.RollupViews)
+        {
+            if (string.Equals(view, caggView, StringComparison.Ordinal))
+            {
+                return rawTable;
+            }
+        }
+
+        return null;
+    }
 }

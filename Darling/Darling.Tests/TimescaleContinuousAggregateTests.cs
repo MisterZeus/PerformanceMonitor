@@ -45,10 +45,54 @@ public sealed class TimescaleContinuousAggregateTests
         Assert.Contains("count(*) AS sample_count", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("avg(", sql, StringComparison.Ordinal);
 
-        /* WITH NO DATA (no startup backfill), and real-time aggregation left ON (no materialized_only) so the
-           view is correct to query for any window immediately. */
+        /* WITH NO DATA — no startup backfill; materializing history is the --backfill-rollups operator op. */
         Assert.Contains("WITH NO DATA", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("materialized_only", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #1759: every query-acceleration rollup stays MATERIALIZED-ONLY, and this pin now carries the opposite
+    /// meaning it used to. It was written asserting "real-time aggregation left ON (no materialized_only)" —
+    /// false twice over. TimescaleDB 2.13+ defaults the option to TRUE, so naming nothing means real-time
+    /// aggregation is OFF (the runtime is pinned at 2.28.1); and turning it on would not surface un-materialized
+    /// history anyway, because the watermark is a hard partition rather than a fallback.
+    ///
+    /// <para>What makes the pin LOAD-BEARING rather than merely accurate: <c>RollupCoverageProbeSql</c> and
+    /// <c>RetentionArmSafetySql</c> both read <c>min(bucket)</c> to mean "the oldest bucket this rollup has
+    /// MATERIALIZED". Adding <c>materialized_only = false</c> would union the raw branch in, so an EMPTY
+    /// materialization would report RAW's oldest row as the rollup's floor. The router would then believe a
+    /// rollup covers history it has not materialized (serving silence), and — far worse — the arming gate would
+    /// arm a raw purge over history no rollup holds. The nine BASELINE aggregates deliberately do set the
+    /// option; they are leaves whose arming coverage is the tier itself, so the same union cannot mislead a
+    /// cross-tier gate.</para>
+    /// </summary>
+    [Fact]
+    public void QueryAccelerationRollups_StayMaterializedOnly_BecauseCoverageAndArmingReadMinBucket()
+    {
+        foreach (var sql in new[]
+        {
+            TimescaleSupport.CreateQueryStatsHourlySql,
+            TimescaleSupport.CreateQueryStatsDailySql,
+            TimescaleSupport.CreateQueryStatsDbHourlySql,
+            TimescaleSupport.CreateQueryStatsDbDailySql,
+            TimescaleSupport.CreateProcedureStatsHourlySql,
+            TimescaleSupport.CreateProcedureStatsDailySql,
+            TimescaleSupport.CreateQueryStoreStatsHourlySql,
+            TimescaleSupport.CreateQueryStoreStatsDailySql,
+        })
+        {
+            Assert.DoesNotContain("materialized_only", sql, StringComparison.Ordinal);
+        }
+
+        /* The probe and the arming gate must keep reading the SAME expression off the SAME relation, or
+           "covered" would mean two different things to the router and to the purge. */
+        var probe = TimescaleSupport.RollupCoverageProbeSql(RollupAvailability.All);
+        var arming = TimescaleSupport.RetentionArmSafetySql(
+            "query_stats", "collection_time", TimescaleSupport.QueryStatsHourlyView);
+
+        Assert.Contains($"min(bucket) FROM collect.{TimescaleSupport.QueryStatsHourlyView}", probe, StringComparison.Ordinal);
+        Assert.Contains($"min(bucket) FROM collect.{TimescaleSupport.QueryStatsHourlyView}", arming, StringComparison.Ordinal);
+        Assert.Contains("min(collection_time) FROM collect.query_stats", probe, StringComparison.Ordinal);
+        Assert.Contains("min(collection_time) FROM collect.query_stats", arming, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -311,7 +311,7 @@ public sealed class DarlingComposeTests
     private static string Compile(PanelPlan plan, IReadOnlyList<string>? servers = null, IReadOnlyDictionary<string, string?>? variables = null)
     {
         var (compiled, error) = ComposeCompiler.Compile(
-            plan, new ComposeRunContext(servers, WindowStart, WindowEnd, variables ?? ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd));
+            plan, new ComposeRunContext(servers, WindowStart, WindowEnd, variables ?? ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown));
         Assert.True(error is null, error);
         Assert.NotNull(compiled);
         return compiled!.Sql;
@@ -401,7 +401,7 @@ public sealed class DarlingComposeTests
         var plan = ValidPlan("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"auto\",\"viz\":\"line\"}");
         var end = WindowEnd;
         var start = end.AddHours(-windowHours);
-        var (compiled, error) = ComposeCompiler.Compile(plan, new ComposeRunContext(null, start, end, ComposeRunContext.NoVariables, RollupAvailability.All, end));
+        var (compiled, error) = ComposeCompiler.Compile(plan, new ComposeRunContext(null, start, end, ComposeRunContext.NoVariables, RollupAvailability.All, end, RollupCoverage.Unknown));
         Assert.True(error is null, error);
         Assert.Contains(expectedTrunc, compiled!.Sql, StringComparison.Ordinal);
     }
@@ -450,7 +450,7 @@ public sealed class DarlingComposeTests
         var plan = ValidPlan("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"minute\",\"viz\":\"line\"}");
         var start = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
         var end = start.AddDays(60); /* 60 days of minutes >> MaxBuckets */
-        var (compiled, error) = ComposeCompiler.Compile(plan, new ComposeRunContext(null, start, end, ComposeRunContext.NoVariables, RollupAvailability.All, end));
+        var (compiled, error) = ComposeCompiler.Compile(plan, new ComposeRunContext(null, start, end, ComposeRunContext.NoVariables, RollupAvailability.All, end, RollupCoverage.Unknown));
         Assert.Null(compiled);
         Assert.Contains("points", error!, StringComparison.OrdinalIgnoreCase);
     }
@@ -463,7 +463,7 @@ public sealed class DarlingComposeTests
         var end = WindowEnd;                 /* EndUtc serves as "now" in the compiler */
         var start = end.AddDays(-daysOld);
         /* NowUtc = end here on purpose: these pins predate #1606 and reason about age relative to the window end. */
-        return ComposeCompiler.Compile(plan, new ComposeRunContext(servers, start, end, ComposeRunContext.NoVariables, RollupAvailability.All, end));
+        return ComposeCompiler.Compile(plan, new ComposeRunContext(servers, start, end, ComposeRunContext.NoVariables, RollupAvailability.All, end, RollupCoverage.Unknown));
     }
 
     [Fact]
@@ -1309,7 +1309,7 @@ public sealed class DarlingComposeTests
 
     private static IReadOnlyList<(string Source, ComposeCompiled Compiled)> CompileAnnotations(
         PanelPlan plan, IReadOnlyList<string>? servers = null) =>
-        ComposeCompiler.CompileAnnotations(plan, new ComposeRunContext(servers, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd));
+        ComposeCompiler.CompileAnnotations(plan, new ComposeRunContext(servers, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown));
 
     [Fact]
     public void CompileAnnotations_ReturnsEmpty_WhenNoneRequested()
@@ -1717,7 +1717,7 @@ public sealed class DarlingComposeTests
         var plan = ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"day\",\"viz\":\"line\"}");
         var end = WindowEnd;
         var (compiled, error) = ComposeCompiler.Compile(
-            plan, new ComposeRunContext(null, end.AddDays(-10), end, ComposeRunContext.NoVariables, RollupAvailability.None, end));
+            plan, new ComposeRunContext(null, end.AddDays(-10), end, ComposeRunContext.NoVariables, RollupAvailability.None, end, RollupCoverage.Unknown));
         Assert.True(error is null, error);
         Assert.Contains("FROM collect.query_stats AS f", compiled!.Sql, StringComparison.Ordinal);
         Assert.DoesNotContain("_hourly", compiled.Sql, StringComparison.Ordinal);
@@ -1748,13 +1748,13 @@ public sealed class DarlingComposeTests
         var dailyRoute = new ComposeRoute(ComposeSourceTier.Daily, "query_stats_daily");
 
         /* Plain PG: silent even for a 40-day raw window — nothing ever dropped raw. */
-        Assert.Null(ComposeStoreAvailability.BuildRetentionNotice("query_stats", rawRoute, now.AddDays(-40), now, RollupAvailability.None));
+        Assert.Null(ComposeStoreAvailability.BuildRetentionNotice("query_stats", rawRoute, now.AddDays(-40), now, RollupAvailability.None, RollupCoverage.Unknown));
 
         /* Retention-active store, raw route, window fits raw's ~4 days: silent. */
-        Assert.Null(ComposeStoreAvailability.BuildRetentionNotice("query_stats", rawRoute, now.AddDays(-1), now, RollupAvailability.All));
+        Assert.Null(ComposeStoreAvailability.BuildRetentionNotice("query_stats", rawRoute, now.AddDays(-1), now, RollupAvailability.All, RollupCoverage.Unknown));
 
         /* Retention-active store, raw route, 10-day window: partial — says so, with the tier's horizon. */
-        var rawNotice = ComposeStoreAvailability.BuildRetentionNotice("query_stats", rawRoute, now.AddDays(-10), now, RollupAvailability.All);
+        var rawNotice = ComposeStoreAvailability.BuildRetentionNotice("query_stats", rawRoute, now.AddDays(-10), now, RollupAvailability.All, RollupCoverage.Unknown);
         Assert.NotNull(rawNotice);
         Assert.Contains("partial window", rawNotice, StringComparison.Ordinal);
         Assert.Contains("4 days", rawNotice, StringComparison.Ordinal);
@@ -1762,20 +1762,20 @@ public sealed class DarlingComposeTests
 
         /* Hourly route past its 21-day horizon (daily view missing on this store): partial. */
         var partial = RollupAvailability.All with { QueryGrainDaily = false };
-        var hourlyNotice = ComposeStoreAvailability.BuildRetentionNotice("query_stats", hourlyRoute, now.AddDays(-40), now, partial);
+        var hourlyNotice = ComposeStoreAvailability.BuildRetentionNotice("query_stats", hourlyRoute, now.AddDays(-40), now, partial, RollupCoverage.Unknown);
         Assert.NotNull(hourlyNotice);
         Assert.Contains("21 days", hourlyNotice, StringComparison.Ordinal);
 
         /* Hourly route, window inside 21 days: silent. */
-        Assert.Null(ComposeStoreAvailability.BuildRetentionNotice("query_stats", hourlyRoute, now.AddDays(-10), now, RollupAvailability.All));
+        Assert.Null(ComposeStoreAvailability.BuildRetentionNotice("query_stats", hourlyRoute, now.AddDays(-10), now, RollupAvailability.All, RollupCoverage.Unknown));
 
         /* Daily route: kept indefinitely — silent no matter the window. */
-        Assert.Null(ComposeStoreAvailability.BuildRetentionNotice("query_stats", dailyRoute, now.AddDays(-400), now, RollupAvailability.All));
+        Assert.Null(ComposeStoreAvailability.BuildRetentionNotice("query_stats", dailyRoute, now.AddDays(-400), now, RollupAvailability.All, RollupCoverage.Unknown));
 
         /* A NON-TIERED table (no CAGG pair) reaches Raw via the no-CAGG early return and lives on the
            30-day collector purge, not the 4-day tier — a 7-day wait_stats window is complete on raw, so
            a notice would be a false alarm even on a fully-built TimescaleDB store. */
-        Assert.Null(ComposeStoreAvailability.BuildRetentionNotice("wait_stats", rawRoute, now.AddDays(-7), now, RollupAvailability.All));
+        Assert.Null(ComposeStoreAvailability.BuildRetentionNotice("wait_stats", rawRoute, now.AddDays(-7), now, RollupAvailability.All, RollupCoverage.Unknown));
     }
 
 
@@ -1820,7 +1820,7 @@ public sealed class DarlingComposeTests
     {
         var with = ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"overlay\":{\"measure\":\"query_elapsed_us\",\"aggregate\":\"sum\"}}");
         var without = ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}");
-        var context = new ComposeRunContext(null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd);
+        var context = new ComposeRunContext(null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown);
 
         var (compiledWith, e1) = ComposeCompiler.Compile(with, context);
         var (compiledWithout, e2) = ComposeCompiler.Compile(without, context);
@@ -1837,7 +1837,7 @@ public sealed class DarlingComposeTests
     public void Compile_Scatter_RanksByPrimary_AndCarriesValue2()
     {
         var plan = ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":25,\"groupBy\":[\"query_hash\"],\"viz\":\"scatter\",\"overlay\":{\"measure\":\"query_executions\",\"aggregate\":\"sum\"}}");
-        var context = new ComposeRunContext(null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd);
+        var context = new ComposeRunContext(null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown);
         var (compiled, error) = ComposeCompiler.Compile(plan, context);
         Assert.True(error is null, error);
         Assert.Contains("AS value2", compiled!.Sql, StringComparison.Ordinal);
@@ -1851,7 +1851,7 @@ public sealed class DarlingComposeTests
     public void Compile_OverlayCaggGate_RemappablePairRidesTheRollup()
     {
         var context = new ComposeRunContext(
-            null, WindowEnd.AddDays(-10), WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd);
+            null, WindowEnd.AddDays(-10), WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown);
 
         var both = ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"overlay\":{\"measure\":\"query_elapsed_us\",\"aggregate\":\"sum\"}}");
         var (compiledBoth, e1) = ComposeCompiler.Compile(both, context);
@@ -1870,7 +1870,7 @@ public sealed class DarlingComposeTests
         var now = WindowEnd;
         var plan = ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"day\",\"viz\":\"line\"}");
         var context = new ComposeRunContext(
-            null, now.AddDays(-30), now.AddDays(-25), ComposeRunContext.NoVariables, RollupAvailability.All, now);
+            null, now.AddDays(-30), now.AddDays(-25), ComposeRunContext.NoVariables, RollupAvailability.All, now, RollupCoverage.Unknown);
         var (compiled, error) = ComposeCompiler.Compile(plan, context);
         Assert.True(error is null, error);
         Assert.Contains("query_stats_daily", compiled!.Sql, StringComparison.Ordinal);

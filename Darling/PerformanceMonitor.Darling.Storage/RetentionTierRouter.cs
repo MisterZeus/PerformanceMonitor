@@ -116,6 +116,65 @@ public static class RetentionTierRouter
     }
 
     /// <summary>
+    /// The COVERAGE-gated form (#1759): the age + availability decision above, degraded again to what each
+    /// tier has actually MATERIALIZED. A rollup created <c>WITH NO DATA</c> over pre-existing history serves
+    /// only its materialized span — real-time aggregation cannot rescue the rest, because the watermark is a
+    /// hard partition (materialized below <c>UNION ALL</c> raw at-or-above) rather than a fallback, so raw
+    /// older than the watermark is excluded by construction. Age alone therefore routed windows onto rollups
+    /// that could not answer them and returned EMPTY while raw still held every row.
+    ///
+    /// <para>The rule is comparative, never absolute: a tier is abandoned only when a LOWER tier is measured
+    /// to reach further back, so the fallback fires on the held-purge shape #1759 describes and stays silent
+    /// on a healthy store, where raw keeps ~4 days against the rollups' weeks and dropping to raw would
+    /// return LESS than staying put. See <see cref="TierCoverage.ReachesFurtherBack"/>.</para>
+    ///
+    /// <para>Daily degrades to hourly before either degrades to raw, mirroring the availability ladder. That
+    /// step matters for exactly one live shape: a daily rollup still empty while its hourly has materialized
+    /// (the transient state after a rollup pair is created, before the daily policy's first run). Without it
+    /// a 30-day window there would skip a 21-day hourly tier to reach a 4-day raw one.</para>
+    ///
+    /// <para>Unknown coverage is INERT by construction — see <see cref="TierCoverage"/>. A failed probe, a
+    /// plain-PostgreSQL store and a partially-built one all produce nulls, and nulls never move a window.</para>
+    /// </summary>
+    public static RetentionTier Resolve(
+        DateTime nowUtc,
+        DateTime windowStartUtc,
+        bool hourlyAvailable,
+        bool dailyAvailable,
+        TierCoverage coverage)
+    {
+        var tier = Resolve(nowUtc, windowStartUtc, hourlyAvailable, dailyAvailable);
+
+        /* Raw is the floor of the ladder: it is the fallback, so it is never itself degraded. */
+        if (tier == RetentionTier.Raw)
+        {
+            return tier;
+        }
+
+        var floor = tier == RetentionTier.Daily ? coverage.DailyFloorUtc : coverage.HourlyFloorUtc;
+        if (TierCoverage.Covers(floor, windowStartUtc))
+        {
+            return tier;
+        }
+
+        /* The chosen rollup cannot answer the oldest part of the window. Prefer the deepest tier that can. */
+        if (tier == RetentionTier.Daily
+            && hourlyAvailable
+            && TierCoverage.ReachesFurtherBack(coverage.HourlyFloorUtc, floor))
+        {
+            tier = RetentionTier.Hourly;
+            floor = coverage.HourlyFloorUtc;
+
+            if (TierCoverage.Covers(floor, windowStartUtc))
+            {
+                return tier;
+            }
+        }
+
+        return TierCoverage.ReachesFurtherBack(coverage.RawOldestUtc, floor) ? RetentionTier.Raw : tier;
+    }
+
+    /// <summary>
     /// The earliest instant a reader that projects per-row text can honestly cover, as of
     /// <paramref name="nowUtc"/>. Callers clamp their window start to this and surface the clamp.
     /// </summary>
