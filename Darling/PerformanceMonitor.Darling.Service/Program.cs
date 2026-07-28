@@ -109,6 +109,23 @@ if (args.Length > 0 && DarlingCliCommands.IsConfigureNetworkVerb(args[0]))
         configPath, Console.In, Console.Out, Console.Error, CancellationToken.None);
 }
 
+/* CLI verb: --configure-firewall (#1771) — create/remove every scoped Darling firewall rule so the live
+   firewall matches darling.json. The service account cannot write firewall rules by design, so this ELEVATED
+   verb owns them: install-darling.ps1 runs it after the service is up, uninstall-darling.ps1 removes them, and
+   the running service only verifies. Reads darling.json only (no store, no credentials), so it works at
+   install time before the store has ever booted. Optional second arg = an explicit config path. */
+if (args.Length > 0 && DarlingCliCommands.IsConfigureFirewallVerb(args[0]))
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        Console.Error.WriteLine("--configure-firewall requires Windows (Windows Firewall).");
+        return 1;
+    }
+
+    var configPath = args.Length > 1 ? args[1] : null;
+    return await DarlingCliCommands.ConfigureFirewallAsync(configPath, Console.Out, Console.Error, CancellationToken.None);
+}
+
 /* CLI verbs: enable/disable the embedded MCP + web-dashboard endpoints on a HEADLESS managed deployment. Each
    flips the live switch in config.config_service (mcp_enabled/web_enabled — the store is authoritative after the
    first run; darling.json's enabled is only the seed) via a targeted UPDATE whose self-bump trigger makes the
