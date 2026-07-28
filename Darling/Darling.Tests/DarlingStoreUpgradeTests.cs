@@ -705,6 +705,7 @@ public sealed class DarlingStoreUpgradeTests
                 Assert.Contains("shared_preload_libraries = 'timescaledb'", conf, StringComparison.Ordinal);
                 Assert.Equal(1, CountOccurrences(conf, DarlingManagedPostgres.ConfMarker));
                 Assert.Equal(1, CountOccurrences(conf, DarlingManagedPostgres.ConfMarkerV6));
+                Assert.Equal(1, CountOccurrences(conf, DarlingManagedPostgres.ConfMarkerV7));
             }
             finally
             {
