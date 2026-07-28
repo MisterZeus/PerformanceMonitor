@@ -34,7 +34,7 @@ WITH latest AS (
         configuration_name,
         value_in_use,
         ROW_NUMBER() OVER (PARTITION BY configuration_name ORDER BY capture_time DESC) AS rn
-    FROM server_config
+    FROM v_server_config
     WHERE server_id = $1
     AND   configuration_name IN (
         'cost threshold for parallelism',
@@ -118,7 +118,7 @@ WHERE rn = 1";
             cmd.CommandText = @"
 SELECT engine_edition,
        CAST(SPLIT_PART(product_version, '.', 1) AS INTEGER) AS major_version
-FROM server_properties
+FROM v_server_properties
 WHERE server_id = $1
 ORDER BY collection_time DESC
 LIMIT 1";
@@ -159,7 +159,7 @@ WITH latest AS (
            is_query_store_on, compatibility_level, page_verify_option,
            is_accelerated_database_recovery_on,
            ROW_NUMBER() OVER (PARTITION BY database_name ORDER BY capture_time DESC) AS rn
-    FROM database_config
+    FROM v_database_config
     WHERE server_id = $1
 )
 SELECT
@@ -234,7 +234,7 @@ AND database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
 WITH latest AS (
     SELECT trace_flag, status,
            ROW_NUMBER() OVER (PARTITION BY trace_flag ORDER BY capture_time DESC) AS rn
-    FROM trace_flags
+    FROM v_trace_flags
     WHERE server_id = $1
     AND   is_global = true
 )
@@ -288,7 +288,7 @@ ORDER BY trace_flag";
 SELECT COALESCE(vcore_count, cpu_count) AS cpu_count, hyperthread_ratio, physical_memory_mb,
        socket_count, cores_per_socket, is_hadr_enabled, edition, product_version,
        lock_pages_in_memory, instant_file_initialization_enabled, memory_dump_count
-FROM server_properties
+FROM v_server_properties
 WHERE server_id = $1
 ORDER BY collection_time DESC
 LIMIT 1";

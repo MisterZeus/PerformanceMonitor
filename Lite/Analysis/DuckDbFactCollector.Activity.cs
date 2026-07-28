@@ -124,7 +124,7 @@ SELECT
     COUNT(CASE WHEN dop > 1 THEN 1 END) AS parallel_count,
     MAX(dop) AS max_dop,
     COUNT(DISTINCT session_id) AS distinct_sessions
-FROM query_snapshots
+FROM v_query_snapshots
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3";
@@ -185,7 +185,7 @@ SELECT
     COUNT(CASE WHEN is_running_long THEN 1 END) AS running_long_count,
     MAX(percent_of_average) AS max_percent_of_avg,
     MAX(current_duration_seconds) AS max_duration_seconds
-FROM running_jobs
+FROM v_running_jobs
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3";
@@ -238,7 +238,7 @@ AND   collection_time <= $3";
 WITH latest AS (
     SELECT program_name, connection_count, running_count, sleeping_count, dormant_count,
            ROW_NUMBER() OVER (PARTITION BY program_name ORDER BY collection_time DESC) AS rn
-    FROM session_stats
+    FROM v_session_stats
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3

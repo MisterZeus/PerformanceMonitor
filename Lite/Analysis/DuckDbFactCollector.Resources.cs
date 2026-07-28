@@ -27,7 +27,7 @@ public partial class DuckDbFactCollector
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
 SELECT total_physical_memory_mb, buffer_pool_mb, target_server_memory_mb
-FROM memory_stats
+FROM v_memory_stats
 WHERE server_id = $1
 AND   collection_time <= $2
 ORDER BY collection_time DESC
@@ -77,7 +77,7 @@ LIMIT 1";
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
 SELECT total_runnable_tasks_count, runnable_tasks_warning
-FROM cpu_scheduler_stats
+FROM v_cpu_scheduler_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
@@ -186,7 +186,7 @@ AND   collection_time <= $3";
 WITH latest AS (
     SELECT clerk_type, memory_mb,
            ROW_NUMBER() OVER (PARTITION BY clerk_type ORDER BY collection_time DESC) AS rn
-    FROM memory_clerks
+    FROM v_memory_clerks
     WHERE server_id = $1
     AND   collection_time <= $2
 )
@@ -323,7 +323,7 @@ AND   collection_time <= $3";
 WITH latest AS (
     SELECT counter_name, cntr_value, delta_cntr_value,
            ROW_NUMBER() OVER (PARTITION BY counter_name ORDER BY collection_time DESC) AS rn
-    FROM perfmon_stats
+    FROM v_perfmon_stats
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
@@ -397,7 +397,7 @@ FROM latest WHERE rn = 1";
 WITH ranked AS (
     SELECT total_plans, single_use_plans, total_size_mb, single_use_size_mb,
            DENSE_RANK() OVER (ORDER BY collection_time DESC) AS rnk
-    FROM plan_cache_stats
+    FROM v_plan_cache_stats
     WHERE server_id = $1
     AND   collection_time <= $2
 )
@@ -473,7 +473,7 @@ SELECT
     SUM(CASE WHEN memory_indicators_process >= 2 OR memory_indicators_system >= 2 THEN 1 ELSE 0 END) AS pressure_event_count,
     MAX(memory_indicators_process) AS max_process,
     MAX(memory_indicators_system) AS max_system
-FROM memory_pressure_events
+FROM v_memory_pressure_events
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3";

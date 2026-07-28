@@ -399,7 +399,7 @@ SELECT
     SUM(delta_worker_time) AS total_cpu_time_us,
     SUM(delta_elapsed_time) AS total_elapsed_time_us,
     SUM(delta_logical_reads) AS total_logical_reads
-FROM procedure_stats
+FROM v_procedure_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
@@ -461,7 +461,7 @@ AND   delta_execution_count > 0";
                 using var command = connection.CreateCommand();
                 command.CommandText = @"
 SELECT query_plan_xml
-FROM query_stats
+FROM v_query_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3

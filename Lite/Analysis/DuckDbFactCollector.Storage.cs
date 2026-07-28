@@ -29,7 +29,7 @@ public partial class DuckDbFactCollector
 WITH latest AS (
     SELECT database_name, file_name, size_mb,
            ROW_NUMBER() OVER (PARTITION BY database_name, file_name ORDER BY collection_time DESC) AS rn
-    FROM file_io_stats
+    FROM v_file_io_stats
     WHERE server_id = $1
     AND   collection_time <= $2
     AND   size_mb > 0
@@ -215,7 +215,7 @@ AND   collection_time <= $3";
 WITH latest AS (
     SELECT database_name, file_id, total_size_mb, is_percent_growth,
            ROW_NUMBER() OVER (PARTITION BY database_name, file_id ORDER BY collection_time DESC) AS rn
-    FROM database_size_stats
+    FROM v_database_size_stats
     WHERE server_id = $1
 )
 SELECT
@@ -269,7 +269,7 @@ AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
 WITH latest AS (
     SELECT volume_mount_point, volume_total_mb, volume_free_mb,
            ROW_NUMBER() OVER (PARTITION BY volume_mount_point ORDER BY collection_time DESC) AS rn
-    FROM database_size_stats
+    FROM v_database_size_stats
     WHERE server_id = $1
     AND   collection_time <= $2
     AND   volume_total_mb > 0
