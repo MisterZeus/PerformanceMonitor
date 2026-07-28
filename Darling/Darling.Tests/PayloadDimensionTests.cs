@@ -322,6 +322,69 @@ public sealed class PayloadDimensionTests
     }
 
     [Fact]
+    public void Batch_ToArrays_EmitsDigestsInAscendingOrder_SoConcurrentSessionsCannotDeadlock()
+    {
+        /* The upsert takes one row lock per conflict key. Two concurrent collection cycles whose batches
+           share two digests in OPPOSITE relative order each end up holding the lock the other needs next --
+           a textbook unordered-multi-row-upsert cycle, and the 40P01s a field instance logged nine times in
+           one night (#1801). A single total order across every session makes it impossible.
+
+           Insertion order here is deliberately adversarial: payloads are added so their digests arrive
+           REVERSED, which is the arrangement a dictionary would faithfully hand back. */
+        var batch = new PayloadDimensionBatch();
+
+        var payloads = Enumerable.Range(0, 12).Select(i => "pm1801-payload-" + i).ToArray();
+        foreach (var payload in payloads
+            .OrderByDescending(t => Convert.ToHexString(PayloadDimensions.Digest(t)), StringComparer.Ordinal))
+        {
+            batch.Add(PayloadDimensions.QueryTextDimTable, PayloadDimensions.Digest(payload), payload);
+        }
+
+        var (digests, texts) = batch.ToArrays(PayloadDimensions.QueryTextDimTable);
+        Assert.Equal(payloads.Length, digests.Length);
+
+        var emitted = digests.Select(d => Convert.ToHexString(d)).ToArray();
+        Assert.Equal(emitted.OrderBy(h => h, StringComparer.Ordinal).ToArray(), emitted);
+
+        /* Ordering must not have broken the index alignment the unnest depends on. */
+        for (var i = 0; i < digests.Length; i++)
+        {
+            Assert.Equal(Convert.ToHexString(PayloadDimensions.Digest(texts[i])), emitted[i]);
+        }
+
+        /* Hex-ordinal order IS byte-wise digest order -- equal-length digests, and hex digits ascend in
+           ASCII in the same sequence as the nibbles they encode. Assert the bytes directly so the claim is
+           not resting on the hex representation the implementation happens to key by. */
+        for (var i = 1; i < digests.Length; i++)
+        {
+            Assert.True(
+                digests[i - 1].AsSpan().SequenceCompareTo(digests[i].AsSpan()) < 0,
+                $"digest {i - 1} must sort before digest {i} byte-wise; got {emitted[i - 1]} then {emitted[i]}");
+        }
+    }
+
+    [Fact]
+    public void Batch_ToArrays_ImposesTheOrderItself_RatherThanLeavingItToDictionaryEnumeration()
+    {
+        /* The ordering is the whole safety mechanism and it is INVISIBLE to every behavioural test: an
+           unordered batch upserts byte-identical DATA, and only the lock-acquisition order differs. So a
+           future edit that drops the sort passes the round-trip tests, the dedup tests and the live suite,
+           and reintroduces #1801 in the field. Read the source for the mechanism. */
+        var root = FindRepoRoot();
+        Assert.True(root is not null, RepoRootNotFound);
+
+        var source = File.ReadAllText(Path.Combine(
+            root!, "Darling", "PerformanceMonitor.Darling.Storage", "PayloadDimensionBatch.cs"));
+
+        var body = MethodBody(source, "public (byte[][] Digests, string[] Payloads) ToArrays");
+        Assert.False(string.IsNullOrEmpty(body),
+            "could not locate ToArrays -- this guard must fail rather than silently pass on a parse miss");
+
+        Assert.Contains("OrderBy", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("entries.Values", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Batch_ToArrays_AreIndexAligned_AndEmptyForATableWithNothingDiverted()
     {
         var batch = new PayloadDimensionBatch();

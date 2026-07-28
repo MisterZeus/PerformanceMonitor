@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -93,10 +94,18 @@ public sealed class PayloadDimensionBatch
         var digests = new byte[entries.Count][];
         var payloads = new string[entries.Count];
         var i = 0;
-        foreach (var entry in entries.Values)
+        /* Ordered by digest, and the ORDER is a correctness requirement, not tidiness: the upsert takes a row
+           lock per conflict key, so two concurrent sessions whose batches share two digests in OPPOSITE
+           relative order each hold the lock the other needs next and deadlock (40P01). Every session emitting
+           the same total order makes the cycle impossible. Dictionary enumeration is per-session ARRIVAL
+           order, which is exactly the absence of one.
+
+           Sorting the hex key ordinally IS byte-wise digest order: every digest is the same length, and hex
+           digits ascend in ASCII in the same sequence as the nibbles they encode. */
+        foreach (var entry in entries.OrderBy(e => e.Key, StringComparer.Ordinal))
         {
-            digests[i] = entry.Digest;
-            payloads[i] = entry.Payload;
+            digests[i] = entry.Value.Digest;
+            payloads[i] = entry.Value.Payload;
             i++;
         }
 

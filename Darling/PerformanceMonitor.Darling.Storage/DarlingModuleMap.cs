@@ -50,6 +50,11 @@ public static class DarlingModuleMap
     /// keeps the most-recent row per handle; the ON CONFLICT only advances a row (never regresses last_seen), so a
     /// stale run can't overwrite a fresher attribution. <c>now()</c> is fine here — this is runtime maintenance, not
     /// the deterministic compiler.
+    ///
+    /// <para>The <c>ORDER BY</c> its DISTINCT ON requires also happens to be a deterministic ascending order
+    /// on the conflict key, so concurrent refreshes take these row locks in the same relative order and the
+    /// unordered-batch-upsert deadlock (#1801) cannot form here. Checked, not assumed -- do not drop or
+    /// reorder it on the belief that it is only about picking the latest row.</para>
     /// </summary>
     public const string RefreshSql = @"INSERT INTO collect.module_map (server_name, sql_handle, database_name, schema_name, object_name, last_seen)
 SELECT DISTINCT ON (server_name, sql_handle)
