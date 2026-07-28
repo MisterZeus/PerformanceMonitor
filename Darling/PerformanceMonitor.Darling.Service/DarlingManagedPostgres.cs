@@ -502,7 +502,14 @@ public sealed class DarlingManagedPostgres
         var effectiveCache = ram / 4 * 3;                          /* 75% RAM — planner hint, not an allocation */
         /* #1777: 5% RAM with a MEASURED 1.5 GB floor (compression throughput rose ~70% reaching it and
            plateaued there), guarded by 25% of RAM so the floor cannot overcommit a small host, and capped
-           at 2 GB where the field data showed nothing further to gain. */
+           at 2 GB where the field data showed nothing further to gain.
+
+           THE CONSTRAINT THE SMALL-HOST LANDINGS REST ON: both of today's consumers allocate
+           INCREMENTALLY — a tuplesort grows to fit its input and SPILLS past the ceiling rather than
+           reserving it, and PG 17+ builds vacuum's dead-TID store (TidStore) the same way. So this number
+           bounds what an operation MAY use, not what it WILL use, which is what makes a 4 GB host's
+           1024 MB landing safe despite being 5x its old 204 MB. If a future consumer ever PRE-ALLOCATES
+           maintenance_work_mem, that reasoning breaks and the small-host landings need revisiting here. */
         var maintenanceWorkMem = Math.Min(
             Math.Min(Math.Max(ram / 20, 1536 * oneMb), ram / 4),
             2048 * oneMb);
