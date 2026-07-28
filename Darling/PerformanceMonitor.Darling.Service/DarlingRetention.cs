@@ -282,11 +282,14 @@ public static class DarlingRetention
             {
                 /* One line, deliberately a fixed string never interpolated: it is the field signature an
                    operator greps for when the dimensions stop shrinking, so it must not vary by store. It
-                   names what actually happened -- a fact purge that did not complete -- rather than any
-                   particular CAUSE of that: the preceding per-table warning already says which table and why
-                   (a failed statement, or a coverage skip once #1784 lands). Naming a cause here would send
-                   the reader after the wrong remedy, which is the one thing a diagnostic line must not do. */
-                logger?.LogWarning("dimension GC deferred: a dim-feeding fact purge did not complete this cycle; facts may outlive their retention until a sweep succeeds");
+                   names the observable STATE -- a table still holding rows past its horizon -- and not any
+                   cause of it. Two different things produce that state: a purge statement that failed, and a
+                   purge deliberately skipped because its rollup does not cover the table (#1784). Naming
+                   either one here would be a lie in the other case and would send the reader after the wrong
+                   remedy, which is the one thing a diagnostic line must not do. The preceding per-table
+                   warning already says which table and which of the two it was, so the cause is one line
+                   above, owned by the code that actually knows it. */
+                logger?.LogWarning("dimension GC deferred: a dim-feeding table kept rows past its horizon this cycle; dimension content is retained until its purge completes");
             }
             else
             {
