@@ -22,45 +22,54 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed partial class ViewerDataService
 {
     private RollupAvailability _rollups;
+    private RollupCoverage _rollupCoverage = RollupCoverage.Unknown;
     private bool _rollupsProbed;
     private DateTime _rollupProbeAtUtc;
 
     /// <summary>
-    /// While the store reports no (or partial) rollups, re-probe at most this often — so a service upgrade
-    /// that creates the continuous aggregates mid-viewer-session converges without a restart. Once every
-    /// rollup exists the answer is cached for the viewer's lifetime (a created CAGG is never dropped outside
-    /// the service's own reshape sweep, which recreates it in the same sweep).
+    /// Re-probe at most this often — so a service upgrade that creates the continuous aggregates mid-viewer-
+    /// session converges without a restart, and (since #1759) so a <c>--backfill-rollups</c> run that moves a
+    /// coverage floor is picked up without one either.
     /// </summary>
     private static readonly TimeSpan RollupReprobeInterval = TimeSpan.FromMinutes(5);
 
     /// <summary>
-    /// The store's rollup availability, probed lazily and cached (<see cref="RollupReprobeInterval"/>). A
-    /// failed probe answers <see cref="RollupAvailability.None"/> — raw always exists, so "route everything
-    /// to raw" is the never-wrong fallback. Benignly racy: concurrent tab loads may probe twice; the probe is
-    /// a single catalog lookup and last-write-wins caches the same answer.
+    /// The store's rollup availability AND each rollup's materialized-coverage floor, probed lazily and
+    /// cached (<see cref="RollupReprobeInterval"/>). A failed probe answers
+    /// <see cref="RollupAvailability.None"/> + <see cref="RollupCoverage.Unknown"/> — raw always exists, so
+    /// "route everything to raw" is the never-wrong availability fallback, and "no coverage evidence" leaves
+    /// the age ladder in charge. Benignly racy: concurrent tab loads may probe twice; the probes are two
+    /// small lookups and last-write-wins caches the same answer.
+    ///
+    /// <para><b>The TTL is now unconditional (#1759).</b> It used to be skipped once every rollup existed,
+    /// because a created aggregate is never dropped — true of EXISTENCE, false of COVERAGE, which moves
+    /// backwards on a backfill and forwards on a retention drop. Keeping the permanent-cache shortcut would
+    /// pin a pre-backfill floor for the life of the viewer session.</para>
     /// </summary>
-    internal async ValueTask<RollupAvailability> GetRollupAvailabilityAsync(CancellationToken cancellationToken)
+    internal async ValueTask<(RollupAvailability Rollups, RollupCoverage Coverage)> GetRollupAvailabilityAsync(
+        CancellationToken cancellationToken)
     {
-        if (_rollupsProbed
-            && (_rollups.AllPresent || DateTime.UtcNow - _rollupProbeAtUtc < RollupReprobeInterval))
+        if (_rollupsProbed && DateTime.UtcNow - _rollupProbeAtUtc < RollupReprobeInterval)
         {
-            return _rollups;
+            return (_rollups, _rollupCoverage);
         }
 
         try
         {
             _rollups = await TimescaleSupport.DetectRollupsAsync(_dataSource, cancellationToken);
+            _rollupCoverage = await TimescaleSupport.DetectRollupCoverageAsync(_dataSource, _rollups, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* A store hiccup mid-probe must not take the tab down — raw is the safe answer, and the
                re-probe interval retries soon. */
             _rollups = RollupAvailability.None;
+            _rollupCoverage = RollupCoverage.Unknown;
             _ = ex;
         }
 
         _rollupsProbed = true;
         _rollupProbeAtUtc = DateTime.UtcNow;
-        return _rollups;
+        return (_rollups, _rollupCoverage);
     }
 }

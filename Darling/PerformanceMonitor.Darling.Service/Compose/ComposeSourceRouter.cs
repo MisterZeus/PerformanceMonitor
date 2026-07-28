@@ -127,10 +127,18 @@ public static class ComposeSourceRouter
     /// (object_name IS covered on query_stats, via the module_map join), the window is recent enough that raw
     /// still holds it, or the age-resolved tier's view is absent (per-table degrade: daily missing → hourly,
     /// hourly missing → raw — the same shared ladder the viewer's built-in tabs use).
+    ///
+    /// <para><paramref name="coverage"/> adds the #1759 gate: a rollup that EXISTS may still not have
+    /// materialized the window (created <c>WITH NO DATA</c> over pre-existing history), and the router drops
+    /// to a tier measured to reach further back rather than serving an empty result off a rollup while raw
+    /// still holds the rows. Pass <see cref="RollupCoverage.Unknown"/> to keep the pure age + availability
+    /// decision.</para>
     /// </summary>
-    public static ComposeRoute Resolve(PanelPlan plan, DateTime nowUtc, DateTime windowStartUtc, RollupAvailability rollups)
+    public static ComposeRoute Resolve(
+        PanelPlan plan, DateTime nowUtc, DateTime windowStartUtc, RollupAvailability rollups, RollupCoverage coverage)
     {
         ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(coverage);
 
         var cagg = ComposeCaggCatalog.For(plan.Measure.SourceTable);
         if (cagg is null)
@@ -170,7 +178,8 @@ public static class ComposeSourceRouter
         var tier = RetentionTierRouter.Resolve(
             nowUtc, windowStartUtc,
             hourlyAvailable: rollups.Has(cagg.HourlyView),
-            dailyAvailable: cagg.DailyView is not null && rollups.Has(cagg.DailyView));
+            dailyAvailable: cagg.DailyView is not null && rollups.Has(cagg.DailyView),
+            coverage: coverage.For(cagg.HourlyView, cagg.DailyView));
 
         if (tier == RetentionTier.Raw)
         {

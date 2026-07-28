@@ -201,8 +201,10 @@ ORDER BY c.cpu_time_ms DESC";
     public async Task<List<DatabaseResourceUsageRow>> GetDatabaseResourceUsageAsync(int serverId, int hoursBack = 24, CancellationToken cancellationToken = default)
     {
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
-        var rollups = await GetRollupAvailabilityAsync(cancellationToken);
-        var tier = RetentionTierRouter.Resolve(DateTime.UtcNow, cutoff, rollups.DbGrainHourly, rollups.DbGrainDaily);
+        var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
+        var tier = RetentionTierRouter.Resolve(
+            DateTime.UtcNow, cutoff, rollups.DbGrainHourly, rollups.DbGrainDaily,
+            coverage.For(TimescaleSupport.QueryStatsDbHourlyView, TimescaleSupport.QueryStatsDbDailyView));
 
         await using var command = _dataSource.CreateCommand(DatabaseResourceUsageSqlFor(tier));
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
@@ -357,8 +359,10 @@ LIMIT $3";
     public async Task<List<TopResourceConsumerRow>> GetTopResourceConsumersByTotalAsync(int serverId, int hoursBack = 24, int topN = 5, CancellationToken cancellationToken = default)
     {
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
-        var rollups = await GetRollupAvailabilityAsync(cancellationToken);
-        var tier = RetentionTierRouter.Resolve(DateTime.UtcNow, cutoff, rollups.QueryGrainHourly, rollups.QueryGrainDaily);
+        var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
+        var tier = RetentionTierRouter.Resolve(
+            DateTime.UtcNow, cutoff, rollups.QueryGrainHourly, rollups.QueryGrainDaily,
+            coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
 
         await using var command = _dataSource.CreateCommand(TopResourceConsumersByTotalSqlFor(tier));
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
@@ -421,8 +425,10 @@ LIMIT $3";
     public async Task<List<TopResourceConsumerRow>> GetTopResourceConsumersByAvgAsync(int serverId, int hoursBack = 24, int topN = 5, CancellationToken cancellationToken = default)
     {
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
-        var rollups = await GetRollupAvailabilityAsync(cancellationToken);
-        var tier = RetentionTierRouter.Resolve(DateTime.UtcNow, cutoff, rollups.QueryGrainHourly, rollups.QueryGrainDaily);
+        var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
+        var tier = RetentionTierRouter.Resolve(
+            DateTime.UtcNow, cutoff, rollups.QueryGrainHourly, rollups.QueryGrainDaily,
+            coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
 
         await using var command = _dataSource.CreateCommand(TopResourceConsumersByAvgSqlFor(tier));
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });

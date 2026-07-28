@@ -199,10 +199,17 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
         NpgsqlDataSource postgres, int serverId, DateTime fromDate, DateTime toDate, CancellationToken cancellationToken = default)
     {
         /* #1664: gate the age decision on the rollups actually existing — a plain-PostgreSQL store has none
-           (and never drops raw, so raw is complete there). Probed per call, uncached: get_daily_health runs at
-           human/model cadence and the probe is one catalog lookup. */
+           (and never drops raw, so raw is complete there). #1759: and on what they have MATERIALIZED, which is
+           a separate question — a rollup created over pre-existing history answers old windows with silence.
+           BOTH gates or neither: this tool and the viewer's calendar answer the same question off the same SQL,
+           so routing them differently would have them report different query counts for the same day on exactly
+           the affected stores, with no way to tell which was right. Probed per call, uncached: get_daily_health
+           runs at human/model cadence and these are two small lookups. */
         var rollups = await TimescaleSupport.DetectRollupsAsync(postgres, cancellationToken);
-        var tier = RetentionTierRouter.Resolve(DateTime.UtcNow, fromDate, rollups.QueryGrainHourly, rollups.QueryGrainDaily);
+        var coverage = await TimescaleSupport.DetectRollupCoverageAsync(postgres, rollups, cancellationToken);
+        var tier = RetentionTierRouter.Resolve(
+            DateTime.UtcNow, fromDate, rollups.QueryGrainHourly, rollups.QueryGrainDaily,
+            coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
 
         var results = new List<DailySummaryReadRow>();
         await using var command = postgres.CreateCommand(DailySummarySql.RangeSqlFor(tier));

@@ -34,6 +34,7 @@ internal static class ComposeStoreAvailability
     private sealed class Entry
     {
         public RollupAvailability Rollups;
+        public RollupCoverage Coverage = RollupCoverage.Unknown;
         public bool Probed;
         public DateTime ProbedAtUtc;
     }
@@ -41,46 +42,61 @@ internal static class ComposeStoreAvailability
     private static readonly ConditionalWeakTable<NpgsqlDataSource, Entry> s_entries = new();
 
     /// <summary>While the store reports no (or partial) rollups, re-probe at most this often — the same
-    /// convergence interval the viewer uses.</summary>
+    /// convergence interval the viewer uses. Since #1759 this ALSO bounds how stale a coverage floor can
+    /// get, which is what lets a backfill be picked up without restarting the service.</summary>
     internal static readonly TimeSpan ReprobeInterval = TimeSpan.FromMinutes(5);
 
-    /// <summary>The store's rollup availability, probed lazily and cached per data source. Benignly racy:
-    /// concurrent panel runs may probe twice; the probe is a single catalog lookup and last-write-wins
-    /// caches the same answer.</summary>
-    internal static async ValueTask<RollupAvailability> GetRollupsAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    /// <summary>
+    /// The store's rollup availability AND each rollup's materialized-coverage floor, probed lazily and
+    /// cached per data source. Benignly racy: concurrent panel runs may probe twice; the probes are two
+    /// small catalog/aggregate lookups and last-write-wins caches the same answer.
+    ///
+    /// <para><b>Coverage expires even when availability does not (#1759).</b> Availability is permanent once
+    /// complete — a created aggregate is never dropped outside the service's own reshape sweep — but a
+    /// coverage floor MOVES: a <c>--backfill-rollups</c> run pushes it backwards, a retention drop pushes it
+    /// forwards. Caching the pair on availability's permanent terms would pin a pre-backfill floor for the
+    /// life of the process, so an operator who just backfilled would keep getting raw fallbacks until a
+    /// restart. The <see cref="ReprobeInterval"/> TTL therefore applies unconditionally, and the
+    /// <c>AllPresent</c> shortcut is deliberately gone.</para>
+    /// </summary>
+    internal static async ValueTask<(RollupAvailability Rollups, RollupCoverage Coverage)> GetRollupsAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
         var entry = s_entries.GetOrCreateValue(postgres);
 
         lock (entry)
         {
-            if (entry.Probed
-                && (entry.Rollups.AllPresent || DateTime.UtcNow - entry.ProbedAtUtc < ReprobeInterval))
+            if (entry.Probed && DateTime.UtcNow - entry.ProbedAtUtc < ReprobeInterval)
             {
-                return entry.Rollups;
+                return (entry.Rollups, entry.Coverage);
             }
         }
 
         RollupAvailability rollups;
+        RollupCoverage coverage;
         try
         {
             rollups = await TimescaleSupport.DetectRollupsAsync(postgres, cancellationToken);
+            coverage = await TimescaleSupport.DetectRollupCoverageAsync(postgres, rollups, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            /* A store hiccup mid-probe must not fail the panel — raw is the safe answer, and the re-probe
-               interval retries soon. */
+            /* A store hiccup mid-probe must not fail the panel — raw is the safe answer for availability,
+               and "no coverage evidence" leaves the age ladder in charge. The re-probe interval retries soon. */
             rollups = RollupAvailability.None;
+            coverage = RollupCoverage.Unknown;
             _ = ex;
         }
 
         lock (entry)
         {
             entry.Rollups = rollups;
+            entry.Coverage = coverage;
             entry.Probed = true;
             entry.ProbedAtUtc = DateTime.UtcNow;
         }
 
-        return rollups;
+        return (rollups, coverage);
     }
 
     /// <summary>
@@ -96,39 +112,71 @@ internal static class ComposeStoreAvailability
     /// Scoped to the TIERED tables (<see cref="ComposeCaggCatalog"/>): every other source reaches Raw via
     /// the no-CAGG early return and lives on the 30-day collector purge, not the 4-day tier — a 7-day
     /// wait_stats panel is complete on raw, and a notice there would be a false alarm.
+    ///
+    /// <para><b>MEASURED beats assumed (#1759).</b> The retention SPAN is only a proxy for how far a tier
+    /// reaches, and on the stores #1759 is about it is the wrong proxy in the dangerous direction: their raw
+    /// purges are HELD PAUSED by the #1680 arming gate, so raw holds months rather than the ~4 days its
+    /// policy nominally keeps. Left assuming, this would stamp "older points are not included" on precisely
+    /// the coverage-fallback panels that are in fact COMPLETE — a false alarm introduced by the fix. So when
+    /// <paramref name="coverage"/> carries a real floor for the routed tier, that floor decides; the span is
+    /// the fallback for an unmeasured store, which reproduces the pre-#1759 text exactly.</para>
     /// </summary>
-    internal static string? BuildRetentionNotice(string sourceTable, ComposeRoute route, DateTime windowStartUtc, DateTime nowUtc, RollupAvailability rollups)
+    internal static string? BuildRetentionNotice(
+        string sourceTable, ComposeRoute route, DateTime windowStartUtc, DateTime nowUtc,
+        RollupAvailability rollups, RollupCoverage coverage)
     {
-        if (rollups == RollupAvailability.None || ComposeCaggCatalog.For(sourceTable) is null)
+        var cagg = ComposeCaggCatalog.For(sourceTable);
+        if (rollups == RollupAvailability.None || cagg is null)
         {
             return null;
         }
 
+        ArgumentNullException.ThrowIfNull(coverage);
+
         TimeSpan retained;
         string tierName;
+        DateTime? measuredOldest;
         switch (route.Tier)
         {
             case ComposeSourceTier.Raw:
                 retained = TimescaleSupport.RawRetentionSpan;
                 tierName = "raw";
+                measuredOldest = RollupCoverage.RawTableFor(cagg.HourlyView) is string rawTable
+                    ? coverage.RawOldestOf(rawTable)
+                    : null;
                 break;
             case ComposeSourceTier.Hourly:
                 retained = TimescaleSupport.HourlyRetentionSpan;
                 tierName = "hourly rollup";
+                measuredOldest = coverage.FloorOf(cagg.HourlyView);
                 break;
-            default: /* Daily — kept indefinitely; every window fits. */
-                return null;
+            default:
+                /* Daily is kept indefinitely, so its RETENTION always fits — but its COVERAGE need not, and
+                   a daily rollup only reached by the router because nothing below it was measurably deeper
+                   can still start after the window does (#1759). Measured only: with no floor there is
+                   nothing to report, which is the pre-#1759 behaviour. */
+                retained = TimeSpan.MaxValue;
+                tierName = "daily rollup";
+                measuredOldest = cagg.DailyView is null ? null : coverage.FloorOf(cagg.DailyView);
+                if (measuredOldest is null)
+                {
+                    return null;
+                }
+
+                break;
         }
 
-        if (windowStartUtc >= nowUtc - retained)
+        var oldestHeld = measuredOldest ?? nowUtc - retained;
+        if (windowStartUtc >= oldestHeld)
         {
             return null;
         }
 
         var windowDays = (nowUtc - windowStartUtc).TotalDays;
+        var heldDays = (nowUtc - oldestHeld).TotalDays;
         return string.Create(
             CultureInfo.InvariantCulture,
-            $"partial window: this panel read the {tierName} tier, which this store keeps for about {retained.TotalDays:0} days, but the requested window starts {windowDays:0.#} days back — older points are not included.");
+            $"partial window: this panel read the {tierName} tier, which on this store reaches back about {heldDays:0} days, but the requested window starts {windowDays:0.#} days back — older points are not included.");
     }
 
     /// <summary>

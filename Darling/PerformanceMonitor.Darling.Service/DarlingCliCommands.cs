@@ -22,6 +22,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -99,6 +100,11 @@ public static class DarlingCliCommands
     public static bool IsDisableWebVerb(string arg) =>
         string.Equals(arg, "--disable-web", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The verb <see cref="BackfillRollupsAsync"/> handles — materialize the query-acceleration rollups
+    /// back to raw's oldest row, behind a disk preflight (#1759 Phase 2).</summary>
+    public static bool IsBackfillRollupsVerb(string arg) =>
+        string.Equals(arg, "--backfill-rollups", StringComparison.OrdinalIgnoreCase);
+
     /// <summary><c>--version</c>/<c>-v</c> — print the product version and exit.</summary>
     public static bool IsVersionVerb(string arg) =>
         string.Equals(arg, "--version", StringComparison.OrdinalIgnoreCase)
@@ -125,7 +131,8 @@ public static class DarlingCliCommands
         || IsEnableMcpVerb(arg)
         || IsDisableMcpVerb(arg)
         || IsEnableWebVerb(arg)
-        || IsDisableWebVerb(arg);
+        || IsDisableWebVerb(arg)
+        || IsBackfillRollupsVerb(arg);
 
     /// <summary>
     /// Classifies the exe's command line from its FIRST argument (#1581): no args → run the host; a recognized
@@ -193,7 +200,9 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --enable-mcp        Enable the MCP endpoint in the store and open its firewall (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-mcp       Disable the MCP endpoint in the store and remove its firewall rule (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-web        Enable the web dashboard in the store and open its firewall (run elevated)." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --disable-web       Disable the web dashboard in the store and remove its firewall rule (run elevated).";
+        "  PerformanceMonitor.Darling.Service.exe --disable-web       Disable the web dashboard in the store and remove its firewall rule (run elevated)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --backfill-rollups  Materialize the retention rollups back over existing history, after a disk preflight." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run   Show the plan, the disk estimate and the time budget, and change nothing.";
 
     /// <summary>
     /// Loads + validates darling.json, then probes every server. Prints one PASS/FAIL line per server and a
@@ -2056,5 +2065,409 @@ public static class DarlingCliCommands
             error.WriteLine("  " + command);
             return false;
         }
+    }
+
+    /* ================================================================================================
+       --backfill-rollups: the staged, disk-preflighted rollup backfill (#1759 Phase 2).
+
+       Why an operator verb and not a startup step: the #1680 arming gate is ALL-OR-NOTHING, so a store
+       with a year of raw has to materialize the WHOLE history before the first purge arms and reclaims
+       anything. Peak disk comes BEFORE any relief. Running that automatically at service start, on the
+       exact stores worst affected (one already down to ~150 GB free), is a plausible disk-exhaustion
+       event -- so it is explicit, preflighted, and refuses with numbers rather than filling the volume.
+
+       This verb's job ENDS AT COVERAGE. It never arms a retention policy: the arming gate already
+       self-heals, checking coverage on every service start and releasing the held purges by itself once
+       a rollup genuinely covers raw. Arming here would duplicate that decision in a second place, and
+       the whole reason nothing has been lost on these stores is that exactly one thing decides it.
+       ================================================================================================ */
+
+    /// <summary>
+    /// Materializes the query-acceleration rollups back over pre-existing history so the held raw retention
+    /// policies can arm themselves (#1759 Phase 2). Runs while the service is UP.
+    ///
+    /// <para><b>Concurrency.</b> <c>refresh_continuous_aggregate</c> takes no lock that blocks writers on the
+    /// source hypertable, so collection keeps running throughout; readers are likewise unaffected (Phase 1 has
+    /// them on raw for these windows anyway, and a window whose coverage a slice has just filled starts
+    /// resolving to the rollup at the next probe). What the refresh DOES contend with is the compression policy
+    /// on the same chunks, which is why slices are one chunk wide — a short window cannot sit across a
+    /// compression job long enough to deadlock (the #1778 watch). It cannot run inside a transaction
+    /// (<c>PreventInTransactionBlock</c>), so each slice is its own statement and partial progress survives an
+    /// abort.
+    ///
+    /// <para><b>Resumable and idempotent.</b> Every pass re-plans from the MEASURED coverage floor, so an
+    /// interrupted run continues where it stopped and a completed one converges to a no-op.</para>
+    ///
+    /// <para>Returns 0 when every rollup reached coverage (or already had it), 1 on a load/mode/credential
+    /// error, on a preflight refusal, or when any rollup finished short of raw.</para>
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public static async Task<int> BackfillRollupsAsync(
+        string? configPath, bool dryRun, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        DarlingConfig config;
+        try
+        {
+            config = DarlingConfig.Load(configPath);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not load configuration: {ex.Message}");
+            return 1;
+        }
+
+        var postgres = config.Postgres;
+        if (postgres is null)
+        {
+            error.WriteLine("postgres section is required.");
+            return 1;
+        }
+
+        /* Managed reads the service's own DPAPI-protected owner credential; bring-your-own uses the operator's
+           configured string. Both are supported — this is a STORE operation, not a Windows one. */
+        var connectionString = postgres.Managed
+            ? DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres)
+            : postgres.ConnectionString;
+
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            error.WriteLine(postgres.Managed
+                ? "The managed store credential does not exist yet — start the PerformanceMonitor Darling service once so its first run initializes the store, then re-run this command."
+                : "postgres.connectionString is empty, so there is no store to back fill.");
+            return 1;
+        }
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        try
+        {
+            await connection.OpenAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"Could not connect to the store: {ex.Message}");
+            return 1;
+        }
+
+        output.WriteLine();
+        output.WriteLine("PerformanceMonitor Darling — rollup backfill (--backfill-rollups)");
+        output.WriteLine();
+
+        /* Plan every rollup. The list is in DEPENDENCY ORDER (hourlies, then the dailies sourced from them),
+           and the run loop below preserves it — a daily refreshed over a range its hourly has not materialized
+           reads an empty source, materializes nothing, reports success, and CONSUMES the invalidations that
+           covered the range, so a later correct-order pass no-ops over the hole. */
+        var plans = new List<(RollupBackfillTarget Target, RollupBackfillPlan Plan)>();
+        var refusedPlans = new List<string>();
+        var rawBytesCache = new Dictionary<string, long>(StringComparer.Ordinal);
+        foreach (var target in RollupBackfill.Targets)
+        {
+            RollupBackfillProbe probe;
+            try
+            {
+                probe = await RollupBackfill.ProbeAsync(connection, target.View, target.RawTable, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                /* A missing rollup (a partially-built store) or a store without TimescaleDB lands here. Report
+                   and carry on: the rollups are independent, and an operator who cannot fix one should not be
+                   blocked from backfilling the rest. */
+                error.WriteLine($"  [SKIP] {target.View}: cannot be probed ({ex.Message}).");
+                continue;
+            }
+
+            if (!rawBytesCache.TryGetValue(target.RawTable, out var rawBytes))
+            {
+                rawBytes = await RollupBackfill.RawBytesAsync(connection, target.RawTable, cancellationToken);
+                rawBytesCache[target.RawTable] = rawBytes;
+            }
+
+            plans.Add((target, RollupBackfill.Plan(
+                target.View, probe.RawOldestUtc, probe.CoverageOldestUtc,
+                probe.MaterializedBuckets, probe.MaterializedBytes, rawBytes,
+                target.IsDaily ? TimeSpan.FromDays(1) : TimeSpan.FromHours(1))));
+        }
+
+        var work = plans.Where(p => !p.Plan.IsComplete).ToList();
+        foreach (var (_, done) in plans.Where(p => p.Plan.IsComplete))
+        {
+            /* A refusal is NOT a skip. "Nothing to do" is a success an operator can scroll past; a plan the
+               store's own data makes nonsense of names a row someone has to go and look at, and printing it as
+               an [OK] line would bury it. */
+            if (done.Refusal is string refusal)
+            {
+                error.WriteLine($"  [REFUSED] {done.View}: {refusal}");
+                refusedPlans.Add($"{done.View}: {refusal}");
+            }
+            else
+            {
+                output.WriteLine($"  [OK]   {done.View}: nothing to do — {done.SkipReason}.");
+            }
+        }
+
+        if (work.Count == 0)
+        {
+            output.WriteLine();
+            if (refusedPlans.Count > 0)
+            {
+                /* Never "all covered, you are done" when a rollup was refused: that rollup is NOT covered, its
+                   retention policy will stay held, and saying otherwise sends the operator away from a corrupt
+                   row they need to fix. */
+                error.WriteLine("REFUSED. Nothing was materialized for these rollups, and their retention policies stay held:");
+                foreach (var refusal in refusedPlans)
+                {
+                    error.WriteLine("  - " + refusal);
+                }
+
+                return 1;
+            }
+
+            output.WriteLine("Every rollup already covers its raw table. Any retention policy still held will arm itself on the next service start.");
+            return 0;
+        }
+
+        var totalEstimate = work.Sum(w => w.Plan.EstimatedBytes);
+        var anyUncalibrated = work.Exists(w => !w.Plan.Calibrated);
+
+        output.WriteLine("Plan:");
+        foreach (var (_, plan) in work)
+        {
+            output.WriteLine(string.Create(
+                CultureInfo.InvariantCulture,
+                $"  {plan.View}: materialize {plan.FromUtc:yyyy-MM-dd} -> {plan.ToUtc:yyyy-MM-dd} ({plan.BucketsToAdd:N0} buckets in {plan.Slices:N0} slices), estimated {plan.EstimatedSize}")
+                + (plan.Calibrated ? "" : " (UNCALIBRATED upper bound — this rollup has materialized nothing to measure)"));
+        }
+
+        output.WriteLine();
+        output.WriteLine(string.Create(
+            CultureInfo.InvariantCulture,
+            $"Total estimated materialization: {RollupBackfillPlan.FormatBytes(totalEstimate)}; expected duration about {DescribeDuration(RollupBackfill.EstimatedDuration(totalEstimate))} at the ~16 MB/s throughput measured on this host class."));
+
+        if (anyUncalibrated)
+        {
+            output.WriteLine(
+                "NOTE: at least one estimate is an UPPER BOUND, not a measurement — that rollup has materialized " +
+                "nothing this could be calibrated against. It is deliberately generous: refusing a backfill that " +
+                "would have fit is recoverable, filling the volume is not.");
+        }
+
+        var (freeBytes, freeError) = await ResolveStoreFreeSpaceAsync(connection, cancellationToken);
+        if (freeError is not null)
+        {
+            error.WriteLine();
+            error.WriteLine("REFUSING: " + freeError);
+            error.WriteLine(
+                "This backfill materializes history BEFORE any purge can reclaim anything, so running it without " +
+                "knowing the free space is exactly the disk-exhaustion risk it exists to avoid.");
+            return 1;
+        }
+
+        output.WriteLine(string.Create(
+            CultureInfo.InvariantCulture,
+            $"Free space on the store volume: {RollupBackfillPlan.FormatBytes(freeBytes)}; required: {RollupBackfillPlan.FormatBytes(RollupBackfill.RequiredBytes(totalEstimate))}."));
+
+        if (!RollupBackfill.HasRoom(totalEstimate, freeBytes))
+        {
+            error.WriteLine();
+            error.WriteLine(FormatDiskRefusal(totalEstimate, freeBytes));
+            return 1;
+        }
+
+        if (dryRun)
+        {
+            output.WriteLine();
+            output.WriteLine("--dry-run: nothing was materialized. Re-run without --dry-run to proceed.");
+            return 0;
+        }
+
+        output.WriteLine();
+        /* Slices run NEWEST-FIRST (see RollupBackfill.Slices), so coverage extends DOWNWARD toward raw's oldest
+           row and the measured floor is a truthful progress cursor rather than a value the first slice pins.
+           That is what makes this claim safe to make: an interrupted run reports SHORT, not DONE. */
+        output.WriteLine("Backfilling, newest-first, so coverage extends downward toward the oldest raw row.");
+        output.WriteLine("Safe to interrupt: every completed slice is committed, an interrupted run reports SHORT rather");
+        output.WriteLine("than claiming success, and re-running resumes from the measured floor.");
+
+        var shortfalls = new List<string>();
+        foreach (var (target, plan) in work)
+        {
+            output.WriteLine();
+            output.WriteLine($"  {plan.View}:");
+
+            var completed = 0L;
+            var sliceFailed = false;
+            foreach (var (from, to) in RollupBackfill.Slices(plan.FromUtc, plan.ToUtc))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    var floor = await RollupBackfill.RunSliceAsync(connection, plan.View, from, to, cancellationToken);
+                    completed++;
+                    output.WriteLine(string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"    [{completed:N0}/{plan.Slices:N0}] {from:yyyy-MM-dd} -> {to:yyyy-MM-dd}; coverage now starts {floor:yyyy-MM-dd HH:mm}"));
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    error.WriteLine($"    FAILED at {from:yyyy-MM-dd}: {ex.Message}");
+                    sliceFailed = true;
+                    break;
+                }
+            }
+
+            /* CONVERGENCE IS MEASURED, NEVER INFERRED. A refresh that stops on its internal batch cap logs
+               server-side and returns success to the client, so "the calls did not throw" is no evidence that
+               the range was materialized. The only honest check is to re-read the floor from DATA and compare
+               it to the raw row it had to reach. */
+            var finalFloor = await RollupBackfill.ReadCoverageFloorAsync(connection, plan.View, cancellationToken);
+            var after = await RollupBackfill.ProbeAsync(connection, plan.View, target.RawTable, cancellationToken);
+            var reached = finalFloor is not null && after.RawOldestUtc is not null && finalFloor <= after.RawOldestUtc;
+
+            /* Short WITHOUT a slice having failed means the refreshes reported success over a range they did
+               not materialize — the signature of an earlier pass cut short, whose invalidation records a plain
+               refresh will now skip straight over. That is the one case the forced form repairs, and the only
+               case it is worth paying for. */
+            if (!reached && !sliceFailed && after.RawOldestUtc is not null)
+            {
+                output.WriteLine($"    {plan.View} is still short after every slice; escalating to a forced refresh over the range.");
+                try
+                {
+                    finalFloor = await RollupBackfill.RepairAsync(connection, plan.View, plan.FromUtc, plan.ToUtc, cancellationToken);
+                    reached = finalFloor is not null && finalFloor <= after.RawOldestUtc;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    /* force arrived in TimescaleDB 2.18 — an older bring-your-own store raises 42883 here.
+                       Reported, not fatal: the shortfall is already going to be reported below. */
+                    error.WriteLine($"    forced refresh unavailable on this store ({ex.Message}).");
+                }
+            }
+
+            if (reached)
+            {
+                output.WriteLine($"    COVERED: {plan.View} now starts at {finalFloor:yyyy-MM-dd HH:mm}, at or before {target.RawTable}'s oldest row ({after.RawOldestUtc:yyyy-MM-dd HH:mm}).");
+            }
+            else
+            {
+                shortfalls.Add($"{plan.View} reaches back to {finalFloor:yyyy-MM-dd HH:mm} but {target.RawTable} reaches back to {after.RawOldestUtc:yyyy-MM-dd HH:mm}");
+                error.WriteLine(
+                    $"    SHORT: {plan.View} did not reach {target.RawTable}'s oldest row" +
+                    (sliceFailed
+                        ? " (a slice failed above)."
+                        : " even though every slice reported success — a refresh that stops on its internal batch cap is silent to the client. Re-run to continue."));
+            }
+        }
+
+        output.WriteLine();
+        /* A refusal from the planning pass counts as a shortfall here too: those rollups were never attempted,
+           so DONE would be a lie about them even when every rollup that DID run reached coverage. */
+        shortfalls.AddRange(refusedPlans);
+
+        if (shortfalls.Count > 0)
+        {
+            error.WriteLine("INCOMPLETE. These rollups do not yet cover their raw tables, so their retention policies stay held:");
+            foreach (var shortfall in shortfalls)
+            {
+                error.WriteLine("  - " + shortfall);
+            }
+
+            error.WriteLine();
+            error.WriteLine("Re-run --backfill-rollups; it resumes from the measured floor.");
+            return 1;
+        }
+
+        output.WriteLine("DONE. Every rollup now covers its raw table.");
+        output.WriteLine();
+        output.WriteLine("NEXT: restart the PerformanceMonitor Darling service. The arming gate checks coverage at");
+        output.WriteLine("startup and releases the held retention policies by itself — there is no arming step here and");
+        output.WriteLine("nothing to run by hand. The startup log line reading");
+        output.WriteLine("  'N/N retention policies in place, N armed, 0 held paused pending backfill'");
+        output.WriteLine("is the confirmation; the first purge then reclaims the raw tables in one pass.");
+        output.WriteLine();
+        output.WriteLine("Do not delay the restart. The hourly rollups carry their OWN 21-day retention policy, already");
+        output.WriteLine("armed on these stores, which will trim the coverage this run just built when it next fires");
+        output.WriteLine("(roughly daily). Restarting now is what lets the raw policies arm off that coverage first. If");
+        output.WriteLine("the trim wins the race nothing is lost — raw is still held — and re-running this verb rebuilds it.");
+        return 0;
+    }
+
+    /// <summary>
+    /// Free space on the volume the store's data directory lives on. Asked of the STORE
+    /// (<c>current_setting('data_directory')</c>) rather than derived from config, so it is right in
+    /// bring-your-own mode too. Returns an error string rather than a number in the two cases where measuring
+    /// would measure the WRONG volume: the login cannot read the setting, or the store is on another host so
+    /// the path does not exist here.
+    /// </summary>
+    private static async Task<(long FreeBytes, string? Error)> ResolveStoreFreeSpaceAsync(
+        NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        var dataDirectory = await RollupBackfill.DataDirectoryAsync(connection, cancellationToken);
+        if (string.IsNullOrWhiteSpace(dataDirectory))
+        {
+            return (0, "could not read the store's data_directory, so the free space on the volume that will grow is unknown. The login needs superuser or pg_read_all_settings.");
+        }
+
+        if (!Directory.Exists(dataDirectory))
+        {
+            return (0, $"the store's data directory ({dataDirectory}) does not exist on this machine, so the store is on another host and this machine's free space is not the number that matters. Run --backfill-rollups ON the store host.");
+        }
+
+        try
+        {
+            return (new DriveInfo(Path.GetPathRoot(Path.GetFullPath(dataDirectory))!).AvailableFreeSpace, null);
+        }
+        catch (Exception ex)
+        {
+            return (0, $"could not read free space for {dataDirectory}: {ex.Message}.");
+        }
+    }
+
+    /// <summary>
+    /// The refusal, with the exact shortfall and the two things an operator can actually do about it. PURE, so
+    /// the numbers and the options pin in a unit test — which matters precisely because this message only ever
+    /// appears in the situation nobody wants to reproduce by hand.
+    /// </summary>
+    public static string FormatDiskRefusal(long estimatedBytes, long freeBytes)
+    {
+        var required = RollupBackfill.RequiredBytes(estimatedBytes);
+        var shortfall = required - freeBytes;
+
+        return string.Create(CultureInfo.InvariantCulture, $@"REFUSING: not enough free space to back fill safely.
+
+  Estimated materialization : {RollupBackfillPlan.FormatBytes(estimatedBytes)}
+  Required free space       : {RollupBackfillPlan.FormatBytes(required)}  (estimate x {RollupBackfill.SafetyFactor:0.##} headroom + {RollupBackfillPlan.FormatBytes(RollupBackfill.ReserveBytes)} reserve)
+  Free space now            : {RollupBackfillPlan.FormatBytes(freeBytes)}
+  SHORT BY                  : {RollupBackfillPlan.FormatBytes(shortfall)}
+
+The rollups have to materialize the WHOLE history before the arming gate will release the raw
+retention policies, so peak disk comes BEFORE any reclaim. Running this now would fill the volume
+and take the store down without ever reaching the point where it frees anything.
+
+Your options:
+  1. Grow the volume by at least {RollupBackfillPlan.FormatBytes(shortfall)} and re-run. This is the option that ends
+     with the raw purges armed and the space reclaimed permanently.
+  2. Accept waiting. Nothing is broken and nothing is being lost: the arming gate is holding the raw
+     purges closed precisely because the rollups do not cover this history yet, and reads of those old
+     windows are served from raw. Raw keeps growing at full rate until the backfill happens, so this
+     buys time rather than solving it.
+
+Re-run with --dry-run at any time to re-check the numbers; the plan is recomputed from the store.");
+    }
+
+    /// <summary>A duration an operator can plan around ("about 3 hours"), not a timespan literal.</summary>
+    private static string DescribeDuration(TimeSpan duration)
+    {
+        if (duration < TimeSpan.FromMinutes(1))
+        {
+            return "under a minute";
+        }
+
+        if (duration < TimeSpan.FromHours(1))
+        {
+            return string.Create(CultureInfo.InvariantCulture, $"{duration.TotalMinutes:0} minutes");
+        }
+
+        return duration < TimeSpan.FromDays(1)
+            ? string.Create(CultureInfo.InvariantCulture, $"{duration.TotalHours:0.#} hours")
+            : string.Create(CultureInfo.InvariantCulture, $"{duration.TotalDays:0.#} days");
     }
 }

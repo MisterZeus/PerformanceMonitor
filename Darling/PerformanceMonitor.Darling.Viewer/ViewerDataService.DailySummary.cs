@@ -52,8 +52,10 @@ public sealed partial class ViewerDataService
     public async Task<List<DailySummaryRow>> GetDailySummaryRangeAsync(
         int serverId, DateTime fromDate, DateTime toDate, CancellationToken cancellationToken = default)
     {
-        var rollups = await GetRollupAvailabilityAsync(cancellationToken);
-        var tier = RetentionTierRouter.Resolve(DateTime.UtcNow, fromDate, rollups.QueryGrainHourly, rollups.QueryGrainDaily);
+        var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
+        var tier = RetentionTierRouter.Resolve(
+            DateTime.UtcNow, fromDate, rollups.QueryGrainHourly, rollups.QueryGrainDaily,
+            coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
 
         await using var command = _dataSource.CreateCommand(DailySummaryRangeSqlFor(tier));
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
