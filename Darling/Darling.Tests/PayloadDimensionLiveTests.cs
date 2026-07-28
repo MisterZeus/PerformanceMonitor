@@ -41,6 +41,15 @@ namespace Darling.Tests;
 [Collection("live-postgres")]
 public sealed class PayloadDimensionLiveTests
 {
+    /// <summary>
+    /// The exact line the dimension GC emits when it stands down, pinned in FULL rather than by prefix: it is
+    /// a field signature an operator greps for, and a partial pin would let the wording drift to name a cause
+    /// the guard does not actually detect -- which is how it came to say "raw purges held" while the shipped
+    /// trigger was a purge that did not complete.
+    /// </summary>
+    private const string DeferralSignature =
+        "dimension GC deferred: a dim-feeding table kept rows past its horizon this cycle; dimension content is retained until its purge completes";
+
     private const string SkipReason =
         "Set DARLING_TEST_PG to a Postgres connection string to run the payload-dimension store tests.";
 
@@ -730,5 +739,102 @@ public sealed class PayloadDimensionLiveTests
             await DeleteDimRowAsync(writer, PayloadDimensions.QueryTextDimTable, textDigest, ct);
             await DeleteDimRowAsync(writer, PayloadDimensions.QueryPlanDimTable, planDigest, ct);
         }
+    }
+
+    /// <summary>
+    /// The dimension GC must NOT prune while a table that feeds it failed to purge this cycle (#1782).
+    ///
+    /// <para>The cutoff assumes facts past their retention are gone. The fact loop is failure-isolated, so a
+    /// table whose drop_chunks fails AND whose DELETE fallback then also fails is warned, skipped, and the
+    /// sweep continues straight into the GC — pruning dimension rows those surviving facts still reference.
+    /// The digests dangle and the resolving view serves NULL payload with no error raised anywhere, which is
+    /// the whole reason this is a guard and not a comment.</para>
+    ///
+    /// <para>The failure is injected by RENAMING query_stats for the duration, which is a genuine total
+    /// failure of both purge paths (the relation the statements name does not exist) rather than a simulated
+    /// one — and it exercises the real seam: the sweep sets the flag, and the GC reads it. It is restored in
+    /// a finally, and the whole live collection is serialized, so no sibling class can observe the rename.</para>
+    /// </summary>
+    [Fact]
+    public async Task DimensionGc_DefersWhenADimFeedingTableFailedItsPurge_ThenPrunesOnceItSucceeds()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), SkipReason);
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = await OpenMigratedStoreAsync(connectionString!, ct);
+
+        /* Far past the ~32-day cutoff, so an unguarded GC would certainly take it. */
+        var digest = PayloadDimensions.Digest("pm1782-" + Guid.NewGuid().ToString("N"));
+        var ancient = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-400), DateTimeKind.Unspecified);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var renamed = false;
+
+        try
+        {
+            using (var seed = new NpgsqlCommand(
+                $"INSERT INTO {PayloadDimensions.QueryPlanDimTable} (digest, query_plan_xml, last_seen) " +
+                "VALUES ($1, $2, $3) ON CONFLICT (digest) DO NOTHING", connection))
+            {
+                seed.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bytea, Value = digest });
+                seed.Parameters.AddWithValue("<ShowPlanXML pm1782=\"1\"/>");
+                seed.Parameters.AddWithValue(ancient);
+                await seed.ExecuteNonQueryAsync(ct);
+            }
+
+            Assert.Equal(1L, await DimRowCountAsync(connection, digest, ct));
+
+            using (var rename = new NpgsqlCommand(
+                "ALTER TABLE collect.query_stats RENAME TO query_stats_pm1782", connection))
+            {
+                await rename.ExecuteNonQueryAsync(ct);
+                renamed = true;
+            }
+
+            var deferredLog = new CapturingTestLogger();
+            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, deferredLog, ct);
+
+            /* The SUBSTANTIVE property first, deliberately: this is the assertion that distinguishes
+               "the guard held" from "the guard logged and pruned anyway", so it is the one a mutation
+               must land on. Asserting the log line first would let a broken guard go red on missing
+               TEXT while the actual data loss went unexamined. */
+            Assert.Equal(1L, await DimRowCountAsync(connection, digest, ct));
+            Assert.Contains(DeferralSignature, deferredLog.Joined, StringComparison.Ordinal);
+
+            using (var restore = new NpgsqlCommand(
+                "ALTER TABLE collect.query_stats_pm1782 RENAME TO query_stats", connection))
+            {
+                await restore.ExecuteNonQueryAsync(ct);
+                renamed = false;
+            }
+
+            /* Control: with the purge healthy again the guard opens and the same row is pruned, so the test
+               cannot pass merely because the GC never runs. */
+            var prunedLog = new CapturingTestLogger();
+            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, prunedLog, ct);
+
+            Assert.DoesNotContain(DeferralSignature, prunedLog.Joined, StringComparison.Ordinal);
+            Assert.Equal(0L, await DimRowCountAsync(connection, digest, ct));
+        }
+        finally
+        {
+            if (renamed)
+            {
+                using var restore = new NpgsqlCommand(
+                    "ALTER TABLE IF EXISTS collect.query_stats_pm1782 RENAME TO query_stats", connection);
+                await restore.ExecuteNonQueryAsync(ct);
+            }
+
+            await DeleteDimRowAsync(connection, PayloadDimensions.QueryPlanDimTable, digest, ct);
+        }
+    }
+
+    private static async Task<long> DimRowCountAsync(NpgsqlConnection connection, byte[] digest, CancellationToken ct)
+    {
+        using var read = new NpgsqlCommand(
+            $"SELECT COUNT(*) FROM {PayloadDimensions.QueryPlanDimTable} WHERE digest = $1", connection);
+        read.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bytea, Value = digest });
+        return (long)(await read.ExecuteScalarAsync(ct))!;
     }
 }
