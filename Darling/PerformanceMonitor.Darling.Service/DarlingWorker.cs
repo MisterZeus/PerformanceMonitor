@@ -697,6 +697,14 @@ public sealed class DarlingWorker : BackgroundService
                 await TimescaleSupport.ConvertToHypertablesAsync(timescaleConnection, _logger, stoppingToken);
                 await TimescaleSupport.ApplyCompressionPolicyAsync(timescaleConnection, _logger, stoppingToken);
                 await TimescaleSupport.EnsureCollectionLogHypertableAsync(timescaleConnection, _logger, stoppingToken);
+
+                /* #1778: the two calls above carry the compression tick on the CREATE, but if_not_exists makes
+                   that a no-op against a policy this store already has — so a store that ever ran an older
+                   build keeps TimescaleDB's 12-hour default forever and its newest closed chunk stays
+                   uncompressed for up to half a day. This retunes the existing policies. AFTER both, so it
+                   covers collection_log (outside the collector catalog) in the same pass; a no-op on every
+                   start after the first, since it only selects policies whose interval differs. */
+                await TimescaleSupport.ConvergeCompressionScheduleAsync(timescaleConnection, _logger, stoppingToken);
                 // Reshape: drop stale old-shape QS / procedure_stats CAGGs FIRST so the ensure below rebuilds them
                 // in the composer-dimension shape (no-op once reshaped, and on a fresh store nothing matches).
                 await TimescaleSupport.DropStaleContinuousAggregatesAsync(timescaleConnection, _logger, stoppingToken);
@@ -2050,6 +2058,17 @@ LIMIT 1", connection);
         try
         {
             await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
+
+            /* #1778: report what compression is DOING before deciding whether anything is stuck. The field
+               could see hours-long compressions only in hindsight, by their effect on disk; this puts a
+               running compression, its elapsed time, and any eligible-chunk backlog in the log while it is
+               still happening. Read on the same connection and the same hourly cadence — the check that
+               already exists for this exact subsystem, rather than a second timer for one log line. */
+            TimescaleSupport.LogCompressionActivity(
+                await TimescaleSupport.ReadCompressionActivityAsync(connection, _logger, cancellationToken),
+                DateTime.UtcNow,
+                _logger);
+
             var stuckJobs = await TimescaleSupport.ReadStuckCompressionJobsAsync(
                 connection, DateTime.UtcNow, _logger, cancellationToken);
             await _selfAlerts!.EvaluateCompressionJobsAsync(
