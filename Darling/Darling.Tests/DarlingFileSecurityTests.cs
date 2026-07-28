@@ -13,6 +13,8 @@ using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Threading.Tasks;
 using PerformanceMonitor.Darling.Service;
+using Microsoft.Extensions.Logging.Abstractions;
+using PerformanceMonitor.Darling.Service;
 using Xunit;
 
 namespace Darling.Tests;
@@ -450,5 +452,72 @@ public sealed class DarlingFileSecurityTests
         Assert.DoesNotContain(rules, r => r.sid.Equals(s_everyone));
         Assert.DoesNotContain(rules, r => r.sid.Equals(s_authenticatedUsers));
         Assert.DoesNotContain(rules, r => r.sid.Equals(s_builtinUsers));
+    }
+
+    /// <summary>
+    /// #1816: the worker's backup sweep hardens EXISTING darling.json.bak-* siblings — the backups
+    /// made before #1786 fixed the creation path kept whatever the folder handed them (on the field
+    /// box, inherited BUILTIN\Users read against machine-scoped DPAPI blobs). The sweep must strip
+    /// that from every backup, leave the live file to its own hardening, and no-op cleanly when there
+    /// are no backups.
+    /// </summary>
+    [Fact]
+    public void ConfigBackupSweep_HardensEveryExistingBackup_AndSkipsTheLiveFile()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "darling-bak-sweep-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var configPath = Path.Combine(directory, "darling.json");
+        var backup1 = configPath + ".bak-20260721-162218";
+        var backup2 = configPath + ".bak-20260722-123603";
+        var decoy = Path.Combine(directory, "unrelated.json.bak-20260721-000000");
+        try
+        {
+            foreach (var file in new[] { configPath, backup1, backup2, decoy })
+            {
+                File.WriteAllText(file, "{}");
+                var exposed = new FileInfo(file).GetAccessControl();
+                exposed.AddAccessRule(new FileSystemAccessRule(
+                    s_builtinUsers, FileSystemRights.Read, AccessControlType.Allow));
+                new FileInfo(file).SetAccessControl(exposed);
+                Assert.True(DarlingFileSecurity.IsReadableByOrdinaryUsers(file));
+            }
+
+            DarlingWorker.TryHardenConfigBackups(configPath, NullLogger.Instance);
+
+            /* Both backups locked down... */
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(backup1),
+                "backup 1 must lose its inherited Users read");
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(backup2),
+                "backup 2 must lose its inherited Users read");
+
+            /* ...the live file untouched by THIS sweep (its own hardening owns it)... */
+            Assert.True(DarlingFileSecurity.IsReadableByOrdinaryUsers(configPath),
+                "the backup sweep must not touch the live config — TryHardenConfigFile owns it");
+
+            /* ...and a file that merely LOOKS like a backup of something else is not swept. */
+            Assert.True(DarlingFileSecurity.IsReadableByOrdinaryUsers(decoy),
+                "only darling.json.bak-* siblings are the sweep's business");
+        }
+        finally
+        {
+            try { Directory.Delete(directory, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
+    [Fact]
+    public void ConfigBackupSweep_NoBackups_IsANoOp()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "darling-bak-none-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var configPath = Path.Combine(directory, "darling.json");
+        try
+        {
+            File.WriteAllText(configPath, "{}");
+            DarlingWorker.TryHardenConfigBackups(configPath, NullLogger.Instance);
+        }
+        finally
+        {
+            try { Directory.Delete(directory, recursive: true); } catch { /* best-effort */ }
+        }
     }
 }

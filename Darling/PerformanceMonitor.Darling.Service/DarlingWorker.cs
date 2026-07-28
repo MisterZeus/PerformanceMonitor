@@ -448,6 +448,7 @@ public sealed class DarlingWorker : BackgroundService
         if (OperatingSystem.IsWindows())
         {
             TryHardenConfigFile(configPath);
+            TryHardenConfigBackups(configPath, _logger);
         }
 
         var problems = config.Validate();
@@ -585,6 +586,70 @@ public sealed class DarlingWorker : BackgroundService
                 "so any local user who can open this file can recover ALL of it. Remove the inherited read access " +
                 "(or move the install out of a world-readable folder such as one created directly under C:\\).",
                 path);
+        }
+    }
+
+    /// <summary>
+    /// #1816: the same lockdown for every EXISTING <c>darling.json.bak-*</c> beside the config. The
+    /// backup-CREATION path hardens new backups as it writes them (#1786), but backups made before that
+    /// fix kept whatever the folder handed them — on the field box that surfaced this, inherited
+    /// <c>BUILTIN\Users</c> read, which against machine-scoped DPAPI blobs means any local account could
+    /// recover every stored credential and token. The installer's security check flags them but only
+    /// prints the fix; this sweep applies it, so no install carries the exposure past its next service
+    /// start. <c>allowInteractiveRead: false</c>, matching the creation path — backups are rollback
+    /// artifacts, nothing interactive reads them. Static with the logger passed in so the test can drive
+    /// it against a scratch directory.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static void TryHardenConfigBackups(string configPath, ILogger logger)
+    {
+        string[] backups;
+        try
+        {
+            var directory = Path.GetDirectoryName(Path.GetFullPath(configPath));
+            if (string.IsNullOrEmpty(directory))
+            {
+                return;
+            }
+
+            backups = Directory.GetFiles(directory, Path.GetFileName(configPath) + ".bak-*");
+        }
+        catch (Exception ex)
+        {
+            /* Enumeration failing is not worth failing the start over — the live file's own hardening
+               already ran, and the installer's check remains the independent witness. */
+            logger.LogWarning("Could not enumerate config backups beside {Path} for ACL hardening: {Message}", configPath, ex.Message);
+            return;
+        }
+
+        foreach (var backup in backups)
+        {
+            try
+            {
+                DarlingFileSecurity.HardenFile(backup, allowInteractiveRead: false);
+            }
+            catch (Exception ex)
+            {
+                /* Same contract as the live file: best-effort, but the remediation is spelled out as
+                   runnable commands so an elevated human can finish the job the service cannot. */
+                var remediation =
+                    $"icacls \"{backup}\" /inheritance:d   then   icacls \"{backup}\" /remove:g \"BUILTIN\\Users\"   " +
+                    $"then   icacls \"{backup}\" /grant \"NT SERVICE\\PerformanceMonitor Darling:(F)\"";
+
+                logger.LogError(
+                    "Could not restrict the ACL on config backup {Path}{Detail} ({Message}). It carries the same " +
+                    "DPAPI-protected credentials as the live config. From an ELEVATED prompt: {Remediation}",
+                    backup, DarlingFileSecurity.DescribeOwnerAndExposure(backup), ex.Message, remediation);
+            }
+
+            if (DarlingFileSecurity.IsReadableByOrdinaryUsers(backup))
+            {
+                logger.LogCritical(
+                    "Config backup {Path} is READABLE by Users/Authenticated Users/Everyone. It holds the same " +
+                    "machine-scoped DPAPI credential blobs as the live config — any local user who can open it " +
+                    "can recover ALL of them. Remove the inherited read access.",
+                    backup);
+            }
         }
     }
 
