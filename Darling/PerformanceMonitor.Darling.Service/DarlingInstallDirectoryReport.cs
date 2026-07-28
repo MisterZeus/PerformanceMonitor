@@ -196,6 +196,14 @@ internal static class DarlingInstallDirectoryReport
     /// <para>An EMPTY directory is not one of these. Something the product shipped would have files in it,
     /// so an empty directory is left to be reported — which is the safe direction: it is named, not
     /// deleted.</para>
+    ///
+    /// <para><b>The residual, seen and accepted rather than discovered later.</b> A dependency that ships a
+    /// NON-satellite file inside a culture-named directory — a localized native library, or a data file
+    /// sitting beside the satellite assembly — fails this test and gets reported as foreign. No such
+    /// directory exists in the layout today (all thirteen were checked), the cost is one wrong line in a
+    /// report that never deletes anything, and the alternative is trusting a directory because of its NAME,
+    /// which is the loophole this rule exists to close. Bounded to report-only by design, and written down
+    /// here so the next reader knows it was a decision.</para>
     /// </summary>
     private static bool IsSatelliteResourceDirectory(string candidate)
     {
