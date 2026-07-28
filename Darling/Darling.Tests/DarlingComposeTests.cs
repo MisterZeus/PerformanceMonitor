@@ -1904,7 +1904,7 @@ public sealed class DarlingComposeTests
 /// shared <c>DARLING_TEST_PG</c> store and runs <c>PgMigrations.MigrateAsync</c> against it, so it must serialize
 /// with the rest of the live collection. Its 126 siblings are pure and must NOT: dragging a 127-test class into
 /// the serialized collection to protect one test would cost the suite far more than the race it prevents, and the
-/// established shape here is exactly this pair (roughly thirty files already split
+/// established shape here is exactly this pair (more than forty files already split
 /// <c>...SurfaceAndSqlTests</c> from <c>...LivePostgresTests</c> for the same reason).
 /// </summary>
 [Collection("live-postgres")]

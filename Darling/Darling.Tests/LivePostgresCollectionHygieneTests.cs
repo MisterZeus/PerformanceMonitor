@@ -127,7 +127,7 @@ public sealed class LivePostgresCollectionHygieneTests
             + $"  - Add an \"{OwnStoreMarker}\" comment if the class mints its own database or cluster and so "
             + "cannot race the shared one. Serializing those is pure slowdown.\n\n"
             + "If the class is mostly pure with one live test, prefer SPLITTING the live test into its own "
-            + "...LivePostgresTests class (the shape roughly thirty files here already use) over serializing "
+            + "...LivePostgresTests class (the shape more than forty files here already use) over serializing "
             + "every pure test alongside it.");
     }
 
