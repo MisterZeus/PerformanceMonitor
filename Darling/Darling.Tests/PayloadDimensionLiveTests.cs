@@ -828,4 +828,101 @@ public sealed class PayloadDimensionLiveTests
         read.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bytea, Value = digest });
         return (long)(await read.ExecuteScalarAsync(ct))!;
     }
+
+    /// <summary>
+    /// The catalog sweep must not drop raw chunks the rollup has not captured (#1784).
+    ///
+    /// <para>Two purges drop these same chunks: the tiered 4-day POLICY, which the #1680 gate holds paused
+    /// until the hourly aggregate covers the table's history, and this catalog sweep at the per-collector
+    /// 30-day horizon — which had no coverage check at all. On a store where the gate is deliberately holding
+    /// the policy, the sweep destroyed exactly the uncovered history the gate exists to protect, silently.</para>
+    ///
+    /// <para>Both halves are asserted, because a guard that never lets anything drop would pass the first one
+    /// alone: with coverage lagging the old row SURVIVES, and once the aggregate reaches back over it the very
+    /// same row is dropped. The backstop still backstops.</para>
+    /// </summary>
+    [Fact]
+    public async Task CatalogSweep_SkipsARawDropTheRollupHasNotCovered_AndResumesOnceItHas()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), SkipReason);
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = await OpenMigratedStoreAsync(connectionString!, ct);
+
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct), "the rig is expected to have TimescaleDB");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var (serverId, serverName) = NewServer();
+
+        /* Well past the 30-day catalog horizon, so the sweep would certainly take it if allowed. */
+        var ancient = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-45), DateTimeKind.Unspecified);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+
+        try
+        {
+            using (var seed = new NpgsqlCommand(
+                "INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash) " +
+                "VALUES ($1, $2, $3, $4, 'pm1784', '0xPM1784')", connection))
+            {
+                seed.Parameters.AddWithValue(CollectionIdGenerator.Next());
+                seed.Parameters.AddWithValue(ancient);
+                seed.Parameters.AddWithValue(serverId);
+                seed.Parameters.AddWithValue(serverName);
+                await seed.ExecuteNonQueryAsync(ct);
+            }
+
+            /* Coverage LAGS: refresh the aggregate only over the recent window, so it holds buckets but none
+               reaching back to the ancient row. That is the field state — a rollup that starts later than raw. */
+            using (var refresh = new NpgsqlCommand(
+                TimescaleSupport.RefreshContinuousAggregateSql(TimescaleSupport.QueryStatsHourlyView), connection))
+            {
+                refresh.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-2), DateTimeKind.Unspecified));
+                await refresh.ExecuteNonQueryAsync(ct);
+            }
+
+            Assert.False(
+                await TimescaleSupport.IsRawTierDropSafeAsync(connection, "query_stats", ct),
+                "with the rollup starting after raw's oldest row, dropping must NOT be judged safe");
+
+            var skipLog = new CapturingTestLogger();
+            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, skipLog, ct);
+
+            /* THE property: uncovered history survives the sweep. Asserted before the log line so a mutation
+               lands on the data loss, not on missing text. */
+            Assert.Equal(1L, await AncientRowCountAsync(connection, serverId, ct));
+            Assert.Contains("Retention purge SKIPPED for query_stats", skipLog.Joined, StringComparison.Ordinal);
+
+            /* Now let coverage reach back over the ancient row. force => recompute the older buckets. */
+            using (var refresh = new NpgsqlCommand(
+                TimescaleSupport.RefreshContinuousAggregateSql(TimescaleSupport.QueryStatsHourlyView, force: true), connection))
+            {
+                refresh.Parameters.AddWithValue(DateTime.SpecifyKind(ancient.AddDays(-1), DateTimeKind.Unspecified));
+                await refresh.ExecuteNonQueryAsync(ct);
+            }
+
+            Assert.True(
+                await TimescaleSupport.IsRawTierDropSafeAsync(connection, "query_stats", ct),
+                "once the rollup covers raw's oldest row the drop must be judged safe again");
+
+            var dropLog = new CapturingTestLogger();
+            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, dropLog, ct);
+
+            Assert.Equal(0L, await AncientRowCountAsync(connection, serverId, ct));
+            Assert.DoesNotContain("Retention purge SKIPPED for query_stats", dropLog.Joined, StringComparison.Ordinal);
+        }
+        finally
+        {
+            await DeleteServerRowsAsync(connection, serverId, ct);
+        }
+    }
+
+    private static async Task<long> AncientRowCountAsync(NpgsqlConnection connection, int serverId, CancellationToken ct)
+    {
+        using var read = new NpgsqlCommand("SELECT COUNT(*) FROM query_stats WHERE server_id = $1", connection);
+        read.Parameters.AddWithValue(serverId);
+        return (long)(await read.ExecuteScalarAsync(ct))!;
+    }
 }
