@@ -56,10 +56,20 @@ public sealed class PayloadDimensionLiveTests
     /// The exact line the dimension GC emits when it stands down, pinned in FULL rather than by prefix: it is
     /// a field signature an operator greps for, and a partial pin would let the wording drift to name a cause
     /// the guard does not actually detect -- which is how it came to say "raw purges held" while the shipped
-    /// trigger was a purge that did not complete.
+    /// trigger was a purge that did not complete. Since #1795 the ONLY deferral trigger is an UNMEASURABLE
+    /// fact floor (the measured bound replaced the blunt purge-failed guard), and the line says so.
     /// </summary>
     private const string DeferralSignature =
-        "dimension GC deferred: a dim-feeding table kept rows past its horizon this cycle; dimension content is retained until its purge completes";
+        "dimension GC deferred: a dim-feeding table's fact floor was unmeasurable this cycle; dimension content is retained until it can be measured";
+
+    /// <summary>
+    /// The exact line the GC emits when the MEASURED bound clamps below the assumed horizon (#1795) —
+    /// the greppable signature of a store whose dimension GC is bounded by held fact history (a coverage
+    /// clamp or a failed purge) rather than by the nominal horizon. Informational: this state is the fix
+    /// working.
+    /// </summary>
+    private const string BoundedSignature =
+        "dimension GC bounded by surviving facts: dimension content newer than the oldest digest-carrying fact row is retained";
 
     private const string SkipReason =
         "Set DARLING_TEST_PG to a Postgres connection string to run the payload-dimension store tests.";
@@ -795,21 +805,22 @@ public sealed class PayloadDimensionLiveTests
     }
 
     /// <summary>
-    /// The dimension GC must NOT prune while a table that feeds it failed to purge this cycle (#1782).
+    /// The dimension GC must NOT prune while a dim-feeding table's fact floor is UNMEASURABLE (#1795,
+    /// narrowing #1782's guard).
     ///
-    /// <para>The cutoff assumes facts past their retention are gone. The fact loop is failure-isolated, so a
-    /// table whose drop_chunks fails AND whose DELETE fallback then also fails is warned, skipped, and the
-    /// sweep continues straight into the GC — pruning dimension rows those surviving facts still reference.
-    /// The digests dangle and the resolving view serves NULL payload with no error raised anywhere, which is
-    /// the whole reason this is a guard and not a comment.</para>
+    /// <para>The GC's cutoff is bounded by the oldest surviving digest-carrying fact row. When that floor
+    /// cannot be measured at all, the safety boundary is unknown — pruning on the assumed horizon could
+    /// dangle digests that still-unmeasurable facts reference, and the resolving view would serve NULL
+    /// payload with no error raised anywhere. So an unmeasurable floor defers the GC for the cycle, the
+    /// same fail-toward-recoverable choice the old purge-failed guard made.</para>
     ///
-    /// <para>The failure is injected by RENAMING query_stats for the duration, which is a genuine total
-    /// failure of both purge paths (the relation the statements name does not exist) rather than a simulated
-    /// one — and it exercises the real seam: the sweep sets the flag, and the GC reads it. It is restored in
-    /// a finally, and the whole live collection is serialized, so no sibling class can observe the rename.</para>
+    /// <para>The unmeasurable state is injected by RENAMING query_stats for the duration — the floor probe's
+    /// relation genuinely does not exist, exercising the real seam rather than a simulated flag. It is
+    /// restored in a finally, and the whole live collection is serialized, so no sibling class can observe
+    /// the rename.</para>
     /// </summary>
     [Fact]
-    public async Task DimensionGc_DefersWhenADimFeedingTableFailedItsPurge_ThenPrunesOnceItSucceeds()
+    public async Task DimensionGc_DefersWhenAFactFloorIsUnmeasurable_ThenPrunesOnceItIs()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString), SkipReason);
@@ -866,14 +877,15 @@ public sealed class PayloadDimensionLiveTests
                 renamed = false;
             }
 
-            /* Since #1784 the sweep SKIPS a raw table whose rollup does not cover it, and that skip sets the
-               same dim-feeding-purge-failed flag this test is about — so a "healthy purge" now means covered as
-               well as succeeding. Satisfy coverage before the control phase, or the GC defers for the OTHER
-               reason and the control proves nothing. */
+            /* Coverage satisfied so the control phase exercises the fully-healthy path end to end — no
+               clamp skip in the log, floors measurable, purge running. (A clamp skip would no longer
+               defer the GC — that is #1795's whole point, pinned by the sibling test below — but the
+               control here is about the unmeasurable-floor deferral ENDING.) */
             await SatisfyRollupCoverageAsync(connection, ct);
 
-            /* Control: with the purge healthy again the guard opens and the same row is pruned, so the test
-               cannot pass merely because the GC never runs. */
+            /* Control: with the table back the floor is measurable again. No digest-carrying facts exist
+               on this rig (the floor is NULL), so the assumed ~32-day horizon applies and the 400-day
+               orphan is pruned — the test cannot pass merely because the GC never runs. */
             var prunedLog = new CapturingTestLogger();
             await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, prunedLog, ct, PurgeDimFeeding(30));
 
@@ -897,9 +909,12 @@ public sealed class PayloadDimensionLiveTests
                     await restore.ExecuteNonQueryAsync(cleanupCt);
                 }
 
-                await RestoreCaggsAsync(cleanup, coverageSnapshot, cleanupCt);
-
                 await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryPlanDimTable, digest, cleanupCt);
+
+                /* LAST, deliberately: the CAGG drops are the one step that can break the session (a
+                   drop colliding with a still-running background job — the CI-proven shape), and a
+                   break here has no cleanup statements left to strand. */
+                await RestoreCaggsAsync(cleanup, coverageSnapshot, cleanupCt);
             });
         }
     }
@@ -910,6 +925,124 @@ public sealed class PayloadDimensionLiveTests
             $"SELECT COUNT(*) FROM {PayloadDimensions.QueryPlanDimTable} WHERE digest = $1", connection);
         read.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bytea, Value = digest });
         return (long)(await read.ExecuteScalarAsync(ct))!;
+    }
+
+    /// <summary>
+    /// The #1795 property, in the exact field shape that motivated it: on a coverage-lagging store the
+    /// #1784 clamp holds query_stats' drop EVERY sweep, and before this change that set the #1782 defer
+    /// flag — so the dimension GC stood down every cycle and a 400-day orphan survived with nothing
+    /// failed anywhere. The GC now prunes against the oldest SURVIVING digest-carrying fact row: the
+    /// orphan (older than anything still referencing content) is reclaimed even while the clamp holds,
+    /// and content the held facts still reference survives, because pruning it would dangle digests the
+    /// clamp deliberately kept alive.
+    /// </summary>
+    [Fact]
+    public async Task DimensionGc_PrunesOrphansButKeepsReferencedContent_WhileTheCoverageClampHoldsFacts()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), SkipReason);
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = await OpenMigratedStoreAsync(connectionString!, ct);
+
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct), "the rig is expected to have TimescaleDB");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        var preexistingCaggs = await ExistingCaggsAsync(connection, ct);
+
+        var (serverId, serverName) = NewServer();
+
+        /* The surviving fact: 45 days back — past the 30-day catalog horizon (the clamp is what keeps
+           it alive) and past the ~32-day assumed GC cutoff, so only the MEASURED bound protects the
+           content it references. */
+        var heldFactTime = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-45), DateTimeKind.Unspecified);
+        var referencedDigest = PayloadDimensions.Digest("pm1795-referenced-" + Guid.NewGuid().ToString("N"));
+        var orphanDigest = PayloadDimensions.Digest("pm1795-orphan-" + Guid.NewGuid().ToString("N"));
+        var orphanSeen = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-400), DateTimeKind.Unspecified);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* INSIDE the try: creating aggregates is the shared-fixture mutation the finally restores.
+               Policies removed immediately - see EnsureAggregatesWithoutPoliciesAsync. */
+            await EnsureAggregatesWithoutPoliciesAsync(connection, ct);
+
+            /* The held digest-carrying fact... */
+            using (var seed = new NpgsqlCommand(
+                "INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_digest) " +
+                "VALUES ($1, $2, $3, $4, 'pm1795', '0xPM1795', $5)", connection))
+            {
+                seed.Parameters.AddWithValue(CollectionIdGenerator.Next());
+                seed.Parameters.AddWithValue(heldFactTime);
+                seed.Parameters.AddWithValue(serverId);
+                seed.Parameters.AddWithValue(serverName);
+                seed.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bytea, Value = referencedDigest });
+                await seed.ExecuteNonQueryAsync(ct);
+            }
+
+            /* ...the content it references (last_seen = its sighting time, 45d — inside the measured
+               bound of floor minus one day)... */
+            using (var seed = new NpgsqlCommand(
+                $"INSERT INTO {PayloadDimensions.QueryPlanDimTable} (digest, query_plan_xml, last_seen) " +
+                "VALUES ($1, $2, $3) ON CONFLICT (digest) DO NOTHING", connection))
+            {
+                seed.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bytea, Value = referencedDigest });
+                seed.Parameters.AddWithValue("<ShowPlanXML pm1795=\"referenced\"/>");
+                seed.Parameters.AddWithValue(heldFactTime);
+                await seed.ExecuteNonQueryAsync(ct);
+            }
+
+            /* ...and the orphan nothing references, older than the oldest surviving fact. */
+            using (var seed = new NpgsqlCommand(
+                $"INSERT INTO {PayloadDimensions.QueryPlanDimTable} (digest, query_plan_xml, last_seen) " +
+                "VALUES ($1, $2, $3) ON CONFLICT (digest) DO NOTHING", connection))
+            {
+                seed.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bytea, Value = orphanDigest });
+                seed.Parameters.AddWithValue("<ShowPlanXML pm1795=\"orphan\"/>");
+                seed.Parameters.AddWithValue(orphanSeen);
+                await seed.ExecuteNonQueryAsync(ct);
+            }
+
+            /* Coverage LAGS: the aggregate holds recent buckets only, none reaching the 45-day fact, so
+               the clamp holds query_stats' drop — the field state. */
+            using (var refresh = new NpgsqlCommand(
+                TimescaleSupport.RefreshContinuousAggregateSql(TimescaleSupport.QueryStatsHourlyView), connection))
+            {
+                refresh.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-2), DateTimeKind.Unspecified));
+                await refresh.ExecuteNonQueryAsync(ct);
+            }
+
+            Assert.False(
+                await TimescaleSupport.IsRawTierDropSafeAsync(connection, "query_stats", ct),
+                "the clamp must be holding query_stats for this test to mean anything");
+
+            var log = new CapturingTestLogger();
+            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, log, ct, PurgeDimFeeding(30));
+
+            /* The clamp held (the fact survived its horizon) — and the GC ran ANYWAY, bounded. */
+            Assert.Contains(CoverageSkipSignature, log.Joined, StringComparison.Ordinal);
+            Assert.Equal(1L, await AncientRowCountAsync(connection, serverId, ct));
+            Assert.DoesNotContain(DeferralSignature, log.Joined, StringComparison.Ordinal);
+            Assert.Contains(BoundedSignature, log.Joined, StringComparison.Ordinal);
+
+            /* The substantive pair: the orphan is reclaimed, the referenced content is not. */
+            Assert.Equal(0L, await DimRowCountAsync(connection, orphanDigest, ct));
+            Assert.Equal(1L, await DimRowCountAsync(connection, referencedDigest, ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteServerRowsAsync(cleanup, serverId, cleanupCt);
+                await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryPlanDimTable, referencedDigest, cleanupCt);
+                await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryPlanDimTable, orphanDigest, cleanupCt);
+                await RestoreCaggsAsync(cleanup, preexistingCaggs, cleanupCt);
+            });
+        }
     }
 
     /// <summary>
@@ -951,8 +1084,9 @@ public sealed class PayloadDimensionLiveTests
         try
         {
             /* INSIDE the try: creating aggregates is the shared-fixture mutation the finally restores,
-               so it must not happen where a throw would skip that restore. */
-            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+               so it must not happen where a throw would skip that restore. Policies removed immediately -
+               their instantly-firing jobs are the 55P03/stranded-aggregate race this class chased in #1795. */
+            await EnsureAggregatesWithoutPoliciesAsync(connection, ct);
 
             using (var seed = new NpgsqlCommand(
                 "INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash) " +
@@ -1042,12 +1176,45 @@ public sealed class PayloadDimensionLiveTests
     {
         try
         {
+            /* A PRIOR best-effort statement may have swallowed a failure that BROKE this connection
+               (proven on CI: a RestoreCaggs drop died, the swallow hid it, and the next helper threw
+               "Connection is not open" out of an otherwise-green test). Reopening the same
+               NpgsqlConnection object checks out a fresh pooled session, so one broken statement
+               cannot cascade into every cleanup statement after it. */
+            if (connection.State != System.Data.ConnectionState.Open)
+            {
+                await connection.OpenAsync(ct);
+            }
+
             using var command = new NpgsqlCommand(sql, connection);
             await command.ExecuteNonQueryAsync(ct);
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            /* Cleanup is best-effort: a restore step that throws must not mask the test's own failure. */
+            /* Cleanup is best-effort: a restore step that throws must not mask the test's own failure.
+               But say WHAT was swallowed — xUnit captures console per test, so on the next mystery this
+               line is the diagnosis instead of a silent hole. */
+            Console.WriteLine($"[cleanup best-effort] {ex.GetType().Name} ({(ex as PostgresException)?.SqlState}): {ex.Message} — {sql}");
+        }
+    }
+
+    /// <summary>
+    /// <see cref="TimescaleSupport.EnsureContinuousAggregatesAsync"/> and then REMOVES every rollup's
+    /// refresh policy. The ensure attaches policies whose jobs fire IMMEDIATELY (the #1788 finding), and
+    /// those background refreshes race everything this class does next: a manual force-refresh collides
+    /// with 55P03 "concurrent refresh", and a restore's DROP can collide with a running job's lock and
+    /// silently strand the aggregate in the shared fixture — which is exactly how query_stats_db_hourly
+    /// and query_stats_db_daily came to persist across runs and flip the #1784 gate for every later
+    /// test. The tests refresh manually and deterministically; they never need the scheduler.
+    /// </summary>
+    private static async Task EnsureAggregatesWithoutPoliciesAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        foreach (var (view, _, _, _) in TimescaleSupport.RollupViews)
+        {
+            await TryExecAsync(connection,
+                $"SELECT remove_continuous_aggregate_policy('collect.{view}', if_exists => true)", ct);
         }
     }
 
@@ -1059,18 +1226,34 @@ public sealed class PayloadDimensionLiveTests
     /// outside its try, so a throw part-way through creation still leaves the finally a baseline to restore
     /// against. Owning the snapshot here made the restore conditional on this method RETURNING, which is
     /// exactly the window in which it leaks aggregates into the shared fixture.</para>
+    ///
+    /// <para>The refresh retries bounded on 55P03: removing the policies closes the standing race, but a
+    /// job that was ALREADY EXECUTING when its policy was removed finishes its run, and one collision can
+    /// still land. The product's backfill slices carry the same bounded transient-only retry for the same
+    /// reason (#1788); every other SQLSTATE still fails fast.</para>
     /// </summary>
     private static async Task SatisfyRollupCoverageAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+        await EnsureAggregatesWithoutPoliciesAsync(connection, ct);
 
         foreach (var (relation, _, coverage) in TimescaleSupport.RawTierCoverage)
         {
             _ = relation;
-            using var refresh = new NpgsqlCommand(
-                TimescaleSupport.RefreshContinuousAggregateSql(coverage, force: true), connection);
-            refresh.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-3650), DateTimeKind.Unspecified));
-            await refresh.ExecuteNonQueryAsync(ct);
+            for (var attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    using var refresh = new NpgsqlCommand(
+                        TimescaleSupport.RefreshContinuousAggregateSql(coverage, force: true), connection);
+                    refresh.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-3650), DateTimeKind.Unspecified));
+                    await refresh.ExecuteNonQueryAsync(ct);
+                    break;
+                }
+                catch (PostgresException ex) when (ex.SqlState == "55P03" && attempt < 5)
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt), ct);
+                }
+            }
         }
     }
 

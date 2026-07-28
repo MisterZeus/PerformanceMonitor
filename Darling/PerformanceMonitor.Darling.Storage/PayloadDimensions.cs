@@ -111,6 +111,22 @@ public static class PayloadDimensions
     /// <summary>The distinct dimension tables, in creation order.</summary>
     public static readonly IReadOnlyList<string> DimTables = new[] { QueryTextDimTable, QueryPlanDimTable };
 
+    /// <summary>
+    /// Per dim-feeding fact table, the SQL predicate "this row carries any payload digest" — the OR of
+    /// that table's digest columns from <see cref="All"/>, in declaration order. The #1795 measured GC
+    /// bound probes <c>min(collection_time)</c> under EXACTLY this predicate, and the V39 partial
+    /// indexes are declared with EXACTLY this predicate, so the probe stays an index-edge read instead
+    /// of an oldest-chunk walk. Derived from the map rather than restated so a new dimension column
+    /// lands in the probe the day it lands in <see cref="All"/> — and a pin test holds the V39 DDL to
+    /// these strings so the index predicate can never drift from the probe's.
+    /// </summary>
+    public static IReadOnlyDictionary<string, string> DigestPredicateByTable { get; } =
+        All.GroupBy(d => d.TargetTable, StringComparer.Ordinal)
+           .ToDictionary(
+                g => g.Key,
+                g => string.Join(" OR ", g.Select(d => d.DigestColumn + " IS NOT NULL").Distinct()),
+                StringComparer.Ordinal);
+
     /// <summary>The diverted columns for one fact table (empty for every table that has none).</summary>
     public static IReadOnlyList<PayloadDimension> ForTable(string targetTable)
         => All.Where(d => string.Equals(d.TargetTable, targetTable, StringComparison.Ordinal)).ToArray();
