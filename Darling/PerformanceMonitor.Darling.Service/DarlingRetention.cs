@@ -7,8 +7,10 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -138,6 +140,12 @@ public static class DarlingRetention
         /* Naive-UTC storage: Npgsql 6+ rejects Kind=Utc against `timestamp` — see PgCollectorRowWriter. */
         var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
 
+        /* Set when a table that feeds a payload dimension could not be purged this cycle, which invalidates
+           the dimension GC's cutoff (#1782). Tracked here rather than inferred later because the sweep is the
+           only thing that knows: a failed purge is warned and skipped, leaving no state a later query could
+           read back. */
+        var dimFeedingPurgeFailed = false;
+
         try
         {
             foreach (var definition in CollectorCatalog.All)
@@ -149,6 +157,7 @@ public static class DarlingRetention
                     logger?.LogWarning("Retention purge: no schedule entry for '{Collector}' — {Table} was not purged",
                         definition.Name, definition.TargetTable);
                     tablesFailed++;
+                    dimFeedingPurgeFailed |= PayloadDimensions.ForTable(definition.TargetTable).Count > 0;
                     continue;
                 }
 
@@ -185,6 +194,11 @@ public static class DarlingRetention
                 else
                 {
                     tablesFailed++;
+
+                    /* Both paths failed for this table, so its rows are still there past their horizon. If it
+                       feeds a payload dimension, that invalidates the dimension GC's cutoff for this cycle
+                       (#1782) — see the guard below. */
+                    dimFeedingPurgeFailed |= PayloadDimensions.ForTable(definition.TargetTable).Count > 0;
                 }
             }
 
@@ -222,20 +236,47 @@ public static class DarlingRetention
                 widestFactRetentionDays = Math.Max(widestFactRetentionDays, factRetentionDays);
             }
 
-            var dimensionCutoff = utcNow.AddDays(-(widestFactRetentionDays + TimescaleSupport.ChunkIntervalDays + 1));
-            foreach (var dimTable in PayloadDimensions.DimTables)
+            /* That whole cutoff embeds one assumption: facts older than their retention are GONE. It holds
+               while the fact purge SUCCEEDS — and the loop above is failure-isolated, so a table whose
+               drop_chunks fails AND whose DELETE fallback then also fails is warned, skipped, and the sweep
+               continues straight into this GC. Those facts persist past the cutoff while their dimension rows
+               are pruned on schedule: the digests dangle, and the resolving view serves NULL payload with no
+               error raised anywhere (#1782).
+
+               So a dim-feeding table failing its purge defers the GC for that cycle. It is keyed to the
+               failure rather than to the retention POLICY's held state, because a held policy cannot cause
+               this: the catalog sweep above drops these tables at their own 30-day horizon regardless of the
+               policy, two days inside this 32-day cutoff, and the ordering survives any override since both
+               sides resolve through the same retentionDaysFor. Deferring on a held policy would stall the GC
+               indefinitely on a store whose policies are held for entirely unrelated reasons.
+
+               Self-ending by construction: the next sweep that purges cleanly runs the GC, and nothing needs
+               an operator. And it fails toward the recoverable side — deferring costs bounded dimension
+               growth, visible and reclaimed by the next cycle, where pruning early corrupts the read path
+               silently. */
+            if (dimFeedingPurgeFailed)
             {
-                var dimDeleted = await PurgeOneAsync(
-                    postgres, dimTable, TimeSlicedDeleteSql(dimTable, PayloadDimensions.LastSeenColumn),
-                    dimensionCutoff, logger, cancellationToken);
-                if (dimDeleted is not null)
+                /* One line, deliberately a fixed string: it is the field signature an operator greps for when
+                   the dimensions stop shrinking, so it must not vary by store. */
+                logger?.LogWarning("dimension GC deferred: raw purges held, facts may outlive their policy window");
+            }
+            else
+            {
+                var dimensionCutoff = utcNow.AddDays(-(widestFactRetentionDays + TimescaleSupport.ChunkIntervalDays + 1));
+                foreach (var dimTable in PayloadDimensions.DimTables)
                 {
-                    tablesPurged++;
-                    totalRowsDeleted += dimDeleted.Value;
-                }
-                else
-                {
-                    tablesFailed++;
+                    var dimDeleted = await PurgeOneAsync(
+                        postgres, dimTable, TimeSlicedDeleteSql(dimTable, PayloadDimensions.LastSeenColumn),
+                        dimensionCutoff, logger, cancellationToken);
+                    if (dimDeleted is not null)
+                    {
+                        tablesPurged++;
+                        totalRowsDeleted += dimDeleted.Value;
+                    }
+                    else
+                    {
+                        tablesFailed++;
+                    }
                 }
             }
 
