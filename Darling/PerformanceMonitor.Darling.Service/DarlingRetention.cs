@@ -166,6 +166,30 @@ public static class DarlingRetention
                    DELETE the entire table. Never purge with a horizon under 1 day. */
                 var retentionDays = Math.Max(1, retentionDaysFor?.Invoke(definition.Name) ?? schedule.RetentionDays);
 
+                /* #1784: this sweep and the tiered retention POLICY drop the same chunks, but only the policy
+                   was coverage-gated. On a store where the #1680 gate is deliberately holding that policy —
+                   because the rollup does not reach back over raw's history — this path dropped those very
+                   chunks at the catalog horizon anyway, destroying exactly the uncovered history the gate
+                   exists to protect. The gate was not bypassed by a bug in the gate; it was bypassed by an
+                   older path that never learned the invariant.
+
+                   So the same predicate now guards both. It is binary rather than a clamped cutoff because
+                   drop_chunks can only remove the OLDEST chunks, and when coverage lags those ARE the
+                   uncovered ones — there is no cutoff that drops the covered tail while sparing the uncovered
+                   head. NOT an outright exclusion of tiered tables either: the moment coverage reaches back,
+                   the normal horizon applies again, so a never-armed policy cannot mean unbounded growth. */
+                if (timescaleAvailable && !await IsTieredDropSafeAsync(postgres, definition.TargetTable, logger, cancellationToken))
+                {
+                    logger?.LogWarning(
+                        "Retention purge SKIPPED for {Table}: its rollup does not yet cover the oldest rows, so dropping would delete history no aggregate holds. Resumes by itself once a backfill extends coverage.",
+                        definition.TargetTable);
+
+                    /* Those rows are still there past their horizon, which is the dimension GC's hazard
+                       (#1782) exactly as a failed purge is — the GC's cutoff assumes they are gone. */
+                    dimFeedingPurgeFailed |= PayloadDimensions.ForTable(definition.TargetTable).Count > 0;
+                    continue;
+                }
+
                 if (timescaleAvailable)
                 {
                     var dropped = await DropChunksOneAsync(
@@ -525,6 +549,44 @@ public static class DarlingRetention
             logger?.LogWarning("Retention purge (drop_chunks) failed for {Table} — falling back to DELETE: {Message}",
                 tableName, ex.Message);
             return null;
+        }
+    }
+
+    /// <summary>
+    /// May this table's expired chunks be dropped, per the #1680 coverage gate (#1784)? Delegates to
+    /// <see cref="TimescaleSupport.IsRawTierDropSafeAsync"/> so the sweep and the tiered policy cannot judge
+    /// the same drop differently; non-tiered tables are always safe.
+    ///
+    /// <para>A connection failure answers "not safe" — for a DROP the fail-closed direction is to leave the
+    /// data alone and re-judge next cycle, which is the same instinct the gate itself follows. That does mean
+    /// a store that cannot reach its own catalogs stops purging these three tables; the skip is logged every
+    /// cycle, and the alternative is deleting history on a guess.</para>
+    /// </summary>
+    private static async Task<bool> IsTieredDropSafeAsync(
+        NpgsqlDataSource postgres,
+        string tableName,
+        ILogger? logger,
+        CancellationToken cancellationToken)
+    {
+        /* Membership first: the sweep calls this for EVERY catalog table, and only the three raw tiers are
+           gated. Opening a pooled connection just to have the predicate return true for the other thirty is
+           avoidable work on a path that already runs per table per day. */
+        if (!TimescaleSupport.IsCoverageGatedRelation(tableName))
+        {
+            return true;
+        }
+
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            return await TimescaleSupport.IsRawTierDropSafeAsync(connection, tableName, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "Could not establish rollup coverage for {Table} ({Message}) — skipping its drop this cycle rather than deleting history on an assumption.",
+                tableName, ex.Message);
+            return false;
         }
     }
 

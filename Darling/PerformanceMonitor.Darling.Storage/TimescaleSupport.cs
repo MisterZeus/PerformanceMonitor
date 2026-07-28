@@ -68,6 +68,32 @@ public static class TimescaleSupport
     public const int CompressAfterDays = 1;
 
     /// <summary>
+    /// How often each compression policy WAKES UP and compresses whatever has become eligible — the TICK,
+    /// which is a different lever from <see cref="CompressAfterDays"/>: the delay governs which chunks are
+    /// eligible, this governs how long an eligible chunk waits before anything acts on it (#1778).
+    ///
+    /// <para><b>Passed explicitly because TimescaleDB's default is 12 hours and we never chose it.</b>
+    /// <c>add_compression_policy</c> computes a default when <c>schedule_interval</c> is omitted — measured on
+    /// 2.28.1, a hypertable with <see cref="ChunkIntervalDays"/> = 1 gets exactly <c>12:00:00</c>. The rule is
+    /// half the chunk interval CAPPED at 12 hours, not floored at it: a 6-hour chunk interval gets
+    /// <c>03:00:00</c>, while 2-day and 7-day intervals both get <c>12:00:00</c> rather than 24h or 84h. The cap
+    /// is what makes 12 hours the default on EVERY store shape this product can produce — the 1-day chunks it
+    /// creates today, and the 7-day-chunk hypertables an adopted store may still carry from before
+    /// <see cref="ChunkIntervalDays"/> was passed (existing chunks keep their original width). That is the
+    /// field's "twice-daily fixed tick": a chunk that had already aged
+    /// past the delay still sat uncompressed for up to another half-day, and on a pre-dedup field store the
+    /// newest closed chunk reached 81 GB before its scheduled compression ever reached it. The newest closed
+    /// chunk is always the least-compressed data on disk, so the tick is the width of that exposure.</para>
+    ///
+    /// <para>One hour rather than something shorter: eligibility only changes once a day per chunk (1-day
+    /// chunks, 1-day delay), so a tighter tick buys no latency and only adds wakeups. It also matches the
+    /// continuous-aggregate refresh cadence already used a few hundred lines down, so the store has one
+    /// background rhythm instead of two. NOT a config knob — defaults over speculative config; nothing in the
+    /// field asked to tune this, they asked for it not to be half a day.</para>
+    /// </summary>
+    public const string CompressScheduleInterval = "1 hour";
+
+    /// <summary>
     /// Hypertable chunk width in days. TimescaleDB's 7-day default is far too coarse for
     /// 1-minute-cadence monitoring data: a chunk stays open (and uncompressible) for its whole
     /// span, so 7-day chunks meant nothing compressed for ~2 weeks. 1-day chunks close daily and
@@ -220,10 +246,22 @@ public static class TimescaleSupport
 
     /// <summary>
     /// One collector table's background compression policy — chunks older than
-    /// <see cref="CompressAfterDays"/> compress automatically; <c>if_not_exists</c> makes the
+    /// <see cref="CompressAfterDays"/> compress automatically, checked every
+    /// <see cref="CompressScheduleInterval"/>; <c>if_not_exists</c> makes the
     /// re-apply on every service start a no-op. Same 2.18+ naming note as
     /// <see cref="EnableCompressionSql"/> (<c>add_compression_policy</c> is the long-stable
     /// alias of the newer <c>add_columnstore_policy</c>).
+    ///
+    /// <para><b>This statement alone only fixes FRESH stores</b>, which is why
+    /// <see cref="ConvergeCompressionScheduleAsync"/> exists. Measured on 2.28.1: called against a store that
+    /// already has a compression policy with a DIFFERENT <c>schedule_interval</c>, <c>if_not_exists => true</c>
+    /// returns <c>-1</c> and emits <c>NOTICE: columnstore policy already exists ... skipping</c> — it does not
+    /// reconcile the parameter. Every store that ever started on an older build would therefore keep the
+    /// 12-hour tick forever, including the field store #1778 was reported from. The signature verified live is
+    /// <c>(hypertable REGCLASS, compress_after "any", if_not_exists BOOL, schedule_interval INTERVAL,
+    /// initial_start TIMESTAMPTZ, timezone TEXT, compress_created_before INTERVAL)</c>, and the extension's own
+    /// SQL notes it is "not strict because we need to set different default values for schedule_interval" —
+    /// i.e. the default is computed in C, so omitting the argument is not the same as passing what we want.</para>
     /// </summary>
     public static string AddCompressionPolicySql(ICollectorSchemaInfo schema)
     {
@@ -238,7 +276,7 @@ public static class TimescaleSupport
     /// <summary>The raw-name compression-policy overload — the collection_log path (see
     /// <see cref="CreateHypertableSql(string, string)"/>).</summary>
     public static string AddCompressionPolicySql(string table)
-        => $"SELECT add_compression_policy('{table}', compress_after => INTERVAL '{CompressAfterDays} days', if_not_exists => true)";
+        => $"SELECT add_compression_policy('{table}', compress_after => INTERVAL '{CompressAfterDays} days', schedule_interval => INTERVAL '{CompressScheduleInterval}', if_not_exists => true)";
 
     /* ─────────────────────────── continuous aggregates (query acceleration) ─────────────────────────── */
 
@@ -1312,6 +1350,67 @@ AND   j.hypertable_name = '{relation}'";
     (SELECT min(bucket) FROM collect.{coverageRelation}) AS coverage_oldest";
 
     /// <summary>
+    /// The raw tier and the aggregate that must already cover it — the single source of truth for which tables
+    /// are coverage-gated, shared by the policy setup (<see cref="EnsureRetentionPoliciesAsync"/>) and by the
+    /// catalog sweep's own drop (#1784). They MUST agree: two purge paths judging the same table by different
+    /// rules is precisely the defect #1784 records.
+    /// </summary>
+    public static readonly IReadOnlyList<(string Relation, string TimeColumn, string Coverage)> RawTierCoverage = new[]
+    {
+        ("query_stats", "collection_time", QueryStatsHourlyView),
+        ("procedure_stats", "collection_time", ProcedureStatsHourlyView),
+        ("query_store_stats", "collection_time", QueryStoreStatsHourlyView),
+    };
+
+    /// <summary>
+    /// Is <paramref name="relation"/> one of the coverage-gated raw tiers? Lets a caller skip the cost of a
+    /// connection for the many tables the gate does not apply to, without duplicating the membership rule --
+    /// it reads the same <see cref="RawTierCoverage"/> map the gate itself does.
+    /// </summary>
+    public static bool IsCoverageGatedRelation(string relation)
+    {
+        foreach (var (tierRelation, _, _) in RawTierCoverage)
+        {
+            if (string.Equals(tierRelation, relation, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// May <paramref name="relation"/>'s expired chunks be dropped right now without destroying history no
+    /// aggregate holds (#1784)? True for any table that is not coverage-gated — the gate is a property of the
+    /// raw tier, not of retention in general.
+    ///
+    /// <para>This is the SAME predicate the #1680 arming gate uses, reached through the same map, deliberately:
+    /// the tiered policy and the catalog sweep drop the same chunks, so they must not be able to disagree about
+    /// whether that is safe. Reusing it also inherits its fail-closed behaviour — an indeterminate coverage
+    /// state answers "not safe", which for a DROP means the data survives to be re-judged next cycle.</para>
+    ///
+    /// <para>Note this is a BINARY judgement, not a clamped cutoff, and it has to be:
+    /// <c>drop_chunks</c> can only remove the OLDEST chunks, and when coverage lags it is exactly the oldest
+    /// chunks that are uncovered. No cutoff drops the covered tail while sparing the uncovered head, so there is
+    /// no cutoff value that expresses the safe operation — only "all of it" or "none of it". See #1784 for the
+    /// worked arithmetic showing where a min(horizon, coverage-floor) clamp still deletes uncovered history.</para>
+    /// </summary>
+    public static async Task<bool> IsRawTierDropSafeAsync(
+        NpgsqlConnection connection, string relation, CancellationToken cancellationToken = default)
+    {
+        foreach (var (tierRelation, timeColumn, coverage) in RawTierCoverage)
+        {
+            if (string.Equals(tierRelation, relation, StringComparison.Ordinal))
+            {
+                return await IsSafeToArmRetentionAsync(connection, tierRelation, timeColumn, coverage, cancellationToken);
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// True when arming <paramref name="relation"/>'s retention policy cannot drop anything the tier below has
     /// not already captured (#1680): the source is empty, or <paramref name="coverageRelation"/> reaches at least
     /// as far back as the source does. Any failure to determine this returns FALSE - an unknown coverage state
@@ -1388,16 +1487,15 @@ AND   j.hypertable_name = '{relation}'";
            belt-and-braces by construction: BaselineRetentionSpan (35d) already exceeds the window, so even an
            immediately-armed policy could not eat it, and Darling.Tests pins that static relation. A policy
            with no identifiable consumer at all still does not belong in this list. */
-        var policies = new[]
+        var policies = RawTierCoverage
+            .Select(t => (Relation: t.Relation, DropAfter: RawRetentionInterval, TimeColumn: t.TimeColumn, Coverage: t.Coverage))
+            .Concat(new[]
         {
-            (Relation: "query_stats",             DropAfter: RawRetentionInterval,    TimeColumn: "collection_time", Coverage: QueryStatsHourlyView),
-            (Relation: "procedure_stats",         DropAfter: RawRetentionInterval,    TimeColumn: "collection_time", Coverage: ProcedureStatsHourlyView),
-            (Relation: "query_store_stats",       DropAfter: RawRetentionInterval,    TimeColumn: "collection_time", Coverage: QueryStoreStatsHourlyView),
             (Relation: QueryStatsHourlyView,      DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: QueryStatsDailyView),
             (Relation: ProcedureStatsHourlyView,  DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: ProcedureStatsDailyView),
             (Relation: QueryStoreStatsHourlyView, DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: QueryStoreStatsDailyView),
             (Relation: QueryStatsDbHourlyView,    DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: QueryStatsDbDailyView),
-        }
+        })
         /* The nine baseline-tier policies (#1757). Coverage is the tier ITSELF: see the leaf rule in the
            comment above -- their consumer is the baseline computation, whose capture requirement is the
            30-day window, and BaselineRetentionSpan (35d) exceeds it by construction. */
@@ -1698,6 +1796,119 @@ AND   j.hypertable_name = '{relation}'";
         return applied;
     }
 
+    /// <summary>
+    /// Every COMPRESSION-policy job whose <c>schedule_interval</c> is not
+    /// <see cref="CompressScheduleInterval"/> — the stores that need converging (#1778). The comparison is
+    /// done by PostgreSQL against a typed <c>INTERVAL</c> literal rather than by string in C#, so
+    /// <c>01:00:00</c> and <c>1 hour</c> compare equal instead of drifting on formatting.
+    ///
+    /// <para>Scoped to compression jobs the SAME tolerant way <see cref="ReadStuckCompressionJobsAsync"/> is
+    /// (<c>policy_compression</c> plus the 2.18+ <c>columnstore</c> rebrand). Retention, continuous-aggregate
+    /// refresh, reorder and every other job type are deliberately untouched: their cadences are separate
+    /// decisions, and the retention jobs in particular carry an armed/paused state (#1680) this must never
+    /// disturb.</para>
+    /// </summary>
+    public static string StaleCompressionScheduleSql =>
+        $@"
+SELECT
+    j.job_id,
+    j.hypertable_name,
+    j.schedule_interval::text
+FROM timescaledb_information.jobs AS j
+WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')
+AND   j.schedule_interval IS DISTINCT FROM INTERVAL '{CompressScheduleInterval}'";
+
+    /// <summary>
+    /// Retunes one existing compression policy to <see cref="CompressScheduleInterval"/>. The job id is BOUND
+    /// as <c>$1</c> and cast <c>::integer</c> — <c>alter_job</c> takes <c>job_id INTEGER</c> and PostgreSQL does
+    /// not down-cast bigint during function resolution, the #1586 trap that shipped once already. The interval
+    /// is a compile-time constant, never user input, so it interpolates like every other literal here.
+    ///
+    /// <para>Only <c>schedule_interval</c> is passed; every other <c>alter_job</c> parameter defaults to NULL,
+    /// which TimescaleDB reads as "leave unchanged" — so this cannot arm a paused job or alter what a policy
+    /// considers eligible. Measured on 2.28.1: the change also re-anchors <c>next_start</c> immediately
+    /// (a job sitting at last-finish + 12h moved to last-finish + 1h), so a converged store starts honoring the
+    /// new cadence on the next tick rather than after one final half-day wait.</para>
+    /// </summary>
+    public static string SetCompressionScheduleSql =>
+        $"SELECT alter_job($1::integer, schedule_interval => INTERVAL '{CompressScheduleInterval}')";
+
+    /// <summary>
+    /// Retunes EXISTING compression policies to <see cref="CompressScheduleInterval"/> (#1778) — the half of
+    /// the tick fix that reaches stores which already have policies.
+    ///
+    /// <para>Without this the change would only ever help fresh installs: <see cref="AddCompressionPolicySql"/>
+    /// carries the interval, but <c>if_not_exists => true</c> makes it a documented no-op against an existing
+    /// policy (measured: returns -1, NOTICE, parameters untouched), so every store that ever ran an older build
+    /// — the field store in #1778 among them — would keep waking twice a day forever. Idempotent by
+    /// construction: it selects only the jobs that DIFFER, so the first start after deploy converges the store
+    /// and every start after that finds nothing and logs nothing.</para>
+    ///
+    /// <para>Failure-isolated PER JOB, the #1775 shape: one <c>alter_job</c> that fails (most often because a
+    /// least-privilege bring-your-own store's login does not own the job) leaves that one hypertable on its old
+    /// cadence and the rest still converge. Returns how many it retuned.</para>
+    /// </summary>
+    public static async Task<int> ConvergeCompressionScheduleAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var stale = new List<(int JobId, string? Hypertable, string? Interval)>();
+        try
+        {
+            using var probe = new NpgsqlCommand(StaleCompressionScheduleSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                stale.Add((
+                    Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture),
+                    reader.IsDBNull(1) ? null : reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2)));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* A plain-PostgreSQL store (the views do not exist) or a store hiccup. The caller already gates on
+               the extension; nothing to converge either way. */
+            logger?.LogDebug("Compression-schedule converge: could not read policy jobs: {Message}", ex.Message);
+            return 0;
+        }
+
+        var converged = 0;
+        foreach (var (jobId, hypertable, interval) in stale)
+        {
+            try
+            {
+                using var alter = new NpgsqlCommand(SetCompressionScheduleSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+                alter.Parameters.AddWithValue(jobId);
+                await alter.ExecuteNonQueryAsync(cancellationToken);
+                converged++;
+
+                logger?.LogInformation(
+                    "TimescaleDB: retuned {Hypertable}'s compression policy from a {Was} tick to {Now} — that is the longest an already-eligible chunk can now sit uncompressed.",
+                    hypertable, interval, CompressScheduleInterval);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Could not retune {Hypertable}'s compression policy (job {JobId}) to a {Interval} tick — it keeps its {Was} cadence, so its newest closed chunk stays uncompressed longer (often a permission issue: the store login must own the job): {Message}",
+                    hypertable, jobId, CompressScheduleInterval, interval, ex.Message);
+            }
+        }
+
+        if (converged > 0)
+        {
+            logger?.LogInformation(
+                "TimescaleDB: {Converged}/{Total} compression policies retuned to a {Interval} tick (#1778 — TimescaleDB's own default for 1-day chunks is 12 hours).",
+                converged, stale.Count, CompressScheduleInterval);
+        }
+
+        return converged;
+    }
+
     /// <summary>The V23 non-catalog hypertable: the per-run observability log. Bare name — the connection's
     /// <c>collect,config,public</c> search path resolves it to <c>collect.collection_log</c>, exactly like the
     /// collector tables' bare TargetTable names.</summary>
@@ -1775,8 +1986,18 @@ AND   j.hypertable_name = '{relation}'";
        finishes in seconds-to-minutes, so a run still 'Running' past this floor (when it dominates
        2x the schedule interval) has hung. Kept generous so a genuinely long first-compression of a
        large adopted store is not false-flagged; next_start = -infinity (the dominant failure mode) is
-       caught immediately regardless of this. */
-    private static readonly TimeSpan s_stuckRunningFloor = TimeSpan.FromHours(2);
+       caught immediately regardless of this.
+
+       RAISED 2h -> 6h WITH THE TICK (#1778), and the floor is now the only thing holding this bound up.
+       The bound is max(2x schedule_interval, floor). While the interval was TimescaleDB's 12-hour default
+       the first term dominated at 24h and the floor never bound anything; shortening the tick to 1 hour
+       collapses that term to 2h, so without this the bound would silently tighten 24h -> 2h. That would be
+       a regression rather than a fix: the SAME field box that reported #1778 measured a query_stats
+       compression still running at 1h33m and characterized compressions as hours-long at ~16 MB/s, so a 2h
+       bound would start flagging legitimately-running compressions as stuck and the #1581 self-heal would
+       re-arm a job that was doing its job. 6h clears every legitimately long run observed in the field with
+       real headroom while still detecting a hung run four times sooner than the accidental 24h did. */
+    private static readonly TimeSpan s_stuckRunningFloor = TimeSpan.FromHours(6);
 
     /// <summary>
     /// The stuck-<c>Running</c> bound: <c>max(2x the schedule interval, a floor)</c>. A run legitimately in
@@ -1930,6 +2151,146 @@ WHERE j.proc_name LIKE '%compression%'
         return stuck;
     }
 
+    /* ---------------- compression-run observability (#1778) ---------------- */
+
+    /// <summary>
+    /// Per-hypertable compression activity: what each policy is doing right now, how long its last completed
+    /// run took, and how many eligible chunks are still waiting (#1778).
+    ///
+    /// <para>THE DURATION SOURCE IS <c>job_stats</c>, NOT the per-execution history table. That is deliberate:
+    /// <c>_timescaledb_internal.bgw_job_stat_history</c> only records successful executions when
+    /// <c>timescaledb.enable_job_execution_logging</c> is ON, and it defaults to OFF — verified live on 2.28.1,
+    /// where a completed run left that table empty. <c>timescaledb_information.job_stats</c> is maintained
+    /// unconditionally, so it is the surface that actually reports on an untouched store.</para>
+    ///
+    /// <para>The backlog count is the number this whole issue is about: chunks that are CLOSED, already past
+    /// the <see cref="CompressAfterDays"/> eligibility delay, and still uncompressed. On a healthy store with a
+    /// <see cref="CompressScheduleInterval"/> tick this is 0 almost always and briefly 1 after a chunk ages in;
+    /// a number that stays high is the store falling behind, which is exactly what went unseen while the tick
+    /// was half a day.</para>
+    ///
+    /// <para><c>last_run_started_at</c> is <c>NULLIF</c>'d against <c>-infinity</c> for the SAME reason
+    /// <see cref="StuckCompressionJobsSql"/> does it (#1760): TimescaleDB stores <b>-infinity</b>, not NULL, as
+    /// the never-ran sentinel, Npgsql maps that to <see cref="DateTime.MinValue"/>, and <c>job_status</c> comes
+    /// from an INDEPENDENT source (<c>pg_stat_activity</c>) than the start time — so a policy's very FIRST run
+    /// reads <c>Running</c> while its start is still the sentinel. Un-guarded, this observability path would
+    /// report that healthy first run as having been going for ~739,000 days. The two queries were written in
+    /// parallel branches and each was green on its own; this is the seam between them, not either side.</para>
+    /// </summary>
+    public static string CompressionActivitySql =>
+        $@"
+SELECT
+    j.hypertable_name,
+    js.job_status,
+    NULLIF(js.last_run_started_at, '-infinity'::timestamptz) AS last_run_started_at,
+    CASE
+        WHEN js.last_successful_finish > NULLIF(js.last_run_started_at, '-infinity'::timestamptz)
+        THEN EXTRACT(EPOCH FROM (js.last_successful_finish - NULLIF(js.last_run_started_at, '-infinity'::timestamptz)))
+    END AS last_run_seconds,
+    (
+        SELECT count(*)
+        FROM timescaledb_information.chunks AS c
+        WHERE c.hypertable_schema = j.hypertable_schema
+        AND   c.hypertable_name = j.hypertable_name
+        AND   NOT c.is_compressed
+        AND   c.range_end < now() - INTERVAL '{CompressAfterDays} days'
+    ) AS eligible_uncompressed
+FROM timescaledb_information.jobs      AS j
+JOIN timescaledb_information.job_stats AS js USING (job_id)
+WHERE j.proc_name LIKE '%compression%'
+   OR j.proc_name LIKE '%columnstore%'";
+
+    /// <summary>
+    /// Reads <see cref="CompressionActivitySql"/>. Failure-isolated to an empty list the same way
+    /// <see cref="ReadStuckCompressionJobsAsync"/> is — observability must never be able to break the sweep
+    /// that carries it.
+    /// </summary>
+    public static async Task<IReadOnlyList<CompressionActivity>> ReadCompressionActivityAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var activity = new List<CompressionActivity>();
+        try
+        {
+            using var command = new NpgsqlCommand(CompressionActivitySql, connection);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                activity.Add(new CompressionActivity(
+                    reader.IsDBNull(0) ? null : reader.GetString(0),
+                    reader.IsDBNull(1) ? null : reader.GetString(1),
+                    reader.IsDBNull(2) ? null : DateTime.SpecifyKind(reader.GetDateTime(2), DateTimeKind.Utc),
+                    reader.IsDBNull(3)
+                        ? null
+                        : TimeSpan.FromSeconds(Convert.ToDouble(reader.GetValue(3), CultureInfo.InvariantCulture)),
+                    Convert.ToInt64(reader.GetValue(4), CultureInfo.InvariantCulture)));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug("Compression-run activity: could not read job stats: {Message}", ex.Message);
+        }
+
+        return activity;
+    }
+
+    /// <summary>
+    /// Logs <see cref="ReadCompressionActivityAsync"/>'s result at a level proportionate to what it says.
+    ///
+    /// <para>A store has one compression policy per hypertable — around forty — so logging all of them hourly
+    /// at Information would bury the signal it exists to provide. Information is reserved for the two things an
+    /// operator actually needs to see: a compression that is RUNNING right now and how long it has been going
+    /// (the field's hours-long runs were invisible while they happened), and a table whose eligible chunks are
+    /// piling up. Everything else is one Debug summary line.</para>
+    /// </summary>
+    public static void LogCompressionActivity(
+        IReadOnlyList<CompressionActivity> activity, DateTime nowUtc, ILogger? logger)
+    {
+        if (activity is null)
+        {
+            throw new ArgumentNullException(nameof(activity));
+        }
+
+        if (logger is null || activity.Count == 0)
+        {
+            return;
+        }
+
+        var running = 0;
+        var backlog = 0L;
+
+        foreach (var item in activity)
+        {
+            if (item.IsRunning)
+            {
+                running++;
+                logger.LogInformation(
+                    "TimescaleDB: compression of {Hypertable} is RUNNING — {Minutes:F0} minute(s) so far, {Waiting} eligible chunk(s) still uncompressed.",
+                    item.HypertableName, item.RunningFor(nowUtc)?.TotalMinutes ?? 0d, item.EligibleUncompressedChunks);
+            }
+            else if (item.EligibleUncompressedChunks > 0)
+            {
+                logger.LogInformation(
+                    "TimescaleDB: {Hypertable} has {Waiting} chunk(s) past the {Days}d compression delay and still uncompressed; its policy wakes every {Interval} (last completed run took {Seconds:F0}s).",
+                    item.HypertableName, item.EligibleUncompressedChunks, CompressAfterDays, CompressScheduleInterval,
+                    item.LastRunDuration?.TotalSeconds ?? 0d);
+            }
+
+            backlog += item.EligibleUncompressedChunks;
+        }
+
+        if (running == 0 && backlog == 0)
+        {
+            logger.LogDebug(
+                "TimescaleDB: {Count} compression policies on a {Interval} tick, nothing running, no eligible chunk uncompressed.",
+                activity.Count, CompressScheduleInterval);
+        }
+    }
+
     /// <summary>
     /// Re-arms one stuck background job via the parameterized <see cref="RearmJobSql"/> (job_id BOUND). Returns
     /// true when <c>alter_job</c> succeeds; false (logged once, no throw) when it fails — most often because the
@@ -1968,6 +2329,44 @@ WHERE j.proc_name LIKE '%compression%'
 /// may be null on an odd catalog), and the human-readable reason the pure predicate produced.
 /// </summary>
 public sealed record StuckCompressionJob(long JobId, string? HypertableName, string Reason);
+
+/// <summary>
+/// One hypertable's compression-policy activity (#1778): whether a run is in progress, when it started, how
+/// long the last COMPLETED run took, and how many chunks are past the eligibility delay but still uncompressed.
+/// </summary>
+public sealed record CompressionActivity(
+    string? HypertableName,
+    string? JobStatus,
+    DateTime? LastRunStartedAtUtc,
+    TimeSpan? LastRunDuration,
+    long EligibleUncompressedChunks)
+{
+    /// <summary>Is a compression run in progress right now?</summary>
+    public bool IsRunning => string.Equals(JobStatus, "Running", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// How long the in-progress run has been going, or null when nothing is running (or the store never
+    /// recorded a start). Clamped at zero so clock skew between the store and the service cannot report a
+    /// negative elapsed time.
+    ///
+    /// <para>A <see cref="LastRunStartedAtUtc"/> of <see cref="DateTime.MinValue"/> counts as NEVER RAN, not as
+    /// "started in year 1" (#1760's lesson, applied to the query #1778 added).
+    /// <see cref="TimescaleSupport.CompressionActivitySql"/> already NULLIFs TimescaleDB's <c>-infinity</c>
+    /// never-ran sentinel, so this is the second line of defence — and note the zero-clamp above does NOT cover
+    /// it: the sentinel produces a huge POSITIVE elapsed, which sails straight through a guard aimed at
+    /// negatives.</para>
+    /// </summary>
+    public TimeSpan? RunningFor(DateTime nowUtc)
+    {
+        if (!IsRunning || LastRunStartedAtUtc is not DateTime startedUtc || startedUtc == DateTime.MinValue)
+        {
+            return null;
+        }
+
+        var elapsed = nowUtc - startedUtc;
+        return elapsed > TimeSpan.Zero ? elapsed : TimeSpan.Zero;
+    }
+}
 
 /// <summary>
 /// Which retention rollups exist in a store (<see cref="TimescaleSupport.DetectRollupsAsync"/>): the
