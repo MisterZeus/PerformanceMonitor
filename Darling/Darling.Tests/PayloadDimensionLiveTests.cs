@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -761,6 +762,7 @@ public sealed class PayloadDimensionLiveTests
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
         var renamed = false;
+        string[]? coverageSnapshot = null;
 
         try
         {
@@ -784,7 +786,7 @@ public sealed class PayloadDimensionLiveTests
             }
 
             var deferredLog = new CapturingTestLogger();
-            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, deferredLog, ct);
+            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, deferredLog, ct, PurgeDimFeeding(30));
 
             /* The SUBSTANTIVE property first, deliberately: this is the assertion that distinguishes
                "the guard held" from "the guard logged and pruned anyway", so it is the one a mutation
@@ -800,10 +802,16 @@ public sealed class PayloadDimensionLiveTests
                 renamed = false;
             }
 
+            /* Since #1784 the sweep SKIPS a raw table whose rollup does not cover it, and that skip sets the
+               same dim-feeding-purge-failed flag this test is about — so a "healthy purge" now means covered as
+               well as succeeding. Satisfy coverage before the control phase, or the GC defers for the OTHER
+               reason and the control proves nothing. */
+            coverageSnapshot = await SatisfyRollupCoverageAsync(connection, ct);
+
             /* Control: with the purge healthy again the guard opens and the same row is pruned, so the test
                cannot pass merely because the GC never runs. */
             var prunedLog = new CapturingTestLogger();
-            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, prunedLog, ct);
+            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, prunedLog, ct, PurgeDimFeeding(30));
 
             Assert.DoesNotContain("dimension GC deferred", prunedLog.Joined, StringComparison.Ordinal);
             Assert.Equal(0L, await DimRowCountAsync(connection, digest, ct));
@@ -815,6 +823,11 @@ public sealed class PayloadDimensionLiveTests
                 using var restore = new NpgsqlCommand(
                     "ALTER TABLE IF EXISTS collect.query_stats_pm1782 RENAME TO query_stats", connection);
                 await restore.ExecuteNonQueryAsync(ct);
+            }
+
+            if (coverageSnapshot is not null)
+            {
+                await RestoreCaggsAsync(connection, coverageSnapshot, ct);
             }
 
             await DeleteDimRowAsync(connection, PayloadDimensions.QueryPlanDimTable, digest, ct);
@@ -852,6 +865,10 @@ public sealed class PayloadDimensionLiveTests
 
         Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct), "the rig is expected to have TimescaleDB");
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        /* Creating aggregates is GLOBAL state on the shared fixture, so snapshot and restore only what this
+           test adds — see ExistingCaggsAsync. */
+        var preexistingCaggs = await ExistingCaggsAsync(connection, ct);
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
         var (serverId, serverName) = NewServer();
@@ -888,7 +905,7 @@ public sealed class PayloadDimensionLiveTests
                 "with the rollup starting after raw's oldest row, dropping must NOT be judged safe");
 
             var skipLog = new CapturingTestLogger();
-            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, skipLog, ct);
+            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, skipLog, ct, OnlyPurge("query_stats", 40));
 
             /* THE property: uncovered history survives the sweep. Asserted before the log line so a mutation
                lands on the data loss, not on missing text. */
@@ -908,7 +925,7 @@ public sealed class PayloadDimensionLiveTests
                 "once the rollup covers raw's oldest row the drop must be judged safe again");
 
             var dropLog = new CapturingTestLogger();
-            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, dropLog, ct);
+            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, dropLog, ct, OnlyPurge("query_stats", 40));
 
             Assert.Equal(0L, await AncientRowCountAsync(connection, serverId, ct));
             Assert.DoesNotContain("Retention purge SKIPPED for query_stats", dropLog.Joined, StringComparison.Ordinal);
@@ -916,8 +933,108 @@ public sealed class PayloadDimensionLiveTests
         finally
         {
             await DeleteServerRowsAsync(connection, serverId, ct);
+            await RestoreCaggsAsync(connection, preexistingCaggs, ct);
         }
     }
+
+
+    /// <summary>
+    /// The continuous aggregates present in <c>collect</c> right now, so a test that creates them can drop
+    /// exactly the ones it created and leave the shared fixture's shape alone. Mirrors the machinery
+    /// TimescaleSupportTests already owns for the same reason: creating aggregates is GLOBAL state — it changes
+    /// compose's tier routing, and it makes EnsureBaselineFallbackViewsAsync a no-op for the baseline tests,
+    /// which is how CI caught this before it merged.
+    /// </summary>
+    private static async Task<string[]> ExistingCaggsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(
+            "SELECT view_name FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect'", connection);
+        using var reader = await command.ExecuteReaderAsync(ct);
+        var names = new List<string>();
+        while (await reader.ReadAsync(ct))
+        {
+            names.Add(reader.GetString(0));
+        }
+
+        return names.ToArray();
+    }
+
+    private static async Task TryExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        try
+        {
+            using var command = new NpgsqlCommand(sql, connection);
+            await command.ExecuteNonQueryAsync(ct);
+        }
+        catch (Exception)
+        {
+            /* Cleanup is best-effort: a restore step that throws must not mask the test's own failure. */
+        }
+    }
+
+    /// <summary>
+    /// Makes the raw tier's rollup coverage reach back over everything raw holds, so the #1784 gate judges a
+    /// drop SAFE. Returns the aggregates that already existed, for the caller's finally to restore against.
+    /// </summary>
+    private static async Task<string[]> SatisfyRollupCoverageAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var preexisting = await ExistingCaggsAsync(connection, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        foreach (var (relation, _, coverage) in TimescaleSupport.RawTierCoverage)
+        {
+            _ = relation;
+            using var refresh = new NpgsqlCommand(
+                TimescaleSupport.RefreshContinuousAggregateSql(coverage, force: true), connection);
+            refresh.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-3650), DateTimeKind.Unspecified));
+            await refresh.ExecuteNonQueryAsync(ct);
+        }
+
+        return preexisting;
+    }
+
+    private static async Task RestoreCaggsAsync(NpgsqlConnection connection, string[] preexisting, CancellationToken ct)
+    {
+        foreach (var (relation, _, coverage) in TimescaleSupport.RawTierCoverage)
+        {
+            await TryExecAsync(connection, $"SELECT remove_retention_policy('collect.{relation}', if_exists => true)", ct);
+            _ = coverage;
+        }
+
+        foreach (var cagg in (await ExistingCaggsAsync(connection, ct)).Except(preexisting, StringComparer.Ordinal))
+        {
+            await TryExecAsync(connection, $"DROP MATERIALIZED VIEW IF EXISTS collect.{cagg} CASCADE", ct);
+        }
+    }
+
+    /// <summary>
+    /// A retention resolver that leaves every table alone except the one under test. PurgeAsync is FLEET-WIDE
+    /// and destructive, and the live fixture is shared: a bare call drops any sibling class's rows older than
+    /// their horizon. Handing every other collector a decade of retention makes the purge surgical while still
+    /// exercising the real sweep.
+    /// </summary>
+    private static Func<string, int> OnlyPurge(string collectorName, int retentionDays)
+        => name => string.Equals(name, collectorName, StringComparison.Ordinal) ? retentionDays : 3650;
+
+    /// <summary>
+    /// Like <see cref="OnlyPurge"/> but keeps EVERY dim-feeding table on the given horizon, because the
+    /// dimension GC's cutoff is the WIDEST of them plus a margin. Handing one of them a decade — as the
+    /// single-table resolver does — pushes that cutoff out by a decade too, and the GC then prunes nothing,
+    /// which silently turns a dimension test green for the wrong reason.
+    /// </summary>
+    private static Func<string, int> PurgeDimFeeding(int retentionDays)
+        => name =>
+        {
+            foreach (var definition in CollectorCatalog.All)
+            {
+                if (string.Equals(definition.Name, name, StringComparison.Ordinal))
+                {
+                    return PayloadDimensions.ForTable(definition.TargetTable).Count > 0 ? retentionDays : 3650;
+                }
+            }
+
+            return 3650;
+        };
 
     private static async Task<long> AncientRowCountAsync(NpgsqlConnection connection, int serverId, CancellationToken ct)
     {
