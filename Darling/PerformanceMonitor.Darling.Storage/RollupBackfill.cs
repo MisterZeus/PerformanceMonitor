@@ -131,6 +131,16 @@ SELECT
     /// <see cref="RunSliceAsync"/>), never speculatively: a refresh consumes invalidations, so a pass cut short
     /// leaves a region whose entries are gone and a later plain refresh no-ops over the hole while reporting
     /// success.</para>
+    ///
+    /// <para><b>NO <c>options</c> ARGUMENT, and that is load-bearing rather than incidental.</b> Leaving the
+    /// 5th parameter off means <c>options</c> is NULL, which is what makes <c>refresh_newest_first</c> take its
+    /// 2.28 default of TRUE — and <see cref="Slices"/>'s resume story depends on exactly that. A killed slice
+    /// is safe to resume from the measured floor with no extra bookkeeping ONLY because the batches that
+    /// committed inside it were the NEWEST ones, leaving the floor inside the slice for the next run's top
+    /// slice to re-cover. Set <c>options</c> here and that inherited default becomes a value someone chose,
+    /// so the mid-slice guarantee stops being free: anything that starts passing options must pass
+    /// <c>refresh_newest_first</c> explicitly and turn this into a pinned property rather than an assumption.
+    /// <c>RefreshSliceSql_PassesNoOptions_SoNewestFirstHoldsByDefault</c> fails the moment that happens.</para>
     /// </summary>
     public static string RefreshSliceSql(string view, bool force = false) => force
         ? $"CALL refresh_continuous_aggregate('collect.{view}'::regclass, $1::timestamp, $2::timestamp, true)"

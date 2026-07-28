@@ -242,11 +242,27 @@ public sealed class RollupBackfillTests
            the last — can ever be narrower than one. */
         Assert.Equal(0, span.Ticks % TimeSpan.FromHours(bucketHours).Ticks);
 
+        /* P2b, RE-VERIFIED ACROSS THE DESCENDING REWRITE. The alignment property was originally established
+           against ascending slicing, where the ragged remainder sat at the TOP of the range. Reversing the
+           order moved it to the BOTTOM — a different slice, produced by a different branch of the loop (the
+           clamp to `from` rather than the clamp to `to`) — so the property had to be re-established, not
+           assumed to have carried. Both ENDS of every slice are checked, not just the width: a slice one
+           bucket wide but half a bucket out of phase is still refused with 22023. */
+        var bucket = TimeSpan.FromHours(bucketHours);
         foreach (var (sliceFrom, sliceTo) in RollupBackfill.Slices(plan.FromUtc, plan.ToUtc))
         {
-            Assert.True((sliceTo - sliceFrom) >= TimeSpan.FromHours(bucketHours),
+            Assert.True((sliceTo - sliceFrom) >= bucket,
                 $"slice {sliceFrom:O} -> {sliceTo:O} is narrower than one {bucketHours}h bucket; TimescaleDB rejects that with 22023");
+
+            Assert.Equal(0, (sliceFrom - plan.FromUtc).Ticks % bucket.Ticks);
+            Assert.Equal(0, (sliceTo - plan.FromUtc).Ticks % bucket.Ticks);
         }
+
+        /* And the remainder really is at the bottom now — the pin that would catch a silent revert to
+           ascending, which would put it back on top and re-open the false-DONE path. */
+        var slices = RollupBackfill.Slices(plan.FromUtc, plan.ToUtc).ToArray();
+        Assert.Equal(plan.FromUtc, slices[^1].FromUtc);
+        Assert.Equal(plan.ToUtc, slices[0].ToUtc);
     }
 
     /// <summary>
@@ -479,6 +495,41 @@ public sealed class RollupBackfillTests
 
         var forced = RollupBackfill.RefreshSliceSql(TimescaleSupport.QueryStatsHourlyView, force: true);
         Assert.Contains("$1::timestamp, $2::timestamp, true)", forced, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// THE INHERITED DEFAULT THE RESUME STORY RESTS ON, pinned so it stops being inherited.
+    ///
+    /// <para>Mid-slice interruption needs no bookkeeping only because a killed slice leaves its NEWEST batches
+    /// committed — the floor lands INSIDE that slice and the next run's top slice re-covers the remainder.
+    /// That holds because <c>refresh_newest_first</c> is TRUE, which on 2.28 is the default taken when
+    /// <c>options</c> is NULL. Passing no 5th argument is therefore a load-bearing choice, not a stylistic
+    /// one, and nothing in the type system says so.</para>
+    ///
+    /// <para>So this fails the moment anything starts passing <c>options</c> — at which point the assumption
+    /// must be made explicit (pass <c>refresh_newest_first</c> by name) rather than silently inherited from a
+    /// value someone else chose. Deliberately asserted on BOTH forms: the forced repair path takes a 4th
+    /// argument and is the likeliest place a 5th would be appended.</para>
+    /// </summary>
+    [Fact]
+    public void RefreshSliceSql_PassesNoOptions_SoNewestFirstHoldsByDefault()
+    {
+        foreach (var sql in new[]
+        {
+            RollupBackfill.RefreshSliceSql(TimescaleSupport.QueryStatsHourlyView),
+            RollupBackfill.RefreshSliceSql(TimescaleSupport.QueryStatsHourlyView, force: true),
+        })
+        {
+            Assert.DoesNotContain("options", sql, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("jsonb", sql, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("refresh_newest_first", sql, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("buckets_per_batch", sql, StringComparison.OrdinalIgnoreCase);
+
+            /* Argument count, counted rather than eyeballed: the CALL carries at most the regclass, the two
+               bounds and force — never a fifth. */
+            var arguments = sql[(sql.IndexOf('(') + 1)..sql.LastIndexOf(')')];
+            Assert.True(arguments.Split(',').Length <= 4, $"refresh call gained an argument: {sql}");
+        }
     }
 
     /// <summary>
