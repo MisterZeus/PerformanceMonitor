@@ -558,7 +558,8 @@ public sealed class McpConfig
 /// service reconciles it on every start (managed mode only): listen_addresses gains the bind IP, a
 /// self-signed TLS cert is generated for verify-full, a marked
 /// <c>hostssl darling &lt;role&gt; &lt;allowFrom&gt; scram-sha-256</c> pg_hba block is written +
-/// reloaded, and a best-effort firewall rule is added. Reconciliation is symmetric (removing the
+/// reloaded, and the scoped firewall rule (created by the elevated installer, #1771) is checked.
+/// Reconciliation is symmetric (removing the
 /// block closes the box) and fail-closed: any invalid/incomplete field degrades the store to
 /// loopback + LogCritical, never exposed. These rules are enforced at the point of use, NOT in the
 /// all-fatal <see cref="DarlingConfig.Validate"/> (D-validate).
