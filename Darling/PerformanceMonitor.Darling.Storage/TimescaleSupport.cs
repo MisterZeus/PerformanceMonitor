@@ -74,9 +74,13 @@ public static class TimescaleSupport
     ///
     /// <para><b>Passed explicitly because TimescaleDB's default is 12 hours and we never chose it.</b>
     /// <c>add_compression_policy</c> computes a default when <c>schedule_interval</c> is omitted — measured on
-    /// 2.28.1, a hypertable with <see cref="ChunkIntervalDays"/> = 1 gets exactly <c>12:00:00</c> (a 6-hour
-    /// chunk interval got <c>03:00:00</c>, i.e. the rule is half the chunk interval, floored at 12 hours for
-    /// daily-and-wider chunks). That is the field's "twice-daily fixed tick": a chunk that had already aged
+    /// 2.28.1, a hypertable with <see cref="ChunkIntervalDays"/> = 1 gets exactly <c>12:00:00</c>. The rule is
+    /// half the chunk interval CAPPED at 12 hours, not floored at it: a 6-hour chunk interval gets
+    /// <c>03:00:00</c>, while 2-day and 7-day intervals both get <c>12:00:00</c> rather than 24h or 84h. The cap
+    /// is what makes 12 hours the default on EVERY store shape this product can produce — the 1-day chunks it
+    /// creates today, and the 7-day-chunk hypertables an adopted store may still carry from before
+    /// <see cref="ChunkIntervalDays"/> was passed (existing chunks keep their original width). That is the
+    /// field's "twice-daily fixed tick": a chunk that had already aged
     /// past the delay still sat uncompressed for up to another half-day, and on a pre-dedup field store the
     /// newest closed chunk reached 81 GB before its scheduled compression ever reached it. The newest closed
     /// chunk is always the least-compressed data on disk, so the tick is the width of that exposure.</para>
