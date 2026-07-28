@@ -61,4 +61,17 @@ public interface ICollectorSchemaInfo
     /// re-encoded per host.
     /// </summary>
     bool AppliesTo(CollectorTargetInfo target);
+
+    /// <summary>
+    /// True when the collector's own query carries a short <c>SET LOCK_TIMEOUT</c> guard as a
+    /// never-be-a-blocker promise, making SQL error 1222 a DELIBERATE yield rather than a
+    /// collection failure (#1805). Hosts classify a 1222 from such a collector as a
+    /// <c>YIELDED</c> collection_log row — visible, counted separately, and excluded from the
+    /// error counts that feed collector health and the daily health band. Declared here — like
+    /// <see cref="AppliesTo"/> — so the runners' catch sites can evaluate it by name (via
+    /// <see cref="CollectorCatalog.YieldsOnLockTimeout(string)"/>) without the row type. False
+    /// everywhere except query_snapshots, the one collector that sets the guard; a 1222 from any
+    /// other collector had to come from somewhere unexpected and stays an ERROR.
+    /// </summary>
+    bool YieldsOnLockTimeout { get; }
 }

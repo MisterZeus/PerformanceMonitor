@@ -517,6 +517,8 @@ public sealed class PgSchemaGeneratorTests
         public string PrefixTimeColumnName => _inner.PrefixTimeColumnName;
         public IReadOnlyList<CollectorColumn> PayloadColumns { get; }
         public bool AppliesTo(CollectorTargetInfo target) => _inner.AppliesTo(target);
+
+        public bool YieldsOnLockTimeout => _inner.YieldsOnLockTimeout;
     }
 
     [Fact]

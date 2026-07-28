@@ -297,6 +297,14 @@ public partial class RemoteCollectorService
                 entry.LastErrorMessage = errorMessage;
                 entry.IsPermissionRestricted = true;
             }
+            else if (status == "YIELDED")
+            {
+                /* Deliberate 1s lock-timeout yield (#1805): evidence about the target's lock
+                   contention, not the monitor — neither a success (a yield is not proof the
+                   collector works, so the error streak is not reset) nor a failure (the guard
+                   worked as designed, so the streak does not grow). The collection_log row is
+                   the visible record. */
+            }
             else
             {
                 entry.LastErrorMessage = errorMessage;
@@ -560,6 +568,19 @@ public partial class RemoteCollectorService
                 : "ERROR";
             xeSessionUnavailable = true;
             AppLogger.Error("Collector", $"  [{server.DisplayName}] {collectorName} {ex.Message}");
+        }
+        catch (SqlException ex) when (ex.Number == 1222 && CollectorCatalog.YieldsOnLockTimeout(collectorName))
+        {
+            /* The 1-second LOCK_TIMEOUT guard doing its job (#1805): the snapshot sweep stepped aside
+               instead of joining a blocking chain on the monitored server. Not a collection failure —
+               the next sweep sees current state and nothing cumulative or watermarked is lost — so it
+               records as YIELDED: its own status, excluded from the error counts that feed collector
+               health and the daily health band, and readable as evidence of lock contention on the
+               TARGET rather than a monitoring fault. A 1222 from any collector without the guard flag
+               falls through to the ERROR catch below, unchanged. */
+            status = "YIELDED";
+            errorMessage = $"Lock-timeout yield (SQL error #{ex.Number}): the 1-second LOCK_TIMEOUT guard fired rather than waiting in a blocking chain. One snapshot sweep skipped; evidence of lock contention on the monitored server, not a monitoring failure.";
+            AppLogger.Info("Collector", $"  [{server.DisplayName}] {collectorName} YIELDED - 1s lock-timeout guard fired (target lock contention)");
         }
         catch (SqlException ex)
         {
