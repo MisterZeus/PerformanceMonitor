@@ -301,8 +301,24 @@ public sealed class RollupCoverageRoutingTests
     /// SQL — so a reader left un-gated would not just be stale, it would disagree with its own twin about how
     /// many queries ran on a given day, on exactly the stores this issue is about.</para>
     ///
-    /// <para>Matched by CONTAINMENT, not by argument position or formatting: the check is that the call's
-    /// argument list mentions a coverage value, so reformatting or renaming a local cannot break it.</para>
+    /// <para>Matched by CONTAINMENT, not by argument position or formatting, so reformatting or renaming a
+    /// local cannot break it. The predicate is deliberately TWO-SIDED — a positive match on a real coverage
+    /// lookup (<c>.For(</c>) AND an explicit rejection of <c>TierCoverage.Unknown</c>.</para>
+    ///
+    /// <para><b>Why two-sided, learned the hard way.</b> The first cut of this guard only checked that the
+    /// argument list contained the substring <c>"overage"</c> — which is a substring of the TYPE NAME
+    /// <c>TierCoverage</c>, so a reader passing <c>TierCoverage.Unknown</c> SATISFIED it. That form is the
+    /// canonical un-gated value, it COMPILES, and it reads as deliberate, which makes it the single most
+    /// probable way #1759 comes back: not by someone dropping an argument (a compile-shaped review catches
+    /// that, and it was the only form the guard had been verified against), but by someone reaching for the
+    /// inert value because it was the easy way to satisfy a signature. The guard standing between this defect
+    /// and its own return has to see the likely path back, not just the obvious one. Both forms are now
+    /// pinned as mutations.</para>
+    ///
+    /// <para><c>TierCoverage.Unknown</c> is legitimate in the TESTS — they use it to prove the coverage
+    /// overload matches the age-only ladder exactly — which is why the scan excludes the test project. In a
+    /// production reader it means "route this window on no evidence", and if that is ever genuinely wanted it
+    /// should have to break this guard and be argued for, not slip through.</para>
     /// </summary>
     [Fact]
     public void EveryProductionRoutingCaller_PassesCoverage()
@@ -331,27 +347,69 @@ public sealed class RollupCoverageRoutingTests
                 continue;
             }
 
-            var text = File.ReadAllText(file);
+            /* COMMENTS STRIPPED FIRST. A <see cref="RetentionTierRouter.Resolve(…, TierCoverage)"/> in a doc
+               comment is not a call site, and the pattern spans newlines looking for the closing ");" — so a
+               cref matched forward into whatever real code followed it. The old one-sided predicate hid that:
+               the cref text contains the type name, so "mentions coverage" was satisfied and the phantom
+               match passed silently while also inflating the rot-detector's count. */
+            var text = StripComments(File.ReadAllText(file));
             foreach (Match match in callPattern.Matches(text))
             {
                 scanned++;
-                if (!match.Groups[1].Value.Contains("overage", StringComparison.Ordinal))
+                var arguments = match.Groups[1].Value;
+
+                /* TWO-SIDED. A positive match on a real coverage lookup, AND a rejection of the inert value.
+                   Either half alone is holed: "mentions coverage" is satisfied by the TYPE NAME in
+                   TierCoverage.Unknown, and "does not say Unknown" is satisfied by passing nothing at all. */
+                var lookedUpCoverage = arguments.Contains(".For(", StringComparison.Ordinal);
+                var routedOnNoEvidence = arguments.Contains("TierCoverage.Unknown", StringComparison.Ordinal);
+
+                if (!lookedUpCoverage || routedOnNoEvidence)
                 {
                     var line = text.AsSpan(0, match.Index).Count('\n') + 1;
-                    offenders.Add($"{Path.GetRelativePath(root!, file)}:{line}");
+                    offenders.Add(
+                        $"{Path.GetRelativePath(root!, file)}:{line}" +
+                        (routedOnNoEvidence ? "  (passes TierCoverage.Unknown — routes on NO evidence)" : "  (passes no coverage lookup)"));
                 }
             }
         }
 
-        /* If the scan finds nothing at all, the regex has rotted and the guard is vacuously passing. */
-        Assert.True(scanned >= 5, $"expected to find the production routing callers, but matched {scanned} call(s) — the scan has rotted.");
+        /* Rot detector, not a census: if the scan stops matching, the guard passes vacuously and nobody
+           notices. Six production call sites today (the composer, the MCP daily-health reader, the viewer's
+           calendar, and three FinOps readers). A legitimate REMOVAL should lower this deliberately rather
+           than be absorbed silently. */
+        Assert.True(scanned >= 6, $"expected to find the production routing callers, but matched {scanned} call(s) — the scan has rotted.");
 
         Assert.True(offenders.Count == 0,
-            "These readers route by AGE and AVAILABILITY but not COVERAGE, so on a store whose rollups were " +
+            "These readers reach the tier router without real coverage, so on a store whose rollups were " +
             "created over pre-existing history they will serve EMPTY results for windows raw still holds " +
-            "(#1759). Pass the matching RollupCoverage.For(hourlyView, dailyView) — and if this reader has a " +
-            "twin answering the same question elsewhere, gate BOTH or the two will disagree:\n\n" +
+            "(#1759). Pass the matching coverage.For(hourlyView, dailyView).\n\n" +
+            "TierCoverage.Unknown does NOT count. It means \"route on no evidence\" and is the inert value the " +
+            "tests use to prove the coverage overload matches the age-only ladder — reaching for it in a " +
+            "production reader satisfies the signature and reinstates the defect. If a reader genuinely has no " +
+            "coverage available, that is a design question, not a value to paste.\n\n" +
+            "And if this reader has a twin answering the same question elsewhere, gate BOTH or the two will " +
+            "disagree:\n\n" +
             string.Join("\n", offenders));
+    }
+
+    /// <summary>
+    /// Blanks out block and line comments so the scan sees only CODE, preserving line count (comment bodies
+    /// become blank lines / spaces) so reported line numbers still point where a reader can open them.
+    ///
+    /// <para>Crude by design: a <c>//</c> inside a string literal is blanked too. That is harmless here —
+    /// mangling a literal cannot manufacture a <c>RetentionTierRouter.Resolve(…);</c> call that was not
+    /// already there — and the alternative is a C# lexer in a drift guard.</para>
+    /// </summary>
+    private static string StripComments(string source)
+    {
+        var withoutBlocks = Regex.Replace(
+            source,
+            @"/\*.*?\*/",
+            m => Regex.Replace(m.Value, @"[^\r\n]", " "),
+            RegexOptions.Singleline);
+
+        return Regex.Replace(withoutBlocks, @"//[^\r\n]*", m => new string(' ', m.Value.Length));
     }
 
     /// <summary>Walks up from the test output directory to the repo root — the directory holding
