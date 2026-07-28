@@ -1897,7 +1897,19 @@ public sealed class DarlingComposeTests
         Assert.NotNull(outcome.Error);
         Assert.Contains(expectedFragment, outcome.Error!, StringComparison.OrdinalIgnoreCase);
     }
+}
 
+/// <summary>
+/// The ONE live compose round-trip, split out of <see cref="DarlingComposeTests"/> (#1776). It connects to the
+/// shared <c>DARLING_TEST_PG</c> store and runs <c>PgMigrations.MigrateAsync</c> against it, so it must serialize
+/// with the rest of the live collection. Its 126 siblings are pure and must NOT: dragging a 127-test class into
+/// the serialized collection to protect one test would cost the suite far more than the race it prevents, and the
+/// established shape here is exactly this pair (roughly thirty files already split
+/// <c>...SurfaceAndSqlTests</c> from <c>...LivePostgresTests</c> for the same reason).
+/// </summary>
+[Collection("live-postgres")]
+public sealed class DarlingComposeLivePostgresTests
+{
     /// <summary>
     /// The live #1665 repro, end-to-end through the ONE shared runner: a >3-day window against a plain
     /// PostgreSQL store (the darling-pg CI service container — no TimescaleDB, so no rollups exist). Before
