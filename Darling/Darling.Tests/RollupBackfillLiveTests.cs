@@ -427,6 +427,138 @@ AND   j.scheduled", ct);
     }
 
     /// <summary>
+    /// THE MID-SLICE PREMISE, GUARDED BEHAVIOURALLY.
+    ///
+    /// <para>Resuming from the measured floor needs no bookkeeping only because a refresh cancelled PART WAY
+    /// THROUGH leaves its NEWEST batches committed — the floor lands INSIDE the cancelled range, and the next
+    /// run's top slice re-covers the remainder. Every other test in this file kills BETWEEN slices (each slice
+    /// taken runs to completion), so until now that premise had nothing watching it: its only evidence was a
+    /// reviewer's hand-executed kills, living in a transcript. A true-today engine behaviour with no guard is
+    /// the exact shape that produced #1759.</para>
+    ///
+    /// <para>Deliberately tests the BEHAVIOUR, not the mechanism. It never mentions
+    /// <c>refresh_newest_first</c>, so it holds on any engine — including a bring-your-own store too old to
+    /// accept the option at all, where a mechanism pin would govern nothing — and a bundled-runtime bump
+    /// re-runs it automatically without anyone remembering why it matters. If a future engine flips its
+    /// batching order, THIS goes red.</para>
+    /// </summary>
+    [Fact]
+    public async Task MidSliceCancellation_LeavesTheFloorInsideTheRange_WithNoGapsAbove()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live mid-slice cancellation test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct));
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        /* Wide enough that one refresh spans many internal batches, so there is a real window to cancel in. */
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var rangeFrom = now.Date.AddDays(-CancellationHistoryDays);
+        var rangeTo = now.Date;
+
+        await SeedHourlyQueryStatsAsync(connection, rangeFrom, rangeTo, ct);
+        /* THE AGGREGATE IS CREATED WITHOUT ITS REFRESH POLICY, deliberately, and this is what makes the test
+           mean anything. EnsureContinuousAggregatesAsync also attaches a policy, and TimescaleDB runs a new
+           policy's first check IMMEDIATELY — that policy then materializes a trailing window CONTIGUOUSLY,
+           which on its own satisfies both assertions below (a floor inside the range, no gaps above it) no
+           matter what the cancelled refresh did. Unscheduling it afterwards is too late and does not hold:
+           an oldest-first mutation still PASSED, because the policy's own work was carrying the test. Creating
+           the aggregate from its own DDL leaves NO policy at all, so the only materialization in this database
+           is the one being cancelled here. */
+        await using (var create = new NpgsqlCommand(TimescaleSupport.CreateQueryStatsHourlySql, connection))
+        {
+            await create.ExecuteNonQueryAsync(ct);
+        }
+
+        var view = TimescaleSupport.QueryStatsHourlyView;
+        Assert.Null(await RollupBackfill.ReadCoverageFloorAsync(connection, view, ct));
+
+        /* ONE wide refresh over the whole un-materialized range, cancelled once it has demonstrably started.
+           Polling for the floor to appear is deterministic where a fixed delay would race the machine. */
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        await using var refreshConnection = new NpgsqlConnection(scratch.ConnectionString);
+        await refreshConnection.OpenAsync(ct);
+
+        var refresh = Task.Run(
+            async () =>
+            {
+                try
+                {
+                    await RollupBackfill.RunSliceAsync(refreshConnection, view, rangeFrom, rangeTo, cancellation.Token);
+                }
+                catch (Exception ex) when (ex is OperationCanceledException or PostgresException or NpgsqlException)
+                {
+                    /* Cancelling a CALL mid-flight surfaces as any of these; the outcome is measured below. */
+                    _ = ex;
+                }
+            },
+            CancellationToken.None);
+
+        DateTime? floorDuring = null;
+        for (var attempt = 0; attempt < 200 && !refresh.IsCompleted; attempt++)
+        {
+            floorDuring = await RollupBackfill.ReadCoverageFloorAsync(connection, view, ct);
+            if (floorDuring is not null && floorDuring > rangeFrom)
+            {
+                break;
+            }
+
+            await Task.Delay(25, ct);
+        }
+
+        await cancellation.CancelAsync();
+        await refresh;
+
+        var floor = await RollupBackfill.ReadCoverageFloorAsync(connection, view, ct);
+
+        Assert.True(floor is not null,
+            "the cancelled refresh materialized nothing at all, so the mid-slice property was never exercised");
+
+        /* (b) ZERO gaps above the floor — the newest batches committed contiguously downward, which is exactly
+               what lets the next run resume from this floor without leaving a hole behind it. Measured FIRST,
+               and against raw itself, because it is the property; the vacuity check below only interprets it. */
+        var gaps = await CountAsync(connection, $@"
+SELECT count(*)
+FROM (
+    SELECT DISTINCT time_bucket('1 hour', collection_time) AS b
+    FROM collect.query_stats
+    WHERE collection_time >= $1 AND collection_time < $2
+) AS src
+WHERE NOT EXISTS (SELECT 1 FROM collect.{view} AS h WHERE h.bucket = src.b)",
+            floor!.Value, rangeTo, ct);
+
+        Assert.True(gaps == 0,
+            $"{gaps} bucket(s) are missing ABOVE the coverage floor {floor:O} — this engine did NOT commit its " +
+            "batches newest-first, so a cancelled refresh leaves holes behind the floor. Resuming from the " +
+            "measured floor would skip them and report success over a gap, which is #1759's data-loss shape. " +
+            "The backfill needs per-slice verification before it can trust this engine's resume.");
+
+        /* (a) The floor landed INSIDE the cancelled range. Checked AFTER the gap test on purpose: floor-at-the-
+               bottom WITH gaps is a flipped engine (reported above, accurately), while floor-at-the-bottom with
+               NO gaps just means the refresh finished before it could be caught — a vacuous pass, which must
+               fail loudly and say what to widen rather than bank an assertion that proved nothing. */
+        Assert.True(floor > rangeFrom,
+            $"the refresh completed the whole range before cancellation (floor {floor:O} reached the bottom {rangeFrom:O}) " +
+            $"with no gaps, so nothing mid-flight was exercised — widen {nameof(CancellationHistoryDays)} rather than " +
+            "accepting a vacuous pass");
+
+        Assert.True(floor < rangeTo, $"floor {floor:O} is not inside the cancelled range [{rangeFrom:O}, {rangeTo:O})");
+    }
+
+    /// <summary>History for the cancellation pin: wide enough that one refresh spans many internal batches, so
+    /// there is a real window to cancel inside. Widen it if that test ever reports the refresh completing
+    /// first.</summary>
+    private const int CancellationHistoryDays = 120;
+
+    /// <summary>
     /// THE INTERRUPTED-BACKFILL ACCEPTANCE — the reviewer's data-loss proof, inverted.
     ///
     /// <para>What was proven against a live store before the fix: slices ran oldest-first, so the FIRST slice

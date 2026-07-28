@@ -493,34 +493,30 @@ public sealed class RollupBackfillTests
     public void RefreshSliceSql_BindsAndCastsBothBounds_AndForcesOnlyOnDemand()
     {
         var plain = RollupBackfill.RefreshSliceSql(TimescaleSupport.QueryStatsHourlyView);
-        Assert.Contains("CALL refresh_continuous_aggregate('collect.query_stats_hourly'::regclass, $1::timestamp, $2::timestamp, false, $3::jsonb)", plain, StringComparison.Ordinal);
+        Assert.Contains("CALL refresh_continuous_aggregate('collect.query_stats_hourly'::regclass, $1::timestamp, $2::timestamp)", plain, StringComparison.Ordinal);
         Assert.DoesNotContain("true", plain, StringComparison.Ordinal);
 
         var forced = RollupBackfill.RefreshSliceSql(TimescaleSupport.QueryStatsHourlyView, force: true);
-        Assert.Contains("$1::timestamp, $2::timestamp, true, $3::jsonb)", forced, StringComparison.Ordinal);
-
-        /* The degraded shapes keep the same force semantics on a store with no options parameter. */
-        Assert.EndsWith("$2::timestamp)", RollupBackfill.RefreshSliceSql(TimescaleSupport.QueryStatsHourlyView, force: false, withOptions: false), StringComparison.Ordinal);
-        Assert.EndsWith("$2::timestamp, true)", RollupBackfill.RefreshSliceSql(TimescaleSupport.QueryStatsHourlyView, force: true, withOptions: false), StringComparison.Ordinal);
+        Assert.Contains("$1::timestamp, $2::timestamp, true)", forced, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// THE PREMISE THE RESUME STORY RESTS ON IS NOW ASSERTED, NOT INHERITED.
+    /// NO <c>options</c> ARGUMENT, on compatibility grounds — the premise it would have asserted is guarded
+    /// BEHAVIOURALLY instead, by
+    /// <c>RollupBackfillLiveTests.MidSliceCancellation_LeavesTheFloorInsideTheRange_WithNoGapsAbove</c>.
     ///
-    /// <para>Mid-slice interruption needs no bookkeeping only because a killed slice leaves its NEWEST batches
-    /// committed — the floor lands INSIDE that slice and the next run's top slice re-covers the remainder.
-    /// That depends on <c>refresh_newest_first</c> being true, and an earlier cut of this code relied on the
-    /// server's default for it. There is no such GUC on 2.28.1 (it is not in <c>pg_settings</c>); it rides the
-    /// <c>options</c> jsonb parameter, so leaving the parameter off meant depending on an UNSTATED SERVER
-    /// DEFAULT that merely happened to be right.</para>
+    /// <para>The resume story depends on newest-first batching, which is not a GUC — it rides the
+    /// <c>options</c> jsonb, so the product inherits an ENGINE DEFAULT here. Passing it explicitly was tried
+    /// and reverted: <c>options</c> arrived in 2.21, nothing gates a bring-your-own store's version, and the
+    /// 5-argument call raises 42883 on 2.18–2.20 — regressing stores that work today to guard a flip that has
+    /// not happened. The live pin tests the PROPERTY rather than the mechanism, so it holds on any engine
+    /// including BYO stores that would reject the option outright.</para>
     ///
-    /// <para>That is precisely the shape of premise that produced this whole issue — <c>materialized_only</c>
-    /// was also assumed, also read as reasonable, and was also wrong — so the call now states the contract it
-    /// needs. Asserted on BOTH forms, since the forced repair path takes the same options argument and is the
-    /// likeliest place the two drift apart.</para>
+    /// <para>This pin therefore guards the compatibility floor: adding <c>options</c> here is a decision with
+    /// a version cost, and it should have to break a test and be argued rather than slip in as a tidy-up.</para>
     /// </summary>
     [Fact]
-    public void RefreshSliceSql_AssertsNewestFirst_RatherThanInheritingIt()
+    public void RefreshSliceSql_PassesNoOptions_BecauseTheBehaviourPinGuardsThePremiseInstead()
     {
         foreach (var sql in new[]
         {
@@ -528,24 +524,13 @@ public sealed class RollupBackfillTests
             RollupBackfill.RefreshSliceSql(TimescaleSupport.QueryStatsHourlyView, force: true),
         })
         {
-            Assert.Contains("$3::jsonb", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("jsonb", sql, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("refresh_newest_first", sql, StringComparison.OrdinalIgnoreCase);
 
-            /* force is positional, so reaching options means passing it explicitly rather than by default. */
+            /* At most regclass + two bounds + force. A fifth argument is the 2.21 floor, not a formatting choice. */
             var arguments = sql[(sql.IndexOf('(') + 1)..sql.LastIndexOf(')')];
-            Assert.Equal(5, arguments.Split(',').Length);
+            Assert.True(arguments.Split(',').Length <= 4, $"refresh call gained an argument, which raises the TimescaleDB floor to 2.21: {sql}");
         }
-
-        /* The bound value carries the contract, and ONLY that contract: batch size and the batch cap stay at
-           the defaults the issue's API research established are already right. */
-        Assert.Contains("\"refresh_newest_first\": true", RollupBackfill.RefreshOptionsJson, StringComparison.Ordinal);
-        Assert.DoesNotContain("buckets_per_batch", RollupBackfill.RefreshOptionsJson, StringComparison.Ordinal);
-        Assert.DoesNotContain("max_batches_per_execution", RollupBackfill.RefreshOptionsJson, StringComparison.Ordinal);
-
-        /* The degrade shape for a pre-2.21 store, which has no options parameter at all. */
-        var degraded = RollupBackfill.RefreshSliceSql(TimescaleSupport.QueryStatsHourlyView, force: false, withOptions: false);
-        Assert.DoesNotContain("jsonb", degraded, StringComparison.Ordinal);
-        Assert.Equal(3, degraded[(degraded.IndexOf('(') + 1)..degraded.LastIndexOf(')')].Split(',').Length);
-        Assert.Equal("42883", RollupBackfill.UndefinedFunctionSqlState);
     }
 
     /// <summary>

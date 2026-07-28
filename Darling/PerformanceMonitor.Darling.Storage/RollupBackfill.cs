@@ -132,46 +132,32 @@ SELECT
     /// leaves a region whose entries are gone and a later plain refresh no-ops over the hole while reporting
     /// success.</para>
     ///
-    /// <para><b><c>refresh_newest_first</c> IS PASSED EXPLICITLY, because the resume story depends on it and
-    /// nothing else states it.</b> A killed slice is safe to resume from the measured floor with no extra
-    /// bookkeeping ONLY because the batches that committed inside it were the NEWEST ones, leaving the floor
-    /// inside that slice for the next run's top slice to re-cover. That behaviour is not a GUC — there is no
-    /// such setting in <c>pg_settings</c> on 2.28.1 — it rides the <c>options</c> jsonb parameter, and leaving
-    /// the parameter off meant inheriting an UNSTATED SERVER DEFAULT. It happens to be true today, and a live
-    /// mid-slice kill measured zero holes above the floor. But an unstated default that happens to be right is
-    /// exactly the shape of premise that produced this whole issue: <c>materialized_only</c> was also assumed,
-    /// also read as reasonable, and was also wrong. So the code now ASSERTS the contract it relies on rather
-    /// than hoping for it, and the comment states what is asserted rather than what is assumed.</para>
+    /// <para><b>NO <c>options</c> ARGUMENT — and the reason is compatibility, not preference.</b> The resume
+    /// story depends on newest-first batching: a killed slice is safe to resume from the measured floor with
+    /// no bookkeeping ONLY because the batches that committed inside it were the NEWEST ones, leaving the
+    /// floor inside that slice for the next run's top slice to re-cover. That behaviour is NOT a GUC — there
+    /// is no such setting in <c>pg_settings</c> — it rides the <c>options</c> jsonb parameter, which means the
+    /// product inherits an ENGINE DEFAULT here rather than configuring anything. Saying otherwise was the
+    /// comment's original lie and is corrected.</para>
     ///
-    /// <para><paramref name="withOptions"/> exists only for the degrade: <c>options</c> arrived in TimescaleDB
-    /// 2.21 and nothing gates a bring-your-own store's version, so an older one raises 42883 on the 5-argument
-    /// call. <see cref="RunSliceAsync"/> falls back to the 3-argument form ONCE and says so out loud — on such
-    /// a store the guarantee genuinely is an inherited default, and the operator should know that rather than
-    /// be told a contract is held when it is not.</para>
+    /// <para>Passing it explicitly was tried and REVERTED, because it buys less than it costs. <c>options</c>
+    /// arrived in TimescaleDB 2.21 and nothing in this product gates a bring-your-own store's version, so the
+    /// 5-argument call raises 42883 on 2.18–2.20 — regressing stores that work today, to guard an engine flip
+    /// that has not happened. What guards the premise instead is a LIVE BEHAVIOURAL pin
+    /// (<c>MidSliceCancellation_LeavesTheFloorInsideTheRange_WithNoGapsAbove</c>): it cancels a refresh
+    /// mid-flight and asserts the floor landed inside the cancelled range with no gaps above it. That tests
+    /// the property the resume depends on rather than the mechanism that currently provides it, so it holds on
+    /// ANY engine and on BYO stores where an explicit option would not even be accepted — and a bundle bump
+    /// re-runs it automatically, with nobody having to remember why.</para>
+    ///
+    /// <para>RESIDUAL, recorded rather than silently accepted: a BYO customer already running a future engine
+    /// whose default has flipped is unprotected at RUNTIME — the pin catches it in CI, not on their box. Only
+    /// version-gated explicit options would close that, deliberately not built because the compatibility cost
+    /// is real and the trigger speculative.</para>
     /// </summary>
-    public static string RefreshSliceSql(string view, bool force = false, bool withOptions = true)
-    {
-        var call = $"CALL refresh_continuous_aggregate('collect.{view}'::regclass, $1::timestamp, $2::timestamp";
-
-        if (withOptions)
-        {
-            /* force must be given positionally to reach options, so the plain path passes an explicit false. */
-            return call + $", {(force ? "true" : "false")}, $3::jsonb)";
-        }
-
-        return force ? call + ", true)" : call + ")";
-    }
-
-    /// <summary>
-    /// The refresh contract this verb's resume story depends on, as the engine's own <c>options</c> jsonb.
-    /// Newest-first is the ONLY option set: batch size and the batch cap are deliberately left at their
-    /// defaults, which the issue's API research established are already the right shape.
-    /// </summary>
-    public const string RefreshOptionsJson = "{\"refresh_newest_first\": true}";
-
-    /// <summary>SQLSTATE <c>undefined_function</c> — what a pre-2.21 store answers to the 5-argument call
-    /// because it has no <c>options</c> parameter. Branched on the STATE, never the message.</summary>
-    public const string UndefinedFunctionSqlState = "42883";
+    public static string RefreshSliceSql(string view, bool force = false) => force
+        ? $"CALL refresh_continuous_aggregate('collect.{view}'::regclass, $1::timestamp, $2::timestamp, true)"
+        : $"CALL refresh_continuous_aggregate('collect.{view}'::regclass, $1::timestamp, $2::timestamp)";
 
     /// <summary>The rollup's oldest materialized bucket — the DATA-based convergence signal. A refresh CALL that
     /// returns without error proves nothing: a batch-cap stop is logged server-side and is completely silent to
@@ -316,15 +302,14 @@ SELECT
     /// refreshing and escalate only on a MEASURED shortfall.</para>
     /// </summary>
     public static async Task<DateTime?> RunSliceAsync(
-        NpgsqlConnection connection, string view, DateTime fromUtc, DateTime toUtc, CancellationToken cancellationToken,
-        Action<string>? onNewestFirstUnavailable = null)
+        NpgsqlConnection connection, string view, DateTime fromUtc, DateTime toUtc, CancellationToken cancellationToken)
     {
         if (connection is null)
         {
             throw new ArgumentNullException(nameof(connection));
         }
 
-        await RefreshAsync(connection, view, fromUtc, toUtc, force: false, onNewestFirstUnavailable, cancellationToken);
+        await RefreshAsync(connection, view, fromUtc, toUtc, force: false, cancellationToken);
         return await ReadCoverageFloorAsync(connection, view, cancellationToken);
     }
 
@@ -343,15 +328,14 @@ SELECT
     /// the run, and which never happens at all unless a shortfall was already measured.</para>
     /// </summary>
     public static async Task<DateTime?> RepairAsync(
-        NpgsqlConnection connection, string view, DateTime fromUtc, DateTime toUtc, CancellationToken cancellationToken,
-        Action<string>? onNewestFirstUnavailable = null)
+        NpgsqlConnection connection, string view, DateTime fromUtc, DateTime toUtc, CancellationToken cancellationToken)
     {
         if (connection is null)
         {
             throw new ArgumentNullException(nameof(connection));
         }
 
-        await RefreshAsync(connection, view, fromUtc, toUtc, force: true, onNewestFirstUnavailable, cancellationToken);
+        await RefreshAsync(connection, view, fromUtc, toUtc, force: true, cancellationToken);
         return await ReadCoverageFloorAsync(connection, view, cancellationToken);
     }
 
@@ -378,24 +362,16 @@ SELECT
     private static readonly TimeSpan ConcurrentRefreshDelay = TimeSpan.FromSeconds(5);
 
     private static async Task RefreshAsync(
-        NpgsqlConnection connection, string view, DateTime fromUtc, DateTime toUtc, bool force,
-        Action<string>? onNewestFirstUnavailable, CancellationToken cancellationToken)
+        NpgsqlConnection connection, string view, DateTime fromUtc, DateTime toUtc, bool force, CancellationToken cancellationToken)
     {
-        var withOptions = true;
-
         for (var attempt = 1; ; attempt++)
         {
             try
             {
                 /* PreventInTransactionBlock: the CALL can never be wrapped in an explicit transaction. */
-                using var refresh = new NpgsqlCommand(RefreshSliceSql(view, force, withOptions), connection) { CommandTimeout = SliceTimeoutSeconds };
+                using var refresh = new NpgsqlCommand(RefreshSliceSql(view, force), connection) { CommandTimeout = SliceTimeoutSeconds };
                 refresh.Parameters.AddWithValue(fromUtc);
                 refresh.Parameters.AddWithValue(toUtc);
-                if (withOptions)
-                {
-                    refresh.Parameters.AddWithValue(RefreshOptionsJson);
-                }
-
                 await refresh.ExecuteNonQueryAsync(cancellationToken);
                 return;
             }
@@ -403,18 +379,6 @@ SELECT
                 when (attempt < ConcurrentRefreshAttempts && ex.SqlState == ConcurrentRefreshSqlState)
             {
                 await Task.Delay(ConcurrentRefreshDelay, cancellationToken);
-            }
-            catch (PostgresException ex) when (withOptions && ex.SqlState == UndefinedFunctionSqlState)
-            {
-                /* Pre-2.21: no options parameter exists, so the contract cannot be asserted here. Degrade to
-                   the 3-argument form and SAY SO — on this store newest-first is an inherited default again,
-                   and the resume guarantee rests on it being what we believe. Telling the operator a contract
-                   is held when it is not would be the same trust failure this whole change removes. */
-                withOptions = false;
-                onNewestFirstUnavailable?.Invoke(
-                    $"this store's TimescaleDB has no refresh 'options' parameter (added in 2.21), so " +
-                    $"refresh_newest_first cannot be set explicitly for {view} — the newest-first resume " +
-                    "guarantee falls back to the server's own default on this store.");
             }
         }
     }
