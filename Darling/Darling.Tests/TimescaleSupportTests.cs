@@ -737,12 +737,12 @@ LIMIT 1", connection))
             await ExecuteAsync(connection, $"DROP TABLE IF EXISTS {table} CASCADE", ct);
             await ExecuteAsync(connection,
                 $"CREATE TABLE {table} (collection_time timestamptz NOT NULL, server_id integer NOT NULL)", ct);
-            await ExecuteAsync(connection,
-                $"SELECT create_hypertable('{table}', by_range('collection_time'), if_not_exists => true)", ct);
-            await ExecuteAsync(connection,
-                $"ALTER TABLE {table} SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')", ct);
-            await ExecuteAsync(connection,
-                $"SELECT add_compression_policy('{table}', INTERVAL '1 day', if_not_exists => true)", ct);
+            /* The product's own SQL builders, not hand-rolled equivalents: a one-argument by_range('col') is
+               accepted by TimescaleDB 2.28 but not by the older version CI's fixture carries, and the point of
+               this test is the catalog's behaviour rather than a second dialect of the same DDL. */
+            await ExecuteAsync(connection, TimescaleSupport.CreateHypertableSql(table, "collection_time"), ct);
+            await ExecuteAsync(connection, TimescaleSupport.EnableCompressionSql(table), ct);
+            await ExecuteAsync(connection, TimescaleSupport.AddCompressionPolicySql(table), ct);
 
             long jobId;
             using (var find = new NpgsqlCommand(
