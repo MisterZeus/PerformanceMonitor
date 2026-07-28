@@ -432,6 +432,56 @@ SELECT
         }
     }
 
+    /// <summary>
+    /// The oldest instant a relation holds — used to bound a hierarchical rollup's PREFLIGHT estimate against
+    /// where its source will end up, not merely where the source starts today.
+    ///
+    /// <para>The preflight has to total the whole job BEFORE any slice runs, but a daily's source is an hourly
+    /// that this same run deepens first. Estimating the daily from the hourly's pre-backfill floor would
+    /// under-count exactly the region the run then writes — the same "the printed number must bound the whole
+    /// job" invariant as the rows-per-bucket under-estimate, and it fails on the store shape where disk is
+    /// tightest.</para>
+    /// </summary>
+    public static async Task<DateTime?> OldestInstantAsync(
+        NpgsqlConnection connection, string relation, string timeColumn, CancellationToken cancellationToken)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        using var command = new NpgsqlCommand($"SELECT min({timeColumn}) FROM collect.{relation}", connection)
+        {
+            CommandTimeout = ProbeTimeoutSeconds,
+        };
+        return await command.ExecuteScalarAsync(cancellationToken) is DateTime oldest ? oldest : null;
+    }
+
+    /// <summary>
+    /// The floor a rollup's backfill will EVENTUALLY be aimed at, given that its source may itself be deepened
+    /// earlier in the same run. The deeper of the two candidates wins, because the run converges to whichever
+    /// the source ends up holding: the source's floor as it stands now, or the root raw table's oldest row,
+    /// which is as far as backfilling that source can ever take it.
+    ///
+    /// <para>For an HOURLY this is a no-op — its source IS raw, so both candidates are the same instant. It
+    /// matters only for the hierarchical dailies, and only in the direction that makes the preflight bound
+    /// LARGER, which is the safe direction for a disk gate.</para>
+    /// </summary>
+    public static DateTime? EventualSourceFloor(DateTime? sourceOldestUtc, DateTime? rootRawOldestUtc)
+    {
+        if (sourceOldestUtc is null)
+        {
+            return rootRawOldestUtc;
+        }
+
+        if (rootRawOldestUtc is null)
+        {
+            return sourceOldestUtc;
+        }
+
+        return rootRawOldestUtc < sourceOldestUtc ? rootRawOldestUtc : sourceOldestUtc;
+    }
+
     /// <summary>The rollup's measured coverage floor, or null when it holds nothing.</summary>
     public static async Task<DateTime?> ReadCoverageFloorAsync(
         NpgsqlConnection connection, string view, CancellationToken cancellationToken)

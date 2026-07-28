@@ -305,6 +305,67 @@ public sealed class RollupBackfillTests
     }
 
     /// <summary>
+    /// THE PREFLIGHT MUST BOUND THE WHOLE JOB, including work a mid-run re-plan discovers.
+    ///
+    /// <para>A hierarchical daily converges to its HOURLY, and that hourly is deepened earlier in the SAME run.
+    /// The preflight has to total everything before committing to any of it, so it estimates from floors taken
+    /// before a single slice has run — and for a daily that pre-backfill floor is shallower than what the run
+    /// will actually aim at. Estimating from it under-counts exactly the region the run then writes, on the
+    /// store shape (deep raw, everything held) where free space is tightest and the printed number is the
+    /// commitment the operator accepted.</para>
+    ///
+    /// <para>The property under test is <b>printed bound &gt;= actual work</b>, not any particular estimator:
+    /// planning with the eventual floor must span at least as much as planning with the floor the run will
+    /// eventually see. Asserted on buckets and bytes, since the operator is shown both.</para>
+    /// </summary>
+    [Fact]
+    public void Preflight_BoundsTheWorkAMidRunReplanWillFind()
+    {
+        /* The sick-store shape: raw holds a year (purges held), the hourly has only its 3-day policy window,
+           and the daily is empty. The run will deepen the hourly to raw FIRST, so by the time the daily runs
+           its source reaches back a year — not the three days the preflight would naively have seen. */
+        var rawOldest = DaysAgo(365);
+        var hourlyFloorAtPreflight = DaysAgo(3);
+
+        var eventual = RollupBackfill.EventualSourceFloor(hourlyFloorAtPreflight, rawOldest);
+        Assert.Equal(rawOldest, eventual);
+
+        var preflight = RollupBackfill.Plan(
+            TimescaleSupport.QueryStatsDailyView, eventual, coverageOldestUtc: null,
+            materializedBuckets: 10, materializedBytes: 10L * 1024 * 1024,
+            rawBytes: 145 * Gb, bucketWidth: TimeSpan.FromDays(1));
+
+        /* What the run re-plans once the hourly has been deepened. */
+        var afterReplan = RollupBackfill.Plan(
+            TimescaleSupport.QueryStatsDailyView, rawOldest, coverageOldestUtc: null,
+            materializedBuckets: 10, materializedBytes: 10L * 1024 * 1024,
+            rawBytes: 145 * Gb, bucketWidth: TimeSpan.FromDays(1));
+
+        Assert.True(preflight.BucketsToAdd >= afterReplan.BucketsToAdd,
+            $"the preflight planned {preflight.BucketsToAdd} buckets but the run will do {afterReplan.BucketsToAdd} — the disk gate was cleared against a number smaller than the job");
+        Assert.True(preflight.EstimatedBytes >= afterReplan.EstimatedBytes,
+            $"the preflight estimated {preflight.EstimatedBytes} bytes but the run will write about {afterReplan.EstimatedBytes}");
+
+        /* And the bound is not vacuous: taking the pre-backfill floor instead really is smaller, which is what
+           makes this a bound rather than an identity. */
+        var naive = RollupBackfill.Plan(
+            TimescaleSupport.QueryStatsDailyView, hourlyFloorAtPreflight, coverageOldestUtc: null,
+            materializedBuckets: 10, materializedBytes: 10L * 1024 * 1024,
+            rawBytes: 145 * Gb, bucketWidth: TimeSpan.FromDays(1));
+
+        Assert.True(naive.BucketsToAdd < afterReplan.BucketsToAdd,
+            "the pre-backfill floor must under-count the run, or this fixture is not exercising the gap");
+
+        /* An HOURLY is unaffected — its source IS raw, so both candidates are the same instant. */
+        Assert.Equal(rawOldest, RollupBackfill.EventualSourceFloor(rawOldest, rawOldest));
+
+        /* Nulls degrade to whichever side is known rather than collapsing the bound to nothing. */
+        Assert.Equal(rawOldest, RollupBackfill.EventualSourceFloor(null, rawOldest));
+        Assert.Equal(hourlyFloorAtPreflight, RollupBackfill.EventualSourceFloor(hourlyFloorAtPreflight, null));
+        Assert.Null(RollupBackfill.EventualSourceFloor(null, null));
+    }
+
+    /// <summary>
     /// A source timestamp can be garbage, and one garbage row must not become a plan. Observed live: a single
     /// stray ancient value produced a 739,825-slice plan spanning 3.7 days of pure planning CPU before anything
     /// was materialized. Refusing beats spanning, and the refusal has to NAME the timestamp — a row that old is

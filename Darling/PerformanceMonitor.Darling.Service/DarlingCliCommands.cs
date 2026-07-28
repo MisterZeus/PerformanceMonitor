@@ -2159,6 +2159,7 @@ public static class DarlingCliCommands
         var plans = new List<(RollupBackfillTarget Target, RollupBackfillPlan Plan)>();
         var refusedPlans = new List<string>();
         var rawBytesCache = new Dictionary<string, long>(StringComparer.Ordinal);
+        var rawOldestCache = new Dictionary<string, DateTime?>(StringComparer.Ordinal);
         foreach (var target in RollupBackfill.Targets)
         {
             RollupBackfillProbe probe;
@@ -2187,8 +2188,19 @@ public static class DarlingCliCommands
                 rawBytesCache[target.RawTable] = rawBytes;
             }
 
+            /* BOUND THE PREFLIGHT AGAINST WHERE THE SOURCE WILL END UP, not where it starts now. A daily's
+               source is an hourly that this same run deepens FIRST, so estimating from the pre-backfill floor
+               under-counts precisely the region the run then writes — and the printed number is the commitment
+               the operator accepted. Same invariant as the rows-per-bucket under-estimate, and it bites on the
+               store shape where disk is tightest. A no-op for the hourlies, whose source IS raw. */
+            if (!rawOldestCache.TryGetValue(target.RawTable, out var rootRawOldest))
+            {
+                rootRawOldest = await RollupBackfill.OldestInstantAsync(connection, target.RawTable, "collection_time", cancellationToken);
+                rawOldestCache[target.RawTable] = rootRawOldest;
+            }
+
             plans.Add((target, RollupBackfill.Plan(
-                target.View, probe.SourceOldestUtc, probe.CoverageOldestUtc,
+                target.View, RollupBackfill.EventualSourceFloor(probe.SourceOldestUtc, rootRawOldest), probe.CoverageOldestUtc,
                 probe.MaterializedBuckets, probe.MaterializedBytes, rawBytes,
                 target.IsDaily ? TimeSpan.FromDays(1) : TimeSpan.FromHours(1))));
         }
@@ -2330,6 +2342,17 @@ public static class DarlingCliCommands
             {
                 error.WriteLine($"    FAILED to re-probe before running: {ex.Message}");
                 shortfalls.Add($"{plannedUpFront.View} could not be re-probed before its slices ran");
+                continue;
+            }
+
+            if (plan.Refusal is string replanRefusal)
+            {
+                /* A REFUSAL is not a completion, and the clamp can fire here even though it passed up front:
+                   a daily's source deepens mid-run, so its re-planned span can cross the ceiling the preflight
+                   cleared. RollupBackfillPlan.Absurd sets IsComplete too, so testing IsComplete first would
+                   have printed "already covers" over a refusal and counted it as success. */
+                error.WriteLine($"    [REFUSED] {target.View}: {replanRefusal}");
+                shortfalls.Add($"{target.View}: {replanRefusal}");
                 continue;
             }
 
