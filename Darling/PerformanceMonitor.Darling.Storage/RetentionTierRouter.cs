@@ -135,6 +135,30 @@ public static class RetentionTierRouter
     ///
     /// <para>Unknown coverage is INERT by construction — see <see cref="TierCoverage"/>. A failed probe, a
     /// plain-PostgreSQL store and a partially-built one all produce nulls, and nulls never move a window.</para>
+    ///
+    /// <para><b>THE FLOOR IS A DEPTH MEASURE, NOT A COMPLETENESS GUARANTEE.</b> A routed tier is the best
+    /// available answer for a window; it is not a promise that the window is fully materialized. Two shapes
+    /// slip through, both known and both accepted:</para>
+    ///
+    /// <para><i>A mid-window HOLE is invisible.</i> Coverage is one number — the oldest materialized bucket —
+    /// so it cannot see a gap ABOVE itself. A service down longer than the refresh policy's 3-day
+    /// <c>start_offset</c> resumes at now-3d and never backfills the skipped interval, while
+    /// <c>min(bucket)</c> goes on reporting the original deep floor. The window then routes to the tier and is
+    /// served as complete with the gap silently inside it.</para>
+    ///
+    /// <para><i>A window STRADDLING the floor is served partially, with no signal to the caller.</i> When the
+    /// window starts below the floor but no lower tier reaches further back, this returns the tier — which is
+    /// the correct CHOICE (raw would return less on a healthy store), but the part of the window below the
+    /// floor is missing and nothing here tells the caller so.</para>
+    ///
+    /// <para>Both are accepted because both are strictly better than the age-only routing they replace, which
+    /// served the ENTIRE window as empty in exactly these cases. What must NOT be inferred is the belief this
+    /// paragraph exists to block: <b>"the coverage gate passed, therefore the result is complete."</b> That
+    /// belief-shape is precisely how #1759 survived as long as it did — the previous comment here asserted the
+    /// view was "correct to query for any window immediately", it read as reasonable, and nobody re-derived it
+    /// for months. Do not re-derive it. Closing the two gaps properly means a two-dimensional coverage probe
+    /// (floor plus gap detection) and a partial-coverage notice for the straddle case; both are tracked
+    /// separately rather than assumed away here.</para>
     /// </summary>
     public static RetentionTier Resolve(
         DateTime nowUtc,
