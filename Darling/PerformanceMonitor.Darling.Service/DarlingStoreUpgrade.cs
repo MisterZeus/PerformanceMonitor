@@ -75,6 +75,20 @@ internal sealed class DarlingStoreUpgrade
     /// <summary>Suffix on the runtime root holding the rescued previous runtime (pg_upgrade's --old-bindir).</summary>
     public const string PreviousRuntimeSuffix = "-prev";
 
+    /* Every directory naming this class can put BESIDE the data directory lives here, because
+       ReportUnmanagedStoreCopies decides what is a stranger's by elimination — anything store-shaped that is
+       not one of ours. A new sibling naming that forgets to register here does not fail loudly; it gets
+       reported to the operator as something the product did not create, which is the one way that diagnostic
+       can lie. DarlingStoreUpgradeSiblingNamesTests pins the pair against the source. The runtime namings
+       (PreviousRuntimeSuffix, and the ".failed" move-aside) are deliberately NOT here: they hold binaries,
+       never a PG_VERSION, so the structural test cannot reach them. */
+
+    /// <summary>Suffix on the data directory holding a retained pre-upgrade copy, kept for rollback.</summary>
+    public const string RetainedDataDirectorySuffix = "-old-";
+
+    /// <summary>Suffix on the data directory holding the new cluster an in-place upgrade builds into.</summary>
+    public const string UpgradeStagingDirectorySuffix = "-upgrade-";
+
     /// <summary>
     /// How many service starts the pre-upgrade data directory is kept before deletion. TWO, not one: the
     /// first start after the upgrade is the one that proves the new cluster serves real collection, and a
@@ -84,6 +98,15 @@ internal sealed class DarlingStoreUpgrade
 
     /// <summary>Slack above the measured 2x requirement for copy mode, so a copy never fills the volume dead.</summary>
     private const long CopyHeadroomSlackBytes = 1L * 1024 * 1024 * 1024;
+
+    /// <summary>
+    /// Wall-clock ceiling on measuring the store-shaped directories reported at every service start. Five
+    /// seconds for the whole report, not per directory: what needs bounding is the delay before the store
+    /// comes up. An ordinary cluster of a few thousand files walks in well under it, so this only engages on
+    /// the pathological directory it exists to survive — and when it does, the log says the number is a lower
+    /// bound rather than pretending otherwise.
+    /// </summary>
+    private static readonly TimeSpan s_sizeProbeBudget = TimeSpan.FromSeconds(5);
 
     /* pg_upgrade on a large field store is genuinely long-running in copy mode, and the store is offline
        for the duration — but a partial copy is worse than a slow one, so the budget is generous rather
@@ -591,17 +614,50 @@ internal sealed class DarlingStoreUpgrade
         }
     }
 
-    /// <summary>Total bytes of every file under <paramref name="directory"/>; unreadable entries are skipped.</summary>
+    /// <summary>
+    /// Total bytes of every file under <paramref name="directory"/>; unreadable entries are skipped.
+    ///
+    /// <para>Walks <see cref="DirectoryInfo"/> rather than paths on purpose: the <see cref="FileInfo"/>
+    /// objects it yields carry the size from the directory enumeration itself, where reading
+    /// <c>new FileInfo(path).Length</c> costs a fresh metadata call PER FILE. On a store data directory —
+    /// one relation file per chunk per index, so tens of thousands of files, and #1770 measures several
+    /// copies of one on every service start — that is the difference between a directory walk and tens of
+    /// thousands of syscalls on the startup path.</para>
+    /// </summary>
     internal static long MeasureDirectoryBytes(string directory)
+        => MeasureDirectoryBytes(directory, deadline: null, out _);
+
+    /// <summary>
+    /// <see cref="MeasureDirectoryBytes(string)"/> with a wall-clock ceiling. Returns what it managed to add
+    /// up and sets <paramref name="complete"/> false when <paramref name="deadline"/> cut the walk short, so
+    /// a caller can say "at least" instead of stating a number it did not finish computing.
+    ///
+    /// <para>The report path needs this because it measures foreign data directories on EVERY service start,
+    /// before the store is up, on exactly the low-headroom hosts the feature exists for. A budget is the
+    /// right shape rather than caching by mtime: it bounds the cost directly and needs no state that can go
+    /// stale, and in the ordinary case — a few thousand files per cluster — the walk finishes far inside it,
+    /// so the ceiling only ever engages on the pathological directory it exists to survive.</para>
+    /// </summary>
+    internal static long MeasureDirectoryBytes(string directory, DateTime? deadline, out bool complete)
     {
         long total = 0;
+        complete = true;
+        var checkedFiles = 0;
         try
         {
-            foreach (var file in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
+            foreach (var file in new DirectoryInfo(directory).EnumerateFiles("*", SearchOption.AllDirectories))
             {
+                /* DateTime.UtcNow per file would itself be a cost on a walk this size; every 512 entries is
+                   often enough to bound the overrun to a fraction of the budget. */
+                if (deadline is not null && ++checkedFiles % 512 == 0 && DateTime.UtcNow > deadline.Value)
+                {
+                    complete = false;
+                    break;
+                }
+
                 try
                 {
-                    total += new FileInfo(file).Length;
+                    total += file.Length;
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                 {
@@ -1155,53 +1211,222 @@ internal sealed class DarlingStoreUpgrade
     /* ============================ retained rollback copies ============================ */
 
     internal static string RetainedDataDirectoryFor(string dataDirectory, int oldMajor)
-        => Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory)) + "-old-" + oldMajor.ToString(CultureInfo.InvariantCulture);
+        => Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory)) + RetainedDataDirectorySuffix + oldMajor.ToString(CultureInfo.InvariantCulture);
 
     /// <summary>
-    /// Ages out the pre-upgrade data directory kept for rollback: each service start bumps its counter, and
-    /// the copy is deleted once it has survived <see cref="RollbackRetentionStarts"/> starts — with a log
-    /// line naming the space reclaimed, because a silently vanishing multi-GB directory is its own support
-    /// call. Runs on EVERY start, not only upgrade starts, since that is what makes the countdown advance.
+    /// Ages out the pre-upgrade data directories kept for rollback: each service start bumps a copy's
+    /// counter, and the copy is deleted once it has survived <see cref="RollbackRetentionStarts"/> starts —
+    /// with a log line naming the space reclaimed, because a silently vanishing multi-GB directory is its
+    /// own support call. Runs on EVERY start, not only upgrade starts, since that is what makes the
+    /// countdown advance.
+    ///
+    /// <para><b>Every retained copy is considered independently (#1770).</b> The failure handling used to sit
+    /// outside the loop, so ONE copy that could not be measured or deleted — a file a not-yet-exited
+    /// postmaster or an antivirus scan still holds, an ACL the service account lost — abandoned the sweep for
+    /// every other copy as well, and kept abandoning it for as long as the condition lasted. Their counters
+    /// stopped advancing too, so nothing aged out and multi-GB directories accumulated on exactly the hosts
+    /// that can least afford them. A failure now costs that one directory its turn and nothing else.</para>
     /// </summary>
     internal void SweepRetainedDataDirectories(string dataDirectory)
     {
+        string liveDataDirectory;
+        string parent;
+        string prefix;
+        string[] retained;
+
         try
         {
-            var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory)));
-            var prefix = Path.GetFileName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory))) + "-old-";
+            liveDataDirectory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory));
+            parent = Path.GetDirectoryName(liveDataDirectory) ?? string.Empty;
+            prefix = Path.GetFileName(liveDataDirectory) + RetainedDataDirectorySuffix;
             if (string.IsNullOrEmpty(parent) || !Directory.Exists(parent))
             {
                 return;
             }
 
-            foreach (var retained in Directory.GetDirectories(parent, prefix + "*"))
-            {
-                var counterPath = retained + ".starts";
-                var starts = int.TryParse(ReadTrimmedOrNull(counterPath), NumberStyles.None, CultureInfo.InvariantCulture, out var parsed)
-                    ? parsed + 1
-                    : 1;
+            retained = Directory.GetDirectories(parent, prefix + "*");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                "Could not look for retained pre-upgrade data directories ({Message}) — any that exist are safe to delete by hand.",
+                ex.Message);
+            return;
+        }
 
-                if (starts < RollbackRetentionStarts)
+        foreach (var copy in retained)
+        {
+            /* A wildcard is not what a delete should be trusting. Directory.GetDirectories' pattern also
+               matches a directory's Windows 8.3 SHORT name, so the real name is re-checked against the
+               prefix before this touches anything: the only directories this deletes are the ones
+               RetainedDataDirectoryFor names. */
+            if (!Path.GetFileName(copy).StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            try
+            {
+                AgeOutRetainedDataDirectory(copy);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    "Could not age out the retained pre-upgrade store data directory {Path} ({Message}). The other retained copies were still swept, and this one is retried on the next service start — it is safe to delete by hand.",
+                    copy, ex.Message);
+            }
+        }
+
+        ReportUnmanagedStoreCopies(parent, liveDataDirectory, retained);
+    }
+
+    /// <summary>
+    /// One retained copy's turn: bump its counter, or delete it once it has outlived
+    /// <see cref="RollbackRetentionStarts"/> starts. Throws on I/O trouble so the caller can report THIS
+    /// directory and carry on with the rest.
+    /// </summary>
+    private void AgeOutRetainedDataDirectory(string retained)
+    {
+        var counterPath = retained + ".starts";
+        var starts = int.TryParse(ReadTrimmedOrNull(counterPath), NumberStyles.None, CultureInfo.InvariantCulture, out var parsed)
+            ? parsed + 1
+            : 1;
+
+        if (starts < RollbackRetentionStarts)
+        {
+            File.WriteAllText(counterPath, starts.ToString(CultureInfo.InvariantCulture));
+            _logger.LogInformation(
+                "Keeping the pre-upgrade store data directory {Path} for {Remaining} more service start(s) as a rollback copy.",
+                retained, RollbackRetentionStarts - starts);
+            return;
+        }
+
+        var reclaimed = MeasureDirectoryBytes(retained);
+        Directory.Delete(retained, recursive: true);
+        TryDeleteFile(counterPath);
+        _logger.LogInformation(
+            "Deleted the pre-upgrade store data directory {Path} after {Starts} service starts on the upgraded store, reclaiming {Size}.",
+            retained, RollbackRetentionStarts, FormatBytes(reclaimed));
+    }
+
+    /// <summary>
+    /// Names the store-shaped directories sitting beside the live data directory that this service did not
+    /// create, with what they are costing in disk — and deletes none of them.
+    ///
+    /// <para>A production field instance was found carrying seven hand-made copies from a week of upgrade
+    /// rehearsals, on a volume with roughly 175 GB free against a 286 GB data directory — far under the 2x a
+    /// future major upgrade in copy mode needs — and nothing had ever mentioned they were there. Deleting
+    /// them is not this service's call: a copy someone made by hand is a decision, and a product that
+    /// silently reverses its operator's decisions is worse than one that wastes disk. But staying silent
+    /// about tens of gigabytes is how a volume gets to that state unnoticed, so the copies are reported every
+    /// start, by name and size, until someone removes them.</para>
+    ///
+    /// <para>Identified STRUCTURALLY — a directory holding a <c>PG_VERSION</c> file — and never by a name
+    /// pattern. That file is what makes a directory a PostgreSQL data directory, so this cannot mistake an
+    /// unrelated folder for a store copy however it happens to be named, and a report is in any case the one
+    /// verdict that stays harmless if it is ever wrong.</para>
+    /// </summary>
+    private void ReportUnmanagedStoreCopies(string parent, string liveDataDirectory, string[] managed)
+    {
+        try
+        {
+            /* An upgrade's half-built cluster is OURS, not a stranger's, and saying otherwise in a
+               diagnostic is how a diagnostic stops being believed. UpgradeDataDirectoryAsync deletes it on
+               every failure path, but only best-effort — so a held file, or a machine that lost power
+               mid-upgrade, leaves one behind and this is the next thing to see it. */
+            var upgradePrefix = Path.GetFileName(liveDataDirectory) + UpgradeStagingDirectorySuffix;
+
+            /* ONE budget for the whole report, not one per directory: what has to be bounded is the delay
+               this adds to a service start, and seven directories each given their own ceiling would multiply
+               it by seven. Whatever is left when the budget runs out is reported without a size rather than
+               with a wrong one. */
+            var deadline = DateTime.UtcNow + s_sizeProbeBudget;
+
+            var found = new List<(string Path, long Bytes, bool Measured, bool Ours)>();
+            foreach (var candidate in Directory.GetDirectories(parent))
+            {
+                if (string.Equals(candidate, liveDataDirectory, StringComparison.OrdinalIgnoreCase)
+                    || IsOneOf(managed, candidate)
+                    || !File.Exists(Path.Combine(candidate, "PG_VERSION")))
                 {
-                    File.WriteAllText(counterPath, starts.ToString(CultureInfo.InvariantCulture));
-                    _logger.LogInformation(
-                        "Keeping the pre-upgrade store data directory {Path} for {Remaining} more service start(s) as a rollback copy.",
-                        retained, RollbackRetentionStarts - starts);
                     continue;
                 }
 
-                var reclaimed = MeasureDirectoryBytes(retained);
-                Directory.Delete(retained, recursive: true);
-                TryDeleteFile(counterPath);
-                _logger.LogInformation(
-                    "Deleted the pre-upgrade store data directory {Path} after {Starts} service starts on the upgraded store, reclaiming {Size}.",
-                    retained, RollbackRetentionStarts, FormatBytes(reclaimed));
+                var ours = Path.GetFileName(candidate).StartsWith(upgradePrefix, StringComparison.OrdinalIgnoreCase);
+                var bytes = MeasureDirectoryBytes(candidate, deadline, out var measured);
+                found.Add((candidate, bytes, measured, ours));
+            }
+
+            if (found.Count == 0)
+            {
+                return;
+            }
+
+            long total = 0;
+            var allMeasured = true;
+            foreach (var (_, bytes, measured, _) in found)
+            {
+                total += bytes;
+                allMeasured &= measured;
+            }
+
+            found.Sort(static (left, right) => right.Bytes.CompareTo(left.Bytes));
+
+            _logger.LogWarning(
+                "{Count} store data director(ies) beside {Live} are not part of the running store, and are holding {Approximately}{Size}. NONE of them is deleted automatically. Remove the ones you no longer need: a major store upgrade in copy mode needs roughly twice the data directory in free space.",
+                found.Count, liveDataDirectory, allMeasured ? string.Empty : "at least ", FormatBytes(total));
+
+            foreach (var (path, bytes, measured, ours) in found)
+            {
+                if (!measured)
+                {
+                    /* Say what was actually established. A size probe that ran out of budget knows a lower
+                       bound and nothing more, and rounding that up to a stated total is how a diagnostic
+                       teaches people to distrust its numbers. */
+                    _logger.LogWarning(
+                        "Store data directory not part of the running store: {Path} (at least {Size}; the {Budget}-second size probe did not finish walking it).",
+                        path, FormatBytes(bytes), (int)s_sizeProbeBudget.TotalSeconds);
+                    continue;
+                }
+
+                if (ours)
+                {
+                    /* Deliberately NOT deleted, and this is the reason. The commit point is two moves — the
+                       live directory aside, then the upgraded one into its place — so a process that died
+                       between them leaves the UPGRADED cluster under this name with nothing at the live
+                       path. Deleting it there would destroy the only good copy, and in hard-link mode the
+                       pre-upgrade directory beside it is not a usable fallback either (pg_upgrade's linked
+                       old cluster must not be started). A human can tell those apart from the log; a sweep
+                       running before the store is up cannot. */
+                    _logger.LogWarning(
+                        "Leftover store data directory from an interrupted upgrade: {Path} ({Size}). Check that {Live} is the cluster you want BEFORE removing it — if a previous upgrade died between swapping the directories, this one is the upgraded store.",
+                        path, FormatBytes(bytes), liveDataDirectory);
+                    continue;
+                }
+
+                _logger.LogWarning(
+                    "Store data directory this service did not create: {Path} ({Size}). It is left alone — a copy made by hand is someone's decision to reverse, not this service's.",
+                    path, FormatBytes(bytes));
             }
         }
         catch (Exception ex)
         {
-            _logger.LogWarning("Could not sweep retained pre-upgrade data directories ({Message}) — they are safe to delete by hand.", ex.Message);
+            _logger.LogWarning(
+                "Could not check for store data directories beside {Live} ({Message}).", liveDataDirectory, ex.Message);
         }
+    }
+
+    private static bool IsOneOf(string[] paths, string candidate)
+    {
+        foreach (var path in paths)
+        {
+            if (string.Equals(path, candidate, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /* ============================ the upgrade ============================ */
@@ -1230,7 +1455,7 @@ internal sealed class DarlingStoreUpgrade
     internal async Task<StoreUpgradeOutcome> UpgradeDataDirectoryAsync(UpgradeContext context, CancellationToken cancellationToken)
     {
         var newDataDirectory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(context.DataDirectory))
-            + "-upgrade-" + context.NewMajor.ToString(CultureInfo.InvariantCulture);
+            + UpgradeStagingDirectorySuffix + context.NewMajor.ToString(CultureInfo.InvariantCulture);
         var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(context.DataDirectory)))!;
         var passwordFile = Path.Combine(parent, "pg-upgrade-pwfile.tmp");
 

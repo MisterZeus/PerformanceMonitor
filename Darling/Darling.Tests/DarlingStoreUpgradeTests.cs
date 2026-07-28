@@ -1081,6 +1081,281 @@ public sealed class DarlingStoreUpgradeTests
         return count;
     }
 
+    /* ==================== #1770: the retained-copy sweep reaches every sibling ==================== */
+
+    /// <summary>
+    /// The sweep ages out EVERY retained copy, not only the one this run's upgrade produced. Two copies are
+    /// planted before the service ever starts — the shape a host reaches after upgrading more than once — and
+    /// two starts later both are gone.
+    /// </summary>
+    [Fact]
+    public void Sweep_AgesOutEveryRetainedSibling_NotOnlyOne()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-sweep-all-");
+        try
+        {
+            var dataDirectory = PlantLiveDataDirectory(root.FullName);
+            var from17 = PlantRetainedCopy(dataDirectory, 17);
+            var from16 = PlantRetainedCopy(dataDirectory, 16);
+
+            var log = new CapturingLogger();
+            var upgrade = new DarlingStoreUpgrade(log);
+
+            /* First start: both are kept, and each says so — the countdown is per copy. */
+            upgrade.SweepRetainedDataDirectories(dataDirectory);
+            Assert.True(Directory.Exists(from17));
+            Assert.True(Directory.Exists(from16));
+
+            /* Second start: both have now survived RollbackRetentionStarts and go. */
+            upgrade.SweepRetainedDataDirectories(dataDirectory);
+            Assert.False(Directory.Exists(from17));
+            Assert.False(Directory.Exists(from16));
+
+            /* ...each named in its own line, with what it gave back. */
+            Assert.Equal(2, CountOccurrences(log.ToString(), "Deleted the pre-upgrade store data directory"));
+            Assert.Contains(from17, log.ToString(), StringComparison.Ordinal);
+            Assert.Contains(from16, log.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// THE #1770 pin. One retained copy that cannot be deleted — here a file held open with no sharing, in
+    /// the field an antivirus scan or a postmaster that has not finished exiting — must cost only itself.
+    ///
+    /// <para>With the failure handling outside the loop, the throw abandoned the sweep, so the OTHER copy
+    /// survived too, its counter never advanced, and it survived every subsequent start for as long as the
+    /// lock lasted. That is the mechanism by which multi-GB directories pile up unnoticed. Restore the
+    /// handler to the outer scope and this goes red on the healthy copy, which is the one assertion that
+    /// distinguishes the fix from the bug.</para>
+    /// </summary>
+    [Fact]
+    public void Sweep_ARetainedCopyItCannotDelete_DoesNotStopTheOthers()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-sweep-locked-");
+        try
+        {
+            var dataDirectory = PlantLiveDataDirectory(root.FullName);
+
+            /* Ordinal order matters: the locked copy must be swept BEFORE the healthy one, or an
+               abort-on-first-failure bug would still leave the healthy one deleted and pass. */
+            var locked = PlantRetainedCopy(dataDirectory, 16);
+            var healthy = PlantRetainedCopy(dataDirectory, 17);
+
+            using var hold = new FileStream(
+                Path.Combine(locked, "PG_VERSION"), FileMode.Open, FileAccess.Read, FileShare.None);
+
+            var log = new CapturingLogger();
+            var upgrade = new DarlingStoreUpgrade(log);
+            upgrade.SweepRetainedDataDirectories(dataDirectory);
+            upgrade.SweepRetainedDataDirectories(dataDirectory);
+
+            /* The healthy copy aged out on schedule despite its sibling failing... */
+            Assert.False(Directory.Exists(healthy));
+
+            /* ...the locked one is still there, reported by name rather than in silence... */
+            Assert.True(Directory.Exists(locked));
+            Assert.Contains("Could not age out the retained pre-upgrade store data directory", log.ToString(), StringComparison.Ordinal);
+            Assert.Contains(locked, log.ToString(), StringComparison.Ordinal);
+
+            /* ...and the failure did not swallow the other copy's own outcome. */
+            Assert.Contains("Deleted the pre-upgrade store data directory", log.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// The scope pin, and the #1770 decision it encodes. A store copy this service did not create — the
+    /// field instance's seven were named <c>_rollback_manual_*</c> and hand-made across a week of upgrade
+    /// rehearsals, by which time nothing in the product had ever produced such a name — is REPORTED with its
+    /// size and left exactly where it is.
+    ///
+    /// <para>Deleting it would be the product silently reversing a decision a person made, on a directory it
+    /// cannot know the purpose of; the sweep's delete stays scoped to the names
+    /// <see cref="DarlingStoreUpgrade.RetainedDataDirectoryFor"/> produces, and nothing else in the parent is
+    /// eligible however store-shaped it looks.</para>
+    /// </summary>
+    [Fact]
+    public void Sweep_ReportsAStoreCopyItDidNotCreate_AndNeverDeletesIt()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-sweep-manual-");
+        try
+        {
+            var dataDirectory = PlantLiveDataDirectory(root.FullName);
+            var ours = PlantRetainedCopy(dataDirectory, 17);
+
+            /* A hand-made copy, in the shape the field reported. */
+            var manual = dataDirectory + "_rollback_manual_20260720";
+            Directory.CreateDirectory(manual);
+            File.WriteAllText(Path.Combine(manual, "PG_VERSION"), "17\n");
+            File.WriteAllText(Path.Combine(manual, "postgresql.conf"), new string('x', 4096));
+
+            /* ...and a neighbour that is not a store at all, which must never be mentioned. */
+            var notAStore = Path.Combine(root.FullName, "logs");
+            Directory.CreateDirectory(notAStore);
+            File.WriteAllText(Path.Combine(notAStore, "darling-service.log"), "hello");
+
+            var log = new CapturingLogger();
+            var upgrade = new DarlingStoreUpgrade(log);
+            upgrade.SweepRetainedDataDirectories(dataDirectory);
+            upgrade.SweepRetainedDataDirectories(dataDirectory);
+
+            /* Ours aged out; theirs did not, and neither did the live data directory. */
+            Assert.False(Directory.Exists(ours));
+            Assert.True(Directory.Exists(manual));
+            Assert.True(Directory.Exists(dataDirectory));
+
+            /* It was reported rather than left to be discovered when the volume filled. */
+            Assert.Contains("are not part of the running store", log.ToString(), StringComparison.Ordinal);
+            Assert.Contains("Store data directory this service did not create: " + manual, log.ToString(), StringComparison.Ordinal);
+
+            /* A directory with no PG_VERSION is not a store copy and is never named. */
+            Assert.DoesNotContain(notAStore, log.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// A half-built cluster left by an interrupted upgrade is OURS, and the report has to say so — telling
+    /// an operator that the product did not create a directory the product plainly created is how a
+    /// diagnostic stops being believed. It is still not deleted, and the line says why: the commit point is
+    /// two directory moves, so a process that died between them leaves the UPGRADED cluster under this name.
+    /// </summary>
+    [Fact]
+    public void Sweep_NamesAnInterruptedUpgradeLeftoverAsOurs_NotAsAStrangers()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-sweep-leftover-");
+        try
+        {
+            var dataDirectory = PlantLiveDataDirectory(root.FullName);
+
+            /* What UpgradeDataDirectoryAsync builds and only best-effort deletes. */
+            var leftover = dataDirectory + "-upgrade-18";
+            Directory.CreateDirectory(leftover);
+            File.WriteAllText(Path.Combine(leftover, "PG_VERSION"), "18\n");
+
+            var log = new CapturingLogger();
+            new DarlingStoreUpgrade(log).SweepRetainedDataDirectories(dataDirectory);
+
+            Assert.True(Directory.Exists(leftover));
+            Assert.Contains("Leftover store data directory from an interrupted upgrade: " + leftover,
+                log.ToString(), StringComparison.Ordinal);
+
+            /* ...and it must NOT be blamed on someone else. */
+            Assert.DoesNotContain("this service did not create: " + leftover, log.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// NO directory naming the upgrade orchestration can create beside the data directory is ever reported as
+    /// something the product did not create. The report decides foreign-ness by ELIMINATION — store-shaped and
+    /// not one of ours — so a sibling naming that nobody remembered to register does not fail loudly, it
+    /// quietly tells an operator the product did not create a directory the product created. That is the one
+    /// way this diagnostic can lie, so every naming is planted here at once.
+    ///
+    /// <para>The runtime namings are planted too, and for the opposite reason: they must be reported as
+    /// NOTHING, because they hold binaries rather than a cluster and the structural <c>PG_VERSION</c> test
+    /// should never reach them. Planting them proves that claim instead of assuming it.</para>
+    /// </summary>
+    [Fact]
+    public void Sweep_NeverCallsAProductOwnedSiblingForeign()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-sweep-owned-");
+        try
+        {
+            var dataDirectory = PlantLiveDataDirectory(root.FullName);
+
+            /* Every naming this class can put beside the data directory. */
+            var retained = PlantRetainedCopy(dataDirectory, 17);
+            var staging = dataDirectory + DarlingStoreUpgrade.UpgradeStagingDirectorySuffix + "18";
+            Directory.CreateDirectory(staging);
+            File.WriteAllText(Path.Combine(staging, "PG_VERSION"), "18\n");
+
+            /* ...and the runtime namings, which carry binaries and must stay invisible to a PG_VERSION test. */
+            var runtimeRoot = Path.Combine(root.FullName, "pg-runtime");
+            var previousRuntime = DarlingStoreUpgrade.PreviousRuntimeRootFor(runtimeRoot);
+            var failedRuntime = Path.Combine(runtimeRoot, "pgsql") + ".failed";
+            foreach (var directory in new[] { Path.Combine(runtimeRoot, "pgsql", "bin"), Path.Combine(previousRuntime, "pgsql", "bin"), failedRuntime })
+            {
+                Directory.CreateDirectory(directory);
+                File.WriteAllText(Path.Combine(directory, "pg_ctl.exe"), "binary");
+            }
+
+            var log = new CapturingLogger();
+            new DarlingStoreUpgrade(log).SweepRetainedDataDirectories(dataDirectory);
+            var lines = log.ToString();
+
+            /* The retained copy is the sweep's own business and never reaches the report; the staging cluster
+               is reported, but AS OURS. */
+            Assert.DoesNotContain("did not create: " + retained, lines, StringComparison.Ordinal);
+            Assert.DoesNotContain("did not create: " + staging, lines, StringComparison.Ordinal);
+            Assert.Contains("Leftover store data directory from an interrupted upgrade: " + staging, lines, StringComparison.Ordinal);
+
+            /* No runtime directory is mentioned at all — none of them is a cluster. */
+            Assert.DoesNotContain(previousRuntime, lines, StringComparison.Ordinal);
+            Assert.DoesNotContain(failedRuntime, lines, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// The two data-directory sibling suffixes are DEFINED once and used everywhere, so the enumeration the
+    /// report relies on cannot drift from the names the upgrade actually creates. Source-parsed, because the
+    /// staging name is computed inside the upgrade's orchestration where a unit test cannot reach it — the
+    /// point is that no second copy of either literal exists to fall out of step.
+    /// </summary>
+    [Fact]
+    public void SiblingDirectorySuffixes_HaveExactlyOneDefinitionEach()
+    {
+        var source = ReadUpgradeSource();
+
+        Assert.Equal("-old-", DarlingStoreUpgrade.RetainedDataDirectorySuffix);
+        Assert.Equal("-upgrade-", DarlingStoreUpgrade.UpgradeStagingDirectorySuffix);
+
+        /* One occurrence each: the const declaration. Every other site names the constant. */
+        Assert.Equal(1, CountOccurrences(source, "\"-old-\""));
+        Assert.Equal(1, CountOccurrences(source, "\"-upgrade-\""));
+
+        /* ...and the staging directory the upgrade builds into is one of those sites. */
+        Assert.Contains("+ UpgradeStagingDirectorySuffix + context.NewMajor", source, StringComparison.Ordinal);
+        Assert.Contains("+ RetainedDataDirectorySuffix + oldMajor", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>A live data directory with the one file that makes a directory a cluster.</summary>
+    private static string PlantLiveDataDirectory(string root)
+    {
+        var dataDirectory = Path.Combine(root, "pg");
+        Directory.CreateDirectory(dataDirectory);
+        File.WriteAllText(Path.Combine(dataDirectory, "PG_VERSION"), "18\n");
+        return dataDirectory;
+    }
+
+    /// <summary>A retained pre-upgrade copy, named exactly as the upgrade names one.</summary>
+    private static string PlantRetainedCopy(string dataDirectory, int oldMajor)
+    {
+        var retained = DarlingStoreUpgrade.RetainedDataDirectoryFor(dataDirectory, oldMajor);
+        Directory.CreateDirectory(retained);
+        File.WriteAllText(
+            Path.Combine(retained, "PG_VERSION"), oldMajor.ToString(CultureInfo.InvariantCulture) + "\n");
+        return retained;
+    }
+
     private static void CopyDirectory(string source, string destination)
     {
         Directory.CreateDirectory(destination);
