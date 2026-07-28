@@ -560,10 +560,19 @@ WHERE hypertable_name = 'wait_stats'
             await ExecAsync(connection, TimescaleSupport.AddCompressionPolicySql($"collect.{Fresh}"), ct);
             Assert.Equal(TimeSpan.FromHours(1), await ScheduleIntervalAsync(connection, Fresh, ct));
 
-            /* THE ASSERTION THE WHOLE ISSUE COMES DOWN TO: the legacy store converges. */
-            var converged = await TimescaleSupport.ConvergeCompressionScheduleAsync(connection, null, ct);
-            Assert.True(converged >= 1, "expected the 12-hour legacy policy to be retuned");
+            /* THE ASSERTION THE WHOLE ISSUE COMES DOWN TO: the legacy store converges. Logged through a
+               capturing logger because that line IS the operator's evidence the cadence changed on their box,
+               and a structured-logging placeholder/argument mismatch would render it wrong with no error
+               anywhere — the one defect that cannot be caught by asserting on the return value. */
+            var convergeLog = new CapturingTestLogger();
+            var converged = await TimescaleSupport.ConvergeCompressionScheduleAsync(connection, convergeLog, ct);
+            Assert.True(converged >= 1, $"expected the 12-hour legacy policy to be retuned; {convergeLog.Joined}");
             Assert.Equal(TimeSpan.FromHours(1), await ScheduleIntervalAsync(connection, Legacy, ct));
+
+            /* The rendered line names the table, the cadence it LEFT, and the cadence it is on now — all three,
+               or an operator cannot tell a converged store from an untouched one. */
+            Assert.Contains($"retuned {Legacy}'s compression policy from a 12:00:00 tick to 1 hour",
+                convergeLog.Joined, StringComparison.Ordinal);
 
             /* Idempotent: a converged store finds nothing on the next start, so this never churns alter_job. */
             Assert.Equal(0, await TimescaleSupport.ConvergeCompressionScheduleAsync(connection, null, ct));
