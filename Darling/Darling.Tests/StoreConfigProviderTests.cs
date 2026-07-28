@@ -26,6 +26,13 @@ namespace Darling.Tests;
 /// (gated on DARLING_TEST_PG) prove the V17 bump trigger fires and are transaction-rolled-back so they never
 /// clobber a shared dev store's singleton config rows.
 /// </summary>
+/* #1776: rolling the writes back protects the DATA, not the CONCURRENCY — an uncommitted write still holds its
+   row locks and still fires the config_version bump trigger, so running unserialized against the shared store
+   raced the 63 classes that do carry this attribute. Measured over three consecutive full-suite runs against one
+   long-lived database: this class failed in run 1, and the failures landed on a DIFFERENT unserialized class each
+   run, which is what makes the class of bug so expensive — it looks like the change under test broke something it
+   never touched. CI never sees it because it creates a throwaway cluster per run. */
+[Collection("live-postgres")]
 public sealed class StoreConfigProviderTests
 {
     /* ---------------- pure: apply (view -> held config, by-reference seam) ---------------- */

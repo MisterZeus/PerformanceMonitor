@@ -35,6 +35,11 @@ namespace Darling.Tests;
 /// idempotent second EnsureRunning and an ownership-respecting stop — never touching a real
 /// Postgres and never downloading anything.
 /// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")], and NOT for the reason a sweep might assume.
+   This class never reads DARLING_TEST_PG at all — it reads DARLING_TEST_PGRUNTIME, which merely shares that
+   prefix, and it stands up its OWN throwaway cluster from the bundled runtime. A substring search for
+   "DARLING_TEST_PG" matches it anyway (that is how #1776's original sweep came to list it), so this note is here to
+   stop the next one serializing a class that touches no shared store. */
 public sealed class DarlingManagedPostgresTests
 {
     [Fact]
