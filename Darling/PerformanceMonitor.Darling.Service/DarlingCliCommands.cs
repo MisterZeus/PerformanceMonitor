@@ -2347,10 +2347,18 @@ public static class DarlingCliCommands
 
             if (plan.Refusal is string replanRefusal)
             {
-                /* A REFUSAL is not a completion, and the clamp can fire here even though it passed up front:
-                   a daily's source deepens mid-run, so its re-planned span can cross the ceiling the preflight
-                   cleared. RollupBackfillPlan.Absurd sets IsComplete too, so testing IsComplete first would
-                   have printed "already covers" over a refusal and counted it as success. */
+                /* A REFUSAL IS NOT A COMPLETION, and this is a GUARD rather than an assertion that the case
+                   cannot arise. RollupBackfillPlan.Absurd sets IsComplete as well as Refusal, so testing
+                   IsComplete first — as an earlier cut did — printed "already covers" over a refusal and
+                   counted it as success.
+
+                   On today's code a refused re-plan is close to unreachable: a corrupt source timestamp makes
+                   the HOURLY's up-front plan refuse on the same row, and since a daily is now planned against
+                   its source's eventual floor, the daily refuses up front too — so neither reaches this loop.
+                   But "close to unreachable" is an argument about the current call graph, not a property, and
+                   the failure it protects against is slicing a window the planner already rejected as garbage.
+                   The guard costs three lines; the argument would have to be re-derived by every future
+                   reader. */
                 error.WriteLine($"    [REFUSED] {target.View}: {replanRefusal}");
                 shortfalls.Add($"{target.View}: {replanRefusal}");
                 continue;

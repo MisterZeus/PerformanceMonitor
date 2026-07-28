@@ -343,8 +343,26 @@ public sealed class RollupBackfillTests
 
         Assert.True(preflight.BucketsToAdd >= afterReplan.BucketsToAdd,
             $"the preflight planned {preflight.BucketsToAdd} buckets but the run will do {afterReplan.BucketsToAdd} — the disk gate was cleared against a number smaller than the job");
+
+        /* Bytes too, since the operator is shown both. Note this is the ESTIMATE — deterministic arithmetic
+           over the planned span times a per-bucket sample — NOT bytes measured off the store. A live
+           byte assertion would be flaky, because compression and page slack make the same span occupy
+           different amounts on different days. */
         Assert.True(preflight.EstimatedBytes >= afterReplan.EstimatedBytes,
             $"the preflight estimated {preflight.EstimatedBytes} bytes but the run will write about {afterReplan.EstimatedBytes}");
+
+        /* THE PROPERTY STATED THE OTHER WAY ROUND, and the more direct form: the daily's up-front plan must
+           span to the hourly's TARGET, not to where the hourly currently stops. Compare against the hourly's
+           OWN up-front plan on the same fixture — if the daily starts no earlier than the hourly will, the
+           preflight has already counted every bucket the run can reach. */
+        var hourlyPlan = RollupBackfill.Plan(
+            TimescaleSupport.QueryStatsHourlyView, rawOldest, hourlyFloorAtPreflight,
+            materializedBuckets: 72, materializedBytes: 72L * 1024 * 1024,
+            rawBytes: 145 * Gb, bucketWidth: TimeSpan.FromHours(1));
+
+        Assert.False(hourlyPlan.IsComplete, "the hourly must have work, or the daily's target cannot move under it");
+        Assert.True(preflight.FromUtc <= hourlyPlan.FromUtc,
+            $"the daily's up-front plan starts at {preflight.FromUtc:O} but its hourly will reach {hourlyPlan.FromUtc:O} — planned against the source's CURRENT floor rather than the source's target");
 
         /* And the bound is not vacuous: taking the pre-backfill floor instead really is smaller, which is what
            makes this a bound rather than an identity. */
