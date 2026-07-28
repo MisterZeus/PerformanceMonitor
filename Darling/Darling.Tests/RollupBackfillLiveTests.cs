@@ -308,14 +308,14 @@ AND   j.scheduled", ct);
             await using (var check = new NpgsqlConnection(scratch.ConnectionString))
             {
                 await check.OpenAsync(ct);
-                var probe = await RollupBackfill.ProbeAsync(check, TimescaleSupport.QueryStatsHourlyView, "query_stats", ct);
+                var probe = await RollupBackfill.ProbeAsync(check, TimescaleSupport.QueryStatsHourlyView, "query_stats", "collection_time", ct);
 
                 /* Deliberately NOT "the rollup is still empty": the aggregate's own refresh policy is attached
                    by the ensure sweep and fires immediately, so a trailing window IS materialized by the time a
                    dry run finishes — by the POLICY, not by this verb. The property that actually distinguishes
                    a dry run from a real one is that the pre-existing history is still uncovered. */
-                Assert.True(probe.CoverageOldestUtc is null || probe.CoverageOldestUtc > probe.RawOldestUtc,
-                    $"--dry-run materialized the backfill: the rollup already covers back to {probe.CoverageOldestUtc:O} against raw's {probe.RawOldestUtc:O}");
+                Assert.True(probe.CoverageOldestUtc is null || probe.CoverageOldestUtc > probe.SourceOldestUtc,
+                    $"--dry-run materialized the backfill: the rollup already covers back to {probe.CoverageOldestUtc:O} against raw's {probe.SourceOldestUtc:O}");
             }
 
             /* ── REAL RUN ── */
@@ -325,7 +325,9 @@ AND   j.scheduled", ct);
 
             var runText = runOut.ToString();
             Assert.True(exit == 0, $"the verb reported failure.\nSTDOUT:\n{runText}\nSTDERR:\n{runErr}");
-            Assert.Contains("DONE. Every rollup now covers its raw table.", runText, StringComparison.Ordinal);
+            /* SOURCE-relative since #1798: a hierarchical daily's gate measures its HOURLY, not raw, so the
+               contract line has to promise what the gate actually checks or DONE keeps over-claiming. */
+            Assert.Contains("DONE. Every rollup now covers its own source", runText, StringComparison.Ordinal);
 
             /* The restart instruction is the operator's ONLY next step, and the trim race is the one thing that
                can waste the run — both must be in the output, not just in a comment. */
@@ -338,21 +340,21 @@ AND   j.scheduled", ct);
                 await verify.OpenAsync(ct);
                 foreach (var target in RollupBackfill.Targets)
                 {
-                    var probe = await RollupBackfill.ProbeAsync(verify, target.View, target.RawTable, ct);
-                    if (probe.RawOldestUtc is null)
+                    var probe = await RollupBackfill.ProbeAsync(verify, target.View, target.Source, target.SourceTimeColumn, ct);
+                    if (probe.SourceOldestUtc is null)
                     {
                         continue; /* that raw table was never seeded, so there was nothing to cover. */
                     }
 
-                    Assert.True(probe.CoverageOldestUtc is not null && probe.CoverageOldestUtc <= probe.RawOldestUtc,
-                        $"the verb reported DONE but {target.View} starts at {probe.CoverageOldestUtc:O}, after {target.RawTable}'s oldest row {probe.RawOldestUtc:O}");
+                    Assert.True(probe.CoverageOldestUtc is not null && probe.CoverageOldestUtc <= probe.SourceOldestUtc,
+                        $"the verb reported DONE but {target.View} starts at {probe.CoverageOldestUtc:O}, after {target.RawTable}'s oldest row {probe.SourceOldestUtc:O}");
                 }
             }
 
             /* ── IDEMPOTENT: a second run finds nothing to do and says so, rather than re-materializing. ── */
             var againOut = new StringWriter();
             Assert.Equal(0, await DarlingCliCommands.BackfillRollupsAsync(configPath, dryRun: false, againOut, new StringWriter(), ct));
-            Assert.Contains("Every rollup already covers its raw table", againOut.ToString(), StringComparison.Ordinal);
+            Assert.Contains("Every rollup already covers its own source", againOut.ToString(), StringComparison.Ordinal);
         }
         finally
         {
@@ -401,7 +403,7 @@ AND   j.scheduled", ct);
         var view = TimescaleSupport.QueryStatsHourlyView;
         await RollupBackfill.RunSliceAsync(connection, view, now.Date.AddDays(-2), now.Date.AddDays(1), SilentDisclosure(), ct);
 
-        var probe = await RollupBackfill.ProbeAsync(connection, view, "query_stats", ct);
+        var probe = await RollupBackfill.ProbeAsync(connection, view, "query_stats", "collection_time", ct);
 
         /* Both counts in ONE statement, and compared as a RATIO rather than against a separately-timed read:
            the aggregate's refresh policy is live and materializes more buckets between any two round trips,
@@ -603,9 +605,9 @@ WHERE NOT EXISTS (SELECT 1 FROM collect.{view} AS h WHERE h.bucket = src.b)",
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
         var view = TimescaleSupport.QueryStatsHourlyView;
-        var probe = await RollupBackfill.ProbeAsync(connection, view, "query_stats", ct);
+        var probe = await RollupBackfill.ProbeAsync(connection, view, "query_stats", "collection_time", ct);
         var plan = RollupBackfill.Plan(
-            view, probe.RawOldestUtc, probe.CoverageOldestUtc,
+            view, probe.SourceOldestUtc, probe.CoverageOldestUtc,
             probe.MaterializedBuckets, probe.MaterializedBytes, rawBytes: 0, bucketWidth: TimeSpan.FromHours(1));
 
         Assert.False(plan.IsComplete);
@@ -623,13 +625,13 @@ WHERE NOT EXISTS (SELECT 1 FROM collect.{view} AS h WHERE h.bucket = src.b)",
                oldest-first the floor had already reached the bottom after slice one. */
         var partialFloor = await RollupBackfill.ReadCoverageFloorAsync(connection, view, ct);
         Assert.NotNull(partialFloor);
-        Assert.True(partialFloor > probe.RawOldestUtc,
-            $"an interrupted backfill reports coverage {partialFloor:O} at or below raw's oldest {probe.RawOldestUtc:O} — it looks COMPLETE, which is the false-DONE that lets the arming gate destroy data");
+        Assert.True(partialFloor > probe.SourceOldestUtc,
+            $"an interrupted backfill reports coverage {partialFloor:O} at or below raw's oldest {probe.SourceOldestUtc:O} — it looks COMPLETE, which is the false-DONE that lets the arming gate destroy data");
 
         /* (2) A re-plan from the measured floor must still have work to do — not "nothing to do". */
-        var partialProbe = await RollupBackfill.ProbeAsync(connection, view, "query_stats", ct);
+        var partialProbe = await RollupBackfill.ProbeAsync(connection, view, "query_stats", "collection_time", ct);
         var resumePlan = RollupBackfill.Plan(
-            view, partialProbe.RawOldestUtc, partialProbe.CoverageOldestUtc,
+            view, partialProbe.SourceOldestUtc, partialProbe.CoverageOldestUtc,
             partialProbe.MaterializedBuckets, partialProbe.MaterializedBytes, rawBytes: 0, bucketWidth: TimeSpan.FromHours(1));
 
         Assert.False(resumePlan.IsComplete, "the resumed plan reported nothing to do while buckets were still missing");
@@ -660,7 +662,7 @@ WHERE NOT EXISTS (SELECT 1 FROM collect.{view} AS h WHERE h.bucket = src.b)",
         Assert.True(missing == 0, $"{missing} bucket(s) raw holds are still missing from {view} after a resumed backfill");
 
         /* (5) And only NOW does the gate arm — coverage genuinely reaches raw. */
-        Assert.True(await RollupBackfill.ReadCoverageFloorAsync(connection, view, ct) <= probe.RawOldestUtc);
+        Assert.True(await RollupBackfill.ReadCoverageFloorAsync(connection, view, ct) <= probe.SourceOldestUtc);
         await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct);
         Assert.Equal(1L, await CountAsync(connection, ArmedRawPolicySql, ct));
 
@@ -734,8 +736,8 @@ VALUES ($1, $2, $3, 'backfill-e2e', 'TestDb', decode(md5('poison'), 'hex'), deco
             Assert.Contains("corrupt row", combined, StringComparison.Ordinal);
 
             /* The properties that make it a refusal rather than a skip. */
-            Assert.DoesNotContain("DONE. Every rollup now covers its raw table.", combined, StringComparison.Ordinal);
-            Assert.DoesNotContain("Every rollup already covers its raw table", combined, StringComparison.Ordinal);
+            Assert.DoesNotContain("DONE. Every rollup now covers its own source", combined, StringComparison.Ordinal);
+            Assert.DoesNotContain("Every rollup already covers its own source", combined, StringComparison.Ordinal);
         }
         finally
         {
@@ -785,6 +787,125 @@ VALUES ($1, $2, $3, 'backfill-e2e', 'TestDb', decode(md5('poison'), 'hex'), deco
     /// </summary>
     private static RefreshDisclosure SilentDisclosure() =>
         new(message => Assert.Fail($"the refresh degraded unexpectedly on a 2.28.1 store: {message}"));
+
+    /// <summary>
+    /// #1798: a hierarchical daily converges to its HOURLY, not to raw — and on a healthy store those are
+    /// different instants by weeks.
+    ///
+    /// <para>The shape that exposed it: raw purges already armed, so raw holds a few days while the hourly
+    /// holds far more. The #1680 gate for an HOURLY-tier policy asks whether the daily covers what the HOURLY
+    /// holds, but the verb converged every rollup to RAW's oldest row — so the daily stopped weeks short, the
+    /// gate correctly refused, and the verb printed DONE with its zero-held promise. Observed on a lab box as
+    /// <c>16/16 retention policies in place, 14 armed, 2 held</c> immediately after a fully-DONE run.</para>
+    ///
+    /// <para>This asserts the fix at the level the defect lives: the daily's floor reaches the HOURLY's oldest
+    /// bucket, which is strictly older than raw's oldest row, and the hourly-tier policy then ARMS. The
+    /// mutation is converging to raw instead — the shipped behaviour — which leaves the daily short and the
+    /// policy held.</para>
+    ///
+    /// <para>NO-POLICY FIXTURE, deliberately: the ensure sweep's refresh policy runs immediately and
+    /// materializes a trailing window contiguously, which can satisfy a coverage assertion on its own. That
+    /// trap already made a pin in this file vacuous twice, so the aggregates here are created from their own
+    /// DDL and the only materialization is the one under test.</para>
+    /// </summary>
+    [Fact]
+    public async Task HierarchicalDaily_ConvergesToItsHourly_NotToRaw_SoTheHourlyTierPolicyArms()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #1798 source-convergence test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct));
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var historyFrom = now.Date.AddDays(-HistoryDays);
+
+        await SeedHourlyQueryStatsAsync(connection, historyFrom, now, ct);
+
+        /* Aggregates WITHOUT their refresh policies — see the remarks. */
+        foreach (var createSql in new[] { TimescaleSupport.CreateQueryStatsHourlySql, TimescaleSupport.CreateQueryStatsDailySql })
+        {
+            await using var create = new NpgsqlCommand(createSql, connection);
+            await create.ExecuteNonQueryAsync(ct);
+        }
+
+        var hourly = TimescaleSupport.QueryStatsHourlyView;
+        var daily = TimescaleSupport.QueryStatsDailyView;
+
+        /* The hourly holds the WHOLE history... */
+        await RollupBackfill.RunSliceAsync(connection, hourly, historyFrom, now.Date, SilentDisclosure(), ct);
+
+        /* ...and then raw is purged back to a short horizon, which is the steady state of a healthy store and
+           the configuration where raw and the hourly stop being interchangeable. */
+        await using (var purge = new NpgsqlCommand("DELETE FROM collect.query_stats WHERE collection_time < $1", connection))
+        {
+            purge.Parameters.AddWithValue(now.AddDays(-4));
+            await purge.ExecuteNonQueryAsync(ct);
+        }
+
+        var target = RollupBackfill.Targets.Single(t => string.Equals(t.View, daily, StringComparison.Ordinal));
+        Assert.Equal(hourly, target.Source);
+
+        var probe = await RollupBackfill.ProbeAsync(connection, daily, target.Source, target.SourceTimeColumn, ct);
+        var rawOldest = await ReadScalarInstantAsync(connection, "SELECT min(collection_time) FROM collect.query_stats", ct);
+
+        Assert.NotNull(probe.SourceOldestUtc);
+        Assert.NotNull(rawOldest);
+        Assert.True(probe.SourceOldestUtc < rawOldest,
+            $"the hourly must out-reach raw for this to exercise #1798 (hourly {probe.SourceOldestUtc:O}, raw {rawOldest:O})");
+
+        /* Back fill the daily against the SOURCE-relative plan, exactly as the verb does. */
+        var plan = RollupBackfill.Plan(
+            daily, probe.SourceOldestUtc, probe.CoverageOldestUtc,
+            probe.MaterializedBuckets, probe.MaterializedBytes, rawBytes: 0, bucketWidth: TimeSpan.FromDays(1));
+
+        Assert.False(plan.IsComplete);
+        foreach (var (from, to) in RollupBackfill.Slices(plan.FromUtc, plan.ToUtc))
+        {
+            await RollupBackfill.RunSliceAsync(connection, daily, from, to, SilentDisclosure(), ct);
+        }
+
+        /* THE ASSERTION: the daily reached the HOURLY's oldest bucket, which is older than raw's oldest row.
+           Converging to raw would stop at rawOldest and fail this by the whole purged span. */
+        var dailyFloor = await RollupBackfill.ReadCoverageFloorAsync(connection, daily, ct);
+        Assert.NotNull(dailyFloor);
+        Assert.True(dailyFloor <= probe.SourceOldestUtc,
+            $"the daily stopped at {dailyFloor:O} but its source hourly reaches {probe.SourceOldestUtc:O} — converged to raw, not to source (#1798)");
+        Assert.True(dailyFloor < rawOldest,
+            $"the daily only reached {dailyFloor:O}, which is no older than raw ({rawOldest:O}) — the hourly-tier gate measures the HOURLY, so this leaves it held");
+
+        /* And the gate agrees: the hourly-tier policy ARMS, which is the operator-visible promise. */
+        await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct);
+        Assert.Equal(1L, await CountAsync(connection, ArmedHourlyPolicySql, ct));
+
+        await UnscheduleAllJobsAsync(connection, ct);
+    }
+
+    /// <summary>Is query_stats_hourly's retention policy ARMED? The #1798 observable — it is gated on the
+    /// DAILY covering the hourly, which is the comparison the backfill now converges to.</summary>
+    private const string ArmedHourlyPolicySql = @"
+SELECT count(*)
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = 'query_stats_hourly'
+AND   j.scheduled";
+
+    /// <summary>One nullable timestamp, for reading a relation's oldest instant.</summary>
+    private static async Task<DateTime?> ReadScalarInstantAsync(
+        NpgsqlConnection connection, string sql, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        return await command.ExecuteScalarAsync(cancellationToken) is DateTime instant ? instant : null;
+    }
 
     /// <summary>Is query_stats' raw retention policy ARMED? The gate's real observable, read from the job
     /// catalog rather than by re-evaluating its predicate.</summary>

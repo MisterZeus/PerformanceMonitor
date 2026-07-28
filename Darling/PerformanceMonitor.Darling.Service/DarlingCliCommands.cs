@@ -2159,12 +2159,13 @@ public static class DarlingCliCommands
         var plans = new List<(RollupBackfillTarget Target, RollupBackfillPlan Plan)>();
         var refusedPlans = new List<string>();
         var rawBytesCache = new Dictionary<string, long>(StringComparer.Ordinal);
+        var rawOldestCache = new Dictionary<string, DateTime?>(StringComparer.Ordinal);
         foreach (var target in RollupBackfill.Targets)
         {
             RollupBackfillProbe probe;
             try
             {
-                probe = await RollupBackfill.ProbeAsync(connection, target.View, target.RawTable, cancellationToken);
+                probe = await RollupBackfill.ProbeAsync(connection, target.View, target.Source, target.SourceTimeColumn, cancellationToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -2175,14 +2176,31 @@ public static class DarlingCliCommands
                 continue;
             }
 
+            /* The UNCALIBRATED estimate stays bounded by RAW's size even for a hierarchical daily, whose
+               convergence target is now its hourly. Raw is the larger relation, so it is the conservative
+               bound, and this branch only runs when the rollup has materialized nothing to measure — where
+               erring high is the whole point (#1759). Deliberately not switched to the source with the rest of
+               #1798: sizing a CAGG source would need its materialization hypertable, which buys accuracy in
+               precisely the case where accuracy is not what is wanted. */
             if (!rawBytesCache.TryGetValue(target.RawTable, out var rawBytes))
             {
                 rawBytes = await RollupBackfill.RawBytesAsync(connection, target.RawTable, cancellationToken);
                 rawBytesCache[target.RawTable] = rawBytes;
             }
 
+            /* BOUND THE PREFLIGHT AGAINST WHERE THE SOURCE WILL END UP, not where it starts now. A daily's
+               source is an hourly that this same run deepens FIRST, so estimating from the pre-backfill floor
+               under-counts precisely the region the run then writes — and the printed number is the commitment
+               the operator accepted. Same invariant as the rows-per-bucket under-estimate, and it bites on the
+               store shape where disk is tightest. A no-op for the hourlies, whose source IS raw. */
+            if (!rawOldestCache.TryGetValue(target.RawTable, out var rootRawOldest))
+            {
+                rootRawOldest = await RollupBackfill.OldestInstantAsync(connection, target.RawTable, "collection_time", cancellationToken);
+                rawOldestCache[target.RawTable] = rootRawOldest;
+            }
+
             plans.Add((target, RollupBackfill.Plan(
-                target.View, probe.RawOldestUtc, probe.CoverageOldestUtc,
+                target.View, RollupBackfill.EventualSourceFloor(probe.SourceOldestUtc, rootRawOldest), probe.CoverageOldestUtc,
                 probe.MaterializedBuckets, probe.MaterializedBytes, rawBytes,
                 target.IsDaily ? TimeSpan.FromDays(1) : TimeSpan.FromHours(1))));
         }
@@ -2221,7 +2239,7 @@ public static class DarlingCliCommands
                 return 1;
             }
 
-            output.WriteLine("Every rollup already covers its raw table. Any retention policy still held will arm itself on the next service start.");
+            output.WriteLine("Every rollup already covers its own source. Any retention policy still held will arm itself on the next service start.");
             return 0;
         }
 
@@ -2295,10 +2313,64 @@ public static class DarlingCliCommands
         var disclosure = new RefreshDisclosure(message => error.WriteLine("  NOTE: " + message));
 
         var shortfalls = new List<string>();
-        foreach (var (target, plan) in work)
+        foreach (var (target, plannedUpFront) in work)
         {
             output.WriteLine();
-            output.WriteLine($"  {plan.View}:");
+            output.WriteLine($"  {plannedUpFront.View}:");
+
+            /* RE-PLAN FROM LIVE MEASUREMENTS, because a hierarchical daily's target MOVES during this run.
+               The plans above were all taken before any slice ran — necessary, since the disk preflight has to
+               total the whole job before committing to any of it — but a daily converges to its HOURLY, and
+               that hourly is backfilled EARLIER IN THIS SAME LOOP. Planning a daily from the pre-backfill
+               snapshot aims it at where its source used to start, so it does almost nothing and is then judged
+               against where its source now starts: SHORT on every daily, every time. Caught by the verb's own
+               end-to-end test going red on exactly that.
+
+               Re-planning here is the same measured-floor idiom that makes resume work, applied one level up:
+               the up-front pass sizes the job, this one aims it. */
+            RollupBackfillPlan plan;
+            try
+            {
+                var live = await RollupBackfill.ProbeAsync(connection, target.View, target.Source, target.SourceTimeColumn, cancellationToken);
+                plan = RollupBackfill.Plan(
+                    target.View, live.SourceOldestUtc, live.CoverageOldestUtc,
+                    live.MaterializedBuckets, live.MaterializedBytes,
+                    rawBytesCache.TryGetValue(target.RawTable, out var cachedRawBytes) ? cachedRawBytes : 0,
+                    target.IsDaily ? TimeSpan.FromDays(1) : TimeSpan.FromHours(1));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                error.WriteLine($"    FAILED to re-probe before running: {ex.Message}");
+                shortfalls.Add($"{plannedUpFront.View} could not be re-probed before its slices ran");
+                continue;
+            }
+
+            if (plan.Refusal is string replanRefusal)
+            {
+                /* A REFUSAL IS NOT A COMPLETION, and this is a GUARD rather than an assertion that the case
+                   cannot arise. RollupBackfillPlan.Absurd sets IsComplete as well as Refusal, so testing
+                   IsComplete first — as an earlier cut did — printed "already covers" over a refusal and
+                   counted it as success.
+
+                   On today's code a refused re-plan is close to unreachable: a corrupt source timestamp makes
+                   the HOURLY's up-front plan refuse on the same row, and since a daily is now planned against
+                   its source's eventual floor, the daily refuses up front too — so neither reaches this loop.
+                   But "close to unreachable" is an argument about the current call graph, not a property, and
+                   the failure it protects against is slicing a window the planner already rejected as garbage.
+                   The guard costs three lines; the argument would have to be re-derived by every future
+                   reader. */
+                error.WriteLine($"    [REFUSED] {target.View}: {replanRefusal}");
+                shortfalls.Add($"{target.View}: {replanRefusal}");
+                continue;
+            }
+
+            if (plan.IsComplete)
+            {
+                /* Its source moved under it and it is already covered — normal for a daily whose hourly
+                   turned out to reach no further back than the daily already did. */
+                output.WriteLine($"    already covers {target.Source} — nothing to do.");
+                continue;
+            }
 
             var completed = 0L;
             var sliceFailed = false;
@@ -2326,20 +2398,20 @@ public static class DarlingCliCommands
                the range was materialized. The only honest check is to re-read the floor from DATA and compare
                it to the raw row it had to reach. */
             var finalFloor = await RollupBackfill.ReadCoverageFloorAsync(connection, plan.View, cancellationToken);
-            var after = await RollupBackfill.ProbeAsync(connection, plan.View, target.RawTable, cancellationToken);
-            var reached = finalFloor is not null && after.RawOldestUtc is not null && finalFloor <= after.RawOldestUtc;
+            var after = await RollupBackfill.ProbeAsync(connection, plan.View, target.Source, target.SourceTimeColumn, cancellationToken);
+            var reached = finalFloor is not null && after.SourceOldestUtc is not null && finalFloor <= after.SourceOldestUtc;
 
             /* Short WITHOUT a slice having failed means the refreshes reported success over a range they did
                not materialize — the signature of an earlier pass cut short, whose invalidation records a plain
                refresh will now skip straight over. That is the one case the forced form repairs, and the only
                case it is worth paying for. */
-            if (!reached && !sliceFailed && after.RawOldestUtc is not null)
+            if (!reached && !sliceFailed && after.SourceOldestUtc is not null)
             {
                 output.WriteLine($"    {plan.View} is still short after every slice; escalating to a forced refresh over the range.");
                 try
                 {
                     finalFloor = await RollupBackfill.RepairAsync(connection, plan.View, plan.FromUtc, plan.ToUtc, disclosure, cancellationToken);
-                    reached = finalFloor is not null && finalFloor <= after.RawOldestUtc;
+                    reached = finalFloor is not null && finalFloor <= after.SourceOldestUtc;
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -2351,13 +2423,13 @@ public static class DarlingCliCommands
 
             if (reached)
             {
-                output.WriteLine($"    COVERED: {plan.View} now starts at {finalFloor:yyyy-MM-dd HH:mm}, at or before {target.RawTable}'s oldest row ({after.RawOldestUtc:yyyy-MM-dd HH:mm}).");
+                output.WriteLine($"    COVERED: {plan.View} now starts at {finalFloor:yyyy-MM-dd HH:mm}, at or before {target.Source}'s oldest row ({after.SourceOldestUtc:yyyy-MM-dd HH:mm}) — which is what the arming gate measures for this tier.");
             }
             else
             {
-                shortfalls.Add($"{plan.View} reaches back to {finalFloor:yyyy-MM-dd HH:mm} but {target.RawTable} reaches back to {after.RawOldestUtc:yyyy-MM-dd HH:mm}");
+                shortfalls.Add($"{plan.View} reaches back to {finalFloor:yyyy-MM-dd HH:mm} but its source {target.Source} reaches back to {after.SourceOldestUtc:yyyy-MM-dd HH:mm}");
                 error.WriteLine(
-                    $"    SHORT: {plan.View} did not reach {target.RawTable}'s oldest row" +
+                    $"    SHORT: {plan.View} did not reach its source {target.Source}'s oldest row" +
                     (sliceFailed
                         ? " (a slice failed above)."
                         : " even though every slice reported success — a refresh that stops on its internal batch cap is silent to the client. Re-run to continue."));
@@ -2371,7 +2443,7 @@ public static class DarlingCliCommands
 
         if (shortfalls.Count > 0)
         {
-            error.WriteLine("INCOMPLETE. These rollups do not yet cover their raw tables, so their retention policies stay held:");
+            error.WriteLine("INCOMPLETE. These rollups do not yet cover their sources, so their retention policies stay held:");
             foreach (var shortfall in shortfalls)
             {
                 error.WriteLine("  - " + shortfall);
@@ -2382,7 +2454,7 @@ public static class DarlingCliCommands
             return 1;
         }
 
-        output.WriteLine("DONE. Every rollup now covers its raw table.");
+        output.WriteLine("DONE. Every rollup now covers its own source, which is what each retention policy's arming gate measures.");
         output.WriteLine();
         output.WriteLine("NEXT: restart the PerformanceMonitor Darling service. The arming gate checks coverage at");
         output.WriteLine("startup and releases the held retention policies by itself — there is no arming step here and");

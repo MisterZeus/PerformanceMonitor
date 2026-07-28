@@ -117,7 +117,7 @@ public sealed class RollupBackfillTests
         /* A fresh #1759 store: raw reaches back a year, the rollup only to the policy's 3-day window. */
         var initial = RollupBackfill.Plan(
             TimescaleSupport.QueryStatsHourlyView,
-            rawOldestUtc: DaysAgo(365), coverageOldestUtc: DaysAgo(3),
+            sourceOldestUtc: DaysAgo(365), coverageOldestUtc: DaysAgo(3),
             materializedBuckets: 72, materializedBytes: 72 * 1024 * 1024,
             rawBytes: 145 * Gb, bucketWidth: TimeSpan.FromHours(1));
 
@@ -128,7 +128,7 @@ public sealed class RollupBackfillTests
         /* Interrupted half way: the next pass plans only the REMAINING span, not the whole thing again. */
         var resumed = RollupBackfill.Plan(
             TimescaleSupport.QueryStatsHourlyView,
-            rawOldestUtc: DaysAgo(365), coverageOldestUtc: DaysAgo(180),
+            sourceOldestUtc: DaysAgo(365), coverageOldestUtc: DaysAgo(180),
             materializedBuckets: 4_500, materializedBytes: 4_500L * 1024 * 1024,
             rawBytes: 145 * Gb, bucketWidth: TimeSpan.FromHours(1));
 
@@ -139,7 +139,7 @@ public sealed class RollupBackfillTests
         /* Complete: coverage reaches raw, so there is nothing to do and the verb says so rather than working. */
         var complete = RollupBackfill.Plan(
             TimescaleSupport.QueryStatsHourlyView,
-            rawOldestUtc: DaysAgo(365), coverageOldestUtc: DaysAgo(365),
+            sourceOldestUtc: DaysAgo(365), coverageOldestUtc: DaysAgo(365),
             materializedBuckets: 8_760, materializedBytes: 9 * Gb,
             rawBytes: 145 * Gb, bucketWidth: TimeSpan.FromHours(1));
 
@@ -150,7 +150,7 @@ public sealed class RollupBackfillTests
         /* Coverage DEEPER than raw (raw has already been purged past it) is also complete — not negative work. */
         var deeper = RollupBackfill.Plan(
             TimescaleSupport.QueryStatsHourlyView,
-            rawOldestUtc: DaysAgo(4), coverageOldestUtc: DaysAgo(21),
+            sourceOldestUtc: DaysAgo(4), coverageOldestUtc: DaysAgo(21),
             materializedBuckets: 500, materializedBytes: Gb, rawBytes: 145 * Gb, bucketWidth: TimeSpan.FromHours(1));
 
         Assert.True(deeper.IsComplete);
@@ -162,7 +162,7 @@ public sealed class RollupBackfillTests
     public void Plan_EmptyRawTable_IsComplete()
     {
         var plan = RollupBackfill.Plan(
-            TimescaleSupport.QueryStatsHourlyView, rawOldestUtc: null, coverageOldestUtc: null,
+            TimescaleSupport.QueryStatsHourlyView, sourceOldestUtc: null, coverageOldestUtc: null,
             materializedBuckets: 0, materializedBytes: 0, rawBytes: 0, bucketWidth: TimeSpan.FromHours(1));
 
         Assert.True(plan.IsComplete);
@@ -181,7 +181,7 @@ public sealed class RollupBackfillTests
         /* 72 buckets occupying 72 MB → 1 MB/bucket. A year of hourly buckets is 8,760 of them. */
         var calibrated = RollupBackfill.Plan(
             TimescaleSupport.QueryStatsHourlyView,
-            rawOldestUtc: DaysAgo(365), coverageOldestUtc: DaysAgo(3),
+            sourceOldestUtc: DaysAgo(365), coverageOldestUtc: DaysAgo(3),
             materializedBuckets: 72, materializedBytes: 72 * 1024 * 1024,
             rawBytes: 145 * Gb, bucketWidth: TimeSpan.FromHours(1));
 
@@ -192,7 +192,7 @@ public sealed class RollupBackfillTests
         /* Nothing materialized: no sample, so the estimate is an upper bound and says so. */
         var uncalibrated = RollupBackfill.Plan(
             TimescaleSupport.QueryStatsHourlyView,
-            rawOldestUtc: DaysAgo(365), coverageOldestUtc: null,
+            sourceOldestUtc: DaysAgo(365), coverageOldestUtc: null,
             materializedBuckets: 0, materializedBytes: 0,
             rawBytes: 145 * Gb, bucketWidth: TimeSpan.FromHours(1));
 
@@ -224,7 +224,7 @@ public sealed class RollupBackfillTests
     {
         var plan = RollupBackfill.Plan(
             TimescaleSupport.QueryStatsDailyView,
-            rawOldestUtc: Now.Date.AddDays(-10), coverageOldestUtc: Now.Date.AddDays(-10 + coverageDaysAgo),
+            sourceOldestUtc: Now.Date.AddDays(-10), coverageOldestUtc: Now.Date.AddDays(-10 + coverageDaysAgo),
             materializedBuckets: 10, materializedBytes: 10 * 1024 * 1024,
             rawBytes: Gb, bucketWidth: TimeSpan.FromHours(bucketHours));
 
@@ -288,7 +288,7 @@ public sealed class RollupBackfillTests
 
         var plan = RollupBackfill.Plan(
             TimescaleSupport.QueryStatsHourlyView,
-            rawOldestUtc: Now.AddHours(-100), coverageOldestUtc: Now,
+            sourceOldestUtc: Now.AddHours(-100), coverageOldestUtc: Now,
             materializedBuckets: sampleBuckets, materializedBytes: sampleBytes,
             rawBytes: 500 * Gb, bucketWidth: TimeSpan.FromHours(1));
 
@@ -299,9 +299,88 @@ public sealed class RollupBackfillTests
         Assert.Equal(expectedPerBucket * plan.BucketsToAdd, plan.EstimatedBytes, expectedPerBucket);
 
         /* And the pin that makes the fix visible in the SQL: a ROW count here is the shipped defect. */
-        var probe = RollupBackfill.ProbeSql(TimescaleSupport.QueryStatsHourlyView, "query_stats");
+        var probe = RollupBackfill.ProbeSql(TimescaleSupport.QueryStatsHourlyView, "query_stats", "collection_time");
         Assert.Contains($"count(DISTINCT bucket) FROM collect.{TimescaleSupport.QueryStatsHourlyView}", probe, StringComparison.Ordinal);
         Assert.DoesNotContain("count(*)", probe, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// THE PREFLIGHT MUST BOUND THE WHOLE JOB, including work a mid-run re-plan discovers.
+    ///
+    /// <para>A hierarchical daily converges to its HOURLY, and that hourly is deepened earlier in the SAME run.
+    /// The preflight has to total everything before committing to any of it, so it estimates from floors taken
+    /// before a single slice has run — and for a daily that pre-backfill floor is shallower than what the run
+    /// will actually aim at. Estimating from it under-counts exactly the region the run then writes, on the
+    /// store shape (deep raw, everything held) where free space is tightest and the printed number is the
+    /// commitment the operator accepted.</para>
+    ///
+    /// <para>The property under test is <b>printed bound &gt;= actual work</b>, not any particular estimator:
+    /// planning with the eventual floor must span at least as much as planning with the floor the run will
+    /// eventually see. Asserted on buckets and bytes, since the operator is shown both.</para>
+    /// </summary>
+    [Fact]
+    public void Preflight_BoundsTheWorkAMidRunReplanWillFind()
+    {
+        /* The sick-store shape: raw holds a year (purges held), the hourly has only its 3-day policy window,
+           and the daily is empty. The run will deepen the hourly to raw FIRST, so by the time the daily runs
+           its source reaches back a year — not the three days the preflight would naively have seen. */
+        var rawOldest = DaysAgo(365);
+        var hourlyFloorAtPreflight = DaysAgo(3);
+
+        var eventual = RollupBackfill.EventualSourceFloor(hourlyFloorAtPreflight, rawOldest);
+        Assert.Equal(rawOldest, eventual);
+
+        var preflight = RollupBackfill.Plan(
+            TimescaleSupport.QueryStatsDailyView, eventual, coverageOldestUtc: null,
+            materializedBuckets: 10, materializedBytes: 10L * 1024 * 1024,
+            rawBytes: 145 * Gb, bucketWidth: TimeSpan.FromDays(1));
+
+        /* What the run re-plans once the hourly has been deepened. */
+        var afterReplan = RollupBackfill.Plan(
+            TimescaleSupport.QueryStatsDailyView, rawOldest, coverageOldestUtc: null,
+            materializedBuckets: 10, materializedBytes: 10L * 1024 * 1024,
+            rawBytes: 145 * Gb, bucketWidth: TimeSpan.FromDays(1));
+
+        Assert.True(preflight.BucketsToAdd >= afterReplan.BucketsToAdd,
+            $"the preflight planned {preflight.BucketsToAdd} buckets but the run will do {afterReplan.BucketsToAdd} — the disk gate was cleared against a number smaller than the job");
+
+        /* Bytes too, since the operator is shown both. Note this is the ESTIMATE — deterministic arithmetic
+           over the planned span times a per-bucket sample — NOT bytes measured off the store. A live
+           byte assertion would be flaky, because compression and page slack make the same span occupy
+           different amounts on different days. */
+        Assert.True(preflight.EstimatedBytes >= afterReplan.EstimatedBytes,
+            $"the preflight estimated {preflight.EstimatedBytes} bytes but the run will write about {afterReplan.EstimatedBytes}");
+
+        /* THE PROPERTY STATED THE OTHER WAY ROUND, and the more direct form: the daily's up-front plan must
+           span to the hourly's TARGET, not to where the hourly currently stops. Compare against the hourly's
+           OWN up-front plan on the same fixture — if the daily starts no earlier than the hourly will, the
+           preflight has already counted every bucket the run can reach. */
+        var hourlyPlan = RollupBackfill.Plan(
+            TimescaleSupport.QueryStatsHourlyView, rawOldest, hourlyFloorAtPreflight,
+            materializedBuckets: 72, materializedBytes: 72L * 1024 * 1024,
+            rawBytes: 145 * Gb, bucketWidth: TimeSpan.FromHours(1));
+
+        Assert.False(hourlyPlan.IsComplete, "the hourly must have work, or the daily's target cannot move under it");
+        Assert.True(preflight.FromUtc <= hourlyPlan.FromUtc,
+            $"the daily's up-front plan starts at {preflight.FromUtc:O} but its hourly will reach {hourlyPlan.FromUtc:O} — planned against the source's CURRENT floor rather than the source's target");
+
+        /* And the bound is not vacuous: taking the pre-backfill floor instead really is smaller, which is what
+           makes this a bound rather than an identity. */
+        var naive = RollupBackfill.Plan(
+            TimescaleSupport.QueryStatsDailyView, hourlyFloorAtPreflight, coverageOldestUtc: null,
+            materializedBuckets: 10, materializedBytes: 10L * 1024 * 1024,
+            rawBytes: 145 * Gb, bucketWidth: TimeSpan.FromDays(1));
+
+        Assert.True(naive.BucketsToAdd < afterReplan.BucketsToAdd,
+            "the pre-backfill floor must under-count the run, or this fixture is not exercising the gap");
+
+        /* An HOURLY is unaffected — its source IS raw, so both candidates are the same instant. */
+        Assert.Equal(rawOldest, RollupBackfill.EventualSourceFloor(rawOldest, rawOldest));
+
+        /* Nulls degrade to whichever side is known rather than collapsing the bound to nothing. */
+        Assert.Equal(rawOldest, RollupBackfill.EventualSourceFloor(null, rawOldest));
+        Assert.Equal(hourlyFloorAtPreflight, RollupBackfill.EventualSourceFloor(hourlyFloorAtPreflight, null));
+        Assert.Null(RollupBackfill.EventualSourceFloor(null, null));
     }
 
     /// <summary>
@@ -317,7 +396,7 @@ public sealed class RollupBackfillTests
 
         var plan = RollupBackfill.Plan(
             TimescaleSupport.QueryStatsHourlyView,
-            rawOldestUtc: epochGarbage, coverageOldestUtc: Now,
+            sourceOldestUtc: epochGarbage, coverageOldestUtc: Now,
             materializedBuckets: 10, materializedBytes: 10 * 1024 * 1024,
             rawBytes: Gb, bucketWidth: TimeSpan.FromHours(1));
 
@@ -334,7 +413,7 @@ public sealed class RollupBackfillTests
         /* Ten years of real history still plans normally — the clamp must not refuse a long-lived store. */
         var longLived = RollupBackfill.Plan(
             TimescaleSupport.QueryStatsHourlyView,
-            rawOldestUtc: Now.AddDays(-3_000), coverageOldestUtc: Now,
+            sourceOldestUtc: Now.AddDays(-3_000), coverageOldestUtc: Now,
             materializedBuckets: 10, materializedBytes: 10 * 1024 * 1024,
             rawBytes: Gb, bucketWidth: TimeSpan.FromHours(1));
 
@@ -592,7 +671,7 @@ public sealed class RollupBackfillTests
     [Fact]
     public void ProbeSql_SizesTheMaterializationHypertable_NotTheViewsParent()
     {
-        var sql = RollupBackfill.ProbeSql(TimescaleSupport.QueryStatsHourlyView, "query_stats");
+        var sql = RollupBackfill.ProbeSql(TimescaleSupport.QueryStatsHourlyView, "query_stats", "collection_time");
 
         Assert.Contains("hypertable_size(", sql, StringComparison.Ordinal);
         Assert.Contains("materialization_hypertable_name", sql, StringComparison.Ordinal);

@@ -226,7 +226,7 @@ public sealed class RollupCoverageRoutingTests
 
         /* Plain PostgreSQL: no rollup named at all, but the raw floors still read. */
         var none = TimescaleSupport.RollupCoverageProbeSql(RollupAvailability.None);
-        foreach (var (view, _) in TimescaleSupport.RollupViews)
+        foreach (var (view, _, _, _) in TimescaleSupport.RollupViews)
         {
             Assert.DoesNotContain($"collect.{view}", none, StringComparison.Ordinal);
         }
