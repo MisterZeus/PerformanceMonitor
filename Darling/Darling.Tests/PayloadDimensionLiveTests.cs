@@ -41,6 +41,15 @@ namespace Darling.Tests;
 [Collection("live-postgres")]
 public sealed class PayloadDimensionLiveTests
 {
+    /// <summary>
+    /// The exact line the dimension GC emits when it stands down, pinned in FULL rather than by prefix: it is
+    /// a field signature an operator greps for, and a partial pin would let the wording drift to name a cause
+    /// the guard does not actually detect -- which is how it came to say "raw purges held" while the shipped
+    /// trigger was a purge that did not complete.
+    /// </summary>
+    private const string DeferralSignature =
+        "dimension GC deferred: a dim-feeding fact purge did not complete this cycle; facts may outlive their retention until a sweep succeeds";
+
     private const string SkipReason =
         "Set DARLING_TEST_PG to a Postgres connection string to run the payload-dimension store tests.";
 
@@ -791,7 +800,7 @@ public sealed class PayloadDimensionLiveTests
                must land on. Asserting the log line first would let a broken guard go red on missing
                TEXT while the actual data loss went unexamined. */
             Assert.Equal(1L, await DimRowCountAsync(connection, digest, ct));
-            Assert.Contains("dimension GC deferred", deferredLog.Joined, StringComparison.Ordinal);
+            Assert.Contains(DeferralSignature, deferredLog.Joined, StringComparison.Ordinal);
 
             using (var restore = new NpgsqlCommand(
                 "ALTER TABLE collect.query_stats_pm1782 RENAME TO query_stats", connection))
@@ -805,7 +814,7 @@ public sealed class PayloadDimensionLiveTests
             var prunedLog = new CapturingTestLogger();
             await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, prunedLog, ct);
 
-            Assert.DoesNotContain("dimension GC deferred", prunedLog.Joined, StringComparison.Ordinal);
+            Assert.DoesNotContain(DeferralSignature, prunedLog.Joined, StringComparison.Ordinal);
             Assert.Equal(0L, await DimRowCountAsync(connection, digest, ct));
         }
         finally
