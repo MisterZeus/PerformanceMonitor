@@ -18,9 +18,9 @@ namespace PerformanceMonitor.Collectors;
 /// Database-scoped configurations from sys.database_scoped_configurations for each online user
 /// database (on-load only). Extracted verbatim from Lite's RemoteCollectorService.ServerConfig.cs.
 /// The enumeration shape: list databases first (on-prem filters to non-AG or primary-replica
-/// databases; Azure lists all online), then EXECUTE [db].sys.sp_executesql per database on the
-/// same connection — the proven per-database idiom the Query Store collector also uses. A
-/// database that fails is skipped with a warning by the host.
+/// databases the login can actually enter; Azure lists all online), then EXECUTE
+/// [db].sys.sp_executesql per database on the same connection — the proven per-database idiom the
+/// Query Store collector also uses. A database that fails is skipped with a warning by the host.
 /// </summary>
 public sealed class DatabaseScopedConfigCollector : CollectorDefinitionBase<DatabaseScopedConfigCollector.Row>
 {
@@ -45,6 +45,7 @@ WHERE (d.database_id > 4 OR d.database_id = 2)
 AND   d.database_id < 32761
 AND   d.name <> N'PerformanceMonitor'
 AND   d.state_desc = N'ONLINE'
+AND   HAS_DBACCESS(d.name) = 1 /*a least-privilege login without per-db access raised 916 per db per cycle (#1823); index_object_stats and database_size_stats already self-skip this way. On-prem only: from master on Azure SQL DB this returns 0 for every user database.*/
 AND
 (
     drs.database_id IS NULL          /*not in any AG*/

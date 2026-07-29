@@ -417,21 +417,49 @@ For a fleet of servers sharing one identity — one managed identity or one serv
 
 ### Lite / Darling (On-Premises)
 
-Nothing is installed on the target server. The login only needs:
+Nothing is installed on the target server. The full least-privilege grant set (verified live against SQL Server 2025 with a scratch login, [#1823](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1823)):
 
 ```sql
 USE [master];
+
+/* Server-scoped DMVs - the required core. Also implies VIEW DATABASE STATE in every database. */
 GRANT VIEW SERVER STATE TO [YourLogin];
 
--- Optional: for Availability Group health (see the note below - without this
--- the AG collectors return zero rows on a server that HAS availability groups)
+/* Enter every current and future database, with no per-database users to maintain. The
+   per-database collectors (database scoped config, index/object stats, database size,
+   Query Store) skip databases the login cannot enter. */
+GRANT CONNECT ANY DATABASE TO [YourLogin];
+
+/* Catalog visibility. Catalog views enforce permissions by HIDING ROWS, not by erroring:
+   without this, sys.tables / sys.indexes (the index and object collectors) and the AG
+   catalog views return zero rows that look exactly like "no data" (see the AG note below). */
 GRANT VIEW ANY DEFINITION TO [YourLogin];
 
--- Optional: for SQL Agent job monitoring
+/* The deadlock / blocked-process Extended Events sessions. */
+GRANT ALTER ANY EVENT SESSION TO [YourLogin];
+
+/* Optional: the default-trace collector reads sys.traces, which requires ALTER TRACE -
+   VIEW SERVER STATE does not cover it. Note ALTER TRACE is not read-only (it also permits
+   creating and altering traces, and implies SHOWPLAN in every database); withhold it and
+   the collector records a PERMISSIONS skip instead. */
+GRANT ALTER TRACE TO [YourLogin];
+
+/* Optional: SQL Agent job monitoring + failed-job alerts. Direct table grants, deliberately
+   NOT SQLAgentReaderRole: that role gates the sp_help_job* procedures, which this product
+   never calls, and grants NO SELECT on the tables the collectors actually read - with only
+   the role, every Agent collector fails with error 229. */
 USE [msdb];
 CREATE USER [YourLogin] FOR LOGIN [YourLogin];
-ALTER ROLE [SQLAgentReaderRole] ADD MEMBER [YourLogin];
+GRANT SELECT ON dbo.sysjobs         TO [YourLogin];
+GRANT SELECT ON dbo.sysjobactivity  TO [YourLogin];
+GRANT SELECT ON dbo.sysjobhistory   TO [YourLogin];
+GRANT SELECT ON dbo.sysjobschedules TO [YourLogin];
+GRANT SELECT ON dbo.syscategories   TO [YourLogin];
+GRANT SELECT ON dbo.syssessions     TO [YourLogin];
+GRANT EXECUTE ON dbo.agent_datetime TO [YourLogin];
 ```
+
+Two operational notes. The msdb grants live inside a system database that SQL Server setup can rewrite — re-check them after a CU or version upgrade. And if a security review rejects `CONNECT ANY DATABASE`, the documented fallback is a real user per database (the same shape as the [FinOps loop below](#finops-index-analysis-per-database-grants), minus the `sql_expression_dependencies` grant) — at the cost of not covering databases created later.
 
 **Availability Groups need a second grant.** The `ag_replica_states` / `ag_database_replica_states` collectors read the AG *catalog views* (`sys.availability_groups`, `sys.availability_replicas`) alongside the `sys.dm_hadr_*` DMVs. The DMVs are covered by `VIEW SERVER STATE`, but [the catalog views require `VIEW ANY DEFINITION`](https://learn.microsoft.com/en-us/sql/database-engine/availability-groups/windows/monitor-availability-groups-transact-sql) — and catalog views enforce that by *hiding rows*, not by raising an error. So on a real AG cluster a login with only `VIEW SERVER STATE` gets zero rows, which looks exactly like a server with no availability groups. If your AG dashboards are empty, this grant is why.
 
@@ -483,6 +511,7 @@ Azure SQL Database doesn't support server-level logins. Create a **contained dat
 -- Connect to your target database (not master)
 CREATE USER [SQLServerPerfMon] WITH PASSWORD = 'YourStrongPassword';
 GRANT VIEW DATABASE STATE TO [SQLServerPerfMon];
+GRANT VIEW DEFINITION     TO [SQLServerPerfMon];
 ```
 
 For [Managed Identity or Service Principal](#authentication) authentication, create the contained user from the identity's display name instead of a password — an Azure AD admin must already be configured on the logical server:
@@ -491,11 +520,12 @@ For [Managed Identity or Service Principal](#authentication) authentication, cre
 -- Connect to your target database (not master)
 CREATE USER [your-managed-identity-or-app-registration-name] FROM EXTERNAL PROVIDER;
 GRANT VIEW DATABASE STATE TO [your-managed-identity-or-app-registration-name];
+GRANT VIEW DEFINITION     TO [your-managed-identity-or-app-registration-name];
 ```
 
 For a large fleet, grant an Entra **group** instead of provisioning each identity individually where your architecture allows it. SQL Agent and msdb are not available on Azure SQL Database — those collectors are skipped automatically.
 
-> `VIEW DATABASE STATE` is what lets the `sys.dm_os_*` DMVs return server hardware inventory (CPU count, physical memory, socket and core topology) and memory metrics on each monitored database. If the contained user lacks it, edition, version, and storage still resolve from permission-free scalars, so the FinOps **Server Inventory** grid keeps the server's row and shows a non-alarming "Hardware Note" that hardware inventory is unavailable, instead of dropping the entire row (#1535).
+> `VIEW DEFINITION` is the database-scoped form of the catalog-visibility grant explained above: without it, `sys.tables` / `sys.indexes` return zero rows to the index and object collectors — silently, not as an error. `VIEW DATABASE STATE` is what lets the `sys.dm_os_*` DMVs return server hardware inventory (CPU count, physical memory, socket and core topology) and memory metrics on each monitored database. If the contained user lacks it, edition, version, and storage still resolve from permission-free scalars, so the FinOps **Server Inventory** grid keeps the server's row and shows a non-alarming "Hardware Note" that hardware inventory is unavailable, instead of dropping the entire row (#1535).
 
 ### Azure SQL Managed Instance
 

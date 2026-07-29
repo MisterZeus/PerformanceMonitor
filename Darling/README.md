@@ -195,33 +195,59 @@ Every failure in steps 2–3 is tolerated and logged: the deadlock/blocked-proce
 
 ### Permissions on Monitored Servers
 
+The full least-privilege set, verified live against SQL Server 2025 with a scratch login carrying exactly these grants ([#1823](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1823)). For integrated auth, replace the first line with `CREATE LOGIN [DOMAIN\svc-account] FROM WINDOWS;` — the grants apply unchanged.
+
 ```sql
 USE [master];
 CREATE LOGIN [DarlingMonitor] WITH PASSWORD = N'YourStrongPassword';
+
+/* Required core: server-scoped DMVs (also implies VIEW DATABASE STATE in every database). */
 GRANT VIEW SERVER STATE TO [DarlingMonitor];
+
+/* The deadlock / blocked-process XE sessions. */
 GRANT ALTER ANY EVENT SESSION TO [DarlingMonitor];
 
--- Only if the instance hosts Availability Groups (see the table below)
+/* Enter every current and future database, with no per-database users to maintain. */
+GRANT CONNECT ANY DATABASE TO [DarlingMonitor];
+
+/* Catalog visibility everywhere - see the table for what goes silently missing without it. */
 GRANT VIEW ANY DEFINITION TO [DarlingMonitor];
 
--- Optional: SQL Agent job monitoring + failed-job alerts
+/* Optional: the default-trace collector (sys.traces requires ALTER TRACE; VIEW SERVER STATE
+   does not cover it). NOT read-only - it also permits creating/altering traces and implies
+   SHOWPLAN - so withholding it is a legitimate choice; the collector degrades cleanly. */
+GRANT ALTER TRACE TO [DarlingMonitor];
+
+/* Optional: SQL Agent job monitoring + failed-job alerts. Direct table grants, deliberately
+   NOT SQLAgentReaderRole - that role gates the sp_help_job* procedures, which this product
+   never calls, and grants NO SELECT on the tables the collectors read. */
 USE [msdb];
 CREATE USER [DarlingMonitor] FOR LOGIN [DarlingMonitor];
-ALTER ROLE [SQLAgentReaderRole] ADD MEMBER [DarlingMonitor];
+GRANT SELECT ON dbo.sysjobs         TO [DarlingMonitor];
+GRANT SELECT ON dbo.sysjobactivity  TO [DarlingMonitor];
+GRANT SELECT ON dbo.sysjobhistory   TO [DarlingMonitor];
+GRANT SELECT ON dbo.sysjobschedules TO [DarlingMonitor];
+GRANT SELECT ON dbo.syscategories   TO [DarlingMonitor];
+GRANT SELECT ON dbo.syssessions     TO [DarlingMonitor];
+GRANT EXECUTE ON dbo.agent_datetime TO [DarlingMonitor];
 ```
 
 | Grant | Why | If missing |
 |---|---|---|
 | `VIEW SERVER STATE` | All DMV collectors (wait stats, query stats, memory, CPU, file I/O, sessions, etc.) and the connect probe | Collection fails — this one is required |
 | `ALTER ANY EVENT SESSION` | Create/start the two XE sessions | Logged; deadlock and blocked-process collectors read zero rows (an admin can pre-create the sessions instead) |
+| `CONNECT ANY DATABASE` | The per-database collectors (`database_scoped_config`, `index_object_stats`, `database_size_stats`, `query_store_stats`) enter each database via `EXECUTE [db].sys.sp_executesql` | Databases the login cannot enter are skipped; without the grant that is every user database |
+| `VIEW ANY DEFINITION` | Catalog-view row visibility everywhere: `sys.tables` / `sys.indexes` / `sys.objects` for the index and object collectors, `sys.dm_db_partition_stats`, and the AG catalog views (`sys.availability_groups`, `sys.availability_replicas`) | **Silently zero rows** — catalog views hide rows rather than erroring, so missing objects look exactly like empty databases, and a real AG cluster looks identical to a server with no AGs |
 | `ALTER SETTINGS` | The `sp_configure` blocked-process-threshold bootstrap | Logged; set the threshold yourself (or via RDS Parameter Group) |
-| `SQLAgentReaderRole` on msdb | `running_jobs` collector and the failed/long-running-job alerts | Skipped gracefully — logged as a permissions skip, alerts return no jobs |
+| `ALTER TRACE` | The `default_trace_events` collector — `sys.traces` / `fn_trace_gettable` accept nothing less | `PERMISSIONS` skip in collection health; the default-trace tab stays empty |
+| msdb job-table `SELECT`s + `agent_datetime` `EXECUTE` | `running_jobs` / `job_history` / `agent_status` collectors and the failed/long-running-job alerts — all direct table reads; `SQLAgentReaderRole` alone leaves every one failing with error 229 | Skipped gracefully — logged as a permissions skip, alerts return no jobs |
 | `DBCC TRACESTATUS` permission | `trace_flags` snapshot | Degrades to zero rows with a warning |
-| `VIEW ANY DEFINITION` | The AG catalog views (`sys.availability_groups`, `sys.availability_replicas`) the `ag_replica_states` / `ag_database_replica_states` collectors join to the `sys.dm_hadr_*` DMVs | **Silently zero rows** — catalog views hide rows rather than erroring, so a real AG cluster looks identical to a server with no AGs. Not needed on an instance without Availability Groups |
 
-**Azure SQL Database:** connect to the one database you monitor (set the server entry's `"database"`), using a contained user with `VIEW DATABASE STATE`, matching the product's existing Azure guidance. The XE sessions are created database-scoped there (`ALTER ANY DATABASE EVENT SESSION`); SQL Agent collectors are skipped automatically.
+The msdb grants live inside a system database SQL Server setup can rewrite — re-check them after a CU or version upgrade.
 
-Collectors that hit a permission error (SQL errors 229/297/300) log a `PERMISSIONS` row in `collection_log` and retry on their next scheduled run — one denied collector never stops the rest.
+**Azure SQL Database:** connect to the one database you monitor (set the server entry's `"database"`), using a contained user with `VIEW DATABASE STATE` and `VIEW DEFINITION`, matching the product's existing Azure guidance. The XE sessions are created database-scoped there (`ALTER ANY DATABASE EVENT SESSION`); SQL Agent collectors are skipped automatically.
+
+Collectors that hit a permission error (SQL errors 229/297/300, plus 8189 from `sys.traces`) log a `PERMISSIONS` row in `collection_log` and retry on their next scheduled run — one denied collector never stops the rest.
 
 #### Which collectors run on which platform
 
