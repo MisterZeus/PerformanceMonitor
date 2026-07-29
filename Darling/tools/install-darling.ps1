@@ -129,6 +129,24 @@ else {
     Write-Host "Created service '$serviceName' (NT SERVICE virtual account, automatic start)."
 }
 
+# The account the service ACTUALLY logs on as - NOT assumed to be the virtual account. Operators using
+# integrated auth to monitored servers re-home the service to a domain account or gMSA (#1802, #1823),
+# and the upgrade path above deliberately preserves that (sc config touches binPath only). The 4b
+# hardening below must grant the account the service really runs as: rebuilding the DACL around the
+# virtual account on a re-homed install would strip the operator's grant and lock the service out of
+# its own config on the next start. Fresh installs resolve to the virtual account just created.
+$serviceAccount = "NT SERVICE\$serviceName"
+try {
+    $startName = (Get-CimInstance -ClassName Win32_Service -Filter "Name='$serviceName'" -ErrorAction Stop).StartName
+    if ($startName) {
+        if ($startName -eq 'LocalSystem') { $serviceAccount = 'NT AUTHORITY\SYSTEM' }
+        else { $serviceAccount = $startName -replace '^\.\\', "$env:COMPUTERNAME\" }
+    }
+}
+catch {
+    # Fall back to the virtual account the create path just used.
+}
+
 # -- 4b. Lock down darling.json (#1647) -----------------------------------------------------------
 # The config holds every monitored server's encryptedPassword plus the MCP bearer and web access tokens.
 # They are DPAPI LocalMachine scope with an entropy constant that ships in the open-source repo, so READ
@@ -162,7 +180,7 @@ foreach ($secretFile in @($configPath) + @(Get-ChildItem -Path $root -Filter 'da
         $systemSid      = New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)
         $adminsSid      = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)
         $interactiveSid = New-Object System.Security.Principal.SecurityIdentifier($wk::InteractiveSid, $null)
-        $serviceSid     = (New-Object System.Security.Principal.NTAccount("NT SERVICE\$serviceName")).Translate([System.Security.Principal.SecurityIdentifier])
+        $serviceSid     = (New-Object System.Security.Principal.NTAccount($serviceAccount)).Translate([System.Security.Principal.SecurityIdentifier])
 
         $acl = New-Object System.Security.AccessControl.FileSecurity
         # Protect the DACL and drop every inherited ACE: access is now EXACTLY the four rules below.
@@ -224,7 +242,7 @@ if ($failed.Count -gt 0) {
     Write-Host '  the file can recover all of it. Fix each one from an elevated prompt:' -ForegroundColor Red
     Write-Host "    icacls `"<file>`" /inheritance:d" -ForegroundColor Yellow
     Write-Host "    icacls `"<file>`" /remove:g `"BUILTIN\Users`"" -ForegroundColor Yellow
-    Write-Host "    icacls `"<file>`" /grant `"NT SERVICE\$serviceName`:(F)`"" -ForegroundColor Yellow
+    Write-Host "    icacls `"<file>`" /grant `"$serviceAccount`:(F)`"" -ForegroundColor Yellow
     Write-Host '  ...or move the install out of a world-readable folder such as one created directly under C:\.' -ForegroundColor Red
     Write-Host ''
 }

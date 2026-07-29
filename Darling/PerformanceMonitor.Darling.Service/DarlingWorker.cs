@@ -564,10 +564,13 @@ public sealed class DarlingWorker : BackgroundService
                who can resolve this, so give them the three lines. */
             /* Built as ONE argument rather than repeating {Path}: a structured-logging template binds
                placeholders POSITIONALLY, so a repeated name silently consumes the next argument and the
-               tail of the message renders empty — in the one log line whose entire job is to be actionable. */
+               tail of the message renders empty — in the one log line whose entire job is to be actionable.
+               The /grant names the identity the service RUNS AS, not the default virtual account — on an
+               install re-homed to a domain account for integrated auth (#1823), granting the virtual
+               account would be a fix that cannot work. */
             var remediation =
                 $"icacls \"{path}\" /inheritance:d   then   icacls \"{path}\" /remove:g \"BUILTIN\\Users\"   " +
-                $"then   icacls \"{path}\" /grant \"NT SERVICE\\PerformanceMonitor Darling:(F)\"";
+                $"then   icacls \"{path}\" /grant \"{DarlingFileSecurity.ServiceAccountDisplayName}:(F)\"";
 
             _logger.LogError(
                 "Could not restrict the ACL on {Path}{Detail} ({Message}). If the owner is not this service, the " +
@@ -631,10 +634,11 @@ public sealed class DarlingWorker : BackgroundService
             catch (Exception ex)
             {
                 /* Same contract as the live file: best-effort, but the remediation is spelled out as
-                   runnable commands so an elevated human can finish the job the service cannot. */
+                   runnable commands so an elevated human can finish the job the service cannot — naming
+                   the identity the service runs as, which is not the virtual account on a re-homed install. */
                 var remediation =
                     $"icacls \"{backup}\" /inheritance:d   then   icacls \"{backup}\" /remove:g \"BUILTIN\\Users\"   " +
-                    $"then   icacls \"{backup}\" /grant \"NT SERVICE\\PerformanceMonitor Darling:(F)\"";
+                    $"then   icacls \"{backup}\" /grant \"{DarlingFileSecurity.ServiceAccountDisplayName}:(F)\"";
 
                 logger.LogError(
                     "Could not restrict the ACL on config backup {Path}{Detail} ({Message}). It carries the same " +

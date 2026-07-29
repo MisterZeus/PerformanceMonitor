@@ -77,7 +77,7 @@ Minimal working example — one server, integrated auth, bring-your-own PostgreS
 }
 ```
 
-**Integrated auth (recommended).** The service connects to monitored servers as the Windows account the service runs under. Grant that account the [permissions below](#permissions-on-monitored-servers).
+**Integrated auth (recommended).** The service connects to monitored servers as the Windows account the service runs under — there is no separate Windows credential to configure. Grant that account the [permissions below](#permissions-on-monitored-servers). The default install's virtual service account reaches *remote* servers as the collector machine's computer account (`DOMAIN\<machine>$`), so for integrated auth you will usually [run the service as a domain account or gMSA](#run-the-service-as-a-domain-account-or-gmsa) instead.
 
 **SQL auth.** Set `"auth": "sql"`, a `username`, and an `encryptedPassword` produced by the `--encrypt-password` verb:
 
@@ -98,6 +98,8 @@ PerformanceMonitor.Darling.Service.exe --test-connection
 ```
 
 (`--validate-config` is an alias.) It validates the file, then connects to and probes each server, printing a `[PASS]`/`[FAIL]` line per server (SQL major version, engine edition, and whether the account has msdb access for failed-job alerts). It exits `0` only when the file is valid **and** every server is reachable, so it doubles as a deployment gate. Add an explicit config path as a second argument if `darling.json` is not next to the exe and `DARLING_CONFIG` is not set. This is the same probe the Viewer's **Test Connection** button runs through the service.
+
+One identity caveat: the verb connects as **you**, the console user — not as the service account. For `"auth": "integrated"` servers a `[PASS]` proves the server is reachable and the config is well-formed, but the grants that matter at runtime are the *service account's*: the per-server connect lines in the service log are the real proof (see [Run the service as a domain account or gMSA](#run-the-service-as-a-domain-account-or-gmsa)).
 
 ### Run It — Console Mode
 
@@ -133,9 +135,41 @@ Also register the service's Windows event source once, from the same elevated sh
 powershell -NoProfile -Command "New-EventLog -LogName Application -Source 'PerformanceMonitor Darling' -ErrorAction SilentlyContinue"
 ```
 
-The `obj=` clause runs the service under a **virtual service account** (`NT SERVICE\<service name>` — password-less, per-service SID, unprivileged; the same convention SQL Server itself uses). That is the right account for SQL-auth monitoring, and with `postgres.managed = true` it is more than a preference: PostgreSQL refuses to execute with administrative privileges, so don't run the service as LocalSystem — a least-privilege account keeps the bundled store's initdb/start path on ground PostgreSQL supports. For integrated auth to monitored servers, set a domain account (or gMSA) holding the SQL-side grants below instead, via **Services.msc → Log On** or `sc config ... obj=`. Note the space after `binPath=`, `start=`, and `obj=` — `sc` requires it.
+The `obj=` clause runs the service under a **virtual service account** (`NT SERVICE\<service name>` — password-less, per-service SID, unprivileged; the same convention SQL Server itself uses). That is the right account for SQL-auth monitoring, and with `postgres.managed = true` it is more than a preference: PostgreSQL refuses to execute with administrative privileges, so don't run the service as LocalSystem — a least-privilege account keeps the bundled store's initdb/start path on ground PostgreSQL supports. For integrated auth to monitored servers, [run the service as a domain account or gMSA](#run-the-service-as-a-domain-account-or-gmsa) instead. Note the space after `binPath=`, `start=`, and `obj=` — `sc` requires it.
 
 One managed-mode handoff gotcha: if you test-drove the service from a console first, the bundled store's data directory belongs to *your* account, and the service account may not be able to write it. Point the service at a fresh `postgres.dataDirectory` (or delete the test directory) rather than fighting ACLs.
+
+#### Run the service as a domain account or gMSA
+
+With `"auth": "integrated"`, the monitoring identity **is** the service's Log On account — nothing in `darling.json` names a Windows account, and there is no separate credential to set. The default virtual account carries only the *machine* identity onto the network (remote servers see `DOMAIN\<collector-machine>$`), so for integrated auth against remote servers you almost always want a real AD service account or, better, a gMSA. Switching is a Windows-side change plus a SQL-side grant, with one file-permission step in the middle that bites everyone who skips it:
+
+1. **Change the Log On account.** Stop the service, then **Services.msc → PerformanceMonitor Darling → Log On → This account** — that route also grants the account the *Log on as a service* right automatically. Or from an elevated prompt (with `sc config` you grant *Log on as a service* yourself, via secpol.msc or GPO):
+
+   ```
+   sc config "PerformanceMonitor Darling" obj= "DOMAIN\svc-account" password= "ThePassword"
+   ```
+
+   A gMSA works the same way with an empty password: `obj= "DOMAIN\gmsa-name$" password= ""`. Keep the account **out of the local Administrators group**: with `postgres.managed = true` the bundled PostgreSQL refuses to run with administrative privileges, exactly as it refuses LocalSystem.
+
+2. **Grant the account on every monitored server** — a Windows login holding the same [permissions below](#permissions-on-monitored-servers) (the `GRANT`s there apply to a Windows login unchanged):
+
+   ```sql
+   USE [master];
+   CREATE LOGIN [DOMAIN\svc-account] FROM WINDOWS;
+   ```
+
+3. **Re-grant the service's own files — the step people miss.** The service deliberately locks its files down to SYSTEM, Administrators, and the account it was *running as*; the new account is on none of those ACLs, and the service will fail to read its config or write its store. One-time, from an elevated prompt, before starting the service:
+
+   ```
+   icacls "C:\ProgramData\PerformanceMonitorDarling" /grant "DOMAIN\svc-account:(OI)(CI)F"
+   icacls "C:\PerformanceMonitorDarling\darling.json" /grant "DOMAIN\svc-account:F"
+   ```
+
+   Adjust the second path to wherever `darling.json` sits beside the service exe; the first covers the logs and, in managed mode, the store's data directory. On its next start the service re-asserts the tight ACL itself — now including the new account — so this does not need repeating.
+
+4. **Start the service and verify from its log** (`%ProgramData%\PerformanceMonitorDarling\logs`): the per-server connect lines are the proof that the *service account's* grants work. `--test-connection` from your console runs as you, not the service account — see the [pre-flight note above](#validate-the-config-pre-flight).
+
+Nothing else moves: anything encrypted with `--encrypt-password` (SQL-auth server passwords, SMTP) survives the account change, because those blobs are DPAPI **machine**-scope, not account-scope — and collected data is untouched. Later `install-darling.ps1` upgrades preserve a custom Log On account and harden `darling.json` for the account the service actually runs as.
 
 ### What the Service Does on Monitored Servers
 
