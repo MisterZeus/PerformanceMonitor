@@ -12,7 +12,6 @@ using System.Linq;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Threading.Tasks;
-using PerformanceMonitor.Darling.Service;
 using Microsoft.Extensions.Logging.Abstractions;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
