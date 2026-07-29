@@ -2465,8 +2465,11 @@ LIMIT 1", connection);
         }
         catch (SqlException ex) when (ex.Number is 229 or 297 or 300 or 916)
         {
-            /* Expected for read-only monitoring accounts; hit every alert cycle, so Info. */
-            _logger.LogInformation("[{Server}] Skipping recently-failed-job check (msdb/SQLAgentReaderRole access needed): {Message}",
+            /* Expected for read-only monitoring accounts; hit every alert cycle, so Info. The named
+               remedy is direct table SELECTs, NOT SQLAgentReaderRole: that role gates the sp_help_job*
+               interface only and confers nothing on the base tables this query reads — a #1823 field
+               box had the role and still landed here every cycle. */
+            _logger.LogInformation("[{Server}] Skipping recently-failed-job check (needs SELECT on msdb.dbo.sysjobs and sysjobhistory — SQLAgentReaderRole alone is not enough; see the monitoring-login grants in the README): {Message}",
                 runtime.Config.DisplayName, ex.Message);
             return new List<FailedJobInfo>();
         }
@@ -3189,12 +3192,15 @@ LIMIT 1";
                 _logger, cancellationToken);
             return 0;
         }
-        catch (SqlException ex) when (ex.Number is 229 or 297 or 300)
+        catch (SqlException ex) when (ex.Number is 229 or 297 or 300 or 8189)
         {
             /* Same Azure explanation Lite appends (#1631): error 300 on Azure SQL Database is a service
                objective limit phrased as a permission denied on 'master', which reads as a missing GRANT
                and sends people looking for one that cannot be issued. Appended, so the raw error stays
-               searchable. Parity is the point — a Darling operator gets the identical sentence Lite gives. */
+               searchable. Parity is the point — a Darling operator gets the identical sentence Lite gives.
+               8189 is sys.traces' own denial ("You do not have permission to run 'SYS.TRACES'", ALTER
+               TRACE missing): a legitimate least-privilege choice (#1823) — ALTER TRACE is not read-only —
+               so default_trace_events must degrade as PERMISSIONS, not scream ERROR every cycle. */
             var message = ex.Message + AzureDmvPermissionHint.For(ex.Number, server.Runtime?.Target.IsAzureSqlDb == true);
 
             _logger.LogWarning("  [{Server}] {Collector} => insufficient permissions ({Number}): {Message}",

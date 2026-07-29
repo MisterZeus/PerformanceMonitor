@@ -42,6 +42,9 @@ public sealed class DatabaseScopedConfigCollectorDefinitionTests
         Assert.NotNull(plan);
         Assert.Contains("sys.dm_hadr_database_replica_states", plan!.Text, StringComparison.Ordinal);
         Assert.Contains("is_primary_replica = 1", plan.Text, StringComparison.Ordinal);
+        /* #1823: a least-privilege login without per-db access must be filtered out up front, the
+           same self-skip index_object_stats and database_size_stats already do. */
+        Assert.Contains("HAS_DBACCESS(d.name) = 1", plan.Text, StringComparison.Ordinal);
         Assert.Contains("AND d.name NOT IN (@excl_db_0)", plan.Text, StringComparison.Ordinal);
         Assert.Equal("SO", Assert.Single(plan.Parameters).Value);
     }
@@ -55,6 +58,9 @@ public sealed class DatabaseScopedConfigCollectorDefinitionTests
         Assert.NotNull(plan);
         Assert.DoesNotContain("dm_hadr_database_replica_states", plan!.Text, StringComparison.Ordinal);
         Assert.Contains("state_desc = N'ONLINE'", plan.Text, StringComparison.Ordinal);
+        /* The asymmetry is deliberate: from master on Azure SQL DB, HAS_DBACCESS() returns 0 for
+           every user database, so the on-prem filter here would silently enumerate nothing. */
+        Assert.DoesNotContain("HAS_DBACCESS", plan.Text, StringComparison.Ordinal);
     }
 
     [Fact]

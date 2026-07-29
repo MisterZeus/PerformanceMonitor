@@ -597,8 +597,11 @@ public partial class RemoteCollectorService
             {
                 AppLogger.Warn("Collector", $"Collector '{collectorName}' column not found for server '{server.DisplayName}' (possible version incompatibility): {ex.Message}");
             }
-            else if (ex.Number == 229 || ex.Number == 297 || ex.Number == 300)
+            else if (ex.Number == 229 || ex.Number == 297 || ex.Number == 300 || ex.Number == 8189)
             {
+                /* 8189 is sys.traces' own denial (ALTER TRACE missing) — a legitimate least-privilege
+                   choice (#1823), so default_trace_events degrades as PERMISSIONS like every other
+                   denied collector instead of erroring every cycle. Mirrors Darling's classifier. */
                 status = "PERMISSIONS";
                 AppLogger.Warn("Collector", $"Collector '{collectorName}' permission denied for server '{server.DisplayName}': {ex.Message}");
             }

@@ -1107,9 +1107,11 @@ namespace PerformanceMonitorDashboard.Services
             }
             catch (Microsoft.Data.SqlClient.SqlException ex) when (ex.Number is 229 or 297 or 300 or 916)
             {
-                /* Login lacks msdb / SQLAgentReaderRole access — expected for read-only monitoring
-                   accounts; hit every alert cycle, so log at Info (not Warning) to avoid burying real warnings. */
-                Logger.Info($"Skipping recently-failed-job check (msdb/SQLAgentReaderRole access needed): {ex.Message}");
+                /* Login lacks direct msdb job-table SELECT — expected for read-only monitoring accounts;
+                   hit every alert cycle, so log at Info (not Warning) to avoid burying real warnings.
+                   SQLAgentReaderRole is deliberately NOT the named remedy: it gates the sp_help_job*
+                   interface only and confers nothing on the base tables this query reads (#1823). */
+                Logger.Info($"Skipping recently-failed-job check (needs SELECT on msdb.dbo.sysjobs and sysjobhistory — SQLAgentReaderRole alone is not enough; see the monitoring-login grants in the README): {ex.Message}");
             }
             catch (Exception ex)
             {
