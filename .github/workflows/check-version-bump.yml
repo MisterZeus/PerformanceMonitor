@@ -61,9 +61,14 @@ jobs:
         id: main
         shell: pwsh
         run: |
-          $version = ([xml](Get-Content main-branch/deprecated/Dashboard/Dashboard.csproj)).Project.PropertyGroup.Version | Where-Object { $_ }
+          # main still carries the pre-deprecation layout until the v3.3.0 promotion lands;
+          # fall back to the old path so the release PR itself can pass. Removable once
+          # main has deprecated/Dashboard/.
+          $path = 'main-branch/deprecated/Dashboard/Dashboard.csproj'
+          if (-not (Test-Path $path)) { $path = 'main-branch/Dashboard/Dashboard.csproj' }
+          $version = ([xml](Get-Content $path)).Project.PropertyGroup.Version | Where-Object { $_ }
           echo "VERSION=$version" >> $env:GITHUB_OUTPUT
-          Write-Host "Main version: $version"
+          Write-Host "Main version: $version (from $path)"
 
       - name: Compare versions
         if: steps.changes.outputs.all_count != steps.changes.outputs.docs_count
