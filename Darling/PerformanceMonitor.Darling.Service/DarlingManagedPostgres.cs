@@ -1486,13 +1486,26 @@ public sealed class DarlingManagedPostgres
 
         /* Pre-plant guard: never trust a superuser credential file owned by an arbitrary local user
            (SYSTEM / Administrators / the service account only). A file someone else owns may have been
-           planted to feed the service a password they know — refuse rather than authenticate with it. */
+           planted to feed the service a password they know — refuse rather than authenticate with it.
+
+           Two very different causes share this symptom, and the benign one is the common one: after an
+           operator re-homes the service to a domain account or gMSA (#1823), the file is still owned by
+           the PREVIOUS service account — the runbook's icacls grants change permissions, never ownership.
+           The message leads with that case and its runnable fix (ownership to Administrators, which stays
+           trusted across any future account change), because the field report behind it read "tampered
+           with or pre-planted" and reached for re-initializing a healthy store. The service cannot fix
+           this itself: taking ownership needs a privilege a service account is not granted. */
         if (!DarlingFileSecurity.IsTrustedOwner(_credentialPath))
         {
             throw new InvalidOperationException(
                 $"The managed Postgres credential file {_credentialPath} is not owned by SYSTEM, Administrators, or the " +
-                "service account — it may have been tampered with or pre-planted. Refusing to trust it. Investigate, then " +
-                "restore it from backup or re-initialize the data directory (destroys collected history).");
+                $"service account{DarlingFileSecurity.DescribeOwnerAndExposure(_credentialPath)}. If you changed the " +
+                "service's Log On account, that is the previous service account still owning the file — from an ELEVATED " +
+                $"prompt run   takeown /f \"{_credentialPath}\" /a   then   " +
+                $"icacls \"{_credentialPath}\" /grant \"{DarlingFileSecurity.ServiceAccountDisplayName}:(F)\"   and start " +
+                "the service again. If you did NOT change the service account, treat the file as tampered with or " +
+                "pre-planted: investigate, then restore it from backup or re-initialize the data directory (destroys " +
+                "collected history).");
         }
 
         return DarlingSecrets.Unprotect(File.ReadAllText(_credentialPath).Trim());
