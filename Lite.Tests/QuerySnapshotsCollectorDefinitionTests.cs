@@ -53,6 +53,11 @@ public sealed class QuerySnapshotsCollectorDefinitionTests
         Assert.Contains("live_query_plan = deqs.query_plan,", sql, StringComparison.Ordinal);
         Assert.Contains("OUTER APPLY sys.dm_exec_query_statistics_xml(der.session_id) AS deqs", sql, StringComparison.Ordinal);
         Assert.Contains("msdb.dbo.cdc_jobs", sql, StringComparison.Ordinal);
+        /* The existence pre-guard, not just the TRY/CATCH: cdc_jobs is created lazily on first CDC
+           configuration, and TRY/CATCH suppresses the failure but NOT the server-side error_reported
+           event — without the guard every no-CDC server fed fleet error monitoring a once-per-cycle
+           "Invalid object name" 208. */
+        Assert.Contains("IF OBJECT_ID(N'msdb.dbo.cdc_jobs') IS NOT NULL", sql, StringComparison.Ordinal);
         Assert.Contains("sp_MScdc_capture_job", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("#req", sql, StringComparison.Ordinal);
         Assert.Contains("der.database_id <> ISNULL(DB_ID(N'PerformanceMonitor'), 0)", sql, StringComparison.Ordinal);
