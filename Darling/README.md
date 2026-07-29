@@ -167,6 +167,15 @@ With `"auth": "integrated"`, the monitoring identity **is** the service's Log On
 
    Adjust the second path to wherever `darling.json` sits beside the service exe; the first covers the logs and, in managed mode, the store's data directory. On its next start the service re-asserts the tight ACL itself — now including the new account — so this does not need repeating.
 
+   In managed-store mode there is one more, and it needs **ownership**, not a grant: the store's superuser credential `pg-credential.dpapi` (beside the data directory, under `C:\ProgramData\PerformanceMonitorDarling` by default) is trusted only when *owned* by SYSTEM, Administrators, or the service account — an anti-pre-plant check — and `icacls /grant` changes permissions, never ownership, so after the switch the file is still owned by the *previous* service account and the service refuses it. Hand ownership to Administrators (trusted across any future account change, which is why not the new account itself) and grant the new account on the file directly — its ACL is protected and does **not** inherit the folder grant above:
+
+   ```
+   takeown /f "C:\ProgramData\PerformanceMonitorDarling\pg-credential.dpapi" /a
+   icacls "C:\ProgramData\PerformanceMonitorDarling\pg-credential.dpapi" /grant "DOMAIN\svc-account:F"
+   ```
+
+   The sibling role credentials (the admin/viewer/mcp `.dpapi` files) hit the same ownership check but self-heal — a role password can be re-asserted, a superuser's cannot — so expect one-time `discarding and regenerating` warnings on the first start, not faults.
+
 4. **Start the service and verify from its log** (`%ProgramData%\PerformanceMonitorDarling\logs`): the per-server connect lines are the proof that the *service account's* grants work. `--test-connection` from your console runs as you, not the service account — see the [pre-flight note above](#validate-the-config-pre-flight).
 
 Nothing else moves: anything encrypted with `--encrypt-password` (SQL-auth server passwords, SMTP) survives the account change, because those blobs are DPAPI **machine**-scope, not account-scope — and collected data is untouched. Later `install-darling.ps1` upgrades preserve a custom Log On account and harden `darling.json` for the account the service actually runs as.
