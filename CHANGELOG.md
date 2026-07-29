@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **CI: the version-bump check survives the deprecated/ layout transition** ([#1821]) - the check compares the PR's Dashboard.csproj version against MAIN's copy, but read main's copy only at the NEW deprecated/ path - which does not exist on main until the v3.3.0 promotion itself lands, so the release PR failed the check on a path error rather than a version verdict. The main-side read now falls back to the pre-move location; removable once main carries the new layout.
+
 ## [3.3.0] - 2026-07-29
 
 ### Important
@@ -1906,6 +1910,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#1665]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1665
 [#1799]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1799
 [#1798]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1798
+[#1821]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1821
 [#1797]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1797
 [#1788]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1788
 [#1781]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1781
