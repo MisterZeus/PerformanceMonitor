@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
@@ -49,6 +50,13 @@ public sealed class ViewerPreferences
 
     /// <summary>Default auto-refresh cadence for a newly-opened server tab: 0=30s, 1=1m, 2=5m.</summary>
     public int AutoRefreshIntervalIndex { get; set; } = DefaultAutoRefreshIntervalIndexValue;
+
+    /// <summary>
+    /// Collapsed sidebar tag groups, so expand/collapse survives a restart. Each entry is a
+    /// <c>FleetGroupKey</c> storage string ("Favorites", "Untagged", or "Tag:{id}"); unknown or stale
+    /// entries (a deleted tag) are ignored on load. Empty by default, so a fresh fleet shows everything.
+    /// </summary>
+    public List<string> CollapsedFleetGroups { get; set; } = new();
 
     /// <summary>
     /// Clamps the two index values back to their defaults when they fall outside the combos' valid ranges

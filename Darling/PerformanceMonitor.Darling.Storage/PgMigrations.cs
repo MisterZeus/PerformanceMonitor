@@ -75,6 +75,14 @@ public static class PgMigrations
         new Migration(29, "long-query-completions-collector", V29Sql),
         new Migration(30, "web-dashboard-config", V30Sql),
         new Migration(31, "custom-views-table", V31Sql),
+        new Migration(32, "server-tags", V32Sql),
+        new Migration(33, "connection-alert-refire", V33Sql),
+        new Migration(34, "availability-group-collectors", V34Sql),
+        new Migration(35, "availability-group-alerts", V35Sql),
+        new Migration(36, "ag-latency-columns", V36Sql),
+        new Migration(37, "ag-local-replica-and-disconnect-refire", V37Sql),
+        new Migration(38, "query-payload-dimensions", PgSchemaGenerator.GenerateV38PayloadDimensions()),
+        new Migration(39, "dim-feeding-fact-floor-indexes", V39Sql),
     };
 
     /// <summary>
@@ -402,6 +410,233 @@ CREATE TABLE IF NOT EXISTS config.custom_views (
     updated_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
     updated_by text
 );";
+
+    /// <summary>
+    /// V32 — the Viewer's fleet TAGS, the user-authored visual organization of a large server list
+    /// (~100 servers at the motivating field site). Two NEW config-plane tables, added additively exactly
+    /// like V31: <c>server_tags</c> is the tag tree, <c>server_tag_map</c> is the many-to-many assignment.
+    ///
+    /// <para><b>Tags, not exclusive groups.</b> A server may carry any number of tags, so the composite
+    /// PK <c>(server_id, tag_id)</c> on the map is the whole membership rule — deliberately NOT a unique
+    /// constraint on <c>server_id</c>, which is what an exclusive-group model would have needed.</para>
+    ///
+    /// <para><b>Membership lives in its own table, never as a column on
+    /// <c>config_monitored_servers</c>.</b> A column there would have required all four of: an edit to the
+    /// fail-closed <c>ViewerRestrictedConfigTables</c> column ACL (an unlisted column is invisible, which
+    /// breaks the read-only viewer's ENTIRE sidebar read, not just the new field); a matching hand edit to
+    /// BYO <c>tools/provision-roles.sql</c>; a silent widening of the network-reachable <c>mcp</c> role,
+    /// whose INSERT/UPDATE/DELETE on that table is TABLE-level and so would cover a new column it cannot
+    /// even SELECT (a blind write); and — because <c>trg_bump_monitored_servers</c> is a STATEMENT-level
+    /// trigger — a full service <c>ReloadFromStoreAsync</c> per tag write, up to one per server on a bulk
+    /// tag of 100. A side table avoids all four. It also survives the server-identity move
+    /// (<c>server_id</c> is derived from host+database+read_only_intent, so editing any of those
+    /// upserts-new-then-deletes-old), which a column on the server row would not.</para>
+    ///
+    /// <para><b>Nesting.</b> <c>parent_id</c> is a self-reference; NULL = a root tag. Depth is capped
+    /// app-side at 4 levels — Postgres cannot express that without a trigger, and the tag table is tiny
+    /// (dozens of rows), so the Viewer loads it whole, builds the tree in memory, and checks both the cap
+    /// and cycle-freedom there. No recursive CTE, no ltree extension, no closure table.
+    /// <c>ON DELETE CASCADE</c> on the self-reference means deleting a tag removes its whole subtree and
+    /// (via the map's own cascade) those assignments — the folder mental model. It can never reach
+    /// <c>config_monitored_servers</c>: there is no FK to it, so no server row, credential blob, or
+    /// collected history is touched. The Viewer still warns with the descendant + assignment counts.</para>
+    ///
+    /// <para><b>Uniqueness is per-parent</b> so <c>prod/primaries</c> and <c>staging/primaries</c> coexist.
+    /// It is a UNIQUE INDEX over <c>COALESCE(parent_id, 0)</c> rather than a plain <c>UNIQUE
+    /// (parent_id, name)</c>, because Postgres treats NULLs as DISTINCT — two ROOT tags both named
+    /// 'Prod' would otherwise both be accepted. Identity starts at 1, so 0 is never a real id.
+    /// <c>lower(name)</c> makes it case-insensitive, matching how the rest of the product treats
+    /// operator-entered names.</para>
+    ///
+    /// <para><b>NO <c>config_bump_version</c> trigger</b>, same reasoning as V31: tags feed the VIEWER's
+    /// sidebar, never the collector/service loop, so there is nothing for the service to reload and a
+    /// beacon bump would only cost a needless fleet reconcile. <c>id</c> is
+    /// <c>GENERATED ALWAYS AS IDENTITY</c> so INSERTs need no sequence USAGE grant. No explicit grant is
+    /// added: both tables are picked up by the blanket <c>GRANT ... ON ALL TABLES IN SCHEMA config</c>
+    /// statements that provisioning re-runs on EVERY service start. Note it is those, not
+    /// <c>ALTER DEFAULT PRIVILEGES</c>, that cover a table introduced by a migration — ADP only applies to
+    /// objects created after it runs, and provisioning runs AFTER the migration pass. No
+    /// <c>ViewerRestrictedConfigTables</c> carve is needed either, because neither table has a secret
+    /// column — but note the corollary: a table in <c>config</c> is readable by the network-reachable
+    /// <c>mcp</c> role by default, so if tag names may carry customer identifiers the REVOKE must be
+    /// emitted inside provisioning AFTER that blanket grant (and mirrored into BYO
+    /// <c>tools/provision-roles.sql</c>), or the next service start silently re-grants it.</para>
+    /// </summary>
+    private const string V32Sql = @"
+CREATE TABLE IF NOT EXISTS config.server_tags (
+    id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name text NOT NULL,
+    parent_id integer REFERENCES config.server_tags(id) ON DELETE CASCADE,
+    sort_order integer NOT NULL DEFAULT 0,
+    created_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC')
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_server_tags_parent_name
+    ON config.server_tags (COALESCE(parent_id, 0), lower(name));
+
+CREATE TABLE IF NOT EXISTS config.server_tag_map (
+    server_id integer NOT NULL,
+    tag_id integer NOT NULL REFERENCES config.server_tags(id) ON DELETE CASCADE,
+    PRIMARY KEY (server_id, tag_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_server_tag_map_tag
+    ON config.server_tag_map (tag_id);";
+
+    /// <summary>
+    /// V33 — the #1659 connection-alert opt-ins on the singleton config_alert_settings row: announce a
+    /// server already down at first sight, and re-announce a standing outage every N minutes (0 = off).
+    /// Both default OFF, preserving the classic edge-only behavior byte-for-byte. ADD COLUMN IF NOT EXISTS
+    /// keeps the migration idempotent; NOT NULL DEFAULT means a pre-V33 row reads correctly with no backfill.
+    /// No ACL/provisioning change: config_alert_settings carries table-level grants (no column carve).
+    /// </summary>
+    private const string V33Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS notify_connection_down_at_startup boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS connection_refire_minutes integer NOT NULL DEFAULT 0;";
+
+    /// <summary>
+    /// V34 — the two Availability Group collector tables (#991): <c>ag_replica_states</c> (replica grain)
+    /// and <c>ag_database_replica_states</c> (database grain, carrying the send/redo queues, rates and
+    /// secondary lag). Added additively exactly like V29 — a fresh store already has both (V1's
+    /// <see cref="PgSchemaGenerator.GenerateFullSchema"/> walks the collector catalog), so
+    /// <c>CREATE TABLE IF NOT EXISTS</c> is a no-op on fresh and the real create on upgrade. Column
+    /// order/types are exactly <see cref="PgSchemaGenerator.CreateTable"/>'s output for the
+    /// <see cref="AgReplicaStatesCollector"/> / <see cref="AgDatabaseReplicaStatesCollector"/> catalog
+    /// entries (prefix NOT NULL, payload nullable). No <c>v_*</c> passthrough views (post-V14 collectors);
+    /// readers use the base tables. Hypertable / compression / retention flow from the catalog at runtime.
+    /// </summary>
+    private const string V34Sql = @"
+CREATE TABLE IF NOT EXISTS collect.ag_replica_states (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    ag_name text,
+    replica_server_name text,
+    role_desc text,
+    operational_state_desc text,
+    connected_state_desc text,
+    recovery_health_desc text,
+    synchronization_health_desc text,
+    availability_mode_desc text,
+    failover_mode_desc text,
+    endpoint_url text
+);
+
+CREATE INDEX IF NOT EXISTS idx_ag_replica_states_time ON collect.ag_replica_states(server_id, collection_time);
+
+CREATE TABLE IF NOT EXISTS collect.ag_database_replica_states (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    ag_name text,
+    database_name text,
+    replica_server_name text,
+    is_local boolean,
+    synchronization_state_desc text,
+    last_hardened_lsn text,
+    last_commit_lsn text,
+    log_send_queue_size bigint,
+    redo_queue_size bigint,
+    log_send_rate bigint,
+    redo_rate bigint,
+    is_suspended boolean,
+    suspend_reason_desc text,
+    availability_mode_desc text,
+    secondary_lag_seconds bigint
+);
+
+CREATE INDEX IF NOT EXISTS idx_ag_database_replica_states_time ON collect.ag_database_replica_states(server_id, collection_time);";
+
+    /// <summary>
+    /// V35 — the #991 Availability Group alert knobs on the singleton config_alert_settings row: the master
+    /// switch for the AG alert family plus the two "AG Sync Fell Behind" triggers. The lag trigger ships ON at
+    /// 300 seconds (a secondary five minutes behind is worth knowing about on any AG); the redo-queue trigger
+    /// ships OFF at 0, because a healthy queue size is workload-specific and a shipped guess would page half
+    /// the fleet. Same shape as V33: ADD COLUMN IF NOT EXISTS keeps it idempotent, and NOT NULL DEFAULT means a
+    /// pre-V35 row reads correctly with no backfill. No ACL/provisioning change — config_alert_settings carries
+    /// table-level grants (no column carve).
+    /// </summary>
+    private const string V35Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS notify_ag_health boolean NOT NULL DEFAULT true,
+    ADD COLUMN IF NOT EXISTS ag_lag_alert_seconds integer NOT NULL DEFAULT 300,
+    ADD COLUMN IF NOT EXISTS ag_redo_queue_alert_kb bigint NOT NULL DEFAULT 0;";
+
+    /// <summary>
+    /// V36 — the AG latency columns (#991 addendum): the four commit/hardened/redone/received timestamps
+    /// the reference project's query skips, plus the two server-computed drain-time estimates
+    /// (queue ÷ rate ÷ 60, guarded against BIGINT integer division and a zero rate).
+    /// <para>APPENDED, never inserted, and deliberately a SEPARATE migration rather than an edit to V34:
+    /// V34's <c>CREATE TABLE IF NOT EXISTS</c> is a no-op on a store that already ran it, so widening V34
+    /// in place would silently leave every already-migrated store (the field box included) six columns
+    /// short while fresh installs got them — the exact drift the fresh-vs-upgraded shape pin exists to
+    /// catch. <c>ADD COLUMN IF NOT EXISTS</c> appends physically, matching the order
+    /// <see cref="PgSchemaGenerator.CreateTable"/> emits for a fresh store, so both provenances end up
+    /// column-for-column identical (pinned by PgSchemaGeneratorTests, which reconstructs the current
+    /// shape from V34 + V36 and compares it to the generator).</para>
+    /// <para>Version 36 because 35 was taken by the concurrent AG-alerts work; both are now on dev, so the
+    /// ladder is dense again.</para>
+    /// </summary>
+    private const string V36Sql = @"
+ALTER TABLE collect.ag_database_replica_states
+    ADD COLUMN IF NOT EXISTS last_commit_time timestamp,
+    ADD COLUMN IF NOT EXISTS last_hardened_time timestamp,
+    ADD COLUMN IF NOT EXISTS last_redone_time timestamp,
+    ADD COLUMN IF NOT EXISTS last_received_time timestamp,
+    ADD COLUMN IF NOT EXISTS est_redo_completion_time_min double precision,
+    ADD COLUMN IF NOT EXISTS est_send_drain_time_min double precision;";
+
+    /// <summary>
+    /// V37 — two additive columns for #1696, in ONE migration because they ship together.
+    ///
+    /// <para><c>ag_replica_states.is_local</c> marks the row describing the replica the collector was
+    /// connected to. Every replica in an AG is visible from every node, so a fully-monitored 3-node AG
+    /// collects the same replica's state three times and previously reported one failover three times. The
+    /// alert path uses this to pick one node's view. NULLABLE, unlike the settings column below: rows
+    /// collected before this migration genuinely do not know, and a NULL must read as "unknown" rather than
+    /// as "not local" — de-duplicating on a false negative would drop a real alert. The de-dup treats a
+    /// snapshot with no known-local row as un-de-duplicable and keeps every row, which is the safe direction.</para>
+    ///
+    /// <para><c>config_alert_settings.ag_disconnect_refire_minutes</c> is the #1659 re-fire treatment for
+    /// "AG Replica Disconnected", which until now was a pure edge: a replica that stayed disconnected for a
+    /// week announced it once. NOT NULL DEFAULT 0 = off, so the shipped behavior is byte-for-byte the old
+    /// edge-only one and nothing starts re-alerting on upgrade.</para>
+    ///
+    /// ADD COLUMN IF NOT EXISTS throughout, per the file's additive idiom; config.-qualified because the
+    /// migrate session runs under search_path = collect, config, public.
+    /// </summary>
+    private const string V37Sql = @"
+ALTER TABLE collect.ag_replica_states
+    ADD COLUMN IF NOT EXISTS is_local boolean;
+
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS ag_disconnect_refire_minutes integer NOT NULL DEFAULT 0;";
+
+    /// <summary>
+    /// V39 — the partial indexes behind the dimension GC's MEASURED bound (#1795). The GC prunes
+    /// dimension content against the oldest SURVIVING digest-carrying fact row rather than an assumed
+    /// horizon, which requires a <c>min(collection_time)</c> probe per dim-feeding table every sweep.
+    /// Unindexed, that is an ordered walk from each hypertable's oldest chunk filtering out NULL-digest
+    /// rows (every pre-#1767 row); with a partial index whose predicate EXACTLY matches the probe's
+    /// WHERE clause, it is an index-edge read. One index per dim-feeding fact table, predicate =
+    /// "carries any digest" (the OR of that table's digest columns from <c>PayloadDimensions.All</c> —
+    /// pinned against the map by test, since a new dimension column would silently fall out of both the
+    /// index and the probe together or neither). TimescaleDB propagates the index to existing and
+    /// future chunks; <c>IF NOT EXISTS</c> keeps the migration idempotent; plain-PostgreSQL stores take
+    /// the same DDL unchanged. Bare names resolve through the migrate session's
+    /// <c>search_path = collect, config, public</c>.
+    /// </summary>
+    private const string V39Sql = @"
+CREATE INDEX IF NOT EXISTS ix_query_stats_digest_floor
+    ON query_stats (collection_time)
+    WHERE query_text_digest IS NOT NULL OR query_plan_digest IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS ix_procedure_stats_digest_floor
+    ON procedure_stats (collection_time)
+    WHERE query_plan_digest IS NOT NULL;";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

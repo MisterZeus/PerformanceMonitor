@@ -48,7 +48,7 @@ public sealed class DarlingMcpLongQueryTools
         {
             var now = DateTime.UtcNow;
             var rows = await DarlingLongQueryReader.GetRecentLongQueryCompletionsAsync(
-                postgres, resolved.Value.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No long-running query completions found in the specified time range. The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data.");
 
@@ -76,7 +76,7 @@ public sealed class DarlingMcpLongQueryTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 total_completions = rows.Count,
                 completions = result

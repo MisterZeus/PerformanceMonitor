@@ -8,13 +8,13 @@
 
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitorLite.Tests;
 using Xunit;
 
 namespace Lite.Tests;
@@ -32,29 +32,34 @@ namespace Lite.Tests;
 /// reconciling in period with the deadlock count over the same v_deadlocks window). Mirrors the Darling
 /// Blocking Stats scenarios (<c>ViewerBlockingStatsTests</c> / <c>ViewerDeadlockSeverityStatsTests</c>).
 /// </summary>
-public sealed class BlockingStatsReaderTests : IDisposable
+public sealed class BlockingStatsReaderTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private const int ServerId = 9922;
 
-    private readonly string _tempDir;
     private readonly DuckDbInitializer _duckDb;
+    private DuckDBConnection? _seedConn;
     private long _nextId = 1;
 
-    public BlockingStatsReaderTests()
+    public BlockingStatsReaderTests(SharedDuckDbFixture fixture)
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "LiteBlkStatsRt_" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(_tempDir);
-        _duckDb = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
     }
 
-    public void Dispose()
+    public void Dispose() => _seedConn?.Dispose();
+
+    /// <summary>
+    /// One connection reused for every seeded row — opening a fresh connection per
+    /// single-row INSERT measured ~90ms/row and dominated this class's runtime.
+    /// </summary>
+    private async Task<DuckDBConnection> SeedConnectionAsync()
     {
-        try
+        if (_seedConn is null)
         {
-            if (Directory.Exists(_tempDir))
-                Directory.Delete(_tempDir, recursive: true);
+            _seedConn = _duckDb.CreateConnection();
+            await _seedConn.OpenAsync();
         }
-        catch { /* Best-effort cleanup */ }
+        return _seedConn;
     }
 
     /* Anchor the window in the recent past so the default 24h read includes it; truncate to the minute so the
@@ -71,7 +76,6 @@ public sealed class BlockingStatsReaderTests : IDisposable
     [Fact]
     public async Task BlockingDurationStats_BucketsPerMinute_TotalMaxAvgEventCount()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         /* Minute A: two blocks (1000 + 3000 ms) → total 4000, max 3000, avg 2000, count 2.
@@ -101,7 +105,6 @@ public sealed class BlockingStatsReaderTests : IDisposable
     [Fact]
     public async Task BlockingDurationStats_ExcludesRowsOutsideTheWindow()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         /* Only event is 48h ago — outside a 24h window (the read windows on event_time, like the count trend). */
@@ -113,7 +116,6 @@ public sealed class BlockingStatsReaderTests : IDisposable
     [Fact]
     public async Task BlockingDurationStats_HonorsDatabaseFilter_1319()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         await SeedBlockedProcessReportAsync(MinuteA.AddSeconds(10), "DbA", 1000);
@@ -133,7 +135,6 @@ public sealed class BlockingStatsReaderTests : IDisposable
     [Fact]
     public async Task BlockingDurationStats_FallsBackToDmvSnapshot_OnlyWhenNoXeInWindow()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         /* No blocked_process_reports at all → the DMV snapshot arm contributes (WHERE NOT EXISTS). */
@@ -155,7 +156,6 @@ public sealed class BlockingStatsReaderTests : IDisposable
     [Fact]
     public async Task DeadlockSeverity_BucketsPerMinute_VictimTotalMaxAvg()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         /* Minute A: two deadlocks — (p1 victim 1000, p2 3000) then (p3 victim 2000) → 2 victims, total 6000,
@@ -186,7 +186,6 @@ public sealed class BlockingStatsReaderTests : IDisposable
     [Fact]
     public async Task DeadlockSeverity_ReconcilesWithDeadlockCountTrend_SameWindow()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         await SeedDeadlockAsync(MinuteA.AddSeconds(10), BuildGraph(("a1", 55, 1000, true), ("a2", 66, 3000, false)));
@@ -207,7 +206,6 @@ public sealed class BlockingStatsReaderTests : IDisposable
     [Fact]
     public async Task DeadlockSeverity_ExcludesRowsOutsideTheWindow()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         /* Collected 48h ago — outside a 24h window (the read windows on collection_time). */
@@ -222,8 +220,7 @@ public sealed class BlockingStatsReaderTests : IDisposable
     private async Task SeedBlockedProcessReportAsync(DateTime eventTime, string databaseName, long waitTimeMs)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
 INSERT INTO blocked_process_reports
@@ -251,8 +248,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)";
     private async Task SeedDmvBlockingSnapshotAsync(DateTime eventTime, string databaseName, long waitTimeMs)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
 INSERT INTO dmv_blocking_snapshots
@@ -276,8 +272,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     private async Task SeedDeadlockAsync(DateTime deadlockTime, string graphXml, DateTime? collectionTimeOverride = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
 INSERT INTO deadlocks

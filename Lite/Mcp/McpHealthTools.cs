@@ -20,17 +20,17 @@ public sealed class McpHealthTools
 
         try
         {
-            var summary = await dataService.GetServerSummaryAsync(resolved.Value.ServerId, resolved.Value.ServerName);
+            var summary = await dataService.GetServerSummaryAsync(resolved.ServerId, resolved.ServerName);
             if (summary == null)
             {
                 return McpHelpers.Status(
                     "unavailable",
-                    $"No data available for {resolved.Value.ServerName}. The collector may not have run yet.");
+                    $"No data available for {resolved.ServerName}. The collector may not have run yet.");
             }
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 cpu_percent = summary.CpuPercent,
                 memory_mb = summary.MemoryMb,
                 blocking_count = summary.BlockingCount,
@@ -64,19 +64,19 @@ public sealed class McpHealthTools
 
         try
         {
-            var row = await dataService.GetDailySummaryAsync(resolved.Value.ServerId, date);
+            var row = await dataService.GetDailySummaryAsync(resolved.ServerId, date);
             if (row == null || !row.HasData)
             {
                 var missDate = row?.SummaryDate ?? date ?? DateTime.UtcNow.Date;
                 return McpHelpers.Status(
                     "empty",
-                    $"No data collected for {resolved.Value.ServerName} on {missDate:yyyy-MM-dd}.",
+                    $"No data collected for {resolved.ServerName} on {missDate:yyyy-MM-dd}.",
                     new { summary_date = missDate.ToString("yyyy-MM-dd"), overall_health = row?.OverallHealth });
             }
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 summary_date = row.SummaryDate.ToString("yyyy-MM-dd"),
                 overall_health = row.OverallHealth,
                 health_band = row.HealthBand.ToString(),
@@ -110,7 +110,7 @@ public sealed class McpHealthTools
 
         try
         {
-            var rows = await dataService.GetCollectionHealthAsync(resolved.Value.ServerId);
+            var rows = await dataService.GetCollectionHealthAsync(resolved.ServerId);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No collection health data available.");
@@ -122,6 +122,9 @@ public sealed class McpHealthTools
                 status = r.HealthStatus,
                 total_runs = r.TotalRuns,
                 errors = r.ErrorCount,
+                /* Deliberate 1s lock-timeout yields (#1805) — benign, distinct from errors; clustering
+                   here is a lock-contention signal about the monitored server. */
+                yields = r.YieldCount,
                 failure_rate_pct = Math.Round(r.FailureRatePercent, 1),
                 avg_duration_ms = Math.Round(r.AvgDurationMs, 0),
                 last_success = r.LastSuccessTime?.ToString("o"),
@@ -130,7 +133,7 @@ public sealed class McpHealthTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 collectors = result
             }, McpHelpers.JsonOptions);
         }

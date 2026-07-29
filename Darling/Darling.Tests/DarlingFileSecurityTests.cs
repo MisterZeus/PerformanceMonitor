@@ -11,6 +11,8 @@ using System.IO;
 using System.Linq;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
 
@@ -54,6 +56,65 @@ public sealed class DarlingFileSecurityTests
         finally
         {
             File.Delete(path);
+        }
+    }
+
+    /// <summary>
+    /// #1769: the non-interactive posture emits EXACTLY three identities — SYSTEM, Administrators and the
+    /// service identity — and nothing else. Presence/absence assertions alone cannot say that: they pass
+    /// happily while a fourth principal rides along, which is precisely the shape of the defect that prompted
+    /// this (an unintended <c>NT AUTHORITY\INTERACTIVE</c> re-added on every service start). This is the
+    /// posture the superuser credential, the transient init pwfile, and the config BACKUPS all take.
+    /// </summary>
+    [Fact]
+    public void HardenFile_NonInteractive_EmitsExactlyTheThreeIntendedIdentities()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        var path = Path.Combine(Path.GetTempPath(), "darling-acl-exact-" + Guid.NewGuid().ToString("N") + ".bak");
+        File.WriteAllText(path, "blob");
+        try
+        {
+            DarlingFileSecurity.HardenFile(path, allowInteractiveRead: false);
+
+            var security = new FileInfo(path).GetAccessControl();
+            var rules = ReadRules(security);
+            AssertProtectedAndNoWorldRead(security, rules);
+
+            /* The service identity is whoever this process runs as — the same resolution HardenFile uses. */
+            var serviceIdentity = WindowsIdentity.GetCurrent().User;
+            Assert.NotNull(serviceIdentity);
+
+            var expected = new[] { s_system, s_administrators, serviceIdentity! };
+            var actual = rules.Select(r => r.sid).Distinct().ToList();
+
+            /* No more, no less. The failure names the unexpected principals rather than just a count, because
+               "expected 3, got 4" tells whoever hits this nothing about which grant crept in. */
+            var unexpected = actual.Where(sid => !expected.Any(sid.Equals)).Select(TranslateOrRaw).ToList();
+            Assert.True(unexpected.Count == 0,
+                "The non-interactive DACL granted principals beyond SYSTEM, Administrators and the service "
+                + "identity: " + string.Join(", ", unexpected));
+
+            var missing = expected.Where(sid => !actual.Any(sid.Equals)).Select(TranslateOrRaw).ToList();
+            Assert.True(missing.Count == 0,
+                "The non-interactive DACL is missing intended principals: " + string.Join(", ", missing));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    /// <summary>A SID's friendly name for a failure message, falling back to the raw SID when it does not map.</summary>
+    private static string TranslateOrRaw(SecurityIdentifier sid)
+    {
+        try
+        {
+            return ((NTAccount)sid.Translate(typeof(NTAccount))).Value;
+        }
+        catch (IdentityNotMappedException)
+        {
+            return sid.Value;
         }
     }
 
@@ -141,6 +202,115 @@ public sealed class DarlingFileSecurityTests
         Assert.False(DarlingFileSecurity.IsTrustedOwner(path));
     }
 
+    /* ---- #1647: the verification half — is a secret-bearing file still readable by ordinary users? ----
+       darling.json carries every monitored server's encryptedPassword plus the MCP and web tokens, all under
+       DPAPI LocalMachine scope with an entropy constant published in this repo, so READ access to the file IS
+       the secret. It never got an ACL: it sits beside the binary, and the documented install (extract to
+       C:\PerformanceMonitorDarling) inherits BUILTIN\Users: Read & Execute from the root DACL. The service now
+       hardens it at startup and raises a Critical when it is still exposed — this is the check behind that. */
+
+    [Fact]
+    public void IsReadableByOrdinaryUsers_TrueWhenUsersHoldsAReadAce_FalseAfterHardening()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        var path = Path.Combine(Path.GetTempPath(), "darling-config-acl-" + Guid.NewGuid().ToString("N") + ".json");
+        File.WriteAllText(path, "{}");
+        try
+        {
+            /* Reproduce what an install under C:\ inherits: BUILTIN\Users allowed Read. Added explicitly
+               because %TEMP% is per-user and grants Users nothing to inherit. */
+            var exposed = new FileInfo(path).GetAccessControl();
+            exposed.AddAccessRule(new FileSystemAccessRule(
+                s_builtinUsers, FileSystemRights.Read, AccessControlType.Allow));
+            new FileInfo(path).SetAccessControl(exposed);
+
+            Assert.True(
+                DarlingFileSecurity.IsReadableByOrdinaryUsers(path),
+                "a file granting BUILTIN\\Users read must be reported as exposed");
+
+            /* The fix the service applies. HardenFile protects the DACL and drops every inherited ACE, so the
+               Users grant is gone even though INTERACTIVE read is added for the Viewer. */
+            DarlingFileSecurity.HardenFile(path, allowInteractiveRead: true);
+
+            Assert.False(
+                DarlingFileSecurity.IsReadableByOrdinaryUsers(path),
+                "after hardening, no Users/Authenticated Users/Everyone read ACE may survive");
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(WellKnownSidType.AuthenticatedUserSid)]
+    [InlineData(WellKnownSidType.WorldSid)]
+    public void IsReadableByOrdinaryUsers_AlsoCatchesAuthenticatedUsersAndEveryone(WellKnownSidType sidType)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        var path = Path.Combine(Path.GetTempPath(), "darling-config-acl-grp-" + Guid.NewGuid().ToString("N") + ".json");
+        File.WriteAllText(path, "{}");
+        try
+        {
+            var security = new FileInfo(path).GetAccessControl();
+            security.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(sidType, null), FileSystemRights.Read, AccessControlType.Allow));
+            new FileInfo(path).SetAccessControl(security);
+
+            Assert.True(DarlingFileSecurity.IsReadableByOrdinaryUsers(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void IsReadableByOrdinaryUsers_IgnoresAMetadataOnlyGrant_AndADenyAce()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        var path = Path.Combine(Path.GetTempPath(), "darling-config-acl-meta-" + Guid.NewGuid().ToString("N") + ".json");
+        File.WriteAllText(path, "{}");
+        try
+        {
+            DarlingFileSecurity.HardenFile(path, allowInteractiveRead: true);
+
+            var security = new FileInfo(path).GetAccessControl();
+            /* ReadAttributes/ReadPermissions grant no BYTES. Testing against the composite
+               FileSystemRights.Read mask would call this "readable" and cry wolf on a common,
+               harmless ACE — hence the check keys on ReadData specifically. */
+            security.AddAccessRule(new FileSystemAccessRule(
+                s_builtinUsers,
+                FileSystemRights.ReadAttributes | FileSystemRights.ReadPermissions,
+                AccessControlType.Allow));
+            /* A DENY ACE is not a grant either. */
+            security.AddAccessRule(new FileSystemAccessRule(
+                s_authenticatedUsers, FileSystemRights.Read, AccessControlType.Deny));
+            new FileInfo(path).SetAccessControl(security);
+
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void IsReadableByOrdinaryUsers_FalseForAnUnreadableDacl_RatherThanThrowing()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        /* A missing file has no DACL to read. It returns false rather than throwing or crying wolf: the
+           caller has ALREADY logged loudly if its harden attempt failed, and a Critical raised on an
+           unreadable DACL would be noise that trains operators to ignore the real one. */
+        Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(
+            Path.Combine(Path.GetTempPath(), "darling-config-absent-" + Guid.NewGuid().ToString("N") + ".json")));
+    }
+
     [Fact]
     public void HardenDirectory_OnTheCredentialParent_LeavesTheSiblingLogDirectoryWritable()
     {
@@ -210,6 +380,67 @@ public sealed class DarlingFileSecurityTests
             .ToArray();
     }
 
+    [Fact]
+    public async Task WriteWithBackup_HardensTheBackup_BecauseFileCopyDoesNotCarryTheDacl()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        /* The install location this reproduces is a folder created directly under C:\, whose root DACL
+           grants BUILTIN\Users an INHERITABLE read. %TEMP% is per-user and grants Users nothing, so the
+           ACE is planted here deliberately — without it the backup would be clean for the wrong reason and
+           this test would pass with the hardening removed. */
+        var directory = Path.Combine(Path.GetTempPath(), "darling-cfg-bak-" + Guid.NewGuid().ToString("N"));
+        _ = Directory.CreateDirectory(directory);
+        try
+        {
+            var directorySecurity = new DirectoryInfo(directory).GetAccessControl();
+            directorySecurity.AddAccessRule(new FileSystemAccessRule(
+                s_builtinUsers,
+                FileSystemRights.Read,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+            new DirectoryInfo(directory).SetAccessControl(directorySecurity);
+
+            var configPath = Path.Combine(directory, "darling.json");
+            await File.WriteAllTextAsync(configPath, "{\"servers\":[]}");
+
+            /* Proves the planted ACE actually flows to a new file in this directory — i.e. that the
+               scenario under test is real on this machine, not just asserted. */
+            var canary = Path.Combine(directory, "canary.json");
+            await File.WriteAllTextAsync(canary, "{}");
+            Assert.True(
+                DarlingFileSecurity.IsReadableByOrdinaryUsers(canary),
+                "a new file in this directory must inherit the Users read ACE, or the test proves nothing");
+
+            var written = await DarlingCliCommands.WriteWithBackupAsync(
+                configPath, "{\"servers\":[],\"edited\":true}", TextWriter.Null, TextWriter.Null, default);
+            Assert.True(written);
+
+            var backup = Directory.GetFiles(directory, "darling.json.bak-*").Single();
+            Assert.False(
+                DarlingFileSecurity.IsReadableByOrdinaryUsers(backup),
+                "the backup is a full copy of the encrypted passwords and access tokens — File.Copy does not " +
+                "carry the source DACL, so an unhardened backup hands every local user the credentials that " +
+                "darling.json's own ACL exists to protect");
+
+            /* #1769: and NOT to INTERACTIVE either. The live darling.json grants it because things genuinely
+               read the config as the interactive operator — the Viewer and the CLI verbs. Nothing reads a
+               backup: the only code that knows the .bak- name is the code that creates it, and restoring one
+               already needs elevation because writing darling.json does. So the grant bought nothing and left
+               a second readable copy of every secret. Asserted end to end through the real WriteWithBackupAsync
+               path rather than against HardenFile directly, because the defect this closes was a CALL SITE
+               passing the wrong argument, which a test of the shape alone cannot see. */
+            Assert.DoesNotContain(
+                ReadRules(new FileInfo(backup).GetAccessControl()),
+                r => r.Item1.Equals(s_interactive));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static void AssertProtectedAndNoWorldRead(
         FileSystemSecurity security, (SecurityIdentifier sid, FileSystemRights rights, InheritanceFlags inheritance)[] rules)
     {
@@ -220,5 +451,72 @@ public sealed class DarlingFileSecurityTests
         Assert.DoesNotContain(rules, r => r.sid.Equals(s_everyone));
         Assert.DoesNotContain(rules, r => r.sid.Equals(s_authenticatedUsers));
         Assert.DoesNotContain(rules, r => r.sid.Equals(s_builtinUsers));
+    }
+
+    /// <summary>
+    /// #1816: the worker's backup sweep hardens EXISTING darling.json.bak-* siblings — the backups
+    /// made before #1786 fixed the creation path kept whatever the folder handed them (on the field
+    /// box, inherited BUILTIN\Users read against machine-scoped DPAPI blobs). The sweep must strip
+    /// that from every backup, leave the live file to its own hardening, and no-op cleanly when there
+    /// are no backups.
+    /// </summary>
+    [Fact]
+    public void ConfigBackupSweep_HardensEveryExistingBackup_AndSkipsTheLiveFile()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "darling-bak-sweep-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var configPath = Path.Combine(directory, "darling.json");
+        var backup1 = configPath + ".bak-20260721-162218";
+        var backup2 = configPath + ".bak-20260722-123603";
+        var decoy = Path.Combine(directory, "unrelated.json.bak-20260721-000000");
+        try
+        {
+            foreach (var file in new[] { configPath, backup1, backup2, decoy })
+            {
+                File.WriteAllText(file, "{}");
+                var exposed = new FileInfo(file).GetAccessControl();
+                exposed.AddAccessRule(new FileSystemAccessRule(
+                    s_builtinUsers, FileSystemRights.Read, AccessControlType.Allow));
+                new FileInfo(file).SetAccessControl(exposed);
+                Assert.True(DarlingFileSecurity.IsReadableByOrdinaryUsers(file));
+            }
+
+            DarlingWorker.TryHardenConfigBackups(configPath, NullLogger.Instance);
+
+            /* Both backups locked down... */
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(backup1),
+                "backup 1 must lose its inherited Users read");
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(backup2),
+                "backup 2 must lose its inherited Users read");
+
+            /* ...the live file untouched by THIS sweep (its own hardening owns it)... */
+            Assert.True(DarlingFileSecurity.IsReadableByOrdinaryUsers(configPath),
+                "the backup sweep must not touch the live config — TryHardenConfigFile owns it");
+
+            /* ...and a file that merely LOOKS like a backup of something else is not swept. */
+            Assert.True(DarlingFileSecurity.IsReadableByOrdinaryUsers(decoy),
+                "only darling.json.bak-* siblings are the sweep's business");
+        }
+        finally
+        {
+            try { Directory.Delete(directory, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
+    [Fact]
+    public void ConfigBackupSweep_NoBackups_IsANoOp()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "darling-bak-none-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var configPath = Path.Combine(directory, "darling.json");
+        try
+        {
+            File.WriteAllText(configPath, "{}");
+            DarlingWorker.TryHardenConfigBackups(configPath, NullLogger.Instance);
+        }
+        finally
+        {
+            try { Directory.Delete(directory, recursive: true); } catch { /* best-effort */ }
+        }
     }
 }

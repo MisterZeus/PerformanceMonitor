@@ -126,10 +126,18 @@ LIMIT $2";
         bool AnalysisNotificationsEnabled, double AnalysisNotifySeverity, string DeliveryMode, int PerEventMax,
         int LongRunningQueryMaxResults, bool LongRunningQueryExcludeSpServerDiagnostics, bool LongRunningQueryExcludeWaitFor,
         bool LongRunningQueryExcludeBackups, bool LongRunningQueryExcludeMiscWaits, bool LongRunningQueryExcludeCdc,
-        bool NotifyConnectionChanges);
+        bool NotifyConnectionChanges,
+        bool NotifyConnectionDownAtStartup,
+        int ConnectionRefireMinutes,
+        bool NotifyAgHealth,
+        int AgLagAlertSeconds,
+        long AgRedoQueueAlertKb,
+        int AgDisconnectRefireMinutes);
 
     /// <summary>The single global alert-settings row (id=1) — the viewer's <c>AlertSettingsSelectSql</c>. The
-    /// 36 columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>).</summary>
+    /// 41 columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>). This had
+    /// stopped at 36, so <c>get_alert_settings</c> reported a store whose newest five knobs did not exist:
+    /// an MCP client could not see the V33 connection opt-ins or the V35 Availability Group family at all.</summary>
     public const string AlertSettingsSelectSql = @"
 SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, blocking_count_threshold,
        deadlock_enabled, deadlock_count_threshold, poison_wait_enabled, poison_wait_threshold_ms,
@@ -140,7 +148,10 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        analysis_notifications_enabled, analysis_notify_severity, delivery_mode, per_event_max,
        long_running_query_max_results, long_running_query_exclude_sp_server_diagnostics,
        long_running_query_exclude_wait_for, long_running_query_exclude_backups,
-       long_running_query_exclude_misc_waits, long_running_query_exclude_cdc, notify_connection_changes
+       long_running_query_exclude_misc_waits, long_running_query_exclude_cdc, notify_connection_changes,
+       notify_connection_down_at_startup, connection_refire_minutes,
+       notify_ag_health, ag_lag_alert_seconds, ag_redo_queue_alert_kb,
+       ag_disconnect_refire_minutes
 FROM config_alert_settings
 WHERE id = 1";
 
@@ -166,6 +177,10 @@ WHERE id = 1";
             reader.GetBoolean(23), reader.GetInt32(24), reader.GetBoolean(25), reader.GetDouble(26),
             reader.GetString(27), reader.GetInt32(28), reader.GetInt32(29), reader.GetBoolean(30),
             reader.GetBoolean(31), reader.GetBoolean(32), reader.GetBoolean(33), reader.GetBoolean(34),
-            reader.GetBoolean(35));
+            reader.GetBoolean(35),
+            /* V33 (#1659) at 36-37, V35 (#991) at 38-40. */
+            reader.GetBoolean(36), reader.GetInt32(37),
+            reader.GetBoolean(38), reader.GetInt32(39), reader.GetInt64(40),
+            reader.GetInt32(41));
     }
 }

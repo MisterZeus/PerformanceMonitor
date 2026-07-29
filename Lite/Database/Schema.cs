@@ -125,9 +125,9 @@ CREATE INDEX IF NOT EXISTS idx_dismissed_archive_alerts
 ON dismissed_archive_alerts (alert_time, server_id, metric_name)";
 
     /// <summary>
-    /// All table creation statements: the hand-written non-collector tables, then the 35 collector
+    /// All table creation statements: the hand-written non-collector tables, then the 36 collector
     /// tables generated from <see cref="PerformanceMonitor.Collectors.CollectorCatalog"/> by
-    /// <see cref="DuckDbSchemaGenerator"/> (42 total). Order is immaterial — every statement is
+    /// <see cref="DuckDbSchemaGenerator"/> (43 total). Order is immaterial — every statement is
     /// <c>CREATE TABLE IF NOT EXISTS</c> and the tables have no inter-table dependencies.
     /// </summary>
     public static IEnumerable<string> GetAllTableStatements()
@@ -148,8 +148,8 @@ ON dismissed_archive_alerts (alert_time, server_id, metric_name)";
 
     /// <summary>
     /// All index creation statements: the hand-written non-collector indexes (collection_log,
-    /// dismissed_archive_alerts) plus the 33 generated collector indexes (server_config and
-    /// database_config have none), 35 total.
+    /// dismissed_archive_alerts) plus the 34 generated collector indexes (server_config and
+    /// database_config have none), 36 total.
     /// </summary>
     public static IEnumerable<string> GetAllIndexStatements()
     {

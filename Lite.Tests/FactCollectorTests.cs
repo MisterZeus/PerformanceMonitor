@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using PerformanceMonitor.Analysis;
@@ -14,28 +13,14 @@ namespace PerformanceMonitorLite.Tests;
 /// Tests the DuckDbFactCollector against seeded test data.
 /// Verifies that facts are collected with correct values and metadata.
 /// </summary>
-public class FactCollectorTests : IDisposable
+public class FactCollectorTests : IClassFixture<SharedDuckDbFixture>
 {
-    private readonly string _tempDir;
-    private readonly string _dbPath;
     private readonly DuckDbInitializer _duckDb;
 
-    public FactCollectorTests()
+    public FactCollectorTests(SharedDuckDbFixture fixture)
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "LiteTests_" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(_tempDir);
-        _dbPath = Path.Combine(_tempDir, "test.duckdb");
-        _duckDb = new DuckDbInitializer(_dbPath);
-    }
-
-    public void Dispose()
-    {
-        try
-        {
-            if (Directory.Exists(_tempDir))
-                Directory.Delete(_tempDir, recursive: true);
-        }
-        catch { /* Best-effort cleanup */ }
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
     }
 
     /// <summary>
@@ -44,10 +29,7 @@ public class FactCollectorTests : IDisposable
     private async Task<Dictionary<string, Fact>> SeedAndCollectAsync(
         Func<TestDataSeeder, Task> seedScenario)
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seedScenario(seeder);
 
         var collector = new DuckDbFactCollector(_duckDb);
@@ -59,10 +41,7 @@ public class FactCollectorTests : IDisposable
     [Fact]
     public async Task CollectFacts_MemoryStarvedServer_ReturnsWaitFacts()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedMemoryStarvedServerAsync();
 
         var collector = new DuckDbFactCollector(_duckDb);
@@ -76,10 +55,7 @@ public class FactCollectorTests : IDisposable
     [Fact]
     public async Task CollectFacts_MemoryStarvedServer_PageioLatchHasCorrectFraction()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedMemoryStarvedServerAsync();
 
         var collector = new DuckDbFactCollector(_duckDb);
@@ -96,10 +72,7 @@ public class FactCollectorTests : IDisposable
     [Fact]
     public async Task CollectFacts_MemoryStarvedServer_MetadataContainsRawValues()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedMemoryStarvedServerAsync();
 
         var collector = new DuckDbFactCollector(_duckDb);
@@ -120,10 +93,7 @@ public class FactCollectorTests : IDisposable
     [Fact]
     public async Task CollectFacts_MemoryStarvedServer_WaitsOrderedByValue()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedMemoryStarvedServerAsync();
 
         var collector = new DuckDbFactCollector(_duckDb);
@@ -138,10 +108,7 @@ public class FactCollectorTests : IDisposable
     [Fact]
     public async Task CollectFacts_CleanServer_ReturnsLowFractions()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedCleanServerAsync();
 
         var collector = new DuckDbFactCollector(_duckDb);
@@ -157,10 +124,7 @@ public class FactCollectorTests : IDisposable
     [Fact]
     public async Task CollectFacts_BadParallelism_CxPacketDominates()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedBadParallelismServerAsync();
 
         var collector = new DuckDbFactCollector(_duckDb);

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
@@ -32,9 +33,14 @@ public sealed class DarlingObservabilityTests
     private const int TestServerId = -424242;
 
     [Fact]
-    public void MigrationScripts_ThirtyOneVersions_V30WebDashboardConfig_V31CustomViews()
+    public void MigrationScripts_AreRegisteredInAscendingOrder_V34AgCollectors_V36AgLatencyColumns()
     {
-        Assert.Equal(31, PgMigrations.Scripts.Count);
+        /* Counted off the registered list rather than hard-coded: the count and the newest version are the
+           same fact stated twice, and pinning the count by literal makes every stacked branch collide here. */
+        Assert.Equal(PgMigrations.Scripts.Count, PgMigrations.Scripts.DistinctBy(s => s.Version).Count());
+        Assert.Equal(
+            PgMigrations.Scripts.Select(s => s.Version).OrderBy(v => v).ToArray(),
+            PgMigrations.Scripts.Select(s => s.Version).ToArray());
         Assert.Equal(1, PgMigrations.Scripts[0].Version);
         Assert.Equal(2, PgMigrations.Scripts[1].Version);
         Assert.Equal(3, PgMigrations.Scripts[2].Version);
@@ -66,7 +72,49 @@ public sealed class DarlingObservabilityTests
         Assert.Equal(29, PgMigrations.Scripts[28].Version);
         Assert.Equal(30, PgMigrations.Scripts[29].Version);
         Assert.Equal(31, PgMigrations.Scripts[30].Version);
-        Assert.Equal(31, StorageVersion.SchemaVersion);
+        Assert.Equal(32, PgMigrations.Scripts[31].Version);
+        Assert.Equal(33, PgMigrations.Scripts[32].Version);
+        /* The newest migration is asserted by identity rather than by ordinal: this ladder is walked by every
+           stacked branch at once, and a positional pin turns each addition into a conflict for the next. */
+        Assert.Equal(39, PgMigrations.Scripts[^1].Version);
+        Assert.Equal(39, StorageVersion.SchemaVersion);
+
+        /* V34 (#991) creates the two Availability Group collector tables. Schema-qualified collect.* and
+           CREATE TABLE IF NOT EXISTS, per the file's additive-create idiom (V29): a no-op on a fresh store
+           whose V1 schema was generated from the collector catalog, the real create on an upgrade.
+           The full column-for-column equality against PgSchemaGenerator.CreateTable is pinned by
+           PgSchemaGeneratorTests.Migrations_JobHistoryAndAgentStatus_MatchGeneratedFreshShape — this test
+           only pins the migration's IDENTITY (version, name) and the two traits worth stating in prose. */
+        var v34Script = PgMigrations.Scripts.Single(s => s.Version == 34);
+        var v34 = v34Script.Sql;
+        Assert.Equal("availability-group-collectors", v34Script.Name);
+
+        /* The LSNs are numeric(25,0) at the source — wider than bigint — so they land as text. */
+        Assert.Contains("last_hardened_lsn text", v34, StringComparison.Ordinal);
+        Assert.Contains("last_commit_lsn text", v34, StringComparison.Ordinal);
+
+        /* V36 (#991 addendum) widens the V34 database-grain table additively. Identity only here; the
+           column-for-column reconstruction of V34 + V36 against the generator is pinned by
+           PgSchemaGeneratorTests.Migrations_JobHistoryAndAgentStatus_MatchGeneratedFreshShape. */
+        var v36Script = PgMigrations.Scripts.Single(s => s.Version == 36);
+        var v36 = v36Script.Sql;
+        Assert.Equal("ag-latency-columns", v36Script.Name);
+        Assert.Contains("ALTER TABLE collect.ag_database_replica_states", v36, StringComparison.Ordinal);
+        Assert.Contains("ADD COLUMN IF NOT EXISTS est_send_drain_time_min double precision", v36, StringComparison.Ordinal);
+
+        /* V38 (#1767) adds the hash-keyed payload dimensions. Identity + the three things the migration body
+           must contain; the generated shape (column list, dependency order, the resolving view) is pinned
+           column-for-column by PayloadDimensionTests. */
+        var v38Script = PgMigrations.Scripts.Single(s => s.Version == 38);
+        var v38 = v38Script.Sql;
+        Assert.Equal("query-payload-dimensions", v38Script.Name);
+        Assert.Contains("CREATE TABLE IF NOT EXISTS query_text_dim (", v38, StringComparison.Ordinal);
+        Assert.Contains("CREATE TABLE IF NOT EXISTS query_plan_dim (", v38, StringComparison.Ordinal);
+        /* ADD COLUMN IF NOT EXISTS, nullable: metadata-only, so the migration never rewrites the existing
+           ~234 GB of inline payload — the zero-rewrite contract the whole design rests on. */
+        Assert.Contains("ALTER TABLE query_stats ADD COLUMN IF NOT EXISTS query_text_digest bytea;", v38, StringComparison.Ordinal);
+        Assert.Contains("ALTER TABLE procedure_stats ADD COLUMN IF NOT EXISTS query_plan_digest bytea;", v38, StringComparison.Ordinal);
+        Assert.Contains("CREATE OR REPLACE VIEW v_query_stats AS", v38, StringComparison.Ordinal);
 
         /* V26 (#1506) adds the generic webhook channel's four columns to the V17 control-plane table.
            Schema-qualified config.* and IF NOT EXISTS, per the file's additive-ALTER idiom. */
@@ -267,9 +315,18 @@ public sealed class DarlingObservabilityTests
             }
         }
 
+        /* The passthrough set plus the payload-RESOLVING views (#1767): v_query_stats was created as
+           a passthrough by V4/V14 and rebuilt by V38 to COALESCE the dimension tables, so it is a
+           view any migration created but deliberately NOT one V14 may refresh. */
         Assert.Equal(
-            new System.Collections.Generic.SortedSet<string>(PgSchemaGenerator.AllPassthroughViews, StringComparer.Ordinal),
+            new System.Collections.Generic.SortedSet<string>(
+                PgSchemaGenerator.AllPassthroughViews.Concat(PgSchemaGenerator.PayloadResolvingViews),
+                StringComparer.Ordinal),
             viewsCreatedByAnyMigration);
+
+        /* The exclusion is the point: V14's refresh must NOT re-expand a resolving view. */
+        Assert.DoesNotContain("v_query_stats", PgSchemaGenerator.AllPassthroughViews);
+        Assert.DoesNotContain("CREATE OR REPLACE VIEW v_query_stats AS SELECT * FROM query_stats;", v14, StringComparison.Ordinal);
 
         /* V15 adds the per-index definition metadata for monitor-side UNUSED/DUPLICATE analysis
            (FinOps Index Analysis, Stage 1) additively — one ADD COLUMN IF NOT EXISTS per column so a
@@ -588,12 +645,12 @@ public sealed class DarlingObservabilityTests
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
 
         await DarlingObservability.SyncServerEnabledStatesAsync(postgres, null, TestContext.Current.CancellationToken);
-        Assert.Equal(false, await ReadObservedEnabledAsync(connection));
+        Assert.False(await ReadObservedEnabledAsync(connection));
 
         /* Re-enable desired -> the sync flips the observed row back to TRUE. */
         await ExecAsync(connection, "UPDATE config.config_monitored_servers SET is_enabled = TRUE WHERE server_id = $1");
         await DarlingObservability.SyncServerEnabledStatesAsync(postgres, null, TestContext.Current.CancellationToken);
-        Assert.Equal(true, await ReadObservedEnabledAsync(connection));
+        Assert.True(await ReadObservedEnabledAsync(connection));
 
         await DeleteTestRowsAsync(connection);
     }
@@ -661,7 +718,7 @@ public sealed class DarlingObservabilityTests
 
         /* A re-connect upsert (ON CONFLICT) must NOT resurrect is_enabled to TRUE (Stage 2 fix). */
         await DarlingObservability.UpsertServerAsync(postgres, server, null, TestContext.Current.CancellationToken);
-        Assert.Equal(false, await ReadObservedEnabledAsync(connection));
+        Assert.False(await ReadObservedEnabledAsync(connection));
 
         await DeleteTestRowsAsync(connection);
     }

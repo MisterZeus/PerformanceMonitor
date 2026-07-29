@@ -224,6 +224,19 @@ public sealed class ServerPropertyRow
     public int? IdleDbCount { get; set; }
     public string? ProvisioningStatus { get; set; }
 
+    /// <summary>
+    /// Non-alarming note when this server's hardware inventory (CPU, memory, sockets) is absent, with the reason.
+    /// Null when hardware is present, which is the normal case.
+    ///
+    /// <para>Lite's twin (<c>LocalDataService.FinOps.ServerProperties</c>) sets this by catching the
+    /// <c>SqlException</c> from its own live <c>sys.dm_os_sys_info</c> read. The viewer cannot: it reads the
+    /// collected store, not the target, so the permission failure happened in the collector minutes or hours
+    /// earlier and is only visible here as NULL hardware columns. Distinguishing "unknown" from a real zero is
+    /// what #1663 made possible — before it, a login without VIEW SERVER STATE lost the ENTIRE server_properties
+    /// row, so there was nothing to annotate.</para>
+    /// </summary>
+    public string? HardwareUnavailableReason { get; set; }
+
     /// <summary>Per-server FinOps budget (servers.monthly_cost_usd from darling.json); 0 hides the cost columns.</summary>
     public decimal MonthlyCost { get; set; }
     public decimal AnnualCost => MonthlyCost * 12m;

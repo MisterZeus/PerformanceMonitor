@@ -22,7 +22,7 @@ public sealed class McpPerfmonTools
 
         try
         {
-            var rows = await dataService.GetLatestPerfmonStatsAsync(resolved.Value.ServerId);
+            var rows = await dataService.GetLatestPerfmonStatsAsync(resolved.ServerId);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No perfmon stats available.");
@@ -44,7 +44,7 @@ public sealed class McpPerfmonTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 counters = result
             }, McpHelpers.JsonOptions);
         }
@@ -70,12 +70,12 @@ public sealed class McpPerfmonTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var points = await dataService.GetPerfmonTrendAsync(resolved.Value.ServerId, counter_name, hours_back);
+            var points = await dataService.GetPerfmonTrendAsync(resolved.ServerId, counter_name, hours_back);
             if (points.Count == 0)
             {
                 /* No points can mean three different things to a caller. Distinguish them so an LLM
                    doesn't read a bad counter name as "this metric looks fine." */
-                var collected = await dataService.GetDistinctPerfmonCountersAsync(resolved.Value.ServerId, hours_back);
+                var collected = await dataService.GetDistinctPerfmonCountersAsync(resolved.ServerId, hours_back);
 
                 /* Page Life Expectancy is the counter people reach for by habit; it is intentionally
                    not collected, so an empty trend would otherwise be misread as "PLE looks fine." */
@@ -111,7 +111,7 @@ public sealed class McpPerfmonTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 counter_name,
                 hours_back,
                 trend = result

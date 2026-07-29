@@ -155,13 +155,16 @@ public sealed class ViewerFinOpsSqlTests
     }
 
     [Fact]
-    public void HighImpactQueriesSql_ReadsBaseTableForCorrelatedSampleText()
+    public void HighImpactQueriesSql_ReadsTheResolvingViewForItsCorrelatedSampleTextAndPlan()
     {
         var sql = ViewerDataService.HighImpactQueriesSql;
-        /* Aggregates to query_hash level; the correlated sample-text subqueries read the query_stats base
-           table (as Lite does), not the view. */
-        Assert.Contains("FROM query_stats AS qs", sql, StringComparison.Ordinal);
-        Assert.Contains("FROM query_stats qs2", sql, StringComparison.Ordinal);
+        /* Aggregates to query_hash level; the correlated subqueries pull sample text, full text and the
+           stored plan, so every one of them must read v_query_stats — the #1767 resolving view. On the base
+           table their `query_text IS NOT NULL AND query_text != ''` filters match nothing on rows written
+           since the migration, and the panel just goes empty with no error anywhere. */
+        Assert.Contains("FROM v_query_stats AS qs", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM v_query_stats qs2", sql, StringComparison.Ordinal);
+        Assert.Equal(3, sql.Split("FROM v_query_stats qs2").Length - 1); /* sample text, full text, plan */
         Assert.Contains("GROUP BY query_hash", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY qs2.delta_execution_count DESC NULLS LAST", sql, StringComparison.Ordinal);
         /* The stored statement-level plan is fetched by the correlated subquery so "View Plan" opens it. */
@@ -349,5 +352,89 @@ public sealed class ViewerFinOpsSqlTests
         Assert.DoesNotContain("@", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("now(", sql.ToLowerInvariant());
         Assert.Contains("$1", sql, StringComparison.Ordinal);
+    }
+
+    /* ── #1591: the permission-denied badge query ── */
+
+    /// <summary>
+    /// The badge counts DISTINCT collectors, not log rows. One collector denied every cycle for a week is "1
+    /// collector has no permission" — counting rows would render a meaningless four-figure number and train the
+    /// operator to ignore the badge.
+    /// </summary>
+    [Fact]
+    public void PermissionDeniedCountSql_CountsDistinctCollectors_NotRows()
+    {
+        var sql = ViewerDataService.PermissionDeniedCollectorCountSql;
+
+        Assert.Contains("COUNT(DISTINCT collector_name)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("COUNT(*)", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// It must filter to PERMISSIONS only. Counting ERROR too would badge ordinary collector failures as a
+    /// permission problem and send the operator hunting for a grant that is not missing.
+    /// </summary>
+    [Fact]
+    public void PermissionDeniedCountSql_FiltersToPermissionsOnly()
+    {
+        var sql = ViewerDataService.PermissionDeniedCollectorCountSql;
+
+        Assert.Contains("status = 'PERMISSIONS'", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("'ERROR'", sql, StringComparison.Ordinal);
+        Assert.Contains("server_id = $1", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
+    }
+
+    /* ── #1591: the Hardware Note ── */
+
+    /// <summary>
+    /// A collector that could not read <c>sys.dm_os_sys_info</c> stores NULL hardware, and the grid's
+    /// <c>IsDBNull ? 0</c> coalesce would otherwise render that as a literal 0 — indistinguishable from a real
+    /// zero, and reading as "this server has no CPUs" rather than "we were not allowed to look".
+    /// </summary>
+    [Fact]
+    public void HardwareNote_ExplainsAbsentHardware_WhenBothColumnsAreNull()
+    {
+        var note = ViewerDataService.HardwareNoteFor(cpuCountIsNull: true, physicalMemoryIsNull: true);
+
+        Assert.NotNull(note);
+        Assert.Contains("VIEW SERVER STATE", note, StringComparison.Ordinal);
+        Assert.Contains("VIEW DATABASE STATE", note, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Present hardware must produce no note — the column stays empty for the normal case, which is what makes it
+    /// non-alarming rather than noise on every row.
+    /// </summary>
+    [Fact]
+    public void HardwareNote_IsNull_WhenHardwareIsPresent() =>
+        Assert.Null(ViewerDataService.HardwareNoteFor(cpuCountIsNull: false, physicalMemoryIsNull: false));
+
+    /// <summary>
+    /// Both columns come from the SAME guarded DMV read, so a single odd NULL is not a permission failure and must
+    /// not be annotated as one.
+    /// </summary>
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void HardwareNote_IsNull_WhenOnlyOneColumnIsMissing(bool cpuNull, bool memNull) =>
+        Assert.Null(ViewerDataService.HardwareNoteFor(cpuNull, memNull));
+
+    /// <summary>
+    /// The note is only reachable because #1663 made the hardware columns nullable. Before it, a login without the
+    /// grant lost the ENTIRE server_properties row, so there was no row left to annotate — pin that the collector
+    /// still types them nullable.
+    /// </summary>
+    [Fact]
+    public void HardwareColumns_AreStillNullable_WhichIsWhatMakesTheNoteReachable()
+    {
+        foreach (var name in new[] { "CpuCount", "PhysicalMemoryMb" })
+        {
+            var property = typeof(PerformanceMonitor.Collectors.ServerPropertiesCollector.Row).GetProperty(name);
+            Assert.NotNull(property);
+            Assert.True(
+                Nullable.GetUnderlyingType(property!.PropertyType) is not null,
+                $"{name} must stay nullable — the Hardware Note depends on distinguishing unknown from zero (#1591/#1663).");
+        }
     }
 }

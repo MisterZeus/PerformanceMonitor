@@ -13,6 +13,7 @@ using System.Data;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Runtime.Versioning;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -431,9 +432,10 @@ public sealed class DarlingWorker : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         DarlingConfig config;
+        string configPath;
         try
         {
-            var configPath = DarlingConfig.ResolveConfigPath();
+            configPath = DarlingConfig.ResolveConfigPath();
             config = DarlingConfig.Load();
             _logger.LogInformation("Loaded configuration from {Path}: {ServerCount} server(s)", configPath, config.Servers.Count);
         }
@@ -441,6 +443,12 @@ public sealed class DarlingWorker : BackgroundService
         {
             _logger.LogCritical("Cannot load configuration: {Message}", ex.Message);
             return;
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            TryHardenConfigFile(configPath);
+            TryHardenConfigBackups(configPath, _logger);
         }
 
         var problems = config.Validate();
@@ -468,6 +476,12 @@ public sealed class DarlingWorker : BackgroundService
            A bootstrap failure is the existing no-store behavior: LogCritical + clean exit. */
         DarlingManagedPostgres? managedPostgres = null;
         var storeConnectionString = config.Postgres.ConnectionString;
+
+        /* #1706: what the store runtime reconcile did this start, carried past the bootstrap so it can be
+           raised as a real self-alert once the alert engine exists. Null when nothing happened, which is
+           every ordinary start. */
+        DarlingSelfAlertEvaluator.StoreUpgradeReport? storeUpgradeReport = null;
+
         if (config.Postgres.Managed)
         {
             if (!OperatingSystem.IsWindows())
@@ -482,6 +496,7 @@ public sealed class DarlingWorker : BackgroundService
             try
             {
                 storeConnectionString = await managedPostgres.EnsureRunningAsync(stoppingToken);
+                storeUpgradeReport = BuildStoreUpgradeReport(managedPostgres.LastUpgradeOutcome);
             }
             catch (OperationCanceledException)
             {
@@ -496,7 +511,7 @@ public sealed class DarlingWorker : BackgroundService
 
         try
         {
-            await RunCollectionLoopAsync(config, storeConnectionString, stoppingToken);
+            await RunCollectionLoopAsync(config, storeConnectionString, storeUpgradeReport, stoppingToken);
         }
         finally
         {
@@ -512,12 +527,165 @@ public sealed class DarlingWorker : BackgroundService
     }
 
     /// <summary>
+    /// #1647: locks <c>darling.json</c> down to the posture the DPAPI credential files already get, then
+    /// VERIFIES it. The config file is not ordinary config — it holds every monitored server's
+    /// <c>encryptedPassword</c>, the MCP bearer token, the web dashboard access token, and in BYO mode the
+    /// store connection string. Those blobs are DPAPI <b>LocalMachine</b> scope with an entropy constant that
+    /// ships in an open-source repo, so anything that can READ the file can unprotect all of it — the ACL is
+    /// the access boundary, exactly as <see cref="DarlingFileSecurity"/> says of the credential files. It never
+    /// got one: every harden call site targeted the credential directory, while the config sat beside the
+    /// binary, and the documented install (extract the zip to <c>C:\PerformanceMonitorDarling</c>) inherits
+    /// <c>BUILTIN\Users: Read &amp; Execute</c> from the root DACL. Any local unprivileged user could read it,
+    /// decrypt every SQL password, and lift the tokens that unlock the MCP write surface.
+    ///
+    /// <para><c>allowInteractiveRead: true</c> — the same argument the admin/viewer credentials pass, and
+    /// required here: the Viewer (<c>ViewerSettings.ResolveConfigPath</c>) and the CLI verbs run as the
+    /// interactive operator and must still read this file.</para>
+    ///
+    /// <para>Best-effort like every other ACL call (a failure is logged, never fatal — a monitoring service must
+    /// not refuse to monitor over a permissions problem), but a file that is STILL readable by
+    /// Users/Authenticated Users after the attempt is a <see cref="LogLevel.Critical"/>: at that point the
+    /// secrets in it are recoverable by anyone with a local logon.</para>
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private void TryHardenConfigFile(string path)
+    {
+        try
+        {
+            DarlingFileSecurity.HardenFile(path, allowInteractiveRead: true);
+        }
+        catch (Exception ex)
+        {
+            /* The remediation is spelled out as runnable commands, not described. This exact failure sat in
+               a field box's log once per service start for months and nobody acted on it, because knowing
+               the ACL is wrong is not the same as knowing what to type — and the service genuinely cannot
+               fix it itself: re-ACLing needs WRITE_DAC, which it does not have, and taking ownership needs
+               a privilege a virtual service account is not granted. An elevated human is the only actor
+               who can resolve this, so give them the three lines. */
+            /* Built as ONE argument rather than repeating {Path}: a structured-logging template binds
+               placeholders POSITIONALLY, so a repeated name silently consumes the next argument and the
+               tail of the message renders empty — in the one log line whose entire job is to be actionable. */
+            var remediation =
+                $"icacls \"{path}\" /inheritance:d   then   icacls \"{path}\" /remove:g \"BUILTIN\\Users\"   " +
+                $"then   icacls \"{path}\" /grant \"NT SERVICE\\PerformanceMonitor Darling:(F)\"";
+
+            _logger.LogError(
+                "Could not restrict the ACL on {Path}{Detail} ({Message}). If the owner is not this service, the " +
+                "re-ACL can never succeed — it needs ownership or FullControl — so restarting will not clear this, " +
+                "and the service cannot fix it alone: taking ownership needs a privilege a virtual service account " +
+                "does not have. From an ELEVATED prompt: {Remediation} — after which this service re-asserts the " +
+                "full ACL by itself on the next start.",
+                path, DarlingFileSecurity.DescribeOwnerAndExposure(path), ex.Message, remediation);
+        }
+
+        if (DarlingFileSecurity.IsReadableByOrdinaryUsers(path))
+        {
+            _logger.LogCritical(
+                "{Path} is READABLE by Users/Authenticated Users/Everyone. It holds every monitored server's " +
+                "encrypted password plus the MCP and web access tokens, all protected with machine-scoped DPAPI — " +
+                "so any local user who can open this file can recover ALL of it. Remove the inherited read access " +
+                "(or move the install out of a world-readable folder such as one created directly under C:\\).",
+                path);
+        }
+    }
+
+    /// <summary>
+    /// #1816: the same lockdown for every EXISTING <c>darling.json.bak-*</c> beside the config. The
+    /// backup-CREATION path hardens new backups as it writes them (#1786), but backups made before that
+    /// fix kept whatever the folder handed them — on the field box that surfaced this, inherited
+    /// <c>BUILTIN\Users</c> read, which against machine-scoped DPAPI blobs means any local account could
+    /// recover every stored credential and token. The installer's security check flags them but only
+    /// prints the fix; this sweep applies it, so no install carries the exposure past its next service
+    /// start. <c>allowInteractiveRead: false</c>, matching the creation path — backups are rollback
+    /// artifacts, nothing interactive reads them. Static with the logger passed in so the test can drive
+    /// it against a scratch directory.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static void TryHardenConfigBackups(string configPath, ILogger logger)
+    {
+        string[] backups;
+        try
+        {
+            var directory = Path.GetDirectoryName(Path.GetFullPath(configPath));
+            if (string.IsNullOrEmpty(directory))
+            {
+                return;
+            }
+
+            backups = Directory.GetFiles(directory, Path.GetFileName(configPath) + ".bak-*");
+        }
+        catch (Exception ex)
+        {
+            /* Enumeration failing is not worth failing the start over — the live file's own hardening
+               already ran, and the installer's check remains the independent witness. */
+            logger.LogWarning("Could not enumerate config backups beside {Path} for ACL hardening: {Message}", configPath, ex.Message);
+            return;
+        }
+
+        foreach (var backup in backups)
+        {
+            try
+            {
+                DarlingFileSecurity.HardenFile(backup, allowInteractiveRead: false);
+            }
+            catch (Exception ex)
+            {
+                /* Same contract as the live file: best-effort, but the remediation is spelled out as
+                   runnable commands so an elevated human can finish the job the service cannot. */
+                var remediation =
+                    $"icacls \"{backup}\" /inheritance:d   then   icacls \"{backup}\" /remove:g \"BUILTIN\\Users\"   " +
+                    $"then   icacls \"{backup}\" /grant \"NT SERVICE\\PerformanceMonitor Darling:(F)\"";
+
+                logger.LogError(
+                    "Could not restrict the ACL on config backup {Path}{Detail} ({Message}). It carries the same " +
+                    "DPAPI-protected credentials as the live config. From an ELEVATED prompt: {Remediation}",
+                    backup, DarlingFileSecurity.DescribeOwnerAndExposure(backup), ex.Message, remediation);
+            }
+
+            if (DarlingFileSecurity.IsReadableByOrdinaryUsers(backup))
+            {
+                logger.LogCritical(
+                    "Config backup {Path} is READABLE by Users/Authenticated Users/Everyone. It holds the same " +
+                    "machine-scoped DPAPI credential blobs as the live config — any local user who can open it " +
+                    "can recover ALL of them. Remove the inherited read access.",
+                    backup);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Maps the Windows-only bootstrap's upgrade outcome to the platform-neutral alert payload (#1706).
+    /// Null for the ordinary case where the runtime did not move, and null for an extension-only update,
+    /// which is a routine maintenance step the log already records rather than something to page about.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static DarlingSelfAlertEvaluator.StoreUpgradeReport? BuildStoreUpgradeReport(
+        DarlingStoreUpgrade.StoreUpgradeOutcome outcome)
+        => outcome.Status switch
+        {
+            /* outcome.Message is carried through on SUCCESS too, not just failure: a post-commit bookkeeping
+               failure returns Succeeded with the warning there, and dropping it here would leave the alert
+               reassuring while the log alarms. The alert is the surface an operator actually receives. */
+            DarlingStoreUpgrade.StoreUpgradeStatus.Succeeded => new DarlingSelfAlertEvaluator.StoreUpgradeReport(
+                true, outcome.FromMajor, outcome.ToMajor, outcome.FromTimescale, outcome.ToTimescale,
+                null, outcome.Message, outcome.UsedLinkMode),
+            DarlingStoreUpgrade.StoreUpgradeStatus.Failed => new DarlingSelfAlertEvaluator.StoreUpgradeReport(
+                false, outcome.FromMajor, outcome.ToMajor, outcome.FromTimescale, outcome.ToTimescale,
+                outcome.FailedStep, outcome.Message, false),
+            _ => null,
+        };
+
+    /// <summary>
     /// Everything after the (optional) managed-Postgres bootstrap: store connection, migration,
     /// Timescale adoption, delta seeding, and the collection/alert/analysis loop. Split from
     /// <see cref="ExecuteAsync"/> so the bootstrap's finally can stop the bundled server after
     /// this method's data source is disposed.
     /// </summary>
-    private async Task RunCollectionLoopAsync(DarlingConfig config, string storeConnectionString, CancellationToken stoppingToken)
+    private async Task RunCollectionLoopAsync(
+        DarlingConfig config,
+        string storeConnectionString,
+        DarlingSelfAlertEvaluator.StoreUpgradeReport? storeUpgradeReport,
+        CancellationToken stoppingToken)
     {
         /* Carry the collect/config search path on the store connection string BEFORE the data
            source (and its pool) is created, so every pooled physical connection resolves the
@@ -580,6 +748,11 @@ public sealed class DarlingWorker : BackgroundService
            migration: MigrateAsync above runs BEFORE the extension exists, so a fresh store's V23
            guard skips the conversion and this heals it (collection_log is outside the collector
            catalog, so the loop calls above never touch it). */
+
+        /* Handle for the background baseline backfill launched inside the block below (#1757); stays null in
+           plain-PostgreSQL mode or if the TimescaleDB block faults before reaching it. Drained at shutdown. */
+        Task? baselineBackfill = null;
+
         try
         {
             await using var timescaleConnection = await postgres.OpenConnectionAsync(stoppingToken);
@@ -589,6 +762,31 @@ public sealed class DarlingWorker : BackgroundService
                 await TimescaleSupport.ConvertToHypertablesAsync(timescaleConnection, _logger, stoppingToken);
                 await TimescaleSupport.ApplyCompressionPolicyAsync(timescaleConnection, _logger, stoppingToken);
                 await TimescaleSupport.EnsureCollectionLogHypertableAsync(timescaleConnection, _logger, stoppingToken);
+
+                /* #1778: the two calls above carry the compression tick on the CREATE, but if_not_exists makes
+                   that a no-op against a policy this store already has — so a store that ever ran an older
+                   build keeps TimescaleDB's 12-hour default forever and its newest closed chunk stays
+                   uncompressed for up to half a day. This retunes the existing policies. AFTER both, so it
+                   covers collection_log (outside the collector catalog) in the same pass; a no-op on every
+                   start after the first, since it only selects policies whose interval differs. */
+                await TimescaleSupport.ConvergeCompressionScheduleAsync(timescaleConnection, _logger, stoppingToken);
+                // Reshape: drop stale old-shape QS / procedure_stats CAGGs FIRST so the ensure below rebuilds them
+                // in the composer-dimension shape (no-op once reshaped, and on a fresh store nothing matches).
+                await TimescaleSupport.DropStaleContinuousAggregatesAsync(timescaleConnection, _logger, stoppingToken);
+                await TimescaleSupport.EnsureContinuousAggregatesAsync(timescaleConnection, _logger, stoppingToken);
+                // AFTER the CAGGs exist: the tiered retention (raw 4d, hourly CAGGs 21d; daily kept indefinitely).
+                await TimescaleSupport.EnsureRetentionPoliciesAsync(timescaleConnection, _logger, stoppingToken);
+
+                /* #1757: the baseline aggregates ship WITH NO DATA and their refresh policy only ever covers
+                   the trailing 3 days, so without this they would answer a 30-day question with 3 days of
+                   supply. DELIBERATELY LAUNCHED, NOT AWAITED: it is a bulk materialization whose cost scales
+                   with however much history the store already had, and every step below this block — the
+                   composer tuning, the delta re-seed, the collection loop itself — is sequenced after it.
+                   Awaiting it here would take a restarted service dark for as long as the backfill runs,
+                   which is exactly when an operator is most likely to be restarting it. Coverage-gated, so it
+                   is a no-op on every start after the first and resumes where it left off if cut short.
+                   Drained with the command loop at shutdown. */
+                baselineBackfill = RunBaselineBackfillAsync(postgres, stoppingToken);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -597,6 +795,51 @@ public sealed class DarlingWorker : BackgroundService
                too, so falling back to plain-PG mode is always safe. */
             _timescaleAvailable = false;
             _logger.LogWarning("TimescaleDB setup failed — continuing in plain-PostgreSQL mode: {Message}", ex.Message);
+        }
+
+        /* #1757: the provider reads the nine baseline relations BY NAME — a missing one throws,
+           ComputeBaselinesAsync swallows it, and that family silently returns an empty baseline. So every
+           relation is guaranteed to EXIST here, with a plain view over the same select filling any gap.
+
+           DELIBERATELY UNGATED on _timescaleAvailable. Three ways a gap appears and only one of them is "no
+           TimescaleDB": the extension is absent, the TimescaleDB block threw partway, or the block ran fine
+           and EnsureContinuousAggregatesAsync's per-aggregate failure isolation left one aggregate unbuilt.
+           That last one is the easiest to miss and would take exactly one family down on an otherwise healthy
+           store. The call is per-view and probes for an existing relation first, so it never touches a real
+           aggregate. Its own connection — the block's is already disposed by here. */
+        try
+        {
+            await using var fallbackConnection = await postgres.OpenConnectionAsync(stoppingToken);
+            await TimescaleSupport.EnsureBaselineFallbackViewsAsync(fallbackConnection, _logger, stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(
+                "Baseline relations could not be checked or backed by plain views — some anomaly baselines may silently return nothing: {Message}",
+                ex.Message);
+        }
+
+        /* Composer + analyze_*_plan performance tuning (covering indexes + per-table autovacuum-insert override) —
+           idempotent RUNTIME setup, NOT a versioned migration: results-invariant perf, so it must not bump
+           StorageVersion and gate the Viewer's schema check on indexes it does not need (the role-GUC provisioning
+           reasoning). AFTER the TimescaleDB block so the collector tables are already hypertables when indexed
+           (CREATE INDEX / ALTER TABLE SET propagate to all chunks), BEFORE collectors so a first build never
+           contends with live inserts. Its own try/catch: a failure degrades to un-tuned (slower) queries, never
+           fatal (the same optional-feature discipline as the TimescaleDB block above). */
+        try
+        {
+            await using var tuningConnection = await postgres.OpenConnectionAsync(stoppingToken);
+            await PgTableTuning.ApplyAsync(tuningConnection, _logger, stoppingToken);
+            // The retained sql_handle->module map (#1568 object_name for OLD query_stats windows the CAGG serves,
+            // after procedure_stats raw drops at 4d): create it, then seed it from recent procedure_stats.
+            if (await DarlingModuleMap.EnsureTableAsync(tuningConnection, _logger, stoppingToken))
+            {
+                await DarlingModuleMap.RefreshAsync(tuningConnection, _logger, stoppingToken);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("Composer performance tuning failed — queries fall back to un-indexed scans: {Message}", ex.Message);
         }
 
         /* Restart continuity: re-seed delta baselines from the store (the Postgres twin of Lite's
@@ -710,7 +953,25 @@ public sealed class DarlingWorker : BackgroundService
             alertSettings, deliverer, historyStore, muteRuleService.IsAlertMuted, _logger,
             /* V20: the connect-edge Server-Unreachable/Restored delivery honors the notify toggle, read live
                through the same by-reference alertSettings seam a store reload hot-swaps. */
-            notifyConnectionChanges: () => alertSettings.NotifyConnectionChanges);
+            notifyConnectionChanges: () => alertSettings.NotifyConnectionChanges,
+            notifyConnectionDownAtStartup: () => alertSettings.NotifyConnectionDownAtStartup,
+            connectionRefireMinutes: () => alertSettings.ConnectionRefireMinutes,
+            /* #991: the Availability Group alert family reads its master switch and both thresholds live
+               through the same by-reference alertSettings seam, so a store edit takes effect on the next sweep
+               without a restart (and the clamps live on the settings properties, not here). */
+            notifyAgHealth: () => alertSettings.NotifyAgHealth,
+            agLagAlertSeconds: () => alertSettings.AgLagAlertSeconds,
+            agRedoQueueAlertKb: () => alertSettings.AgRedoQueueAlertKb,
+            agDisconnectRefireMinutes: () => alertSettings.AgDisconnectRefireMinutes);
+
+        /* #1706: report this start's store runtime upgrade, now that there IS an alert engine to report it
+           through. Fired once, here, and never re-evaluated — the store is down while an upgrade runs, so
+           its start could only ever be a log line, and by the time this line is reached both terminal states
+           (upgraded, or reverted and still running) have a live store to alert from. */
+        if (storeUpgradeReport is not null)
+        {
+            await _selfAlerts.EvaluateStoreUpgradeAsync(storeUpgradeReport, stoppingToken);
+        }
 
         /* Phase-5 analysis slice AN3: the analysis pipeline's shared pieces, constructed once.
            The plan fetcher resolves a finding's serverId to the CONNECTED runtime's connection
@@ -960,6 +1221,18 @@ public sealed class DarlingWorker : BackgroundService
                    incidentally); a 24/7 service must actually invoke it or analysis_findings
                    grows unbounded. Rides the daily purge; never throws (logs + degrades). */
                 await new PgFindingStore(postgres, _logger).CleanupOldFindingsAsync(retentionDays: 30);
+
+                /* #1652: sweep the service's own rolling log files. The provider swept only in its
+                   constructor, so a service up for months — the normal case — swept once at startup and
+                   never again while writing a file a day. Rides the daily purge like every other
+                   maintenance chore; static + best-effort, so the worker needs no reference to the
+                   provider the host owns and a locked file can never break the tick. */
+                DarlingFileLoggerProvider.SweepOldFiles(DarlingFileLoggerProvider.DefaultLogDirectory());
+
+                /* Keep the retained sql_handle->module map current (object_name attribution for old query_stats
+                   CAGG windows). Rides the daily purge; failure-isolated inside RefreshAsync. */
+                await using var moduleMapConnection = await postgres.OpenConnectionAsync(stoppingToken);
+                await DarlingModuleMap.RefreshAsync(moduleMapConnection, _logger, stoppingToken);
             }
 
             /* Stage 4 fleet-level self-alert: the store disk-pressure backstop. The daily purge is the ONLY
@@ -1025,6 +1298,22 @@ public sealed class DarlingWorker : BackgroundService
         catch (OperationCanceledException)
         {
             /* Expected on shutdown. */
+        }
+
+        /* Drain the background baseline backfill the same way (#1757). It observes the same token, and its
+           own body already swallows everything but cancellation, so this is about not leaving an unobserved
+           Task behind — a backfill still running at shutdown is fine to abandon: TimescaleDB commits it in
+           per-batch transactions and the coverage gate picks it up from there on the next start. */
+        if (baselineBackfill is not null)
+        {
+            try
+            {
+                await baselineBackfill;
+            }
+            catch (OperationCanceledException)
+            {
+                /* Expected on shutdown. */
+            }
         }
 
         _logger.LogInformation("PerformanceMonitor Darling collection loop stopped");
@@ -1185,6 +1474,38 @@ public sealed class DarlingWorker : BackgroundService
         {
             _logger.LogWarning("[{Server}] Failed to reconcile the long-query completion XE session: {Message}",
                 server.Config.DisplayName, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Materializes the baseline aggregates over the history the store already had (#1757), concurrently with
+    /// the collection sweep rather than ahead of it. On a fresh store the coverage gate makes this a no-op; on
+    /// an upgraded store it is the one-time pass that turns a 3-day supply into the full baseline window.
+    ///
+    /// <para>Takes its OWN connection rather than borrowing the startup one: the caller's connection is scoped
+    /// to the TimescaleDB setup block and is disposed the moment that block exits, which is long before this
+    /// finishes. Everything is swallowed but cancellation — a store that cannot be backfilled must degrade to
+    /// short baselines, never take down collection — and <see cref="TimescaleSupport.BackfillBaselineAggregatesAsync"/>
+    /// is itself failure-isolated per aggregate, so this catch is only for the connection-open path.</para>
+    /// </summary>
+    private async Task RunBaselineBackfillAsync(NpgsqlDataSource postgres, CancellationToken stoppingToken)
+    {
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(stoppingToken);
+            var backfilled = await TimescaleSupport.BackfillBaselineAggregatesAsync(connection, _logger, stoppingToken);
+            if (backfilled > 0)
+            {
+                _logger.LogInformation(
+                    "TimescaleDB: baseline backfill complete — {Backfilled} aggregate(s) materialized over pre-existing history.",
+                    backfilled);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(
+                "Baseline aggregate backfill could not run — baselines are computed from however much history the aggregates already hold: {Message}",
+                ex.Message);
         }
     }
 
@@ -1629,7 +1950,11 @@ public sealed class DarlingWorker : BackgroundService
 
         return new AlertEngine(
             alertSettings,
-            new DarlingAlertReadAdapter(postgres),
+            /* #1812: the adapter's snapshot-freshness bound needs the server's EFFECTIVE running_jobs
+               cadence — the same resolution the sweep schedules by, reading the live overrides field so
+               a control-plane reload reaches the very next check. */
+            new DarlingAlertReadAdapter(postgres, serverId =>
+                StoreConfigProvider.ResolveSchedule("running_jobs", serverId, _scheduleOverrides).FrequencyMinutes),
             stateStore,
             deliverer,
             muteRuleService.IsAlertMuted,
@@ -1637,8 +1962,10 @@ public sealed class DarlingWorker : BackgroundService
                 FetchFailedJobsAsync(servers, serverKey, lookbackMinutes, ct),
             resolutionCallback: async (resolution, _) =>
             {
-                _logger.LogInformation("[{Server}] {Title}: {Message}",
-                    resolution.ServerName, resolution.Title, resolution.Message);
+                /* #1681: same shared shape as the firing line the engine's funnel writes, so an engine
+                   alert's TRIGGERED and RESOLVED halves pair up in the log. */
+                _logger.LogInformation("{Line}",
+                    AlertFiringLog.Resolved(resolution.ServerName, resolution.Title, resolution.Message));
                 /* Stage 4 parity-gap fix: record a resolved-flavored history row so an operator reviewing
                    alert history sees the paired "Detected" then "Cleared/Resolved" entries (the Dashboard
                    records these explicitly; Darling previously only logged them). A resolution has no send
@@ -1800,6 +2127,17 @@ LIMIT 1", connection);
         try
         {
             await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
+
+            /* #1778: report what compression is DOING before deciding whether anything is stuck. The field
+               could see hours-long compressions only in hindsight, by their effect on disk; this puts a
+               running compression, its elapsed time, and any eligible-chunk backlog in the log while it is
+               still happening. Read on the same connection and the same hourly cadence — the check that
+               already exists for this exact subsystem, rather than a second timer for one log line. */
+            TimescaleSupport.LogCompressionActivity(
+                await TimescaleSupport.ReadCompressionActivityAsync(connection, _logger, cancellationToken),
+                DateTime.UtcNow,
+                _logger);
+
             var stuckJobs = await TimescaleSupport.ReadStuckCompressionJobsAsync(
                 connection, DateTime.UtcNow, _logger, cancellationToken);
             await _selfAlerts!.EvaluateCompressionJobsAsync(
@@ -2534,7 +2872,7 @@ LIMIT 1", connection);
     /// Public const so a test can pin its shape ($1 server_id, $2 query_hash, $3 database_name).</summary>
     public const string ResolveStoredQueryForActualPlanSql = @"
 SELECT query_text, query_plan_xml, NULL::text AS transaction_isolation_level
-FROM query_stats
+FROM v_query_stats
 WHERE server_id = $1
 AND   query_hash = $2
 AND   database_name = $3
@@ -2826,13 +3164,40 @@ LIMIT 1";
                 _postgres!, runtime, collectorName, "SESSION_MISSING", 0, 0, 0, ex.Message, _logger, cancellationToken);
             return 0;
         }
-        catch (SqlException ex) when (ex.Number is 229 or 297 or 300)
+        catch (SqlException ex) when (ex.Number == 1222 && CollectorCatalog.YieldsOnLockTimeout(collectorName))
         {
-            _logger.LogWarning("  [{Server}] {Collector} => insufficient permissions ({Number}): {Message}",
-                server.Config.DisplayName, collectorName, ex.Number, ex.Message);
+            /* The 1-second LOCK_TIMEOUT guard doing its job (#1805): the snapshot sweep stepped aside
+               instead of joining a blocking chain on the monitored server. Not a collection failure —
+               the next sweep sees current state — so it records as YIELDED: its own status, excluded
+               from the error counts that feed collector health, the daily health band, and the
+               collection-failure self-alerts, and readable as evidence of lock contention on the
+               TARGET rather than a monitoring fault. Same classification Lite applies — parity is the
+               point. A 1222 from a collector without the guard flag falls through to the general
+               catch below, unchanged. This filter and the permissions filter match disjoint
+               conditions, so their relative order is not load-bearing; both only need to precede the
+               general Exception catch. */
+            _logger.LogInformation("  [{Server}] {Collector} => YIELDED - 1s lock-timeout guard fired (target lock contention)",
+                server.Config.DisplayName, collectorName);
 
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, 0, ex.Message, _logger, cancellationToken);
+                _postgres!, runtime, collectorName, "YIELDED", 0, 0, 0,
+                $"Lock-timeout yield (SQL error #{ex.Number}): the 1-second LOCK_TIMEOUT guard fired rather than waiting in a blocking chain. One snapshot sweep skipped; evidence of lock contention on the monitored server, not a monitoring failure.",
+                _logger, cancellationToken);
+            return 0;
+        }
+        catch (SqlException ex) when (ex.Number is 229 or 297 or 300)
+        {
+            /* Same Azure explanation Lite appends (#1631): error 300 on Azure SQL Database is a service
+               objective limit phrased as a permission denied on 'master', which reads as a missing GRANT
+               and sends people looking for one that cannot be issued. Appended, so the raw error stays
+               searchable. Parity is the point — a Darling operator gets the identical sentence Lite gives. */
+            var message = ex.Message + AzureDmvPermissionHint.For(ex.Number, server.Runtime?.Target.IsAzureSqlDb == true);
+
+            _logger.LogWarning("  [{Server}] {Collector} => insufficient permissions ({Number}): {Message}",
+                server.Config.DisplayName, collectorName, ex.Number, message);
+
+            await DarlingObservability.LogCollectionAsync(
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, 0, message, _logger, cancellationToken);
             return 0;
         }
         catch (Exception ex)
@@ -2917,6 +3282,8 @@ LIMIT 1";
         ["default_trace_events"] = (r, s, ct) => r.RunAsync(DefaultTraceEventsCollector.Instance, s, ct),
         ["job_history"] = (r, s, ct) => r.RunAsync(JobHistoryCollector.Instance, s, ct),
         ["agent_status"] = (r, s, ct) => r.RunAsync(AgentStatusCollector.Instance, s, ct),
+        ["ag_replica_states"] = (r, s, ct) => r.RunAsync(AgReplicaStatesCollector.Instance, s, ct),
+        ["ag_database_replica_states"] = (r, s, ct) => r.RunAsync(AgDatabaseReplicaStatesCollector.Instance, s, ct),
     };
 
     /// <summary>

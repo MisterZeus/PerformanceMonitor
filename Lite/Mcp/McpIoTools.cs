@@ -20,7 +20,7 @@ public sealed class McpIoTools
 
         try
         {
-            var rows = await dataService.GetLatestFileIoStatsAsync(resolved.Value.ServerId);
+            var rows = await dataService.GetLatestFileIoStatsAsync(resolved.ServerId);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No file I/O stats available.");
@@ -45,7 +45,7 @@ public sealed class McpIoTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 files = result
             }, McpHelpers.JsonOptions);
         }
@@ -70,7 +70,7 @@ public sealed class McpIoTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var points = await dataService.GetFileIoLatencyTrendAsync(resolved.Value.ServerId, hours_back);
+            var points = await dataService.GetFileIoLatencyTrendAsync(resolved.ServerId, hours_back);
             var result = points.Select(p => new
             {
                 time = p.CollectionTime.ToString("o"),
@@ -81,7 +81,7 @@ public sealed class McpIoTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 trend = result
             }, McpHelpers.JsonOptions);

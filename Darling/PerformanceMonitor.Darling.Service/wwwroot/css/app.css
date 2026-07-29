@@ -153,15 +153,21 @@ a:hover { text-decoration: underline; }
 }
 .panel { margin-bottom: 1.25rem; }
 
-/* Custom-views renderer grid (#1563): stored panels tile responsively; a span-2 panel spans both columns via
-   the existing .panel.span-2 { grid-column: 1 / -1 } rule below. The grid gap owns spacing, so the panel's
-   stacked-page bottom margin is reset inside the grid. */
+/* Custom-views renderer grid (#1563): stored panels tile responsively, capped at two columns on wide screens so a
+   dense view no longer crams 4-across; a span-2 panel spans the full width via .panel.span-2 { grid-column: 1 / -1 }
+   below. The min track is >=45% of the row so at most two columns ever fit; a lone or span-2 panel takes the full
+   width. The grid gap owns spacing, so the panel's stacked-page bottom margin is reset inside the grid. */
 .panel-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(clamp(320px, 45%, 700px), 1fr));
   gap: 1.25rem;
 }
 .panel-grid .panel { margin-bottom: 0; }
+
+/* Time-range picker (view chrome): the preset <select> plus the inline custom-window input revealed by "Custom…". */
+.range-select { display: inline-flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+.range-custom { display: inline-flex; align-items: center; gap: 0.35rem; }
+.range-custom-n { width: 4.5rem; }
 
 .panel > h3 {
   margin: 0 0 0.6rem;
@@ -351,6 +357,11 @@ table.data td.sev-Healthy { color: var(--ok); }
 .chart .axis .axis-unit { fill: var(--dim); font-size: 10px; }
 .chart .grid-line { stroke: var(--border); stroke-width: 1; }
 .chart .series-line { fill: none; stroke-width: 2; }
+.chart .series-line-overlay { stroke-dasharray: 6 3; } /* the dual-axis overlay reads as its own kind of line */
+.chart .brush-rect { fill: rgba(46, 174, 241, 0.18); stroke: rgba(46, 174, 241, 0.55); stroke-width: 1; pointer-events: none; }
+.chart .scatter-dot { cursor: default; }
+.chart .scatter-dot.drillable { cursor: pointer; }
+.chart .scatter-dot.drillable:hover { fill-opacity: 1; }
 .chart .hover-line { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; }
 .chart .hover-dot { stroke: var(--bg-dark); stroke-width: 1.5; }
 
@@ -536,6 +547,7 @@ table.data td.sev-Healthy { color: var(--ok); }
 }
 .strip.error { background: rgba(229, 115, 115, 0.14); border: 1px solid rgba(229, 115, 115, 0.4); color: var(--err); }
 .strip.empty { background: var(--bg-dark); border: 1px solid var(--border); color: var(--muted); }
+.strip.notice { background: rgba(255, 213, 79, 0.10); border: 1px solid rgba(255, 213, 79, 0.35); color: var(--warn); }
 .strip.loading { color: var(--muted); }
 
 .all-healthy {
@@ -721,3 +733,70 @@ pre.code {
 
 /* A notebook entry in the sidebar view list gets a small document glyph so it reads apart from a dashboard view. */
 .view-item.is-notebook::before { content: "▤ "; color: var(--muted); }
+
+/* ─────────────────────────── availability groups (#991) ─────────────────────────── */
+
+/* One card per (reporting server, AG). Full width rather than tiled in .grid: each card carries a database table
+   that needs the room. The left border repeats the pre-banded severity the badge states in words. */
+.ag-card {
+  border-left: 4px solid var(--band-unknown);
+  margin-bottom: 1rem;
+}
+.ag-card.band-Healthy { border-left-color: var(--band-healthy); }
+.ag-card.band-Warning { border-left-color: var(--band-warning); }
+.ag-card.band-Critical { border-left-color: var(--band-critical); }
+
+.ag-card .head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.15rem;
+}
+.ag-card .head .title { font-weight: 600; font-size: 1.02rem; }
+.ag-card .head .spacer { flex: 1; }
+.ag-card .status-line { font-size: 0.75rem; color: var(--muted); margin-bottom: 0.7rem; }
+.ag-primary-note { font-size: 0.78rem; color: var(--dim); }
+.ag-primary-note.muted { color: var(--muted); }
+
+/* Replica chips reuse .metric-chip (and its sev-* border colors) but wrap instead of sitting on a fixed 3-column
+   grid — an AG has anywhere from one to nine replicas. */
+.ag-replicas {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.85rem;
+}
+.ag-replica { min-width: 190px; flex: 1 1 190px; }
+
+/* The current primary is the one replica a reader looks for first, so it gets the accent ring on top of whatever
+   severity color its left border already carries. */
+.ag-replica.is-primary {
+  outline: 1px solid rgba(46, 174, 241, 0.45);
+  background: rgba(46, 174, 241, 0.06);
+}
+.ag-replica.is-primary .label { color: var(--accent); font-weight: 700; }
+
+/* .nav a sets display:flex, and an AUTHOR display declaration outranks the UA stylesheet's [hidden]{display:none}
+   — so without this rule the hidden Availability Groups entry would paint on every AG-less fleet, which is exactly
+   what the gate exists to prevent. */
+.nav a[hidden] { display: none; }
+
+.ag-databases { margin-top: 0.2rem; }
+.ag-databases .strip { margin: 0; }
+
+/* The two custom-rendered database cells (lag, data movement) build their own <span>, and the shared cell()
+   deliberately puts no severity class on a custom-render <td> — so the bare span needs its own colors here or the
+   suspended cue, the one that says "this looks caught up but isn't", would render in plain body text. */
+.ag-databases td .sev-Healthy { color: var(--ok); }
+.ag-databases td .sev-Warning { color: var(--warn); }
+.ag-databases td .sev-Critical { color: var(--err); }
+
+/* The "local" marker on an AG replica chip — quiet, since it is a fact about whose view this is rather than a
+   health signal. */
+.ag-replica .ag-local {
+  font-size: 0.58rem;
+  font-style: italic;
+  color: var(--dim);
+  margin-left: 0.3rem;
+}

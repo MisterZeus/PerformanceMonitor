@@ -30,13 +30,13 @@ public sealed class McpLatchSpinlockTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var rows = await dataService.GetLatchStatsSnapshotAsync(resolved.Value.ServerId, hours_back);
+            var rows = await dataService.GetLatchStatsSnapshotAsync(resolved.ServerId, hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No latch statistics available in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 latch_count = rows.Count,
                 latches = rows.Select(r => new
@@ -74,13 +74,13 @@ public sealed class McpLatchSpinlockTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var rows = await dataService.GetSpinlockStatsSnapshotAsync(resolved.Value.ServerId, hours_back);
+            var rows = await dataService.GetSpinlockStatsSnapshotAsync(resolved.ServerId, hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No spinlock statistics available in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 spinlock_count = rows.Count,
                 spinlocks = rows.Select(r => new

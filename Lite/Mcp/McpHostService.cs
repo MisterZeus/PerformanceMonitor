@@ -1,10 +1,12 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.AspNetCore;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
@@ -100,6 +102,27 @@ public sealed class McpHostService : BackgroundService
                 .WithGeminiCompatibleTools<McpAnalysisTools>();
 
             _app = builder.Build();
+
+            /* DNS-rebinding guard (#1648) — the FIRST middleware, running the SAME shared decision Darling's
+               web dashboard and MCP host install (HostHeaderGuard; never a second copy of the rule). This host
+               is loopback-only and tokenless, so a browser on this machine that loads attacker content could be
+               rebound to 127.0.0.1:{port} and reach every tool same-origin; application/json does not force a
+               CORS preflight under a rebind, because the browser considers the request same-origin. Loopback-
+               only means no configured listen IP, so ONLY loopback Hosts (localhost / 127.0.0.1 / ::1) and an
+               absent Host pass — a rebound foreign hostname is rejected 400 before MapMcp or any tool handler.
+               Severity here is informational (single-user desktop app, no service-account privilege), but the
+               guard is shared code and covers both apps rather than only the one that was exploitable. */
+            _app.Use(async (context, next) =>
+            {
+                if (!HostHeaderGuard.IsAllowedHost(context.Request.Host.Host, networkListenIp: null))
+                {
+                    context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                    return;
+                }
+
+                await next(context);
+            });
+
             _app.MapMcp();
 
             AppLogger.Info("MCP", $"Starting MCP server on http://localhost:{_port}");

@@ -6,11 +6,14 @@
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
-    <NoWarn>CA1849;CA2007;CA1508;CA1822;CA1805;CA1510;CA1816;CA1861;CA1845;CA2201;CS4014;NU1701;CA1001;CA1848;CA1852;CA1305;CA1860;CA1707;CA1507;CA1806</NoWarn>
+    <!-- xUnit1051 (use TestContext.Current.CancellationToken): a per-call-site style nag across
+         hundreds of short-lived test calls; suppressed like CS4014 rather than threading the
+         ambient token through every call. -->
+    <NoWarn>CA1849;CA2007;CA1508;CA1822;CA1805;CA1510;CA1816;CA1861;CA1845;CA2201;CS4014;NU1701;CA1001;CA1848;CA1852;CA1305;CA1860;CA1707;CA1507;CA1806;xUnit1051</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.6.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
@@ -33,5 +36,26 @@
     <None Include="Fixtures\SystemHealth\*.xml" CopyToOutputDirectory="PreserveNewest" />
     <!-- Deadlock graph parser/layout golden samples (real sql2025 captures + synthetic edge cases). -->
     <None Include="Fixtures\Deadlocks\*.xml" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The SHIPPED bring-your-own-Postgres provisioning script, copied beside the test binary so
+         ProvisionRolesAclDriftTests can parse the REAL file (never a stale second copy) from
+         AppContext.BaseDirectory, with no repo-root path walking. Same Link+copy delivery the Service
+         project uses for tools\install-darling.ps1. -->
+    <None Include="..\tools\provision-roles.sql" Link="Fixtures\provision-roles.sql" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The two Darling Kestrel hosts' sources, copied beside the test binary (same Link+copy delivery as the
+         provisioning script above — the files live outside this project directory, so the default Compile glob
+         never sees them). HostHeaderGuardTests parses them to pin that the #1648 DNS-rebinding middleware is
+         installed FIRST and in BOTH bind modes: the defect was a WIRING omission, not a logic bug, so the pure
+         decision test alone would have passed on the broken build. -->
+    <!-- #1706: the store-upgrade orchestration is parsed as SOURCE to pin two WIRING invariants that no
+         behavioral test can reach — the post-commit catch must stay ahead of the general one, and the port
+         preflight must actually be called. Both defects are invisible to logic tests and to the happy-path
+         E2E, exactly like the #1648 middleware-ordering case these fixtures already exist for. -->
+    <None Include="..\PerformanceMonitor.Darling.Service\DarlingStoreUpgrade.cs" Link="Fixtures\DarlingStoreUpgrade.cs" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\PerformanceMonitor.Darling.Service\Mcp\DarlingMcpHostService.cs" Link="Fixtures\DarlingMcpHostService.cs" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\PerformanceMonitor.Darling.Service\Mcp\DarlingWebHostService.cs" Link="Fixtures\DarlingWebHostService.cs" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The runtime fetch script, copied beside the test binary so DarlingPgRuntimeVersionPinTests reads
+         the REAL pins (#1706) rather than a second copy that could itself go stale — the exact failure
+         mode the test exists to catch. Same Link+copy delivery as the provisioning script above. -->
+    <None Include="..\tools\fetch-pg-runtime.ps1" Link="Fixtures\fetch-pg-runtime.ps1" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

@@ -110,9 +110,9 @@ public sealed class DarlingMcpHealthParserTools
         {
             var now = DateTime.UtcNow;
             /* database_id → name resolution needs the collected size-stats mapping (the shred left it null). */
-            var mapTask = DarlingSystemHealthReader.GetDatabaseNameMapAsync(postgres, resolved.Value.ServerId);
+            var mapTask = DarlingSystemHealthReader.GetDatabaseNameMapAsync(postgres, resolved.ServerId);
             var xmls = await DarlingSystemHealthReader.ReadEventXmlAsync(
-                postgres, resolved.Value.ServerId, now.AddHours(-hours_back), now, SystemHealthParser.ErrorReportedEvent);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, SystemHealthParser.ErrorReportedEvent);
             var map = await mapTask;
 
             var rows = xmls
@@ -124,7 +124,7 @@ public sealed class DarlingMcpHealthParserTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 error_count = rows.Count,
                 shown = Math.Min(rows.Count, limit),
@@ -453,7 +453,7 @@ public sealed class DarlingMcpHealthParserTools
 
         var now = DateTime.UtcNow;
         var xmls = await DarlingSystemHealthReader.ReadEventXmlAsync(
-            postgres, resolved.Value.ServerId, now.AddHours(-hoursBack), now, eventType);
+            postgres, resolved.ServerId, now.AddHours(-hoursBack), now, eventType);
 
         var rows = new List<T>();
         foreach (var xml in xmls)
@@ -465,7 +465,7 @@ public sealed class DarlingMcpHealthParserTools
             }
         }
 
-        return new Collected<T>(null, resolved.Value.ServerName, rows);
+        return new Collected<T>(null, resolved.ServerName, rows);
     }
 
     /// <summary>Wraps a single-record shred (0-or-1) as the 0..n sequence <see cref="CollectAsync"/> expects.</summary>

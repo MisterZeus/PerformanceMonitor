@@ -114,9 +114,20 @@ public sealed class DefaultTraceEventsCollector : CollectorDefinitionBase<Defaul
 
     /* The curated, config-slice-free event set (see the class remarks). A {0} placeholder is spliced with
        the per-server excluded-database clause on ft.DatabaseName; the rollover-file base-path normalization
-       (strip _NN + re-append the extension) reads every retained file. READ UNCOMMITTED like every collector;
-       OPTION(RECOMPILE) because the cutoff selectivity varies wildly between the all-history first run and the
-       tiny steady-state windows. */
+       (strip _NN + re-append the extension) reads every retained file. The strip only fires when the
+       LAST underscore sits in the FILENAME, i.e. after the last path separator (either family — the
+       collector runs against Windows and Linux targets): SQL Server on Linux names the initial trace
+       file without a rollover suffix (log.trc, not log_1.trc), so an unguarded strip mangles the path
+       (log.trc.trc — #1633), and a trace DIRECTORY containing an underscore would mangle it a second
+       way (/var/opt/my_sql/log/log.trc -> /var/opt/my.trc — #1636); fn_trace_gettable then errors on
+       the nonexistent file (Msg 19049) and no events are collected. Falling back to t.path in both
+       cases keeps the Windows behavior (which always has the _N suffix) unchanged. READ UNCOMMITTED
+       like every collector; OPTION(RECOMPILE) because the cutoff selectivity varies wildly between the
+       all-history first run and the tiny steady-state windows. */
+    /* Parsed once — the template is re-formatted every collection cycle (CA1863). */
+    private static readonly System.Text.CompositeFormat QueryTemplateFormat =
+        System.Text.CompositeFormat.Parse(QueryTemplate);
+
     private const string QueryTemplate = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
@@ -145,8 +156,13 @@ SELECT
 FROM sys.traces AS t
 CROSS APPLY sys.fn_trace_gettable
 (
-    LEFT(t.path, LEN(t.path) - CHARINDEX(N'_', REVERSE(t.path))) +
-    RIGHT(t.path, 4),
+    CASE
+        WHEN CHARINDEX(N'_', REVERSE(t.path)) > 0
+        AND (CHARINDEX(N'\', REVERSE(t.path)) = 0 OR CHARINDEX(N'_', REVERSE(t.path)) < CHARINDEX(N'\', REVERSE(t.path)))
+        AND (CHARINDEX(N'/', REVERSE(t.path)) = 0 OR CHARINDEX(N'_', REVERSE(t.path)) < CHARINDEX(N'/', REVERSE(t.path)))
+        THEN LEFT(t.path, LEN(t.path) - CHARINDEX(N'_', REVERSE(t.path))) + RIGHT(t.path, 4)
+        ELSE t.path
+    END,
     t.max_files
 ) AS ft
 JOIN sys.trace_events AS te
@@ -221,7 +237,7 @@ OPTION(RECOMPILE);";
         var (exclusionClause, exclusionParameters) = BuildNullSafeDatabaseExclusion(context.ExcludedDatabases);
         var exclusionSplice = exclusionClause.Length == 0 ? string.Empty : "\r\n" + exclusionClause;
 
-        var text = string.Format(CultureInfo.InvariantCulture, QueryTemplate, exclusionSplice);
+        var text = string.Format(CultureInfo.InvariantCulture, QueryTemplateFormat, exclusionSplice);
 
         /* Cutoff selection (the Dashboard's first-run guard, ported):
              - watermark present            -> steady state, collect newer than it.

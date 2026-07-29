@@ -5,11 +5,14 @@
     <UseWPF>true</UseWPF>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
-    <NoWarn>CA1849;CA2007;CA1508;CA1822;CA1805;CA1510;CA1816;CA1861;CA1845;CA2201;CS4014;NU1701;CA1001;CA1848;CA1852;CA1305;CA1860;CA1707;CA1507;CA1806</NoWarn>
+    <!-- xUnit1051 (use TestContext.Current.CancellationToken): a per-call-site style nag across
+         hundreds of short-lived test calls; suppressed like CS4014 rather than threading the
+         ambient token through every call. -->
+    <NoWarn>CA1849;CA2007;CA1508;CA1822;CA1805;CA1510;CA1816;CA1861;CA1845;CA2201;CS4014;NU1701;CA1001;CA1848;CA1852;CA1305;CA1860;CA1707;CA1507;CA1806;xUnit1051</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.6.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
@@ -26,5 +29,16 @@
     <!-- system_health event samples (one per feeder event; shapes per sp_HealthParser xpath) for the
          System Events reader round-trip tests. Mirrors Darling.Tests' Fixtures\SystemHealth set. -->
     <None Include="Fixtures\SystemHealth\*.xml" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Lite's MCP host source, copied beside the test binary (it lives outside this project directory, so the
+         default Compile glob never sees it) so HostHeaderGuardTests can pin that the #1648 DNS-rebinding
+         middleware is installed FIRST, ahead of MapMcp. Mirrors Darling.Tests' guard on its two hosts — the
+         defect was a wiring omission in both apps, and only the wiring can regress. -->
+    <None Include="..\Lite\Mcp\McpHostService.cs" Link="Fixtures\McpHostService.cs" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The three services that build DuckDB COPY/read_parquet path literals, so DataImportPathEscapingTests
+         can pin that none of them interpolates a path without EscapeSqlPath. DataImportService was the one
+         that had drifted from its siblings, and a forgotten call is only visible in the source. -->
+    <None Include="..\Lite\Services\DataImportService.cs" Link="Fixtures\DataImportService.cs" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\Lite\Services\ArchiveService.cs" Link="Fixtures\ArchiveService.cs" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\Lite\Services\ParquetCompaction.cs" Link="Fixtures\ParquetCompaction.cs" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

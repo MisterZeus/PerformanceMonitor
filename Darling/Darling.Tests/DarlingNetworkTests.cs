@@ -256,7 +256,53 @@ public sealed class DarlingNetworkTests
         Assert.Contains("-Action Allow", cmd, StringComparison.Ordinal);
         Assert.Contains("-Protocol TCP", cmd, StringComparison.Ordinal);
         Assert.Contains("-LocalPort 5641", cmd, StringComparison.Ordinal);
-        Assert.Contains("-RemoteAddress 192.168.1.0/24", cmd, StringComparison.Ordinal);
+        /* #1646: quoted, where it used to be bare. New-NetFirewallRule takes the single-quoted literal
+           identically, so this is behavior-preserving; what changes is that a value carrying a statement
+           separator can no longer end the command. */
+        Assert.Contains("-RemoteAddress '192.168.1.0/24'", cmd, StringComparison.Ordinal);
+    }
+
+    /* ---- #1646: the builders quote + escape every interpolated value (defense in depth) ----
+       darling.json is operator-supplied text, and the toggle verbs read it with DarlingConfig.Load, which
+       never calls Validate(). The primary fix parses allowFrom as a CIDR at the caller
+       (DarlingCliCommands.ClassifyAllowFrom); these pin the second layer, so the builders stay safe no matter
+       what any present or future caller hands them. */
+
+    [Theory]
+    [InlineData("192.168.1.0/24; Start-Process calc.exe")]
+    [InlineData("10.0.0.0/8'; whoami; '")]
+    [InlineData("' | Out-Null; New-NetFirewallRule -DisplayName 'pwn' -RemoteAddress Any; '")]
+    [InlineData("$(whoami)")]
+    [InlineData("`nStop-Service 'PerformanceMonitor Darling'")]
+    public void BuildFirewallEnableCommand_KeepsAnyRemoteAddressInsideOneSingleQuotedLiteral(string hostile)
+    {
+        var cmd = DarlingManagedPostgres.BuildFirewallEnableCommand("PerformanceMonitor Darling MCP (port 5152)", 5152, hostile);
+
+        /* Inside '…' PowerShell expands nothing, so the ONE way out is an unescaped quote. Every quote in the
+           emitted command must therefore be part of a balanced pair: an odd count would mean the value broke
+           out of its literal. The builder emits exactly 6 quotes of its own (two rule names + the address). */
+        var quotes = cmd.Split('\'').Length - 1;
+        Assert.True(quotes % 2 == 0, $"unbalanced quoting lets the value escape its literal: {cmd}");
+
+        /* And the value's own quotes are doubled, never passed through raw. */
+        var expected = "-RemoteAddress '" + hostile.Replace("'", "''", StringComparison.Ordinal) + "'";
+        Assert.Contains(expected, cmd, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FirewallCommandBuilders_QuoteTheRuleNameToo_AndAreUnchangedForRealRuleNames()
+    {
+        /* Real rule names carry no quote, so quoting them leaves both commands byte-for-byte what they were —
+           which is what lets this hardening ship without re-validating the firewall behavior. */
+        const string ruleName = "PerformanceMonitor Darling Web (port 5153)";
+        Assert.Equal(
+            $"Remove-NetFirewallRule -DisplayName '{ruleName}' -ErrorAction SilentlyContinue; " +
+            $"New-NetFirewallRule -DisplayName '{ruleName}' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5153 -RemoteAddress '192.168.1.0/24' | Out-Null",
+            DarlingManagedPostgres.BuildFirewallEnableCommand(ruleName, 5153, "192.168.1.0/24"));
+
+        /* A quote in a rule name is doubled rather than closing the literal. */
+        var hostile = DarlingManagedPostgres.BuildFirewallDisableCommand("rule'; whoami; '");
+        Assert.Contains("-DisplayName 'rule''; whoami; '''", hostile, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -83,6 +83,16 @@ public sealed class PgCopyWriterTests
     }
 
     [Fact]
+    public void StripEmbeddedNuls_RemovesNulsPostgresRejects_LeavesCleanTextAlone()
+    {
+        /* SQL Server NVARCHAR allows embedded NUL; Postgres text rejects it with 22021 (#1614). */
+        Assert.Equal("SELECT 1;", PgCollectorRowWriter.StripEmbeddedNuls("SELECT 1;"));
+        Assert.Equal("SELECT 1;", PgCollectorRowWriter.StripEmbeddedNuls("SELECT\0 1;\0"));
+        Assert.Equal(string.Empty, PgCollectorRowWriter.StripEmbeddedNuls("\0\0"));
+        Assert.Equal(string.Empty, PgCollectorRowWriter.StripEmbeddedNuls(string.Empty));
+    }
+
+    [Fact]
     public async Task EndToEnd_MigrateCopyReadBack_AgainstDevPostgres()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
@@ -96,13 +106,15 @@ public sealed class PgCopyWriterTests
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
         Assert.Equal(0, await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken));
 
-        /* COPY one deadlocks row through the definition's own WritePayload. */
+        /* COPY one deadlocks row through the definition's own WritePayload. The victim text
+           carries an embedded NUL — the #1614 repro: SQL Server NVARCHAR allows it, Postgres
+           rejects the raw byte with 22021, and the writer must strip it or this COPY fails. */
         var collectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
         var row = new DeadlocksCollector.Row
         {
             DeadlockTime = collectionTime,
             VictimProcessId = "process-e2e",
-            VictimSqlText = "UPDATE t SET x = 1;",
+            VictimSqlText = "UPDATE t SET x = 1;\0",
             GraphXml = "<deadlock/>",
         };
 

@@ -438,8 +438,18 @@ function tsPanel(o) {
   const cell = { type: "panel", source: o.source, viz: o.viz || "line", timeBucket: o.timeBucket || "hour", title: o.title };
   applyMetric(cell, o);
   if (Array.isArray(o.groupBy) && o.groupBy.length) cell.groupBy = o.groupBy;
+  /* The #1606 dual-axis second measure. Only legal on an UNGROUPED line/area (the server rejects it
+     anywhere else), so a template using it must not also set groupBy. */
+  if (o.overlay) cell.overlay = o.overlay;
   if (Array.isArray(o.annotations) && o.annotations.length) cell.annotations = o.annotations;
   if (Array.isArray(o.thresholds) && o.thresholds.length) cell.thresholds = o.thresholds;
+  return cell;
+}
+
+/** A single-value (stat tile) panel cell: no timeBucket and no topN is what makes it scalar mode. */
+function statPanel(o) {
+  const cell = { type: "panel", source: o.source, viz: o.viz || "stat", title: o.title };
+  applyMetric(cell, o);
   return cell;
 }
 
@@ -726,6 +736,103 @@ export const NOTEBOOK_TEMPLATES = [
               "### If you see RESOURCE_SEMAPHORE waits\n\n" +
                 "That is queries waiting for a memory grant. Cross-reference the wait stats, look for oversized grants in " +
                 "Query Store, and review `MAX_GRANT_PERCENT` / Resource Governor limits."
+            ),
+          ],
+        },
+      };
+    },
+  },
+  {
+    key: "ag-health",
+    label: "AG Health",
+    description: "Availability Group replication health: secondary lag, send vs redo throughput, queue backlogs, and drain estimates.",
+    make() {
+      return {
+        name: "AG Health",
+        description: "Availability Group replication health and latency.",
+        definition: {
+          kind: NOTEBOOK_KIND,
+          cells: [
+            md(
+              "# Availability Group health\n\n" +
+                "How far behind the secondaries are, and why. Set the server and time range at the top to scope every " +
+                "panel — **point them at the PRIMARY**: `sys.dm_hadr_*` only carries the local replica's rows on a " +
+                "secondary, so a secondary-scoped view shows that one replica's self-view and nothing about its peers.\n\n" +
+                "Reading order: lag says *how bad*, the rate and queue panels say *why*, and the drain estimate says " +
+                "*how long until it clears at the current rate*."
+            ),
+            md("## 1. How far behind is each secondary?"),
+            tsPanel({
+              title: "Secondary lag by replica",
+              source: "ag_database_replica_states",
+              measure: "ag_secondary_lag",
+              aggregate: "max",
+              unit: "s",
+              viz: "line",
+              groupBy: ["replica_server_name"],
+            }),
+            md(
+              "Lag climbing on one replica but not the others points at that node (network, disk, CPU); climbing on all " +
+                "of them points at the primary's log-generation rate. A replica whose data movement is **suspended** " +
+                "shows lag accruing here, so a spike is not automatically a performance problem — check the " +
+                "synchronization state before chasing it."
+            ),
+            md("## 2. Send vs redo: which side is the bottleneck?"),
+            tsPanel({
+              title: "Log send rate vs redo rate",
+              source: "ag_database_replica_states",
+              measure: "ag_log_send_rate",
+              aggregate: "avg",
+              unit: "kb",
+              viz: "line",
+              overlay: { measure: "ag_redo_rate", aggregate: "avg", unit: "kb" },
+            }),
+            md(
+              "Both are KB/second. Send outpacing redo means the secondary is receiving faster than it can replay — the " +
+                "redo queue grows and failover time with it. Redo at or above send means the secondary is keeping up. " +
+                "(Ungrouped by design: a dual-axis panel plots one series per axis.)"
+            ),
+            md("## 3. Where is the redo backlog?"),
+            tsPanel({
+              title: "Redo queue by database",
+              source: "ag_database_replica_states",
+              measure: "ag_redo_queue",
+              aggregate: "max",
+              unit: "kb",
+              viz: "stacked",
+              groupBy: ["database_name"],
+            }),
+            md("## 4. How long until the redo queue clears?"),
+            statPanel({
+              title: "Estimated redo drain (worst, minutes)",
+              source: "ag_database_replica_states",
+              measure: "ag_est_redo_drain_min",
+              aggregate: "max",
+              unit: "min",
+            }),
+            md(
+              "Queue ÷ rate at each sample's own instant, so it reflects the rate that actually applied. **Blank means " +
+                "there is no drain rate** — idle, caught up, or suspended — not that it drains instantly."
+            ),
+            md("## 5. Which databases are backing up on the send side?"),
+            rankedPanel({
+              title: "Log send queue by database",
+              source: "ag_database_replica_states",
+              measure: "ag_log_send_queue",
+              aggregate: "max",
+              unit: "kb",
+              viz: "bar",
+              groupBy: ["database_name"],
+              topN: 10,
+            }),
+            md(
+              "### Next steps\n\n" +
+                "- Send-side backlog with a healthy redo rate is usually network or primary log throughput.\n" +
+                "- Redo-side backlog is the secondary: check its CPU, disk latency, and whether redo is single-threaded " +
+                "for that database.\n" +
+                "- For primary-side commit cost, chart `Transaction Delay` and `Mirrored Write Transactions/sec` from " +
+                "`perfmon_stats` — their ratio is the average delay per mirrored transaction — and cross-check " +
+                "`HADR_SYNC_COMMIT` in wait stats."
             ),
           ],
         },

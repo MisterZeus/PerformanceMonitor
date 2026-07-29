@@ -104,11 +104,12 @@
     }
   ],
 
-  // Capture execution plans into query_stats.query_plan_xml and query_store_stats.query_plan_text
-  // (default true). PostgreSQL TOAST compresses the plan text transparently (pglz) and TimescaleDB
-  // chunk compression squeezes it further, so plans are cheap to keep here — unlike Performance
-  // Monitor Lite, which stores to DuckDB/parquet and deliberately never captures them. Set false to
-  // skip plan capture (e.g. to shave storage across a very large fleet).
+  // Capture execution plans (default true). A query_stats plan is stored ONCE per distinct plan in
+  // query_plan_dim, and the fact row carries only its content digest (query_plan_digest), so
+  // re-collecting the same cached plan every cycle costs a hash rather than another copy of the XML
+  // — that is what makes plans cheap to keep here, unlike Performance Monitor Lite, which stores to
+  // DuckDB/parquet and deliberately never captures them. (query_store_stats.query_plan_text is
+  // still stored inline; it is not deduplicated yet.) Set false to skip plan capture entirely.
   "capturePlans": true,
 
   // Record Object:Created / Object:Altered / Object:Deleted schema-change (DDL) events in the built-in

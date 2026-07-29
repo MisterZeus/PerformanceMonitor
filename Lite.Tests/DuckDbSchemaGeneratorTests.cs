@@ -163,12 +163,12 @@ public sealed class DuckDbSchemaGeneratorTests
     }
 
     [Fact]
-    public void Generated_EmitsEveryCatalogTable_AndThirtyFourIndexes()
+    public void Generated_EmitsEveryCatalogTable_AndThirtySixIndexes()
     {
-        Assert.Equal(36, DuckDbSchemaGenerator.CreateTableStatements().Count());
+        Assert.Equal(38, DuckDbSchemaGenerator.CreateTableStatements().Count());
 
-        /* 36 collectors minus the two index-less config tables = 34 indexes. */
-        Assert.Equal(34, DuckDbSchemaGenerator.CreateIndexStatements().Count());
+        /* 38 collectors minus the two index-less config tables = 36 indexes. */
+        Assert.Equal(36, DuckDbSchemaGenerator.CreateIndexStatements().Count());
     }
 
     /// <summary>
@@ -215,7 +215,7 @@ public sealed class DuckDbSchemaGeneratorTests
     /// <summary>
     /// Pins the "three registrations" collapse: the archive-view list (DuckDbInitializer) and the
     /// archival/purge list (ArchiveService) are now BOTH derived from the catalog, so they cover
-    /// exactly the 35 collector tables plus the two non-collector time-series tables, and can never
+    /// exactly the 36 collector tables plus the two non-collector time-series tables, and can never
     /// again fall out of sync by hand.
     /// </summary>
     [Fact]

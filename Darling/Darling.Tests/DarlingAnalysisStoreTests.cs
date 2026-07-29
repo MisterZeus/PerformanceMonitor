@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
@@ -239,12 +240,22 @@ public sealed class DarlingAnalysisStoreTests
         /* Migrations are idempotent — an older store comes up to current, a current store no-ops. */
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
 
+        /* Two separate invariants, because the single COUNT(*) == SchemaVersion check they replace conflated
+           them: it only holds while migration versions are DENSE from 1, so the first concurrently-developed
+           pair of migrations (V35 alerts / V36 AG latency, built on separate branches) broke it with a
+           temporary gap that is completely inert to the applier — MigrateAsync applies every script whose
+           version exceeds MAX(version) and never assumes contiguity. Assert what actually matters instead,
+           which is also strictly stronger than the old proxy. */
+        using (var maxVersion = new NpgsqlCommand("SELECT COALESCE(MAX(version), 0) FROM darling_schema_version", connection))
+        {
+            /* The store reached the version this build knows — the same expression MigrateAsync reads. */
+            Assert.Equal(StorageVersion.SchemaVersion, Convert.ToInt32(await maxVersion.ExecuteScalarAsync(TestContext.Current.CancellationToken), CultureInfo.InvariantCulture));
+        }
+
         using (var versions = new NpgsqlCommand("SELECT COUNT(*) FROM darling_schema_version", connection))
         {
-            /* One row per applied migration, so the count tracks the current schema version. Reference the
-               constant rather than a literal — this was hardcoded to a since-superseded number (15) and, as a
-               live-only assertion CI skips, silently rotted until the schema reached V17. */
-            Assert.Equal((long)StorageVersion.SchemaVersion, await versions.ExecuteScalarAsync(TestContext.Current.CancellationToken));
+            /* And EVERY script ran, one stamped row apiece — so a script silently skipped still fails here. */
+            Assert.Equal((long)PgMigrations.Scripts.Count, await versions.ExecuteScalarAsync(TestContext.Current.CancellationToken));
         }
 
         /* Clear leftovers from an earlier aborted run so the assertions below are deterministic. */

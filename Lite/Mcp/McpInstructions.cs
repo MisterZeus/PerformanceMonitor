@@ -68,7 +68,7 @@ internal static class McpInstructions
         ### Query Performance Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `get_top_queries_by_cpu` | Expensive queries from plan cache with DOP, spills, query_hash | `server_name`, `hours_back`, `top`, `database_name`, `parallel_only`, `min_dop` |
+        | `get_top_queries_by_cpu` | Expensive queries from plan cache with DOP, spills, query_hash. `max_dop` is a lifetime-max for the cached plan, not current parallelism - confirm with `analyze_query_plan` | `server_name`, `hours_back`, `top`, `database_name`, `parallel_only`, `min_dop` |
         | `get_top_procedures_by_cpu` | Expensive stored procedures by CPU time | `server_name`, `hours_back`, `top`, `database_name` |
         | `get_query_store_top` | Expensive queries from Query Store (persistent) | `server_name`, `hours_back`, `top`, `database_name` |
         | `get_query_trend` | Time-series for a specific query by query_hash | `query_hash` (required), `database_name` (required), `server_name`, `hours_back` |
@@ -164,7 +164,7 @@ internal static class McpInstructions
         ### Session & Active Query Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `get_active_queries` | Active query snapshots from sp_WhoIsActive — what was running at each collection point | `server_name`, `hours_back` (default 1), `database_name`, `blocking_only`, `limit` |
+        | `get_active_queries` | Active query snapshots from sys.dm_exec_requests — what was running at each collection point | `server_name`, `hours_back` (default 1), `database_name`, `blocking_only`, `limit` |
         | `get_session_stats` | Connection counts and resource usage grouped by application | `server_name` |
 
         ### Execution Plan Analysis Tools

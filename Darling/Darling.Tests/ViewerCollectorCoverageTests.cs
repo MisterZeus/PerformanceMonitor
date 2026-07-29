@@ -38,14 +38,17 @@ namespace Darling.Tests;
 public sealed class ViewerCollectorCoverageTests
 {
     /// <summary>
-    /// Collector tables the Darling service stores but whose data no viewer reader surfaces yet. Empty
-    /// today — the viewer has a reader for all 35 catalog tables. A genuinely store-only/headless table
-    /// (one deliberately never shown) would go here with a comment; an unbuilt-UI table would go here with
-    /// a <c>// UNBUILT UI (parity board Tier 1) -- remove when the tab ships</c> comment.
+    /// Collector tables the Darling service stores but whose data no viewer reader surfaces yet. A genuinely
+    /// store-only/headless table (one deliberately never shown) would go here with a comment; an unbuilt-UI
+    /// table would go here with a <c>// UNBUILT UI (parity board Tier 1) -- remove when the tab ships</c>
+    /// comment.
     /// </summary>
     private static readonly HashSet<string> KnownStoreOnlyOrUnbuiltTables = new(StringComparer.OrdinalIgnoreCase)
     {
-        // (empty) -- the Darling viewer reads every collector table.
+        // Empty: every collector table now has a Darling viewer reader. The two AG tables were the last
+        // entries -- carried as tracked debt while #991 shipped collection-only, and removed when the
+        // Availability Groups tab landed. This ratchet only ever shrinks; adding an entry back means a
+        // collector shipped without a viewer surface.
     };
 
     [Fact]
@@ -140,8 +143,22 @@ public sealed class ViewerCollectorCoverageTests
             $"No ViewerDataService*.cs files found under {readerDir} — the coverage pin cannot read the " +
             "Darling viewer's reader layer (did the reader layer move?).");
 
-        return string.Join("\n", files.Select(File.ReadAllText));
+        return string.Join("\n", files.Select(f => StripSchemaProbeLines(File.ReadAllText(f))));
     }
+
+    /// <summary>
+    /// Drops every <c>information_schema</c> line before the substring scan. Those lines are the
+    /// connect-time store-schema PROBE (<c>ViewerDataService.StoreSchemaProbeSql</c>), which asks whether a
+    /// table EXISTS — it never reads a row out of one. Without this, naming a collector table as a migration
+    /// sentinel (V29 long_query_completions, V34 ag_database_replica_states) would make that table look
+    /// "covered" and silently exempt it from the ratchet — the exact failure this pin exists to catch.
+    /// <c>information_schema</c> appears nowhere else in the reader layer, so the filter costs no real
+    /// coverage.
+    /// </summary>
+    private static string StripSchemaProbeLines(string source) =>
+        string.Join("\n", source
+            .Split('\n')
+            .Where(line => !line.Contains("information_schema", StringComparison.OrdinalIgnoreCase)));
 
     /// <summary>True if any whole path segment is a build-output directory (obj/bin). Segment-based, not a
     /// substring test — a plain Contains("obj") would false-positive on a source file whose name embeds it.</summary>

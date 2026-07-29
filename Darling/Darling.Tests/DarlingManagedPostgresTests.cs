@@ -35,6 +35,11 @@ namespace Darling.Tests;
 /// idempotent second EnsureRunning and an ownership-respecting stop — never touching a real
 /// Postgres and never downloading anything.
 /// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")], and NOT for the reason a sweep might assume.
+   This class never reads DARLING_TEST_PG at all — it reads DARLING_TEST_PGRUNTIME, which merely shares that
+   prefix, and it stands up its OWN throwaway cluster from the bundled runtime. A substring search for
+   "DARLING_TEST_PG" matches it anyway (that is how #1776's original sweep came to list it), so this note is here to
+   stop the next one serializing a class that touches no shared store. */
 public sealed class DarlingManagedPostgresTests
 {
     [Fact]
@@ -123,8 +128,9 @@ public sealed class DarlingManagedPostgresTests
     /// <summary>
     /// SCALE-READINESS memory tuning (mirrors the worker sizing): the v3 block derives shared_buffers /
     /// effective_cache_size / maintenance_work_mem / work_mem from the host's physical RAM, injected here so
-    /// the derivation is deterministic and unit-testable. 8 GB is the current DARLING01 box — none of the
-    /// caps engage, so it exercises the raw percentages (and pins work_mem at its 16 MB floor).
+    /// the derivation is deterministic and unit-testable. 8 GB is the current DARLING01 box — it pins
+    /// work_mem at its 16 MB floor, shared_buffers at the 1 GB co-located cap, and maintenance_work_mem at
+    /// the #1777 compression floor (5% of 8 GB = 409 MB is well under it, and 25% = 2 GB does not bite).
     /// </summary>
     [Fact]
     public void MemorySizingConfAppend_PinsV3Marker_AndDerivesFrom8GbRam()
@@ -135,7 +141,7 @@ public sealed class DarlingManagedPostgresTests
         Assert.Contains(DarlingManagedPostgres.ConfMarkerV3, block, StringComparison.Ordinal);
         Assert.Contains("shared_buffers = 1024MB", block, StringComparison.Ordinal);        /* 25% of 8 GB, capped at the 1 GB co-located ceiling (#1559) */
         Assert.Contains("effective_cache_size = 6144MB", block, StringComparison.Ordinal);  /* 75% of 8 GB */
-        Assert.Contains("maintenance_work_mem = 409MB", block, StringComparison.Ordinal);   /* 5% of 8 GB */
+        Assert.Contains("maintenance_work_mem = 1536MB", block, StringComparison.Ordinal);  /* the #1777 measured floor; 5% of 8 GB = 409 MB is far under it */
         Assert.Contains("work_mem = 16MB", block, StringComparison.Ordinal);                /* RAM/512, at the 16 MB floor */
 
         /* The blocks compose, they don't compete — v3 must not restate v1/v2 settings. */
@@ -189,9 +195,179 @@ public sealed class DarlingManagedPostgresTests
     }
 
     /// <summary>
-    /// On a big box every cap/ceiling engages: shared_buffers pins at 8 GB (not 25% = 16 GB),
-    /// maintenance_work_mem at 1 GB (not 5% = 3.2 GB), work_mem at 64 MB (not RAM/512 = 128 MB);
-    /// effective_cache_size stays the uncapped 75% planner hint.
+    /// The v6 log-rotation block (#1652): the logging collector as a SELF-CAPPING weekday ring. The three
+    /// settings that make the ring bounded are load-bearing together — %a weekday naming caps the set at
+    /// seven files, truncate-on-rotation stops a weekday file from growing week over week, and
+    /// rotation_size 0 keeps size rolls (which append rather than truncate) from defeating the ring.
+    /// </summary>
+    [Fact]
+    public void LogRotationConfAppend_PinsV6Marker_AndTheSelfCappingWeekdayRing()
+    {
+        var block = DarlingManagedPostgres.BuildLogRotationConfAppend();
+
+        Assert.Contains(DarlingManagedPostgres.ConfMarkerV6, block, StringComparison.Ordinal);
+        Assert.Contains("logging_collector = on", block, StringComparison.Ordinal);
+        Assert.Contains("log_directory = 'log'", block, StringComparison.Ordinal);
+        Assert.Contains("log_filename = 'postgresql-%a.log'", block, StringComparison.Ordinal);
+        Assert.Contains("log_rotation_age = 1d", block, StringComparison.Ordinal);
+        Assert.Contains("log_rotation_size = 0", block, StringComparison.Ordinal);
+        Assert.Contains("log_truncate_on_rotation = on", block, StringComparison.Ordinal);
+
+        /* The blocks compose, they don't compete. */
+        Assert.DoesNotContain("shared_buffers", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("max_connections", block, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The v7 compression-memory override (#1777) — the PROPAGATION half of the raised floor, and the only
+    /// reason an EXISTING store adopts it. A store provisioned before #1777 carries a v3 block whose
+    /// maintenance_work_mem was written under the old min(5% RAM, 1 GB) rule: on a 16 GB host that is the
+    /// 819 MB line simulated here. Appending v7 must make the LAST occurrence the new 1536 MB value, which
+    /// is the one PostgreSQL honors — the v3 block is never rewritten in place.
+    /// </summary>
+    [Fact]
+    public void CompressionMemoryConfAppend_PinsV7Marker_AndOverridesAnOlderV3Line()
+    {
+        const long sixteenGb = 16L * 1024 * 1024 * 1024;
+        var block = DarlingManagedPostgres.BuildCompressionMemoryConfAppend(sixteenGb);
+
+        Assert.Contains(DarlingManagedPostgres.ConfMarkerV7, block, StringComparison.Ordinal);
+        Assert.Contains("maintenance_work_mem = 1536MB", block, StringComparison.Ordinal);
+
+        /* The pre-#1777 conf shape: a v3 block carrying the OLD landing value. Appending v7 is what an
+           existing store's next service-owned start does, and last-occurrence-wins is what makes it real. */
+        var legacyConf =
+            DarlingManagedPostgres.ConfMarkerV3 + "\n" +
+            "shared_buffers = 1024MB\n" +
+            "effective_cache_size = 12288MB\n" +
+            "maintenance_work_mem = 819MB\n" +
+            "work_mem = 32MB\n";
+        Assert.Equal("819MB", LastSettingValue(legacyConf, "maintenance_work_mem"));
+        Assert.Equal("1536MB", LastSettingValue(legacyConf + block, "maintenance_work_mem"));
+
+        /* The older block is preserved, not edited — the heal path only ever appends. */
+        Assert.Contains("maintenance_work_mem = 819MB", legacyConf + block, StringComparison.Ordinal);
+
+        /* The blocks compose, they don't compete — v7 restates ONLY maintenance_work_mem. (The work_mem
+           probe is anchored to a line start: "maintenance_work_mem = " trivially contains "work_mem = ".) */
+        Assert.DoesNotContain("shared_buffers", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("\nwork_mem = ", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("effective_cache_size", block, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The value PostgreSQL would honor for <paramref name="setting"/>: the LAST assignment in the file,
+    /// which is the whole mechanism behind the versioned override blocks (v5 shared_buffers, v7
+    /// maintenance_work_mem). Ignores comment lines so a marker can never be read as an assignment.
+    /// </summary>
+    private static string? LastSettingValue(string conf, string setting)
+    {
+        string? value = null;
+        foreach (var raw in conf.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.StartsWith('#'))
+            {
+                continue;
+            }
+
+            var separator = line.IndexOf('=', StringComparison.Ordinal);
+            if (separator > 0 && line[..separator].Trim().Equals(setting, StringComparison.Ordinal))
+            {
+                /* The stock conf trails inline comments after the value ("100  # (change requires
+                   restart)"); ours never do, but the parser must not depend on that. */
+                var assignment = line[(separator + 1)..];
+                var comment = assignment.IndexOf('#', StringComparison.Ordinal);
+                value = (comment >= 0 ? assignment[..comment] : assignment).Trim();
+            }
+        }
+
+        return value;
+    }
+
+    /// <summary>
+    /// #1652: the diagnostics tail must follow the log wherever Postgres last wrote it — pg.log for
+    /// pre-collector/startup failures, the v6 ring for a server that came up and then complained.
+    /// </summary>
+    [Fact]
+    public void PickNewestServerLog_ChoosesTheNewestOfPgLogAndTheRing()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-pglogpick-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            Directory.CreateDirectory(dataDirectory);
+            var pgLog = Path.Combine(root.FullName, "pg.log");
+
+            /* Nothing exists yet. */
+            Assert.Null(DarlingManagedPostgres.PickNewestServerLog(pgLog, dataDirectory));
+
+            /* Only pg.log — the pre-collector failure shape. */
+            File.WriteAllText(pgLog, "FATAL: could not start");
+            Assert.Equal(pgLog, DarlingManagedPostgres.PickNewestServerLog(pgLog, dataDirectory));
+
+            /* The ring exists and is newer — the started-then-complained shape. */
+            var ringDirectory = Path.Combine(dataDirectory, "log");
+            Directory.CreateDirectory(ringDirectory);
+            var ringFile = Path.Combine(ringDirectory, "postgresql-Mon.log");
+            File.WriteAllText(ringFile, "ERROR: something after startup");
+            File.SetLastWriteTimeUtc(pgLog, DateTime.UtcNow.AddMinutes(-10));
+            File.SetLastWriteTimeUtc(ringFile, DateTime.UtcNow);
+            Assert.Equal(ringFile, DarlingManagedPostgres.PickNewestServerLog(pgLog, dataDirectory));
+
+            /* pg.log newer again (a fresh failed restart after the server had been up). */
+            File.SetLastWriteTimeUtc(pgLog, DateTime.UtcNow.AddMinutes(5));
+            Assert.Equal(pgLog, DarlingManagedPostgres.PickNewestServerLog(pgLog, dataDirectory));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// #1652: the one-time legacy cap — an oversized pre-rotation pg.log rolls to pg.log.old (replacing any
+    /// prior roll, so the pair is bounded forever); a small file is left alone; a missing file is a no-op.
+    /// </summary>
+    [Fact]
+    public void CapLegacyServerLog_RollsOnlyOversizedFiles()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-pglogcap-");
+        try
+        {
+            var pgLog = Path.Combine(root.FullName, "pg.log");
+            var rolled = pgLog + ".old";
+
+            /* Missing file: no-op, no throw. */
+            DarlingManagedPostgres.CapLegacyServerLog(pgLog, capBytes: 10, logger: null);
+            Assert.False(File.Exists(rolled));
+
+            /* Under the cap: untouched. */
+            File.WriteAllText(pgLog, "small");
+            DarlingManagedPostgres.CapLegacyServerLog(pgLog, capBytes: 1024, logger: null);
+            Assert.True(File.Exists(pgLog));
+            Assert.False(File.Exists(rolled));
+
+            /* Over the cap: rolled aside; a second oversized roll REPLACES the first (two files, ever). */
+            File.WriteAllText(pgLog, new string('x', 2048));
+            DarlingManagedPostgres.CapLegacyServerLog(pgLog, capBytes: 1024, logger: null);
+            Assert.False(File.Exists(pgLog));
+            Assert.True(File.Exists(rolled));
+
+            File.WriteAllText(pgLog, new string('y', 4096));
+            DarlingManagedPostgres.CapLegacyServerLog(pgLog, capBytes: 1024, logger: null);
+            Assert.Equal(4096, new FileInfo(rolled).Length);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// On a big box every cap/ceiling engages: shared_buffers pins at the 1 GB co-located cap (not 25% =
+    /// 16 GB), maintenance_work_mem at the #1777 2 GB cap (not 5% = 3.2 GB), work_mem at 64 MB (not
+    /// RAM/512 = 128 MB); effective_cache_size stays the uncapped 75% planner hint.
     /// </summary>
     [Fact]
     public void MemorySizingConfAppend_EngagesCapsOnLargeRam()
@@ -201,7 +377,7 @@ public sealed class DarlingManagedPostgresTests
 
         Assert.Contains("shared_buffers = 1024MB", block, StringComparison.Ordinal);          /* capped at the 1 GB co-located ceiling (#1559) */
         Assert.Contains("effective_cache_size = 49152MB", block, StringComparison.Ordinal);   /* 75% of 64 GB, uncapped */
-        Assert.Contains("maintenance_work_mem = 1024MB", block, StringComparison.Ordinal);    /* capped at 1 GB */
+        Assert.Contains("maintenance_work_mem = 2048MB", block, StringComparison.Ordinal);    /* capped at 2 GB (#1777) */
         Assert.Contains("work_mem = 64MB", block, StringComparison.Ordinal);                  /* capped at 64 MB */
     }
 
@@ -209,13 +385,22 @@ public sealed class DarlingManagedPostgresTests
     /// The pure derivation across RAM tiers, pinning each formula and its cap/clamp. work_mem is the
     /// flagged per-connection setting: it scales RAM/512 and reaches the 64 MB ceiling at 32 GB, so the
     /// pathological max_connections × sorts × work_mem never grows past the ceiling on a bigger box.
+    ///
+    /// <para>The maintenance_work_mem column is the #1777 LANDING TABLE, and each row exercises a different
+    /// one of the three terms so the interaction cannot silently change: at 2 GB and 4 GB the 25%-of-RAM
+    /// SMALL-HOST GUARD wins (512 / 1024 MB — the floor is held back rather than overcommitting the box);
+    /// at 8 GB and 16 GB the measured 1536 MB FLOOR wins (16 GB is the RAM class the field measurement came
+    /// from, and it must land exactly on the 1536 MB capture point); at 32 GB the raw 5%-of-RAM term has
+    /// finally overtaken the floor and wins on its own (1638 MB); at 64 GB the 2 GB CAP wins (5% would be
+    /// 3276 MB, and the field data showed nothing to gain past 1536).</para>
     /// </summary>
     [Theory]
-    [InlineData(2, 512, 1536, 102, 16)]      /* 2 GB: under every cap; work_mem at the 16 MB floor */
-    [InlineData(8, 1024, 6144, 409, 16)]     /* 8 GB: shared_buffers hits the 1 GB co-located cap (#1559); work_mem at the floor */
-    [InlineData(16, 1024, 12288, 819, 32)]   /* 16 GB: shared_buffers capped (the field box); work_mem RAM/512 = 32 MB */
-    [InlineData(32, 1024, 24576, 1024, 64)]  /* 32 GB: shared_buffers at the 1 GB cap, maintenance hits 1 GB, work_mem hits the 64 MB ceiling */
-    [InlineData(64, 1024, 49152, 1024, 64)]  /* 64 GB: everything but effective_cache_size capped; the planner hint keeps scaling */
+    [InlineData(2, 512, 1536, 512, 16)]      /* 2 GB: maintenance held to 25% of RAM by the small-host guard; work_mem at the 16 MB floor */
+    [InlineData(4, 1024, 3072, 1024, 16)]    /* 4 GB: the smallest host — the 25% guard holds the 1536 floor down to 1 GB (#1777) */
+    [InlineData(8, 1024, 6144, 1536, 16)]    /* 8 GB: shared_buffers hits the 1 GB co-located cap (#1559); maintenance at the measured floor; work_mem at the floor */
+    [InlineData(16, 1024, 12288, 1536, 32)]  /* 16 GB: the field-measured class — maintenance lands exactly on the 1536 MB capture point; work_mem RAM/512 = 32 MB */
+    [InlineData(32, 1024, 24576, 1638, 64)]  /* 32 GB: 5% of RAM has overtaken the floor and wins outright; work_mem hits the 64 MB ceiling */
+    [InlineData(64, 1024, 49152, 2048, 64)]  /* 64 GB: maintenance at the 2 GB cap; everything but effective_cache_size capped */
     public void DeriveMemorySettings_PerTier(long ramGb, int sharedBuffersMb, int effectiveCacheMb, int maintenanceMb, int workMemMb)
     {
         var settings = DarlingManagedPostgres.DeriveMemorySettings(ramGb * 1024 * 1024 * 1024);
@@ -235,7 +420,7 @@ public sealed class DarlingManagedPostgresTests
 
         Assert.Equal(1024, settings.SharedBuffersMb);       /* 25% of the 4 GB fallback */
         Assert.Equal(3072, settings.EffectiveCacheSizeMb);  /* 75% of 4 GB */
-        Assert.Equal(204, settings.MaintenanceWorkMemMb);   /* 5% of 4 GB */
+        Assert.Equal(1024, settings.MaintenanceWorkMemMb);  /* the #1777 1536 MB floor, held to 25% of the 4 GB fallback */
         Assert.Equal(16, settings.WorkMemMb);               /* RAM/512 = 8 MB, lifted to the 16 MB floor */
     }
 
@@ -458,6 +643,20 @@ public sealed class DarlingManagedPostgresTests
             Assert.Contains("max_connections = 200", conf, StringComparison.Ordinal);
             Assert.Contains("max_wal_size = 4GB", conf, StringComparison.Ordinal);
 
+            /* v6 log rotation rode the same first-run append, and the server ACCEPTED it (a bad line here
+               fails pg_ctl start outright) — the logging collector is live, proven by the weekday ring file
+               it creates under <data>\log the moment it starts (#1652). */
+            Assert.Contains(DarlingManagedPostgres.ConfMarkerV6, conf, StringComparison.Ordinal);
+            var ringFiles = Directory.GetFiles(Path.Combine(dataDirectory, "log"), "postgresql-*.log");
+            Assert.NotEmpty(ringFiles);
+
+            /* v7 compression memory (#1777) rode the same first-run append. Its value derives from THIS
+               host's RAM, so pin the marker and capture the conf's EFFECTIVE value (the last assignment,
+               which is the one the server honors) to compare against the live setting below. */
+            Assert.Contains(DarlingManagedPostgres.ConfMarkerV7, conf, StringComparison.Ordinal);
+            var confMaintenanceWorkMem = LastSettingValue(conf, "maintenance_work_mem");
+            Assert.NotNull(confMaintenanceWorkMem);
+
             /* The derived credential really authenticates (scram, not trust) into the darling
                database — and the server started with our appended conf, so the timescaledb
                preload line was accepted; the v2 worker sizing was accepted too (the setting is
@@ -466,8 +665,10 @@ public sealed class DarlingManagedPostgresTests
             {
                 await connection.OpenAsync(timeout.Token);
                 using var current = new NpgsqlCommand(
-                    "SELECT current_database(), current_user, current_setting('max_worker_processes'), current_setting('work_mem'), current_setting('shared_buffers')",
+                    "SELECT current_database(), current_user, current_setting('max_worker_processes'), current_setting('work_mem'), current_setting('shared_buffers'), " +
+                    "pg_size_bytes(current_setting('maintenance_work_mem')), pg_size_bytes(@confMaintenance)",
                     connection);
+                current.Parameters.AddWithValue("confMaintenance", confMaintenanceWorkMem);
                 using var reader = await current.ExecuteReaderAsync(timeout.Token);
                 Assert.True(await reader.ReadAsync(timeout.Token));
                 Assert.Equal("darling", reader.GetString(0));
@@ -481,6 +682,13 @@ public sealed class DarlingManagedPostgresTests
                    never the stock 4 MB / 128 MB defaults. */
                 Assert.NotEqual("4MB", reader.GetString(3));
                 Assert.NotEqual("128MB", reader.GetString(4));
+
+                /* #1777: the v7 override is LIVE, not merely written — the server holds exactly the conf's
+                   effective (last) assignment, never the stock 64 MB default. Compared in BYTES because
+                   PostgreSQL normalizes units on the way out: a conf line of "2048MB" reads back as "2GB",
+                   the same setting and a failed string compare (seen live on a large-RAM runner). */
+                Assert.Equal(reader.GetInt64(6), reader.GetInt64(5));
+                Assert.NotEqual(64L * 1024 * 1024, reader.GetInt64(5));
             }
 
             /* Second EnsureRunning against the live server: idempotent — no re-init (credential
@@ -499,6 +707,8 @@ public sealed class DarlingManagedPostgresTests
             Assert.Equal(1, CountOccurrences(confAfterSecond, DarlingManagedPostgres.ConfMarkerV3));
             Assert.Equal(1, CountOccurrences(confAfterSecond, DarlingManagedPostgres.ConfMarkerV4));
             Assert.Equal(1, CountOccurrences(confAfterSecond, DarlingManagedPostgres.ConfMarkerV5));
+            Assert.Equal(1, CountOccurrences(confAfterSecond, DarlingManagedPostgres.ConfMarkerV6));
+            Assert.Equal(1, CountOccurrences(confAfterSecond, DarlingManagedPostgres.ConfMarkerV7));
 
             /* Both up/down probes below must bypass Npgsql's pool: OpenAsync on a pooled string
                can hand back an idle socket with no I/O at all, which "succeeds" against a stopped
@@ -528,6 +738,130 @@ public sealed class DarlingManagedPostgresTests
             await owner.StopIfStartedByThisProcessAsync();
             TryDeleteRecursive(root.FullName);
         }
+    }
+
+    /// <summary>
+    /// #1777 PROPAGATION, proven against a real server: an EXISTING store — one whose conf carries the v3
+    /// block written under the old <c>min(5% RAM, 1 GB)</c> rule and no v7 marker — must adopt the raised
+    /// maintenance_work_mem on its next service-owned start. This is the half that actually reaches the
+    /// field; a formula change alone would only ever have applied to a fresh initdb, and the boxes that
+    /// need it are already collecting.
+    ///
+    /// <para>The pre-#1777 conf is reconstructed exactly, not approximated: the v7 block is removed (it is
+    /// the last thing appended, so truncating at its marker restores the old file byte-for-byte) and the v3
+    /// block's value is rewritten to 819 MB, which is what the old formula produced on a 16 GB host — the
+    /// RAM class the field measurement came from. The BEFORE reading is taken from the live server, so the
+    /// old value is proven in effect before the new one is proven to replace it.</para>
+    /// </summary>
+    [Fact]
+    public async Task ExistingStore_AdoptsRaisedMaintenanceWorkMem_OnNextStart_Gated()
+    {
+        var runtimeRoot = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(runtimeRoot),
+            "Set DARLING_TEST_PGRUNTIME to an assembled pg-runtime directory (the folder containing pgsql\\bin\\pg_ctl.exe; " +
+            "Darling\\tools\\fetch-pg-runtime.ps1 -KeepWork leaves one under artifacts\\pg-runtime-work\\assemble\\pg-runtime) " +
+            "to run the #1777 conf-propagation E2E.");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The bundled runtime is Windows-only.");
+        Assert.SkipUnless(File.Exists(Path.Combine(runtimeRoot!, "pgsql", "bin", "pg_ctl.exe")),
+            $"DARLING_TEST_PGRUNTIME={runtimeRoot} does not contain pgsql\\bin\\pg_ctl.exe.");
+
+        var root = Directory.CreateTempSubdirectory("darling-pgv7-");
+        var dataDirectory = Path.Combine(root.FullName, "pg");
+        var config = new PostgresConfig
+        {
+            Managed = true,
+            Port = FindFreeTcpPort(),
+            DataDirectory = dataDirectory,
+        };
+        var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+        const string legacyValue = "819MB";
+
+        var owner = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(8));
+
+            /* A real store, provisioned the normal way. */
+            await owner.EnsureRunningAsync(timeout.Token);
+            await owner.StopIfStartedByThisProcessAsync();
+
+            /* Rewind the conf to its pre-#1777 shape: drop the v7 block (appended last, so the marker is a
+               clean truncation point) and put the OLD formula's 16 GB landing value in the v3 block. */
+            var fresh = await File.ReadAllTextAsync(confPath, timeout.Token);
+            var v7Index = fresh.IndexOf(DarlingManagedPostgres.ConfMarkerV7, StringComparison.Ordinal);
+            Assert.True(v7Index > 0, "The fresh conf should carry the v7 block before it is rewound.");
+            var derivedValue = LastSettingValue(fresh, "maintenance_work_mem");
+            Assert.NotNull(derivedValue);
+            /* The whole test turns on before != after. A host with ~3.2 GB RAM would derive exactly 819MB
+               through the 25% guard and make the comparison vacuous — that is a property of the RUNNER,
+               not a product failure, so skip rather than pass emptily. */
+            Assert.SkipWhen(string.Equals(derivedValue, legacyValue, StringComparison.Ordinal),
+                $"This host derives maintenance_work_mem = {derivedValue}, the same value the test uses as the legacy reading.");
+
+            var legacyConf = fresh[..v7Index]
+                .Replace($"maintenance_work_mem = {derivedValue}", $"maintenance_work_mem = {legacyValue}", StringComparison.Ordinal);
+            await File.WriteAllTextAsync(confPath, legacyConf, timeout.Token);
+
+            Assert.DoesNotContain(DarlingManagedPostgres.ConfMarkerV7, legacyConf, StringComparison.Ordinal);
+            Assert.Equal(legacyValue, LastSettingValue(legacyConf, "maintenance_work_mem"));
+
+            /* The service-owned start: EnsureConfAppended heals BEFORE pg_ctl start, so the raised value is
+               live on this very start rather than one restart later. That ordering is what makes the live
+               assertion below decisive — without the v7 append this server would have come up on the
+               rewound conf and reported the legacy 819MB. */
+            var healedOwner = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+            var healedConnectionString = await healedOwner.EnsureRunningAsync(timeout.Token);
+            try
+            {
+                var healedConf = await File.ReadAllTextAsync(confPath, timeout.Token);
+                Assert.Equal(1, CountOccurrences(healedConf, DarlingManagedPostgres.ConfMarkerV7));
+                Assert.Equal(derivedValue, LastSettingValue(healedConf, "maintenance_work_mem"));
+                /* Appended, never rewritten in place — the legacy line is still there, just outvoted. */
+                Assert.Contains($"maintenance_work_mem = {legacyValue}", healedConf, StringComparison.Ordinal);
+
+                var (live, expected) = await ReadSettingAndLiteralBytesAsync(
+                    healedConnectionString, "maintenance_work_mem", derivedValue, timeout.Token);
+                Assert.Equal(expected, live);
+                Assert.NotEqual(819L * 1024 * 1024, live);
+            }
+            finally
+            {
+                await healedOwner.StopIfStartedByThisProcessAsync();
+            }
+
+            /* A third start must not append a second v7 block. */
+            Assert.Equal(1, CountOccurrences(await File.ReadAllTextAsync(confPath, timeout.Token), DarlingManagedPostgres.ConfMarkerV7));
+        }
+        finally
+        {
+            await owner.StopIfStartedByThisProcessAsync();
+            TryDeleteRecursive(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// Reads one live GUC and one postgresql.conf size literal, both as BYTES, through an UNPOOLED
+    /// connection — so the reading always costs real I/O against the server running right now rather than a
+    /// recycled idle socket.
+    ///
+    /// <para>Bytes rather than the raw strings, and measured BY THE SERVER rather than by reimplementing
+    /// PostgreSQL's unit parsing here: the server normalizes memory units on the way out, so a conf line of
+    /// <c>2048MB</c> reads back as <c>2GB</c> — the same setting, and a string compare that fails. That is
+    /// not hypothetical; it is what a large-RAM runner did to the first version of this test.</para>
+    /// </summary>
+    private static async Task<(long Live, long Expected)> ReadSettingAndLiteralBytesAsync(
+        string connectionString, string setting, string literal, CancellationToken cancellationToken)
+    {
+        var unpooled = new NpgsqlConnectionStringBuilder(connectionString) { Pooling = false }.ConnectionString;
+        await using var connection = new NpgsqlConnection(unpooled);
+        await connection.OpenAsync(cancellationToken);
+        using var command = new NpgsqlCommand(
+            "SELECT pg_size_bytes(current_setting(@setting)), pg_size_bytes(@literal)", connection);
+        command.Parameters.AddWithValue("setting", setting);
+        command.Parameters.AddWithValue("literal", literal);
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        Assert.True(await reader.ReadAsync(cancellationToken));
+        return (reader.GetInt64(0), reader.GetInt64(1));
     }
 
     private static int CountOccurrences(string text, string value)

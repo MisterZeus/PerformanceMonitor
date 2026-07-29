@@ -355,6 +355,37 @@ AND    dismissed = FALSE";
     }
 
     /// <summary>
+    /// How long a <c>dismissed_archive_alerts</c> row is kept, keyed on the <c>alert_time</c> of the
+    /// alert it suppresses. The horizon MUST outlive the parquet archives, because suppressing an
+    /// archived alert is the row's entire job: purge it while its alert is still readable through
+    /// <c>v_config_alert_log</c> and an alert the user already dismissed reappears. Parquet is pruned
+    /// at 3 months (<see cref="RetentionService.CleanupOldArchives"/>) on the FILE's date prefix, and
+    /// a file's prefix is the archive date — always newer than the rows inside it, by 7 days in
+    /// steady state and by however long the app was closed otherwise — so real parquet lifetime runs
+    /// past 3 months from alert_time. 180 days clears that with room to spare while still bounding a
+    /// table that previously had no purge path at all (#1651). Growth is user-paced (one row per
+    /// dismissed archived alert), so a generous horizon costs nothing.
+    /// </summary>
+    internal const int DismissedArchiveAlertRetentionDays = 180;
+
+    /// <summary>
+    /// Purges <c>dismissed_archive_alerts</c> rows whose alert is older than
+    /// <paramref name="retentionDays"/> — rows whose parquet has long since been pruned, so they can
+    /// never match anything again. This is the table's ONLY delete path: it is deliberately in
+    /// <see cref="ArchiveService"/>'s PreservedConfigTables (it must survive the 512 MB emergency
+    /// reset, or every dismissal a user ever made comes back at once), which is exactly why it needs
+    /// an age horizon of its own — nothing else ever shrinks it. Returns the rows removed.
+    /// </summary>
+    public async Task<int> PurgeOldDismissedArchiveAlertsAsync(int retentionDays = DismissedArchiveAlertRetentionDays)
+    {
+        using var connection = await OpenWriteConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM dismissed_archive_alerts WHERE alert_time < $1";
+        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-retentionDays) });
+        return await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
     /// Verifies that no undismissed alerts remain in the dismissed time range.
     /// </summary>
     private static async System.Threading.Tasks.Task VerifyDismissAllAsync(LockedConnection connection, DateTime cutoff, int? serverId, int expectedDismissed)

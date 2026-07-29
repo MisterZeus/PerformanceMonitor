@@ -4,12 +4,14 @@ A clear description of the change and why it's being made.
 
 ## Which component(s) does this affect?
 
-- [ ] Full Dashboard
-- [ ] Lite Dashboard
+- [ ] Lite
+- [ ] Darling
 - [ ] Lite Tests
+- [ ] Darling Tests
 - [ ] SQL collection scripts
-- [ ] CLI Installer
 - [ ] Documentation
+- [ ] Full Dashboard (deprecated)
+- [ ] CLI Installer (deprecated)
 
 ## How was this tested?
 

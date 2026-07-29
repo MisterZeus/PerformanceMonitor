@@ -61,6 +61,16 @@ public partial class MainWindow : Window
            is an INPUT to the shared engine (evaluate-but-don't-deliver, gates don't advance). */
         bool suppressPopups = !_alertStateService.ShouldShowAlerts(key);
 
+        /* #1696 Availability Group health, evaluated alongside the engine sweep rather than inside it: AG
+           conditions are judged off the COLLECTED ag_* snapshots, not the engine's live per-server snapshot
+           (the same reason Darling keeps them in its self-alert evaluator). Fire-and-forget so a DuckDB read
+           can never stall the UI-timer sweep, and gated on the master AG switch so a fleet with no AGs pays
+           only a dictionary lookup. */
+        if (App.NotifyAgHealth)
+        {
+            _ = EvaluateAvailabilityGroupAlertsAsync(summary.ServerId, summary.DisplayName, suppressPopups);
+        }
+
         /* The failed-jobs check needs the live connection status (online + engine edition); the
            fetcher re-checks it fresh at fetch time, exactly where the old loop's gate sat. */
         var connStatus = badgeServer != null ? _serverManager.GetConnectionStatus(badgeServer.Id) : null;
@@ -159,6 +169,12 @@ public partial class MainWindow : Window
                 MetricName = metricName
             });
 
+            /* #1681: log the FIRING. Connection alerts bypass both the shared engine and its logging funnel
+               (they fire from the connect edge, not the sweep), so without this they were invisible in the
+               log while their resolution toast was not. */
+            AppLogger.Warn("Alerts", AlertFiringLog.Fired(
+                serverName, metricName, "Critical", currentValue, isMuted));
+
             _ = _emailAlertService.TrySendAlertEmailAsync(
                 metricName,
                 serverName,
@@ -214,6 +230,12 @@ public partial class MainWindow : Window
     /// </summary>
     private Task ShowAlertResolutionToastAsync(AlertResolution resolution, CancellationToken cancellationToken)
     {
+        /* #1681: Lite logged NEITHER half — the toast is transient and nothing reached the log file, so an
+           operator reading logs after the fact saw no alert history at all. Now the engine's funnel logs the
+           firing and this logs the clear, in the shared shape, so the pair greps together. */
+        AppLogger.Info("Alerts", AlertFiringLog.Resolved(
+            resolution.ServerName, resolution.MetricName, resolution.Message));
+
         var tray = _trayService;
         if (tray != null)
         {
@@ -228,4 +250,119 @@ public partial class MainWindow : Window
         }
         return Task.CompletedTask;
     }
+
+    /// <summary>
+    /// Evaluates the four Availability Group conditions for one server from its latest collected snapshots
+    /// and delivers whatever fired (#1696) — Lite's half of AG alert parity with Darling.
+    ///
+    /// <para>Each grain is freshness-gated on its OWN snapshot time, because the two AG collectors carry
+    /// independent schedule entries: a disabled or failing database-grain collector must not have the replica
+    /// grain's healthy timestamp vouch for its stale rows and keep re-firing "AG Sync Fell Behind" off
+    /// days-old lag readings. A missing or stale snapshot is NO SIGNAL — neither fire nor clear — which is
+    /// also the normal state on a server that simply has no Availability Groups (zero rows collected).</para>
+    ///
+    /// <para>Never throws: this runs unawaited off a UI-timer tick, so a DuckDB read failure logs and returns
+    /// rather than surfacing as an unobserved task exception.</para>
+    /// </summary>
+    private async Task EvaluateAvailabilityGroupAlertsAsync(int serverId, string serverName, bool suppressed)
+    {
+        /* Captured once and null-checked, the same shape as the tray capture above. _dataService is
+           nullable and unset until the local store opens, and this method runs UNAWAITED off a UI-timer
+           tick — so it can land before the service is wired, and an NRE on a fire-and-forget task is an
+           unobserved exception nobody ever sees. The symptom would have been AG alerts silently not
+           evaluating on some launches with nothing in the log. Capturing also removes the gap a bare
+           field check leaves: the field could be reassigned across either await below. */
+        var data = _dataService;
+        if (data is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var alerts = new List<AgAlert>();
+            var now = DateTime.UtcNow;
+
+            var (replicaTimeUtc, replicas) = await data.GetLatestAgReplicaStatesAsync(serverId);
+            if (IsFresh(replicaTimeUtc))
+            {
+                alerts.AddRange(_agAlertEvaluator.EvaluateReplicas(serverId, replicas));
+            }
+
+            var (databaseTimeUtc, databases) = await data.GetLatestAgDatabaseReplicaStatesAsync(serverId);
+            if (IsFresh(databaseTimeUtc))
+            {
+                alerts.AddRange(_agAlertEvaluator.EvaluateDatabases(
+                    serverId,
+                    databases,
+                    App.AgLagAlertSeconds,
+                    App.AgRedoQueueAlertKb,
+                    TimeSpan.FromMinutes(App.AlertCooldownMinutes)));
+            }
+
+            if (alerts.Count == 0 || suppressed)
+            {
+                return;
+            }
+
+            foreach (var alert in alerts)
+            {
+                SendAgAlert(serverId, serverName, alert);
+            }
+
+            bool IsFresh(DateTime? snapshotUtc) =>
+                snapshotUtc.HasValue && now - snapshotUtc.Value < TimeSpan.FromMinutes(30);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("AgAlerts", $"Availability Group alert evaluation failed for {serverName}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Delivers one AG alert through the SAME path every other Lite alert uses — mute check, then
+    /// <see cref="EmailAlertService.TrySendAlertEmailAsync"/>, which writes the one combined
+    /// <c>config_alert_log</c> row and fans out to email + webhook. Metric names come from the shared
+    /// <see cref="PerformanceMonitor.Common.AgAlertPolicy"/> consts, so a webhook keyed on "AG Failover"
+    /// matches whether the alert came from Lite or from Darling.
+    /// </summary>
+    private void SendAgAlert(int serverId, string serverName, AgAlert alert)
+    {
+        try
+        {
+            bool isMuted = _muteRuleService.IsAlertMuted(new AlertMuteContext
+            {
+                ServerName = serverName,
+                MetricName = alert.MetricName
+            });
+
+            /* #1681: AG alerts also bypass the engine funnel, so they log here. A resolution notice logs as
+               RESOLVED rather than TRIGGERED, which is what makes the pair readable — an "AG Replica
+               Reconnected" with no preceding "AG Replica Disconnected" is the exact half-story this fixes. */
+            if (alert.IsResolution)
+            {
+                AppLogger.Info("Alerts", AlertFiringLog.Resolved(serverName, alert.MetricName, alert.DetailText));
+            }
+            else
+            {
+                AppLogger.Warn("Alerts", AlertFiringLog.Fired(
+                    serverName, alert.MetricName, "Warning", alert.CurrentValue, isMuted));
+            }
+
+            _ = _emailAlertService.TrySendAlertEmailAsync(
+                alert.MetricName,
+                serverName,
+                alert.CurrentValue,
+                alert.ThresholdValue,
+                serverId,
+                context: null,
+                muted: isMuted,
+                detailText: alert.DetailText);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("AgAlerts", $"AG alert delivery failed for {alert.MetricName}: {ex.Message}");
+        }
+    }
+
 }

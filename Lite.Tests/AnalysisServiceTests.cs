@@ -1,5 +1,4 @@
 using System;
-using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using PerformanceMonitor.Analysis;
@@ -12,35 +11,20 @@ namespace PerformanceMonitorLite.Tests;
 /// <summary>
 /// Tests for AnalysisService — the full orchestration pipeline.
 /// </summary>
-public class AnalysisServiceTests : IDisposable
+public class AnalysisServiceTests : IClassFixture<SharedDuckDbFixture>
 {
-    private readonly string _tempDir;
     private readonly DuckDbInitializer _duckDb;
 
-    public AnalysisServiceTests()
+    public AnalysisServiceTests(SharedDuckDbFixture fixture)
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "LiteTests_" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(_tempDir);
-        var dbPath = Path.Combine(_tempDir, "test.duckdb");
-        _duckDb = new DuckDbInitializer(dbPath);
-    }
-
-    public void Dispose()
-    {
-        try
-        {
-            if (Directory.Exists(_tempDir))
-                Directory.Delete(_tempDir, recursive: true);
-        }
-        catch { /* Best-effort cleanup */ }
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
     }
 
     [Fact]
     public async Task AnalyzeAsync_MemoryStarved_ProducesFindings()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedMemoryStarvedServerAsync();
 
         var service = CreateTestService();
@@ -64,9 +48,7 @@ public class AnalysisServiceTests : IDisposable
     [Fact]
     public async Task AnalyzeAsync_CleanServer_ProducesNoFindings()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedCleanServerAsync();
 
         var service = CreateTestService();
@@ -80,9 +62,7 @@ public class AnalysisServiceTests : IDisposable
     [Fact]
     public async Task AnalyzeAsync_SetsLastAnalysisTime()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedCleanServerAsync();
 
         var service = CreateTestService();
@@ -96,9 +76,7 @@ public class AnalysisServiceTests : IDisposable
     [Fact]
     public async Task AnalyzeAsync_RaisesAnalysisCompletedEvent()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedMemoryStarvedServerAsync();
 
         var service = CreateTestService();
@@ -116,9 +94,7 @@ public class AnalysisServiceTests : IDisposable
     [Fact]
     public async Task GetLatestFindings_ReturnsPersistedResults()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedLockContentionServerAsync();
 
         var service = CreateTestService();
@@ -136,9 +112,7 @@ public class AnalysisServiceTests : IDisposable
     [Fact]
     public async Task MuteFinding_ExcludesFromNextRun()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedLogWritePressureServerAsync();
 
         var service = CreateTestService();
@@ -162,9 +136,7 @@ public class AnalysisServiceTests : IDisposable
     [Fact]
     public async Task AnalyzeAsync_InsufficientData_ReturnsEmptyWithMessage()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedMemoryStarvedServerAsync();
 
         // Set 72h minimum — test data is only 4h, so this should be rejected
@@ -180,9 +152,7 @@ public class AnalysisServiceTests : IDisposable
     [Fact]
     public async Task AnalyzeAsync_BlockingScenario_IncludesBlockingFindings()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seeder.SeedBlockingThreadExhaustionServerAsync();
 
         var service = CreateTestService();

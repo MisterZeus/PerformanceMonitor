@@ -102,6 +102,14 @@ public enum PanelMode
 }
 
 /// <summary>
+/// A panel's optional SECOND measure (#1606 reporting layer): the y axis of a scatter, or the right-hand
+/// axis of a dual-axis line/area. Same-source only — it compiles as a second select expression
+/// (<c>AS value2</c>) over the SAME fact rows, the ratio two-operand precedent generalized — so it can
+/// never add a join, a parameter, or a second query. Aggregate/unit obey exactly the primary's rules.
+/// </summary>
+public sealed record ComposeOverlay(ComposeMeasure Measure, ComposeAggregate Aggregate, string Unit);
+
+/// <summary>
 /// A fully-parsed, fully-validated panel — everything the compiler needs, with every identifier already
 /// resolved to a catalog object (never a raw string). Produced by <see cref="ComposeSpec.TryParsePanel"/>
 /// (the write-time authority and the compiler's input alike), so a <see cref="PanelPlan"/> in hand is by
@@ -130,6 +138,11 @@ public sealed record PanelPlan
     /// <see cref="ComposeCompiler.CompileAnnotations"/> and returned alongside the panel's rows.</summary>
     public IReadOnlyList<ComposeAnnotationSource> Annotations { get; init; } = Array.Empty<ComposeAnnotationSource>();
 
+    /// <summary>Optional second measure (#1606): scatter's y axis, or a dual-axis line/area's right axis.
+    /// Only ever non-null when the viz is scatter (where it is REQUIRED) or an ungrouped line/area —
+    /// parse rejects every other combination, so a stored def is never un-renderable.</summary>
+    public ComposeOverlay? Overlay { get; init; }
+
     /// <summary>True when any filter/groupBy dimension is stitched from the #1568 module join, so the
     /// compiler must emit (and window-bound) the module CTE.</summary>
     public bool UsesModuleJoin =>
@@ -152,7 +165,7 @@ public static class ComposeSpec
     /// <summary>The v2 composed-panel viz vocabulary (design §4) — distinct from v1 read panels' KnownViz
     /// (table/line/stat/bandlist). The composer's viz picker serves this; every stored composed panel's viz
     /// must be in it AND coherent with the panel's mode (<see cref="ValidateVizMode"/>).</summary>
-    public static readonly IReadOnlyList<string> ComposeVizList = new[] { "line", "area", "bar", "stacked", "stacked-bar", "pie", "table", "stat" };
+    public static readonly IReadOnlyList<string> ComposeVizList = new[] { "line", "area", "bar", "stacked", "stacked-bar", "pie", "scatter", "table", "stat" };
 
     /// <summary>Set form of <see cref="ComposeVizList"/> for O(1) membership.</summary>
     public static readonly IReadOnlySet<string> KnownComposeViz = new HashSet<string>(ComposeVizList, StringComparer.Ordinal);
@@ -295,52 +308,14 @@ public static class ComposeSpec
             return (null, $"'{measure.Key}' is not a ratio; reference it as 'measure', not 'ratio'.");
         }
 
-        /* aggregate (scalar only; a ratio's aggregation is fixed). */
-        var aggregate = measure.DefaultTimeAgg;
-        if (!isRatio)
+        /* aggregate + unit — the shared rules (ValidAggs, the percentile gate, the count-is-unitless
+           rule, the unit family), extracted so the overlay (#1606) validates through the SAME authority
+           and the two can never drift. */
+        var (aggregate, unit, aggUnitError) = ResolveAggregateAndUnit(
+            measure, isRatio, Str(panel, "aggregate"), Str(panel, "unit"), "panel");
+        if (aggUnitError is not null)
         {
-            var aggWire = Str(panel, "aggregate");
-            if (aggWire is null)
-            {
-                return (null, $"panel is missing 'aggregate' (one of {string.Join(", ", MeasureCatalog.AggregateWireNames)}).");
-            }
-
-            if (!MeasureCatalog.TryParseAggregate(aggWire, out aggregate))
-            {
-                return (null, $"panel has unknown aggregate '{aggWire}'.");
-            }
-
-            if (!measure.ValidAggs.Contains(aggregate))
-            {
-                return (null, $"aggregate '{aggWire}' is not valid for measure '{measure.Key}'.");
-            }
-
-            /* Defense in depth over ValidAggs: percentile_cont is legal ONLY on a per-event measure. */
-            if (aggregate == ComposeAggregate.PercentileCont && measure.Archetype != MeasureArchetype.PerEvent)
-            {
-                return (null, "percentile_cont is only valid on per-event measures.");
-            }
-        }
-
-        /* unit ∈ the measure's family — except COUNT, which is a plain row count (unitless) regardless
-           of the measure's family, so its only legal unit is 'count'. */
-        string unit;
-        if (!isRatio && aggregate == ComposeAggregate.Count)
-        {
-            unit = Str(panel, "unit") ?? MeasureCatalog.FamilyCount;
-            if (!string.Equals(unit, MeasureCatalog.FamilyCount, StringComparison.Ordinal))
-            {
-                return (null, "a count aggregate is unitless; its unit must be 'count'.");
-            }
-        }
-        else
-        {
-            unit = Str(panel, "unit") ?? measure.DefaultUnit;
-            var family = MeasureCatalog.Family(measure.UnitFamily);
-            if (family is null || !family.Has(unit))
-            {
-                return (null, $"unit '{unit}' is not valid for measure '{measure.Key}' (family '{measure.UnitFamily}').");
-            }
+            return (null, aggUnitError);
         }
 
         /* mode: a real timeBucket => time series; else topN => ranked; else scalar. */
@@ -401,6 +376,68 @@ public static class ComposeSpec
             return (null, vizModeError);
         }
 
+        /* overlay — the optional SECOND measure (#1606): scatter's y axis, or a dual-axis line/area's
+           right axis. Same-source only, validated by the SAME aggregate/unit authority as the primary.
+           Coherence lives HERE (not ValidateVizMode, whose table early-return would leak table+overlay):
+           scatter REQUIRES an overlay; everything except scatter and an UNGROUPED line/area rejects one —
+           silence would hide author error. */
+        ComposeOverlay? overlay = null;
+        if (panel["overlay"] is JsonNode overlayNode)
+        {
+            if (overlayNode is not JsonObject overlayObject)
+            {
+                return (null, "panel.overlay must be an object: {\"measure\": ..., \"aggregate\": ..., \"unit\": ...}.");
+            }
+
+            var overlayKey = Str(overlayObject, "measure");
+            var overlayMeasure = MeasureCatalog.Measure(overlayKey);
+            if (overlayMeasure is null)
+            {
+                return (null, $"overlay references unknown measure '{overlayKey}'.");
+            }
+
+            if (!string.Equals(overlayMeasure.SourceTable, source, StringComparison.Ordinal))
+            {
+                return (null, $"overlay measure '{overlayMeasure.Key}' is on source '{overlayMeasure.SourceTable}', not the panel's '{source}' — an overlay must share the panel's source.");
+            }
+
+            var overlayIsRatio = overlayMeasure.Kind == MeasureKind.Ratio;
+            if (overlayIsRatio && Str(overlayObject, "aggregate") is not null)
+            {
+                return (null, $"overlay measure '{overlayMeasure.Key}' is a ratio; its aggregation is fixed — omit 'aggregate'.");
+            }
+
+            var (overlayAggregate, overlayUnit, overlayError) = ResolveAggregateAndUnit(
+                overlayMeasure, overlayIsRatio, Str(overlayObject, "aggregate"), Str(overlayObject, "unit"), "overlay");
+            if (overlayError is not null)
+            {
+                return (null, overlayError);
+            }
+
+            var overlayAllowed =
+                string.Equals(viz, "scatter", StringComparison.Ordinal)
+                || (mode == PanelMode.TimeSeries
+                    && (string.Equals(viz, "line", StringComparison.Ordinal) || string.Equals(viz, "area", StringComparison.Ordinal))
+                    && groupBy!.Count == 0);
+            if (!overlayAllowed)
+            {
+                /* Name the REAL blocker: a viz that never carries an overlay reports that, and only a
+                   line/area whose sole problem is the groupBy gets the dual-axis-grouping message. */
+                var vizCarriesOverlay = string.Equals(viz, "line", StringComparison.Ordinal)
+                    || string.Equals(viz, "area", StringComparison.Ordinal);
+                return (null, vizCarriesOverlay && mode == PanelMode.TimeSeries && groupBy!.Count > 0
+                    ? "an overlay (dual-axis) time series cannot also group by a dimension — two value axes times many series is unreadable; drop the groupBy or the overlay."
+                    : $"a '{viz}' panel cannot carry an overlay; overlays belong to scatter and ungrouped line/area panels.");
+            }
+
+            overlay = new ComposeOverlay(overlayMeasure, overlayAggregate, overlayUnit);
+        }
+
+        if (string.Equals(viz, "scatter", StringComparison.Ordinal) && overlay is null)
+        {
+            return (null, "a scatter panel needs an 'overlay' second measure — the primary measure ranks the points (x), the overlay is the y axis.");
+        }
+
         /* thresholds — optional render-only reference lines (design D3). Validated here so a stored def can't
            carry a non-number/NaN/over-long list, but NOT compiled: the frontend draws them, so they never enter
            the compiler/SQL. */
@@ -433,6 +470,7 @@ public static class ComposeSpec
             Viz = viz,
             Thresholds = thresholds!,
             Annotations = annotations!,
+            Overlay = overlay,
         };
 
         return (plan, null);
@@ -512,7 +550,7 @@ public static class ComposeSpec
                 text = value.ToString();
             }
 
-            if (text.StartsWith("$", StringComparison.Ordinal))
+            if (text.StartsWith('$'))
             {
                 var varName = text.Substring(1);
                 if (varName.Length == 0 || !declaredVariables.Contains(varName))
@@ -725,9 +763,9 @@ public static class ComposeSpec
                 return null;
 
             case PanelMode.Ranked:
-                if (viz is not ("bar" or "pie"))
+                if (viz is not ("bar" or "pie" or "scatter"))
                 {
-                    return $"a '{viz}' chart cannot render a ranked (topN) panel; use bar or pie.";
+                    return $"a '{viz}' chart cannot render a ranked (topN) panel; use bar, pie, or scatter.";
                 }
 
                 if (groupByCount == 0)
@@ -750,6 +788,65 @@ public static class ComposeSpec
             default:
                 return null;
         }
+    }
+
+    /// <summary>
+    /// The ONE aggregate/unit rulebook (#1606): ValidAggs membership, the percentile-only-on-per-event
+    /// defense, the count-is-unitless rule, and the unit-family check — shared verbatim by the primary
+    /// measure and the overlay so the two validations can never drift. A ratio's aggregation is fixed
+    /// (<see cref="ComposeMeasure.DefaultTimeAgg"/>); a non-ratio requires an explicit aggregate.
+    /// <paramref name="owner"/> names the failing field in errors ("panel" or "overlay").
+    /// </summary>
+    private static (ComposeAggregate Aggregate, string Unit, string? Error) ResolveAggregateAndUnit(
+        ComposeMeasure measure, bool isRatio, string? aggWire, string? unitWire, string owner)
+    {
+        var aggregate = measure.DefaultTimeAgg;
+        if (!isRatio)
+        {
+            if (aggWire is null)
+            {
+                return (default, string.Empty, $"{owner} is missing 'aggregate' (one of {string.Join(", ", MeasureCatalog.AggregateWireNames)}).");
+            }
+
+            if (!MeasureCatalog.TryParseAggregate(aggWire, out aggregate))
+            {
+                return (default, string.Empty, $"{owner} has unknown aggregate '{aggWire}'.");
+            }
+
+            if (!measure.ValidAggs.Contains(aggregate))
+            {
+                return (default, string.Empty, $"aggregate '{aggWire}' is not valid for measure '{measure.Key}'.");
+            }
+
+            /* Defense in depth over ValidAggs: percentile_cont is legal ONLY on a per-event measure. */
+            if (aggregate == ComposeAggregate.PercentileCont && measure.Archetype != MeasureArchetype.PerEvent)
+            {
+                return (default, string.Empty, "percentile_cont is only valid on per-event measures.");
+            }
+        }
+
+        /* unit ∈ the measure's family — except COUNT, which is a plain row count (unitless) regardless
+           of the measure's family, so its only legal unit is 'count'. */
+        string unit;
+        if (!isRatio && aggregate == ComposeAggregate.Count)
+        {
+            unit = unitWire ?? MeasureCatalog.FamilyCount;
+            if (!string.Equals(unit, MeasureCatalog.FamilyCount, StringComparison.Ordinal))
+            {
+                return (default, string.Empty, "a count aggregate is unitless; its unit must be 'count'.");
+            }
+        }
+        else
+        {
+            unit = unitWire ?? measure.DefaultUnit;
+            var family = MeasureCatalog.Family(measure.UnitFamily);
+            if (family is null || !family.Has(unit))
+            {
+                return (default, string.Empty, $"unit '{unit}' is not valid for measure '{measure.Key}' (family '{measure.UnitFamily}').");
+            }
+        }
+
+        return (aggregate, unit, null);
     }
 
     private static string? Str(JsonObject obj, string key) =>

@@ -22,6 +22,10 @@ namespace Darling.Tests;
 /// wide statics are not mutated; two focused tests confirm the static <c>ForDisplay</c>/<c>DisplayToNaiveUtc</c>
 /// delegate to them (saving/restoring the statics).
 /// </summary>
+/* Serialized: these classes flip the process-wide ViewerTimeHelper.CurrentDisplayMode static (each
+   restores in finally, but xUnit runs CLASSES in parallel — two flippers racing corrupts the mode a
+   third class reads). One shared collection serializes them. */
+[Collection("viewer-time-statics")]
 public sealed class ViewerTimeHelperTests
 {
     private static readonly DateTime NaiveUtc = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Unspecified);

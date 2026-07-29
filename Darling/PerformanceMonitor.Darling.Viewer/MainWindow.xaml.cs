@@ -68,6 +68,11 @@ public partial class MainWindow : Window
     /// </summary>
     private readonly OpenServerTabRegistry<TabItem> _openServerTabs = new();
 
+    /// <summary>The fleet: the authoritative full server set plus the filtered subset the sidebar shows.
+    /// Consumers asking "what servers exist?" must read <c>_fleet.All</c>, never the bound list — see
+    /// <see cref="FleetView"/> for why reading ItemsSource back is the bug this replaces.</summary>
+    private readonly FleetView _fleet = new();
+
     /// <summary>
     /// The viewer's per-user preferences store (a small JSON file in %APPDATA%) and the current in-memory
     /// copy. These are the persisted DEFAULTS that seed each newly-opened <see cref="ViewerServerTab"/>'s
@@ -235,6 +240,11 @@ public partial class MainWindow : Window
         JobHistoryContent.Initialize(_dataService);
         JobHistoryContent.StatusChanged += OnServerTabStatusChanged;
 
+        /* Availability Groups (#991): a self-loading fleet-wide control. Its TabItem ships Collapsed and is
+           revealed only once a load finds AG rows, so an Always-On-less fleet never carries a dead tab. */
+        AvailabilityGroupsContent.Initialize(_dataService);
+        AvailabilityGroupsContent.StatusChanged += OnServerTabStatusChanged;
+
         /* The FinOps tab is a self-loading cross-server aggregate control with its own server selector; give
            it the store, surface its load/refresh outcomes on the shared status bar, and route its query grids'
            "View Plan" requests into the standalone Plan Viewer surface (it has no per-server plan host). */
@@ -258,9 +268,10 @@ public partial class MainWindow : Window
            the same tab a double-click opens. Case-insensitive on the registered server name;
            an unknown name is ignored (the window still opens normally). */
         var openServer = OpenServerNameFromArgs();
-        if (openServer is not null && ServerList.ItemsSource is IEnumerable<DarlingServer> loaded)
+        if (openServer is not null)
         {
-            var match = loaded.FirstOrDefault(s =>
+            /* Against the whole fleet: a deep link must open a server the current filter is hiding. */
+            var match = _fleet.All.FirstOrDefault(s =>
                 string.Equals(s.ServerName, openServer, StringComparison.OrdinalIgnoreCase));
             if (match is not null)
             {
@@ -359,6 +370,14 @@ public partial class MainWindow : Window
         /* Poll alert history once, regardless of the visible tab: refresh the per-server "needs attention"
            badges (sidebar + open tabs) and surface genuinely-new rows as tray toasts. */
         _ = PollAlertsAsync();
+
+        /* Probe for Availability Groups while the tab is still hidden, so standing an AG up reveals it without
+           a restart. Converge-then-stop: once revealed this does nothing and the tab refreshes through the
+           normal visible-tab path, so an AG fleet does not pay for the probe twice. */
+        if (AvailabilityGroupsTabItem.Visibility != Visibility.Visible)
+        {
+            _ = RefreshAvailabilityGroupsAsync();
+        }
 
         /* Two tabs opt out of this timer: Recommendations refreshes on tab-activation only (matching Lite —
            analysis findings change on the service's 30-minute cadence, so an interval auto-refresh is pointless
@@ -563,14 +582,33 @@ public partial class MainWindow : Window
     /// reloads the visible tab. The two syncs suppress their own SelectionChanged, so the visible tab is
     /// loaded exactly once here by <see cref="RefreshVisibleAsync"/>.
     /// </summary>
+    private bool _suppressSidebarSelection;
+
+    /// <summary>
+    /// Sidebar selection. A server row syncs the aggregate tabs and loads the visible tab; a group header
+    /// is never a real selection — clicking one expands/collapses its group and the selection is restored
+    /// to a server. The suppression guard stops that restore from re-entering this handler.
+    /// </summary>
     private async void ServerList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (ServerList.SelectedItem is DarlingServer server)
+        if (_suppressSidebarSelection)
         {
-            SyncAggregateServerSelectors(server);
+            return;
         }
 
-        await RefreshVisibleAsync();
+        if (ServerList.SelectedItem is FleetHeaderRow header)
+        {
+            /* The header just took the selection, so the previously-selected server is in RemovedItems. */
+            var previousServerId = e.RemovedItems.OfType<FleetServerRow>().FirstOrDefault()?.Server.ServerId;
+            ToggleGroup(header, previousServerId);
+            return;
+        }
+
+        if (ServerList.SelectedItem is FleetServerRow row)
+        {
+            SyncAggregateServerSelectors(row.Server);
+            await RefreshVisibleAsync();
+        }
     }
 
     /// <summary>
@@ -600,9 +638,31 @@ public partial class MainWindow : Window
     /// <summary>Double-click opens (or focuses) the selected server's per-server tab (Lite's rule).</summary>
     private void ServerList_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (ServerList.SelectedItem is DarlingServer server)
+        if (ServerList.SelectedItem is FleetServerRow row)
         {
-            OpenServerTab(server);
+            OpenServerTab(row.Server);
+        }
+    }
+
+    /// <summary>
+    /// Expands or collapses a sidebar group and re-selects a server so the sidebar never rests on a header.
+    /// Reprojects through <see cref="FleetView"/> (the single seam), rebinds, and restores the prior server
+    /// if it is still visible — else the first visible one — under the suppression guard so the
+    /// programmatic re-selection does not recurse into <see cref="ServerList_SelectionChanged"/>.
+    /// </summary>
+    private void ToggleGroup(FleetHeaderRow header, int? previousServerId)
+    {
+        _suppressSidebarSelection = true;
+        try
+        {
+            _fleet.ToggleExpanded(header);
+            ServerList.ItemsSource = _fleet.Visible;
+            ServerList.SelectedItem = _fleet.ResolveSelection(previousServerId);
+            PersistCollapseState();
+        }
+        finally
+        {
+            _suppressSidebarSelection = false;
         }
     }
 
@@ -634,14 +694,15 @@ public partial class MainWindow : Window
 
         try
         {
-            var previousSelection = (ServerList.SelectedItem as DarlingServer)?.ServerId;
+            var previousSelection = (ServerList.SelectedItem as FleetServerRow)?.Server.ServerId;
 
             /* The DESIRED-state managed set (config_monitored_servers), enriched with the observed
                collect.servers facts by the shared server_id, so a viewer add/remove/enable is reflected at
                once. Stamp the viewer's favorite pins (matched by server name) and sort favorites-first. */
             var servers = ApplyFavoritesAndSort(await _dataService.GetManagedServersAsync());
-            ServerList.ItemsSource = servers;
-            ServerCountText.Text = $"Servers: {servers.Count}";
+            _fleet.SetAll(servers);
+            ServerList.ItemsSource = _fleet.Visible;
+            ServerCountText.Text = $"Servers: {_fleet.TotalCount}";
 
             /* The Recommendations tab has its OWN server selector, synced to the sidebar selection on a
                single-click (SyncAggregateServerSelectors) yet independently changeable while the tab is open.
@@ -670,18 +731,17 @@ public partial class MainWindow : Window
             {
                 /* Triggers SelectionChanged, which loads the active aggregate tab. Restore the prior
                    selection after a server add/edit/remove (preserveSelection) so the view doesn't jump
-                   back to the first server; the initial load selects the first. */
-                var restore = preserveSelection && previousSelection is int prev
-                    ? servers.Find(s => s.ServerId == prev)
-                    : null;
-                if (restore is not null)
-                {
-                    ServerList.SelectedItem = restore;
-                }
-                else
-                {
-                    ServerList.SelectedIndex = 0;
-                }
+                   back to the first server; the initial load selects the first.
+
+                   Resolved by SERVER, never by index: once tag rows share this list, row 0 is a header
+                   rather than a server, so a SelectedIndex = 0 fallback would select a non-server and the
+                   aggregate-tab sync would silently never run. */
+                ServerList.SelectedItem = _fleet.ResolveSelection(preserveSelection ? previousSelection : null);
+
+                /* Fold the fleet tags into the sidebar (opt-in: no tags => the list stays flat). Done after
+                   the selectors are populated and the initial selection is set, so the tag re-projection
+                   just preserves that selection under its own suppression guard. */
+                await LoadTagsAsync();
             }
             else
             {
@@ -696,6 +756,23 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             ShowMessage($"Cannot read the Darling store: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Loads the Availability Groups tab and reveals it once the store actually has AG rows (#991). Always On is
+    /// opt-in and most fleets run none, so the tab ships Collapsed rather than standing there permanently empty.
+    /// The reveal is one-way within a session: a fleet that HAS AGs keeps the tab even if a later sweep reads
+    /// zero (a collector hiccup should not make a tab vanish under the operator mid-look).
+    /// </summary>
+    private async Task RefreshAvailabilityGroupsAsync()
+    {
+        await AvailabilityGroupsContent.RefreshAgAsync();
+
+        if (AvailabilityGroupsContent.HasAvailabilityGroups
+            && AvailabilityGroupsTabItem.Visibility != Visibility.Visible)
+        {
+            AvailabilityGroupsTabItem.Visibility = Visibility.Visible;
         }
     }
 
@@ -755,6 +832,9 @@ public partial class MainWindow : Window
                     break;
                 case TabItem tab when ReferenceEquals(tab, JobHistoryTabItem):
                     await JobHistoryContent.RefreshJobsAsync();
+                    break;
+                case TabItem tab when ReferenceEquals(tab, AvailabilityGroupsTabItem):
+                    await RefreshAvailabilityGroupsAsync();
                     break;
                 case TabItem tab when ReferenceEquals(tab, FinOpsTab):
                     await FinOpsContent.RefreshActiveSubTabAsync();
@@ -964,7 +1044,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (ServerList.ItemsSource is not IEnumerable<DarlingServer> servers)
+        var servers = _fleet.All;
+        if (servers.Count == 0)
         {
             OverviewItemsControl.ItemsSource = null;
             FleetRollupContainer.Visibility = Visibility.Collapsed;
@@ -1044,10 +1125,10 @@ public partial class MainWindow : Window
     private void OverviewCard_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
         if (e.ClickCount == 2
-            && sender is FrameworkElement { DataContext: ServerSummaryItem summary }
-            && ServerList.ItemsSource is IEnumerable<DarlingServer> servers)
+            && sender is FrameworkElement { DataContext: ServerSummaryItem summary })
         {
-            var server = servers.FirstOrDefault(s => s.ServerId == summary.ServerId);
+            /* Resolved against the whole fleet, so a card click still opens a filtered-out server. */
+            var server = _fleet.Find(summary.ServerId);
             if (server is not null)
             {
                 OpenServerTab(server);
@@ -1062,10 +1143,9 @@ public partial class MainWindow : Window
     /// </summary>
     private void FleetWorstServer_Click(object sender, MouseButtonEventArgs e)
     {
-        if (sender is FrameworkElement { DataContext: FleetRankedServer ranked }
-            && ServerList.ItemsSource is IEnumerable<DarlingServer> servers)
+        if (sender is FrameworkElement { DataContext: FleetRankedServer ranked })
         {
-            var server = servers.FirstOrDefault(s => s.ServerId == ranked.ServerId);
+            var server = _fleet.Find(ranked.ServerId);
             if (server is not null)
             {
                 OpenServerTab(server);
@@ -1328,8 +1408,9 @@ public partial class MainWindow : Window
     private void SettingsButton_Click(object sender, RoutedEventArgs e)
     {
         /* Hand the current managed-server list to the collector-schedule editor's per-server scope. */
-        var servers = (ServerList.ItemsSource as IReadOnlyList<DarlingServer>) ?? Array.Empty<DarlingServer>();
-        var settings = new SettingsWindow(_preferences, _appSettingsStore, _dataService, servers) { Owner = this };
+        /* The schedule editor edits CONFIG, so it must see every server — a filtered sidebar must never
+           mean you cannot edit the schedule of a server it happens to be hiding. */
+        var settings = new SettingsWindow(_preferences, _appSettingsStore, _dataService, _fleet.All) { Owner = this };
         if (settings.ShowDialog() == true && settings.Result is not null)
         {
             _preferences = settings.Result;

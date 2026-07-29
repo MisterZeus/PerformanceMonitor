@@ -10,6 +10,7 @@
  * Darling Web entry point (#1562, extended for #1563): the hash router, the sidebar server + view lists, and the
  * refresh loop. Routes:
  *   #/fleet             — Fleet Overview (default)
+ *   #/ag                — Availability Group topology (#991; nav entry revealed only when the store has AG data)
  *   #/server/{name}     — one server's detail
  *   #/alerts            — fleet-wide Alert History
  *   #/views             — Custom Views list (#1563)
@@ -28,6 +29,7 @@
 import { el, mount, apiGet, bandClass, localTime } from "./util.js";
 import { navigateServer } from "./panels.js";
 import { renderFleet } from "./pages/fleet.js";
+import { renderAg } from "./pages/ag.js";
 import { renderServer } from "./pages/server.js";
 import { renderAlerts } from "./pages/alerts.js";
 import { renderViewList, renderView } from "./pages/views.js";
@@ -47,6 +49,7 @@ const statusbar = document.getElementById("statusbar");
 function currentRoute() {
   const h = location.hash || "#/fleet";
   if (h.startsWith("#/server/")) return { name: "server", param: decodeURIComponent(h.slice("#/server/".length)) };
+  if (h === "#/ag" || h === "#/ag/") return { name: "ag" };
   if (h.startsWith("#/alerts")) return { name: "alerts" };
   /* #/views (list) is checked before the #/view/ forms; and the /edit form is tested before the bare /view/. */
   if (h === "#/views" || h === "#/views/") return { name: "views" };
@@ -71,6 +74,7 @@ function route() {
   const r = currentRoute();
   setActiveNav(r);
   if (r.name === "server") renderServer(main, r.param);
+  else if (r.name === "ag") renderAg(main);
   else if (r.name === "alerts") renderAlerts(main);
   else if (r.name === "views") renderViewList(main);
   else if (r.name === "view") renderView(main, r.id);
@@ -142,6 +146,27 @@ async function refreshSidebar() {
     })
   );
   updateStatusBar(res.data);
+}
+
+/* ─────────────────────────── availability-groups nav gate (#991) ─────────────────────────── */
+
+/* Always On is opt-in and most fleets have none, so the Availability Groups entry stays hidden until the store
+   actually has AG data — a permanent entry that only ever says "nothing here" is noise. The probe converges the
+   way ComposeStoreAvailability's does: once AGs are seen the answer is cached for the session and the probe stops;
+   while none are seen the 60s poll re-probes, so standing up an AG reveals the entry without a reload. The #/ag
+   route itself is never gated — a deep link renders the page (with its own empty state) either way. */
+let agNavRevealed = false;
+
+async function refreshAgNav() {
+  if (agNavRevealed) return;
+  const link = document.querySelector('.nav a[data-route="ag"]');
+  if (!link) return;
+
+  const res = await apiGet("/api/ag");
+  if (res.kind !== "data" || !res.data || !res.data.availability_group_count) return;
+
+  agNavRevealed = true;
+  link.hidden = false;
 }
 
 /* ─────────────────────────── sidebar view list (#1563) ─────────────────────────── */
@@ -216,6 +241,7 @@ function updateStatusBar(d) {
 function refresh() {
   refreshSidebar();
   refreshViewList();
+  refreshAgNav();
   /* Poll-clobber guard (#1563): never re-render a composer (dashboard OR notebook, #1563 D7) from the background
      poll — a rebuild would discard an in-progress edit. hashchange still routes to it normally; only this periodic
      refresh skips it. */
@@ -235,6 +261,7 @@ function start() {
 
   refreshSidebar();
   refreshViewList();
+  refreshAgNav();
   route();
 }
 

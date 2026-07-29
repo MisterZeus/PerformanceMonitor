@@ -863,7 +863,7 @@ WITH
     SELECT
         sort_order = 70,
         metric_name = N'worst_query_hash',
-        metric_value = CONVERT(sql_variant, wq.query_hash)
+        metric_value = CONVERT(sql_variant, CONVERT(nvarchar(20), wq.query_hash, 1))
     FROM worst_query AS wq
 
     UNION ALL
@@ -1133,9 +1133,9 @@ SELECT
         END,
     change_description =
         CASE
-            WHEN rc.previous_status = N'OFF' AND rc.status = N'ON'
+            WHEN rc.previous_status = 0 AND rc.status = 1
             THEN N'Trace flag ' + CONVERT(nvarchar(10), rc.trace_flag) + N' ENABLED'
-            WHEN rc.previous_status = N'ON' AND rc.status = N'OFF'
+            WHEN rc.previous_status = 1 AND rc.status = 0
             THEN N'Trace flag ' + CONVERT(nvarchar(10), rc.trace_flag) + N' DISABLED'
             ELSE N'Status unchanged'
         END,

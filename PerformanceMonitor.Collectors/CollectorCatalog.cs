@@ -57,6 +57,8 @@ public static class CollectorCatalog
         DefaultTraceEventsCollector.Instance,
         JobHistoryCollector.Instance,
         AgentStatusCollector.Instance,
+        AgReplicaStatesCollector.Instance,
+        AgDatabaseReplicaStatesCollector.Instance,
     };
 
     /// <summary>Name → definition, for the by-name target-gate lookup. Built once from <see cref="All"/>.</summary>
@@ -74,4 +76,15 @@ public static class CollectorCatalog
     /// </summary>
     public static bool AppliesTo(string collectorName, CollectorTargetInfo target) =>
         s_byName.TryGetValue(collectorName, out var definition) ? definition.AppliesTo(target) : true;
+
+    /// <summary>
+    /// True when <paramref name="collectorName"/>'s query carries the deliberate short
+    /// <c>SET LOCK_TIMEOUT</c> guard, so the runners' catch sites can classify SQL error 1222 as a
+    /// <c>YIELDED</c> row by name (#1805) — the flag CONDITION lives on the definition
+    /// (<see cref="ICollectorSchemaInfo.YieldsOnLockTimeout"/>) and nowhere else. An unknown name
+    /// returns <c>false</c> — the opposite default from <see cref="AppliesTo"/>, deliberately: a
+    /// 1222 from a collector this catalog does not know is unexpected and must stay an ERROR.
+    /// </summary>
+    public static bool YieldsOnLockTimeout(string collectorName) =>
+        s_byName.TryGetValue(collectorName, out var definition) && definition.YieldsOnLockTimeout;
 }

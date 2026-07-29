@@ -392,7 +392,15 @@ SELECT
     EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'query_store_stats' AND column_name = 'replica_role'),
     EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'long_query_completions'),
     EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_service' AND column_name = 'web_enabled'),
-    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'custom_views')";
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'custom_views'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'server_tags'),
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_alert_settings' AND column_name = 'notify_connection_down_at_startup'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'ag_database_replica_states'),
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_alert_settings' AND column_name = 'notify_ag_health'),
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_alert_settings' AND column_name = 'ag_disconnect_refire_minutes'),
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'ag_database_replica_states' AND column_name = 'est_send_drain_time_min'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'query_plan_dim'),
+    EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'ix_query_stats_digest_floor')";
 
     /// <summary>The store schema version this viewer build requires — the highest migration it knows
     /// (<see cref="StorageVersion.SchemaVersion"/>). The connect-time gate blocks a store below this.</summary>
@@ -413,7 +421,7 @@ SELECT
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {
-                return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14));
+                return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15), reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18), reader.GetBoolean(19), reader.GetBoolean(20), reader.GetBoolean(21), reader.GetBoolean(22));
             }
 
             return null;
@@ -435,11 +443,80 @@ SELECT
     /// 19, else <paramref name="hasAlertDeliveryOverride"/> (V18) → 18, else
     /// <paramref name="hasConfigControlPlane"/> (V17) → 17, else 16 — the "older than the V17 config control
     /// plane" floor (the exact pre-17 version isn't probed, but it is below what the viewer needs). Pure, so it
-    /// is unit-tested without a live store; a schema bump past 29 trips the pinning test that keeps this in step
-    /// with <see cref="StorageVersion.SchemaVersion"/>.
+    /// is unit-tested without a live store; any schema bump past the newest arm trips the pinning test that keeps
+    /// this in step with <see cref="StorageVersion.SchemaVersion"/>.
     /// </summary>
-    internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews)
+    internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false, bool hasAgCollectors = false, bool hasAgAlertKnobs = false, bool hasAgLatencyColumns = false, bool hasAgDisconnectRefire = false, bool hasPayloadDimensions = false, bool hasDimFloorIndexes = false)
     {
+        /* V39 (#1795 dimension GC measured bound): index-existence sentinel, newest-first arm — the
+           same pg_indexes idiom as the V22 sentinel. ix_query_stats_digest_floor exists only at V39
+           or later. The viewer itself never reads the index; the arm exists so a fully-migrated V39
+           store maps to exactly RequiredStoreSchemaVersion instead of capping at 38 and tripping the
+           connect-time gate against a perfectly healthy store. */
+        if (hasDimFloorIndexes)
+        {
+            return 39;
+        }
+
+        /* V38 (#1767 query payload dimensions): table-existence sentinel, newest-first arm.
+           query_plan_dim exists only at V38 or later. The viewer MUST gate on it: at V38 the
+           collectors stop writing query_text/query_plan_xml inline, so a pre-V38 viewer pointed at a
+           V38 store would read NULL for every new row's text and plan — no error, just a product
+           that quietly shows nothing. */
+        if (hasPayloadDimensions)
+        {
+            return 38;
+        }
+
+        /* V37 (#1696 AG disconnect re-fire): engine-agnostic column-existence sentinel, newest-first arm.
+           config_alert_settings.ag_disconnect_refire_minutes exists only at V37 or later. */
+        if (hasAgDisconnectRefire)
+        {
+            return 37;
+        }
+
+        /* V36 (#991 addendum, AG latency columns): engine-agnostic COLUMN-existence sentinel — V36 only
+           widens the V34 table, so the table-existence arm below cannot distinguish the two. Newest-first. */
+        if (hasAgLatencyColumns)
+        {
+            return 36;
+        }
+
+        /* V35 (#991 Availability Group alert knobs): engine-agnostic column-existence sentinel, newest-first
+           arm. config_alert_settings.notify_ag_health exists only at V35 or later. */
+        if (hasAgAlertKnobs)
+        {
+            return 35;
+        }
+
+        /* V34 (#991 Availability Group collectors): engine-agnostic table-existence sentinel, newest-first
+           arm. The AG database-grain collector table exists only at V34 or later. (Named only in the probe
+           SQL, deliberately not repeated here: ViewerCollectorCoverageTests scans this layer by substring
+           and strips the probe's information_schema lines, so spelling the table in prose would make it
+           read as "covered" and quietly exempt it from the coverage ratchet.) */
+        if (hasAgCollectors)
+        {
+            return 34;
+        }
+
+        /* V33 (#1659 connection-alert opt-ins): engine-agnostic column-existence sentinel, newest-first
+           arm. config_alert_settings.notify_connection_down_at_startup exists only at V33 or later. */
+        if (hasConnectionRefireKnobs)
+        {
+            return 33;
+        }
+
+        /* V32 (fleet tags): engine-agnostic table-existence sentinel, newest-first arm.
+           config.server_tags exists only at V32 or later. Adding a migration WITHOUT adding an arm here
+           is the trap this ladder exists to prevent: the probe would cap at the previous version, so a
+           fully-migrated store would still read as older than RequiredStoreSchemaVersion and the
+           connect-time gate would refuse to open the viewer — permanently, and deploying the service
+           first would not help. */
+        if (hasServerTags)
+        {
+            return 32;
+        }
+
         /* V31 (#1563 custom views): engine-agnostic table-existence sentinel, newest-first arm.
            config.custom_views exists only at V31 or later. */
         if (hasCustomViews)

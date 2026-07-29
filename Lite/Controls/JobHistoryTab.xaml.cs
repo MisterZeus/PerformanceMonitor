@@ -128,19 +128,31 @@ public partial class JobHistoryTab : UserControl
                 return;
             }
 
+            /* Red is reserved for a fresh reading of a genuinely stopped Agent on a server that RUNS one.
+               A stale snapshot and a target that never ran Agent (a container built without it, Express, a
+               Linux-minimal image) are absence of signal, not a problem, and painting them red trained the
+               operator to ignore the indicator. */
             if (serverId.HasValue)
             {
                 var s = statuses[0];
-                AgentStatusIndicator.Text = $"Agent: {s.StatusDisplay} · Next run: {s.NextScheduledRunLocal}";
-                AgentStatusIndicator.Foreground = s.AgentRunning ? okBrush : alertBrush;
+                AgentStatusIndicator.Text = s.IsAgentProblem || s.AgentRunning
+                    ? $"Agent: {s.StatusDisplay} · Next run: {s.NextScheduledRunLocal}"
+                    : $"Agent: {s.StatusDisplay}";
+                AgentStatusIndicator.Foreground = s.IsAgentProblem ? alertBrush : okBrush;
             }
             else
             {
-                var running = statuses.Count(x => x.AgentRunning);
-                var stopped = statuses.Count - running;
-                AgentStatusIndicator.Text = stopped > 0
-                    ? $"Agents: {running}/{statuses.Count} running, {stopped} stopped"
-                    : $"Agents: {running}/{statuses.Count} running";
+                /* Fleet roll-up counts only the servers the question applies to: a server that never ran Agent
+                   is not "stopped", and a stale one is not evidence either way. */
+                var known = statuses.Where(x => !x.IsStale && x.EverSeenRunning).ToList();
+                var running = known.Count(x => x.AgentRunning);
+                var stopped = known.Count - running;
+
+                AgentStatusIndicator.Text = known.Count == 0
+                    ? "Agents: none observed"
+                    : stopped > 0
+                        ? $"Agents: {running}/{known.Count} running, {stopped} stopped"
+                        : $"Agents: {running}/{known.Count} running";
                 AgentStatusIndicator.Foreground = stopped > 0 ? alertBrush : okBrush;
             }
         }

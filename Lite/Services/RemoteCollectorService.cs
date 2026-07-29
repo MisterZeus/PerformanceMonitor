@@ -25,10 +25,6 @@ using PerformanceMonitor.Common;
 namespace PerformanceMonitorLite.Services;
 
 /// <summary>
-/// Base service for collecting performance data from remote SQL Servers.
-/// Partial class - individual collectors are in separate files.
-/// </summary>
-/// <summary>
 /// Tracks the health state of an individual collector.
 /// </summary>
 public class CollectorHealthEntry
@@ -96,6 +92,10 @@ public class CollectorHealthSummary
     public List<CollectorHealthEntry> XeSessionFailures { get; set; } = new();
 }
 
+/// <summary>
+/// Base service for collecting performance data from remote SQL Servers.
+/// Partial class - individual collectors are in separate files.
+/// </summary>
 public partial class RemoteCollectorService
 {
     private readonly DuckDbInitializer _duckDb;
@@ -296,6 +296,14 @@ public partial class RemoteCollectorService
                    the rest of the app session. */
                 entry.LastErrorMessage = errorMessage;
                 entry.IsPermissionRestricted = true;
+            }
+            else if (status == "YIELDED")
+            {
+                /* Deliberate 1s lock-timeout yield (#1805): evidence about the target's lock
+                   contention, not the monitor — neither a success (a yield is not proof the
+                   collector works, so the error streak is not reset) nor a failure (the guard
+                   worked as designed, so the streak does not grow). The collection_log row is
+                   the visible record. */
             }
             else
             {
@@ -538,6 +546,8 @@ public partial class RemoteCollectorService
                 "default_trace_events" => await CollectDefaultTraceEventsAsync(server, cancellationToken),
                 "job_history" => await CollectJobHistoryAsync(server, cancellationToken),
                 "agent_status" => await CollectAgentStatusAsync(server, cancellationToken),
+                "ag_replica_states" => await CollectAgReplicaStatesAsync(server, cancellationToken),
+                "ag_database_replica_states" => await CollectAgDatabaseReplicaStatesAsync(server, cancellationToken),
                 _ => throw new ArgumentException($"Unknown collector: {collectorName}")
             };
 
@@ -559,10 +569,24 @@ public partial class RemoteCollectorService
             xeSessionUnavailable = true;
             AppLogger.Error("Collector", $"  [{server.DisplayName}] {collectorName} {ex.Message}");
         }
+        catch (SqlException ex) when (ex.Number == 1222 && CollectorCatalog.YieldsOnLockTimeout(collectorName))
+        {
+            /* The 1-second LOCK_TIMEOUT guard doing its job (#1805): the snapshot sweep stepped aside
+               instead of joining a blocking chain on the monitored server. Not a collection failure —
+               the next sweep sees current state and nothing cumulative or watermarked is lost — so it
+               records as YIELDED: its own status, excluded from the error counts that feed collector
+               health and the daily health band, and readable as evidence of lock contention on the
+               TARGET rather than a monitoring fault. A 1222 from any collector without the guard flag
+               falls through to the ERROR catch below, unchanged. */
+            status = "YIELDED";
+            errorMessage = $"Lock-timeout yield (SQL error #{ex.Number}): the 1-second LOCK_TIMEOUT guard fired rather than waiting in a blocking chain. One snapshot sweep skipped; evidence of lock contention on the monitored server, not a monitoring failure.";
+            AppLogger.Info("Collector", $"  [{server.DisplayName}] {collectorName} YIELDED - 1s lock-timeout guard fired (target lock contention)");
+        }
         catch (SqlException ex)
         {
             status = "ERROR";
-            errorMessage = $"SQL Error #{ex.Number}: {ex.Message}";
+            errorMessage = $"SQL Error #{ex.Number}: {ex.Message}"
+                + AzureDmvPermissionHint.For(ex.Number, _serverManager.GetConnectionStatus(server.Id).SqlEngineEdition == 5);
             AppLogger.Error("Collector", $"  [{server.DisplayName}] {collectorName} SQL Error #{ex.Number}: {ex.Message}");
 
             if (RetryHelper.IsTransient(ex))
@@ -812,7 +836,7 @@ WHERE server_id = $3";
                 $"enumerate databases on {server.DisplayName}",
                 cancellationToken: cancellationToken);
         }
-        catch (SqlException ex) when (IsMasterAccessDeniedError(ex.Number))
+        catch (SqlException ex) when (ShouldFallBackToSingleDatabaseError(ex.Number))
         {
             MarkMasterInaccessible(serverId);
 
@@ -961,13 +985,16 @@ WHERE server_id = $3";
     }
 
     /// <summary>
-    /// Whether this error means the login cannot read master, in which case database-scoped collectors
-    /// fall back to the connection's own catalog (#857). The list — and the reason a reachability error
-    /// must never be on it (#1506) — is owned by <see cref="SqlErrorClassification"/>, shared with
-    /// Darling so the two cannot drift.
+    /// Whether master enumeration failed in a way that means database-scoped collectors should fall back
+    /// to the connection's own catalog (#857). Deliberately broader than "this login cannot read master":
+    /// a 40615 firewall rejection at the logical server says nothing about the login's rights, but the
+    /// fallback still works, because Azure evaluates DATABASE-level firewall rules first and a user
+    /// database can be reachable while master is not (#1631). The list — and the reason a reachability
+    /// error must never be read as a rights verdict (#1506) — is owned by
+    /// <see cref="SqlErrorClassification"/>, shared with Darling so the two cannot drift.
     /// </summary>
-    internal static bool IsMasterAccessDeniedError(int errorNumber) =>
-        SqlErrorClassification.IsMasterAccessDenied(errorNumber);
+    internal static bool ShouldFallBackToSingleDatabaseError(int errorNumber) =>
+        SqlErrorClassification.ShouldFallBackToSingleDatabase(errorNumber);
 
     /// <summary>
     /// Opens a SQL connection to a specific database on an Azure SQL DB logical server.

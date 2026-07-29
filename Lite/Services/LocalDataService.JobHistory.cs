@@ -149,6 +149,10 @@ LIMIT {limitParam}";
 
         var serverFilter = serverId.HasValue ? "WHERE server_id = $1" : string.Empty;
 
+        /* collection_time comes back so the caller can refuse to present a stale reading as current, and
+           ever_seen_running so it can tell "Agent is off right now" apart from "this server has never run
+           Agent" — a container built without it, Express, a Linux-minimal image. Without those two columns a
+           header can only say "Stopped", which is misleading on the second case and wrong on the first. */
         command.CommandText = $@"
 SELECT
     server_id,
@@ -156,7 +160,9 @@ SELECT
     agent_running,
     agent_status_desc,
     agent_startup_desc,
-    next_scheduled_run
+    next_scheduled_run,
+    collection_time,
+    ever_seen_running
 FROM (
     SELECT
         server_id,
@@ -165,6 +171,8 @@ FROM (
         agent_status_desc,
         agent_startup_desc,
         next_scheduled_run,
+        collection_time,
+        MAX(CASE WHEN agent_running THEN 1 ELSE 0 END) OVER (PARTITION BY server_id) = 1 AS ever_seen_running,
         ROW_NUMBER() OVER (PARTITION BY server_id ORDER BY collection_time DESC) AS rn
     FROM agent_status
     {serverFilter}
@@ -187,6 +195,8 @@ ORDER BY server_name";
                 AgentStatusDesc = reader.IsDBNull(3) ? null : reader.GetString(3),
                 AgentStartupDesc = reader.IsDBNull(4) ? null : reader.GetString(4),
                 NextScheduledRun = reader.IsDBNull(5) ? null : reader.GetDateTime(5),
+                CollectionTime = reader.IsDBNull(6) ? null : reader.GetDateTime(6),
+                EverSeenRunning = !reader.IsDBNull(7) && reader.GetBoolean(7),
             });
         }
 
@@ -250,7 +260,8 @@ public class JobHistoryRow
 
 /// <summary>
 /// The latest SQL Agent status snapshot for one server (issue #1433 Phase 2) — drives the Job History tab
-/// header and the "Agent Not Running" alert. next_scheduled_run is the server's local wall clock (from
+/// header, and Darling's "Agent Not Running" alert reads the same collected data (Lite raises no such alert
+/// itself). next_scheduled_run is the server's local wall clock (from
 /// msdb), shown as-is like the job run times.
 /// </summary>
 public class AgentStatusRow
@@ -262,7 +273,39 @@ public class AgentStatusRow
     public string? AgentStartupDesc { get; set; }
     public DateTime? NextScheduledRun { get; set; }
 
-    public string StatusDisplay => AgentRunning ? "Running" : (AgentStatusDesc ?? "Stopped");
+    /// <summary>When this snapshot was collected. Null only on a row that predates the column being read.</summary>
+    public DateTime? CollectionTime { get; set; }
+
+    /// <summary>Has SQL Agent been observed RUNNING on this server at any point in retained history? False for a
+    /// target where Agent is off by design — a container built without it, Express, a Linux-minimal image.</summary>
+    public bool EverSeenRunning { get; set; }
+
+    /// <summary>A reading older than this is not presented as current. Mirrors the headless service's
+    /// <c>StaleWindow</c>, so both surfaces refuse to judge on the same age of data.</summary>
+    public static readonly TimeSpan StaleWindow = TimeSpan.FromMinutes(30);
+
+    /// <summary>True when the newest snapshot is too old to describe the server right now — collection stopped,
+    /// the server went away, or the collector is failing. A stale reading must never render as a current state.</summary>
+    public bool IsStale => CollectionTime is null || DateTime.UtcNow - CollectionTime.Value >= StaleWindow;
+
+    /// <summary>
+    /// What to SHOW for Agent, which is not the same question as what the last row said.
+    ///
+    /// <para>Three cases the old <c>Running</c>/<c>Stopped</c> pair collapsed wrongly. A stale reading is
+    /// <c>unknown</c>, not "Stopped" — a server nobody has collected from in days is not evidence Agent is
+    /// down. A server where Agent has NEVER been seen running is <c>not present</c>, not "Stopped" — nothing
+    /// stopped, the target simply does not run Agent, and Lite/Darling collect in-process so nothing here
+    /// depends on it. Only a fresh reading on a server that HAS run Agent is a genuine "Stopped".</para>
+    /// </summary>
+    public string StatusDisplay =>
+        IsStale ? "unknown (stale)"
+        : AgentRunning ? "Running"
+        : EverSeenRunning ? (AgentStatusDesc ?? "Stopped")
+        : "not present";
+
+    /// <summary>Does this row warrant the attention (red) treatment? Only a fresh, genuinely-stopped Agent on a
+    /// server that runs one. Stale and never-present are neutral — they are absence of signal, not a problem.</summary>
+    public bool IsAgentProblem => !IsStale && !AgentRunning && EverSeenRunning;
 
     public string NextScheduledRunLocal => NextScheduledRun?.ToString("yyyy-MM-dd HH:mm:ss") ?? "None scheduled";
 }

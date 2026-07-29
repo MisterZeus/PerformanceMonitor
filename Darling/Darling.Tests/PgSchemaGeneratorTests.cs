@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
@@ -26,10 +27,11 @@ public sealed class PgSchemaGeneratorTests
     [Fact]
     public void Catalog_CoversAllCollectors_WithUniqueTablesAndNames()
     {
-        /* 35 through agent_status + long_query_completions (#1496 long-query trace) = 36. */
-        Assert.Equal(36, CollectorCatalog.All.Count);
-        Assert.Equal(36, CollectorCatalog.All.Select(s => s.TargetTable).Distinct().Count());
-        Assert.Equal(36, CollectorCatalog.All.Select(s => s.Name).Distinct().Count());
+        /* 35 through agent_status + long_query_completions (#1496 long-query trace) = 36, plus the two
+           Availability Group collectors (#991) = 38. */
+        Assert.Equal(38, CollectorCatalog.All.Count);
+        Assert.Equal(38, CollectorCatalog.All.Select(s => s.TargetTable).Distinct().Count());
+        Assert.Equal(38, CollectorCatalog.All.Select(s => s.Name).Distinct().Count());
     }
 
     [Fact]
@@ -389,9 +391,15 @@ public sealed class PgSchemaGeneratorTests
     [Fact]
     public void Migrations_JobHistoryAndAgentStatus_MatchGeneratedFreshShape()
     {
-        /* The additive V24/V25 upgrade bodies MUST be the collect.-qualified twin of the fresh (V1
-           GenerateFullSchema) table, or a fresh store and an upgraded store would drift and the positional
-           binary COPY would mis-bind. Pin each migration's CREATE TABLE against the generator's output. */
+        /* The additive upgrade bodies MUST be the collect.-qualified twin of the fresh (V1
+           GenerateFullSchema) table, or a fresh store and an upgraded store drift apart. What breaks is
+           NAMES and TYPES first: PgCollectorRowWriter.CopyCommandFor emits an explicit column list
+           ("COPY t (a, b, ...)") built from PayloadColumns, so Postgres binds by name — a renamed or
+           missing column fails the COPY outright and a retyped one mis-stores or throws. Column ORDER is
+           not a COPY hazard on this side (it is on Lite's, whose DuckDB appender is genuinely positional),
+           but it is pinned anyway so the two provenances stay physically comparable — a store's shape
+           should not reveal whether it was installed fresh or upgraded. Pin each migration's CREATE TABLE
+           against the generator's output. */
         /* Normalize line endings: CreateTable emits '\n'; the verbatim-string V##Sql consts carry the
            source file's CRLF, so compare on a common newline. */
         static string Lf(string s) => s.Replace("\r\n", "\n", StringComparison.Ordinal);
@@ -412,6 +420,105 @@ public sealed class PgSchemaGeneratorTests
         Assert.Contains("CREATE INDEX IF NOT EXISTS idx_job_history_time ON collect.job_history(server_id, collection_time);", v24, StringComparison.Ordinal);
         Assert.Contains(CollectQualified(AgentStatusCollector.Instance), v25, StringComparison.Ordinal);
         Assert.Contains("CREATE INDEX IF NOT EXISTS idx_agent_status_time ON collect.agent_status(server_id, collection_time);", v25, StringComparison.Ordinal);
+
+        /* V34 (#991) creates BOTH Availability Group tables in one migration body — same contract. The
+           weaker `Assert.Contains(column.Name)` sweep this replaces would have passed a V34 with the
+           columns reordered, is_local typed text, or a spurious NOT NULL: exactly the drifts that make an
+           upgraded store's physical shape differ from a fresh one. */
+        var v34 = Lf(PgMigrations.Scripts.Single(m => m.Version == 34).Sql);
+
+        /* The REPLICA-grain table is now the same two-migration story as the database grain below: V34
+           created its first 10 payload columns and V37 (#1696) appended is_local, so an upgraded store's
+           shape is V34 + V37 and only their sum equals the generator's current output. */
+        var replicaColumns = AgReplicaStatesCollector.Instance.PayloadColumns;
+        const int V34ReplicaColumnCount = 10;
+
+        Assert.Contains(
+            CollectQualified(new TruncatedSchema(AgReplicaStatesCollector.Instance, V34ReplicaColumnCount)),
+            v34,
+            StringComparison.Ordinal);
+        Assert.Contains("CREATE INDEX IF NOT EXISTS idx_ag_replica_states_time ON collect.ag_replica_states(server_id, collection_time);", v34, StringComparison.Ordinal);
+
+        var v37 = Lf(PgMigrations.Scripts.Single(m => m.Version == 37).Sql);
+
+        foreach (var column in replicaColumns.Skip(V34ReplicaColumnCount))
+        {
+            var generatedType = Lf(PgSchemaGenerator.CreateTable(new TruncatedSchema(AgReplicaStatesCollector.Instance, replicaColumns.Count)))
+                .Split('\n')
+                .Single(l => l.TrimStart().StartsWith(column.Name + " ", StringComparison.Ordinal))
+                .Trim()
+                .TrimEnd(',');
+
+            Assert.Contains($"ADD COLUMN IF NOT EXISTS {generatedType}", v37, StringComparison.Ordinal);
+        }
+
+        /* No "V34 was not widened in place" sweep for this grain, unlike the database one below: the
+           TruncatedSchema assertion above already matches V34's ag_replica_states block EXACTLY, which is a
+           strictly stronger statement than any name-absence check. A substring sweep would also be wrong
+           here — is_local is a real V34 column on the DATABASE grain, so searching the whole migration body
+           for it finds the other table's legitimate column and fails. */
+        Assert.Contains("CREATE INDEX IF NOT EXISTS idx_ag_database_replica_states_time ON collect.ag_database_replica_states(server_id, collection_time);", v34, StringComparison.Ordinal);
+
+        /* The database-grain table is the one case where a single migration is NOT the whole story: V34
+           created its first 15 payload columns and V36 (#991 addendum) appended 6 more, so an upgraded
+           store's shape is V34 + V36 and only their SUM can equal the generator's current output.
+           Reconstruct that here rather than weakening the pin to name-presence — generate the historical
+           15-column shape and assert V34 matches it exactly, then assert V36 appends the remaining columns
+           in order with the generator's own types. Together those two prove fresh == upgraded. */
+        var currentColumns = AgDatabaseReplicaStatesCollector.Instance.PayloadColumns;
+        const int V34ColumnCount = 15;
+
+        Assert.Contains(
+            CollectQualified(new TruncatedSchema(AgDatabaseReplicaStatesCollector.Instance, V34ColumnCount)),
+            v34,
+            StringComparison.Ordinal);
+
+        var v36 = Lf(PgMigrations.Scripts.Single(m => m.Version == 36).Sql);
+
+        foreach (var column in currentColumns.Skip(V34ColumnCount))
+        {
+            var generatedType = Lf(PgSchemaGenerator.CreateTable(new TruncatedSchema(AgDatabaseReplicaStatesCollector.Instance, currentColumns.Count)))
+                .Split('\n')
+                .Single(l => l.TrimStart().StartsWith(column.Name + " ", StringComparison.Ordinal))
+                .Trim()
+                .TrimEnd(',');
+
+            Assert.Contains($"ADD COLUMN IF NOT EXISTS {generatedType}", v36, StringComparison.Ordinal);
+        }
+
+        /* And V34 must NOT have been widened in place: its CREATE TABLE IF NOT EXISTS is a no-op on a store
+           that already ran it, so editing V34 instead of adding V36 would leave every migrated store short
+           the new columns while fresh installs got them. */
+        foreach (var appended in currentColumns.Skip(V34ColumnCount))
+        {
+            Assert.DoesNotContain($"    {appended.Name} ", v34, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// A collector's schema surface with its payload truncated to the first N columns — lets a test
+    /// generate the HISTORICAL shape a migration froze, so an additive migration can be pinned as
+    /// "V-old created these, V-new appended those, and together they equal today's generated table".
+    /// </summary>
+    private sealed class TruncatedSchema : ICollectorSchemaInfo
+    {
+        private readonly ICollectorSchemaInfo _inner;
+
+        public TruncatedSchema(ICollectorSchemaInfo inner, int columnCount)
+        {
+            _inner = inner;
+            PayloadColumns = inner.PayloadColumns.Take(columnCount).ToList();
+        }
+
+        public string Name => _inner.Name;
+        public string TargetTable => _inner.TargetTable;
+        public bool IncludesCollectionId => _inner.IncludesCollectionId;
+        public string PrefixIdColumnName => _inner.PrefixIdColumnName;
+        public string PrefixTimeColumnName => _inner.PrefixTimeColumnName;
+        public IReadOnlyList<CollectorColumn> PayloadColumns { get; }
+        public bool AppliesTo(CollectorTargetInfo target) => _inner.AppliesTo(target);
+
+        public bool YieldsOnLockTimeout => _inner.YieldsOnLockTimeout;
     }
 
     [Fact]
@@ -439,11 +546,11 @@ public sealed class PgSchemaGeneratorTests
         var script = PgSchemaGenerator.GenerateFullSchema();
 
         var tableCount = CollectorCatalog.All.Count(s => script.Contains($"CREATE TABLE IF NOT EXISTS {s.TargetTable} (", StringComparison.Ordinal));
-        Assert.Equal(36, tableCount);
+        Assert.Equal(38, tableCount);
 
-        /* 36 tables minus the two index-less config tables (server_config, database_config) = 34 indexes. */
+        /* 38 tables minus the two index-less config tables (server_config, database_config) = 36 indexes. */
         var indexCount = script.Split("CREATE INDEX IF NOT EXISTS").Length - 1;
-        Assert.Equal(34, indexCount);
+        Assert.Equal(36, indexCount);
 
         /* The precision guard can never regress silently. */
         Assert.DoesNotContain("numeric(0,0)", script, StringComparison.Ordinal);

@@ -163,9 +163,13 @@ INSERT INTO config_alert_settings (
     analysis_notifications_enabled, analysis_notify_severity, delivery_mode, per_event_max,
     long_running_query_max_results, long_running_query_exclude_sp_server_diagnostics,
     long_running_query_exclude_wait_for, long_running_query_exclude_backups,
-    long_running_query_exclude_misc_waits, long_running_query_exclude_cdc, notify_connection_changes, modified_at)
+    long_running_query_exclude_misc_waits, long_running_query_exclude_cdc, notify_connection_changes,
+    notify_connection_down_at_startup, connection_refire_minutes,
+    notify_ag_health, ag_lag_alert_seconds, ag_redo_queue_alert_kb,
+    ag_disconnect_refire_minutes, modified_at)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
-        $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37)
+        $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42,
+        $43)
 ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(a.Enabled);
         command.Parameters.AddWithValue(a.CpuEnabled);
@@ -206,6 +210,15 @@ ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(a.LongRunningQueryExcludeCdc);
         /* V20 connection-change notify gate. */
         command.Parameters.AddWithValue(a.NotifyConnectionChanges);
+        /* V33 #1659 opt-ins: already-down-at-first-sight + standing-outage re-fire. */
+        command.Parameters.AddWithValue(a.NotifyConnectionDownAtStartup);
+        command.Parameters.AddWithValue(a.ConnectionRefireMinutes);
+        /* V35 #991 Availability Group knobs: master switch + the two sync-behind triggers. */
+        command.Parameters.AddWithValue(a.NotifyAgHealth);
+        command.Parameters.AddWithValue(a.AgLagAlertSeconds);
+        command.Parameters.AddWithValue(a.AgRedoQueueAlertKb);
+        /* V37 #1696: AG disconnect re-fire. */
+        command.Parameters.AddWithValue(a.AgDisconnectRefireMinutes);
         command.Parameters.AddWithValue(now);
         await command.ExecuteNonQueryAsync(ct);
     }
@@ -348,7 +361,10 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        analysis_notifications_enabled, analysis_notify_severity, delivery_mode, per_event_max,
        long_running_query_max_results, long_running_query_exclude_sp_server_diagnostics,
        long_running_query_exclude_wait_for, long_running_query_exclude_backups,
-       long_running_query_exclude_misc_waits, long_running_query_exclude_cdc, notify_connection_changes
+       long_running_query_exclude_misc_waits, long_running_query_exclude_cdc, notify_connection_changes,
+       notify_connection_down_at_startup, connection_refire_minutes,
+       notify_ag_health, ag_lag_alert_seconds, ag_redo_queue_alert_kb,
+       ag_disconnect_refire_minutes
 FROM config_alert_settings WHERE id = 1", connection);
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -395,6 +411,17 @@ FROM config_alert_settings WHERE id = 1", connection);
             LongRunningQueryExcludeCdc = reader.GetBoolean(34),
             /* connection-change notify gate appended (V20) at ordinal 35. */
             NotifyConnectionChanges = reader.GetBoolean(35),
+            /* #1659 opt-ins appended (V33) at ordinals 36–37; NOT NULL DEFAULT so a pre-V33 row can't
+               reach here without the columns present. */
+            NotifyConnectionDownAtStartup = reader.GetBoolean(36),
+            ConnectionRefireMinutes = reader.GetInt32(37),
+            /* #991 AG knobs appended (V35) at ordinals 38–40; NOT NULL DEFAULT so a pre-V35 row can't reach
+               here without the columns present. */
+            NotifyAgHealth = reader.GetBoolean(38),
+            AgLagAlertSeconds = reader.GetInt32(39),
+            AgRedoQueueAlertKb = reader.GetInt64(40),
+            /* #1696 AG disconnect re-fire appended (V37) at ordinal 41. */
+            AgDisconnectRefireMinutes = reader.GetInt32(41),
         };
         var analysis = new AnalysisConfig
         {

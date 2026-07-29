@@ -57,7 +57,7 @@ public sealed class DarlingMcpTrendTools
         try
         {
             var now = DateTime.UtcNow;
-            var points = await DarlingTrendReader.GetMemoryTrendAsync(postgres, resolved.Value.ServerId, now.AddHours(-hours_back), now);
+            var points = await DarlingTrendReader.GetMemoryTrendAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (points.Count == 0)
                 return McpHelpers.Status("unavailable", "No memory trend data available.");
 
@@ -76,7 +76,7 @@ public sealed class DarlingMcpTrendTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 trend = result
             }, McpHelpers.JsonOptions);
@@ -104,13 +104,13 @@ public sealed class DarlingMcpTrendTools
         {
             var now = DateTime.UtcNow;
             var start = now.AddHours(-hours_back);
-            var points = await DarlingTrendReader.GetPerfmonTrendAsync(postgres, resolved.Value.ServerId, counter_name, start, now);
+            var points = await DarlingTrendReader.GetPerfmonTrendAsync(postgres, resolved.ServerId, counter_name, start, now);
             if (points.Count == 0)
             {
                 /* No points can mean three different things to a caller. Distinguish them so an LLM
                    doesn't read a bad counter name as "this metric looks fine" — Lite's get_perfmon_trend
                    miss vocabulary. */
-                var collected = await DarlingTrendReader.GetDistinctPerfmonCountersAsync(postgres, resolved.Value.ServerId, start, now);
+                var collected = await DarlingTrendReader.GetDistinctPerfmonCountersAsync(postgres, resolved.ServerId, start, now);
 
                 /* Page Life Expectancy is the counter people reach for by habit; it is intentionally
                    not collected, so an empty trend would otherwise be misread as "PLE looks fine." */
@@ -146,7 +146,7 @@ public sealed class DarlingMcpTrendTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 counter_name,
                 hours_back,
                 trend = result
@@ -173,7 +173,7 @@ public sealed class DarlingMcpTrendTools
         try
         {
             var now = DateTime.UtcNow;
-            var points = await DarlingTrendReader.GetFileIoLatencyTrendAsync(postgres, resolved.Value.ServerId, now.AddHours(-hours_back), now);
+            var points = await DarlingTrendReader.GetFileIoLatencyTrendAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (points.Count == 0)
                 return McpHelpers.Status("unavailable", "No I/O trend data available.");
 
@@ -187,7 +187,7 @@ public sealed class DarlingMcpTrendTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 trend = result
             }, McpHelpers.JsonOptions);
@@ -215,7 +215,7 @@ public sealed class DarlingMcpTrendTools
         try
         {
             var now = DateTime.UtcNow;
-            var rows = await DarlingTrendReader.GetQueryHistoryAsync(postgres, resolved.Value.ServerId, database_name, query_hash, now.AddHours(-hours_back), now);
+            var rows = await DarlingTrendReader.GetQueryHistoryAsync(postgres, resolved.ServerId, database_name, query_hash, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", $"No history found for query_hash '{query_hash}' in database '{database_name}' within the last {hours_back} hours.");
 
@@ -239,7 +239,7 @@ public sealed class DarlingMcpTrendTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 database_name,
                 query_hash,
                 hours_back,
@@ -268,7 +268,7 @@ public sealed class DarlingMcpTrendTools
         try
         {
             var now = DateTime.UtcNow;
-            var points = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, resolved.Value.ServerId, now.AddHours(-hours_back), now);
+            var points = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (points.Count == 0)
                 return McpHelpers.Status("unavailable", "No query duration trend data available.");
 
@@ -281,7 +281,7 @@ public sealed class DarlingMcpTrendTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 trend = result
             }, McpHelpers.JsonOptions);

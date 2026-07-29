@@ -12,6 +12,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 
+using PerformanceMonitor.Darling.Storage;
+
 namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>
@@ -25,6 +27,113 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed partial class ViewerDataService
 {
     /// <summary>Per-database resource usage from query_stats + file_io_stats deltas. $1 server_id, $2 cutoff.</summary>
+
+    /* ── #1661: retention-tier routing for the aggregate workload queries ───────────────────────────────
+       These sum additively over database_name, which is exactly what the rollups materialize, so routing
+       them is lossless. Each swap throws if it matches nothing, so editing the SQL without updating the
+       matching fragment fails loudly instead of silently leaving the panel on raw. */
+
+    /// <summary>The database-grain CTE in <see cref="DatabaseResourceUsageSql"/>, verbatim.</summary>
+    private const string WorkloadCteRaw = """
+        database_name,
+        SUM(delta_worker_time) / 1000.0 AS cpu_time_ms,
+        SUM(delta_logical_reads) AS logical_reads,
+        SUM(delta_physical_reads) AS physical_reads,
+        SUM(delta_logical_writes) AS logical_writes,
+        SUM(delta_execution_count) AS execution_count
+    FROM v_query_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   delta_worker_time IS NOT NULL
+    GROUP BY database_name
+""";
+
+    /// <summary>
+    /// The same CTE over the per-database rollup. This is the ONE reader that needs
+    /// <c>query_stats_db_hourly</c>: it sums the I/O columns, which the query-grain aggregate does not carry.
+    /// The rollup already applies the same <c>delta_worker_time IS NOT NULL</c> filter, so it is dropped here.
+    /// </summary>
+    private static string WorkloadCteForCagg(string relation) => $"""
+        database_name,
+        SUM(worker_time_sum) / 1000.0 AS cpu_time_ms,
+        SUM(logical_reads_sum) AS logical_reads,
+        SUM(physical_reads_sum) AS physical_reads,
+        SUM(logical_writes_sum) AS logical_writes,
+        SUM(execution_count_sum) AS execution_count
+    FROM collect.{relation}
+    WHERE server_id = $1
+    AND   bucket >= $2
+    GROUP BY database_name
+""";
+
+    /// <summary>The CPU/execution CTE shared by both top-consumer queries, verbatim.</summary>
+    private const string ConsumerCteRaw = """
+        database_name,
+        SUM(delta_worker_time) / 1000.0 AS cpu_time_ms,
+        SUM(delta_execution_count) AS execution_count
+    FROM v_query_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   delta_worker_time IS NOT NULL
+    GROUP BY database_name
+""";
+
+    /// <summary>
+    /// The same CTE over the QUERY-grain rollup — these two need only CPU and executions, both of which
+    /// <c>query_stats_hourly</c> already carries, so they route without the per-database aggregate.
+    /// </summary>
+    private static string ConsumerCteForCagg(string relation) => $"""
+        database_name,
+        SUM(worker_time_sum) / 1000.0 AS cpu_time_ms,
+        SUM(execution_count_sum) AS execution_count
+    FROM collect.{relation}
+    WHERE server_id = $1
+    AND   bucket >= $2
+    GROUP BY database_name
+""";
+
+    private static string RouteOrThrow(string sql, string from, string to, string what)
+    {
+        var routed = sql.Replace(from, to, StringComparison.Ordinal);
+        if (string.Equals(routed, sql, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"FinOps {what} CAGG routing found nothing to replace — its raw fragment has drifted from the SQL (#1661).");
+        }
+
+        return routed;
+    }
+
+    /// <summary>Database resource usage for <paramref name="tier"/>. Raw returns the constant untouched.</summary>
+    public static string DatabaseResourceUsageSqlFor(RetentionTier tier) =>
+        tier == RetentionTier.Raw
+            ? DatabaseResourceUsageSql
+            : RouteOrThrow(
+                DatabaseResourceUsageSql,
+                WorkloadCteRaw,
+                WorkloadCteForCagg(tier == RetentionTier.Hourly ? TimescaleSupport.QueryStatsDbHourlyView : TimescaleSupport.QueryStatsDbDailyView),
+                "database resource usage");
+
+    /// <summary>Top consumers (by total) for <paramref name="tier"/>.</summary>
+    public static string TopResourceConsumersByTotalSqlFor(RetentionTier tier) =>
+        tier == RetentionTier.Raw
+            ? TopResourceConsumersByTotalSql
+            : RouteOrThrow(
+                TopResourceConsumersByTotalSql,
+                ConsumerCteRaw,
+                ConsumerCteForCagg(tier == RetentionTier.Hourly ? TimescaleSupport.QueryStatsHourlyView : TimescaleSupport.QueryStatsDailyView),
+                "top consumers by total");
+
+    /// <summary>Top consumers (by average) for <paramref name="tier"/>.</summary>
+    public static string TopResourceConsumersByAvgSqlFor(RetentionTier tier) =>
+        tier == RetentionTier.Raw
+            ? TopResourceConsumersByAvgSql
+            : RouteOrThrow(
+                TopResourceConsumersByAvgSql,
+                ConsumerCteRaw,
+                ConsumerCteForCagg(tier == RetentionTier.Hourly ? TimescaleSupport.QueryStatsHourlyView : TimescaleSupport.QueryStatsDailyView),
+                "top consumers by average");
+
     public const string DatabaseResourceUsageSql = @"
 WITH workload AS (
     SELECT
@@ -92,8 +201,12 @@ ORDER BY c.cpu_time_ms DESC";
     public async Task<List<DatabaseResourceUsageRow>> GetDatabaseResourceUsageAsync(int serverId, int hoursBack = 24, CancellationToken cancellationToken = default)
     {
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
+        var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
+        var tier = RetentionTierRouter.Resolve(
+            DateTime.UtcNow, cutoff, rollups.DbGrainHourly, rollups.DbGrainDaily,
+            coverage.For(TimescaleSupport.QueryStatsDbHourlyView, TimescaleSupport.QueryStatsDbDailyView));
 
-        await using var command = _dataSource.CreateCommand(DatabaseResourceUsageSql);
+        await using var command = _dataSource.CreateCommand(DatabaseResourceUsageSqlFor(tier));
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
 
@@ -246,8 +359,12 @@ LIMIT $3";
     public async Task<List<TopResourceConsumerRow>> GetTopResourceConsumersByTotalAsync(int serverId, int hoursBack = 24, int topN = 5, CancellationToken cancellationToken = default)
     {
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
+        var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
+        var tier = RetentionTierRouter.Resolve(
+            DateTime.UtcNow, cutoff, rollups.QueryGrainHourly, rollups.QueryGrainDaily,
+            coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
 
-        await using var command = _dataSource.CreateCommand(TopResourceConsumersByTotalSql);
+        await using var command = _dataSource.CreateCommand(TopResourceConsumersByTotalSqlFor(tier));
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = topN });
@@ -308,8 +425,12 @@ LIMIT $3";
     public async Task<List<TopResourceConsumerRow>> GetTopResourceConsumersByAvgAsync(int serverId, int hoursBack = 24, int topN = 5, CancellationToken cancellationToken = default)
     {
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
+        var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
+        var tier = RetentionTierRouter.Resolve(
+            DateTime.UtcNow, cutoff, rollups.QueryGrainHourly, rollups.QueryGrainDaily,
+            coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
 
-        await using var command = _dataSource.CreateCommand(TopResourceConsumersByAvgSql);
+        await using var command = _dataSource.CreateCommand(TopResourceConsumersByAvgSqlFor(tier));
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = topN });
@@ -446,7 +567,13 @@ LIMIT $3";
 
     public async Task<List<ExpensiveQueryRow>> GetExpensiveQueriesAsync(int serverId, int hoursBack = 24, int topN = 20, CancellationToken cancellationToken = default)
     {
-        var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
+        /* #1661: this reader projects query_text and query_plan_xml, and NO rollup carries per-row text — the
+           CAGGs group by identity and sum deltas. So unlike the aggregate FinOps queries this one cannot be
+           routed; it is limited to whatever raw still retains, however wide a window the picker offers. Clamp to
+           that horizon so the query states the range it can actually answer. The UI labels the clamp
+           (FinOpsTab.Loaders) using the same router, rather than quietly showing a few days of a month. */
+        var now = DateTime.UtcNow;
+        var (cutoff, _) = RetentionTierRouter.ClampToTextHorizon(now, now.AddHours(-hoursBack));
 
         await using var command = _dataSource.CreateCommand(ExpensiveQueriesSql);
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
@@ -475,8 +602,8 @@ LIMIT $3";
 
     /// <summary>
     /// High-impact queries — 80/20 analysis across CPU/duration/reads/writes/memory/executions. Aggregates
-    /// to query_hash level in SQL (reading the <c>query_stats</c> base table for the correlated sample-text
-    /// subqueries, as Lite does), then scores in C# via <see cref="HighImpactScorer"/>. $1 server_id, $2 cutoff.
+    /// to query_hash level in SQL (with correlated sample-text subqueries, as Lite does), then scores in C#
+    /// via <see cref="HighImpactScorer"/>. $1 server_id, $2 cutoff.
     /// </summary>
     public const string HighImpactQueriesSql = @"
 SELECT
@@ -488,28 +615,28 @@ SELECT
     SUM(delta_logical_reads) AS total_reads,
     SUM(delta_logical_writes) AS total_writes,
     SUM(COALESCE(max_grant_kb, 0)) / 1024.0 AS total_memory_mb,
-    (SELECT LEFT(qs2.query_text, 200) FROM query_stats qs2
+    (SELECT LEFT(qs2.query_text, 200) FROM v_query_stats qs2
      WHERE qs2.query_hash = qs.query_hash
      AND qs2.server_id = $1
      AND qs2.collection_time >= $2
      AND qs2.query_text IS NOT NULL AND qs2.query_text != ''
      ORDER BY qs2.delta_execution_count DESC NULLS LAST
      LIMIT 1) AS sample_query_text,
-    (SELECT qs2.query_text FROM query_stats qs2
+    (SELECT qs2.query_text FROM v_query_stats qs2
      WHERE qs2.query_hash = qs.query_hash
      AND qs2.server_id = $1
      AND qs2.collection_time >= $2
      AND qs2.query_text IS NOT NULL AND qs2.query_text != ''
      ORDER BY qs2.delta_execution_count DESC NULLS LAST
      LIMIT 1) AS full_query_text,
-    (SELECT qs2.query_plan_xml FROM query_stats qs2
+    (SELECT qs2.query_plan_xml FROM v_query_stats qs2
      WHERE qs2.query_hash = qs.query_hash
      AND qs2.server_id = $1
      AND qs2.collection_time >= $2
      AND qs2.query_plan_xml IS NOT NULL AND qs2.query_plan_xml != ''
      ORDER BY qs2.delta_execution_count DESC NULLS LAST
      LIMIT 1) AS query_plan_xml
-FROM query_stats AS qs
+FROM v_query_stats AS qs
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   query_hash IS NOT NULL AND query_hash != ''

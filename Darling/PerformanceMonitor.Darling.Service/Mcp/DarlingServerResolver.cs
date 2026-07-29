@@ -48,11 +48,12 @@ ORDER BY server_name";
     /// (server_id, storage name) or a ready-to-return error string listing the available
     /// servers — Lite's <c>ServerResolver.ResolveOrError</c> shape, so the tools collapse the
     /// resolve-and-bail block to: <c>var (resolved, error) = await ...; if (error != null) return error;</c>.
+    /// resolved is default (not meaningful) whenever error is non-null — always bail on error first.
     /// Unlike Lite's in-memory resolution this one READS (the registry), so a store failure
     /// degrades to an informative error string here — the tools' always-return-a-string
     /// contract holds instead of surfacing the MCP SDK's generic invocation error.
     /// </summary>
-    public static async Task<((int ServerId, string ServerName)? resolved, string? error)> ResolveOrErrorAsync(
+    public static async Task<((int ServerId, string ServerName) resolved, string? error)> ResolveOrErrorAsync(
         NpgsqlDataSource postgres,
         string? serverName)
     {
@@ -63,7 +64,7 @@ ORDER BY server_name";
         }
         catch (Exception ex)
         {
-            return (null, $"Could not read the servers registry from the Postgres store: {ex.Message}");
+            return (default, $"Could not read the servers registry from the Postgres store: {ex.Message}");
         }
 
         return ResolveOrError(servers, serverName);
@@ -73,14 +74,14 @@ ORDER BY server_name";
     /// The pure matching half — Lite's semantics over materialized registry rows, separated
     /// from the Postgres read so the resolution rules unit-test without a live store.
     /// </summary>
-    internal static ((int ServerId, string ServerName)? resolved, string? error) ResolveOrError(
+    internal static ((int ServerId, string ServerName) resolved, string? error) ResolveOrError(
         IReadOnlyList<RegisteredServer> servers,
         string? serverName)
     {
         var resolved = Resolve(servers, serverName);
         return resolved is null
-            ? (null, $"Could not resolve server. Available servers:\n{ListAvailableServers(servers)}")
-            : (resolved, null);
+            ? (default, $"Could not resolve server. Available servers:\n{ListAvailableServers(servers)}")
+            : (resolved.Value, null);
     }
 
     private static (int ServerId, string ServerName)? Resolve(

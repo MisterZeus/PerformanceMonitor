@@ -17,8 +17,8 @@ public sealed class McpQueryTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Number of top queries. Default 20.")] int top = 20,
         [Description("Filter to a specific database.")] string? database_name = null,
-        [Description("If true, only return queries that used parallelism (max_dop > 1).")] bool parallel_only = false,
-        [Description("Minimum DOP to filter on. Implies parallel filtering.")] int min_dop = 0)
+        [Description("If true, only return queries whose cached plan has EVER run at DOP > 1. Note: max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled. Confirm current parallelism with analyze_query_plan, which reads the actual plan.")] bool parallel_only = false,
+        [Description("Minimum DOP to filter on. Implies parallel filtering. Filters the same lifetime-max value as parallel_only, not current parallelism.")] int min_dop = 0)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -31,7 +31,7 @@ public sealed class McpQueryTools
             var topError = McpHelpers.ValidateTop(top, "top");
             if (topError != null) return topError;
 
-            var rows = await dataService.GetTopQueriesByCpuAsync(resolved.Value.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name });
+            var rows = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name });
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
@@ -71,7 +71,7 @@ public sealed class McpQueryTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 queries = result
             }, McpHelpers.JsonOptions);
@@ -102,7 +102,7 @@ public sealed class McpQueryTools
             var topError = McpHelpers.ValidateTop(top, "top");
             if (topError != null) return topError;
 
-            var rows = await dataService.GetTopProceduresByCpuAsync(resolved.Value.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name });
+            var rows = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name });
             if (rows.Count == 0)
             {
                 return McpHelpers.Status(
@@ -135,7 +135,7 @@ public sealed class McpQueryTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 procedures = result
             }, McpHelpers.JsonOptions);
@@ -166,7 +166,7 @@ public sealed class McpQueryTools
             var topError = McpHelpers.ValidateTop(top, "top");
             if (topError != null) return topError;
 
-            var rows = await dataService.GetQueryStoreTopQueriesAsync(resolved.Value.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name });
+            var rows = await dataService.GetQueryStoreTopQueriesAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name });
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No Query Store data available. Query Store may not be enabled on target databases.");
@@ -192,7 +192,7 @@ public sealed class McpQueryTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 queries = result
             }, McpHelpers.JsonOptions);
@@ -218,7 +218,7 @@ public sealed class McpQueryTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var points = await dataService.GetQueryDurationTrendAsync(resolved.Value.ServerId, hours_back);
+            var points = await dataService.GetQueryDurationTrendAsync(resolved.ServerId, hours_back);
             var result = points.Select(p => new
             {
                 time = p.CollectionTime.ToString("o"),
@@ -228,7 +228,7 @@ public sealed class McpQueryTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 trend = result
             }, McpHelpers.JsonOptions);
@@ -256,7 +256,7 @@ public sealed class McpQueryTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var rows = await dataService.GetQueryStatsHistoryAsync(resolved.Value.ServerId, database_name, query_hash, hours_back);
+            var rows = await dataService.GetQueryStatsHistoryAsync(resolved.ServerId, database_name, query_hash, hours_back);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("empty", $"No history found for query_hash '{query_hash}' in database '{database_name}' within the last {hours_back} hours.");
@@ -282,7 +282,7 @@ public sealed class McpQueryTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 database_name,
                 query_hash,
                 hours_back,

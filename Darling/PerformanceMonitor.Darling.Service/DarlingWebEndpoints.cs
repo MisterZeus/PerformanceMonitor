@@ -47,7 +47,8 @@ namespace PerformanceMonitor.Darling.Service;
 ///
 /// <para><b>The pre-banded fleet.</b> <c>GET /api/fleet</c> and the <c>get_fleet_overview</c> MCP tool both read
 /// through <see cref="DarlingFleetReader"/> — the enriched per-server cards and the cross-server rollup, banded
-/// once by the shared <c>ServerHealthClassifier</c>.</para>
+/// once by the shared <c>ServerHealthClassifier</c>. <c>GET /api/ag</c> and <c>get_ag_health</c> pair the same way
+/// over <see cref="DarlingAgReader"/> for the Availability Group topology (#991).</para>
 /// </summary>
 public static class DarlingWebEndpoints
 {
@@ -110,6 +111,18 @@ public static class DarlingWebEndpoints
             var result = await DarlingFleetReader.GetFleetOverviewAsync(
                 postgres, now.AddHours(-hours), now, now, worstCount, context.RequestAborted);
             return Results.Json(result, DarlingFleetReader.JsonOptions);
+        });
+
+        /* The Availability Group topology (#991, also surfaced as the get_ag_health MCP tool). Fleet-wide, exactly
+           like /api/fleet — the per-server view is reachable through the /api/read/get_ag_health mirror, which
+           owns the name-resolution error path. Unlike that mirror this returns the DTO directly: an AG-less store
+           answers with an empty groups array rather than the tool's {status:"empty"} envelope, so the page renders
+           its own empty state and the nav gate can read the count off the same response. */
+        app.MapGet("/api/ag", async (HttpContext context) =>
+        {
+            var result = await DarlingAgReader.GetAgHealthAsync(
+                postgres, null, DateTime.UtcNow, context.RequestAborted);
+            return Results.Json(result, DarlingAgReader.JsonOptions);
         });
 
         /* One GET per read-only tool, calling the tool method directly (no SQL/projection re-implementation). */
@@ -374,12 +387,60 @@ public static class DarlingWebEndpoints
            many names => a bound server_name = ANY filter. */
         var serverScope = ParseServerScope(body, values);
 
-        var hours = body["hours"] is JsonValue hoursValue && hoursValue.TryGetValue<int>(out var h) ? h : DefaultComposeHours;
-        hours = Math.Clamp(hours, 1, ComposeLimits.MaxWindowHours);
-        var end = DateTime.UtcNow;
-        var start = end.AddHours(-hours);
+        /* The run window (#1606): an explicit absolute pair (windowStart/windowEnd — the zoom/brush and
+           historical-analysis path) takes precedence over the relative `hours` (which the frontend keeps
+           sending alongside); both-or-neither, start < end, span capped at the same MaxWindowHours ceiling.
+           An explicit window is an explicit request, so violations REJECT rather than silently sliding an
+           endpoint. NowUtc stays the real wall clock either way — routing and the partial-window notice
+           measure age from now, never from a historical window's end. */
+        var now = DateTime.UtcNow;
+        DateTime start;
+        DateTime end;
+        var hasWindowStart = body["windowStart"] is not null;
+        var hasWindowEnd = body["windowEnd"] is not null;
+        if (hasWindowStart || hasWindowEnd)
+        {
+            if (!hasWindowStart || !hasWindowEnd)
+            {
+                return ComposeRunOutcome.BadRequest("windowStart and windowEnd must be provided together.");
+            }
 
-        var runContext = new ComposeRunContext(serverScope, start, end, values);
+            if (!TryParseUtcInstant(body["windowStart"], out start) || !TryParseUtcInstant(body["windowEnd"], out end))
+            {
+                return ComposeRunOutcome.BadRequest("windowStart/windowEnd must be ISO-8601 timestamps (UTC; a trailing Z and fractional seconds are fine).");
+            }
+
+            /* The future is empty by definition — clamp the end to now for honesty (routing only cares about
+               the start's age, so this is presentation, not safety). */
+            if (end > now)
+            {
+                end = now;
+            }
+
+            if (start >= end)
+            {
+                return ComposeRunOutcome.BadRequest("windowStart must be earlier than windowEnd.");
+            }
+
+            if ((end - start) > TimeSpan.FromHours(ComposeLimits.MaxWindowHours))
+            {
+                return ComposeRunOutcome.BadRequest($"the window spans more than the {ComposeLimits.MaxWindowHours / 24}-day ceiling; narrow it.");
+            }
+        }
+        else
+        {
+            var hours = body["hours"] is JsonValue hoursValue && hoursValue.TryGetValue<int>(out var h) ? h : DefaultComposeHours;
+            hours = Math.Clamp(hours, 1, ComposeLimits.MaxWindowHours);
+            end = now;
+            start = end.AddHours(-hours);
+        }
+
+        /* Which rollups exist in THIS store (#1665) gates the source routing below — a plain-PostgreSQL
+           store (or a partially-built TimescaleDB one) must route to what it HAS, never onto a missing
+           relation. Probed lazily, cached per data source. */
+        var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
+
+        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage);
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, runContext);
         if (compileError is not null)
         {
@@ -393,7 +454,22 @@ public static class DarlingWebEndpoints
                source, on the SAME window + server scope, under the same statement_timeout. Additive —
                {sql, rows} are unchanged; a panel that requests no annotations returns an empty array. */
             var annotations = await RunAnnotationsAsync(postgres, plan!, runContext, cancellationToken);
-            return ComposeRunOutcome.Ok(new JsonObject { ["sql"] = compiled!.Sql, ["rows"] = rows, ["annotations"] = annotations });
+            var payload = new JsonObject { ["sql"] = compiled!.Sql, ["rows"] = rows, ["annotations"] = annotations };
+            /* Partial window, and says so (#1665): when the route landed on a tier whose retention cannot
+               reach the window's start on a retention-active store, tell the caller instead of quietly
+               returning a short slice of what they asked for. Additive — absent when the window fits.
+               Joined with the row-cap notice (#1687), because the two truncate a panel from OPPOSITE
+               ends — retention loses the oldest points, the row cap now drops them too by keeping the
+               newest buckets — and a panel can genuinely hit both at once. Showing one and swallowing
+               the other would under-report exactly the panel that is worst off. */
+            if (ComposeStoreAvailability.CombineNotices(
+                    ComposeStoreAvailability.BuildRetentionNotice(plan!.Measure.SourceTable, compiled.Route, start, now, rollups, coverage),
+                    ComposeStoreAvailability.BuildRowCapNotice(plan.Mode, rows.Count)) is string notice)
+            {
+                payload["notice"] = notice;
+            }
+
+            return ComposeRunOutcome.Ok(payload);
         }
         catch (PostgresException ex)
         {
@@ -409,11 +485,35 @@ public static class DarlingWebEndpoints
     /// <summary>Default compose-run window (hours) when the request omits one.</summary>
     private const int DefaultComposeHours = 24;
 
+    /// <summary>Parses an absolute run-window bound (#1606): ISO-8601, treated as UTC whether or not it
+    /// carries a Z (JS <c>toISOString()</c> sends ms+Z; the store is naive UTC), normalized to
+    /// Kind-Unspecified naive UTC like every other Darling read binding.</summary>
+    private static bool TryParseUtcInstant(JsonNode? node, out DateTime value)
+    {
+        value = default;
+        if (node is not JsonValue jsonValue || !jsonValue.TryGetValue<string>(out var text) || string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        if (!DateTime.TryParse(
+                text,
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                out var parsed))
+        {
+            return false;
+        }
+
+        value = DateTime.SpecifyKind(parsed, DateTimeKind.Unspecified);
+        return true;
+    }
+
     /// <summary>Resolves the run's server scope (Erik's Decision 1): the top-level <c>server</c> (a name or an
     /// array of names), else the <c>$server</c> variable value. Absent / "All" / empty ⇒ null (the whole fleet,
     /// no server predicate); one or many names ⇒ that list, which the compiler binds as a
     /// <c>server_name = ANY($n)</c> text[] parameter — never resolved to ids or interpolated.</summary>
-    private static IReadOnlyList<string>? ParseServerScope(JsonObject body, IReadOnlyDictionary<string, string?> values)
+    private static List<string>? ParseServerScope(JsonObject body, Dictionary<string, string?> values)
     {
         var names = new List<string>();
 
@@ -455,7 +555,7 @@ public static class DarlingWebEndpoints
 
     /// <summary>Parses the run's resolved variable values (<c>{name: scalar}</c>) into the string map the
     /// compiler binds $var filters from. A non-scalar value maps to null (an unresolved variable).</summary>
-    private static IReadOnlyDictionary<string, string?> ParseRunValues(JsonNode? node)
+    private static Dictionary<string, string?> ParseRunValues(JsonNode? node)
     {
         var values = new Dictionary<string, string?>(StringComparer.Ordinal);
         if (node is JsonObject obj)
@@ -517,7 +617,7 @@ public static class DarlingWebEndpoints
         return annotations;
     }
 
-    private static JsonNode? DbValueToJson(object value) => value switch
+    private static JsonValue? DbValueToJson(object value) => value switch
     {
         DateTime dt => JsonValue.Create(dt.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture)),
         double d => JsonValue.Create(d),
@@ -543,10 +643,12 @@ public static class DarlingWebEndpoints
     /* ── loopback determination (the web host's tokenless-loopback auth arm) ── */
 
     /// <summary>
-    /// PURE: whether a request's remote address is loopback — the tokenless-access arm of the web host's auth
-    /// gate (<see cref="DarlingWebHostService.DecideWebAuth"/> calls this: a loopback request needs no token).
-    /// Unwraps an IPv4-mapped-IPv6 address (<c>::ffff:127.0.0.1</c>) then defers to
-    /// <see cref="IPAddress.IsLoopback"/>; a null/unverifiable remote is NOT loopback (fail-closed).
+    /// PURE: whether a request's remote address is loopback — the CIDR-exemption arm of the web host's auth
+    /// gate (<see cref="DarlingWebHostService.DecideWebAuth"/> calls this). A loopback request skips the CIDR
+    /// test, because 127.0.0.1 is not inside a LAN CIDR and would otherwise 403 the operator's own browser; it
+    /// still has to present a session cookie or token (#1649). Unwraps an IPv4-mapped-IPv6 address
+    /// (<c>::ffff:127.0.0.1</c>) then defers to <see cref="IPAddress.IsLoopback"/>; a null/unverifiable remote
+    /// is NOT loopback (fail-closed).
     /// </summary>
     internal static bool IsLoopbackRemote(IPAddress? remoteIp)
     {
@@ -1025,6 +1127,7 @@ public static class DarlingWebEndpoints
             ["get_server_summary"] = R(CatOverview, "A one-shot health summary for a server.", PServer()),
             ["get_daily_summary"] = R(CatOverview, "The daily health summary (optionally for a specific date).", PServer(), PText("summary_date")),
             ["get_fleet_overview"] = R(CatOverview, "The banded cross-server fleet roll-up.", PHours(DefaultFleetHours)),
+            ["get_ag_health"] = R(CatOverview, "Availability Group topology: replicas and per-database secondary state.", PServer()),
 
             /* ── latch / spinlock (DarlingMcpLatchSpinlockTools) ── */
             ["get_latch_stats"] = R(CatLatch, "Top latch waits in the window.", PServer(), PHours(24), PTop(10)),
@@ -1454,6 +1557,7 @@ public static class DarlingWebEndpoints
             ["get_server_summary"] = (c, pg, an) => DarlingMcpHealthTools.GetServerSummary(pg, Server(c)),
             ["get_daily_summary"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummary(pg, Server(c), Str(c, "summary_date")),
             ["get_fleet_overview"] = (c, pg, an) => DarlingMcpFleetTools.GetFleetOverview(pg, Hours(c, DefaultFleetHours)),
+            ["get_ag_health"] = (c, pg, an) => DarlingMcpAgTools.GetAgHealth(pg, Server(c)),
 
             /* ── latch / spinlock ── */
             ["get_latch_stats"] = (c, pg, an) => DarlingMcpLatchSpinlockTools.GetLatchStats(pg, Server(c), Hours(c, 24), Rows(c, "top", 10)),

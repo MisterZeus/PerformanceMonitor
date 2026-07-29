@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Net;
@@ -160,6 +161,26 @@ public sealed class DarlingManagedPostgres
     public const string ConfMarkerV5 = "# Managed by PerformanceMonitor Darling (v5 co-located sizing) -- do not remove this block";
 
     /// <summary>
+    /// Marker for the v6 log-rotation block (#1652). Before this block the server's ONLY log was the single
+    /// <c>pg.log</c> pg_ctl appends to — no rotation of any kind, growing unbounded across restarts on the
+    /// same volume as the data directory. Same heal discipline as v2-v5: existing clusters gain the block on
+    /// their next service-owned start (<c>logging_collector</c> is restart-only, so it applies right then —
+    /// the append happens before pg_ctl start).
+    /// </summary>
+    public const string ConfMarkerV6 = "# Managed by PerformanceMonitor Darling (v6 log rotation) -- do not remove this block";
+
+    /// <summary>
+    /// Marker for the v7 compression-memory override (#1777). A SEVENTH independently versioned block,
+    /// same heal discipline as v5: it re-states ONLY <c>maintenance_work_mem</c>, so a store already
+    /// carrying a v3 block written under the old <c>min(5% RAM, 1 GB)</c> rule adopts the raised floor on
+    /// its next service-owned start — postgresql.conf takes the LAST occurrence of a setting, so appending
+    /// wins without rewriting v3. This is the half that reaches EXISTING stores: a formula change alone
+    /// would only ever have applied to a fresh initdb, and the boxes that need it are the ones already
+    /// collecting.
+    /// </summary>
+    public const string ConfMarkerV7 = "# Managed by PerformanceMonitor Darling (v7 compression memory) -- do not remove this block";
+
+    /// <summary>
     /// Markers delimiting the Darling-managed network access block in pg_hba.conf
     /// (darling-network-endpoints, D5). <see cref="ReconcilePgHba"/> replaces exactly the lines
     /// between them and preserves every non-marked line, so the opt-in <c>hostssl</c> rule is
@@ -194,22 +215,50 @@ public sealed class DarlingManagedPostgres
     private readonly string _dataDirectory;
     private readonly string _credentialPath;
     private readonly string _serverLogPath;
+    private readonly DarlingStoreUpgrade _storeUpgrade;
 
     private bool _startedByThisProcess;
+
+    /// <summary>What the runtime probe did with the shipped zip this start (#1706) — non-null only when a
+    /// newer runtime was extracted, and its PreviousBinDirectory is pg_upgrade's --old-bindir.</summary>
+    private DarlingStoreUpgrade.RuntimeAdvance? _runtimeAdvance;
+
+    /// <summary>The bundled runtime's identity, read once the runtime is settled and used by the post-start
+    /// verification and the same-major TimescaleDB update.</summary>
+    private int _bundledMajor;
+    private string? _bundledTimescaleVersion;
 
     public DarlingManagedPostgres(PostgresConfig config, ILogger logger, string? runtimeRootOverride = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _runtimeRoot = runtimeRootOverride ?? Path.Combine(AppContext.BaseDirectory, "pg-runtime");
-        _runtimeZipPath = Path.Combine(AppContext.BaseDirectory, "pg-runtime.zip");
+        /* The zip is always the runtime root's SIBLING — that is the shipped layout (both beside the
+           service binary), and deriving it from the override rather than hardcoding AppContext keeps an
+           overridden runtime a complete, self-consistent deployment. The store-upgrade path (#1706) needs
+           exactly that: a staged runtime plus the zip that supersedes it. */
+        _runtimeZipPath = runtimeRootOverride is null
+            ? Path.Combine(AppContext.BaseDirectory, "pg-runtime.zip")
+            : Path.Combine(
+                Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(runtimeRootOverride)))
+                    ?? AppContext.BaseDirectory,
+                "pg-runtime.zip");
         _dataDirectory = ResolveDataDirectory(config);
         _credentialPath = CredentialPathFor(_dataDirectory);
         _serverLogPath = Path.Combine(ParentOf(_dataDirectory), ServerLogFileName);
+        _storeUpgrade = new DarlingStoreUpgrade(_logger);
     }
 
     /// <summary>True when THIS process started the server — the only case shutdown may stop it.</summary>
     public bool StartedByThisProcess => _startedByThisProcess;
+
+    /// <summary>
+    /// What this start's store-runtime reconcile did (#1706) — carried out of the bootstrap so the worker
+    /// can raise a real self-alert once the alert engine is up. The store is down while an upgrade runs, so
+    /// its START can only be a log line; both terminal states happen with a live store and are alertable.
+    /// </summary>
+    internal DarlingStoreUpgrade.StoreUpgradeOutcome LastUpgradeOutcome { get; private set; }
+        = DarlingStoreUpgrade.StoreUpgradeOutcome.None;
 
     public string DataDirectory => _dataDirectory;
 
@@ -266,6 +315,13 @@ public sealed class DarlingManagedPostgres
         builder.Append("shared_preload_libraries = 'timescaledb'\n");
         builder.Append("port = ").Append(port).Append('\n');
         builder.Append("listen_addresses = '127.0.0.1'\n");
+        /* #1681: per-run audit trail for TimescaleDB background jobs. Off by default, which meant
+           timescaledb_information.job_errors and job_history returned ZERO rows for every job on a field
+           store — including jobs with dozens of confirmed successful runs. When a compression job hung
+           there (9 times in 6 days, always the two highest-write hypertables) there was no captured error,
+           no worker PID, no start/finish record: nothing to diagnose from. The rows are small and written
+           once per job run, not per row processed. */
+        builder.Append("timescaledb.enable_job_execution_logging = on\n");
         /* LZ4 TOAST (PG14+; the bundled runtime is PG18): large text/XML values — query text, plan
            XML, deadlock/blocked-process XML — auto-compress on write faster than the pglz default
            and about as small, shrinking the ~1-day hot window before TimescaleDB's columnar
@@ -346,6 +402,34 @@ public sealed class DarlingManagedPostgres
         return builder.ToString();
     }
 
+    /// <summary>
+    /// The v6 log-rotation block (#1652): hand server logging to PostgreSQL's own logging collector as a
+    /// SELF-CAPPING weekday ring — <c>log_filename = 'postgresql-%a.log'</c> names files by weekday
+    /// (postgresql-Mon.log … postgresql-Sun.log), <c>log_rotation_age = 1d</c> rolls daily, and
+    /// <c>log_truncate_on_rotation = on</c> truncates each file when its weekday comes around again. Hard
+    /// cap of seven files, one week of history, ZERO sweep code — the ring is the retention policy.
+    /// <c>log_rotation_size = 0</c> disables size-based rotation on purpose: a size roll appends (the
+    /// truncate applies only to age-based rotation), and the age ring already bounds the set.
+    ///
+    /// <para><c>pg.log</c> (the pg_ctl <c>-l</c> file) stays exactly where it is and keeps its job: pg_ctl's
+    /// own chatter plus anything the server says BEFORE the collector starts — which is precisely the
+    /// startup-failure window the diagnostics tail exists for. With the collector owning steady-state
+    /// logging, pg.log gains only a few lines per restart instead of the entire server log.</para>
+    /// </summary>
+    public static string BuildLogRotationConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV6).Append('\n');
+        builder.Append("logging_collector = on\n");
+        builder.Append("log_directory = 'log'\n");
+        builder.Append("log_filename = 'postgresql-%a.log'\n");
+        builder.Append("log_rotation_age = 1d\n");
+        builder.Append("log_rotation_size = 0\n");
+        builder.Append("log_truncate_on_rotation = on\n");
+        return builder.ToString();
+    }
+
     /* ===================== v3 memory sizing (derived from host RAM) ===================== */
 
     /// <summary>4 GB — the conservative fallback used only when the runtime RAM query fails, so sizing
@@ -379,8 +463,25 @@ public sealed class DarlingManagedPostgres
     ///   RESTART-ONLY, like max_worker_processes; it applies on the next server start.</item>
     /// <item><b>effective_cache_size</b> = 75% RAM — a PLANNER HINT (no allocation) telling the planner how
     ///   much data is likely cached (PG + OS cache), biasing it toward index scans.</item>
-    /// <item><b>maintenance_work_mem</b> = min(5% RAM, 1 GB) — headroom for VACUUM / CREATE INDEX; capped at
-    ///   1 GB because several autovacuum workers can each take up to this.</item>
+    /// <item><b>maintenance_work_mem</b> = min(max(5% RAM, 1.5 GB), 25% RAM, 2 GB) — headroom for VACUUM /
+    ///   CREATE INDEX, and the setting TimescaleDB's compression sort runs on, which is what drove the
+    ///   shape (#1777). MEASURED on a production field instance (16 GB RAM class), three points during a
+    ///   one-time catch-up of large backlog chunks: at the old formula's landing point (~800 MB) compression
+    ///   moved ~9.1 MB/s of uncompressed input; at 1536 MB it moved 15.5 MB/s (a pure-linear null hypothesis
+    ///   predicted 2833s, actual was 1657s — a real effect, not noise); at 4096 MB it moved 16.1 MB/s, so
+    ///   going 2.7x further past 1536 bought nothing measurable. Hence the terms: the <b>1.5 GB floor</b> is
+    ///   the measured capture point and is the fix itself (the old 5%-of-RAM term landed UNDER the old 1 GB
+    ///   cap on a 16 GB host, so raising the cap alone would have changed nothing); the <b>25%-of-RAM</b>
+    ///   term keeps the floor from overcommitting a small host; the <b>2 GB cap</b> concedes nothing
+    ///   measurable and bounds the big-RAM case. Honest limits, both recorded in #1777: the three points are
+    ///   different tables at different sizes rather than a controlled experiment, so the exact threshold
+    ///   between ~800 MB and 1536 MB is unknown; and the floor raises SMALL hosts more than the 16 GB host
+    ///   it was measured on (a 4 GB host goes 204 -> 1024 MB, an 8 GB host 409 -> 1536 MB). That is
+    ///   deliberate and bounded: this is a per-operation CEILING, not a reservation — PostgreSQL grows the
+    ///   sort/TidStore allocation to fit the work, and a small host's chunks are small, so the ceiling is
+    ///   simply never reached there. PG 17+ (the bundle pins 18.4) also made vacuum's dead-TID store grow
+    ///   incrementally rather than allocating the full limit up front, which is what made the old comment's
+    ///   "several autovacuum workers can each take up to this" the binding worry it no longer is.</item>
     /// <item><b>work_mem</b> = clamp(RAM/512, 16 MB, 64 MB) — the ONE with real downside (per-sort,
     ///   per-connection: worst-case ≈ max_connections × sorts × work_mem), so it is deliberately modest.
     ///   At the PG default max_connections = 100 with ~3 concurrent sort/hash nodes, the pathological
@@ -399,7 +500,19 @@ public sealed class DarlingManagedPostgres
 
         var sharedBuffers = Math.Min(ram / 4, oneGb);              /* 25% RAM, capped at 1 GB (co-located store + Windows 487 mitigation, #1559) — restart-only */
         var effectiveCache = ram / 4 * 3;                          /* 75% RAM — planner hint, not an allocation */
-        var maintenanceWorkMem = Math.Min(ram / 20, oneGb);        /* 5% RAM, capped at 1 GB */
+        /* #1777: 5% RAM with a MEASURED 1.5 GB floor (compression throughput rose ~70% reaching it and
+           plateaued there), guarded by 25% of RAM so the floor cannot overcommit a small host, and capped
+           at 2 GB where the field data showed nothing further to gain.
+
+           THE CONSTRAINT THE SMALL-HOST LANDINGS REST ON: both of today's consumers allocate
+           INCREMENTALLY — a tuplesort grows to fit its input and SPILLS past the ceiling rather than
+           reserving it, and PG 17+ builds vacuum's dead-TID store (TidStore) the same way. So this number
+           bounds what an operation MAY use, not what it WILL use, which is what makes a 4 GB host's
+           1024 MB landing safe despite being 5x its old 204 MB. If a future consumer ever PRE-ALLOCATES
+           maintenance_work_mem, that reasoning breaks and the small-host landings need revisiting here. */
+        var maintenanceWorkMem = Math.Min(
+            Math.Min(Math.Max(ram / 20, 1536 * oneMb), ram / 4),
+            2048 * oneMb);
         var workMem = Math.Clamp(ram / 512, 16 * oneMb, 64 * oneMb);
 
         return new MemorySettings(
@@ -428,6 +541,27 @@ public sealed class DarlingManagedPostgres
         builder.Append("effective_cache_size = ").Append(settings.EffectiveCacheSizeMb).Append("MB\n");
         builder.Append("maintenance_work_mem = ").Append(settings.MaintenanceWorkMemMb).Append("MB\n");
         builder.Append("work_mem = ").Append(settings.WorkMemMb).Append("MB\n");
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// The v7 compression-memory override (#1777) — the propagation half of the raised
+    /// <c>maintenance_work_mem</c> floor. Built exactly like the v5 shared_buffers override: it re-states
+    /// ONE setting so a store whose v3 block was written under the old <c>min(5% RAM, 1 GB)</c> rule heals
+    /// UP by conf last-occurrence-wins, without ever rewriting the v3 block (which
+    /// <see cref="EnsureConfAppended"/> never does). Without this block the new formula would reach fresh
+    /// initdbs only, and the stores that measurably need it are the ones already running.
+    ///
+    /// <para><c>maintenance_work_mem</c> is plain SIGHUP-reloadable rather than restart-only, but the append
+    /// happens before <c>pg_ctl start</c>, so an existing store picks it up on that very start.</para>
+    /// </summary>
+    public static string BuildCompressionMemoryConfAppend(long totalPhysicalMemoryBytes)
+    {
+        var settings = DeriveMemorySettings(totalPhysicalMemoryBytes);
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV7).Append('\n');
+        builder.Append("maintenance_work_mem = ").Append(settings.MaintenanceWorkMemMb).Append("MB\n");
         return builder.ToString();
     }
 
@@ -542,12 +676,31 @@ public sealed class DarlingManagedPostgres
         Directory.CreateDirectory(ParentOf(_dataDirectory));
         TryHardenDirectory(ParentOf(_dataDirectory));
 
+        /* Age out any pre-upgrade rollback copy BEFORE this start's own upgrade can create a new one.
+           Running it afterwards would bump the brand-new copy's counter on the very start that produced
+           it, costing it one of the two starts it is supposed to survive. */
+        _storeUpgrade.SweepRetainedDataDirectories(_dataDirectory);
+
+        /* The install directory's own housekeeping report, beside the store's. Deliberately adjacent: the
+           two answer the same operator question about two different parents, and a field instance proved
+           that reporting only the data directory's siblings leaves directories under the install directory
+           completely unmentioned. Never throws, never deletes. */
+        DarlingInstallDirectoryReport.Report(AppContext.BaseDirectory, _logger);
+
         if (!File.Exists(Path.Combine(_dataDirectory, "PG_VERSION")))
         {
             await InitializeClusterAsync(binDirectory, cancellationToken);
         }
+        else
+        {
+            /* #1706: an EXISTING data directory may have been created by an older PostgreSQL than the one
+               the package now ships. This is the only window in which an in-place major upgrade can run —
+               nothing is connected, and both runtimes are on disk. It either upgrades, does nothing, or
+               reverts and leaves the store exactly as it was. */
+            await EnsureDataDirectoryMajorAsync(binDirectory, cancellationToken);
+        }
 
-        EnsureConfAppended();
+        EnsureConfAppended(_dataDirectory);
 
         var password = ReadStoredPassword();
 
@@ -583,6 +736,24 @@ public sealed class DarlingManagedPostgres
 
         var connectionString = BuildConnectionString(_config.Port, password);
         await EnsureDatabaseAsync(connectionString, cancellationToken);
+
+        /* #1706: everything that needs a LIVE server — verify the upgrade landed, apply a same-major
+           TimescaleDB extension update (the #1705 case, which needs no pg_upgrade at all), and run the
+           post-upgrade analyze staging. Deliberately AFTER the start above rather than inside the upgrade,
+           so the server this process started stays one this process will stop. */
+        if (_bundledMajor > 0)
+        {
+            LastUpgradeOutcome = await _storeUpgrade.CompleteAfterStartAsync(
+                LastUpgradeOutcome,
+                connectionString,
+                binDirectory,
+                _config.Port,
+                UserName,
+                password,
+                _bundledMajor,
+                _bundledTimescaleVersion ?? string.Empty,
+                cancellationToken);
+        }
 
         /* Reconcile pg_hba + reload + verify, the adopted-listener guard, and the firewall against the LIVE
            server — symmetric (present when exposed, absent when loopback/degraded). Never throws (Round 4 #3):
@@ -641,6 +812,16 @@ public sealed class DarlingManagedPostgres
         var pgCtl = Path.Combine(binDirectory, "pg_ctl.exe");
         if (File.Exists(pgCtl))
         {
+            /* #1706: an extracted runtime is NOT refreshed by a deploy — this early return is exactly why a
+               field store ran its original PostgreSQL and TimescaleDB forever. Compare the shipped zip
+               against the stamp recorded at extraction time; a difference means the package carries a new
+               runtime, and the rescued previous one becomes pg_upgrade's --old-bindir. */
+            if (File.Exists(_runtimeZipPath))
+            {
+                _runtimeAdvance = await _storeUpgrade.TryAdvanceRuntimeAsync(
+                    _runtimeRoot, _runtimeZipPath, _dataDirectory, TryIsRunningAsync, cancellationToken);
+            }
+
             return binDirectory;
         }
 
@@ -653,6 +834,10 @@ public sealed class DarlingManagedPostgres
 
             if (File.Exists(pgCtl))
             {
+                /* Stamp the extraction so a later package that ships a different runtime is detectable. */
+                File.WriteAllText(
+                    Path.Combine(_runtimeRoot, DarlingStoreUpgrade.RuntimeStampFileName),
+                    DarlingStoreUpgrade.ComputeFileHash(_runtimeZipPath));
                 return binDirectory;
             }
 
@@ -725,10 +910,15 @@ public sealed class DarlingManagedPostgres
     /// Marker-guarded conf append, re-checked on EVERY start — heals the crash window between
     /// initdb and the first append, which would otherwise silently cost TimescaleDB
     /// (shared_preload_libraries missing = CREATE EXTENSION fails = plain-PG degradation).
+    ///
+    /// <para>Takes the data directory rather than reading the field, because the store upgrade (#1706)
+    /// must apply the SAME blocks to the freshly-initdb'd cluster BEFORE pg_upgrade runs: pg_upgrade
+    /// starts the new cluster internally to restore the dump, and restoring TimescaleDB into a server
+    /// that has not preloaded its library fails outright. Healing it afterwards would be too late.</para>
     /// </summary>
-    private void EnsureConfAppended()
+    private void EnsureConfAppended(string dataDirectory)
     {
-        var confPath = Path.Combine(_dataDirectory, "postgresql.conf");
+        var confPath = Path.Combine(dataDirectory, "postgresql.conf");
         if (!File.Exists(confPath))
         {
             throw new InvalidOperationException(
@@ -785,6 +975,30 @@ public sealed class DarlingManagedPostgres
                 "Appended v5 co-located sizing to postgresql.conf (shared_buffers = {SharedBuffers}MB, capped at min(25% RAM, 1GB); effective from the next PostgreSQL restart)",
                 DeriveMemorySettings(v5RamBytes).SharedBuffersMb);
         }
+
+        /* Checked independently of v1-v5: an existing cluster heals by GAINING the log-rotation block
+           (#1652). logging_collector is restart-only, and this append runs before pg_ctl start, so it is
+           effective immediately on this very start. */
+        if (!conf.Contains(ConfMarkerV6, StringComparison.Ordinal))
+        {
+            File.AppendAllText(confPath, BuildLogRotationConfAppend());
+            _logger.LogInformation(
+                "Appended v6 log rotation to postgresql.conf (logging collector, 7-file weekday ring under {LogDir}; pg.log keeps only pg_ctl and pre-collector startup lines)",
+                Path.Combine(dataDirectory, "log"));
+        }
+
+        /* Checked independently of v1-v6: a store whose v3 block wrote maintenance_work_mem under the old
+           min(5% RAM, 1 GB) rule heals UP to the measured 1.5 GB compression floor (last-occurrence-wins
+           override, #1777). This is what carries the fix to EXISTING stores — the formula alone would only
+           ever have reached a fresh initdb. */
+        if (!conf.Contains(ConfMarkerV7, StringComparison.Ordinal))
+        {
+            var v7RamBytes = GetTotalPhysicalMemoryBytes();
+            File.AppendAllText(confPath, BuildCompressionMemoryConfAppend(v7RamBytes));
+            _logger.LogInformation(
+                "Appended v7 compression memory to postgresql.conf (maintenance_work_mem = {Maintenance}MB from min(max(5% RAM, 1536MB), 25% RAM, 2048MB); TimescaleDB compression sorts on this setting)",
+                DeriveMemorySettings(v7RamBytes).MaintenanceWorkMemMb);
+        }
     }
 
     /// <summary>
@@ -837,6 +1051,170 @@ public sealed class DarlingManagedPostgres
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GlobalMemoryStatusEx([In, Out] MemoryStatusEx lpBuffer);
 
+    /// <summary>
+    /// The runtime-swap gate's view of "is anything running here" (#1706): TRUE only for an unambiguous
+    /// running postmaster. Unlike <see cref="IsRunningAsync"/> this never throws — it runs BEFORE the data
+    /// directory is known to exist (a host with an extracted runtime but a failed initdb answers 4, not 3),
+    /// and for the swap decision "cannot tell" and "not running" have the same safe answer: the swap only
+    /// needs to know nobody is holding the binaries open.
+    /// </summary>
+    private async Task<bool> TryIsRunningAsync(string binDirectory, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var (exitCode, _) = await RunToolAsync(
+                Path.Combine(binDirectory, "pg_ctl.exe"),
+                $"status -D \"{_dataDirectory}\"",
+                s_statusTimeout,
+                cancellationToken);
+            return exitCode == 0;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Detects and, when required, performs the in-place major upgrade of an EXISTING data directory
+    /// (#1706). Three outcomes, all of which leave a startable store:
+    /// <list type="bullet">
+    /// <item>Data directory major EQUALS the bundled major — nothing to do, the overwhelmingly common case.</item>
+    /// <item>Data directory is OLDER — run the orchestrated pg_upgrade, or (on any failure) revert and keep
+    /// running the old major.</item>
+    /// <item>Data directory is NEWER than the bundled runtime — REFUSE to start. PostgreSQL cannot open a
+    /// newer cluster with older binaries; starting anyway is how a downgrade silently corrupts a store.</item>
+    /// </list>
+    /// </summary>
+    private async Task EnsureDataDirectoryMajorAsync(string binDirectory, CancellationToken cancellationToken)
+    {
+        var dataMajor = DarlingStoreUpgrade.ParseDataDirectoryMajor(
+            await File.ReadAllTextAsync(Path.Combine(_dataDirectory, "PG_VERSION"), cancellationToken));
+        var bundledMajor = await ReadRuntimeMajorAsync(binDirectory, cancellationToken);
+
+        if (DarlingStoreUpgrade.MustRefuseUnidentifiableRuntime(dataMajor, bundledMajor))
+        {
+            /* #1738: this exact pairing — the store's need KNOWN, the runtime unidentifiable — was logged on
+               DARLING01 as "skipping the runtime version check. The store starts normally." and was followed
+               one second later by the bootstrap dying on exit code -1073741515 (STATUS_DLL_NOT_FOUND). The
+               degrade was backwards: the version check could not run BECAUSE the binaries could not run, which
+               is the strongest possible evidence they must not be used, not a reason to wave them through.
+               Refusing here costs nothing that proceeding would have saved — the start was going to fail
+               regardless — and it converts a cryptic Win32 status code into a message naming the rescued
+               runtime to restore. */
+            throw new InvalidOperationException(
+                $"The store's data directory {_dataDirectory} is PostgreSQL {dataMajor}, but the runtime at {binDirectory} could not be identified — its binaries did not run. " +
+                "A runtime that cannot report its own version cannot start this store either, so the service is stopping here rather than failing deeper with a Win32 error code. " +
+                $"This usually means the wrong package was deployed. Restore the previous runtime from {PreviousRuntimeHint()} over {Path.GetDirectoryName(binDirectory)}, or redeploy a package whose PostgreSQL major is {dataMajor} or newer, then restart the service. " +
+                "The data directory has not been touched.");
+        }
+
+        if (dataMajor is null || bundledMajor is null)
+        {
+            _logger.LogWarning(
+                "Could not determine the store's PostgreSQL major (data directory: {Data}, bundled runtime: {Bundled}) — skipping the runtime version check. The store starts normally.",
+                dataMajor?.ToString(CultureInfo.InvariantCulture) ?? "unreadable",
+                bundledMajor?.ToString(CultureInfo.InvariantCulture) ?? "unreadable");
+            return;
+        }
+
+        _bundledMajor = bundledMajor.Value;
+        _bundledTimescaleVersion = ReadBundledTimescaleVersion(binDirectory);
+
+        if (dataMajor == bundledMajor)
+        {
+            return;
+        }
+
+        if (dataMajor > bundledMajor)
+        {
+            throw new InvalidOperationException(
+                $"The store data directory {_dataDirectory} was created by PostgreSQL {dataMajor}, but this package bundles PostgreSQL {bundledMajor}. " +
+                "PostgreSQL cannot open a newer cluster with older binaries, and there is no supported downgrade. " +
+                "Install the newer package again, or restore the store from a backup taken with a matching runtime.");
+        }
+
+        var previousBin = _runtimeAdvance?.PreviousBinDirectory;
+        if (previousBin is null || !File.Exists(Path.Combine(previousBin, "pg_ctl.exe")))
+        {
+            throw new InvalidOperationException(
+                $"The store data directory {_dataDirectory} was created by PostgreSQL {dataMajor} and this package bundles PostgreSQL {bundledMajor}, " +
+                $"but the PostgreSQL {dataMajor} binaries are not on this host, so an in-place upgrade is impossible " +
+                "(pg_upgrade needs both runtimes). This happens when the pg-runtime directory was deleted before the upgrade ran. " +
+                $"Restore a PostgreSQL {dataMajor} runtime at {PreviousRuntimeHint()}, then restart the service to upgrade; " +
+                "or restore the store from backup.");
+        }
+
+        var outcome = await _storeUpgrade.UpgradeDataDirectoryAsync(
+            new DarlingStoreUpgrade.UpgradeContext(
+                previousBin,
+                binDirectory,
+                _runtimeRoot,
+                _runtimeAdvance!.ZipHash ?? string.Empty,
+                _dataDirectory,
+                _config.Port,
+                UserName,
+                ReadStoredPassword(),
+                dataMajor.Value,
+                bundledMajor.Value,
+                _bundledTimescaleVersion ?? string.Empty,
+                EnsureConfAppended),
+            cancellationToken);
+
+        LastUpgradeOutcome = outcome;
+
+        if (outcome.Status == DarlingStoreUpgrade.StoreUpgradeStatus.Failed)
+        {
+            /* The revert put the PREVIOUS runtime back behind the same bin path, so the identity read
+               above now describes binaries that are no longer there. Re-read it, or the post-start
+               completion would try to move the extension to a version this runtime does not ship. */
+            _bundledMajor = await ReadRuntimeMajorAsync(binDirectory, cancellationToken) ?? 0;
+            _bundledTimescaleVersion = ReadBundledTimescaleVersion(binDirectory);
+        }
+    }
+
+    private string PreviousRuntimeHint()
+        => Path.Combine(DarlingStoreUpgrade.PreviousRuntimeRootFor(_runtimeRoot), "pgsql");
+
+    /// <summary>The bundled runtime's PostgreSQL major, from the binaries themselves rather than from a
+    /// manifest that could disagree with what is on disk.</summary>
+    private static async Task<int?> ReadRuntimeMajorAsync(string binDirectory, CancellationToken cancellationToken)
+    {
+        var (exitCode, output) = await RunToolAsync(
+            Path.Combine(binDirectory, "pg_ctl.exe"), "--version", s_statusTimeout, cancellationToken);
+        return exitCode == 0 ? DarlingStoreUpgrade.ParsePostgresMajor(output) : null;
+    }
+
+    /// <summary>
+    /// The TimescaleDB version the bundled runtime ships, read from its own
+    /// <c>share\extension\timescaledb.control</c>. This is the version the store's extension must reach:
+    /// every TimescaleDB function resolves to a version-suffixed library, and the runtime carries exactly one.
+    /// </summary>
+    private static string? ReadBundledTimescaleVersion(string binDirectory)
+    {
+        try
+        {
+            var pgsql = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(binDirectory));
+            if (pgsql is null)
+            {
+                return null;
+            }
+
+            var control = Path.Combine(pgsql, "share", "extension", "timescaledb.control");
+            return File.Exists(control)
+                ? DarlingStoreUpgrade.ParseTimescaleDefaultVersion(File.ReadAllText(control))
+                : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>pg_ctl status: 0 = a postmaster is running on this data directory, 3 = not running, 4 = bad/inaccessible data directory.</summary>
     private async Task<bool> IsRunningAsync(string binDirectory, CancellationToken cancellationToken)
     {
@@ -879,6 +1257,12 @@ public sealed class DarlingManagedPostgres
             exposed ? "on" : "off",
             _config.Port, _serverLogPath);
 
+        /* #1652: on clusters that grew a large pre-rotation pg.log, roll it aside ONCE so the
+           legacy file stays bounded too. Going forward the v6 logging collector owns the server
+           log and pg.log gains only pg_ctl chatter + pre-collector startup lines. Runs while the
+           server is down (this method only runs when nothing is listening), so nothing holds the file. */
+        CapLegacyServerLog(_serverLogPath, LegacyServerLogCapBytes, _logger);
+
         var exitCode = await RunDetachingToolAsync(
             Path.Combine(binDirectory, "pg_ctl.exe"),
             $"-D \"{_dataDirectory}\" -o \"{runtimeOptions}\" -l \"{_serverLogPath}\" -w -t {PgCtlWaitSeconds} start",
@@ -889,29 +1273,110 @@ public sealed class DarlingManagedPostgres
         {
             throw new InvalidOperationException(
                 $"pg_ctl start failed (exit code {exitCode}) for {_dataDirectory}.\n" +
-                $"Server log tail ({_serverLogPath}):\n{ReadServerLogTail()}");
+                $"Server log tail:\n{ReadServerLogTail()}");
         }
 
         _logger.LogInformation("Managed Postgres started");
     }
 
-    private string ReadServerLogTail()
+    /// <summary>The one-time cap on the legacy pre-rotation <c>pg.log</c> (#1652): past this size it is
+    /// rolled to <c>pg.log.old</c> (replacing any previous roll) before the next start. Two files, bounded
+    /// forever; small files are left alone so a healthy post-rotation pg.log is never churned.</summary>
+    internal const long LegacyServerLogCapBytes = 10L * 1024 * 1024;
+
+    /// <summary>
+    /// Rolls an oversized <c>pg.log</c> to <c>pg.log.old</c> (replace-existing, so the pair can never grow
+    /// past two files). Static and failure-tolerant: a locked or missing file logs a warning and never
+    /// blocks the server start — the cap is hygiene, not a precondition.
+    /// </summary>
+    internal static void CapLegacyServerLog(string serverLogPath, long capBytes, ILogger? logger)
     {
         try
         {
-            if (!File.Exists(_serverLogPath))
+            var info = new FileInfo(serverLogPath);
+            if (!info.Exists || info.Length <= capBytes)
             {
-                return "(no server log written)";
+                return;
             }
 
-            var lines = File.ReadAllLines(_serverLogPath);
+            File.Move(serverLogPath, serverLogPath + ".old", overwrite: true);
+            logger?.LogInformation(
+                "Rolled the {Size:N0}-byte pre-rotation pg.log to pg.log.old (one-time cap; the v6 logging collector owns the server log now)",
+                info.Length);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger?.LogWarning("Could not roll the oversized pg.log aside — it stays in place until the next start retries: {Message}", ex.Message);
+        }
+    }
+
+    private string ReadServerLogTail()
+    {
+        var newest = PickNewestServerLog(_serverLogPath, _dataDirectory);
+        if (newest is null)
+        {
+            return "(no server log written)";
+        }
+
+        try
+        {
+            var lines = File.ReadAllLines(newest);
             var take = Math.Min(40, lines.Length);
-            return string.Join('\n', lines[^take..]);
+            return $"({newest})\n" + string.Join('\n', lines[^take..]);
         }
         catch (IOException ex)
         {
-            return $"(could not read server log: {ex.Message})";
+            return $"(could not read server log {newest}: {ex.Message})";
         }
+    }
+
+    /// <summary>
+    /// The file that best answers "what did Postgres just say?" — the NEWEST-modified of the pg_ctl
+    /// <c>pg.log</c> and the v6 logging collector's ring files (<c>&lt;data&gt;\log\*.log</c>). A start that
+    /// fails before the collector comes up wrote its reason to pg.log (the newest by definition); a server
+    /// that started and then complained wrote to the ring. Null when nothing exists yet. Static for tests.
+    /// </summary>
+    internal static string? PickNewestServerLog(string serverLogPath, string dataDirectory)
+    {
+        string? newest = null;
+        var newestWrite = DateTime.MinValue;
+
+        void Consider(string path)
+        {
+            try
+            {
+                var info = new FileInfo(path);
+                if (info.Exists && info.LastWriteTimeUtc > newestWrite)
+                {
+                    newest = path;
+                    newestWrite = info.LastWriteTimeUtc;
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                /* An unreadable candidate just isn't chosen. */
+            }
+        }
+
+        Consider(serverLogPath);
+
+        try
+        {
+            var ringDirectory = Path.Combine(dataDirectory, "log");
+            if (Directory.Exists(ringDirectory))
+            {
+                foreach (var file in Directory.GetFiles(ringDirectory, "*.log"))
+                {
+                    Consider(file);
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            /* Ring directory unreadable — pg.log (if any) still answers. */
+        }
+
+        return newest;
     }
 
     /// <summary>
@@ -921,6 +1386,33 @@ public sealed class DarlingManagedPostgres
     /// instead of somewhere inside the migration path.
     /// </summary>
     private async Task EnsureDatabaseAsync(string connectionString, CancellationToken cancellationToken)
+    {
+        /* The whole unit retries, not just the connect. A backend that loses the post-start race dies
+           AFTER authenticating, so the Open succeeds and the first QUERY is what fails — retrying only the
+           Open would never have helped. Each attempt gets a fresh connection because the old one's
+           connector is dead. */
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await EnsureDatabaseOnceAsync(connectionString, cancellationToken);
+                return;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex) when (attempt < FirstConnectionAttempts && IsTransientConnectionFault(ex))
+            {
+                _logger.LogWarning(
+                    "The store dropped the first connection after start ({Message}) — attempt {Attempt} of {Total}. A backend that loses the shared-memory reservation race just after start does this; retrying.",
+                    ex.Message, attempt, FirstConnectionAttempts);
+                await Task.Delay(s_firstConnectionRetryDelay, cancellationToken);
+            }
+        }
+    }
+
+    private async Task EnsureDatabaseOnceAsync(string connectionString, CancellationToken cancellationToken)
     {
         var builder = new NpgsqlConnectionStringBuilder(connectionString) { Database = "postgres" };
         await using var connection = new NpgsqlConnection(builder.ConnectionString);
@@ -941,6 +1433,44 @@ public sealed class DarlingManagedPostgres
            plain ExecuteNonQuery is the correct shape. */
         using var create = new NpgsqlCommand($"CREATE DATABASE {DatabaseName}", connection);
         await create.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Attempts for the first store interaction after a server start, and the pause between them.
+    ///
+    /// <para><c>pg_ctl -w</c> returns when the postmaster reports it is accepting connections, but on
+    /// Windows that is not quite the same as "the next backend will spawn and survive". Every backend is
+    /// its own process that must re-reserve the shared-memory region at the postmaster's base address —
+    /// the error-487 surface this class already documents at length behind the 1 GB <c>shared_buffers</c>
+    /// cap (#1559). Losing that race presents to Npgsql not as a refused connection but as one that
+    /// authenticates and then dies on its first query (<c>Exception while writing to stream</c>), which is
+    /// exactly what a freshly upgraded cluster produced here while the server itself was demonstrably
+    /// healthy and stayed up for minutes afterwards.</para>
+    /// </summary>
+    private const int FirstConnectionAttempts = 6;
+    private static readonly TimeSpan s_firstConnectionRetryDelay = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// Whether an exception is a transport-level fault worth retrying (socket reset, stream write failure,
+    /// timeout) rather than a definitive answer from a working server (bad password, missing role).
+    /// <see cref="PostgresException"/> means the server replied, so it is never transient by this test.
+    /// </summary>
+    private static bool IsTransientConnectionFault(Exception exception)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is PostgresException)
+            {
+                return false;
+            }
+
+            if (current is SocketException or IOException or TimeoutException)
+            {
+                return true;
+            }
+        }
+
+        return exception is NpgsqlException;
     }
 
     private string ReadStoredPassword()
@@ -982,13 +1512,20 @@ public sealed class DarlingManagedPostgres
         catch (Exception ex)
         {
             _logger.LogError(
-                "Could not restrict the ACL on {Path} ({Message}). The DPAPI credential files it holds may be readable by " +
-                "other local users — fix the directory permissions by hand (SYSTEM/Administrators/the service account only).",
-                path, ex.Message);
+                "Could not restrict the ACL on {Path}{Detail} ({Message}). The DPAPI credential files it holds may be " +
+                "readable by other local users. If the owner is not this service, the re-ACL can never succeed — it " +
+                "needs ownership or FullControl — so restarting will not clear this; grant the service account " +
+                "FullControl or make it the owner (SYSTEM/Administrators/the service account only).",
+                path, DarlingFileSecurity.DescribeOwnerAndExposure(path), ex.Message);
         }
     }
 
-    /// <summary>Best-effort restrictive ACL on one credential file — same posture as <see cref="TryHardenDirectory"/>.</summary>
+    /// <summary>
+    /// Best-effort restrictive ACL on one credential file — same posture as <see cref="TryHardenDirectory"/>,
+    /// and the same verify-don't-assume rule the config file already had: the harden is attempted, then the
+    /// RESULT is checked, because "we tried" is not the same claim as "the secret is not readable". These blobs
+    /// are machine-scoped DPAPI, so read access IS the secret.
+    /// </summary>
     private void TryHardenCredentialFile(string path, bool allowInteractiveRead)
     {
         try
@@ -998,8 +1535,19 @@ public sealed class DarlingManagedPostgres
         catch (Exception ex)
         {
             _logger.LogError(
-                "Could not restrict the ACL on {Path} ({Message}). This DPAPI credential may be readable by other local " +
-                "users — fix the file permissions by hand.", path, ex.Message);
+                "Could not restrict the ACL on {Path}{Detail} ({Message}). If the owner is not this service, the " +
+                "re-ACL can never succeed — it needs ownership or FullControl — so restarting will not clear this; " +
+                "grant the service account FullControl or make it the owner.",
+                path, DarlingFileSecurity.DescribeOwnerAndExposure(path), ex.Message);
+        }
+
+        if (DarlingFileSecurity.IsReadableByOrdinaryUsers(path))
+        {
+            _logger.LogCritical(
+                "{Path} is READABLE by ordinary local users{Detail}. It holds a machine-scoped DPAPI credential, " +
+                "which any local process can decrypt — so read access to this file IS the credential. Remove the " +
+                "inherited read access.",
+                path, DarlingFileSecurity.DescribeOwnerAndExposure(path));
         }
     }
 
@@ -1463,17 +2011,11 @@ public sealed class DarlingManagedPostgres
                 await GuardAdoptedListenAsync(ownerConnectionString, plan, cancellationToken);
             }
 
-            /* Defense-in-depth firewall rule (the boundary is pg_hba + TLS). Best-effort, never fatal. Enable
-               when exposed; on a disable EDGE (we just removed the block) also remove the rule. A store that
-               was never exposed touches the firewall not at all (the early return above). */
-            if (exposed)
-            {
-                await TryConfigureStoreFirewallAsync(enable: true, plan.Cidr!, cancellationToken);
-            }
-            else
-            {
-                await TryConfigureStoreFirewallAsync(enable: false, cidr: null, cancellationToken);
-            }
+            /* Defense-in-depth firewall rule (the boundary is pg_hba + TLS). CHECKED, never written (#1771):
+               an exposed store reports a missing rule, and a disable EDGE (we just removed the block) reports
+               the now-stale rule, each naming the elevated command. A store that was never exposed touches the
+               firewall not at all (the early return above). */
+            await CheckStoreFirewallAsync(exposed, exposed ? plan.Cidr : null, cancellationToken);
         }
         catch (OperationCanceledException)
         {
@@ -1644,14 +2186,29 @@ public sealed class DarlingManagedPostgres
         return false;
     }
 
-    /// <summary>The scoped store firewall rule name (idempotent by DisplayName), port-specific.</summary>
-    private string StoreFirewallRuleName => $"PerformanceMonitor Darling store (port {_config.Port})";
+    /// <summary>The scoped store firewall rule name (idempotent by DisplayName), port-specific.
+    /// <c>internal static</c> so the elevated <c>--configure-firewall</c> verb creates the SAME rule this
+    /// checks for, from darling.json alone and without a running store (#1771).</summary>
+    internal static string StoreFirewallRuleName(int port) => $"PerformanceMonitor Darling store (port {port})";
+
+    /// <summary>
+    /// PowerShell single-quoted literal. Inside <c>'…'</c> PowerShell expands nothing — no <c>$</c>, no
+    /// backtick escapes, no subexpressions — so the ONE metacharacter is the quote itself, escaped by
+    /// doubling it. Every value the firewall builders interpolate goes through this (#1646): the builders
+    /// are then safe no matter what a caller hands them, INDEPENDENT of the caller-side CIDR parse that is
+    /// the primary fix. The rule names are internally generated and contain no quotes, so quoting them
+    /// leaves the emitted command byte-for-byte what it has always been.
+    /// <para><c>internal</c> so <see cref="DarlingFirewallCheck.BuildProbeCommand"/> escapes the rule name
+    /// through this same one helper rather than growing a second, subtly different quoting rule (#1771).</para>
+    /// </summary>
+    internal static string SingleQuotedPowerShell(string value)
+        => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
 
     /// <summary>Idempotent-named enable command (remove-by-name then add) — the exact scoped command the docs
     /// lead with (D1). Pure + testable.</summary>
     internal static string BuildFirewallEnableCommand(string ruleName, int port, string remoteCidr)
-        => $"Remove-NetFirewallRule -DisplayName '{ruleName}' -ErrorAction SilentlyContinue; " +
-           $"New-NetFirewallRule -DisplayName '{ruleName}' -Direction Inbound -Action Allow -Protocol TCP -LocalPort {port} -RemoteAddress {remoteCidr} | Out-Null";
+        => $"Remove-NetFirewallRule -DisplayName {SingleQuotedPowerShell(ruleName)} -ErrorAction SilentlyContinue; " +
+           $"New-NetFirewallRule -DisplayName {SingleQuotedPowerShell(ruleName)} -Direction Inbound -Action Allow -Protocol TCP -LocalPort {port} -RemoteAddress {SingleQuotedPowerShell(remoteCidr)} | Out-Null";
 
     /// <summary>
     /// Idempotent-named disable command (remove-by-name). Pure + testable.
@@ -1665,64 +2222,54 @@ public sealed class DarlingManagedPostgres
     /// The catch alone is not enough: a caught error leaves the exit state non-zero, hence the exit 0.
     /// </summary>
     internal static string BuildFirewallDisableCommand(string ruleName)
-        => $"try {{ Remove-NetFirewallRule -DisplayName '{ruleName}' -ErrorAction Stop }} " +
+        => $"try {{ Remove-NetFirewallRule -DisplayName {SingleQuotedPowerShell(ruleName)} -ErrorAction Stop }} " +
            $"catch {{ if ($_.CategoryInfo.Category -ne 'ObjectNotFound') {{ throw }} }}; exit 0";
 
     /// <summary>
-    /// Best-effort firewall reconcile (D1): add/remove the scoped, idempotent-named inbound rule via
-    /// PowerShell. The firewall is defense-in-depth, NOT the boundary (pg_hba + TLS are), so a failure (no
-    /// elevation, PowerShell missing) logs the exact scoped command for the operator to run by hand and
-    /// NEVER fails startup.
+    /// Removes EVERY rule matching a DisplayName wildcard — how the elevated verb clears one surface's rules
+    /// for ALL ports before ensuring the current one (#1771). The port lives in the rule NAME, so a port change
+    /// does not update a rule, it strands the old one as an inbound allow rule on a port nothing serves; only a
+    /// wildcard sweep can reach it.
+    /// <para>Shaped exactly like <see cref="BuildFirewallDisableCommand"/> rather than with
+    /// <c>-ErrorAction SilentlyContinue</c>, and for the same reason: SilentlyContinue hides the error TEXT but
+    /// still exits 1, so a genuine failure (access denied, leaving a stale allow rule behind) would report as
+    /// "exit 1:" with an EMPTY message — the trap that builder documents. Catching ObjectNotFound and
+    /// rethrowing anything else keeps a real failure loud and a no-op quiet. A wildcard matching nothing is not
+    /// an error here anyway (verified on Windows 11 26200, where the exact-name form DOES raise
+    /// ObjectNotFound), but the shape costs nothing and does not depend on that.</para>
+    /// <para>This is a COMPLETE command, not a fragment: the trailing <c>exit 0</c> means it must be run as its
+    /// own step and never string-concatenated ahead of another command, which would terminate the shell before
+    /// that command ran. Callers MUST pass a wildcard from
+    /// <see cref="DarlingFirewallCheck.SurfaceRuleWildcard"/>, never an operator-supplied string.</para>
     /// </summary>
-    private async Task TryConfigureStoreFirewallAsync(bool enable, string? cidr, CancellationToken cancellationToken)
-    {
-        var ruleName = StoreFirewallRuleName;
-        var command = enable
-            ? BuildFirewallEnableCommand(ruleName, _config.Port, cidr!)
-            : BuildFirewallDisableCommand(ruleName);
+    internal static string BuildFirewallSweepCommand(string displayNameWildcard)
+        => $"try {{ Remove-NetFirewallRule -DisplayName {SingleQuotedPowerShell(displayNameWildcard)} -ErrorAction Stop }} " +
+           $"catch {{ if ($_.CategoryInfo.Category -ne 'ObjectNotFound') {{ throw }} }}; exit 0";
 
-        try
-        {
-            var (exitCode, output) = await RunPowerShellAsync(command, cancellationToken);
-            if (exitCode == 0)
-            {
-                _logger.LogInformation("Firewall rule '{Rule}' {Verb}.", ruleName, enable ? "ensured" : "removed");
-            }
-            else if (enable)
-            {
-                _logger.LogWarning(
-                    "Could not configure the firewall automatically (exit {ExitCode}: {Output}). Run this in an elevated PowerShell:\n{Command}",
-                    exitCode, output, command);
-            }
-            else
-            {
-                _logger.LogWarning("Could not remove the firewall rule automatically (exit {ExitCode}: {Output}).", exitCode, output);
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            if (enable)
-            {
-                _logger.LogWarning(
-                    "Could not configure the firewall automatically ({Message}). Run this in an elevated PowerShell:\n{Command}",
-                    ex.Message, command);
-            }
-            else
-            {
-                _logger.LogWarning("Could not remove the firewall rule automatically ({Message}).", ex.Message);
-            }
-        }
-    }
+    /// <summary>Last (rule, verdict) reported, so a repeated network reconcile restates a steady firewall
+    /// state at most once (<see cref="DarlingFirewallCheck.ShouldReport"/>).</summary>
+    private string? _lastFirewallRule;
+    private FirewallRuleVerdict? _lastFirewallVerdict;
+
+    /// <summary>
+    /// Read-only firewall VERIFICATION for the store's scoped rule (#1771). This used to add/remove the rule
+    /// itself, which the service account cannot do — the identical structural bug the MCP and web hosts had,
+    /// fixed the same way: the elevated installer creates the rule, and the running service only reports what
+    /// it finds. The firewall is defense-in-depth, NOT the boundary (pg_hba + TLS are), so a check that cannot
+    /// run NEVER fails startup.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private async Task CheckStoreFirewallAsync(bool exposed, string? cidr, CancellationToken cancellationToken)
+        => (_lastFirewallRule, _lastFirewallVerdict) = await DarlingFirewallCheck.CheckAsync(
+            StoreFirewallRuleName(_config.Port), _config.Port, exposed, cidr,
+            _lastFirewallRule, _lastFirewallVerdict, _logger, cancellationToken);
 
     /// <summary>
     /// Runs a PowerShell command with captured, interleaved stdout+stderr and a timeout. <c>internal</c>
-    /// so the (separate) MCP host can reuse it for its own best-effort firewall reconcile
-    /// (darling-network-endpoints) instead of duplicating it — the firewall command shape is shared via the
-    /// pure <see cref="BuildFirewallEnableCommand"/>/<see cref="BuildFirewallDisableCommand"/> builders.
+    /// so the elevated <c>--configure-firewall</c> verb and the runtime firewall CHECK
+    /// (<see cref="DarlingFirewallCheck"/>) reuse it instead of duplicating it — the command shapes are shared
+    /// via the pure <see cref="BuildFirewallEnableCommand"/>/<see cref="BuildFirewallDisableCommand"/>
+    /// builders.
     /// <paramref name="timeout"/> is optional and defaults to the shared status timeout
     /// (<see cref="s_statusTimeout"/>); the <c>--configure-network</c> wizard passes a longer one for a
     /// service restart, which routinely exceeds the status budget. Existing callers are unaffected.
@@ -1792,12 +2339,47 @@ public sealed class DarlingManagedPostgres
     }
 
     /// <summary>
+    /// <summary>
+    /// Applies the optional per-invocation environment and working directory shared by both process
+    /// runners. Values are ADDED to the inherited environment rather than replacing it — a PG tool still
+    /// needs PATH, TEMP and the rest — and an existing name is overwritten so a caller's PGPASSFILE always
+    /// wins over one that happens to be set for the service account.
+    /// </summary>
+    private static void ApplyProcessEnvironment(
+        ProcessStartInfo startInfo, IReadOnlyDictionary<string, string>? environment, string? workingDirectory)
+    {
+        if (environment is not null)
+        {
+            foreach (var pair in environment)
+            {
+                startInfo.Environment[pair.Key] = pair.Value;
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(workingDirectory))
+        {
+            startInfo.WorkingDirectory = workingDirectory;
+        }
+    }
+
+    /// <summary>
     /// Runs one PG tool with captured, interleaved stdout+stderr and a hard timeout. The
     /// service's stopping token cancels a bootstrap mid-flight; the shutdown stop path passes
     /// CancellationToken.None because its token is by definition already cancelled.
+    ///
+    /// <para><paramref name="environment"/> carries per-invocation variables the tool needs — today
+    /// <c>PGPASSFILE</c> for the store-upgrade path (#1706), whose libpq-based tools must authenticate
+    /// without a password prompt. <c>internal</c> for the same reason: <see cref="DarlingStoreUpgrade"/>
+    /// runs the same class of tool and must not grow a second process runner with its own timeout,
+    /// cancellation and capture semantics.</para>
     /// </summary>
-    private static async Task<(int ExitCode, string Output)> RunToolAsync(
-        string exePath, string arguments, TimeSpan timeout, CancellationToken cancellationToken)
+    internal static async Task<(int ExitCode, string Output)> RunToolAsync(
+        string exePath,
+        string arguments,
+        TimeSpan timeout,
+        CancellationToken cancellationToken,
+        IReadOnlyDictionary<string, string>? environment = null,
+        string? workingDirectory = null)
     {
         if (!File.Exists(exePath))
         {
@@ -1817,6 +2399,8 @@ public sealed class DarlingManagedPostgres
             RedirectStandardOutput = true,
             RedirectStandardError = true,
         };
+
+        ApplyProcessEnvironment(process.StartInfo, environment, workingDirectory);
 
         var output = new StringBuilder();
         var outputLock = new object();
@@ -1886,9 +2470,19 @@ public sealed class DarlingManagedPostgres
     /// server log, which the caller surfaces via <see cref="ReadServerLogTail"/>. initdb and
     /// pg_ctl stop/status stay on <see cref="RunToolAsync"/> — nothing they spawn survives them,
     /// so their pipes close and their captured output is worth having.
+    ///
+    /// <para><b>pg_upgrade rides this runner too</b> (#1706), for exactly the same reason: it starts each
+    /// cluster's postmaster through pg_ctl, so redirecting its output inherits the handles into servers that
+    /// hold them open for their lifetime. Its diagnostics come from the log files it writes under the new
+    /// data directory, which is why they are read on failure instead of captured here.</para>
     /// </summary>
-    private static async Task<int> RunDetachingToolAsync(
-        string exePath, string arguments, TimeSpan timeout, CancellationToken cancellationToken)
+    internal static async Task<int> RunDetachingToolAsync(
+        string exePath,
+        string arguments,
+        TimeSpan timeout,
+        CancellationToken cancellationToken,
+        IReadOnlyDictionary<string, string>? environment = null,
+        string? workingDirectory = null)
     {
         if (!File.Exists(exePath))
         {
@@ -1906,6 +2500,8 @@ public sealed class DarlingManagedPostgres
             UseShellExecute = false,
             CreateNoWindow = true,
         };
+
+        ApplyProcessEnvironment(process.StartInfo, environment, workingDirectory);
 
         if (!process.Start())
         {

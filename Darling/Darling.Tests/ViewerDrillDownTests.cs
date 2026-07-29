@@ -21,6 +21,10 @@ namespace Darling.Tests;
 /// computation, the slicer-overlay metric selection, the Wait Stats "Show Queries With &lt;wait&gt;"
 /// classification + sort, and the new store reads' SQL shape. Pure logic + SQL pins only (no live Postgres).
 /// </summary>
+/* Serialized: these classes flip the process-wide ViewerTimeHelper.CurrentDisplayMode static (each
+   restores in finally, but xUnit runs CLASSES in parallel — two flippers racing corrupts the mode a
+   third class reads). One shared collection serializes them. */
+[Collection("viewer-time-statics")]
 public sealed class ViewerDrillDownTests
 {
     // ── +/-30-minute drill window (Items 1-3) ──

@@ -20,22 +20,34 @@ namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>The server scope + window + variable bindings a <see cref="PanelPlan"/> compiles against. The
 /// window is naive UTC (Kind=Unspecified is stamped when bound, matching every other Darling read).
+/// <see cref="NowUtc"/> is the actual wall-clock now, DECOUPLED from <see cref="EndUtc"/> (#1606): the
+/// window binds $1/$2 and the bucket ceiling, but retention-tier routing and the partial-window notice
+/// measure AGE from now — an absolute (zoomed/historical) window can end long before now.
 /// <see cref="Servers"/> is the resolved <c>$server</c> scope (Erik's Decision 1 fleet axis): null/empty =
 /// the WHOLE FLEET (no server predicate); one or many server names = a bound <c>server_name = ANY($n)</c>
 /// filter, never interpolated (the compile-run endpoint resolves the $server variable to this). Group-by-server
 /// and a per-panel server filter are separate and flow through the normal dimension path.</summary>
+/// <see cref="Coverage"/> is the #1759 companion to <see cref="Rollups"/>: existence is not enough, because a
+/// rollup created over pre-existing history serves only what it materialized, so the router also needs each
+/// tier's measured floor to avoid answering an old window with silence.
 public sealed record ComposeRunContext(
     IReadOnlyList<string>? Servers,
     DateTime StartUtc,
     DateTime EndUtc,
-    IReadOnlyDictionary<string, string?> Variables)
+    IReadOnlyDictionary<string, string?> Variables,
+    RollupAvailability Rollups,
+    DateTime NowUtc,
+    RollupCoverage Coverage)
 {
     public static readonly IReadOnlyDictionary<string, string?> NoVariables =
         new Dictionary<string, string?>(StringComparer.Ordinal);
 }
 
-/// <summary>The compiled SQL + its bound parameters (in <c>$1..$n</c> order).</summary>
-public sealed record ComposeCompiled(string Sql, IReadOnlyList<NpgsqlParameter> Parameters);
+/// <summary>The compiled SQL + its bound parameters (in <c>$1..$n</c> order), and the source route the
+/// compiler actually took (<see cref="ComposeRoute.Raw"/> for annotation queries, whose event tables have no
+/// rollups) — the runner reads the route to tell the user when a raw/hourly fallback cannot retain the whole
+/// requested window on a retention-active store (#1665).</summary>
+public sealed record ComposeCompiled(string Sql, IReadOnlyList<NpgsqlParameter> Parameters, ComposeRoute Route);
 
 /// <summary>
 /// Compiles a validated <see cref="PanelPlan"/> into a parameterized Postgres query. IRON RULES, all
@@ -68,9 +80,9 @@ public static class ComposeCompiler
 
     /// <summary>The fact-table alias every composed query uses, so fact columns qualify unambiguously
     /// against the <c>m</c> module-join alias.</summary>
-    private const string FactAlias = "f";
+    private const char FactAlias = 'f';
 
-    private const string ModuleAlias = "m";
+    private const char ModuleAlias = 'm';
 
     /// <summary>
     /// Compiles <paramref name="plan"/> against <paramref name="context"/>. Returns the parameterized SQL,
@@ -88,17 +100,43 @@ public static class ComposeCompiler
             throw new ArgumentNullException(nameof(context));
         }
 
+        /* Source routing: read a CAGG rollup instead of raw when the window's oldest point is past the raw
+           horizon (ComposeSourceRouter). Age is measured from NowUtc, NOT EndUtc (#1606): an absolute zoomed
+           window can end well in the past, and retention drops by actual wall-clock now — a purely historical
+           window must reach the tier that still retains it. Fall back to raw when a value expression can't be
+           remapped to the CAGG columns (CanRemap; the overlay AND-gate below). */
+        var route = ComposeSourceRouter.Resolve(plan, context.NowUtc, context.StartUtc, context.Rollups, context.Coverage);
+        if (route.IsCagg
+            && (!ComposeCaggValueMapper.CanRemap(plan.Measure, plan.Aggregate)
+                || (plan.Overlay is ComposeOverlay o && !ComposeCaggValueMapper.CanRemap(o.Measure, o.Aggregate))))
+        {
+            /* One route serves BOTH value expressions — if either can't remap to the rollup columns, the whole
+               panel reads raw (#1606: the overlay AND-gate). */
+            route = ComposeRoute.Raw;
+        }
+
+        /* Auto resolves to a concrete grain from the window before anything downstream (ceiling + date_trunc);
+           a non-Auto bucket passes through unchanged, so existing panels are byte-for-byte identical. */
+        var effectiveBucket = plan.TimeBucket;
         if (plan.Mode == PanelMode.TimeSeries)
         {
             var windowSeconds = (context.EndUtc - context.StartUtc).TotalSeconds;
-            var bucketSeconds = MeasureCatalog.BucketSeconds(plan.TimeBucket);
+            effectiveBucket = MeasureCatalog.ResolveBucket(plan.TimeBucket, windowSeconds);
+            /* A CAGG can't render finer than its own bucket — clamp the display grain up to the tier's grain
+               (hourly -> at least hour, daily -> at least day) so date_trunc re-aggregates, never under-reads. */
+            if (route.IsCagg)
+            {
+                effectiveBucket = CoarserBucket(
+                    effectiveBucket, route.Tier == ComposeSourceTier.Daily ? ComposeTimeBucket.Day : ComposeTimeBucket.Hour);
+            }
+            var bucketSeconds = MeasureCatalog.BucketSeconds(effectiveBucket);
             if (bucketSeconds > 0)
             {
                 var buckets = Math.Ceiling(windowSeconds / bucketSeconds);
                 if (buckets > ComposeLimits.MaxBuckets)
                 {
                     return (null,
-                        $"the window and '{MeasureCatalog.WireName(plan.TimeBucket)}' bucket would produce {buckets:0} points " +
+                        $"the window and '{MeasureCatalog.WireName(effectiveBucket)}' bucket would produce {buckets:0} points " +
                         $"(max {ComposeLimits.MaxBuckets}); choose a coarser bucket or a shorter window.");
                 }
             }
@@ -113,11 +151,12 @@ public static class ComposeCompiler
         var hasServerScope = context.Servers is { Count: > 0 };
         var serverScopeParam = hasServerScope ? p.AddTextArray(context.Servers!) : null;
 
-        var timeColumn = s_timeColumnByTable[plan.Measure.SourceTable];
+        var timeColumn = route.IsCagg ? ComposeRoute.CaggTimeColumn : s_timeColumnByTable[plan.Measure.SourceTable];
         var sql = new StringBuilder();
 
-        /* The #1568 module CTE (window-bounded) — only when a dimension is stitched from it. */
-        if (plan.UsesModuleJoin)
+        /* The #1568 module CTE (window-bounded from procedure_stats) — only on the RAW path. A CAGG route joins the
+           retained module_map instead (procedure_stats raw is dropped at 4d, so the CTE can't cover old windows). */
+        if (plan.UsesModuleJoin && !route.IsCagg)
         {
             /* Window-bounded AND scoped to the same server set — partitioned by (server_name, sql_handle) so a
                handle reused across servers attributes per server, not globally. */
@@ -141,13 +180,18 @@ public static class ComposeCompiler
             sql.Append(")\n");
         }
 
+        /* Where the CTE (if any) ends and the real statement begins. A capped time-series query is wrapped
+           in a subquery below, and the wrapper has to open HERE so the WITH stays at the top level rather
+           than being swallowed into the subquery. */
+        var bodyStart = sql.Length;
+
         /* SELECT list + the matching GROUP BY expressions. */
         var selectExprs = new List<string>();
         var groupExprs = new List<string>();
 
         if (plan.Mode == PanelMode.TimeSeries)
         {
-            var bucketExpr = $"date_trunc('{MeasureCatalog.DateTruncField(plan.TimeBucket)}', {FactAlias}.{timeColumn})";
+            var bucketExpr = $"date_trunc('{MeasureCatalog.DateTruncField(effectiveBucket)}', {FactAlias}.{timeColumn})";
             selectExprs.Add(bucketExpr + " AS bucket");
             groupExprs.Add(bucketExpr);
         }
@@ -159,17 +203,36 @@ public static class ComposeCompiler
             groupExprs.Add(expr);
         }
 
-        selectExprs.Add(BuildValueExpr(plan) + " AS value");
+        selectExprs.Add(BuildValueExpr(plan.Measure, plan.Aggregate, plan.Unit, route) + " AS value");
+        if (plan.Overlay is ComposeOverlay overlay)
+        {
+            /* The second measure (#1606): one more select expression over the SAME fact rows — never a join,
+               never a parameter, never a second query. Same route as the primary (the AND-gate above). */
+            selectExprs.Add(BuildValueExpr(overlay.Measure, overlay.Aggregate, overlay.Unit, route) + " AS value2");
+        }
 
         sql.Append("SELECT ").Append(string.Join(", ", selectExprs)).Append('\n');
-        sql.Append("FROM ").Append(PgSchemaGenerator.CollectSchema).Append('.').Append(plan.Measure.SourceTable)
+        sql.Append("FROM ").Append(PgSchemaGenerator.CollectSchema).Append('.')
+            .Append(route.IsCagg ? route.CaggRelation! : plan.Measure.SourceTable)
             .Append(" AS ").Append(FactAlias).Append('\n');
 
         if (plan.UsesModuleJoin)
         {
-            sql.Append("LEFT JOIN ").Append(ModuleAlias).Append(" ON ").Append(ModuleAlias)
-                .Append(".sql_handle = ").Append(FactAlias).Append(".sql_handle AND ").Append(ModuleAlias)
-                .Append(".server_name = ").Append(FactAlias).Append(".server_name\n");
+            /* Raw joins the window-bounded CTE (m); a CAGG route joins the retained collect.module_map directly
+               (its raw procedure_stats is gone at 4d, but the CAGG carries sql_handle). Same alias + join keys, so
+               object_name resolves as m.object_name either way. */
+            if (route.IsCagg)
+            {
+                sql.Append("LEFT JOIN ").Append(PgSchemaGenerator.CollectSchema).Append(".module_map AS ").Append(ModuleAlias)
+                    .Append(" ON ").Append(ModuleAlias).Append(".sql_handle = ").Append(FactAlias).Append(".sql_handle AND ")
+                    .Append(ModuleAlias).Append(".server_name = ").Append(FactAlias).Append(".server_name\n");
+            }
+            else
+            {
+                sql.Append("LEFT JOIN ").Append(ModuleAlias).Append(" ON ").Append(ModuleAlias)
+                    .Append(".sql_handle = ").Append(FactAlias).Append(".sql_handle AND ").Append(ModuleAlias)
+                    .Append(".server_name = ").Append(FactAlias).Append(".server_name\n");
+            }
         }
 
         sql.Append("WHERE ").Append(FactAlias).Append('.').Append(timeColumn).Append(" >= ").Append(startParam).Append('\n');
@@ -192,8 +255,22 @@ public static class ComposeCompiler
         switch (plan.Mode)
         {
             case PanelMode.TimeSeries:
-                sql.Append("ORDER BY bucket\n");
-                sql.Append("LIMIT ").Append(ComposeLimits.HardRowCap);
+                /* The cap keeps the NEWEST buckets, not the oldest (#1687). A plain
+                   "ORDER BY bucket LIMIT n" silently returns the EARLIEST n rows, so a grouped
+                   minute-grain panel over 24h rendered its first ~87 minutes as though that were the
+                   whole window — numbers right, window wrong, and nothing on screen said so. Recent
+                   data is the point of a monitoring chart, so the cap is applied DESC inside a
+                   subquery and the survivors re-sorted ascending for the renderer, which consumes
+                   buckets in order.
+
+                   No parameter-ordering hazard: this LIMIT is a literal (only the Ranked arm binds a
+                   LIMIT parameter), and the wrapper only brackets text whose parameters were already
+                   appended in the same order, so $n positions are untouched. */
+                sql.Insert(bodyStart, "SELECT * FROM (\n");
+                sql.Append("ORDER BY bucket DESC\n");
+                sql.Append("LIMIT ").Append(ComposeLimits.HardRowCap).Append('\n');
+                sql.Append(") AS capped\n");
+                sql.Append("ORDER BY bucket");
                 break;
             case PanelMode.Ranked:
                 sql.Append("ORDER BY value DESC\n");
@@ -204,7 +281,7 @@ public static class ComposeCompiler
                 break;
         }
 
-        return (new ComposeCompiled(sql.ToString(), p.Parameters), null);
+        return (new ComposeCompiled(sql.ToString(), p.Parameters, route), null);
     }
 
     /// <summary>
@@ -269,7 +346,7 @@ public static class ComposeCompiler
         sql.Append("ORDER BY ts\n");
         sql.Append("LIMIT ").Append(ComposeLimits.MaxAnnotationEvents);
 
-        return new ComposeCompiled(sql.ToString(), p.Parameters);
+        return new ComposeCompiled(sql.ToString(), p.Parameters, ComposeRoute.Raw);
     }
 
     /// <summary>The qualified reference for a dimension column: <c>m.</c> for a module-join dimension,
@@ -277,11 +354,25 @@ public static class ComposeCompiler
     private static string ColumnRef(ComposeDimension dimension) =>
         (dimension.ViaModuleJoin ? ModuleAlias : FactAlias) + "." + dimension.Column;
 
+    /// <summary>The coarser of two buckets (None &lt; Minute &lt; Hour &lt; Day) — clamps a display grain up to a
+    /// CAGG tier's own grain, since a rollup can never be rendered finer than it was materialized.</summary>
+    private static ComposeTimeBucket CoarserBucket(ComposeTimeBucket a, ComposeTimeBucket b) =>
+        (ComposeTimeBucket)Math.Max((int)a, (int)b);
+
     /// <summary>Builds the <c>value</c> expression: the archetype/kind-gated aggregate, cast to double, then
-    /// scaled by the requested unit's conversion factor (a compile-time family constant).</summary>
-    private static string BuildValueExpr(PanelPlan plan)
+    /// scaled by the requested unit's conversion factor (a compile-time family constant). Parameterized on
+    /// (measure, aggregate, unit) rather than the whole plan (#1606) so the overlay's <c>value2</c> compiles
+    /// through the SAME expression builder — the two can never drift. Binds ZERO parameters (the percentile
+    /// and unit factors are literals), so a second call cannot shift the $n order.</summary>
+    private static string BuildValueExpr(ComposeMeasure measure, ComposeAggregate aggregate, string unit, ComposeRoute route)
     {
-        var measure = plan.Measure;
+        /* A CAGG route reads the pre-aggregated rollup columns instead of the raw delta (the route gate guarantees
+           the measure + aggregate is remappable — CanRemap); unit-scaled exactly like the raw paths below. */
+        if (route.IsCagg)
+        {
+            return ApplyUnitConversion(
+                ComposeCaggValueMapper.BuildCaggNativeExpr(measure, aggregate), measure.UnitFamily, measure.NativeUnit, unit);
+        }
 
         if (measure.Kind == MeasureKind.Ratio)
         {
@@ -308,11 +399,11 @@ public static class ComposeCompiler
                       $"/ NULLIF(SUM({FactAlias}.{denominator.AggregationColumn}), 0))";
             }
 
-            return ApplyUnitConversion(native, measure.UnitFamily, measure.NativeUnit, plan.Unit);
+            return ApplyUnitConversion(native, measure.UnitFamily, measure.NativeUnit, unit);
         }
 
         /* COUNT is a plain, unitless row count. */
-        if (plan.Aggregate == ComposeAggregate.Count)
+        if (aggregate == ComposeAggregate.Count)
         {
             return "CAST(COUNT(*) AS double precision)";
         }
@@ -321,7 +412,7 @@ public static class ComposeCompiler
         var aggColumn = measure.Archetype == MeasureArchetype.Cumulative ? measure.DeltaColumn! : measure.Column!;
         var qualified = FactAlias + "." + aggColumn;
 
-        var nativeExpr = plan.Aggregate switch
+        var nativeExpr = aggregate switch
         {
             ComposeAggregate.Sum => $"CAST(SUM({qualified}) AS double precision)",
             ComposeAggregate.Avg => $"CAST(AVG({qualified}) AS double precision)",
@@ -329,10 +420,10 @@ public static class ComposeCompiler
             ComposeAggregate.Max => $"CAST(MAX({qualified}) AS double precision)",
             ComposeAggregate.PercentileCont =>
                 $"percentile_cont({FormatDouble(ComposeLimits.DefaultPercentile)}) WITHIN GROUP (ORDER BY {qualified})",
-            _ => throw new InvalidOperationException($"Unhandled aggregate {plan.Aggregate}"),
+            _ => throw new InvalidOperationException($"Unhandled aggregate {aggregate}"),
         };
 
-        return ApplyUnitConversion(nativeExpr, measure.UnitFamily, measure.NativeUnit, plan.Unit);
+        return ApplyUnitConversion(nativeExpr, measure.UnitFamily, measure.NativeUnit, unit);
     }
 
     /// <summary>Scales <paramref name="expr"/> (already a double) from <paramref name="nativeUnit"/> to

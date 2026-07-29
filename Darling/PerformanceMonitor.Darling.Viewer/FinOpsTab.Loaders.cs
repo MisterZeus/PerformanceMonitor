@@ -15,6 +15,8 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using PerformanceMonitor.Ui;
 
+using PerformanceMonitor.Darling.Storage;
+
 namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>
@@ -457,7 +459,20 @@ public partial class FinOpsTab
 
         _finopsExpensiveQueriesFilterMgr!.UpdateData(data);
         FinOpsExpensiveQueriesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        FinOpsExpensiveQueriesCountIndicator.Text = data.Count > 0 ? $"{data.Count} query(s)" : "";
+
+        /* #1661: query text and plans live only in the raw tier, so this panel cannot answer a window wider than
+           the raw horizon no matter what the picker offers. Say so rather than presenting a few days of data as
+           though it were the month that was asked for — the aggregate FinOps panels DO reach further back via the
+           rollups, so without this note the two would look inconsistent for no visible reason. */
+        var now = DateTime.UtcNow;
+        var (_, clamped) = RetentionTierRouter.ClampToTextHorizon(now, now.AddHours(-hoursBack));
+        var coverageNote = clamped
+            ? $" — showing the last {RetentionTierRouter.RawTextHorizon.TotalDays:N0} days; query text and plans are not retained beyond that"
+            : "";
+
+        FinOpsExpensiveQueriesCountIndicator.Text = data.Count > 0
+            ? $"{data.Count} query(s){coverageNote}"
+            : clamped ? coverageNote.TrimStart(' ', '—', ' ') : "";
     }
 
     private async Task LoadFinOpsMemoryGrantEfficiencyAsync()

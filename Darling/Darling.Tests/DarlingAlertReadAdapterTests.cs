@@ -39,6 +39,23 @@ public sealed class DarlingAlertReadAdapterTests
     private static readonly string TestServerKey = TestServerId.ToString(CultureInfo.InvariantCulture);
     private const string TestServerName = "alert-adapter-e2e";
 
+    /// <summary>
+    /// Regression guard: the sp_server_diagnostics exclusion must match on BOTH the wait type and the query text.
+    /// A field session (multi39, 2026-07-22) fired a false Long-Running Query alert because sp_server_diagnostics
+    /// was captured in a PREEMPTIVE_XE_GETTARGETSTATE wait (it also does Extended Events work), which the
+    /// wait-type-only match missed. The query-text match (case-insensitive, NULL-safe) catches it regardless of
+    /// the wait it is in at capture time. Ungated (a pure SQL-fragment pin).
+    /// </summary>
+    [Fact]
+    public void SpServerDiagnosticsFilter_AlsoMatchesQueryText_NotJustWaitType_AndIsNullSafe()
+    {
+        var filter = DarlingAlertReadAdapter.SpServerDiagnosticsFilter;
+        Assert.Contains("wait_type NOT LIKE '%SP_SERVER_DIAGNOSTICS%'", filter, StringComparison.Ordinal);
+        Assert.Contains("query_text NOT ILIKE '%sp_server_diagnostics%'", filter, StringComparison.Ordinal);
+        /* NULL-safe: a legitimate long-running query with a NULL query_text must NOT be dropped by this filter. */
+        Assert.Contains("r.query_text IS NULL OR", filter, StringComparison.Ordinal);
+    }
+
     private static readonly string[] AllFeedSql =
     {
         DarlingAlertReadAdapter.BlockedProcessReportsSql,
@@ -296,10 +313,41 @@ public sealed class DarlingAlertReadAdapterTests
 
             /* --- anomalous jobs: threshold + the 60-second average noise floor --- */
             var jobs = await adapter.GetAnomalousJobsAsync(TestServerKey, multiplier: 3, ct);
-            var job = Assert.Single(jobs);
+            Assert.True(jobs.SnapshotIsFresh);
+            var job = Assert.Single(jobs.Jobs);
             Assert.Equal("Nightly ETL", job.JobName);
             Assert.Equal(3661L, job.CurrentDurationSeconds);
             Assert.Equal(350.0m, job.PercentOfAverage);
+
+            /* #1812: age the SAME snapshot past the freshness bound (default 2-minute cadence → 10
+               minutes) — the read becomes no evidence: not fresh, rows skipped, exactly the state that
+               used to re-alert a historical run every cooldown forever.
+
+               Aged by DELETE + re-INSERT at the old timestamp, NOT by UPDATE: collection_time is the
+               hypertable's partition key, and TimescaleDB never re-routes a row on UPDATE — moving the
+               key across a chunk boundary violates the chunk's slice CHECK constraint (23514). now-2h
+               crosses the UTC-midnight boundary between 00:00 and 02:00 UTC, so the UPDATE form is a
+               nightly two-hour time bomb; a fresh INSERT routes to the right chunk at any hour. */
+            var agedTime = DateTime.SpecifyKind(DateTime.UtcNow.AddHours(-2), DateTimeKind.Unspecified);
+            await InsertAsync(connection, $"DELETE FROM running_jobs WHERE server_id = {TestServerId}");
+            await InsertAsync(connection,
+                "INSERT INTO running_jobs (collection_time, server_id, server_name, job_name, job_id, start_time, current_duration_seconds, avg_duration_seconds, p95_duration_seconds, percent_of_average) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                agedTime, TestServerId, TestServerName, "Nightly ETL", "job-guid-1",
+                utcNow.AddHours(-1), 3661L, 90L, 120L, 350.0m);
+            await InsertAsync(connection,
+                "INSERT INTO running_jobs (collection_time, server_id, server_name, job_name, job_id, start_time, current_duration_seconds, avg_duration_seconds, p95_duration_seconds, percent_of_average) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                agedTime, TestServerId, TestServerName, "Fast Job", "job-guid-2",
+                utcNow.AddMinutes(-2), 90L, 30L, 40L, 999.0m);
+            var stale = await adapter.GetAnomalousJobsAsync(TestServerKey, multiplier: 3, ct);
+            Assert.False(stale.SnapshotIsFresh);
+            Assert.Empty(stale.Jobs);
+
+            /* And the cadence hook genuinely widens the bound: a relaxed profile's 60-minute cadence
+               makes the same 2-hour-old snapshot CURRENT (bound 180 minutes). */
+            var relaxed = new DarlingAlertReadAdapter(postgres, _ => 60);
+            var slowProfile = await relaxed.GetAnomalousJobsAsync(TestServerKey, multiplier: 3, ct);
+            Assert.True(slowProfile.SnapshotIsFresh);
+            Assert.Single(slowProfile.Jobs);
         }
         finally
         {

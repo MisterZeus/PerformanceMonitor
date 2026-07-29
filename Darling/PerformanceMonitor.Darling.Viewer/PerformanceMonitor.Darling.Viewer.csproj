@@ -15,9 +15,9 @@
          hooks go unhandled. It is a harmless no-op for the co-located (non-Velopack) viewer that
          ships inside the service zip. -->
     <StartupObject>PerformanceMonitor.Darling.Viewer.Program</StartupObject>
-    <Version>3.2.0</Version>
-    <AssemblyVersion>3.2.0.0</AssemblyVersion>
-    <FileVersion>3.2.0.0</FileVersion>
+    <Version>3.3.0</Version>
+    <AssemblyVersion>3.3.0.0</AssemblyVersion>
+    <FileVersion>3.3.0.0</FileVersion>
     <Company>Darling Data, LLC</Company>
     <Copyright>Copyright © 2026 Darling Data, LLC</Copyright>
     <ApplicationIcon>EDD.ico</ApplicationIcon>
@@ -34,7 +34,7 @@
 
   <ItemGroup>
     <!-- Same package + version as Lite, so both chart hosts pin one ScottPlot. -->
-    <PackageReference Include="ScottPlot.WPF" Version="5.1.58" />
+    <PackageReference Include="ScottPlot.WPF" Version="5.1.59" />
     <!-- System tray icon + balloon toasts (ported from Lite's SystemTrayService). Same package + version
          as Lite so both WPF front ends pin one Hardcodet.NotifyIcon.Wpf. -->
     <PackageReference Include="Hardcodet.NotifyIcon.Wpf" Version="2.0.1" />

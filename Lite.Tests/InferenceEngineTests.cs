@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using PerformanceMonitor.Analysis;
@@ -14,28 +13,14 @@ namespace PerformanceMonitorLite.Tests;
 /// Tests the InferenceEngine and RelationshipGraph against seeded scenarios.
 /// Validates that stories are built with correct paths and severity ordering.
 /// </summary>
-public class InferenceEngineTests : IDisposable
+public class InferenceEngineTests : IClassFixture<SharedDuckDbFixture>
 {
-    private readonly string _tempDir;
-    private readonly string _dbPath;
     private readonly DuckDbInitializer _duckDb;
 
-    public InferenceEngineTests()
+    public InferenceEngineTests(SharedDuckDbFixture fixture)
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "LiteTests_" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(_tempDir);
-        _dbPath = Path.Combine(_tempDir, "test.duckdb");
-        _duckDb = new DuckDbInitializer(_dbPath);
-    }
-
-    public void Dispose()
-    {
-        try
-        {
-            if (Directory.Exists(_tempDir))
-                Directory.Delete(_tempDir, recursive: true);
-        }
-        catch { /* Best-effort cleanup */ }
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
     }
 
     /* ── MemoryStarved scenario ── */
@@ -170,10 +155,7 @@ public class InferenceEngineTests : IDisposable
 
     private async Task<List<AnalysisStory>> BuildStoriesAsync(Func<TestDataSeeder, Task> seedAction)
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
-        var seeder = new TestDataSeeder(_duckDb);
+        using var seeder = new TestDataSeeder(_duckDb);
         await seedAction(seeder);
 
         var collector = new DuckDbFactCollector(_duckDb);

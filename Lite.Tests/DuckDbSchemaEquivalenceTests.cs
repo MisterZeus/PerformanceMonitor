@@ -19,7 +19,7 @@ using Xunit;
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// THE data-safety proof for the catalog-driven collector schema: for every one of the 35 collector
+/// THE data-safety proof for the catalog-driven collector schema: for every one of the 36 collector
 /// tables, the DDL <see cref="DuckDbSchemaGenerator"/> now generates must produce a DuckDB table that
 /// is byte-for-byte STORAGE-equivalent to the hand-written table it replaced — identical columns,
 /// DuckDB types, column order, NOT NULL flags, DEFAULT values, and PRIMARY KEY, plus an identical
@@ -111,9 +111,9 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
         var catalogTables = CollectorCatalog.All.Select(c => c.TargetTable).OrderBy(t => t, StringComparer.Ordinal);
         var goldenTables = GoldenCollectorSchema.Tables.Keys.OrderBy(t => t, StringComparer.Ordinal);
 
-        /* The frozen oracle must describe exactly the 36 catalog collector tables — no more, no fewer. */
+        /* The frozen oracle must describe exactly the 38 catalog collector tables — no more, no fewer. */
         Assert.Equal(catalogTables, goldenTables);
-        Assert.Equal(36, GoldenCollectorSchema.Tables.Count);
+        Assert.Equal(38, GoldenCollectorSchema.Tables.Count);
 
         /* Only server_config and database_config lack an index (matches DuckDbSchemaGenerator.CreateIndex). */
         var goldenIndexless = CollectorCatalog.All
@@ -123,6 +123,28 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
             .ToArray();
         Assert.Equal(new[] { "database_config", "server_config" }, goldenIndexless);
     }
+
+    /// <summary>
+    /// Columns whose storage shape has INTENTIONALLY diverged from the pre-change hand-written
+    /// schema since the extraction, each paired with the schema version that migrates existing
+    /// databases. The golden snapshot stays frozen — it is the proof the extraction itself was
+    /// lossless — so a deliberate change is recorded here rather than by rewriting history, and
+    /// every entry has to be justified in review.
+    ///
+    /// <para>#1591 / schema v48: <c>cpu_count</c>, <c>hyperthread_ratio</c> and
+    /// <c>physical_memory_mb</c> dropped NOT NULL. They are the only server_properties columns read
+    /// from <c>sys.dm_os_sys_info</c>, which requires VIEW SERVER STATE (VIEW DATABASE STATE on
+    /// Azure SQL DB). The collector now reads them inside TRY/CATCH so a login without that grant
+    /// keeps every permission-free column instead of losing the entire row — which only works if the
+    /// columns can hold NULL. <see cref="DuckDbInitializer"/>'s v48 migration drops the constraint on
+    /// existing databases.</para>
+    /// </summary>
+    private static readonly HashSet<string> IntentionalStorageDivergences = new(StringComparer.Ordinal)
+    {
+        "server_properties.cpu_count",
+        "server_properties.hyperthread_ratio",
+        "server_properties.physical_memory_mb",
+    };
 
     [Fact]
     public void GeneratedCollectorTables_AreStorageEquivalentToPreChangeHandWritten()
@@ -142,7 +164,13 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
             var goldenInfo = TableInfo(conn, goldenDdl, table);
             var generatedInfo = TableInfo(conn, generatedDdl, table);
 
-            if (!goldenInfo.SequenceEqual(generatedInfo))
+            /* Allow ONLY the recorded divergences, and only in the NOT NULL flag — a changed type,
+               name, position, default or PK still fails even for a listed column. */
+            var goldenComparable = goldenInfo
+                .Select(c => IntentionalStorageDivergences.Contains($"{table}.{c.Name}") ? c with { NotNull = false } : c)
+                .ToList();
+
+            if (!goldenComparable.SequenceEqual(generatedInfo))
             {
                 failures.Add(BuildTableDiff(table, goldenInfo, generatedInfo));
             }
@@ -210,7 +238,7 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
         count.CommandText =
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_name IN (" +
             string.Join(",", CollectorCatalog.All.Select(c => $"'{c.TargetTable}'")) + ")";
-        Assert.Equal(36, Convert.ToInt32(count.ExecuteScalar()));
+        Assert.Equal(38, Convert.ToInt32(count.ExecuteScalar()));
     }
 
     private static string BuildTableDiff(string table, List<ColumnInfo> golden, List<ColumnInfo> generated)

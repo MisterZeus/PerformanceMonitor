@@ -9,10 +9,9 @@ body:
     attributes:
       label: Which component is your question about?
       options:
-        - Full Dashboard
         - Lite
-        - SQL collection scripts
-        - Installer
+        - Darling
+        - Full Dashboard (deprecated)
         - General / setup
     validations:
       required: true

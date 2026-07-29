@@ -54,6 +54,11 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, bool> _badgeFailedJob = new();
     private readonly Dictionary<string, (int Blocking, int Deadlock, DateTime? LatestEvent)> _lastBadgeCounts = new();
     private readonly Dictionary<string, bool> _previousConnectionStates = new();
+
+    /// <summary>When the last down alert (Lost / AlreadyDownAtFirstSight / StillDown) fired per server —
+    /// the re-fire clock for <see cref="PerformanceMonitor.Common.ConnectionAlertPolicy"/> (#1659).
+    /// Stamped on every down alert delivered, cleared on Restored.</summary>
+    private readonly Dictionary<string, DateTime> _lastConnectionDownAlertUtc = new();
     private readonly Dictionary<string, bool> _previousCollectorErrorStates = new();
     private readonly Dictionary<string, bool> _previousXeSessionFailureStates = new();
     private readonly DispatcherTimer _statusTimer;
@@ -67,6 +72,13 @@ public partial class MainWindow : Window
        gate) and the #1145 restart-surviving watermark seed/persist through LiteAlertStateStore;
        Lite-specific delivery (tray/badges/#1141 split) lives behind LiteAlertDeliverer. */
     private AlertEngine? _alertEngine;
+
+    /// <summary>#1696: Availability Group alert state, per AG grain. Not part of the shared AlertEngine
+    /// because AG health is judged off the COLLECTED ag_* snapshots rather than the engine's live
+    /// per-server snapshot — the same reason Darling keeps it in its self-alert evaluator rather than the
+    /// engine. The decisions themselves are the shared PerformanceMonitor.Common.AgAlertPolicy, so both apps
+    /// fire on identical rules under identical metric names.</summary>
+    private readonly Services.AgAlertEvaluator _agAlertEvaluator = new();
     private McpHostService? _mcpService;
     private readonly AlertStateService _alertStateService = new();
     private readonly IAlertSettings _alertSettings = new AppAlertSettings();
@@ -201,7 +213,18 @@ public partial class MainWindow : Window
 
             // Initialize data service for overview
             _dataService = new LocalDataService(_databaseInitializer);
-            _alertReadAdapter = new LiteAlertReadAdapter(_dataService);
+
+            /* #1812: the adapter's snapshot-freshness bound needs the server's EFFECTIVE running_jobs
+               cadence. The adapter keys servers by the deterministic int hash; ScheduleManager keys by
+               the connection GUID — the same hash-match FetchFailedJobsForAlertAsync already does. */
+            _alertReadAdapter = new LiteAlertReadAdapter(_dataService, serverId =>
+            {
+                var server = _serverManager.GetAllServers().FirstOrDefault(s =>
+                    RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s)) == serverId);
+                return server is null
+                    ? 0
+                    : _scheduleManager.GetScheduleForServer(server.Id, "running_jobs")?.FrequencyMinutes ?? 0;
+            });
 
             /* Phase-5 forwarding: construct the shared alert engine once, over Lite's five seam
                implementations — live App.* thresholds, the DuckDB read adapter, the DuckDB
@@ -230,11 +253,14 @@ public partial class MainWindow : Window
             // Initialize job history tab
             JobHistoryContent.Initialize(_dataService);
 
+            // Availability Groups (#991): self-loading, and its tab stays hidden until a load finds AG rows.
+            AvailabilityGroupsContent.Initialize(_dataService);
+
             // Initialize FinOps tab
             FinOpsContent.Initialize(_dataService, _serverManager);
 
             // Initialize Recommendations tab (advise-only)
-            RecommendationsContent.Initialize(_databaseInitializer, _serverManager);
+            RecommendationsContent.Initialize(_databaseInitializer, _serverManager, _scheduleManager);
 
             // Start MCP server if enabled
             await StartMcpServerAsync();
@@ -263,6 +289,24 @@ public partial class MainWindow : Window
                 "Initialization Error",
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
+        }
+    }
+
+
+    /// <summary>
+    /// Loads the Availability Groups tab and reveals it once the local store has AG rows (#991). Always On is
+    /// opt-in, so the tab ships collapsed rather than standing permanently empty. The reveal is one-way within a
+    /// session: an install that HAS AGs keeps the tab even if a later sweep reads zero, because a collector
+    /// hiccup should not make a tab vanish under the operator mid-look.
+    /// </summary>
+    private async Task RefreshAvailabilityGroupsAsync()
+    {
+        await AvailabilityGroupsContent.RefreshAgAsync();
+
+        if (AvailabilityGroupsContent.HasAvailabilityGroups
+            && AvailabilityGroupsTabItem.Visibility != Visibility.Visible)
+        {
+            AvailabilityGroupsTabItem.Visibility = Visibility.Visible;
         }
     }
 
@@ -391,6 +435,11 @@ public partial class MainWindow : Window
         }
 
         /* Refresh job history tab when selected */
+        if (ServerTabControl.SelectedItem == AvailabilityGroupsTabItem)
+        {
+            _ = RefreshAvailabilityGroupsAsync();
+        }
+
         if (ServerTabControl.SelectedItem == JobHistoryTabItem)
         {
             JobHistoryContent.RefreshJobs();
@@ -1467,9 +1516,13 @@ public partial class MainWindow : Window
         if (result == MessageBoxResult.Yes)
         {
             CloseServerTab(server.Id);
-            _collectorService?.ClearHealthForServer(
-                RemoteCollectorService.GetDeterministicHashCode(
-                    RemoteCollectorService.GetServerNameForStorage(server)));
+            var removedServerId = RemoteCollectorService.GetDeterministicHashCode(
+                RemoteCollectorService.GetServerNameForStorage(server));
+            _collectorService?.ClearHealthForServer(removedServerId);
+            /* #1696: drop this server's AG edge state, or a remove-then-re-add would compare the new first
+               sighting against the OLD role and page a phantom failover. The storage name hashes
+               deterministically, so a re-added server really does get the same id back. */
+            _agAlertEvaluator.Forget(removedServerId);
             _serverManager.DeleteServer(server.Id);
             RefreshServerList();
             StatusText.Text = $"Removed server: {server.DisplayNameWithIntent}";
@@ -1539,26 +1592,46 @@ public partial class MainWindow : Window
 
                 /* null = never observed: a silent baseline (no edge, but a refresh). */
                 bool? previouslyOnline = _previousConnectionStates.TryGetValue(server.Id, out var prev) ? prev : null;
-                var connectionEdge = ConnectionEdgeDetector.Detect(previouslyOnline, isOnline);
+                var connectionDecision = ConnectionAlertPolicy.Decide(
+                    previouslyOnline,
+                    isOnline,
+                    App.NotifyConnectionDownAtStartup,
+                    App.ConnectionRefireMinutes > 0 ? TimeSpan.FromMinutes(App.ConnectionRefireMinutes) : null,
+                    _lastConnectionDownAlertUtc.TryGetValue(server.Id, out var lastDown) ? lastDown : null,
+                    DateTime.UtcNow);
 
                 if (App.AlertsEnabled && App.NotifyConnectionChanges)
                 {
-                    /* Each edge now ALSO routes through Lite's alert path — email + webhook + a
-                       config_alert_log row (#1506) — alongside the tray balloon it always showed. The
-                       detector is the edge trigger: a server that stays down is offline→offline, so an
-                       outage produces ONE "Server Unreachable", not one per poll. */
-                    if (connectionEdge == ConnectionAlertEdge.Lost)
+                    /* Each announcement routes through Lite's alert path — email + webhook + a
+                       config_alert_log row (#1506) — alongside the tray balloon it always showed. The shared
+                       policy is the trigger: edge-only by default (one "Server Unreachable" per outage), with
+                       the two #1659 opt-ins — announce a server already down at first sight, and re-announce
+                       a standing outage every N minutes. Every down flavor delivers under the SAME
+                       "Server Unreachable" metric name, because downstream automation (the webhook-driven
+                       auto-heal loop this exists for) matches on it. */
+                    if (connectionDecision is ConnectionAlertDecision.Lost
+                        or ConnectionAlertDecision.AlreadyDownAtFirstSight
+                        or ConnectionAlertDecision.StillDown)
                     {
                         var reason = status.ErrorMessage ?? "unknown error";
+                        var detail = connectionDecision switch
+                        {
+                            ConnectionAlertDecision.AlreadyDownAtFirstSight =>
+                                $"Already unreachable when monitoring started: {reason}",
+                            ConnectionAlertDecision.StillDown =>
+                                $"Still unreachable (re-alerting every {App.ConnectionRefireMinutes} min): {reason}",
+                            _ => reason
+                        };
 
                         _trayService?.ShowNotification(
                             "Server Offline",
                             $"{server.DisplayNameWithIntent} is unreachable: {reason}",
                             Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Error);
 
-                        SendConnectionAlert(server, "Server Unreachable", reason, reason);
+                        SendConnectionAlert(server, "Server Unreachable", reason, detail);
+                        _lastConnectionDownAlertUtc[server.Id] = DateTime.UtcNow;
                     }
-                    else if (connectionEdge == ConnectionAlertEdge.Restored)
+                    else if (connectionDecision == ConnectionAlertDecision.Restored)
                     {
                         _trayService?.ShowNotification(
                             "Server Online",
@@ -1566,6 +1639,7 @@ public partial class MainWindow : Window
                             Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Info);
 
                         SendConnectionAlert(server, "Server Restored", "Online", "Connection restored");
+                        _lastConnectionDownAlertUtc.Remove(server.Id);
                     }
                 }
 

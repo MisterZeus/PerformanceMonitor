@@ -7,29 +7,61 @@ on:
     branches: [main, dev]
   release:
     types: [published]
+  # Merge-queue runs. Inert until a queue ruleset is enabled on a branch (a repo setting),
+  # but the required checks must handle the event BEFORE that click, or every queued PR
+  # stalls on checks that never report. dorny/paths-filter v4.0.1+ resolves merge_group
+  # diffs from the payload's base_sha/head_sha whenever the base input is empty — exactly
+  # what the filter steps pass for non-push events — so path classification works
+  # unchanged in a queue run.
+  merge_group:
 
 permissions:
   contents: write
   id-token: write
   actions: read
 
+# A re-push to a PR cancels that PR's superseded in-flight run, and a push to dev/main
+# cancels that BRANCH's superseded in-flight run — newest SHA wins. Finishing a build of
+# code that is no longer the head helps nobody, and the shared Windows runner pool is what
+# serializes everyone's CI (#1697 sat queued behind two dev builds; on 2026-07-26 a
+# ~20-merge train left 13 of the day's 30 dev-push runs finishing SHAs a newer merge had
+# already replaced — ~60 reclaimable runner-minutes in one evening). Cancelling a
+# superseded PUSH run is safe because a push run produces nothing any other run consumes:
+# every upload-artifact step in this workflow is gated to the release event (the SignPath
+# signing path) or to failure() (darling-pg diagnostics), nothing in the repo downloads
+# cross-run artifacts (no download-artifact, gh run download, or workflow_run consumer
+# exists), nightly.yml builds its own tree from its own checkout, and a release compiles
+# fresh on the release event. The accepted trade: push builds are diff-scoped, so a
+# cancelled run's areas are not re-verified until the next change touches them — the
+# nightly and the all-areas dev->main release PR are the backstops. Release and
+# merge-queue runs deliberately keep a UNIQUE group per run (run_id) and are NEVER
+# cancelled: a release build waits on SignPath's manual approval gate, and a queue
+# validation is the last check before its result lands on dev.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('build-pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && format('build-push-{0}', github.ref) || format('build-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
+
 jobs:
   build:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Detect changed paths
         id: filter
         if: github.event_name != 'release'
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@v4
         with:
           # On push events, compare against the previous commit on this branch
           # (github.event.before). Without this, the action defaults to comparing
           # against the default branch on non-default branch pushes, which would
           # match every accumulated change and defeat the filter.
           base: ${{ github.event_name == 'push' && github.event.before || '' }}
+          # Emit the matched file list so the fast-path step can NAME what it classified
+          # as documentation. A fast path that silently under-builds is the failure mode
+          # worth guarding against, so the reason is always printed, never inferred.
+          list-files: shell
           filters: |
             # A change to a root build file (the solution, restore config, or THIS workflow) can
             # affect every product, so it forces a full build/test/publish.
@@ -42,71 +74,146 @@ jobs:
             # The shared PerformanceMonitor.* core libraries feed Lite, the Full Dashboard, AND
             # Darling (verified via ProjectReference), so a change here fans out to all three.
             # NOT the CLI Installer — it references only Installer.Core.
+            #
+            # Every area pattern says `dir/**/!(*.md)` — any non-markdown file under the
+            # area — instead of the old `dir/**` include plus a bare `!**/*.md` exclude.
+            # That is not style: dorny v4 evaluates each pattern as an INDEPENDENT
+            # predicate under the default predicate-quantifier 'some' (a filter is true
+            # when any changed file matches at least one rule), so a bare `!**/*.md` line
+            # is not a subtraction — it is its own rule meaning "any file that is not
+            # markdown", which silently made every area filter true for ANY non-markdown
+            # change anywhere in the repo. Measured proof: a single root .gitignore edit
+            # built and tested all four products and ran the full Darling PG suite
+            # (PR #1714, run 30219202642, filter log: "Filter darling = true, Matching
+            # files: .gitignore"). The extglob keeps the markdown carve-out INSIDE the
+            # include, where quantifier semantics cannot detach it.
             core:
-              - 'PerformanceMonitor.Alerting/**'
-              - 'PerformanceMonitor.Analysis/**'
-              - 'PerformanceMonitor.Collectors/**'
-              - 'PerformanceMonitor.Common/**'
-              - 'PerformanceMonitor.Notifications/**'
-              - 'PerformanceMonitor.PlanAnalysis/**'
-              - 'PerformanceMonitor.Ui/**'
-              - '!**/*.md'
+              - 'PerformanceMonitor.Alerting/**/!(*.md)'
+              - 'PerformanceMonitor.Analysis/**/!(*.md)'
+              - 'PerformanceMonitor.Collectors/**/!(*.md)'
+              - 'PerformanceMonitor.Common/**/!(*.md)'
+              - 'PerformanceMonitor.Notifications/**/!(*.md)'
+              - 'PerformanceMonitor.PlanAnalysis/**/!(*.md)'
+              - 'PerformanceMonitor.Ui/**/!(*.md)'
             # Installer.Core is shared by the CLI Installer AND the Full Dashboard's integrated
             # installer — a change rebuilds both, and nothing else.
             installer_core:
-              - 'Installer.Core/**'
-              - '!**/*.md'
+              - 'deprecated/Installer.Core/**/!(*.md)'
             dashboard:
-              - 'Dashboard/**'
-              - 'Dashboard.Tests/**'
-              - '!**/*.md'
+              - 'deprecated/Dashboard/**/!(*.md)'
+              - 'deprecated/Dashboard.Tests/**/!(*.md)'
             lite:
-              - 'Lite/**'
-              - 'Lite.Tests/**'
-              - '!**/*.md'
-            # Lite's analysis-heavy test subset — the narrower gate the workflow already used, so
-            # those slow tests run only when Lite analysis code (or shared/root code) changed.
-            lite_analysis:
-              - 'Lite/Analysis/**'
-              - 'Lite/Services/**'
-              - 'Lite/DuckDb/**'
-              - 'Lite/Models/**'
-              - 'Lite.Tests/**'
-              - 'Lite/PerformanceMonitorLite.csproj'
-              - '!**/*.md'
+              - 'Lite/**/!(*.md)'
+              - 'Lite.Tests/**/!(*.md)'
             installer:
-              - 'Installer/**'
-              - 'Installer.Tests/**'
-              - 'install/**'
-              - 'upgrades/**'
-              - '!**/*.md'
+              - 'deprecated/Installer/**/!(*.md)'
+              - 'deprecated/Installer.Tests/**/!(*.md)'
+              - 'install/**/!(*.md)'
+              - 'upgrades/**/!(*.md)'
             darling:
-              - 'Darling/**'
-              - '!**/*.md'
-            # True when any non-documentation file changed. Documentation-only
-            # changes (e.g. a CHANGELOG or README edit) skip the build/test/
-            # publish steps below — there is nothing to compile. The job still
-            # runs so the required 'build' check reports a result.
-            code:
+              - 'Darling/**/!(*.md)'
+            # The DOCUMENTATION allowlist: files that cannot affect a build under any
+            # job in this workflow. Deliberately an allowlist of non-executable content,
+            # not a "everything that isn't code" subtraction — a new file type defaults
+            # to being treated as code, which is the safe direction to be wrong in.
+            #
+            # NOT here, on purpose: *.sql (the installer and sql-validation compile it),
+            # *.yml (workflows), *.csproj / *.props / packages.lock.json (build inputs),
+            # and *.cs regardless of how comment-only the change looks — an XML doc
+            # comment still recompiles, and the compiler is what proves it still builds.
+            #
+            # The docs/ and Screenshots/ entries are extension-explicit rather than bare
+            # directory globs for the same reason: everything in them today is markdown,
+            # SVG, or a screenshot image, and a .sql or script dropped into either
+            # directory tomorrow should default to being code, not inherit a free pass
+            # from its parent directory.
+            docs:
+              - '**/*.md'
+              - 'LICENSE'
+              - 'CITATION.cff'
+              - '.gitignore'
+              - '.gitattributes'
+              - 'docs/**/*.{md,svg,png,jpg,jpeg,gif}'
+              - 'Screenshots/**/*.{md,svg,png,jpg,jpeg,gif}'
+            # Catch-all COUNTER, not a boolean gate: the classify step below decides
+            # "documentation-only" by comparing all_count to docs_count — they are equal
+            # exactly when every changed file sits on the docs allowlist. Stated as a
+            # count comparison because the previous shape ('**' plus '!' exclusions,
+            # a code: filter) could never be false under predicate-quantifier 'some' —
+            # every file matches '**', so the #1712 fast path shipped unable to engage
+            # (throwaway PR #1714: a .gitignore-only diff still paid setup + restore and,
+            # via the predicate bug above, a full build).
+            all:
               - '**'
-              - '!**/*.md'
+
+      # Decides the docs fast path ONCE, in one place, and says so out loud. Guards keep
+      # it off every path where a skipped restore would be a real loss:
+      #   release  — the filter step does not even run there, and a release must always
+      #              compile and publish from a cold, fully restored tree.
+      #   push     — dev/main pushes are the integration signal for what just merged, so
+      #              they restore unconditionally even for a docs-only commit. Cheap
+      #              insurance: this only forces the restore back on, it does not force
+      #              the per-product build/test steps, which stay path-gated as before.
+      #   merge_group — a queue run is the LAST validation before its result lands on dev,
+      #              so it takes the same always-restore path as a push.
+      #   areas    — belt and suspenders: even when the counts say docs-only, any lit
+      #              area filter vetoes the fast path, because an area=true with restore
+      #              skipped would run `dotnet build --no-restore` against nothing. The
+      #              two classifications are built from the same allowlist so they cannot
+      #              disagree today; this guard is for the day someone edits one and not
+      #              the other.
+      # Everything else (pull_request) is eligible, and engages only when EVERY changed
+      # file is on the documentation allowlist (all_count == docs_count).
+      - name: Classify change for the docs fast path
+        id: fastpath
+        shell: bash
+        env:
+          ALL_COUNT: ${{ steps.filter.outputs.all_count }}
+          DOCS_COUNT: ${{ steps.filter.outputs.docs_count }}
+          DOCS_FILES: ${{ steps.filter.outputs.docs_files }}
+          AREAS: 'root=${{ steps.filter.outputs.root }} core=${{ steps.filter.outputs.core }} installer_core=${{ steps.filter.outputs.installer_core }} dashboard=${{ steps.filter.outputs.dashboard }} lite=${{ steps.filter.outputs.lite }} installer=${{ steps.filter.outputs.installer }} darling=${{ steps.filter.outputs.darling }}'
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "engaged=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Full build::Release event - the docs fast path never applies to a release."
+            exit 0
+          fi
+
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "merge_group" ]; then
+            echo "engaged=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Full build::${{ github.event_name }} on '${{ github.ref_name }}' - integration runs always restore, even for a docs-only change."
+            exit 0
+          fi
+
+          echo "Changed files: ${ALL_COUNT:-0} total, ${DOCS_COUNT:-0} on the documentation allowlist. Areas: ${AREAS}"
+
+          if [ "${ALL_COUNT:-0}" -gt 0 ] && [ "${ALL_COUNT:-0}" -eq "${DOCS_COUNT:-0}" ] && [[ "${AREAS}" != *"=true"* ]]; then
+            echo "engaged=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=DOCS FAST PATH ENGAGED::All ${ALL_COUNT} changed files are on the documentation allowlist, so .NET setup, restore and versioning are skipped. This job still reports its result."
+            echo "Documentation files classified in this change:"
+            for f in ${DOCS_FILES}; do echo "  - ${f}"; done
+          else
+            echo "engaged=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Full build::At least one changed file is off the documentation allowlist (${DOCS_COUNT:-0} of ${ALL_COUNT:-0} classified as documentation)."
+          fi
 
       - name: Setup .NET 10.0
-        if: steps.filter.outputs.code != 'false'
-        uses: actions/setup-dotnet@v5
+        if: steps.fastpath.outputs.engaged != 'true'
+        uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: 10.0.x
+          global-json-file: global.json
           cache: true
           cache-dependency-path: '**/packages.lock.json'
 
       - name: Restore dependencies
-        if: steps.filter.outputs.code != 'false'
+        if: steps.fastpath.outputs.engaged != 'true'
         run: |
-          dotnet restore Dashboard/Dashboard.csproj --locked-mode
           dotnet restore Lite/PerformanceMonitorLite.csproj --locked-mode
-          dotnet restore Installer/PerformanceMonitorInstaller.csproj --locked-mode
           dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
-          dotnet restore Installer.Tests/Installer.Tests.csproj --locked-mode
+          dotnet restore deprecated/Installer.Tests/Installer.Tests.csproj --locked-mode
+          dotnet restore deprecated/Dashboard.Tests/Dashboard.Tests.csproj --locked-mode
           dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
           dotnet restore Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj --locked-mode
 
@@ -116,7 +223,16 @@ jobs:
 
       - name: Build Installer.Tests
         if: steps.filter.outputs.installer == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        run: dotnet build Installer.Tests/Installer.Tests.csproj -c Release --no-restore
+        run: dotnet build deprecated/Installer.Tests/Installer.Tests.csproj -c Release --no-restore
+
+      # The 'dashboard' path filter was defined when the Full Dashboard moved to deprecated/ (#1612) but
+      # never wired to a step, so its build and tests silently stopped running — which is how a batch of
+      # compiler warnings and three broken ThemeParityTests accumulated unnoticed (#1643). Deprecated means
+      # bug-fix-only, not unverified: it still compiles warning-free and its tests still guard cross-app
+      # parity (the theme palettes it checks are LITE's too).
+      - name: Build Dashboard.Tests
+        if: steps.filter.outputs.dashboard == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
+        run: dotnet build deprecated/Dashboard.Tests/Dashboard.Tests.csproj -c Release --no-restore
 
       - name: Build Darling
         if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
@@ -124,37 +240,35 @@ jobs:
           dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
           dotnet build Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release --no-restore
 
-      - name: Run Lite fast tests
+      # One step for the whole Lite suite. It was split into fast / analysis-heavy halves when the
+      # seven analysis classes rebuilt the full DuckDB schema inside every test and their subset
+      # alone cost ~9 minutes; after the shared class fixtures (#1693, #1698) and batched seeding
+      # (#1694) that subset runs in ~1 minute, so the split — and the narrower lite_analysis path
+      # gate that let non-analysis Lite changes skip it — stopped earning its second test-host
+      # spin-up and its filter-drift risk.
+      - name: Run Lite tests
         if: steps.filter.outputs.lite == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        run: dotnet test Lite.Tests/Lite.Tests.csproj -c Release --no-build --verbosity normal --filter "FullyQualifiedName!~AnomalyDetectorTests&FullyQualifiedName!~FactCollectorTests&FullyQualifiedName!~FactCollectorMiseryTests&FullyQualifiedName!~BaselineProviderTests&FullyQualifiedName!~InferenceEngineTests&FullyQualifiedName!~ScenarioTests&FullyQualifiedName!~AnalysisServiceTests"
-
-      - name: Run Lite analysis-heavy tests
-        if: steps.filter.outputs.lite_analysis == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        run: dotnet test Lite.Tests/Lite.Tests.csproj -c Release --no-build --verbosity normal --filter "FullyQualifiedName~AnomalyDetectorTests|FullyQualifiedName~FactCollectorTests|FullyQualifiedName~FactCollectorMiseryTests|FullyQualifiedName~BaselineProviderTests|FullyQualifiedName~InferenceEngineTests|FullyQualifiedName~ScenarioTests|FullyQualifiedName~AnalysisServiceTests"
+        run: dotnet test Lite.Tests/Lite.Tests.csproj -c Release --no-build --verbosity normal
 
       - name: Run Installer tests
         if: steps.filter.outputs.installer == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        run: dotnet test Installer.Tests/Installer.Tests.csproj -c Release --no-build --verbosity normal --filter "FullyQualifiedName!~VersionDetectionTests&FullyQualifiedName!~IdempotencyTests&FullyQualifiedName!~AdversarialTests"
+        run: dotnet test deprecated/Installer.Tests/Installer.Tests.csproj -c Release --no-build --verbosity normal --filter "FullyQualifiedName!~VersionDetectionTests&FullyQualifiedName!~IdempotencyTests&FullyQualifiedName!~AdversarialTests"
+
+      - name: Run Dashboard tests
+        if: steps.filter.outputs.dashboard == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
+        run: dotnet test deprecated/Dashboard.Tests/Dashboard.Tests.csproj -c Release --no-build --verbosity normal
 
       - name: Run Darling tests
         if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         run: dotnet test Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build --verbosity normal
 
       - name: Get version
-        if: steps.filter.outputs.code != 'false'
+        if: steps.fastpath.outputs.engaged != 'true'
         id: version
         shell: pwsh
         run: |
-          $version = ([xml](Get-Content Dashboard/Dashboard.csproj)).Project.PropertyGroup.Version | Where-Object { $_ }
+          $version = ([xml](Get-Content Lite/PerformanceMonitorLite.csproj)).Project.PropertyGroup.Version | Where-Object { $_ }
           echo "VERSION=$version" >> $env:GITHUB_OUTPUT
-
-      - name: Publish Dashboard
-        if: steps.filter.outputs.dashboard == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        run: dotnet publish Dashboard/Dashboard.csproj -c Release -o publish/Dashboard
-
-      - name: Publish Dashboard (self-contained for Velopack)
-        if: github.event_name == 'release'
-        run: dotnet publish Dashboard/Dashboard.csproj -c Release -r win-x64 --self-contained -o publish/Dashboard-velopack
 
       - name: Publish Lite
         if: steps.filter.outputs.lite == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
@@ -164,15 +278,6 @@ jobs:
         if: github.event_name == 'release'
         run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -r win-x64 --self-contained -o publish/Lite-velopack
 
-      - name: Publish CLI Installer
-        if: steps.filter.outputs.installer == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        run: dotnet publish Installer/PerformanceMonitorInstaller.csproj -c Release
-
-      # Darling (headless edition): the Windows-service collector and the WPF viewer, published
-      # framework-dependent for the plain zip (both apps). The SERVICE stays zip-only — a Windows
-      # service has a different update story, deliberately deferred for v1. The VIEWER additionally
-      # ships as a remote-seat Velopack Setup.exe (#1555) via the self-contained publish below,
-      # exactly like Dashboard/Lite.
       - name: Publish Darling Service
         if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -o publish/DarlingService
@@ -194,7 +299,7 @@ jobs:
       - name: Cache Darling pg-runtime.zip
         if: github.event_name == 'release'
         id: cache-pg-runtime
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: Darling/artifacts/pg-runtime.zip
           key: pg-runtime-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-runtime.ps1') }}
@@ -211,37 +316,15 @@ jobs:
           $version = "${{ steps.version.outputs.VERSION }}"
           New-Item -ItemType Directory -Force -Path releases
 
-          # Dashboard ZIP — portable artifact for advanced/air-gapped users.
-          # The README points end users at Setup.exe (Velopack) because it sets up Start Menu
-          # shortcuts and Apps & Features registration; this ZIP is the explicit fallback.
-          Compress-Archive -Path 'publish/Dashboard/*' -DestinationPath "releases/PerformanceMonitorDashboard-$version.zip" -Force
-
-          # Lite ZIP — same rationale.
+          # Lite ZIP - portable artifact for advanced/air-gapped users. The README points end
+          # users at Setup.exe (Velopack); this ZIP is the explicit fallback.
           Compress-Archive -Path 'publish/Lite/*' -DestinationPath "releases/PerformanceMonitorLite-$version.zip" -Force
 
-          # Installer ZIP (CLI + SQL scripts) — still shipped for server-side install
-          $instDir = 'publish/Installer'
-          New-Item -ItemType Directory -Force -Path $instDir
-          New-Item -ItemType Directory -Force -Path "$instDir/install"
-          New-Item -ItemType Directory -Force -Path "$instDir/upgrades"
-
-          Copy-Item 'Installer/bin/Release/net10.0/win-x64/publish/PerformanceMonitorInstaller.exe' $instDir
-          Copy-Item 'install/*.sql' "$instDir/install/"
-          if (Test-Path 'upgrades') { Copy-Item 'upgrades/*' "$instDir/upgrades/" -Recurse -ErrorAction SilentlyContinue }
-          if (Test-Path 'README.md') { Copy-Item 'README.md' $instDir }
-          if (Test-Path 'LICENSE') { Copy-Item 'LICENSE' $instDir }
-          if (Test-Path 'THIRD_PARTY_NOTICES.md') { Copy-Item 'THIRD_PARTY_NOTICES.md' $instDir }
-
-          Compress-Archive -Path 'publish/Installer/*' -DestinationPath "releases/PerformanceMonitorInstaller-$version.zip" -Force
-
-      - name: Upload Dashboard for signing
-        if: github.event_name == 'release'
-        id: upload-dashboard
-        uses: actions/upload-artifact@v6
-        with:
-          name: Dashboard-unsigned
-          path: publish/Dashboard/
-
+      # upload-artifact is deliberately HELD at v6 (#1653): every signing step below consumes
+      # `steps.upload-*.outputs.artifact-id`, and v7 changes artifact archiving semantics (the
+      # `archive` parameter). The signing path only executes on `release: [published]`, so a broken
+      # bump surfaces at release time — bump only alongside a validated real signing run.
+      # Dependabot is configured to skip this major (see .github/dependabot.yml).
       - name: Upload Lite for signing
         if: github.event_name == 'release'
         id: upload-lite
@@ -250,19 +333,6 @@ jobs:
           name: Lite-unsigned
           path: publish/Lite/
 
-      - name: Upload Installer for signing
-        if: github.event_name == 'release'
-        id: upload-installer
-        uses: actions/upload-artifact@v6
-        with:
-          name: Installer-unsigned
-          path: publish/Installer/
-
-      # Only our own .NET output (the service + viewer apphost exes + PerformanceMonitor.* dlls) is
-      # uploaded to SignPath, staged in the exact layout the single 'Darling' artifact-configuration
-      # signs: the service at the root, the viewer under viewer/. pg-runtime.zip is deliberately NOT
-      # here — the bundled EDB PostgreSQL binaries inside are EDB's and ship as opaque data, so the
-      # zip is placed into the package AFTER signing (see "Package Darling (signed)" below).
       - name: Stage Darling for signing
         if: github.event_name == 'release'
         shell: pwsh
@@ -281,19 +351,6 @@ jobs:
           name: Darling-unsigned
           path: publish/Darling-signing/
 
-      - name: Sign Dashboard
-        if: github.event_name == 'release'
-        uses: signpath/github-action-submit-signing-request@v2
-        with:
-          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
-          organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
-          project-slug: 'PerformanceMonitor'
-          signing-policy-slug: 'release-signing'
-          artifact-configuration-slug: 'Dashboard'
-          github-artifact-id: '${{ steps.upload-dashboard.outputs.artifact-id }}'
-          wait-for-completion: true
-          output-artifact-directory: 'signed/Dashboard'
-
       - name: Sign Lite
         if: github.event_name == 'release'
         uses: signpath/github-action-submit-signing-request@v2
@@ -307,24 +364,6 @@ jobs:
           wait-for-completion: true
           output-artifact-directory: 'signed/Lite'
 
-      - name: Sign Installer
-        if: github.event_name == 'release'
-        uses: signpath/github-action-submit-signing-request@v2
-        with:
-          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
-          organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
-          project-slug: 'PerformanceMonitor'
-          signing-policy-slug: 'release-signing'
-          artifact-configuration-slug: 'Installers'
-          github-artifact-id: '${{ steps.upload-installer.outputs.artifact-id }}'
-          wait-for-completion: true
-          output-artifact-directory: 'signed/Installer'
-
-      # The single 'Darling' artifact-configuration slug on signpath.io signs the two apphost exes
-      # at their staged paths (PerformanceMonitor.Darling.Service.exe at the root and
-      # viewer/PerformanceMonitor.Darling.Viewer.exe) and leaves the PerformanceMonitor.* and
-      # third-party dlls alone. That config (which files get signed) lives outside this repo; until
-      # the 'Darling' slug exists this step fails the release.
       - name: Sign Darling
         if: github.event_name == 'release'
         uses: signpath/github-action-submit-signing-request@v2
@@ -344,12 +383,8 @@ jobs:
         run: |
           $version = "${{ steps.version.outputs.VERSION }}"
           # Re-zip signed files into release archives
-          Remove-Item "releases/PerformanceMonitorDashboard-$version.zip" -ErrorAction SilentlyContinue
-          Compress-Archive -Path 'signed/Dashboard/*' -DestinationPath "releases/PerformanceMonitorDashboard-$version.zip" -Force
           Remove-Item "releases/PerformanceMonitorLite-$version.zip" -ErrorAction SilentlyContinue
           Compress-Archive -Path 'signed/Lite/*' -DestinationPath "releases/PerformanceMonitorLite-$version.zip" -Force
-          Remove-Item "releases/PerformanceMonitorInstaller-$version.zip" -ErrorAction SilentlyContinue
-          Compress-Archive -Path 'signed/Installer/*' -DestinationPath "releases/PerformanceMonitorInstaller-$version.zip" -Force
 
       - name: Package Darling (signed)
         if: github.event_name == 'release'
@@ -375,14 +410,6 @@ jobs:
       # since Velopack packaging was introduced. These steps close that gap by
       # mirroring the exact upload/sign pattern used for Dashboard/Lite/Installer
       # above, and vpk pack below now reads from the signed output.
-      - name: Upload Dashboard (Velopack) for signing
-        if: github.event_name == 'release'
-        id: upload-dashboard-velopack
-        uses: actions/upload-artifact@v6
-        with:
-          name: Dashboard-Velopack-unsigned
-          path: publish/Dashboard-velopack/
-
       - name: Upload Lite (Velopack) for signing
         if: github.event_name == 'release'
         id: upload-lite-velopack
@@ -398,19 +425,6 @@ jobs:
         with:
           name: DarlingViewer-Velopack-unsigned
           path: publish/DarlingViewer-velopack/
-
-      - name: Sign Dashboard (Velopack)
-        if: github.event_name == 'release'
-        uses: signpath/github-action-submit-signing-request@v2
-        with:
-          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
-          organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
-          project-slug: 'PerformanceMonitor'
-          signing-policy-slug: 'release-signing'
-          artifact-configuration-slug: 'Dashboard'
-          github-artifact-id: '${{ steps.upload-dashboard-velopack.outputs.artifact-id }}'
-          wait-for-completion: true
-          output-artifact-directory: 'signed/Dashboard-Velopack'
 
       - name: Sign Lite (Velopack)
         if: github.event_name == 'release'
@@ -443,7 +457,7 @@ jobs:
           wait-for-completion: true
           output-artifact-directory: 'signed/DarlingViewer-Velopack'
 
-      - name: Create Velopack release (Dashboard)
+      - name: Create Velopack releases (Lite + Darling Viewer)
         if: github.event_name == 'release'
         shell: pwsh
         env:
@@ -451,15 +465,10 @@ jobs:
           VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
           # Pin vpk to the Velopack library version (keep in sync with the Velopack
-          # PackageReference in Dashboard.csproj / PerformanceMonitorLite.csproj).
+          # PackageReference in PerformanceMonitorLite.csproj).
           dotnet tool install -g vpk --version 1.2.0
-          New-Item -ItemType Directory -Force -Path releases/velopack-dashboard
           New-Item -ItemType Directory -Force -Path releases/velopack-lite
           New-Item -ItemType Directory -Force -Path releases/velopack-darlingviewer
-
-          # Dashboard: download previous + pack (from the SIGNED velopack output, not the raw publish dir)
-          vpk download github --repoUrl https://github.com/${{ github.repository }} --channel dashboard -o releases/velopack-dashboard --token $env:GH_TOKEN
-          vpk pack -u PerformanceMonitorDashboard -v $env:VERSION -p signed/Dashboard-Velopack -e PerformanceMonitorDashboard.exe -o releases/velopack-dashboard --channel dashboard
 
           # Lite: download previous + pack (from the SIGNED velopack output, not the raw publish dir)
           vpk download github --repoUrl https://github.com/${{ github.repository }} --channel lite -o releases/velopack-lite --token $env:GH_TOKEN
@@ -489,15 +498,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload ${{ github.event.release.tag_name }} releases/*.zip releases/SHA256SUMS.txt --clobber
-
-      - name: Upload Dashboard Velopack artifacts
-        if: github.event_name == 'release'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ steps.version.outputs.VERSION }}
-        run: |
-          vpk upload github --repoUrl https://github.com/${{ github.repository }} --channel dashboard -o releases/velopack-dashboard --releaseName "v$env:VERSION" --tag "v$env:VERSION" --merge --token $env:GH_TOKEN
 
       - name: Upload Lite Velopack artifacts
         if: github.event_name == 'release'
@@ -531,11 +531,18 @@ jobs:
   darling-pg:
     name: Darling PostgreSQL tests
     runs-on: windows-latest
+    # Max observed on a warm cache is ~3m40s; a cold pg-runtime cache adds a ~340MB fetch.
+    # 30 minutes is 3x headroom over the cold path — past that, something is hung (pg_ctl -w
+    # waiting on a cluster that will never come up), and the default 6h timeout would hold a
+    # shared-pool Windows runner hostage for the duration. The build job above deliberately
+    # has NO timeout: on release it waits on SignPath's manual approval gate, which can
+    # legitimately take hours.
+    timeout-minutes: 30
     permissions:
       contents: read
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # Only do the expensive TimescaleDB work when Darling code changed — or when THIS workflow
       # changed, so a change to the gate itself is exercised by the gate (this is what makes the PR
@@ -545,22 +552,44 @@ jobs:
       - name: Detect changed paths
         id: filter
         if: github.event_name != 'release'
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@v4
         with:
           # On push, compare against the previous commit on this branch (mirrors the build job);
           # on pull_request, an empty base makes the action diff against the PR base branch.
           base: ${{ github.event_name == 'push' && github.event.before || '' }}
+          # `Darling/**/!(*.md)` instead of a `Darling/**` include plus a `!Darling/**/*.md`
+          # exclude: dorny v4 treats each pattern as an independent predicate under the
+          # default quantifier, so the old bare negation was itself a match-all-non-Darling-md
+          # rule — this job ran the full TimescaleDB suite on every PR, including md-only
+          # ones (run 30218459544: "Filter darling = true, Matching files: CHANGELOG.md").
           filters: |
             darling:
-              - 'Darling/**'
-              - '!Darling/**/*.md'
+              - 'Darling/**/!(*.md)'
               - '.github/workflows/build.yml'
+
+      # This job's gate was already correct for documentation — a docs-only change leaves
+      # 'darling' false and every step below no-ops. What it lacked was SAYING so: a job
+      # that reports success having quietly run nothing looks identical to one that tested
+      # everything. Costs one step; buys a log you can point at when asking "did this
+      # actually get tested?".
+      - name: Report the Darling PG gate decision
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "::notice title=Darling PG tests skipped::Release event - the dev push that produced this commit already ran them."
+          elif [ "${{ steps.filter.outputs.darling }}" = "true" ]; then
+            echo "::notice title=Darling PG tests running::Darling code (or this workflow) changed."
+          else
+            echo "::notice title=Darling PG tests skipped::No Darling code changed - documentation-only Darling edits do not trigger the TimescaleDB suite."
+          fi
 
       - name: Setup .NET 10.0
         if: steps.filter.outputs.darling == 'true'
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: 10.0.x
+          global-json-file: global.json
           cache: true
           cache-dependency-path: '**/packages.lock.json'
 
@@ -569,7 +598,7 @@ jobs:
       - name: Cache Darling pg-runtime.zip
         if: steps.filter.outputs.darling == 'true'
         id: cache-pg-runtime
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: Darling/artifacts/pg-runtime.zip
           key: pg-runtime-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-runtime.ps1') }}

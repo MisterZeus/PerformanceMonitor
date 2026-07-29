@@ -62,7 +62,7 @@ public sealed class DarlingMcpDataTools
 
         try
         {
-            var rows = await DarlingDataReader.GetCpuUtilizationAsync(postgres, resolved.Value.ServerId, DateTime.UtcNow.AddHours(-hours_back));
+            var rows = await DarlingDataReader.GetCpuUtilizationAsync(postgres, resolved.ServerId, DateTime.UtcNow.AddHours(-hours_back));
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No CPU utilization data available.");
 
@@ -83,7 +83,7 @@ public sealed class DarlingMcpDataTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 note = "Values are 1-minute averages of 15-second ring buffer samples.",
                 samples = bucketed
@@ -113,7 +113,7 @@ public sealed class DarlingMcpDataTools
         try
         {
             var now = DateTime.UtcNow;
-            var rows = await DarlingDataReader.GetWaitStatsAsync(postgres, resolved.Value.ServerId, now.AddHours(-hours_back), now);
+            var rows = await DarlingDataReader.GetWaitStatsAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No wait stats data available for the specified time range.");
 
@@ -133,7 +133,7 @@ public sealed class DarlingMcpDataTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 waits = result
             }, McpHelpers.JsonOptions);
@@ -160,11 +160,11 @@ public sealed class DarlingMcpDataTools
         {
             var now = DateTime.UtcNow;
             var types = await DarlingDataReader.GetDistinctWaitTypesAsync(
-                postgres, resolved.Value.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 wait_types = types
             }, McpHelpers.JsonOptions);
@@ -192,12 +192,12 @@ public sealed class DarlingMcpDataTools
         {
             var now = DateTime.UtcNow;
             var start = now.AddHours(-hours_back);
-            var points = await DarlingDataReader.GetWaitTrendAsync(postgres, resolved.Value.ServerId, wait_type, start, now);
+            var points = await DarlingDataReader.GetWaitTrendAsync(postgres, resolved.ServerId, wait_type, start, now);
             if (points.Count == 0)
             {
                 /* Distinguish "unknown wait type here" from "nothing collected at all", handing back the
                    ones that do have data — Lite's get_wait_trend miss vocabulary. */
-                var collected = await DarlingDataReader.GetDistinctWaitTypesAsync(postgres, resolved.Value.ServerId, start, now);
+                var collected = await DarlingDataReader.GetDistinctWaitTypesAsync(postgres, resolved.ServerId, start, now);
                 if (collected.Count == 0)
                     return McpHelpers.Status(
                         "unavailable",
@@ -219,7 +219,7 @@ public sealed class DarlingMcpDataTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 wait_type,
                 hours_back,
                 trend = result
@@ -241,7 +241,7 @@ public sealed class DarlingMcpDataTools
 
         try
         {
-            var stats = await DarlingDataReader.GetLatestMemoryStatsAsync(postgres, resolved.Value.ServerId);
+            var stats = await DarlingDataReader.GetLatestMemoryStatsAsync(postgres, resolved.ServerId);
             if (stats == null)
                 return McpHelpers.Status("unavailable", "No memory stats available.");
 
@@ -251,7 +251,7 @@ public sealed class DarlingMcpDataTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 collection_time = stats.CollectionTime.ToString("o"),
                 total_physical_memory_mb = stats.TotalPhysicalMemoryMb,
                 available_physical_memory_mb = stats.AvailablePhysicalMemoryMb,
@@ -280,7 +280,7 @@ public sealed class DarlingMcpDataTools
 
         try
         {
-            var rows = await DarlingDataReader.GetLatestMemoryClerksAsync(postgres, resolved.Value.ServerId);
+            var rows = await DarlingDataReader.GetLatestMemoryClerksAsync(postgres, resolved.ServerId);
             var result = rows.Select(r => new
             {
                 clerk_type = r.ClerkType,
@@ -289,7 +289,7 @@ public sealed class DarlingMcpDataTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 clerks = result
             }, McpHelpers.JsonOptions);
         }
@@ -309,7 +309,7 @@ public sealed class DarlingMcpDataTools
 
         try
         {
-            var rows = await DarlingDataReader.GetLatestFileIoStatsAsync(postgres, resolved.Value.ServerId);
+            var rows = await DarlingDataReader.GetLatestFileIoStatsAsync(postgres, resolved.ServerId);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No file I/O stats available.");
 
@@ -332,7 +332,7 @@ public sealed class DarlingMcpDataTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 files = result
             }, McpHelpers.JsonOptions);
         }
@@ -356,7 +356,7 @@ public sealed class DarlingMcpDataTools
 
         try
         {
-            var rows = await DarlingDataReader.GetTempDbTrendAsync(postgres, resolved.Value.ServerId, DateTime.UtcNow.AddHours(-hours_back));
+            var rows = await DarlingDataReader.GetTempDbTrendAsync(postgres, resolved.ServerId, DateTime.UtcNow.AddHours(-hours_back));
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No TempDB data available.");
 
@@ -375,7 +375,7 @@ public sealed class DarlingMcpDataTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 trend = result
             }, McpHelpers.JsonOptions);
@@ -398,7 +398,7 @@ public sealed class DarlingMcpDataTools
 
         try
         {
-            var rows = await DarlingDataReader.GetLatestPerfmonStatsAsync(postgres, resolved.Value.ServerId);
+            var rows = await DarlingDataReader.GetLatestPerfmonStatsAsync(postgres, resolved.ServerId);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No perfmon stats available.");
 
@@ -418,7 +418,7 @@ public sealed class DarlingMcpDataTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 counters = result
             }, McpHelpers.JsonOptions);
         }
@@ -437,8 +437,8 @@ public sealed class DarlingMcpDataTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Number of top queries. Default 20.")] int top = 20,
         [Description("Filter to a specific database.")] string? database_name = null,
-        [Description("If true, only return queries that used parallelism (max_dop > 1).")] bool parallel_only = false,
-        [Description("Minimum DOP to filter on. Implies parallel filtering.")] int min_dop = 0)
+        [Description("If true, only return queries whose cached plan has EVER run at DOP > 1. Note: max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled. Confirm current parallelism with analyze_query_plan, which reads the actual plan.")] bool parallel_only = false,
+        [Description("Minimum DOP to filter on. Implies parallel filtering. Filters the same lifetime-max value as parallel_only, not current parallelism.")] int min_dop = 0)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
@@ -451,7 +451,7 @@ public sealed class DarlingMcpDataTools
         try
         {
             var now = DateTime.UtcNow;
-            var rows = await DarlingDataReader.GetTopQueriesByCpuAsync(postgres, resolved.Value.ServerId, now.AddHours(-hours_back), now, top, database_name);
+            var rows = await DarlingDataReader.GetTopQueriesByCpuAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, top, database_name);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
 
@@ -489,7 +489,7 @@ public sealed class DarlingMcpDataTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 queries = result
             }, McpHelpers.JsonOptions);
@@ -519,7 +519,7 @@ public sealed class DarlingMcpDataTools
         try
         {
             var now = DateTime.UtcNow;
-            var rows = await DarlingDataReader.GetTopProceduresByCpuAsync(postgres, resolved.Value.ServerId, now.AddHours(-hours_back), now, top, database_name);
+            var rows = await DarlingDataReader.GetTopProceduresByCpuAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, top, database_name);
             if (rows.Count == 0)
                 return McpHelpers.Status(
                     "unavailable",
@@ -550,7 +550,7 @@ public sealed class DarlingMcpDataTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 procedures = result
             }, McpHelpers.JsonOptions);
@@ -580,7 +580,7 @@ public sealed class DarlingMcpDataTools
         try
         {
             var now = DateTime.UtcNow;
-            var rows = await DarlingDataReader.GetQueryStoreTopAsync(postgres, resolved.Value.ServerId, now.AddHours(-hours_back), now, top, database_name);
+            var rows = await DarlingDataReader.GetQueryStoreTopAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, top, database_name);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No Query Store data available. Query Store may not be enabled on target databases.");
 
@@ -608,7 +608,7 @@ public sealed class DarlingMcpDataTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 queries = result
             }, McpHelpers.JsonOptions);
@@ -673,7 +673,7 @@ public sealed class DarlingMcpDataTools
 
         try
         {
-            var rows = await DarlingDataReader.GetCollectionHealthAsync(postgres, resolved.Value.ServerId, DateTime.UtcNow.AddDays(-7));
+            var rows = await DarlingDataReader.GetCollectionHealthAsync(postgres, resolved.ServerId, DateTime.UtcNow.AddDays(-7));
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No collection health data available.");
 
@@ -683,6 +683,9 @@ public sealed class DarlingMcpDataTools
                 status = r.HealthStatus,
                 total_runs = r.TotalRuns,
                 errors = r.ErrorCount,
+                /* Deliberate 1s lock-timeout yields (#1805) — benign, distinct from errors; clustering
+                   here is a lock-contention signal about the monitored server. */
+                yields = r.YieldCount,
                 failure_rate_pct = Math.Round(r.FailureRatePercent, 1),
                 avg_duration_ms = Math.Round(r.AvgDurationMs, 0),
                 last_success = r.LastSuccessTime?.ToString("o"),
@@ -691,7 +694,7 @@ public sealed class DarlingMcpDataTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 collectors = result
             }, McpHelpers.JsonOptions);
         }
@@ -711,13 +714,13 @@ public sealed class DarlingMcpDataTools
 
         try
         {
-            var row = await DarlingDataReader.GetLatestServerPropertiesAsync(postgres, resolved.Value.ServerId);
+            var row = await DarlingDataReader.GetLatestServerPropertiesAsync(postgres, resolved.ServerId);
             if (row == null)
                 return McpHelpers.Status("unavailable", "No server properties available. The properties collector may not have run yet.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 collection_time = row.CollectionTime.ToString("o"),
                 edition = row.Edition,
                 engine_edition = row.EngineEdition,

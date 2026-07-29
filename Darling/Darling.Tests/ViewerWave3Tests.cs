@@ -373,7 +373,7 @@ public sealed class ViewerWave3LivePostgresTests
             };
             await viewer.InsertMuteRuleAsync(rule);
 
-            var inserted = Assert.Single((await viewer.GetMuteRulesAsync()).Where(r => r.Id == MuteRuleId));
+            var inserted = Assert.Single(await viewer.GetMuteRulesAsync(), r => r.Id == MuteRuleId);
             Assert.True(inserted.Enabled);
             Assert.Equal(MuteRuleServer, inserted.ServerName);
             Assert.Equal("High CPU", inserted.MetricName);
@@ -384,17 +384,17 @@ public sealed class ViewerWave3LivePostgresTests
             rule.MetricName = "Poison Wait";
             rule.Reason = "updated";
             await viewer.UpdateMuteRuleAsync(rule);
-            var updated = Assert.Single((await viewer.GetMuteRulesAsync()).Where(r => r.Id == MuteRuleId));
+            var updated = Assert.Single(await viewer.GetMuteRulesAsync(), r => r.Id == MuteRuleId);
             Assert.Equal("Poison Wait", updated.MetricName);
             Assert.Equal("updated", updated.Reason);
 
             /* Toggle enabled off. */
             await viewer.SetMuteRuleEnabledAsync(MuteRuleId, false);
-            Assert.False(Assert.Single((await viewer.GetMuteRulesAsync()).Where(r => r.Id == MuteRuleId)).Enabled);
+            Assert.False(Assert.Single(await viewer.GetMuteRulesAsync(), r => r.Id == MuteRuleId).Enabled);
 
             /* Delete removes it. */
             await viewer.DeleteMuteRuleAsync(MuteRuleId);
-            Assert.Empty((await viewer.GetMuteRulesAsync()).Where(r => r.Id == MuteRuleId));
+            Assert.DoesNotContain(await viewer.GetMuteRulesAsync(), r => r.Id == MuteRuleId);
 
             /* Purge-expired removes an already-expired rule. */
             await viewer.InsertMuteRuleAsync(new MuteRule
@@ -407,7 +407,7 @@ public sealed class ViewerWave3LivePostgresTests
             });
             var removed = await viewer.PurgeExpiredMuteRulesAsync();
             Assert.True(removed >= 1);
-            Assert.Empty((await viewer.GetMuteRulesAsync()).Where(r => r.Id == MuteRuleId));
+            Assert.DoesNotContain(await viewer.GetMuteRulesAsync(), r => r.Id == MuteRuleId);
         }
         finally
         {

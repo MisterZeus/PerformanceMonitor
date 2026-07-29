@@ -26,14 +26,23 @@ namespace PerformanceMonitor.Darling.Service;
 public sealed class DarlingDeltaCalculator : CollectorDeltaCalculator
 {
     /* The four seed queries are verbatim from Lite's DeltaCalculator — deliberately written in
-       the PG-shared dialect (the (server_id, collection_time) row-value latest-row form runs on
-       both engines as-is). Pinned by DarlingDeltaSeederTests. */
+       the PG-shared dialect (the (server_id, collection_time) row-value latest-row form, and the
+       reused $1 positional placeholder, both run on either engine as-is). Pinned by
+       DarlingDeltaSeederTests, and mirrored in Lite by LiteDeltaSeederTests.
+
+       $1 is CollectorDeltaCalculator.SeedCutoff(), and it is bound on BOTH the outer read and the
+       inner MAX() — either one left unbounded scans every chunk of the hypertable. That is what
+       #1772 was: on a 276 GB field store the unbounded form could not finish inside the 30-second
+       command timeout, so restart continuity silently degraded to first-cycle-zero deltas every
+       time the service came up. The bound is free rather than a trade, because the delta gap policy
+       throws away anything older than it anyway — see CollectorDeltaCalculator.SeedLookback. */
 
     public const string WaitStatsSeedSql = @"
 SELECT server_id, wait_type, waiting_tasks_count, wait_time_ms, signal_wait_time_ms, collection_time
 FROM wait_stats
-WHERE (server_id, collection_time) IN (
-    SELECT server_id, MAX(collection_time) FROM wait_stats GROUP BY server_id
+WHERE collection_time >= $1
+AND   (server_id, collection_time) IN (
+    SELECT server_id, MAX(collection_time) FROM wait_stats WHERE collection_time >= $1 GROUP BY server_id
 )";
 
     public const string FileIoStatsSeedSql = @"
@@ -43,22 +52,30 @@ SELECT server_id, database_name, file_name,
        io_stall_queued_read_ms, io_stall_queued_write_ms,
        collection_time
 FROM file_io_stats
-WHERE (server_id, collection_time) IN (
-    SELECT server_id, MAX(collection_time) FROM file_io_stats GROUP BY server_id
+WHERE collection_time >= $1
+AND   (server_id, collection_time) IN (
+    SELECT server_id, MAX(collection_time) FROM file_io_stats WHERE collection_time >= $1 GROUP BY server_id
 )";
 
     public const string PerfmonStatsSeedSql = @"
 SELECT server_id, object_name, counter_name, instance_name, cntr_value, collection_time
 FROM perfmon_stats
-WHERE (server_id, collection_time) IN (
-    SELECT server_id, MAX(collection_time) FROM perfmon_stats GROUP BY server_id
+WHERE collection_time >= $1
+AND   (server_id, collection_time) IN (
+    SELECT server_id, MAX(collection_time) FROM perfmon_stats WHERE collection_time >= $1 GROUP BY server_id
 )";
 
+    /* This one also SELECTs collection_time, which the other three always did. Without it the
+       memory-grant baselines seeded with a null timestamp, which disarms the gap policy for exactly
+       the two counters where a stale baseline shows as a fabricated spike (grant timeouts and forced
+       grants are monotonic). Inside the bounded window the row is fresh anyway; carrying the
+       timestamp is what makes that a guarantee instead of an assumption. */
     public const string MemoryGrantStatsSeedSql = @"
-SELECT server_id, pool_id, resource_semaphore_id, timeout_error_count, forced_grant_count
+SELECT server_id, pool_id, resource_semaphore_id, timeout_error_count, forced_grant_count, collection_time
 FROM memory_grant_stats
-WHERE (server_id, collection_time) IN (
-    SELECT server_id, MAX(collection_time) FROM memory_grant_stats GROUP BY server_id
+WHERE collection_time >= $1
+AND   (server_id, collection_time) IN (
+    SELECT server_id, MAX(collection_time) FROM memory_grant_stats WHERE collection_time >= $1 GROUP BY server_id
 )";
 
     /// <summary>
@@ -73,12 +90,17 @@ WHERE (server_id, collection_time) IN (
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
 
-            await SeedWaitStatsAsync(connection, logger, cancellationToken);
-            await SeedFileIoStatsAsync(connection, logger, cancellationToken);
-            await SeedPerfmonStatsAsync(connection, logger, cancellationToken);
-            await SeedMemoryGrantStatsAsync(connection, logger, cancellationToken);
+            /* One cutoff for all four reads, so they describe the same instant. */
+            var cutoff = SeedCutoff();
 
-            logger?.LogInformation("Delta calculator seeded from Postgres store");
+            await SeedWaitStatsAsync(connection, cutoff, logger, cancellationToken);
+            await SeedFileIoStatsAsync(connection, cutoff, logger, cancellationToken);
+            await SeedPerfmonStatsAsync(connection, cutoff, logger, cancellationToken);
+            await SeedMemoryGrantStatsAsync(connection, cutoff, logger, cancellationToken);
+
+            logger?.LogInformation(
+                "Delta calculator seeded from Postgres store (baselines from the last {Minutes} minutes)",
+                (int)SeedLookback.TotalMinutes);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -86,9 +108,10 @@ WHERE (server_id, collection_time) IN (
         }
     }
 
-    private async Task SeedWaitStatsAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
+    private async Task SeedWaitStatsAsync(NpgsqlConnection connection, DateTime cutoff, ILogger? logger, CancellationToken cancellationToken)
     {
         using var cmd = new NpgsqlCommand(WaitStatsSeedSql, connection);
+        cmd.Parameters.AddWithValue(cutoff);
         using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         var count = 0;
         while (await reader.ReadAsync(cancellationToken))
@@ -105,9 +128,10 @@ WHERE (server_id, collection_time) IN (
         if (count > 0) logger?.LogDebug("Seeded {Count} wait_stats baseline rows", count);
     }
 
-    private async Task SeedFileIoStatsAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
+    private async Task SeedFileIoStatsAsync(NpgsqlConnection connection, DateTime cutoff, ILogger? logger, CancellationToken cancellationToken)
     {
         using var cmd = new NpgsqlCommand(FileIoStatsSeedSql, connection);
+        cmd.Parameters.AddWithValue(cutoff);
         using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         var count = 0;
         while (await reader.ReadAsync(cancellationToken))
@@ -130,9 +154,10 @@ WHERE (server_id, collection_time) IN (
         if (count > 0) logger?.LogDebug("Seeded {Count} file_io_stats baseline rows", count);
     }
 
-    private async Task SeedPerfmonStatsAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
+    private async Task SeedPerfmonStatsAsync(NpgsqlConnection connection, DateTime cutoff, ILogger? logger, CancellationToken cancellationToken)
     {
         using var cmd = new NpgsqlCommand(PerfmonStatsSeedSql, connection);
+        cmd.Parameters.AddWithValue(cutoff);
         using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         var count = 0;
         while (await reader.ReadAsync(cancellationToken))
@@ -148,11 +173,12 @@ WHERE (server_id, collection_time) IN (
         if (count > 0) logger?.LogDebug("Seeded {Count} perfmon_stats baseline rows", count);
     }
 
-    private async Task SeedMemoryGrantStatsAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
+    private async Task SeedMemoryGrantStatsAsync(NpgsqlConnection connection, DateTime cutoff, ILogger? logger, CancellationToken cancellationToken)
     {
         try
         {
             using var cmd = new NpgsqlCommand(MemoryGrantStatsSeedSql, connection);
+            cmd.Parameters.AddWithValue(cutoff);
             using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             var count = 0;
             while (await reader.ReadAsync(cancellationToken))
@@ -161,8 +187,9 @@ WHERE (server_id, collection_time) IN (
                 var poolId = reader.IsDBNull(1) ? 0 : reader.GetInt32(1);
                 var semaphoreId = reader.IsDBNull(2) ? (short)0 : reader.GetInt16(2);
                 var deltaKey = $"{poolId}_{semaphoreId}";
-                Seed(serverId, "memory_grants_timeouts", deltaKey, reader.IsDBNull(3) ? 0 : reader.GetInt64(3), null);
-                Seed(serverId, "memory_grants_forced", deltaKey, reader.IsDBNull(4) ? 0 : reader.GetInt64(4), null);
+                var ts = reader.IsDBNull(5) ? (DateTime?)null : reader.GetDateTime(5);
+                Seed(serverId, "memory_grants_timeouts", deltaKey, reader.IsDBNull(3) ? 0 : reader.GetInt64(3), ts);
+                Seed(serverId, "memory_grants_forced", deltaKey, reader.IsDBNull(4) ? 0 : reader.GetInt64(4), ts);
                 count++;
             }
             if (count > 0) logger?.LogDebug("Seeded {Count} memory_grant_stats baseline rows", count);

@@ -442,7 +442,7 @@ AND   delta_execution_count > 0";
 
     public const string PlanAdvisorySql = @"
 SELECT query_plan_xml
-FROM query_stats
+FROM v_query_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3

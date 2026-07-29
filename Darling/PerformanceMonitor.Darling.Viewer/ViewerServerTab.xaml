@@ -3204,7 +3204,7 @@
              HealthStatus cell is plain text (Lite doesn't color it — the shell's StatusToBrush stays on
              the Findings grid only), and Lite's "Open Log File" button is dropped (it opens Lite's local
              log file, which the viewer has no equivalent of). -->
-        <TabItem Header="Collection Health">
+        <TabItem x:Name="CollectionHealthTab" Header="Collection Health">
             <Grid Margin="8">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
@@ -3239,6 +3239,9 @@
                                 </DataGridTextColumn>
                                 <DataGridTextColumn Binding="{Binding ErrorCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ErrorCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Errors" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Binding="{Binding YieldCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="YieldCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Yields" FontWeight="Bold" VerticalAlignment="Center" ToolTip="Deliberate 1-second lock-timeout yields: the snapshot collector stepped aside instead of joining a blocking chain. A signal about lock contention on the monitored server, not a collection failure."/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                                 <DataGridTextColumn Binding="{Binding FailureRatePercent, StringFormat=N1}" ElementStyle="{StaticResource NumericCell}" Width="85">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="FailureRatePercent" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Fail %" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>

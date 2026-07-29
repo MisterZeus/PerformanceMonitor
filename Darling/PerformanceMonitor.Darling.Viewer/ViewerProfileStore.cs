@@ -187,12 +187,12 @@ public sealed class ViewerProfileStore
             return true;
         }
 
-        return _secrets.Get(ProfileCredentialId(profile.Id)) is not null;
+        return _secrets.Find(ProfileCredentialId(profile.Id)) is not null;
     }
 
     /// <summary>The stored (username, secret) for a profile, or null — used to pre-fill the profile editor on edit.</summary>
     public (string Username, string Password)? GetSecret(string profileId) =>
-        _secrets.Get(ProfileCredentialId(profileId));
+        _secrets.Find(ProfileCredentialId(profileId));
 
     private void StoreSecretIfNeeded(ViewerCredentialProfile profile, string? username, string? secret)
     {

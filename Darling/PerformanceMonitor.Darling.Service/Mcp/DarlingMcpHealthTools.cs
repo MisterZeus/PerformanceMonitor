@@ -40,15 +40,15 @@ public sealed class DarlingMcpHealthTools
 
         try
         {
-            var summary = await DarlingHealthReader.GetServerSummaryAsync(postgres, resolved.Value.ServerId);
+            var summary = await DarlingHealthReader.GetServerSummaryAsync(postgres, resolved.ServerId);
             if (summary.HasNoData)
                 return McpHelpers.Status(
                     "unavailable",
-                    $"No data available for {resolved.Value.ServerName}. The collector may not have run yet.");
+                    $"No data available for {resolved.ServerName}. The collector may not have run yet.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 cpu_percent = summary.CpuPercent,
                 memory_mb = summary.MemoryMb,
                 blocking_count = summary.BlockingCount,
@@ -81,16 +81,16 @@ public sealed class DarlingMcpHealthTools
 
         try
         {
-            var row = await DarlingHealthReader.GetDailySummaryAsync(postgres, resolved.Value.ServerId, date);
+            var row = await DarlingHealthReader.GetDailySummaryAsync(postgres, resolved.ServerId, date);
             if (!row.HasData)
                 return McpHelpers.Status(
                     "empty",
-                    $"No data collected for {resolved.Value.ServerName} on {row.SummaryDate:yyyy-MM-dd}.",
+                    $"No data collected for {resolved.ServerName} on {row.SummaryDate:yyyy-MM-dd}.",
                     new { summary_date = row.SummaryDate.ToString("yyyy-MM-dd"), overall_health = row.OverallHealth });
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 summary_date = row.SummaryDate.ToString("yyyy-MM-dd"),
                 overall_health = row.OverallHealth,
                 health_band = row.HealthBand.ToString(),

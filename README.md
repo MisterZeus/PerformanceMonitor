@@ -28,15 +28,15 @@
 
 Pick by how you want collection to run — the monitoring brain (collectors, alert engine, plan analysis, MCP tools) is shared across all three at the library level.
 
-| | **[Lite](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** — flagship | **[Darling](Darling/README.md)** — headless | **[Dashboard](Dashboard/README.md)** — *deprecated* |
+| | **[Lite](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** — flagship | **[Darling](Darling/README.md)** — headless | **[Dashboard](deprecated/Dashboard/README.md)** — *deprecated* |
 |---|---|---|---|
 | **How it runs** | Single desktop app monitors remotely, on demand | Windows service collects 24/7 into a central store; detached viewer reads it from any seat | SQL-Server-installed database + Agent collectors, separate viewer app |
 | **Installs on your server?** | No | No | Yes (a `PerformanceMonitor` database) |
 | **Stores data** | Local DuckDB + Parquet | Bundled PostgreSQL + TimescaleDB | In the target SQL Server |
 | **Best for** | Quick triage, Azure SQL DB, locked-down servers, consultants, firefighting | Always-on monitoring of many servers from one service | *Existing installs only — new deployments should use Lite or Darling* |
-| **Requires** | `VIEW SERVER STATE` ([permissions](#permissions)) | `VIEW SERVER STATE` + a place to run the service | SQL Agent ([Dashboard docs](Dashboard/README.md)) |
+| **Requires** | `VIEW SERVER STATE` ([permissions](#permissions)) | `VIEW SERVER STATE` + a place to run the service | SQL Agent ([Dashboard docs](deprecated/Dashboard/README.md)) |
 
-> **⚠️ The "Full" Dashboard edition is deprecated.** It still ships and is supported for existing users, but it is no longer the recommended path. New deployments should use **Lite** or **Darling**. Its docs now live with the code: **[Dashboard/README.md](Dashboard/README.md)** (the app, tabs, permissions) and **[Installer/README.md](Installer/README.md)** (the CLI database installer). The Dashboard installer remains in the release assets.
+> **⚠️ The "Full" Dashboard edition is deprecated.** Existing installs keep working and remain on bug-fix support, but it is no longer the recommended path and — as of v3.3.0 — the Dashboard and its CLI installer are **no longer included in release assets**. The last shipped builds are in the [v3.2.0 release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/tag/v3.2.0), and both remain buildable from the repo. New deployments should use **Lite** or **Darling**. Its docs live with the code: **[deprecated/Dashboard/README.md](deprecated/Dashboard/README.md)** (the app, tabs, permissions) and **[deprecated/Installer/README.md](deprecated/Installer/README.md)** (the CLI database installer).
 
 **👉 Not sure? [Start with Lite.](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** One download, nothing installed on your server, data flowing in under 5 minutes.
 
@@ -106,7 +106,7 @@ Data starts flowing within 1–5 minutes. That's it. No installation on your ser
 
 ### Lite Collectors
 
-36 collectors run on independent, configurable schedules (the long-running-query completion trace is opt-in and ships disabled):
+38 collectors run on independent, configurable schedules (the long-running-query completion trace is opt-in and ships disabled):
 
 | Collector | Default | Source |
 |---|---|---|
@@ -128,6 +128,8 @@ Data starts flowing within 1–5 minutes. That's it. No installation on your ser
 | perfmon_stats | 1 min | `sys.dm_os_performance_counters` (deltas) |
 | deadlocks | 1 min | dedicated `PerformanceMonitor_Deadlock` XE session (`xml_deadlock_report`; `database_xml_deadlock_report` on Azure SQL DB) |
 | dmv_blocking_snapshot | 1 min | `sys.dm_os_waiting_tasks` + `sys.dm_exec_*` (always-on blocking fallback when the blocked-process-report XE is unavailable) |
+| ag_replica_states | 1 min | `sys.dm_hadr_availability_replica_states` + `sys.availability_replicas` (Availability Group replica health; zero rows without AGs, not Azure SQL DB) |
+| ag_database_replica_states | 1 min | `sys.dm_hadr_database_replica_states` (per-database send/redo queues, rates, secondary lag; zero rows without AGs, not Azure SQL DB) |
 | session_stats | 5 min | `sys.dm_exec_sessions` active session tracking |
 | session_summary_stats | 5 min | `sys.dm_exec_sessions` top app/host/database summary |
 | memory_clerks | 5 min | `sys.dm_os_memory_clerks` |
@@ -223,7 +225,7 @@ The **Lite** app and the **Darling** viewer share the same tab layout (the viewe
 | **FinOps** | Utilization & provisioning analysis, database resource breakdown, storage growth (7d/30d), idle database detection, index analysis via sp_IndexCleanup, per-object table/index size, growth, usage, and locking/contention analysis, application connections, server inventory, cost optimization recommendations, column-level filtering on all grids |
 | **Recommendations** | Prioritized findings drawn from collected metrics, grouped into incidents, each card showing the affected database, the recommendation, the reasoning behind it, and a copyable MCP investigation prompt |
 
-Both feature auto-refresh, configurable time ranges, chart drill-down to Active Queries, right-click CSV export, system tray integration, dark and light themes, and timezone display options (server time, local time, or UTC). The Darling viewer adds a fleet sidebar and per-server tabs; see [Darling/README.md](Darling/README.md). The deprecated Dashboard's six-tab-group layout is documented in [Dashboard/README.md](Dashboard/README.md).
+Both feature auto-refresh, configurable time ranges, chart drill-down to Active Queries, right-click CSV export, system tray integration, dark and light themes, and timezone display options (server time, local time, or UTC). The Darling viewer adds a fleet sidebar and per-server tabs; see [Darling/README.md](Darling/README.md). The deprecated Dashboard's six-tab-group layout is documented in [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md).
 
 ---
 
@@ -318,7 +320,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 
 ### Available Tools
 
-**Lite** exposes 74 tools; **Darling** exposes the analysis + data-read surface on request; the deprecated **Dashboard** exposes 66 (see [Dashboard/README.md](Dashboard/README.md)). Core tools are shared.
+**Lite** exposes 74 tools; **Darling** exposes the analysis + data-read surface on request; the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md)). Core tools are shared.
 
 | Category | Tools |
 |---|---|
@@ -384,7 +386,7 @@ Common issues:
 4. **Connection failures** — Verify network connectivity, firewall rules, and that the login has the required [permissions](#permissions). For Azure SQL Database, use a contained database user with `VIEW DATABASE STATE`.
 5. **FinOps Index Analysis hangs, times out, or returns `Msg 229` on `sql_expression_dependencies`** — see [FinOps Index Analysis](#finops-index-analysis-per-database-grants) below for the full per-database grant set that fixes both failure modes.
 
-**Darling** troubleshooting (service logs, store connectivity, permissions) is in the [Darling operator guide](Darling/README.md). **Dashboard** (Full edition) troubleshooting is in [Dashboard/README.md](Dashboard/README.md).
+**Darling** troubleshooting (service logs, store connectivity, permissions) is in the [Darling operator guide](Darling/README.md). **Dashboard** (Full edition) troubleshooting is in [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md).
 
 ---
 
@@ -421,13 +423,19 @@ Nothing is installed on the target server. The login only needs:
 USE [master];
 GRANT VIEW SERVER STATE TO [YourLogin];
 
+-- Optional: for Availability Group health (see the note below - without this
+-- the AG collectors return zero rows on a server that HAS availability groups)
+GRANT VIEW ANY DEFINITION TO [YourLogin];
+
 -- Optional: for SQL Agent job monitoring
 USE [msdb];
 CREATE USER [YourLogin] FOR LOGIN [YourLogin];
 ALTER ROLE [SQLAgentReaderRole] ADD MEMBER [YourLogin];
 ```
 
-Darling uses the same target-server grants; its bundled PostgreSQL store and service account are covered in the [Darling operator guide](Darling/README.md). The deprecated Full edition's install/least-privilege grants are in [Dashboard/README.md](Dashboard/README.md).
+**Availability Groups need a second grant.** The `ag_replica_states` / `ag_database_replica_states` collectors read the AG *catalog views* (`sys.availability_groups`, `sys.availability_replicas`) alongside the `sys.dm_hadr_*` DMVs. The DMVs are covered by `VIEW SERVER STATE`, but [the catalog views require `VIEW ANY DEFINITION`](https://learn.microsoft.com/en-us/sql/database-engine/availability-groups/windows/monitor-availability-groups-transact-sql) — and catalog views enforce that by *hiding rows*, not by raising an error. So on a real AG cluster a login with only `VIEW SERVER STATE` gets zero rows, which looks exactly like a server with no availability groups. If your AG dashboards are empty, this grant is why.
+
+Darling uses the same target-server grants; its bundled PostgreSQL store and service account are covered in the [Darling operator guide](Darling/README.md). The deprecated Full edition's install/least-privilege grants are in [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md).
 
 ### FinOps Index Analysis (per-database grants)
 
@@ -536,9 +544,9 @@ PerformanceMonitor/
 │   Full Edition (deprecated) — server-installed collectors + separate dashboard
 ├── install/               # SQL installation scripts (Full edition)
 ├── upgrades/              # Version-specific upgrade scripts (Full edition)
-├── Installer/             # CLI installer for the Full edition database (see Installer/README.md)
-├── Installer.Core/        # Shared installation library (CLI + Dashboard)
-├── Dashboard/             # Full edition dashboard app (see Dashboard/README.md)
+├── deprecated/Installer/  # CLI installer for the Full edition database (see deprecated/Installer/README.md)
+├── deprecated/Installer.Core/  # Shared installation library (CLI + Dashboard)
+├── deprecated/Dashboard/  # Full edition dashboard app (see deprecated/Dashboard/README.md)
 │
 └── README.md              # This file
 ```
@@ -558,8 +566,8 @@ dotnet build Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darli
 dotnet build Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj
 
 # Full Edition (deprecated) — Dashboard app + CLI installer
-dotnet build Dashboard/Dashboard.csproj
-dotnet publish Installer/PerformanceMonitorInstaller.csproj -c Release
+dotnet build deprecated/Dashboard/Dashboard.csproj
+dotnet publish deprecated/Installer/PerformanceMonitorInstaller.csproj -c Release
 ```
 
 ---

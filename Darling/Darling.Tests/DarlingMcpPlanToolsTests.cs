@@ -153,7 +153,9 @@ public sealed class DarlingMcpPlanToolsSurfaceAndSqlTests
     {
         var sql = DarlingStoredPlanReader.QueryStatsPlanXmlByHashSql;
         Assert.Contains("SELECT query_plan_xml", sql, StringComparison.Ordinal);
-        Assert.Contains("FROM query_stats", sql, StringComparison.Ordinal);
+        /* The RESOLVING view, not the base table (#1767): query_stats.query_plan_xml is NULL on every row
+           written since the migration. Reading the base table would return NULL rather than error. */
+        Assert.Contains("FROM v_query_stats", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("query_hash = $2", sql, StringComparison.Ordinal);                    /* the Dashboard's key */
         Assert.Contains("$3::text IS NULL OR database_name = $3", sql, StringComparison.Ordinal); /* optional database refinement */
@@ -163,16 +165,27 @@ public sealed class DarlingMcpPlanToolsSurfaceAndSqlTests
     }
 
     [Fact]
-    public void ProcedurePlanSql_ReadsStoredXml_KeyedBySqlHandle_LatestNonNull()
+    public void ProcedurePlanSql_ResolvesThePlanDimensionItself_GuardingOnTheCoalescedExpression()
     {
         var sql = DarlingStoredPlanReader.ProcedurePlanXmlBySqlHandleSql;
-        Assert.Contains("SELECT query_plan_xml", sql, StringComparison.Ordinal);
-        Assert.Contains("FROM procedure_stats", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("v_procedure_stats", sql, StringComparison.Ordinal);            /* plan column is on the base table */
-        Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("sql_handle = $2", sql, StringComparison.Ordinal);                    /* the Dashboard's key */
-        Assert.Contains("query_plan_xml IS NOT NULL", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collection_time DESC", sql, StringComparison.Ordinal);
+
+        /* No v_procedure_stats exists to resolve the #1767 plan dimension, so this read joins query_plan_dim
+           itself — the same shape as the viewer's ProcedureStatsPlanXmlSql twin. */
+        Assert.Contains("SELECT COALESCE(ps.query_plan_xml, qpd.query_plan_xml)", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM procedure_stats AS ps", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("v_procedure_stats", sql, StringComparison.Ordinal);            /* that view has never existed */
+        Assert.Contains("LEFT JOIN query_plan_dim AS qpd", sql, StringComparison.Ordinal);
+        Assert.Contains("ON qpd.digest = ps.query_plan_digest", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE ps.server_id = $1", sql, StringComparison.Ordinal);
+        Assert.Contains("ps.sql_handle = $2", sql, StringComparison.Ordinal);                 /* the Dashboard's key */
+
+        /* THE regression to guard: the presence filter must ride the COALESCED expression. On the bare
+           inline column it discards every row written since #1767 before the join can resolve it — zero
+           rows, no error, reads exactly like "no plan captured". */
+        Assert.Contains("AND   COALESCE(ps.query_plan_xml, qpd.query_plan_xml) IS NOT NULL", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("AND   ps.query_plan_xml IS NOT NULL", sql, StringComparison.Ordinal);
+
+        Assert.Contains("ORDER BY ps.collection_time DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
     }
 

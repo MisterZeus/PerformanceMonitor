@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
@@ -15,11 +14,11 @@ namespace PerformanceMonitorLite.Tests;
 /// Tests for BaselineProvider: time-bucketed baseline computation, bucket collapse
 /// with hysteresis, restart poisoning exclusion, and division-by-zero handling.
 /// </summary>
-public class BaselineProviderTests : IDisposable
+public class BaselineProviderTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
-    private readonly string _tempDir;
     private readonly DuckDbInitializer _duckDb;
     private readonly BaselineProvider _provider;
+    private DuckDBConnection? _seedConn;
 
     private const int ServerId = -999;
 
@@ -29,25 +28,29 @@ public class BaselineProviderTests : IDisposable
 
     private long _nextId = -1;
 
-    public BaselineProviderTests()
+    public BaselineProviderTests(SharedDuckDbFixture fixture)
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "BaselineTests_" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(_tempDir);
-        var dbPath = Path.Combine(_tempDir, "test.duckdb");
-        _duckDb = new DuckDbInitializer(dbPath);
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
         _provider = new BaselineProvider(_duckDb);
         // Use very short TTL so cache doesn't interfere between tests
         BaselineProvider.CacheTtl = TimeSpan.FromMilliseconds(1);
     }
 
-    public void Dispose()
+    public void Dispose() => _seedConn?.Dispose();
+
+    /// <summary>
+    /// One connection reused for every seeded row — opening a fresh connection per
+    /// single-row INSERT measured ~90ms/row and dominated this class's runtime.
+    /// </summary>
+    private async Task<DuckDBConnection> SeedConnectionAsync()
     {
-        try
+        if (_seedConn is null)
         {
-            if (Directory.Exists(_tempDir))
-                Directory.Delete(_tempDir, recursive: true);
+            _seedConn = _duckDb.CreateConnection();
+            await _seedConn.OpenAsync();
         }
-        catch { /* Best-effort cleanup */ }
+        return _seedConn;
     }
 
     // ── Full bucket: enough samples in one hour+dow ──
@@ -55,8 +58,6 @@ public class BaselineProviderTests : IDisposable
     [Fact]
     public async Task GetBaseline_FullBucket_ReturnsMeanAndStdDev()
     {
-        await _duckDb.InitializeAsync();
-
         // Seed 20 CPU samples on Wednesdays at 14:xx over 4 weeks (well above RestoreThreshold=15)
         for (int week = 0; week < 4; week++)
         {
@@ -80,8 +81,6 @@ public class BaselineProviderTests : IDisposable
     [Fact]
     public async Task GetBaseline_SparseBucket_CollapsesToHourOnly()
     {
-        await _duckDb.InitializeAsync();
-
         // Seed only 5 samples on Wednesday 14:xx (below CollapseThreshold=10)
         var wednesday = AnalysisTime.AddDays(-7);
         for (int i = 0; i < 5; i++)
@@ -108,8 +107,6 @@ public class BaselineProviderTests : IDisposable
     [Fact]
     public async Task GetBaseline_VerySparseBucket_CollapsesToFlat()
     {
-        await _duckDb.InitializeAsync();
-
         // Seed only 2 samples at 14:xx (below threshold for hour-only)
         var day = AnalysisTime.AddDays(-7);
         await SeedCpuAsync(day.AddMinutes(0), 30);
@@ -132,8 +129,6 @@ public class BaselineProviderTests : IDisposable
     [Fact]
     public async Task GetBaseline_FullBucket_PopulatesDistinctDaysAndIsTrustworthy()
     {
-        await _duckDb.InitializeAsync();
-
         // 20 samples across 4 distinct Wednesdays at 14:xx.
         for (int week = 0; week < 4; week++)
         {
@@ -152,8 +147,6 @@ public class BaselineProviderTests : IDisposable
     [Fact]
     public async Task GetBaseline_HourOnly_SumsDistinctDaysAcrossDowBuckets()
     {
-        await _duckDb.InitializeAsync();
-
         // Same hour (14:00) across 4 distinct calendar days of DIFFERENT days-of-week, 4 samples each
         // (below Full's restore) → collapses to hour-only. Each calendar day lands in exactly one
         // day-of-week bucket, so summing distinct-days across those buckets is exact (= 4).
@@ -174,8 +167,6 @@ public class BaselineProviderTests : IDisposable
     [Fact]
     public async Task GetBaseline_Flat_TakesMaxDistinctDaysAcrossBuckets()
     {
-        await _duckDb.InitializeAsync();
-
         // Everything on ONE calendar day (2 samples at 14:xx + 5 samples at other hours) → collapses to
         // flat. A calendar day recurs across hour buckets, so DistinctDays is the conservative MAX (= 1),
         // not the sum.
@@ -197,8 +188,6 @@ public class BaselineProviderTests : IDisposable
     [Fact]
     public async Task GetBaseline_NoData_ReturnsEmpty()
     {
-        await _duckDb.InitializeAsync();
-
         var baseline = await _provider.GetBaselineAsync(ServerId, MetricNames.Cpu, AnalysisTime);
 
         Assert.Equal(0, baseline.SampleCount);
@@ -209,8 +198,6 @@ public class BaselineProviderTests : IDisposable
     [Fact]
     public async Task GetBaseline_BetweenThresholds_UsesFullBucket()
     {
-        await _duckDb.InitializeAsync();
-
         // Seed exactly 12 samples on Wednesday 14:xx (between 10 and 15)
         for (int week = 0; week < 3; week++)
         {
@@ -277,8 +264,6 @@ public class BaselineProviderTests : IDisposable
     [Fact]
     public async Task GetBaseline_BatchRequests_ExcludesRestartDrop()
     {
-        await _duckDb.InitializeAsync();
-
         // Seed batch requests with a restart-shaped drop in the middle
         var baseDay = AnalysisTime.AddDays(-7);
         var normalValues = new[] { 5000, 5100, 4900, 5200, 5050, 4950 };
@@ -310,8 +295,6 @@ public class BaselineProviderTests : IDisposable
     [Fact]
     public async Task GetBaseline_WaitStats_AggregatesPerCollection()
     {
-        await _duckDb.InitializeAsync();
-
         // Seed multiple wait types at each collection time — baseline should aggregate to total
         for (int week = 0; week < 4; week++)
         {
@@ -338,8 +321,6 @@ public class BaselineProviderTests : IDisposable
     [Fact]
     public async Task GetBaseline_SessionCount_AggregatesPerCollection()
     {
-        await _duckDb.InitializeAsync();
-
         // Seed multiple program_name rows per collection
         for (int week = 0; week < 4; week++)
         {
@@ -365,8 +346,6 @@ public class BaselineProviderTests : IDisposable
     [Fact]
     public async Task GetBaseline_CacheHit_ReturnsSameResult()
     {
-        await _duckDb.InitializeAsync();
-
         for (int i = 0; i < 20; i++)
             await SeedCpuAsync(AnalysisTime.AddDays(-7).AddMinutes(i * 10), 50);
 
@@ -386,8 +365,6 @@ public class BaselineProviderTests : IDisposable
     [Fact]
     public async Task InvalidateCache_ClearsServerEntries()
     {
-        await _duckDb.InitializeAsync();
-
         for (int i = 0; i < 20; i++)
             await SeedCpuAsync(AnalysisTime.AddDays(-7).AddMinutes(i * 10), 50);
 
@@ -409,8 +386,6 @@ public class BaselineProviderTests : IDisposable
     [Fact]
     public async Task GetBaseline_DifferentServers_NoCrossContamination()
     {
-        await _duckDb.InitializeAsync();
-
         int server1 = -998, server2 = -997;
 
         // Seed different CPU values for two servers
@@ -433,8 +408,6 @@ public class BaselineProviderTests : IDisposable
     [Fact]
     public async Task GetBaseline_Memory_ComputesPressurePercent()
     {
-        await _duckDb.InitializeAsync();
-
         // 80% memory pressure: 80GB used of 100GB target
         for (int week = 0; week < 4; week++)
         {
@@ -455,8 +428,7 @@ public class BaselineProviderTests : IDisposable
     private async Task SeedCpuAsync(DateTime time, int cpuValue, int serverId = ServerId)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var conn = _duckDb.CreateConnection();
-        await conn.OpenAsync();
+        var conn = await SeedConnectionAsync();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"INSERT INTO cpu_utilization_stats
             (collection_id, collection_time, server_id, server_name, sample_time,
@@ -473,8 +445,7 @@ public class BaselineProviderTests : IDisposable
     private async Task SeedPerfmonAsync(DateTime time, string counterName, long deltaValue)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var conn = _duckDb.CreateConnection();
-        await conn.OpenAsync();
+        var conn = await SeedConnectionAsync();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"INSERT INTO perfmon_stats
             (collection_id, collection_time, server_id, server_name,
@@ -491,8 +462,7 @@ public class BaselineProviderTests : IDisposable
     private async Task SeedWaitStatAsync(DateTime time, string waitType, long deltaWaitMs)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var conn = _duckDb.CreateConnection();
-        await conn.OpenAsync();
+        var conn = await SeedConnectionAsync();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"INSERT INTO wait_stats
             (collection_id, collection_time, server_id, server_name, wait_type,
@@ -510,8 +480,7 @@ public class BaselineProviderTests : IDisposable
     private async Task SeedSessionStatAsync(DateTime time, string programName, long connectionCount)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var conn = _duckDb.CreateConnection();
-        await conn.OpenAsync();
+        var conn = await SeedConnectionAsync();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"INSERT INTO session_stats
             (collection_id, collection_time, server_id, server_name, program_name,
@@ -528,8 +497,7 @@ public class BaselineProviderTests : IDisposable
     private async Task SeedMemoryStatAsync(DateTime time, double totalServerMb, double targetMb)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var conn = _duckDb.CreateConnection();
-        await conn.OpenAsync();
+        var conn = await SeedConnectionAsync();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"INSERT INTO memory_stats
             (collection_id, collection_time, server_id, server_name,

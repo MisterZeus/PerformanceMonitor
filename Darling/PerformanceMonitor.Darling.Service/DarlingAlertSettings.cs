@@ -81,6 +81,34 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     /// </summary>
     public bool NotifyConnectionChanges => _config.Alerts.NotifyConnectionChanges;
 
+    /// <summary>#1659 opt-in (V33), read live like <see cref="NotifyConnectionChanges"/>: announce a server
+    /// already down on its first-ever connect attempt. Default false.</summary>
+    public bool NotifyConnectionDownAtStartup => _config.Alerts.NotifyConnectionDownAtStartup;
+
+    /// <summary>#1659 opt-in (V33), read live: re-announce a standing outage every N minutes (0 = off).
+    /// Clamped 0–1440 like the other store-fed numerics, so a hand-edited row can't drive a per-sweep spam
+    /// loop or a never-fires interval.</summary>
+    public int ConnectionRefireMinutes => Math.Clamp(_config.Alerts.ConnectionRefireMinutes, 0, 1440);
+
+    /// <summary>#991 master switch (V35), read live like <see cref="NotifyConnectionChanges"/>: whether the
+    /// Availability Group alert family evaluates and delivers at all. Default true.</summary>
+    public bool NotifyAgHealth => _config.Alerts.NotifyAgHealth;
+
+    /// <summary>#991 (V35), read live: the "AG Sync Fell Behind" lag trigger in seconds (0 = off). Clamped
+    /// 0–86400 (one day) like the other store-fed numerics, so a hand-edited row can neither fire on every
+    /// sweep for a negative value nor set a window so wide the alert can never fire.</summary>
+    public int AgLagAlertSeconds => Math.Clamp(_config.Alerts.AgLagAlertSeconds, 0, 86400);
+
+    /// <summary>#991 (V35), read live: the "AG Sync Fell Behind" redo-queue trigger in KB (0 = off). Clamped
+    /// 0–1073741824 (1 TB expressed in KB) — above that the threshold is larger than any real redo queue, so
+    /// it is indistinguishable from off, and a negative would fire on every healthy row.</summary>
+    public long AgRedoQueueAlertKb => Math.Clamp(_config.Alerts.AgRedoQueueAlertKb, 0L, 1073741824L);
+
+    /// <summary>#1696 (V37), read live: re-announce a still-disconnected AG replica every N minutes
+    /// (0 = off). Clamped 0–1440 like the sibling connection re-fire, so a hand-edited row can drive
+    /// neither a per-sweep spam loop nor a never-fires interval.</summary>
+    public int AgDisconnectRefireMinutes => Math.Clamp(_config.Alerts.AgDisconnectRefireMinutes, 0, 1440);
+
     /// <summary>"sql" → SqlProcess; anything else (incl. Lite's default "total") → TotalServer.</summary>
     public CpuAlertMode CpuAlertMode =>
         string.Equals(_config.Alerts.CpuMode, "sql", StringComparison.OrdinalIgnoreCase)

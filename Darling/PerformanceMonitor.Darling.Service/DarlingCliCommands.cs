@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
@@ -19,7 +20,9 @@ using System.Security.Principal;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -75,6 +78,12 @@ public static class DarlingCliCommands
     public static bool IsConfigureNetworkVerb(string arg) =>
         string.Equals(arg, "--configure-network", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The verb <see cref="ConfigureFirewallAsync"/> handles — reconcile every scoped Darling firewall
+    /// rule from darling.json, elevated (#1771). This is the ONLY place rules are created; the service itself
+    /// only verifies them.</summary>
+    public static bool IsConfigureFirewallVerb(string arg) =>
+        string.Equals(arg, "--configure-firewall", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The verb <see cref="EnableMcpAsync"/> handles — enable the MCP endpoint in the store (+ firewall).</summary>
     public static bool IsEnableMcpVerb(string arg) =>
         string.Equals(arg, "--enable-mcp", StringComparison.OrdinalIgnoreCase);
@@ -90,6 +99,11 @@ public static class DarlingCliCommands
     /// <summary>The verb <see cref="DisableWebAsync"/> handles — disable the web-dashboard endpoint in the store (+ firewall).</summary>
     public static bool IsDisableWebVerb(string arg) =>
         string.Equals(arg, "--disable-web", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The verb <see cref="BackfillRollupsAsync"/> handles — materialize the query-acceleration rollups
+    /// back to raw's oldest row, behind a disk preflight (#1759 Phase 2).</summary>
+    public static bool IsBackfillRollupsVerb(string arg) =>
+        string.Equals(arg, "--backfill-rollups", StringComparison.OrdinalIgnoreCase);
 
     /// <summary><c>--version</c>/<c>-v</c> — print the product version and exit.</summary>
     public static bool IsVersionVerb(string arg) =>
@@ -113,10 +127,12 @@ public static class DarlingCliCommands
         || IsValidateConfigVerb(arg)
         || IsPrintViewerConnectionVerb(arg)
         || IsConfigureNetworkVerb(arg)
+        || IsConfigureFirewallVerb(arg)
         || IsEnableMcpVerb(arg)
         || IsDisableMcpVerb(arg)
         || IsEnableWebVerb(arg)
-        || IsDisableWebVerb(arg);
+        || IsDisableWebVerb(arg)
+        || IsBackfillRollupsVerb(arg);
 
     /// <summary>
     /// Classifies the exe's command line from its FIRST argument (#1581): no args → run the host; a recognized
@@ -180,10 +196,13 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --encrypt-password  Encrypt a SQL-auth password for darling.json (reads stdin)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --print-viewer-connection   Print a remote-viewer connection string (managed store)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --configure-network Interactive LAN-exposure wizard." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --configure-firewall  Create/remove the scoped firewall rules to match darling.json (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-mcp        Enable the MCP endpoint in the store and open its firewall (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-mcp       Disable the MCP endpoint in the store and remove its firewall rule (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-web        Enable the web dashboard in the store and open its firewall (run elevated)." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --disable-web       Disable the web dashboard in the store and remove its firewall rule (run elevated).";
+        "  PerformanceMonitor.Darling.Service.exe --disable-web       Disable the web dashboard in the store and remove its firewall rule (run elevated)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --backfill-rollups  Materialize the retention rollups back over existing history, after a disk preflight." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run   Show the plan, the disk estimate and the time budget, and change nothing.";
 
     /// <summary>
     /// Loads + validates darling.json, then probes every server. Prints one PASS/FAIL line per server and a
@@ -444,7 +463,8 @@ public static class DarlingCliCommands
        Design invariants (the whole reason this is safe):
          - Validation is DELEGATED. Every candidate value is checked by building the SAME config object
            the service reads and running the SAME resolver it fail-closes on (the store's
-           DarlingManagedPostgres.ResolveNetworkExposure, the MCP host's DarlingMcpHostService.ResolveMcpBind).
+           DarlingManagedPostgres.ResolveNetworkExposure, the MCP host's DarlingMcpHostService.ResolveMcpBind,
+           the web host's DarlingWebHostService.ResolveWebBind).
            The wizard never re-implements CIDR / family / role / token rules — it re-prompts with the
            resolver's own degrade reason, so the wizard can never write what the service would reject.
          - The edit is comment-preserving TEXT SURGERY (DarlingNetworkConfigEditor) — the sample's
@@ -452,8 +472,9 @@ public static class DarlingCliCommands
          - Nothing is written until the new text passes DarlingConfig.Parse AND the resolver re-check on
            the REPARSED result, and only then behind a timestamped backup. An edit never leaves an
            unparseable or fail-closed darling.json.
-         - The MCP bearer token is generated + DPAPI-protected; the plaintext is printed to STDOUT exactly
-           once with the save-this warning on STDERR (the --print-viewer-connection secret-split posture).
+         - The MCP bearer / web access tokens are generated + DPAPI-protected; each plaintext is printed to
+           STDOUT exactly once with the save-this warning on STDERR (the --print-viewer-connection
+           secret-split posture).
          - mcp.enabled / mcp.port are control-plane after the first run (the Viewer's Settings toggle owns
            them live), so the wizard WARNS and points at Settings — it never edits them. The network block
            it writes is deliberately file-defined + restart-only.
@@ -462,7 +483,7 @@ public static class DarlingCliCommands
     private const string ServiceName = "PerformanceMonitor Darling";
 
     /// <summary>
-    /// Interactive wizard that guides the operator through the opt-in store / MCP LAN exposure and writes
+    /// Interactive wizard that guides the operator through the opt-in store / MCP / web-dashboard LAN exposure and writes
     /// a comment-preserving, resolver-validated edit to darling.json behind a timestamped backup. Managed
     /// mode only (BYO exposure is governed by the operator's own PostgreSQL). Windows-only (it generates a
     /// DPAPI-protected token and controls the Windows service). <paramref name="input"/> is the scripted-
@@ -519,12 +540,20 @@ public static class DarlingCliCommands
             mcpNow.Reason is DarlingMcpHostService.McpBindReason.NetworkExposed or DarlingMcpHostService.McpBindReason.LoopbackByDefault
                 ? null
                 : McpDegradeText(mcpNow.Reason, config.Mcp);
+        var webNow = DarlingWebHostService.ResolveWebBind(config.Web, postgres.Managed);
+        var webNowExposed = webNow.Mode == DarlingHostBinding.BindMode.NetworkAndLoopback;
+        var webNowDegrade =
+            webNow.Reason is DarlingHostBinding.BindReason.NetworkExposed or DarlingHostBinding.BindReason.LoopbackByDefault
+                ? null
+                : WebDegradeText(webNow.Reason, config.Web);
 
         output.WriteLine("Current exposure:");
         output.WriteLine(DarlingNetworkConfigEditor.FormatExposureState(
             "Store", storeNow.Exposed, storeNow.ListenIp, storeNow.Cidr, storeNow.Role, storeNow.DegradeReason));
         output.WriteLine(DarlingNetworkConfigEditor.FormatExposureState(
             "MCP  ", mcpNowExposed, config.Mcp.Network?.Listen, config.Mcp.Network?.AllowFrom, null, mcpNowDegrade));
+        output.WriteLine(DarlingNetworkConfigEditor.FormatExposureState(
+            "Web  ", webNowExposed, config.Web.Network?.Listen, config.Web.Network?.AllowFrom, null, webNowDegrade));
         output.WriteLine($"  Service: {await DescribeServiceStateAsync(cancellationToken)}");
         output.WriteLine();
 
@@ -535,7 +564,9 @@ public static class DarlingCliCommands
             output.WriteLine("This darling.json uses bring-your-own PostgreSQL (postgres.connectionString), so your own");
             output.WriteLine("PostgreSQL / reverse proxy governs network exposure — the wizard cannot open the endpoints here.");
 
-            var hasBlocks = (postgres.Network?.IsConfigured ?? false) || (config.Mcp.Network?.IsConfigured ?? false);
+            var hasBlocks = (postgres.Network?.IsConfigured ?? false)
+                || (config.Mcp.Network?.IsConfigured ?? false)
+                || (config.Web.Network?.IsConfigured ?? false);
             if (hasBlocks && AskYesNo(input, output, "A network block is present but IGNORED in this mode. Remove it from darling.json?", defaultYes: false))
             {
                 return await DisableExposureAsync(resolvedPath, originalText, input, output, error, cancellationToken);
@@ -544,12 +575,13 @@ public static class DarlingCliCommands
             return 1;
         }
 
-        /* Surface selection. */
+        /* Surface selection — one surface, a comma combination (e.g. "1,3"), all three, or disable. */
         output.WriteLine("What would you like to configure?");
         output.WriteLine("  [1] Store   — a remote Viewer over TLS (verify-full)");
         output.WriteLine("  [2] MCP     — a LAN assistant/client behind a bearer token");
-        output.WriteLine("  [3] Both");
-        output.WriteLine("  [4] Disable — remove all exposure (back to loopback-only)");
+        output.WriteLine("  [3] Web     — the browser dashboard behind a token->cookie login");
+        output.WriteLine("  [4] All     — every surface above (or pick a combination, e.g. 1,3)");
+        output.WriteLine("  [5] Disable — remove all exposure (back to loopback-only)");
         output.WriteLine("  [q] Quit without changes");
         var choice = Prompt(input, output, "Choice", "q");
         if (choice is null || choice.Length == 0 || string.Equals(choice, "q", StringComparison.OrdinalIgnoreCase))
@@ -558,21 +590,19 @@ public static class DarlingCliCommands
             return 0;
         }
 
-        if (choice == "4")
+        if (choice == "5")
         {
             return await DisableExposureAsync(resolvedPath, originalText, input, output, error, cancellationToken);
         }
 
-        var doStore = choice is "1" or "3";
-        var doMcp = choice is "2" or "3";
-        if (!doStore && !doMcp)
+        if (!TryParseSurfaceChoice(choice, out var doStore, out var doMcp, out var doWeb))
         {
             output.WriteLine("Unrecognized choice; no changes made.");
             return 0;
         }
 
         /* Gather all inputs (delegated validation) BEFORE writing anything, so a cancel leaves the file
-           untouched and a "both" run is all-or-nothing. */
+           untouched and a multi-surface run is all-or-nothing. */
         (string Listen, string AllowFrom, string Role)? store = null;
         if (doStore)
         {
@@ -604,6 +634,25 @@ public static class DarlingCliCommands
             }
         }
 
+        (string Listen, string AllowFrom, string? EncryptedToken, string? PlainToken, string? GeneratedPlain)? web = null;
+        if (doWeb)
+        {
+            output.WriteLine();
+            output.WriteLine("== Web dashboard exposure ==");
+            if (!config.Web.Enabled)
+            {
+                output.WriteLine("NOTE: web.enabled is currently false. The wizard writes the network block, but the dashboard");
+                output.WriteLine("      stays down until you enable it with --enable-web or the Viewer's Settings (enabled/port");
+                output.WriteLine("      are control-plane after first run; the wizard never edits them).");
+            }
+
+            web = GatherWebInputs(input, output, error, config.Web);
+            if (web is null)
+            {
+                return 1;
+            }
+        }
+
         /* Build the edit through the comment-preserving surgeon. */
         var newText = originalText;
         if (store is not null)
@@ -618,6 +667,13 @@ public static class DarlingCliCommands
             newText = DarlingNetworkConfigEditor.UpsertNetworkBlock(
                 newText, "mcp",
                 DarlingNetworkConfigEditor.BuildMcpNetworkBlock(mcp.Value.Listen, mcp.Value.AllowFrom, mcp.Value.EncryptedToken, mcp.Value.PlainToken));
+        }
+
+        if (web is not null)
+        {
+            newText = DarlingNetworkConfigEditor.UpsertNetworkBlock(
+                newText, "web",
+                DarlingNetworkConfigEditor.BuildWebNetworkBlock(web.Value.Listen, web.Value.AllowFrom, web.Value.EncryptedToken, web.Value.PlainToken));
         }
 
         /* Guard 1: the edited text must PARSE (comments/trailing-commas tolerated). */
@@ -654,14 +710,25 @@ public static class DarlingCliCommands
             }
         }
 
+        if (web is not null)
+        {
+            var check = DarlingWebHostService.ResolveWebBind(reparsed.Web, reparsed.Postgres.Managed);
+            if (check.Mode != DarlingHostBinding.BindMode.NetworkAndLoopback)
+            {
+                error.WriteLine($"Internal error: the web block would fail-close ({WebDegradeText(check.Reason, reparsed.Web)}). No changes were written.");
+                return 1;
+            }
+        }
+
         /* Only now: timestamped backup + write. */
         if (!await WriteWithBackupAsync(resolvedPath, newText, output, error, cancellationToken))
         {
             return 1;
         }
 
-        /* The generated MCP token plaintext — STDOUT exactly once; the save-this warning on STDERR so a
-           STDOUT redirect keeps the token without swallowing the warning. */
+        /* The generated token plaintexts — STDOUT exactly once each; the save-this warning on STDERR so a
+           STDOUT redirect keeps the token without swallowing the warning (MCP first, then web, so a
+           two-token capture is unambiguous by order). */
         if (mcp is not null && mcp.Value.GeneratedPlain is not null)
         {
             error.WriteLine();
@@ -670,13 +737,53 @@ public static class DarlingCliCommands
             output.WriteLine(mcp.Value.GeneratedPlain);
         }
 
+        if (web is not null && web.Value.GeneratedPlain is not null)
+        {
+            error.WriteLine();
+            error.WriteLine("SAVE THIS NOW — your new web dashboard access token is shown ONCE (darling.json stores only its DPAPI blob).");
+            error.WriteLine("A remote browser presents it once via ?token=... and gets a session cookie back.");
+            output.WriteLine(web.Value.GeneratedPlain);
+        }
+
         PrintNextSteps(
             output,
             store is not null, postgres.Port, store?.AllowFrom,
-            mcp is not null, config.Mcp.Port, mcp?.AllowFrom, config.Mcp.Enabled);
+            mcp is not null, config.Mcp.Port, mcp?.AllowFrom, config.Mcp.Enabled,
+            web is not null, config.Web.Port, web?.AllowFrom, config.Web.Enabled, web?.Listen);
 
         await OfferRestartAsync(input, output, error, cancellationToken);
         return 0;
+    }
+
+    /// <summary>
+    /// Parses the surface-selection choice: "1"/"2"/"3" (store/MCP/web), "4" = all three, or a comma
+    /// combination like "1,3". STRICT — every token must be a known surface digit, so a typo ("1,shop")
+    /// rejects the whole input instead of silently configuring a subset. False = unrecognized (nothing
+    /// selected). Pure.
+    /// </summary>
+    internal static bool TryParseSurfaceChoice(string choice, out bool doStore, out bool doMcp, out bool doWeb)
+    {
+        doStore = false;
+        doMcp = false;
+        doWeb = false;
+
+        foreach (var raw in choice.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+        {
+            switch (raw)
+            {
+                case "1": doStore = true; break;
+                case "2": doMcp = true; break;
+                case "3": doWeb = true; break;
+                case "4": doStore = true; doMcp = true; doWeb = true; break;
+                default:
+                    doStore = false;
+                    doMcp = false;
+                    doWeb = false;
+                    return false;
+            }
+        }
+
+        return doStore || doMcp || doWeb;
     }
 
     /// <summary>
@@ -717,7 +824,7 @@ public static class DarlingCliCommands
     }
 
     /// <summary>The machine's non-loopback IPv4 unicast addresses (interface name + address). Impure (queries the OS); the pure menu formatter takes its output.</summary>
-    private static IReadOnlyList<(string Name, string Address)> EnumerateLocalIPv4()
+    private static List<(string Name, string Address)> EnumerateLocalIPv4()
     {
         var addresses = new List<(string Name, string Address)>();
         foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
@@ -943,6 +1050,97 @@ public static class DarlingCliCommands
         }
     }
 
+    /// <summary>
+    /// Gathers the web dashboard access token (default KEEP an existing one; else generate a fresh 32-char
+    /// token and DPAPI-protect it) plus listen / allowFrom, RE-PROMPTING with the web bind resolver's degrade
+    /// reason until it accepts them — the web twin of <see cref="GatherMcpInputs"/> (#1617). Returns the
+    /// fields to write plus the generated plaintext (non-null only when a token was generated, so the caller
+    /// prints it once). Returns null on cancel.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private static (string Listen, string AllowFrom, string? EncryptedToken, string? PlainToken, string? GeneratedPlain)? GatherWebInputs(
+        TextReader input, TextWriter output, TextWriter error, WebConfig currentWeb)
+    {
+        string? encryptedToken = null;
+        string? plainToken = null;
+        string? generatedPlain = null;
+
+        var existing = currentWeb.Network;
+        var hasExistingToken = existing is not null
+            && (!string.IsNullOrWhiteSpace(existing.EncryptedToken) || !string.IsNullOrWhiteSpace(existing.Token));
+
+        if (hasExistingToken && AskYesNo(input, output, "A web access token already exists. Keep it?", defaultYes: true))
+        {
+            if (!string.IsNullOrWhiteSpace(existing!.EncryptedToken))
+            {
+                encryptedToken = existing.EncryptedToken;
+            }
+            else
+            {
+                plainToken = existing!.Token;
+                output.WriteLine("  Keeping the existing PLAINTEXT token (consider regenerating to store it DPAPI-encrypted instead).");
+            }
+        }
+        else
+        {
+            generatedPlain = DarlingManagedPostgres.GeneratePassword();
+            encryptedToken = DarlingSecrets.Protect(generatedPlain);
+        }
+
+        while (true)
+        {
+            var listen = SelectListenAddress(input, output, "web");
+            if (listen is null)
+            {
+                output.WriteLine("Cancelled — no changes made.");
+                return null;
+            }
+
+            var allowFrom = Prompt(input, output, "Allowed remote CIDR (e.g. 192.168.1.0/24)");
+            if (allowFrom is null)
+            {
+                output.WriteLine("Cancelled — no changes made.");
+                return null;
+            }
+
+            var candidate = new WebConfig
+            {
+                Enabled = currentWeb.Enabled,
+                Port = currentWeb.Port,
+                Network = new WebNetworkConfig
+                {
+                    Listen = listen,
+                    AllowFrom = allowFrom,
+                    EncryptedToken = encryptedToken,
+                    Token = plainToken,
+                },
+            };
+
+            var decision = DarlingWebHostService.ResolveWebBind(candidate, managed: true);
+            if (decision.Mode == DarlingHostBinding.BindMode.NetworkAndLoopback)
+            {
+                return (listen, allowFrom, encryptedToken, plainToken, generatedPlain);
+            }
+
+            output.WriteLine($"  Not accepted: {WebDegradeText(decision.Reason, candidate)}");
+            output.WriteLine("  Let us try again.");
+        }
+    }
+
+    /// <summary>Human text for a web bind degrade reason (presentation only — the resolver decides; this narrates).</summary>
+    private static string WebDegradeText(DarlingHostBinding.BindReason reason, WebConfig web) => reason switch
+    {
+        DarlingHostBinding.BindReason.ListenInvalid =>
+            $"web.network.listen '{web.Network?.Listen}' is not a valid IP address (use a specific IP, or 0.0.0.0 for all interfaces).",
+        DarlingHostBinding.BindReason.TokenMissing =>
+            "no access token is set (the wizard should have supplied one — this is unexpected).",
+        DarlingHostBinding.BindReason.AllowFromInvalid =>
+            $"web.network.allowFrom '{web.Network?.AllowFrom}' is not a valid CIDR or its address family does not match listen (e.g. 192.168.1.0/24, host bits zeroed).",
+        DarlingHostBinding.BindReason.ManagedModeRequired =>
+            "network exposure is managed-mode only.",
+        _ => "the web bind resolver rejected these values.",
+    };
+
     /// <summary>Human text for an MCP bind degrade reason (presentation only — the resolver decides; this narrates).</summary>
     private static string McpDegradeText(DarlingMcpHostService.McpBindReason reason, McpConfig mcp) => reason switch
     {
@@ -957,13 +1155,14 @@ public static class DarlingCliCommands
         _ => "the MCP resolver rejected these values.",
     };
 
-    /// <summary>Removes BOTH network blocks (symmetric with the reconcilers), validating parse + loopback-only before the timestamped write, then offers a restart. Shared by the managed Disable choice and the BYO cleanup.</summary>
+    /// <summary>Removes all three network blocks (symmetric with the reconcilers), validating parse + loopback-only before the timestamped write, then offers a restart. Shared by the managed Disable choice and the BYO cleanup.</summary>
     [SupportedOSPlatform("windows")]
     private static async Task<int> DisableExposureAsync(
         string resolvedPath, string originalText, TextReader input, TextWriter output, TextWriter error, CancellationToken cancellationToken)
     {
         var newText = DarlingNetworkConfigEditor.RemoveNetworkBlock(originalText, "postgres");
         newText = DarlingNetworkConfigEditor.RemoveNetworkBlock(newText, "mcp");
+        newText = DarlingNetworkConfigEditor.RemoveNetworkBlock(newText, "web");
 
         if (string.Equals(newText, originalText, StringComparison.Ordinal))
         {
@@ -986,7 +1185,9 @@ public static class DarlingCliCommands
         var storeStillExposed = DarlingManagedPostgres.ResolveNetworkExposure(reparsed.Postgres.Network, certPath, keyPath).Exposed;
         var mcpStillExposed = DarlingMcpHostService.ResolveMcpBind(reparsed.Mcp, reparsed.Postgres.Managed).Mode
             == DarlingMcpHostService.McpBindMode.NetworkAndLoopback;
-        if (storeStillExposed || mcpStillExposed)
+        var webStillExposed = DarlingWebHostService.ResolveWebBind(reparsed.Web, reparsed.Postgres.Managed).Mode
+            == DarlingHostBinding.BindMode.NetworkAndLoopback;
+        if (storeStillExposed || mcpStillExposed || webStillExposed)
         {
             error.WriteLine("Internal error: exposure is still present after removal. No changes were written.");
             return 1;
@@ -1057,12 +1258,13 @@ public static class DarlingCliCommands
         output.WriteLine($"  (or:  sc.exe stop \"{ServiceName}\"   then   sc.exe start \"{ServiceName}\")");
     }
 
-    /// <summary>Prints the handoff reminders: the scoped firewall command(s) and, for the store, the --print-viewer-connection step.</summary>
+    /// <summary>Prints the handoff reminders: the scoped firewall command(s), the store's --print-viewer-connection step, and the web dashboard's browser login hint.</summary>
     [SupportedOSPlatform("windows")]
     private static void PrintNextSteps(
         TextWriter output,
         bool storeConfigured, int storePort, string? storeCidr,
-        bool mcpConfigured, int mcpPort, string? mcpCidr, bool mcpEnabled)
+        bool mcpConfigured, int mcpPort, string? mcpCidr, bool mcpEnabled,
+        bool webConfigured, int webPort, string? webCidr, bool webEnabled, string? webListen)
     {
         output.WriteLine();
         output.WriteLine("Next steps:");
@@ -1080,17 +1282,58 @@ public static class DarlingCliCommands
         {
             output.WriteLine("  MCP firewall rule (run ELEVATED; scoped to the port + CIDR):");
             output.WriteLine("    " + DarlingManagedPostgres.BuildFirewallEnableCommand(
-                $"PerformanceMonitor Darling MCP (port {mcpPort})", mcpPort, mcpCidr!));
+                DarlingMcpHostService.McpFirewallRuleName(mcpPort), mcpPort, mcpCidr!));
             if (!mcpEnabled)
             {
                 output.WriteLine("  NOTE: mcp.enabled is false, so the MCP endpoint stays down until you enable MCP in the");
                 output.WriteLine("        Viewer's Settings. The network block you just wrote applies once MCP is enabled.");
             }
         }
+
+        if (webConfigured)
+        {
+            output.WriteLine("  Web dashboard firewall rule (run ELEVATED; scoped to the port + CIDR — --enable-web also");
+            output.WriteLine("  reconciles this rule for you):");
+            output.WriteLine("    " + DarlingManagedPostgres.BuildFirewallEnableCommand(
+                DarlingWebHostService.WebFirewallRuleName(webPort), webPort, webCidr!));
+
+            /* The one login step a human does differently for Web: a remote browser presents the access token
+               once via ?token= and is 302'd back with a session cookie. A 0.0.0.0 bind has no single address
+               to print, so fall back to a placeholder. */
+            var webHost = webListen == "0.0.0.0" ? "<a-LAN-IP-of-this-machine>" : webListen;
+            output.WriteLine("  Remote browser login (after the service restarts):");
+            output.WriteLine($"    http://{webHost}:{webPort}/?token=<your-access-token>");
+            output.WriteLine("  (the token is exchanged for a session cookie and stripped from the URL; loopback needs no token)");
+            if (!webEnabled)
+            {
+                output.WriteLine("  NOTE: web.enabled is false, so the dashboard stays down until you enable it with --enable-web");
+                output.WriteLine("        or the Viewer's Settings. The network block you just wrote applies once the web dashboard");
+                output.WriteLine("        is enabled.");
+            }
+        }
     }
 
-    /// <summary>Backs up darling.json to a timestamped sibling, then writes the new text. Returns false (with a message) on any I/O failure.</summary>
-    private static async Task<bool> WriteWithBackupAsync(
+    /// <summary>
+    /// Backs up darling.json to a timestamped sibling, then writes the new text. Returns false (with a
+    /// message) on any I/O failure.
+    ///
+    /// <para><b>The backup is hardened, because it is a second copy of the secret.</b> Every edit here
+    /// copies a file holding each monitored server's encrypted password and the MCP/web tokens, and
+    /// <c>File.Copy</c> does NOT carry the source's DACL — the new file takes the DIRECTORY's inheritable
+    /// ACEs instead. Measured, not assumed: copying a file whose DACL is protected with one ACE produces a
+    /// backup that is unprotected with three inherited ones. On the documented install location, a folder
+    /// created directly under <c>C:\</c>, those inherited ACEs include <c>BUILTIN\Users: Read</c> — so
+    /// without this every <c>--rotate-token</c> or <c>--disable</c> would drop a world-readable copy of
+    /// every credential beside a correctly hardened <c>darling.json</c>, defeating the ACL that is the
+    /// whole protection boundary for LocalMachine-scope DPAPI blobs (#1721).</para>
+    ///
+    /// <para>Copy-then-harden leaves a sub-millisecond window where the backup exists with inherited
+    /// access. That is stated rather than hidden: closing it would mean creating the file with an explicit
+    /// security descriptor, which is a bigger change than the exposure warrants for an operator-initiated,
+    /// elevated, interactive command — but it is the reason this is a mitigation of a leak rather than a
+    /// proof of its absence.</para>
+    /// </summary>
+    internal static async Task<bool> WriteWithBackupAsync(
         string resolvedPath, string newText, TextWriter output, TextWriter error, CancellationToken cancellationToken)
     {
         try
@@ -1103,6 +1346,13 @@ public static class DarlingCliCommands
             }
 
             File.Copy(resolvedPath, backupPath, overwrite: false);
+            if (OperatingSystem.IsWindows())
+            {
+                HardenConfigBackup(backupPath, error);
+            }
+
+            /* WriteAllText TRUNCATES an existing file rather than recreating it, so darling.json keeps
+               whatever DACL it already had — only the new backup needs hardening. */
             await File.WriteAllTextAsync(resolvedPath, newText, cancellationToken);
             output.WriteLine($"Wrote {resolvedPath}");
             output.WriteLine($"Backup saved: {backupPath}");
@@ -1116,6 +1366,50 @@ public static class DarlingCliCommands
         {
             error.WriteLine($"Could not write the configuration: {ex.Message}");
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Locks a freshly written config backup to SYSTEM, Administrators and the service account — and,
+    /// unlike <c>darling.json</c> itself, NOT to <c>NT AUTHORITY\INTERACTIVE</c> (#1769).
+    ///
+    /// <para>A backup is a byte-for-byte copy of the config: every monitored server's
+    /// <c>encryptedPassword</c>, the MCP bearer token, the web access token. Those are DPAPI
+    /// <b>LocalMachine</b> blobs with an entropy constant that ships in an open-source repo, so READ access
+    /// IS the secret. The live config grants INTERACTIVE read because things genuinely read it as the
+    /// interactive operator — the Viewer (<c>ViewerSettings.TryLoad</c>) and the CLI verbs. <b>Nothing reads
+    /// a backup.</b> The only references to the <c>.bak-</c> name in non-test code are the two lines above
+    /// that CONSTRUCT it, and restoring one is a hand operation that already requires elevation, because
+    /// writing <c>darling.json</c> does — INTERACTIVE only ever had Read here, never Write. So the grant
+    /// bought nothing and cost a second copy of every secret, readable by any interactively-logged-on user.</para>
+    ///
+    /// <para>Never fatal — the edit that produced the backup has already been decided on and refusing to
+    /// finish it over a permissions problem would leave the operator worse off. But it is reported LOUDLY
+    /// and names the file, because a silent best-effort ACL failure is exactly how #1721 persisted
+    /// unnoticed across months of service starts: the failure was logged once per start and read by nobody
+    /// until a deploy check happened to look. An operator who just ran a command is the one person
+    /// guaranteed to be watching, so tell them while they are there.</para>
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private static void HardenConfigBackup(string backupPath, TextWriter error)
+    {
+        try
+        {
+            DarlingFileSecurity.HardenFile(backupPath, allowInteractiveRead: false);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"WARNING: could not restrict permissions on the backup {backupPath} ({ex.Message}).");
+            error.WriteLine("         It is a full copy of your encrypted passwords and access tokens. Delete it, or");
+            error.WriteLine("         restrict it by hand, before leaving this machine.");
+            return;
+        }
+
+        if (DarlingFileSecurity.IsReadableByOrdinaryUsers(backupPath))
+        {
+            error.WriteLine($"WARNING: {backupPath} is still readable by ordinary local users after hardening.");
+            error.WriteLine("         It is a full copy of your encrypted passwords and access tokens. Delete it, or");
+            error.WriteLine("         move the install out of a world-readable folder.");
         }
     }
 
@@ -1159,7 +1453,7 @@ public static class DarlingCliCommands
        --enable-mcp / --disable-mcp / --enable-web / --disable-web: headless endpoint bring-up.
 
        Two gaps these close on a headless box (no WPF Viewer, and the service runs as a virtual service
-       account that CANNOT modify Windows Firewall, so its best-effort self-reconcile silently fails):
+       account that CANNOT modify Windows Firewall, so the running service only VERIFIES its rules):
          (a) ENABLE/DISABLE an endpoint. After the first run mcp.enabled/web.enabled in darling.json are only
              a SEED; the store (config.config_service.mcp_enabled/web_enabled) is authoritative and is normally
              toggled only by the Viewer's Settings. These verbs write the store directly — a TARGETED UPDATE
@@ -1223,6 +1517,51 @@ public static class DarlingCliCommands
         !exposed ? EndpointFirewallPlan.LoopbackNoAction
         : elevated ? EndpointFirewallPlan.RunElevated
         : EndpointFirewallPlan.Handoff;
+
+    /// <summary>Whether an ENABLE toggle's <c>allowFrom</c> can be used as a firewall <c>-RemoteAddress</c> (#1646).</summary>
+    public enum EndpointAllowFromVerdict
+    {
+        /// <summary>Absent/blank — the service would fail-close this endpoint to loopback, so there is nothing to open.</summary>
+        Missing,
+
+        /// <summary>Present but not a CIDR — REFUSE. Never build a firewall command from it.</summary>
+        Invalid,
+
+        /// <summary>A valid CIDR; the canonical <c>IPNetwork.ToString()</c> form is what reaches the command.</summary>
+        Valid,
+    }
+
+    /// <summary>
+    /// PURE <c>allowFrom</c> gate for a toggle verb (#1646). <c>darling.json</c> is operator-supplied text that
+    /// <see cref="DarlingConfig.Load"/> only deserializes — it never calls <see cref="DarlingConfig.Validate"/> —
+    /// so this was the ONE <see cref="DarlingManagedPostgres.BuildFirewallEnableCommand"/> caller that reached
+    /// the PowerShell <c>-Command</c> string with an unparsed value, where a blank-check was the only gate.
+    /// Every other call site passes a canonicalized <c>IPNetwork.ToString()</c>; this makes that universal.
+    /// Parsing is the security property, not the formatting: <see cref="IPNetwork.TryParse"/> accepts ONLY a
+    /// single <c>address/prefix</c> pair, so no shell metacharacter, statement separator, or second CIDR can
+    /// survive it — and <paramref name="canonicalCidr"/> is the PARSER'S output, never the caller's string, so
+    /// nothing unvalidated is carried through even on the valid path. That last point is load-bearing rather
+    /// than belt-and-braces: <c>TryParse</c> MASKS host bits instead of rejecting them (<c>192.168.1.5/24</c>
+    /// parses, as <c>192.168.1.0/24</c>), so "validate, then use the original" would forward a string the
+    /// parser had already decided meant something else.
+    /// </summary>
+    public static EndpointAllowFromVerdict ClassifyAllowFrom(string? allowFrom, out string canonicalCidr)
+    {
+        canonicalCidr = "";
+
+        if (string.IsNullOrWhiteSpace(allowFrom))
+        {
+            return EndpointAllowFromVerdict.Missing;
+        }
+
+        if (!IPNetwork.TryParse(allowFrom.Trim(), out var cidr))
+        {
+            return EndpointAllowFromVerdict.Invalid;
+        }
+
+        canonicalCidr = cidr.ToString();
+        return EndpointAllowFromVerdict.Valid;
+    }
 
     /// <summary>
     /// Enables the embedded MCP endpoint on a headless managed deployment: flips
@@ -1381,7 +1720,7 @@ public static class DarlingCliCommands
     /// The firewall half of a toggle (defense-in-depth, never the boundary — pg_hba/token + the in-app CIDR
     /// check are). Only acts when the endpoint's darling.json network block opts into LAN exposure (a non-loopback
     /// listen, via the shared <see cref="DarlingNetwork.IsExposedListenAddress"/>). Uses the SAME scoped,
-    /// idempotent-by-DisplayName rule name the host's self-reconcile uses
+    /// idempotent-by-DisplayName rule name the host's start-up check looks for
     /// (<see cref="DarlingMcpHostService.McpFirewallRuleName"/> / <see cref="DarlingWebHostService.WebFirewallRuleName"/>)
     /// and the SAME pure command builders. Elevated -> runs the rule; otherwise prints the exact elevated command
     /// — the store toggle already succeeded, so a non-elevated shell is a handoff, never a failure. A firewall
@@ -1408,18 +1747,36 @@ public static class DarlingCliCommands
             return;
         }
 
-        if (enable && string.IsNullOrWhiteSpace(allowFrom))
+        /* #1646: parse allowFrom as a CIDR BEFORE it can reach a PowerShell -Command string, and pass the
+           parser's canonical form — the posture every other BuildFirewallEnableCommand caller already had.
+           An unparseable value is refused outright: the firewall is NOT touched and nothing is printed for an
+           operator to paste into an elevated shell, because the injected text would run either way (this verb
+           runs the command itself when elevated, and hands it to a human to run elevated when it is not). */
+        var canonicalCidr = "";
+        if (enable)
         {
-            /* Non-loopback listen but no allowFrom CIDR: the service itself would fail-close this to loopback, so
-               there is nothing to open. Point at the wizard rather than emit a malformed New-NetFirewallRule. */
-            output.WriteLine(
-                $"Firewall: the network block sets listen '{listen}' but no allowFrom CIDR, so the service will bind " +
-                "loopback-only until it is completed. Run --configure-network to finish the block; not opening the firewall.");
-            return;
+            switch (ClassifyAllowFrom(allowFrom, out canonicalCidr))
+            {
+                case EndpointAllowFromVerdict.Missing:
+                    /* Non-loopback listen but no allowFrom CIDR: the service itself would fail-close this to loopback, so
+                       there is nothing to open. Point at the wizard rather than emit a malformed New-NetFirewallRule. */
+                    output.WriteLine(
+                        $"Firewall: the network block sets listen '{listen}' but no allowFrom CIDR, so the service will bind " +
+                        "loopback-only until it is completed. Run --configure-network to finish the block; not opening the firewall.");
+                    return;
+
+                case EndpointAllowFromVerdict.Invalid:
+                    error.WriteLine(
+                        $"Firewall: allowFrom in darling.json is not a valid CIDR, so NO firewall change was made and no " +
+                        "command is being printed to run by hand. The endpoint toggle itself already succeeded; the service " +
+                        "will bind loopback-only until allowFrom is fixed. Expected an address/prefix with the host bits " +
+                        "zeroed, e.g. 192.168.1.0/24 or 2001:db8::/32. Run --configure-network to rewrite the block.");
+                    return;
+            }
         }
 
         var command = enable
-            ? DarlingManagedPostgres.BuildFirewallEnableCommand(ruleName, port, allowFrom!)
+            ? DarlingManagedPostgres.BuildFirewallEnableCommand(ruleName, port, canonicalCidr)
             : DarlingManagedPostgres.BuildFirewallDisableCommand(ruleName);
 
         if (plan == EndpointFirewallPlan.RunElevated)
@@ -1466,5 +1823,730 @@ public static class DarlingCliCommands
             error.WriteLine($"Firewall rule {(enable ? "open" : "removal")} failed ({ex.Message}). Run this in an elevated PowerShell:");
             error.WriteLine("  " + command);
         }
+    }
+
+    /* ================================================================================================
+       --configure-firewall: the ELEVATED owner of every scoped Darling firewall rule (#1771).
+
+       The service runs as an unprivileged virtual account and CANNOT create firewall rules. It used to try
+       on every start anyway, failing "Access is denied" each time; on a fresh networked install — the normal
+       deployment mode — that meant the rule was never created at all and remote clients were simply blocked.
+       Rule management therefore belongs to the elevated context that already exists: install-darling.ps1
+       calls this verb, uninstall-darling.ps1 removes the rules, and the running service only VERIFIES
+       (DarlingFirewallCheck).
+
+       It reconciles all THREE surfaces (store, MCP, web) in one pass, from darling.json alone: no store
+       connection, no credentials, so it is safe to run at install time before the store has ever booted —
+       unlike --enable-mcp/--enable-web, which write the control-plane store and therefore need it running.
+       ================================================================================================ */
+
+    /// <summary>What <c>--configure-firewall</c> will do to one surface's rule.</summary>
+    public enum FirewallRuleAction
+    {
+        /// <summary>The config exposes this surface on the LAN — create/refresh the scoped allow rule.</summary>
+        Open,
+
+        /// <summary>The surface is loopback-only (by config, or fail-closed by its own resolver) — the desired
+        /// state is NO rule. Removal is idempotent, so this is also the no-op for a rule that never existed.</summary>
+        Remove,
+    }
+
+    /// <summary>One surface's desired firewall state. <paramref name="Note"/> is a human explanation printed
+    /// alongside, non-null only where the reason is not self-evident (a fail-closed exposure).</summary>
+    public readonly record struct FirewallRulePlan(
+        string Surface, string RuleName, int Port, FirewallRuleAction Action, string? Cidr, string? Note);
+
+    /// <summary>
+    /// PURE desired-state for all three rules, so the whole decision pins without a live firewall.
+    /// <para>Every surface is resolved by the SAME resolver the RUNNING service fail-closes on
+    /// (<see cref="DarlingManagedPostgres.ResolveNetworkExposure"/>,
+    /// <see cref="DarlingMcpHostService.ResolveMcpBind"/>, <see cref="DarlingWebHostService.ResolveWebBind"/>)
+    /// rather than by re-reading <c>listen</c>/<c>allowFrom</c> here. That is the load-bearing choice: a config
+    /// the service degrades to loopback (an unparseable listen, a mismatched address family, a missing CIDR)
+    /// must NOT get an open port, and the service's own start-up check must reach the same verdict this did —
+    /// otherwise every start would report a rule this verb had just deliberately created.</para>
+    /// <para>BYO mode resolves loopback for MCP/web (their resolvers take <c>managed</c> and refuse exposure
+    /// without it) and skips the store entirely, whose exposure the operator's own PostgreSQL governs.</para>
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public static IReadOnlyList<FirewallRulePlan> PlanFirewallRules(DarlingConfig config)
+    {
+        var plans = new List<FirewallRulePlan>();
+        var managed = config.Postgres?.Managed ?? false;
+
+        if (managed && config.Postgres is not null)
+        {
+            var (certPath, keyPath) = ResolveStoreCertPaths(config.Postgres);
+            var store = DarlingManagedPostgres.ResolveNetworkExposure(config.Postgres.Network, certPath, keyPath);
+            plans.Add(new FirewallRulePlan(
+                "store",
+                DarlingManagedPostgres.StoreFirewallRuleName(config.Postgres.Port),
+                config.Postgres.Port,
+                store.Exposed ? FirewallRuleAction.Open : FirewallRuleAction.Remove,
+                store.Exposed ? store.Cidr : null,
+                store.DegradeReason));
+        }
+
+        var mcpBind = DarlingMcpHostService.ResolveMcpBind(config.Mcp, managed);
+        var mcpExposed = mcpBind.Mode == DarlingMcpHostService.McpBindMode.NetworkAndLoopback;
+        plans.Add(new FirewallRulePlan(
+            "MCP",
+            DarlingMcpHostService.McpFirewallRuleName(config.Mcp.Port),
+            config.Mcp.Port,
+            mcpExposed ? FirewallRuleAction.Open : FirewallRuleAction.Remove,
+            mcpExposed ? CanonicalCidrOrNull(config.Mcp.Network?.AllowFrom) : null,
+            mcpExposed ? null : DescribeLoopbackReason(mcpBind.Reason, "mcp")));
+
+        var webBind = DarlingWebHostService.ResolveWebBind(config.Web, managed);
+        var webExposed = webBind.Mode == DarlingHostBinding.BindMode.NetworkAndLoopback;
+        plans.Add(new FirewallRulePlan(
+            "web dashboard",
+            DarlingWebHostService.WebFirewallRuleName(config.Web.Port),
+            config.Web.Port,
+            webExposed ? FirewallRuleAction.Open : FirewallRuleAction.Remove,
+            webExposed ? CanonicalCidrOrNull(config.Web.Network?.AllowFrom) : null,
+            webExposed ? null : DescribeLoopbackReason((DarlingMcpHostService.McpBindReason)webBind.Reason, "web")));
+
+        return plans;
+    }
+
+    /// <summary>The parser's canonical CIDR, or null when it will not parse. The bind resolvers have already
+    /// refused exposure in the null case, so an Open plan always carries a real CIDR; this never forwards the
+    /// caller's raw string into a PowerShell command (#1646).</summary>
+    private static string? CanonicalCidrOrNull(string? allowFrom) =>
+        ClassifyAllowFrom(allowFrom, out var canonical) == EndpointAllowFromVerdict.Valid ? canonical : null;
+
+    /// <summary>Why a surface is loopback-only, when the reason is a DEGRADE worth printing. A plain
+    /// loopback-by-default config is the normal case and gets no note.</summary>
+    private static string? DescribeLoopbackReason(DarlingMcpHostService.McpBindReason reason, string section) =>
+        reason switch
+        {
+            DarlingMcpHostService.McpBindReason.TokenMissing =>
+                $"{section}.network is set but its token is missing or unreadable, so the service fail-closes this endpoint to loopback",
+            DarlingMcpHostService.McpBindReason.AllowFromInvalid =>
+                $"{section}.network.allowFrom is missing or not a valid CIDR, so the service fail-closes this endpoint to loopback",
+            DarlingMcpHostService.McpBindReason.ManagedModeRequired =>
+                $"{section}.network is set but postgres.managed = false; LAN exposure is managed-mode only and is ignored",
+            _ => null,
+        };
+
+    /// <summary>
+    /// Creates or removes every scoped Darling firewall rule so the live firewall matches darling.json.
+    /// Requires elevation (that is the entire point of the verb) and is idempotent — safe to re-run on every
+    /// upgrade, which is exactly how install-darling.ps1 uses it. Returns 0 when the firewall ends up matching
+    /// the config, 1 when it could not be made to.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public static async Task<int> ConfigureFirewallAsync(
+        string? configPath, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        DarlingConfig config;
+        try
+        {
+            config = DarlingConfig.Load(configPath);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not load configuration: {ex.Message}");
+            return 1;
+        }
+
+        var plans = PlanFirewallRules(config);
+        var toOpen = plans.Count(p => p.Action == FirewallRuleAction.Open);
+
+        output.WriteLine("Reconciling the scoped Windows Firewall rules to match darling.json.");
+        output.WriteLine(
+            "These rules are managed HERE, elevated. The service account cannot create them by design, so the " +
+            "running service only verifies them and reports what it finds.");
+        output.WriteLine();
+
+        if (!IsElevated())
+        {
+            /* Not elevated. When nothing is exposed there is genuinely nothing to do and a hard failure would
+               be a lie (and would fail an otherwise fine loopback install); when something IS exposed this is a
+               real, actionable failure, so exit non-zero AND print every command to run by hand. */
+            if (toOpen == 0)
+            {
+                output.WriteLine(
+                    "Every endpoint is loopback-only, so no firewall rule is needed and none was changed. " +
+                    "(This shell is not elevated, but there was nothing to do.)");
+                return 0;
+            }
+
+            error.WriteLine("This shell is not elevated, so NO firewall rule was changed. Run these in an ELEVATED PowerShell:");
+            foreach (var plan in plans.Where(p => p.Action == FirewallRuleAction.Open))
+            {
+                error.WriteLine("  " + DarlingManagedPostgres.BuildFirewallEnableCommand(plan.RuleName, plan.Port, plan.Cidr!));
+            }
+
+            return 1;
+        }
+
+        var failures = 0;
+        foreach (var plan in plans)
+        {
+            if (plan.Note is not null)
+            {
+                output.WriteLine($"{plan.Surface}: {plan.Note}.");
+            }
+
+            /* Sweep this surface's rules for EVERY port FIRST, as its own step. The port is part of the rule
+               name, so changing a port does not update a rule — it makes a different one and strands the old as
+               an inbound allow rule on a port nothing serves. Reconciling by exact name could never reach that.
+               Its own step, not concatenated ahead of the open below, because the sweep command ends in exit 0
+               and would otherwise terminate the shell before the rule was created. */
+            var wildcard = DarlingFirewallCheck.SurfaceRuleWildcard(plan.RuleName);
+            if (!await TryRunFirewallStepAsync(
+                DarlingManagedPostgres.BuildFirewallSweepCommand(wildcard),
+                plan.Action == FirewallRuleAction.Remove
+                    ? $"{plan.Surface}: loopback-only — no rule needed (removed any '{wildcard}')."
+                    : $"{plan.Surface}: cleared any previous rule matching '{wildcard}'.",
+                $"{plan.Surface}: could not remove the rule(s) matching '{wildcard}'",
+                output, error, cancellationToken))
+            {
+                failures++;
+            }
+
+            if (plan.Action == FirewallRuleAction.Remove)
+            {
+                /* Loopback-only: the desired state is no rule at all, on any port — the sweep WAS the work. */
+                continue;
+            }
+
+            if (!await TryRunFirewallStepAsync(
+                DarlingManagedPostgres.BuildFirewallEnableCommand(plan.RuleName, plan.Port, plan.Cidr!),
+                $"{plan.Surface}: opened '{plan.RuleName}' (TCP {plan.Port}, inbound, from {plan.Cidr}).",
+                $"{plan.Surface}: could not open the rule '{plan.RuleName}'",
+                output, error, cancellationToken))
+            {
+                failures++;
+            }
+        }
+
+        output.WriteLine();
+        if (failures > 0)
+        {
+            error.WriteLine($"{failures} firewall rule(s) could not be reconciled — see the commands above.");
+            return 1;
+        }
+
+        output.WriteLine(toOpen == 0
+            ? "Done. Every endpoint is loopback-only, so no port was opened."
+            : $"Done. {toOpen} endpoint(s) exposed on the LAN; their scoped rules are in place.");
+        return 0;
+    }
+
+    /// <summary>Runs one reconcile step and reports it. Returns false on failure, after printing the exact
+    /// command so an operator can finish by hand. Never throws except on cancellation.</summary>
+    [SupportedOSPlatform("windows")]
+    private static async Task<bool> TryRunFirewallStepAsync(
+        string command, string successLine, string failurePrefix, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var (exitCode, psOutput) = await DarlingManagedPostgres.RunPowerShellAsync(command, cancellationToken);
+            if (exitCode == 0)
+            {
+                output.WriteLine(successLine);
+                return true;
+            }
+
+            error.WriteLine($"{failurePrefix} (exit {exitCode}: {psOutput}). Run this by hand:");
+            error.WriteLine("  " + command);
+            return false;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"{failurePrefix} ({ex.Message}). Run this by hand:");
+            error.WriteLine("  " + command);
+            return false;
+        }
+    }
+
+    /* ================================================================================================
+       --backfill-rollups: the staged, disk-preflighted rollup backfill (#1759 Phase 2).
+
+       Why an operator verb and not a startup step: the #1680 arming gate is ALL-OR-NOTHING, so a store
+       with a year of raw has to materialize the WHOLE history before the first purge arms and reclaims
+       anything. Peak disk comes BEFORE any relief. Running that automatically at service start, on the
+       exact stores worst affected (one already down to ~150 GB free), is a plausible disk-exhaustion
+       event -- so it is explicit, preflighted, and refuses with numbers rather than filling the volume.
+
+       This verb's job ENDS AT COVERAGE. It never arms a retention policy: the arming gate already
+       self-heals, checking coverage on every service start and releasing the held purges by itself once
+       a rollup genuinely covers raw. Arming here would duplicate that decision in a second place, and
+       the whole reason nothing has been lost on these stores is that exactly one thing decides it.
+       ================================================================================================ */
+
+    /// <summary>
+    /// Materializes the query-acceleration rollups back over pre-existing history so the held raw retention
+    /// policies can arm themselves (#1759 Phase 2). Runs while the service is UP.
+    ///
+    /// <para><b>Concurrency.</b> <c>refresh_continuous_aggregate</c> takes no lock that blocks writers on the
+    /// source hypertable, so collection keeps running throughout; readers are likewise unaffected (Phase 1 has
+    /// them on raw for these windows anyway, and a window whose coverage a slice has just filled starts
+    /// resolving to the rollup at the next probe). What the refresh DOES contend with is the compression policy
+    /// on the same chunks, which is why slices are one chunk wide — a short window cannot sit across a
+    /// compression job long enough to deadlock (the #1778 watch). It cannot run inside a transaction
+    /// (<c>PreventInTransactionBlock</c>), so each slice is its own statement and partial progress survives an
+    /// abort.
+    ///
+    /// <para><b>Resumable and idempotent.</b> Every pass re-plans from the MEASURED coverage floor, so an
+    /// interrupted run continues where it stopped and a completed one converges to a no-op.</para>
+    ///
+    /// <para>Returns 0 when every rollup reached coverage (or already had it), 1 on a load/mode/credential
+    /// error, on a preflight refusal, or when any rollup finished short of raw.</para>
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public static async Task<int> BackfillRollupsAsync(
+        string? configPath, bool dryRun, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        DarlingConfig config;
+        try
+        {
+            config = DarlingConfig.Load(configPath);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not load configuration: {ex.Message}");
+            return 1;
+        }
+
+        var postgres = config.Postgres;
+        if (postgres is null)
+        {
+            error.WriteLine("postgres section is required.");
+            return 1;
+        }
+
+        /* Managed reads the service's own DPAPI-protected owner credential; bring-your-own uses the operator's
+           configured string. Both are supported — this is a STORE operation, not a Windows one. */
+        var connectionString = postgres.Managed
+            ? DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres)
+            : postgres.ConnectionString;
+
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            error.WriteLine(postgres.Managed
+                ? "The managed store credential does not exist yet — start the PerformanceMonitor Darling service once so its first run initializes the store, then re-run this command."
+                : "postgres.connectionString is empty, so there is no store to back fill.");
+            return 1;
+        }
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        try
+        {
+            await connection.OpenAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"Could not connect to the store: {ex.Message}");
+            return 1;
+        }
+
+        output.WriteLine();
+        output.WriteLine("PerformanceMonitor Darling — rollup backfill (--backfill-rollups)");
+        output.WriteLine();
+
+        /* Plan every rollup. The list is in DEPENDENCY ORDER (hourlies, then the dailies sourced from them),
+           and the run loop below preserves it — a daily refreshed over a range its hourly has not materialized
+           reads an empty source, materializes nothing, reports success, and CONSUMES the invalidations that
+           covered the range, so a later correct-order pass no-ops over the hole. */
+        var plans = new List<(RollupBackfillTarget Target, RollupBackfillPlan Plan)>();
+        var refusedPlans = new List<string>();
+        var rawBytesCache = new Dictionary<string, long>(StringComparer.Ordinal);
+        var rawOldestCache = new Dictionary<string, DateTime?>(StringComparer.Ordinal);
+        foreach (var target in RollupBackfill.Targets)
+        {
+            RollupBackfillProbe probe;
+            try
+            {
+                probe = await RollupBackfill.ProbeAsync(connection, target.View, target.Source, target.SourceTimeColumn, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                /* A missing rollup (a partially-built store) or a store without TimescaleDB lands here. Report
+                   and carry on: the rollups are independent, and an operator who cannot fix one should not be
+                   blocked from backfilling the rest. */
+                error.WriteLine($"  [SKIP] {target.View}: cannot be probed ({ex.Message}).");
+                continue;
+            }
+
+            /* The UNCALIBRATED estimate stays bounded by RAW's size even for a hierarchical daily, whose
+               convergence target is now its hourly. Raw is the larger relation, so it is the conservative
+               bound, and this branch only runs when the rollup has materialized nothing to measure — where
+               erring high is the whole point (#1759). Deliberately not switched to the source with the rest of
+               #1798: sizing a CAGG source would need its materialization hypertable, which buys accuracy in
+               precisely the case where accuracy is not what is wanted. */
+            if (!rawBytesCache.TryGetValue(target.RawTable, out var rawBytes))
+            {
+                rawBytes = await RollupBackfill.RawBytesAsync(connection, target.RawTable, cancellationToken);
+                rawBytesCache[target.RawTable] = rawBytes;
+            }
+
+            /* BOUND THE PREFLIGHT AGAINST WHERE THE SOURCE WILL END UP, not where it starts now. A daily's
+               source is an hourly that this same run deepens FIRST, so estimating from the pre-backfill floor
+               under-counts precisely the region the run then writes — and the printed number is the commitment
+               the operator accepted. Same invariant as the rows-per-bucket under-estimate, and it bites on the
+               store shape where disk is tightest. A no-op for the hourlies, whose source IS raw. */
+            if (!rawOldestCache.TryGetValue(target.RawTable, out var rootRawOldest))
+            {
+                rootRawOldest = await RollupBackfill.OldestInstantAsync(connection, target.RawTable, "collection_time", cancellationToken);
+                rawOldestCache[target.RawTable] = rootRawOldest;
+            }
+
+            plans.Add((target, RollupBackfill.Plan(
+                target.View, RollupBackfill.EventualSourceFloor(probe.SourceOldestUtc, rootRawOldest), probe.CoverageOldestUtc,
+                probe.MaterializedBuckets, probe.MaterializedBytes, rawBytes,
+                target.IsDaily ? TimeSpan.FromDays(1) : TimeSpan.FromHours(1))));
+        }
+
+        var work = plans.Where(p => !p.Plan.IsComplete).ToList();
+        foreach (var (_, done) in plans.Where(p => p.Plan.IsComplete))
+        {
+            /* A refusal is NOT a skip. "Nothing to do" is a success an operator can scroll past; a plan the
+               store's own data makes nonsense of names a row someone has to go and look at, and printing it as
+               an [OK] line would bury it. */
+            if (done.Refusal is string refusal)
+            {
+                error.WriteLine($"  [REFUSED] {done.View}: {refusal}");
+                refusedPlans.Add($"{done.View}: {refusal}");
+            }
+            else
+            {
+                output.WriteLine($"  [OK]   {done.View}: nothing to do — {done.SkipReason}.");
+            }
+        }
+
+        if (work.Count == 0)
+        {
+            output.WriteLine();
+            if (refusedPlans.Count > 0)
+            {
+                /* Never "all covered, you are done" when a rollup was refused: that rollup is NOT covered, its
+                   retention policy will stay held, and saying otherwise sends the operator away from a corrupt
+                   row they need to fix. */
+                error.WriteLine("REFUSED. Nothing was materialized for these rollups, and their retention policies stay held:");
+                foreach (var refusal in refusedPlans)
+                {
+                    error.WriteLine("  - " + refusal);
+                }
+
+                return 1;
+            }
+
+            output.WriteLine("Every rollup already covers its own source. Any retention policy still held will arm itself on the next service start.");
+            return 0;
+        }
+
+        var totalEstimate = work.Sum(w => w.Plan.EstimatedBytes);
+        var anyUncalibrated = work.Exists(w => !w.Plan.Calibrated);
+
+        output.WriteLine("Plan:");
+        foreach (var (_, plan) in work)
+        {
+            output.WriteLine(string.Create(
+                CultureInfo.InvariantCulture,
+                $"  {plan.View}: materialize {plan.FromUtc:yyyy-MM-dd} -> {plan.ToUtc:yyyy-MM-dd} ({plan.BucketsToAdd:N0} buckets in {plan.Slices:N0} slices), estimated {plan.EstimatedSize}")
+                + (plan.Calibrated ? "" : " (UNCALIBRATED upper bound — this rollup has materialized nothing to measure)"));
+        }
+
+        output.WriteLine();
+        output.WriteLine(string.Create(
+            CultureInfo.InvariantCulture,
+            $"Total estimated materialization: {RollupBackfillPlan.FormatBytes(totalEstimate)}; expected duration about {DescribeDuration(RollupBackfill.EstimatedDuration(totalEstimate))} at the ~16 MB/s throughput measured on this host class."));
+
+        if (anyUncalibrated)
+        {
+            output.WriteLine(
+                "NOTE: at least one estimate is an UPPER BOUND, not a measurement — that rollup has materialized " +
+                "nothing this could be calibrated against. It is deliberately generous: refusing a backfill that " +
+                "would have fit is recoverable, filling the volume is not.");
+        }
+
+        var (freeBytes, freeError) = await ResolveStoreFreeSpaceAsync(connection, cancellationToken);
+        if (freeError is not null)
+        {
+            error.WriteLine();
+            error.WriteLine("REFUSING: " + freeError);
+            error.WriteLine(
+                "This backfill materializes history BEFORE any purge can reclaim anything, so running it without " +
+                "knowing the free space is exactly the disk-exhaustion risk it exists to avoid.");
+            return 1;
+        }
+
+        output.WriteLine(string.Create(
+            CultureInfo.InvariantCulture,
+            $"Free space on the store volume: {RollupBackfillPlan.FormatBytes(freeBytes)}; required: {RollupBackfillPlan.FormatBytes(RollupBackfill.RequiredBytes(totalEstimate))}."));
+
+        if (!RollupBackfill.HasRoom(totalEstimate, freeBytes))
+        {
+            error.WriteLine();
+            error.WriteLine(FormatDiskRefusal(totalEstimate, freeBytes));
+            return 1;
+        }
+
+        if (dryRun)
+        {
+            output.WriteLine();
+            output.WriteLine("--dry-run: nothing was materialized. Re-run without --dry-run to proceed.");
+            return 0;
+        }
+
+        output.WriteLine();
+        /* Slices run NEWEST-FIRST (see RollupBackfill.Slices), so coverage extends DOWNWARD toward raw's oldest
+           row and the measured floor is a truthful progress cursor rather than a value the first slice pins.
+           That is what makes this claim safe to make: an interrupted run reports SHORT, not DONE. */
+        output.WriteLine("Backfilling, newest-first, so coverage extends downward toward the oldest raw row.");
+        output.WriteLine("Safe to interrupt: every completed slice is committed, an interrupted run reports SHORT rather");
+        output.WriteLine("than claiming success, and re-running resumes from the measured floor.");
+
+        /* THE DEGRADE HAS TO REACH THE OPERATOR. RefreshDisclosure carries both the run's options capability
+           (latched once, so a pre-2.21 store pays one failed call rather than one per slice) and the sink that
+           says so. It is a REQUIRED argument precisely because the first cut made it a trailing optional and
+           both call sites silently omitted it — degrade-and-be-silent, while the call-site doc claimed the
+           contract was held. Routed to stderr alongside the REFUSED/SHORT lines. */
+        var disclosure = new RefreshDisclosure(message => error.WriteLine("  NOTE: " + message));
+
+        var shortfalls = new List<string>();
+        foreach (var (target, plannedUpFront) in work)
+        {
+            output.WriteLine();
+            output.WriteLine($"  {plannedUpFront.View}:");
+
+            /* RE-PLAN FROM LIVE MEASUREMENTS, because a hierarchical daily's target MOVES during this run.
+               The plans above were all taken before any slice ran — necessary, since the disk preflight has to
+               total the whole job before committing to any of it — but a daily converges to its HOURLY, and
+               that hourly is backfilled EARLIER IN THIS SAME LOOP. Planning a daily from the pre-backfill
+               snapshot aims it at where its source used to start, so it does almost nothing and is then judged
+               against where its source now starts: SHORT on every daily, every time. Caught by the verb's own
+               end-to-end test going red on exactly that.
+
+               Re-planning here is the same measured-floor idiom that makes resume work, applied one level up:
+               the up-front pass sizes the job, this one aims it. */
+            RollupBackfillPlan plan;
+            try
+            {
+                var live = await RollupBackfill.ProbeAsync(connection, target.View, target.Source, target.SourceTimeColumn, cancellationToken);
+                plan = RollupBackfill.Plan(
+                    target.View, live.SourceOldestUtc, live.CoverageOldestUtc,
+                    live.MaterializedBuckets, live.MaterializedBytes,
+                    rawBytesCache.TryGetValue(target.RawTable, out var cachedRawBytes) ? cachedRawBytes : 0,
+                    target.IsDaily ? TimeSpan.FromDays(1) : TimeSpan.FromHours(1));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                error.WriteLine($"    FAILED to re-probe before running: {ex.Message}");
+                shortfalls.Add($"{plannedUpFront.View} could not be re-probed before its slices ran");
+                continue;
+            }
+
+            if (plan.Refusal is string replanRefusal)
+            {
+                /* A REFUSAL IS NOT A COMPLETION, and this is a GUARD rather than an assertion that the case
+                   cannot arise. RollupBackfillPlan.Absurd sets IsComplete as well as Refusal, so testing
+                   IsComplete first — as an earlier cut did — printed "already covers" over a refusal and
+                   counted it as success.
+
+                   On today's code a refused re-plan is close to unreachable: a corrupt source timestamp makes
+                   the HOURLY's up-front plan refuse on the same row, and since a daily is now planned against
+                   its source's eventual floor, the daily refuses up front too — so neither reaches this loop.
+                   But "close to unreachable" is an argument about the current call graph, not a property, and
+                   the failure it protects against is slicing a window the planner already rejected as garbage.
+                   The guard costs three lines; the argument would have to be re-derived by every future
+                   reader. */
+                error.WriteLine($"    [REFUSED] {target.View}: {replanRefusal}");
+                shortfalls.Add($"{target.View}: {replanRefusal}");
+                continue;
+            }
+
+            if (plan.IsComplete)
+            {
+                /* Its source moved under it and it is already covered — normal for a daily whose hourly
+                   turned out to reach no further back than the daily already did. */
+                output.WriteLine($"    already covers {target.Source} — nothing to do.");
+                continue;
+            }
+
+            var completed = 0L;
+            var sliceFailed = false;
+            foreach (var (from, to) in RollupBackfill.Slices(plan.FromUtc, plan.ToUtc))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    var floor = await RollupBackfill.RunSliceAsync(connection, plan.View, from, to, disclosure, cancellationToken);
+                    completed++;
+                    output.WriteLine(string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"    [{completed:N0}/{plan.Slices:N0}] {from:yyyy-MM-dd} -> {to:yyyy-MM-dd}; coverage now starts {floor:yyyy-MM-dd HH:mm}"));
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    error.WriteLine($"    FAILED at {from:yyyy-MM-dd}: {ex.Message}");
+                    sliceFailed = true;
+                    break;
+                }
+            }
+
+            /* CONVERGENCE IS MEASURED, NEVER INFERRED. A refresh that stops on its internal batch cap logs
+               server-side and returns success to the client, so "the calls did not throw" is no evidence that
+               the range was materialized. The only honest check is to re-read the floor from DATA and compare
+               it to the raw row it had to reach. */
+            var finalFloor = await RollupBackfill.ReadCoverageFloorAsync(connection, plan.View, cancellationToken);
+            var after = await RollupBackfill.ProbeAsync(connection, plan.View, target.Source, target.SourceTimeColumn, cancellationToken);
+            var reached = finalFloor is not null && after.SourceOldestUtc is not null && finalFloor <= after.SourceOldestUtc;
+
+            /* Short WITHOUT a slice having failed means the refreshes reported success over a range they did
+               not materialize — the signature of an earlier pass cut short, whose invalidation records a plain
+               refresh will now skip straight over. That is the one case the forced form repairs, and the only
+               case it is worth paying for. */
+            if (!reached && !sliceFailed && after.SourceOldestUtc is not null)
+            {
+                output.WriteLine($"    {plan.View} is still short after every slice; escalating to a forced refresh over the range.");
+                try
+                {
+                    finalFloor = await RollupBackfill.RepairAsync(connection, plan.View, plan.FromUtc, plan.ToUtc, disclosure, cancellationToken);
+                    reached = finalFloor is not null && finalFloor <= after.SourceOldestUtc;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    /* force arrived in TimescaleDB 2.18 — an older bring-your-own store raises 42883 here.
+                       Reported, not fatal: the shortfall is already going to be reported below. */
+                    error.WriteLine($"    forced refresh unavailable on this store ({ex.Message}).");
+                }
+            }
+
+            if (reached)
+            {
+                output.WriteLine($"    COVERED: {plan.View} now starts at {finalFloor:yyyy-MM-dd HH:mm}, at or before {target.Source}'s oldest row ({after.SourceOldestUtc:yyyy-MM-dd HH:mm}) — which is what the arming gate measures for this tier.");
+            }
+            else
+            {
+                shortfalls.Add($"{plan.View} reaches back to {finalFloor:yyyy-MM-dd HH:mm} but its source {target.Source} reaches back to {after.SourceOldestUtc:yyyy-MM-dd HH:mm}");
+                error.WriteLine(
+                    $"    SHORT: {plan.View} did not reach its source {target.Source}'s oldest row" +
+                    (sliceFailed
+                        ? " (a slice failed above)."
+                        : " even though every slice reported success — a refresh that stops on its internal batch cap is silent to the client. Re-run to continue."));
+            }
+        }
+
+        output.WriteLine();
+        /* A refusal from the planning pass counts as a shortfall here too: those rollups were never attempted,
+           so DONE would be a lie about them even when every rollup that DID run reached coverage. */
+        shortfalls.AddRange(refusedPlans);
+
+        if (shortfalls.Count > 0)
+        {
+            error.WriteLine("INCOMPLETE. These rollups do not yet cover their sources, so their retention policies stay held:");
+            foreach (var shortfall in shortfalls)
+            {
+                error.WriteLine("  - " + shortfall);
+            }
+
+            error.WriteLine();
+            error.WriteLine("Re-run --backfill-rollups; it resumes from the measured floor.");
+            return 1;
+        }
+
+        output.WriteLine("DONE. Every rollup now covers its own source, which is what each retention policy's arming gate measures.");
+        output.WriteLine();
+        output.WriteLine("NEXT: restart the PerformanceMonitor Darling service. The arming gate checks coverage at");
+        output.WriteLine("startup and releases the held retention policies by itself — there is no arming step here and");
+        output.WriteLine("nothing to run by hand. The startup log line reading");
+        output.WriteLine("  'N/N retention policies in place, N armed, 0 held paused pending backfill'");
+        output.WriteLine("is the confirmation; the first purge then reclaims the raw tables in one pass.");
+        output.WriteLine();
+        output.WriteLine("Do not delay the restart. The hourly rollups carry their OWN 21-day retention policy, already");
+        output.WriteLine("armed on these stores, which will trim the coverage this run just built when it next fires");
+        output.WriteLine("(roughly daily). Restarting now is what lets the raw policies arm off that coverage first. If");
+        output.WriteLine("the trim wins the race nothing is lost — raw is still held — and re-running this verb rebuilds it.");
+        return 0;
+    }
+
+    /// <summary>
+    /// Free space on the volume the store's data directory lives on. Asked of the STORE
+    /// (<c>current_setting('data_directory')</c>) rather than derived from config, so it is right in
+    /// bring-your-own mode too. Returns an error string rather than a number in the two cases where measuring
+    /// would measure the WRONG volume: the login cannot read the setting, or the store is on another host so
+    /// the path does not exist here.
+    /// </summary>
+    private static async Task<(long FreeBytes, string? Error)> ResolveStoreFreeSpaceAsync(
+        NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        var dataDirectory = await RollupBackfill.DataDirectoryAsync(connection, cancellationToken);
+        if (string.IsNullOrWhiteSpace(dataDirectory))
+        {
+            return (0, "could not read the store's data_directory, so the free space on the volume that will grow is unknown. The login needs superuser or pg_read_all_settings.");
+        }
+
+        if (!Directory.Exists(dataDirectory))
+        {
+            return (0, $"the store's data directory ({dataDirectory}) does not exist on this machine, so the store is on another host and this machine's free space is not the number that matters. Run --backfill-rollups ON the store host.");
+        }
+
+        try
+        {
+            return (new DriveInfo(Path.GetPathRoot(Path.GetFullPath(dataDirectory))!).AvailableFreeSpace, null);
+        }
+        catch (Exception ex)
+        {
+            return (0, $"could not read free space for {dataDirectory}: {ex.Message}.");
+        }
+    }
+
+    /// <summary>
+    /// The refusal, with the exact shortfall and the two things an operator can actually do about it. PURE, so
+    /// the numbers and the options pin in a unit test — which matters precisely because this message only ever
+    /// appears in the situation nobody wants to reproduce by hand.
+    /// </summary>
+    public static string FormatDiskRefusal(long estimatedBytes, long freeBytes)
+    {
+        var required = RollupBackfill.RequiredBytes(estimatedBytes);
+        var shortfall = required - freeBytes;
+
+        return string.Create(CultureInfo.InvariantCulture, $@"REFUSING: not enough free space to back fill safely.
+
+  Estimated materialization : {RollupBackfillPlan.FormatBytes(estimatedBytes)}
+  Required free space       : {RollupBackfillPlan.FormatBytes(required)}  (estimate x {RollupBackfill.SafetyFactor:0.##} headroom + {RollupBackfillPlan.FormatBytes(RollupBackfill.ReserveBytes)} reserve)
+  Free space now            : {RollupBackfillPlan.FormatBytes(freeBytes)}
+  SHORT BY                  : {RollupBackfillPlan.FormatBytes(shortfall)}
+
+The rollups have to materialize the WHOLE history before the arming gate will release the raw
+retention policies, so peak disk comes BEFORE any reclaim. Running this now would fill the volume
+and take the store down without ever reaching the point where it frees anything.
+
+Your options:
+  1. Grow the volume by at least {RollupBackfillPlan.FormatBytes(shortfall)} and re-run. This is the option that ends
+     with the raw purges armed and the space reclaimed permanently.
+  2. Accept waiting. Nothing is broken and nothing is being lost: the arming gate is holding the raw
+     purges closed precisely because the rollups do not cover this history yet, and reads of those old
+     windows are served from raw. Raw keeps growing at full rate until the backfill happens, so this
+     buys time rather than solving it.
+
+Re-run with --dry-run at any time to re-check the numbers; the plan is recomputed from the store.");
+    }
+
+    /// <summary>A duration an operator can plan around ("about 3 hours"), not a timespan literal.</summary>
+    private static string DescribeDuration(TimeSpan duration)
+    {
+        if (duration < TimeSpan.FromMinutes(1))
+        {
+            return "under a minute";
+        }
+
+        if (duration < TimeSpan.FromHours(1))
+        {
+            return string.Create(CultureInfo.InvariantCulture, $"{duration.TotalMinutes:0} minutes");
+        }
+
+        return duration < TimeSpan.FromDays(1)
+            ? string.Create(CultureInfo.InvariantCulture, $"{duration.TotalHours:0.#} hours")
+            : string.Create(CultureInfo.InvariantCulture, $"{duration.TotalDays:0.#} days");
     }
 }

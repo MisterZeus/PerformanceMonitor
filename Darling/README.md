@@ -4,7 +4,7 @@ Darling is the headless, centralized edition of Performance Monitor: a 24/7 Wind
 
 It runs the **same monitoring brain as the Lite edition** — one shared codebase, two storage engines:
 
-- `PerformanceMonitor.Collectors` owns all 32 collector definitions: the exact T-SQL sent to monitored servers, the result-row mappings, the delta rules, the default cadences and retention horizons, and the ignored-wait-types list. Lite writes those rows to DuckDB; Darling writes the same rows to PostgreSQL via binary COPY.
+- `PerformanceMonitor.Collectors` owns all 38 collector definitions: the exact T-SQL sent to monitored servers, the result-row mappings, the delta rules, the default cadences and retention horizons, and the ignored-wait-types list. Lite writes those rows to DuckDB; Darling writes the same rows to PostgreSQL via binary COPY.
 - `PerformanceMonitor.Alerting` owns the shared alert engine — the same thresholds, edge-trigger gates, cooldowns, and dedup fingerprints Lite uses.
 - The analysis/recommendations pipeline (the same inference engine behind both apps' Recommendations tabs and the `analyze_server` MCP tool) runs on a schedule inside the service.
 
@@ -107,7 +107,7 @@ The same executable serves interactive debugging and service installation; the W
 Darling\PerformanceMonitor.Darling.Service\bin\Release\net10.0\PerformanceMonitor.Darling.Service.exe
 ```
 
-Watch the log output: you should see the config load (`Loaded configuration from ...`), the store migrate (`Postgres store ready (schema v20, ...)`), the TimescaleDB detection result, per-server connects, and then per-collector run lines with row counts.
+Watch the log output: you should see the config load (`Loaded configuration from ...`), the store migrate (`Postgres store ready (schema v34, ...)`), the TimescaleDB detection result, per-server connects, and then per-collector run lines with row counts.
 
 ### Install as a Windows Service
 
@@ -158,6 +158,9 @@ CREATE LOGIN [DarlingMonitor] WITH PASSWORD = N'YourStrongPassword';
 GRANT VIEW SERVER STATE TO [DarlingMonitor];
 GRANT ALTER ANY EVENT SESSION TO [DarlingMonitor];
 
+-- Only if the instance hosts Availability Groups (see the table below)
+GRANT VIEW ANY DEFINITION TO [DarlingMonitor];
+
 -- Optional: SQL Agent job monitoring + failed-job alerts
 USE [msdb];
 CREATE USER [DarlingMonitor] FOR LOGIN [DarlingMonitor];
@@ -171,10 +174,32 @@ ALTER ROLE [SQLAgentReaderRole] ADD MEMBER [DarlingMonitor];
 | `ALTER SETTINGS` | The `sp_configure` blocked-process-threshold bootstrap | Logged; set the threshold yourself (or via RDS Parameter Group) |
 | `SQLAgentReaderRole` on msdb | `running_jobs` collector and the failed/long-running-job alerts | Skipped gracefully — logged as a permissions skip, alerts return no jobs |
 | `DBCC TRACESTATUS` permission | `trace_flags` snapshot | Degrades to zero rows with a warning |
+| `VIEW ANY DEFINITION` | The AG catalog views (`sys.availability_groups`, `sys.availability_replicas`) the `ag_replica_states` / `ag_database_replica_states` collectors join to the `sys.dm_hadr_*` DMVs | **Silently zero rows** — catalog views hide rows rather than erroring, so a real AG cluster looks identical to a server with no AGs. Not needed on an instance without Availability Groups |
 
 **Azure SQL Database:** connect to the one database you monitor (set the server entry's `"database"`), using a contained user with `VIEW DATABASE STATE`, matching the product's existing Azure guidance. The XE sessions are created database-scoped there (`ALTER ANY DATABASE EVENT SESSION`); SQL Agent collectors are skipped automatically.
 
 Collectors that hit a permission error (SQL errors 229/297/300) log a `PERMISSIONS` row in `collection_log` and retry on their next scheduled run — one denied collector never stops the rest.
+
+#### Which collectors run on which platform
+
+Every collector declares its own applicability in code (`AppliesTo(CollectorTargetInfo)`), so this is not a hand-maintained list of 36 rows — the collectors fall into five groups, and a collector outside its supported platform is **skipped before it runs**, not failed and logged every cycle.
+
+| Runs on | Collectors | Gate |
+|---|---|---|
+| Everything | wait stats, CPU utilization, memory (stats/clerks/grants), file I/O, tempdb, latches, spinlocks, plan cache, session summary, plus blocking, deadlocks, blocked-process reports, DMV blocking snapshots, perfmon, query snapshots, procedure stats, index/object stats, long-query completions, database config/scoped-config/size, server properties, session stats, waiting tasks | no gate |
+| On-prem, Managed Instance, RDS — **not** Azure SQL DB | CPU scheduler stats, default trace events, memory pressure events, server config, system health events, trace flags | `!IsAzureSqlDb` |
+| On-prem and Managed Instance, needs msdb | job history | `!IsAzureSqlDb && HasMsdbAccess` |
+| On-prem and Managed Instance, needs msdb — **not** RDS | agent status, running jobs | `!IsAzureSqlDb && !IsAwsRds && HasMsdbAccess` |
+| SQL Server 2016+ (or any Azure flavour) | query stats, Query Store stats | `SqlMajorVersion >= 13 \|\| IsAzureSqlDb \|\| IsAzureManagedInstance` |
+
+Notes:
+
+- **Azure SQL DB** is the most restricted target: the six `!IsAzureSqlDb` collectors read server-scoped DMVs or on-disk artifacts that do not exist there, and the SQL Agent collectors have no Agent to read. Nothing about that is a permission problem, so it is not reported as one.
+- **AWS RDS** blocks direct `msdb` job reads specifically; the rest of the SQL Agent surface is unaffected.
+- **`HasMsdbAccess`** is probed per server at connect (`HAS_DBACCESS('msdb')`), so losing the `SQLAgentReaderRole` grant later moves those collectors from running to skipped without an error storm.
+- An unknown version (`SqlMajorVersion == 0`, i.e. detection has not completed yet) is treated as capable rather than skipped, so a collector is never silently dropped because a probe was slow.
+
+If a tab or column is empty and you expect data, check **Collection Health**: a collector skipped for platform reasons shows no runs at all, whereas one denied by permissions logs `PERMISSIONS` and is classified `NO_PERMISSIONS`. Those are different problems with different fixes — the first is expected on that platform, the second is a grant to add from the table above.
 
 ---
 
@@ -412,7 +437,7 @@ All timestamps in the store are **naive-UTC** `timestamp` columns — the produc
 
 At startup, right after migration, the service attempts `CREATE EXTENSION IF NOT EXISTS timescaledb` and checks `pg_extension`:
 
-- **Present** — every collector table is converted to a hypertable (partitioned on its own time column into **1-day chunks**, existing rows migrated) and gets a compression policy: chunks older than **1 day** compress automatically (segmented by `server_id`). The short intervals matter at the 1-minute collection cadence — a chunk cannot compress until it closes and then ages, so TimescaleDB's 7-day default left the store fully uncompressed for ~2 weeks (a near-idle 5-server fleet still reached ~1 GB in a couple of days); 1-day chunks + 1-day compress keep it compact (measured ~16.7x on perfmon, ~6.4x on the plan-XML-heavy query_stats). Compressed chunks stay fully queryable — this is Darling's archival tier, the centralized-store answer to Lite's Parquet archive. Everything is idempotent and re-converges on every service start; a table that fails conversion stays a plain table and keeps working.
+- **Present** — every collector table is converted to a hypertable (partitioned on its own time column into **1-day chunks**, existing rows migrated) and gets a compression policy: chunks older than **1 day** compress automatically (segmented by `server_id`), checked **hourly**. The hourly tick is passed explicitly because TimescaleDB's own default is **12 hours** for 1-day chunks — that is a second, separate wait *after* a chunk is already eligible, and on a field store it left the newest closed chunk (always the least-compressed data on disk) uncompressed for most of a day. Stores created before this shipped are retuned automatically on the next service start. The short intervals matter at the 1-minute collection cadence — a chunk cannot compress until it closes and then ages, so TimescaleDB's 7-day default left the store fully uncompressed for ~2 weeks (a near-idle 5-server fleet still reached ~1 GB in a couple of days); 1-day chunks + 1-day compress keep it compact (measured ~16.7x on perfmon, ~6.4x on the plan-XML-heavy query_stats). Compressed chunks stay fully queryable — this is Darling's archival tier, the centralized-store answer to Lite's Parquet archive. Everything is idempotent and re-converges on every service start; a table that fails conversion stays a plain table and keeps working.
 - **Absent** — the service logs one Information line and runs in plain-PostgreSQL mode, which is a fully supported configuration, not a degraded one.
 
 `IF NOT EXISTS` short-circuits before privilege checks, so a store whose administrator pre-created the extension works for a service login that could never create it.
@@ -547,7 +572,7 @@ With `postgres.managed = true` (the sample's default), the service runs its own 
 }
 ```
 
-**What first run does.** The service looks for `pg-runtime\pgsql\` beside its binary, extracting it from `pg-runtime.zip` when only the zip is present (deleting the extracted directory is therefore always safe — it self-heals). If the data directory has no cluster, it generates a 32-character random password, protects it with DPAPI LocalMachine into `pg-credential.dpapi` beside the data directory (credential first, so a crash mid-initdb never strands a cluster nobody can log into), then runs `initdb` with `scram-sha-256` auth, data checksums, and UTF8/C locale. A marker-guarded block appended to `postgresql.conf` preloads TimescaleDB, sets the port, and restricts listening to `127.0.0.1`; a second versioned block sizes background workers up for the per-hypertable compression jobs (`timescaledb.max_background_workers = 28`, `max_worker_processes = 40` — PostgreSQL's default of 8 workers cannot launch them); a third versioned block sizes memory from the host's physical RAM for the up-to-500-servers case (`shared_buffers = min(25% RAM, 8GB)`, `effective_cache_size = 75% RAM`, `maintenance_work_mem = min(5% RAM, 1GB)`, and a deliberately-modest per-connection `work_mem = clamp(RAM/512, 16MB, 64MB)` — on an 8 GB box that is `shared_buffers 2048MB` / `work_mem 16MB`; the stock 128 MB / 4 MB defaults are fine at small scale but bottleneck at fleet scale). All three appends are re-checked on every start, so a crash between initdb and the append heals itself instead of silently degrading — and clusters initialized before the worker or memory sizing existed gain the missing block on their next start (effective at the next PostgreSQL restart). Then `pg_ctl start`, `CREATE DATABASE darling`, and the normal startup path (migrations, TimescaleDB adoption — you should see `32/32 collector table(s) are hypertables`) continues exactly as in bring-your-own mode. The connection string is derived from the stored credential; the Viewer and the MCP host on the same machine derive it the same way, so nothing needs configuring there either.
+**What first run does.** The service looks for `pg-runtime\pgsql\` beside its binary, extracting it from `pg-runtime.zip` when only the zip is present (deleting the extracted directory is therefore always safe — it self-heals). If the data directory has no cluster, it generates a 32-character random password, protects it with DPAPI LocalMachine into `pg-credential.dpapi` beside the data directory (credential first, so a crash mid-initdb never strands a cluster nobody can log into), then runs `initdb` with `scram-sha-256` auth, data checksums, and UTF8/C locale. A marker-guarded block appended to `postgresql.conf` preloads TimescaleDB, sets the port, and restricts listening to `127.0.0.1`; a second versioned block sizes background workers up for the per-hypertable compression jobs (`timescaledb.max_background_workers = 28`, `max_worker_processes = 40` — PostgreSQL's default of 8 workers cannot launch them); a third versioned block sizes memory from the host's physical RAM for the up-to-500-servers case (`shared_buffers = min(25% RAM, 1GB)`, `effective_cache_size = 75% RAM`, `maintenance_work_mem = min(max(5% RAM, 1536MB), 25% RAM, 2048MB)`, and a deliberately-modest per-connection `work_mem = clamp(RAM/512, 16MB, 64MB)` — on an 8 GB box that is `shared_buffers 1024MB` / `work_mem 16MB`; the stock 128 MB / 4 MB defaults are fine at small scale but bottleneck at fleet scale). Later blocks re-state single settings that field measurement moved: a fifth caps `shared_buffers` for the co-located store, a sixth turns on the log-rotation ring, and a seventh carries the `maintenance_work_mem` floor that TimescaleDB's compression sort runs on (measured at ~+70% compression throughput on a 16 GB-class host, plateauing by 1536 MB). `postgresql.conf` takes the LAST assignment of a setting, so these override without rewriting anything. Every append is re-checked on every start, so a crash between initdb and the append heals itself instead of silently degrading — and clusters initialized before a given block existed gain it on their next start (effective at the next PostgreSQL restart). Then `pg_ctl start`, `CREATE DATABASE darling`, and the normal startup path (migrations, TimescaleDB adoption — you should see `32/32 collector table(s) are hypertables`) continues exactly as in bring-your-own mode. The connection string is derived from the stored credential; the Viewer and the MCP host on the same machine derive it the same way, so nothing needs configuring there either.
 
 **Why scram and not trust, even loopback-only.** Trust auth would hand superuser to any local code that can open a loopback socket — every other local user, and network-capable-but-not-filesystem-capable attack primitives like SSRF from a co-hosted app. With scram the credential travels on the wire, failed attempts are auditable, and access is confined to what can read the DPAPI-protected credential file. `listen_addresses = '127.0.0.1'` keeps the server unreachable off the machine on top — unless you deliberately opt into a LAN endpoint (see [Opt-in Network Endpoints (LAN)](#opt-in-network-endpoints-lan)), which reconciles `listen_addresses`, a `hostssl` pg_hba rule, and TLS on every start and is otherwise off.
 
@@ -602,7 +627,7 @@ Edit the two password placeholders (and the database/owner names if yours differ
 
 ## Opt-in Network Endpoints (LAN)
 
-By default both network surfaces bind **loopback only** — the store to `127.0.0.1`, the MCP server to `localhost` — exactly as they always have. Two optional, independent opt-ins let a remote viewer or MCP client on your **trusted LAN** reach them. This is a home-lab / trusted-subnet feature: **never expose either endpoint to the internet.** Both are **managed-mode only** (in bring-your-own mode your own PostgreSQL / reverse proxy governs exposure, and the config is ignored with a warning), and both are **fail-closed** — any invalid or incomplete field degrades that endpoint back to loopback and logs a critical line rather than exposing it. Removing the config on the next restart closes the box again.
+By default all three network surfaces bind **loopback only** — the store to `127.0.0.1`, the MCP server and the web dashboard to `localhost` — exactly as they always have. Three optional, independent opt-ins let a remote viewer, MCP client, or browser on your **trusted LAN** reach them. This is a home-lab / trusted-subnet feature: **never expose any of these endpoints to the internet.** All three are **managed-mode only** (in bring-your-own mode your own PostgreSQL / reverse proxy governs exposure, and the config is ignored with a warning), and all three are **fail-closed** — any invalid or incomplete field degrades that endpoint back to loopback and logs a critical line rather than exposing it. Removing the config on the next restart closes the box again.
 
 ### Guided setup (`--configure-network`)
 
@@ -612,7 +637,21 @@ The fastest path is the interactive wizard — run it on the **service host**:
 PerformanceMonitor.Darling.Service.exe --configure-network
 ```
 
-It shows the current exposure (read from the service's own resolvers), then walks you through the **store**, **MCP**, or **both** (or a **disable** that removes exposure). Every answer is validated **by delegation to the exact checks the running service fail-closes on**, so the wizard can never write a config the service would refuse — it re-prompts with the resolver's own reason. It generates the MCP bearer token for you (DPAPI-protected; the plaintext is printed once, so save it then), edits `darling.json` **in place preserving every comment** behind a timestamped `darling.json.bak-<timestamp>` backup, prints the scoped firewall command(s) and the `--print-viewer-connection` handoff, and offers to restart the service to apply. `install-darling.ps1 -Network` runs it automatically right after the install reaches Running. The manual field reference below documents exactly what it writes.
+It shows the current exposure (read from the service's own resolvers), then walks you through the **store**, **MCP**, the **web dashboard**, any comma combination (e.g. `1,3`), or all three at once (or a **disable** that removes all exposure). Every answer is validated **by delegation to the exact checks the running service fail-closes on**, so the wizard can never write a config the service would refuse — it re-prompts with the resolver's own reason. It generates the MCP bearer / web access tokens for you (DPAPI-protected; each plaintext is printed once, so save it then), edits `darling.json` **in place preserving every comment** behind a timestamped `darling.json.bak-<timestamp>` backup, prints the scoped firewall command(s), the `--print-viewer-connection` handoff, and the web dashboard's browser login URL (`http://<listen>:<port>/?token=...`), and offers to restart the service to apply. `install-darling.ps1 -Network` runs it automatically right after the install reaches Running. The manual field reference below documents exactly what it writes.
+
+### Firewall rules (`--configure-firewall`)
+
+The service runs as `NT SERVICE\PerformanceMonitor Darling`, an unprivileged virtual account that **cannot create Windows Firewall rules** — and should not be able to. So the rules are managed from the elevated install instead: `install-darling.ps1` runs `--configure-firewall` for you (before the first start, and again after `-Network`), and `uninstall-darling.ps1` removes them. Run it by hand after any edit to a `network` block:
+
+```
+PerformanceMonitor.Darling.Service.exe --configure-firewall
+```
+
+Run **elevated**. It reconciles all three scoped rules — store, MCP, web dashboard — against `darling.json` in one pass: it opens the port for every surface that really is exposed and removes the rule for every surface that is not, so it also cleans up after an exposure you turned back off. It is idempotent (safe on every upgrade) and reads **only** `darling.json`, so it works before the store has ever booted — unlike `--enable-mcp` / `--enable-web`, which write the control-plane store and need the service to have initialized it.
+
+"Really exposed" is decided by the same resolvers the running service fail-closes on, not by reading `listen` at face value. A `network` block the service would degrade to loopback — an unparseable `listen`, a missing or invalid `allowFrom`, an address family that disagrees, a missing token, BYO mode — gets **no open port**, and the verb tells you why.
+
+The running service never touches these rules. It **checks** them on start and logs what it finds: nothing at all for the normal loopback-only install, one INFO line when an exposed endpoint's rule is present, and one WARN naming the exact command when an exposed endpoint's rule is missing or when a loopback-only endpoint still has a stale rule open. It states each verdict once, not once per retry.
 
 ### Headless enable/disable + firewall (`--enable-mcp` / `--enable-web`)
 
@@ -625,7 +664,20 @@ PerformanceMonitor.Darling.Service.exe --enable-web
 PerformanceMonitor.Darling.Service.exe --disable-web
 ```
 
-Each flips only its endpoint's **live store flag** with a targeted `config_service` write; the service **hot-reloads within one collection sweep — no restart.** If that endpoint's `network` block opts into LAN exposure (a non-loopback `listen`), the verb also reconciles the **same scoped, idempotent-by-name firewall rule the service would**: **run elevated**, it opens (or, on `--disable-*`, removes) the rule; **run non-elevated**, the store toggle still succeeds and it prints the exact elevated firewall command to run by hand (a loopback-only endpoint needs no rule and says so). Managed-mode only, Windows only. So the headless bring-up is: write the `network` block (the wizard above or the manual reference below), then `--enable-mcp` / `--enable-web` from an **elevated** shell.
+Each flips only its endpoint's **live store flag** with a targeted `config_service` write; the service **hot-reloads within one collection sweep — no restart.** If that endpoint's `network` block opts into LAN exposure (a non-loopback `listen`), the verb also reconciles that endpoint's **scoped, idempotent-by-name firewall rule**: **run elevated**, it opens (or, on `--disable-*`, removes) the rule; **run non-elevated**, the store toggle still succeeds and it prints the exact elevated firewall command to run by hand (a loopback-only endpoint needs no rule and says so). Managed-mode only, Windows only. So the headless bring-up is: write the `network` block (the wizard above or the manual reference below), then `--enable-mcp` / `--enable-web` from an **elevated** shell.
+
+### Verify it's actually reachable (and the two failures that look like bugs)
+
+Enabling an endpoint is **not** the same as reaching it, and both common failures leave the store flag reading `true`, so "it says enabled" is not proof. After `--enable-mcp` / `--enable-web`, verify on the **service host**:
+
+1. **The listener is on the LAN address, not loopback.** `Get-NetTCPConnection -State Listen | Where-Object LocalPort -eq 5152` (or `5153` for web) must show the box's LAN IP, e.g. `10.0.0.5:5152` — **not** only `::1` / `127.0.0.1`. *Enabled but still loopback-bound* is the single most common failure: the store flag is on, but the service loaded `darling.json` **before** the `network` block existed. The block is read **once at service start** — the enable toggle stops/starts the endpoint with the already-loaded config and does **not** reload the file. **Restart the service** (`Restart-Service 'PerformanceMonitor Darling'`) so it re-reads the block, then re-check the listener; after the restart run `--configure-firewall` **elevated** if the firewall rule is missing (the service account cannot create it, so the service only tells you it is missing).
+2. **The scoped firewall rule exists and covers the client.** `Get-NetFirewallRule -DisplayName 'PerformanceMonitor Darling MCP (port 5152)'` (or `... Web (port 5153)`) should be `Enabled=True, Action=Allow`, scoped to the `network.allowFrom` CIDR. If it is absent, the service's own start-up log already says so and names the command; `--configure-firewall` elevated is the one-step fix. Reading rules needs no elevation, so this check works from any shell.
+
+Then from the **client** host:
+
+3. **Connect to the box's LAN IP, never `localhost`.** Use `http://<box-LAN-IP>:5152/`. `localhost` / `127.0.0.1` only resolves *on the box itself*, so an off-box MCP client pointed at localhost fails silently — this is the number-one "MCP won't connect" cause. Send `Authorization: Bearer <token>` (the `network.token`), and do a **fresh** `initialize` + `tools/list` rather than trusting a cached tool list from a previous version.
+
+**After a reinstall:** the installer replaces binaries but does **not** touch `darling.json` (the zip ships only `darling.sample.json`) or the store, so the `network` block and both live flags survive the upgrade — and the reinstall restarts the service, which re-reads the block. If MCP stops connecting afterward it is almost always failure 3 (the client pointed at `localhost`) or a missing firewall rule, **not** lost config: run `--configure-firewall` **elevated** to re-open the rule if check 2 comes up empty (the installer already does this, so an in-place upgrade normally leaves the rules correct). A stale loopback bind is unlikely after a restart unless the block itself is invalid, in which case the endpoint fail-closes to loopback and logs a critical line saying why — fix the block and restart again. A full `--configure-network` re-run is only needed if the `network` block itself is gone.
 
 ### Store endpoint (viewer over the LAN)
 
@@ -643,14 +695,14 @@ Add a `network` block to `postgres` (managed mode):
 }
 ```
 
-On every start the service reconciles this against the live cluster: it adds the bind IP to `listen_addresses`, generates a self-signed TLS certificate (`server.crt` / `server.key` beside the data directory, with both an IP SAN for `listen` and a DNS SAN for the machine hostname), writes a marked `hostssl darling <role> <allowFrom> scram-sha-256` rule into `pg_hba.conf` and reloads, and best-effort adds a firewall rule.
+On every start the service reconciles this against the live cluster: it adds the bind IP to `listen_addresses`, generates a self-signed TLS certificate (`server.crt` / `server.key` beside the data directory, with both an IP SAN for `listen` and a DNS SAN for the machine hostname), writes a marked `hostssl darling <role> <allowFrom> scram-sha-256` rule into `pg_hba.conf` and reloads, and **checks** (never creates — see [Firewall rules](#firewall-rules---configure-firewall)) that the store's scoped firewall rule matches.
 
 - **`role`** — the pg_hba login role the rule names: `"viewer"` (default, **read-only** — the secure default, covering a laptop reading every dashboard, chart, and finding) or `"admin"` (full remote **writes**; the service logs a warning because `admin` holds the `config_command` / `config_monitored_servers` / `config_notification` service-credential pivot). Never the superuser. This is **distinct from `postgres.connectAs`** (the *local* VM viewer's loopback role, default `admin`): `network.role` is the *remote* role and defaults to `viewer`, so the two have opposite defaults — the local seat is writable, the remote seat is read-only, unless you say otherwise.
 - **TLS is verify-full, not `require`.** Because Darling generates the cert, the client can pin it, so the connection string below uses `SSL Mode=VerifyFull` — which actually defends against an on-path MITM (`require` verifies nothing). The store's network pg_hba line is `hostssl`, so a non-TLS network client is refused.
-- **The firewall is defense-in-depth, and you should set the scoped rule yourself** (the service's best-effort rule is a convenience). The store's real boundary is pg_hba + TLS:
+- **The firewall is defense-in-depth, not the boundary** — pg_hba + TLS are. `--configure-firewall` (elevated) creates the store's scoped rule for you along with the other two; the equivalent by hand is:
 
   ```
-  New-NetFirewallRule -DisplayName "Darling store (Postgres)" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5641 -RemoteAddress 192.168.1.0/24
+  New-NetFirewallRule -DisplayName "PerformanceMonitor Darling store (port 5641)" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5641 -RemoteAddress 192.168.1.0/24
   ```
 
 **Remote-viewer handoff.** On the **service host**, run:

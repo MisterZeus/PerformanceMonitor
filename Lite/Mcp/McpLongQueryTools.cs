@@ -35,7 +35,7 @@ public sealed class McpLongQueryTools
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
 
-            var rows = await dataService.GetRecentLongQueryCompletionsAsync(resolved.Value.ServerId, hours_back);
+            var rows = await dataService.GetRecentLongQueryCompletionsAsync(resolved.ServerId, hours_back);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("empty", "No long-running query completions found in the specified time range. The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data.");
@@ -68,7 +68,7 @@ public sealed class McpLongQueryTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 total_completions = rows.Count,
                 completions = result

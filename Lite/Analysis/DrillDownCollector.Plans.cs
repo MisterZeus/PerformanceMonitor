@@ -136,7 +136,7 @@ LIMIT 1";
                 using var cmd = connection.CreateCommand();
                 cmd.CommandText = @"
 SELECT query_plan_xml
-FROM query_stats
+FROM v_query_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3

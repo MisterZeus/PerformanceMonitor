@@ -41,13 +41,14 @@ public sealed class DarlingConfig
     public List<MonitoredServer> Servers { get; set; } = new();
 
     /// <summary>
-    /// Capture execution-plan text into query_stats.query_plan_xml and
-    /// query_store_stats.query_plan_text. Default TRUE for Darling: PostgreSQL TOAST compresses the
-    /// plan text transparently (pglz), and TimescaleDB chunk compression squeezes it further, so
-    /// plans are cheap to keep — unlike Lite, which stores to DuckDB/parquet and deliberately never
-    /// captures them. Set false to skip plan capture (e.g. to shave storage across a very large
-    /// fleet). Feeds <see cref="CollectorContext.CapturePlanXml"/> in the shared query_stats /
-    /// query_store collectors.
+    /// Capture execution-plan text. Default TRUE for Darling. Since #1767 a query_stats plan is
+    /// stored ONCE per distinct plan in <c>query_plan_dim</c> and the fact row carries only its
+    /// content digest (<c>query_plan_digest</c>), so re-collecting the same cached plan every cycle
+    /// costs a hash rather than another copy of the XML — which is what makes keeping plans cheap.
+    /// (query_store_stats.query_plan_text is still stored inline; it is not deduplicated yet.)
+    /// Unlike Lite, which stores to DuckDB/parquet and deliberately never captures plans. Set false
+    /// to skip plan capture entirely. Feeds <see cref="CollectorContext.CapturePlanXml"/> in the
+    /// shared query_stats / query_store collectors.
     /// </summary>
     [JsonPropertyName("capturePlans")]
     public bool CapturePlans { get; set; } = true;
@@ -310,6 +311,42 @@ public sealed class AlertsConfig
     [JsonPropertyName("notifyConnectionChanges")]
     public bool NotifyConnectionChanges { get; set; } = true;
 
+    /// <summary>#1659 opt-in (V33): announce a server that is already down on its first-ever connect attempt
+    /// (a service started mid-outage otherwise never alerts — there was no edge). Default false: the classic
+    /// edge-only behavior.</summary>
+    public bool NotifyConnectionDownAtStartup { get; set; }
+
+    /// <summary>#1659 opt-in (V33): re-announce a standing outage every N minutes (0 = off). Re-fires deliver
+    /// under the SAME "Server Unreachable" metric name so webhook-driven automation keyed on it re-triggers.</summary>
+    public int ConnectionRefireMinutes { get; set; }
+
+    /// <summary>#991 (V35): the master switch for the Availability Group alert family — failover, replica
+    /// disconnect/reconnect, sync fell behind, database suspended. Default true, matching the sibling
+    /// <see cref="NotifyConnectionChanges"/> gate: a fleet with no AGs collects no AG rows, so the alerts are
+    /// silent anyway, and an operator who DOES run AGs should not have to discover a switch to be told about a
+    /// failover. Turning it off also skips the per-server AG store read entirely.</summary>
+    [JsonPropertyName("notifyAgHealth")]
+    public bool NotifyAgHealth { get; set; } = true;
+
+    /// <summary>#991 (V35): "AG Sync Fell Behind" fires when a secondary's <c>secondary_lag_seconds</c> reaches
+    /// this (0 = off). Default 300 — five minutes of lag is well past a healthy synchronous or asynchronous
+    /// replica on a working network, and short enough to matter before a failover decision.</summary>
+    [JsonPropertyName("agLagAlertSeconds")]
+    public int AgLagAlertSeconds { get; set; } = 300;
+
+    /// <summary>#991 (V35): the second, independent "AG Sync Fell Behind" trigger — the secondary's
+    /// <c>redo_queue_size</c> in KILOBYTES (0 = off, the default). Off by default because a healthy redo queue
+    /// size is entirely workload-dependent: it is the knob to reach for once you know your own baseline, and a
+    /// shipped guess would page half the fleet on day one.</summary>
+    [JsonPropertyName("agRedoQueueAlertKb")]
+    public long AgRedoQueueAlertKb { get; set; }
+
+    /// <summary>#1696 (V37): re-announce a still-disconnected AG replica every N minutes (0 = off, the
+    /// default). "AG Replica Disconnected" was a pure edge, so a replica down for a week announced it once.
+    /// Re-fires deliver under the SAME metric name so webhook automation keyed on it re-triggers.</summary>
+    [JsonPropertyName("agDisconnectRefireMinutes")]
+    public int AgDisconnectRefireMinutes { get; set; }
+
     [JsonPropertyName("cpuEnabled")]
     public bool CpuEnabled { get; set; } = true;
 
@@ -521,7 +558,8 @@ public sealed class McpConfig
 /// service reconciles it on every start (managed mode only): listen_addresses gains the bind IP, a
 /// self-signed TLS cert is generated for verify-full, a marked
 /// <c>hostssl darling &lt;role&gt; &lt;allowFrom&gt; scram-sha-256</c> pg_hba block is written +
-/// reloaded, and a best-effort firewall rule is added. Reconciliation is symmetric (removing the
+/// reloaded, and the scoped firewall rule (created by the elevated installer, #1771) is checked.
+/// Reconciliation is symmetric (removing the
 /// block closes the box) and fail-closed: any invalid/incomplete field degrades the store to
 /// loopback + LogCritical, never exposed. These rules are enforced at the point of use, NOT in the
 /// all-fatal <see cref="DarlingConfig.Validate"/> (D-validate).

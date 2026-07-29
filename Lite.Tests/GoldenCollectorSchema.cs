@@ -845,9 +845,53 @@ internal static class GoldenCollectorSchema
     agent_startup_desc VARCHAR,
     next_scheduled_run TIMESTAMP
 )",
+        ["ag_replica_states"] = @"CREATE TABLE IF NOT EXISTS ag_replica_states (
+    collection_id BIGINT PRIMARY KEY,
+    collection_time TIMESTAMP NOT NULL,
+    server_id INTEGER NOT NULL,
+    server_name VARCHAR NOT NULL,
+    ag_name VARCHAR,
+    replica_server_name VARCHAR,
+    role_desc VARCHAR,
+    operational_state_desc VARCHAR,
+    connected_state_desc VARCHAR,
+    recovery_health_desc VARCHAR,
+    synchronization_health_desc VARCHAR,
+    availability_mode_desc VARCHAR,
+    failover_mode_desc VARCHAR,
+    endpoint_url VARCHAR,
+    is_local BOOLEAN
+)",
+        ["ag_database_replica_states"] = @"CREATE TABLE IF NOT EXISTS ag_database_replica_states (
+    collection_id BIGINT PRIMARY KEY,
+    collection_time TIMESTAMP NOT NULL,
+    server_id INTEGER NOT NULL,
+    server_name VARCHAR NOT NULL,
+    ag_name VARCHAR,
+    database_name VARCHAR,
+    replica_server_name VARCHAR,
+    is_local BOOLEAN,
+    synchronization_state_desc VARCHAR,
+    last_hardened_lsn VARCHAR,
+    last_commit_lsn VARCHAR,
+    log_send_queue_size BIGINT,
+    redo_queue_size BIGINT,
+    log_send_rate BIGINT,
+    redo_rate BIGINT,
+    is_suspended BOOLEAN,
+    suspend_reason_desc VARCHAR,
+    availability_mode_desc VARCHAR,
+    secondary_lag_seconds BIGINT,
+    last_commit_time TIMESTAMP,
+    last_hardened_time TIMESTAMP,
+    last_redone_time TIMESTAMP,
+    last_received_time TIMESTAMP,
+    est_redo_completion_time_min DOUBLE,
+    est_send_drain_time_min DOUBLE
+)",
     };
 
-    /// <summary>Pre-change CREATE INDEX DDL, keyed by collector target table (33 entries; server_config and database_config have no index).</summary>
+    /// <summary>Pre-change CREATE INDEX DDL, keyed by collector target table (35 entries; server_config and database_config have no index).</summary>
     public static readonly IReadOnlyDictionary<string, string> Indexes = new Dictionary<string, string>
     {
         ["wait_stats"] = @"CREATE INDEX IF NOT EXISTS idx_wait_stats_time ON wait_stats(server_id, collection_time)",
@@ -884,5 +928,7 @@ internal static class GoldenCollectorSchema
         ["default_trace_events"] = @"CREATE INDEX IF NOT EXISTS idx_default_trace_events_time ON default_trace_events(server_id, collection_time)",
         ["job_history"] = @"CREATE INDEX IF NOT EXISTS idx_job_history_time ON job_history(server_id, collection_time)",
         ["agent_status"] = @"CREATE INDEX IF NOT EXISTS idx_agent_status_time ON agent_status(server_id, collection_time)",
+        ["ag_replica_states"] = @"CREATE INDEX IF NOT EXISTS idx_ag_replica_states_time ON ag_replica_states(server_id, collection_time)",
+        ["ag_database_replica_states"] = @"CREATE INDEX IF NOT EXISTS idx_ag_database_replica_states_time ON ag_database_replica_states(server_id, collection_time)",
     };
 }

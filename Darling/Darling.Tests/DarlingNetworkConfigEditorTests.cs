@@ -10,8 +10,10 @@ using System;
 using System.IO;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
+using PerformanceMonitor.Darling.Service.Hosting;
 using Editor = PerformanceMonitor.Darling.Service.DarlingNetworkConfigEditor;
 using Host = PerformanceMonitor.Darling.Service.Mcp.DarlingMcpHostService;
+using WebHost = PerformanceMonitor.Darling.Service.Mcp.DarlingWebHostService;
 
 namespace Darling.Tests;
 
@@ -143,6 +145,63 @@ public sealed class DarlingNetworkConfigEditorTests
 
         /* Both commented templates still present (count of the commented marker unchanged from the sample). */
         Assert.Equal(CountOccurrences(sample, "// \"network\": {"), CountOccurrences(edited, "// \"network\": {"));
+    }
+
+    /* ============================ web insert (#1617) ============================ */
+
+    [Fact]
+    public void UpsertWeb_IntoSample_TemplateSurvives_ParsesAndResolverExposed()
+    {
+        var sample = LoadSample();
+        /* A non-empty encryptedToken satisfies the resolver's PRESENCE check (no DPAPI decryption here). */
+        var block = Editor.BuildWebNetworkBlock("192.168.1.205", "192.168.1.0/24", encryptedToken: "DPAPI-BLOB", plaintextToken: null);
+        var edited = Editor.UpsertNetworkBlock(sample, "web", block);
+
+        var config = DarlingConfig.Parse(edited);
+        Assert.Contains("// \"network\": {", edited, StringComparison.Ordinal);
+
+        var decision = WebHost.ResolveWebBind(config.Web, managed: true);
+        Assert.Equal(DarlingHostBinding.BindMode.NetworkAndLoopback, decision.Mode);
+        Assert.Equal(DarlingHostBinding.BindReason.NetworkExposed, decision.Reason);
+        Assert.Equal("DPAPI-BLOB", config.Web.Network!.EncryptedToken);
+    }
+
+    [Fact]
+    public void UpsertAllThreeParents_EachResolverExposed_AllTemplatesSurvive()
+    {
+        var sample = LoadSample();
+        var edited = Editor.UpsertNetworkBlock(sample, "postgres",
+            Editor.BuildStoreNetworkBlock("10.0.0.5", "10.0.0.0/24", "viewer"));
+        edited = Editor.UpsertNetworkBlock(edited, "mcp",
+            Editor.BuildMcpNetworkBlock("10.0.0.5", "10.0.0.0/24", encryptedToken: "BLOB", plaintextToken: null));
+        edited = Editor.UpsertNetworkBlock(edited, "web",
+            Editor.BuildWebNetworkBlock("10.0.0.5", "10.0.0.0/24", encryptedToken: "BLOB", plaintextToken: null));
+
+        var config = DarlingConfig.Parse(edited);
+        Assert.True(DarlingManagedPostgres.ResolveNetworkExposure(config.Postgres.Network, CertPath, KeyPath).Exposed);
+        Assert.Equal(Host.McpBindMode.NetworkAndLoopback, Host.ResolveMcpBind(config.Mcp, managed: true).Mode);
+        Assert.Equal(DarlingHostBinding.BindMode.NetworkAndLoopback, WebHost.ResolveWebBind(config.Web, managed: true).Mode);
+
+        /* All commented templates still present (count of the commented marker unchanged from the sample). */
+        Assert.Equal(CountOccurrences(sample, "// \"network\": {"), CountOccurrences(edited, "// \"network\": {"));
+    }
+
+    [Fact]
+    public void UpsertWeb_MissingWebSection_CreatesParentAtRoot()
+    {
+        /* An older darling.json with NO "web" section at all: the upsert must create the parent, not throw
+           — the exact shape a pre-#1562 config presents when the wizard adds Web exposure. */
+        var json = """
+            {
+              "postgres": { "managed": true },
+              "servers": [ { "host": "S" } ]
+            }
+            """;
+        var edited = Editor.UpsertNetworkBlock(json, "web",
+            Editor.BuildWebNetworkBlock("192.168.1.205", "192.168.1.0/24", encryptedToken: "BLOB", plaintextToken: null));
+
+        var config = DarlingConfig.Parse(edited);
+        Assert.Equal(DarlingHostBinding.BindMode.NetworkAndLoopback, WebHost.ResolveWebBind(config.Web, managed: true).Mode);
     }
 
     /* ============================ replace (idempotent-ish upsert) ============================ */

@@ -7,13 +7,13 @@
  */
 
 using System;
-using System.IO;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Lite.Tests.Helpers;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitorLite.Tests;
 using Xunit;
 
 namespace Lite.Tests;
@@ -30,29 +30,14 @@ namespace Lite.Tests;
 /// tables introduce (new to Lite's schema, HUGEINT-backed) plus the BOOLEAN pressure warnings and a
 /// nullable column left NULL.
 /// </summary>
-public sealed class CpuSchedulerPlanCacheRoundTripTests : IDisposable
+public sealed class CpuSchedulerPlanCacheRoundTripTests : IClassFixture<SharedDuckDbFixture>
 {
-    private readonly string _tempDir;
+    private readonly DuckDbInitializer _duckDb;
 
-    public CpuSchedulerPlanCacheRoundTripTests()
+    public CpuSchedulerPlanCacheRoundTripTests(SharedDuckDbFixture fixture)
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "LiteCpuPcRt_" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(_tempDir);
-    }
-
-    public void Dispose()
-    {
-        try
-        {
-            if (Directory.Exists(_tempDir))
-            {
-                Directory.Delete(_tempDir, recursive: true);
-            }
-        }
-        catch
-        {
-            /* Best-effort cleanup */
-        }
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
     }
 
     [Fact]
@@ -68,7 +53,7 @@ public sealed class CpuSchedulerPlanCacheRoundTripTests : IDisposable
 
         Assert.Equal(1.50m, (decimal)await ScalarAsync(connection, "cpu_scheduler_stats", "avg_runnable_tasks_count"));
         Assert.Equal(0L, (long)await ScalarAsync(connection, "cpu_scheduler_stats", "total_work_queue_count"));
-        Assert.Equal(true, (bool)await ScalarAsync(connection, "cpu_scheduler_stats", "worker_thread_exhaustion_warning"));
+        Assert.True((bool)await ScalarAsync(connection, "cpu_scheduler_stats", "worker_thread_exhaustion_warning"));
         Assert.Equal("Available physical memory is high", (string)await ScalarAsync(connection, "cpu_scheduler_stats", "system_memory_state_desc"));
         Assert.Equal(DBNull.Value, await ScalarAsync(connection, "cpu_scheduler_stats", "runnable_percent"));
         Assert.Equal(DBNull.Value, await ScalarAsync(connection, "cpu_scheduler_stats", "runnable_request_count"));
@@ -95,12 +80,9 @@ public sealed class CpuSchedulerPlanCacheRoundTripTests : IDisposable
     /// </summary>
     private async Task<DuckDBConnection> AppendOneRowAsync<TRow>(ICollectorDefinition<TRow> definition, TRow row)
     {
-        var dbPath = Path.Combine(_tempDir, $"{definition.TargetTable}.duckdb");
-        await new DuckDbInitializer(dbPath).InitializeAsync();
-
         var context = CollectorTestContext.Make(new RecordingCollectorDeltaCalculator());
 
-        var connection = new DuckDBConnection($"Data Source={dbPath}");
+        var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(TestContext.Current.CancellationToken);
 
         using (var appender = connection.CreateAppender(definition.TargetTable))

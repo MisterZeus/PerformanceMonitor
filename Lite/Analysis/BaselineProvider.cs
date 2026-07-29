@@ -32,9 +32,83 @@ public class BaselineProvider
 
     private readonly ConcurrentDictionary<string, CachedBaseline> _cache = new();
 
-    public BaselineProvider(DuckDbInitializer duckDb)
+    /// <summary>
+    /// Resolves a collector's configured retention in days, or null when it cannot be determined (#1757).
+    /// A SEAM rather than a ScheduleManager dependency: this provider is constructed in two places and has
+    /// never needed the schedule, so taking the whole manager to read one integer would couple the analysis
+    /// path to the collection path for no other reason. Null disables the warning entirely, which keeps
+    /// every existing caller and every test working unchanged.
+    /// </summary>
+    private readonly Func<string, int?>? _retentionDaysForCollector;
+
+    /// <summary>Families already warned about this process-run — the warning is a configuration statement,
+    /// not an event, so it belongs once per family per start rather than once per baseline computation
+    /// (which runs hourly, forever).</summary>
+    private readonly ConcurrentDictionary<string, bool> _retentionWarned = new(StringComparer.Ordinal);
+
+    public BaselineProvider(DuckDbInitializer duckDb, Func<string, int?>? retentionDaysForCollector = null)
     {
         _duckDb = duckDb;
+        _retentionDaysForCollector = retentionDaysForCollector;
+    }
+
+    /// <summary>
+    /// The source table each baseline family reads, for the retention check below. Lite reads raw directly
+    /// (it has no continuous-aggregate tier), so a family's usable history IS its source table's retention.
+    /// </summary>
+    private static readonly Dictionary<string, string> SourceCollectorFor = new(StringComparer.Ordinal)
+    {
+        [MetricNames.Cpu] = "cpu_utilization",
+        [MetricNames.BatchRequests] = "perfmon_stats",
+        [MetricNames.WaitStats] = "wait_stats",
+        [MetricNames.WaitMsPerSec] = "wait_stats",
+        [MetricNames.SessionCount] = "session_stats",
+        [MetricNames.QueryDuration] = "query_stats",
+        [MetricNames.IoLatency] = "file_io_stats",
+        [MetricNames.Blocking] = "blocked_process_report",
+        [MetricNames.BlockingPerMinute] = "blocked_process_report",
+        [MetricNames.Deadlock] = "deadlocks",
+        [MetricNames.Memory] = "memory_stats",
+    };
+
+    /// <summary>
+    /// Warns ONCE per family per process-run when a baseline source table is retained for less than the
+    /// baseline window (#1757).
+    ///
+    /// <para>Darling hit this as a product bug: tiered retention shrank raw to 4 days while the baseline
+    /// asks for 30, and the thresholds silently degraded — seven day-of-week buckets cannot be filled from
+    /// four days. Lite ships every baseline source at 30 days so it is NOT affected by default, but its
+    /// retention is user-editable, so the same silent degradation is one settings change away and nothing
+    /// would say so. This is what says so.</para>
+    ///
+    /// <para>Deliberately a warning and not a correction: shortening retention is a legitimate choice for
+    /// disk reasons, and the user is entitled to make it — they are just not entitled to be surprised by
+    /// what it does to anomaly detection.</para>
+    /// </summary>
+    private void WarnIfRetentionUndercutsBaselineWindow(string metricName)
+    {
+        if (_retentionDaysForCollector is null || !SourceCollectorFor.TryGetValue(metricName, out var collector))
+        {
+            return;
+        }
+
+        var retentionDays = _retentionDaysForCollector(collector);
+        if (retentionDays is not int days || days >= BaselineMath.BaselineWindowDays)
+        {
+            return;
+        }
+
+        if (!_retentionWarned.TryAdd(metricName, true))
+        {
+            return;
+        }
+
+        AppLogger.Warn(
+            "Baselines",
+            $"{collector} is retained for {days} days but the {metricName} baseline window is " +
+            $"{BaselineMath.BaselineWindowDays} days — baselines for {metricName} are computed from " +
+            $"{days} days of history, so anomaly thresholds are degraded. Raise {collector}'s retention to " +
+            $"at least {BaselineMath.BaselineWindowDays} days, or expect less reliable detection.");
     }
 
     /// <summary>
@@ -44,6 +118,8 @@ public class BaselineProvider
     public async Task<BaselineBucket> GetBaselineAsync(
         int serverId, string metricName, DateTime analysisTime)
     {
+        WarnIfRetentionUndercutsBaselineWindow(metricName);
+
         var hourOfDay = analysisTime.Hour;
         var dayOfWeek = (int)analysisTime.DayOfWeek; // Sunday=0
 

@@ -124,6 +124,10 @@ public sealed class ExcludedDatabasesPickerTests
 /// is set): the picker's list is the DISTINCT user databases across <c>v_database_config</c> and
 /// <c>v_database_size_stats</c>, system databases removed, resolved from the registry server name.
 /// </summary>
+/* #1776: seeds and reads registry + database rows on the SHARED store, so it must serialize with the 63 classes
+   that already do — measured failing in the third of three consecutive full-suite runs against one long-lived
+   database. Only the live class takes the attribute; the sibling picker tests above touch no store. */
+[Collection("live-postgres")]
 public sealed class ExcludedDatabasesStoreLiveTests
 {
     private const int ServerId = 990_101;

@@ -474,6 +474,11 @@ public partial class SettingsWindow : Window
         MinimizeToTrayCheckBox.IsChecked = App.MinimizeToTray;
         AlertsEnabledCheckBox.IsChecked = App.AlertsEnabled;
         NotifyConnectionCheckBox.IsChecked = App.NotifyConnectionChanges;
+        NotifyConnectionDownAtStartupCheckBox.IsChecked = App.NotifyConnectionDownAtStartup;
+        ConnectionRefireMinutesBox.Text = App.ConnectionRefireMinutes.ToString();
+        NotifyAgHealthCheckBox.IsChecked = App.NotifyAgHealth;
+        AgLagAlertSecondsBox.Text = App.AgLagAlertSeconds.ToString();
+        AgRedoQueueAlertKbBox.Text = App.AgRedoQueueAlertKb.ToString();
         AlertCpuCheckBox.IsChecked = App.AlertCpuEnabled;
         AlertCpuThresholdBox.Text = App.AlertCpuThreshold.ToString();
         AlertCpuModeBox.SelectedIndex = App.AlertCpuMode == CpuAlertMode.SqlOnly ? 1 : 0;
@@ -525,6 +530,17 @@ public partial class SettingsWindow : Window
         App.MinimizeToTray = MinimizeToTrayCheckBox.IsChecked == true;
         App.AlertsEnabled = AlertsEnabledCheckBox.IsChecked == true;
         App.NotifyConnectionChanges = NotifyConnectionCheckBox.IsChecked == true;
+        App.NotifyConnectionDownAtStartup = NotifyConnectionDownAtStartupCheckBox.IsChecked == true;
+        if (int.TryParse(ConnectionRefireMinutesBox.Text, out var refire))
+            App.ConnectionRefireMinutes = Math.Clamp(refire, 0, 1440);
+        App.NotifyAgHealth = NotifyAgHealthCheckBox.IsChecked == true;
+        /* Clamped to the same ranges App clamps on load and Darling clamps on read, so the stored value and
+           the effective value can never disagree. An unparseable box keeps the current setting rather than
+           silently zeroing the lag trigger, which would DISABLE it. */
+        if (int.TryParse(AgLagAlertSecondsBox.Text, out var agLag))
+            App.AgLagAlertSeconds = Math.Clamp(agLag, 0, 86400);
+        if (long.TryParse(AgRedoQueueAlertKbBox.Text, out var agRedo))
+            App.AgRedoQueueAlertKb = Math.Clamp(agRedo, 0L, 1073741824L);
         App.AlertCpuEnabled = AlertCpuCheckBox.IsChecked == true;
         if (int.TryParse(AlertCpuThresholdBox.Text, out var cpu) && cpu > 0 && cpu <= 100)
             App.AlertCpuThreshold = cpu;
@@ -612,6 +628,11 @@ public partial class SettingsWindow : Window
             root["minimize_to_tray"] = App.MinimizeToTray;
             root["alerts_enabled"] = App.AlertsEnabled;
             root["notify_connection_changes"] = App.NotifyConnectionChanges;
+            root["notify_connection_down_at_startup"] = App.NotifyConnectionDownAtStartup;
+            root["connection_refire_minutes"] = App.ConnectionRefireMinutes;
+            root["notify_ag_health"] = App.NotifyAgHealth;
+            root["ag_lag_alert_seconds"] = App.AgLagAlertSeconds;
+            root["ag_redo_queue_alert_kb"] = App.AgRedoQueueAlertKb;
             root["alert_cpu_enabled"] = App.AlertCpuEnabled;
             root["alert_cpu_threshold"] = App.AlertCpuThreshold;
             root["alert_cpu_mode"] = App.AlertCpuMode.ToString();

@@ -53,7 +53,13 @@ public class AnalysisService
     /// </summary>
     public string? InsufficientDataMessage { get; private set; }
 
-    public AnalysisService(DuckDbInitializer duckDb, IPlanFetcher? planFetcher = null)
+    /// <param name="retentionDaysForCollector">#1757: resolves a collector's configured retention so the
+    /// baseline provider can warn when a source table is retained for less than the baseline window. Optional
+    /// — null simply disables that warning, which is why every existing caller keeps working unchanged.</param>
+    public AnalysisService(
+        DuckDbInitializer duckDb,
+        IPlanFetcher? planFetcher = null,
+        Func<string, int?>? retentionDaysForCollector = null)
     {
         _duckDb = duckDb;
         _findingStore = new FindingStore(duckDb);
@@ -62,7 +68,7 @@ public class AnalysisService
         _graph = new RelationshipGraph();
         _engine = new InferenceEngine(_graph);
         _drillDown = new DrillDownCollector(duckDb, planFetcher);
-        _baselineProvider = new BaselineProvider(duckDb);
+        _baselineProvider = new BaselineProvider(duckDb, retentionDaysForCollector);
         _anomalyDetector = new AnomalyDetector(duckDb, _baselineProvider);
     }
 
@@ -329,7 +335,9 @@ public class AnalysisService
     /// the analysis window. A server with 100 hours of total history can safely
     /// be analyzed over a 4-hour window without dilution.
     /// </summary>
-    private async Task<double> GetTotalDataSpanHoursAsync(int serverId)
+    /* Internal for AnalysisDataSpanTests (#1809): the span must survive an archive/reset, which is
+       only observable with a real DuckDB + parquet fixture. */
+    internal async Task<double> GetTotalDataSpanHoursAsync(int serverId)
     {
         try
         {
@@ -340,7 +348,7 @@ public class AnalysisService
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
 SELECT EXTRACT(EPOCH FROM (MAX(collection_time) - MIN(collection_time))) / 3600.0
-FROM wait_stats
+FROM v_wait_stats
 WHERE server_id = $1";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });

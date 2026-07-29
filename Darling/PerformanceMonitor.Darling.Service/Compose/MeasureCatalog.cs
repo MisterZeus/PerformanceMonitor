@@ -92,6 +92,11 @@ public enum ComposeTimeBucket
     Minute,
     Hour,
     Day,
+
+    /// <summary>Adaptive: the compiler resolves this to a concrete grain (minute/hour/day) from the panel's
+    /// window at compile time (see <see cref="MeasureCatalog.ResolveBucket"/>), so any range renders a readable,
+    /// bounded point count. Never reaches <c>date_trunc</c> as-is.</summary>
+    Auto,
 }
 
 /// <summary>The fixed filter-operator vocabulary — each maps to a compile-time SQL operator string
@@ -365,6 +370,20 @@ public static class MeasureCatalog
         new ComposeDimension("query_store_stats", "database_name", "database_name", Likeable: true),
         new ComposeDimension("query_store_stats", "module_name", "module_name", Likeable: true),
         new ComposeDimension("query_store_stats", "query_hash", "query_hash", Likeable: false),
+
+        /* #991 AG health. Only the database grain carries measures — the replica-grain table is all
+           state strings with nothing numeric to aggregate — so only its dimensions appear here.
+           synchronization_state_desc / suspend_reason_desc are here for a specific reason, not for
+           completeness: secondary_lag_seconds reads 0 (not NULL) while data movement is SUSPENDED, so
+           without a way to filter on suspension a lag panel cannot tell a healthy zero from a suspended
+           one — the exact misread the measure's own comment warns about. These two are the text columns
+           that make that filterable (is_suspended cannot be a dimension: the compiler binds filter values
+           as text, which would not match a boolean column). */
+        new ComposeDimension("ag_database_replica_states", "ag_name", "ag_name", Likeable: true),
+        new ComposeDimension("ag_database_replica_states", "database_name", "database_name", Likeable: true),
+        new ComposeDimension("ag_database_replica_states", "replica_server_name", "replica_server_name", Likeable: true),
+        new ComposeDimension("ag_database_replica_states", "synchronization_state_desc", "synchronization_state_desc", Likeable: true),
+        new ComposeDimension("ag_database_replica_states", "suspend_reason_desc", "suspend_reason_desc", Likeable: true),
     };
 
     private static readonly Dictionary<(string Source, string Name), ComposeDimension> s_dimByKey =
@@ -427,6 +446,7 @@ public static class MeasureCatalog
     private const string CatJobs = "Agent Jobs";
     private const string CatPerfmon = "Perfmon Counters";
     private const string CatQueryStore = "Query Store";
+    private const string CatAvailabilityGroups = "Availability Groups";
 
     private static readonly string[] WaitDims = { "wait_type" };
     private static readonly string[] ProcDims = { "database_name", "schema_name", "object_name" };
@@ -453,6 +473,7 @@ public static class MeasureCatalog
     private static readonly string[] JobHistoryDims = { "job_name", "step_name", "run_status_desc", "category_name" };
     private static readonly string[] PerfmonDims = { "object_name", "counter_name", "instance_name" };
     private static readonly string[] QueryStoreDims = { "database_name", "module_name", "query_hash" };
+    private static readonly string[] AgDatabaseDims = { "ag_name", "database_name", "replica_server_name", "synchronization_state_desc", "suspend_reason_desc" };
 
     /// <summary>The catalog. Every measure's SourceTable is a real collector; every Column/DeltaColumn is a
     /// real payload column of that collector (pinned by test).</summary>
@@ -1021,6 +1042,84 @@ public static class MeasureCatalog
             ValidAggs = NoAggs, AllowedDimensions = QueryStoreDims,
         },
 
+        /* ── ag_database_replica_states (#991). Every one is a Gauge: the DMV recomputes queue depth, rate
+             and lag from the CURRENT backlog each read, so none is a counter with a delta — SUM over a
+             window would be a category error, exactly the trap the cpu_utilization gauge documents. The
+             queues default to Max (the worst backlog in the bucket is the signal), the rates to Avg
+             (sustained throughput), and lag to Max (the worst lag is what an RPO conversation is about).
+
+             The two rates are KB/SECOND but the catalog has no per-second family, so they ride the bytes
+             family — correct under conversion, since kb/s → mb/s scales by the same factor — with the
+             per-second nature stated in the display name rather than implied by a unit the picker would
+             render as a plain size.
+
+             SUSPENSION is the trap under all of these, and it does NOT hit them the same way. Measured on a
+             live 2022 AG: secondary_lag_seconds ACCRUES while suspended (the docs claim it reads 0 — either
+             way a lag panel is safe, it can only over-report), but every other measure here goes STALE.
+             log_send_queue_size reads NULL, redo_queue_size FREEZES at its last value, and — the sharp one —
+             ag_est_redo_drain_min is queue ÷ rate with both frozen, so it holds a small, static, reassuring
+             number (0.0144 min, flat across a 45 s suspension) when the true answer is "never, movement is
+             stopped". So a suspended replica can make a drain or queue panel look HEALTHIER than reality,
+             never worse. That is why the two state columns are dimensions rather than just documented:
+             filter to synchronization_state_desc <> 'NOT SYNCHRONIZING', or group by suspend_reason_desc,
+             before trusting any panel on this source to say something has recovered. ── */
+        new ComposeMeasure
+        {
+            Key = "ag_log_send_queue", DisplayName = "AG log send queue", Category = CatAvailabilityGroups, SourceTable = "ag_database_replica_states",
+            Archetype = MeasureArchetype.Gauge, Column = "log_send_queue_size",
+            NativeUnit = "kb", DefaultUnit = "kb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = AgDatabaseDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "ag_redo_queue", DisplayName = "AG redo queue", Category = CatAvailabilityGroups, SourceTable = "ag_database_replica_states",
+            Archetype = MeasureArchetype.Gauge, Column = "redo_queue_size",
+            NativeUnit = "kb", DefaultUnit = "kb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = AgDatabaseDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "ag_log_send_rate", DisplayName = "AG log send rate (per second)", Category = CatAvailabilityGroups, SourceTable = "ag_database_replica_states",
+            Archetype = MeasureArchetype.Gauge, Column = "log_send_rate",
+            NativeUnit = "kb", DefaultUnit = "kb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Avg, ValidAggs = GaugeAggs, AllowedDimensions = AgDatabaseDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "ag_redo_rate", DisplayName = "AG redo rate (per second)", Category = CatAvailabilityGroups, SourceTable = "ag_database_replica_states",
+            Archetype = MeasureArchetype.Gauge, Column = "redo_rate",
+            NativeUnit = "kb", DefaultUnit = "kb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Avg, ValidAggs = GaugeAggs, AllowedDimensions = AgDatabaseDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "ag_secondary_lag", DisplayName = "AG secondary lag", Category = CatAvailabilityGroups, SourceTable = "ag_database_replica_states",
+            Archetype = MeasureArchetype.Gauge, Column = "secondary_lag_seconds",
+            NativeUnit = "s", DefaultUnit = "s", UnitFamily = FamilyDuration,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = AgDatabaseDims,
+        },
+
+        /* The two drain-time ESTIMATES (#991 addendum). Computed server-side per row, at the sample's own
+           instant, rather than composed here as a queue/rate ratio — and that is the whole point: a ratio
+           of two window AGGREGATES (avg queue ÷ avg rate) is not the average of the per-sample ratios, and
+           the two diverge badly exactly when rates swing, which is when anyone is looking. Storing the
+           per-row ratio and averaging THAT is the honest read. NULL where no rate exists (idle, suspended,
+           caught up); NULL is never coerced to 0, which would read as "drains instantly". */
+        new ComposeMeasure
+        {
+            Key = "ag_est_redo_drain_min", DisplayName = "AG estimated redo drain time", Category = CatAvailabilityGroups, SourceTable = "ag_database_replica_states",
+            Archetype = MeasureArchetype.Gauge, Column = "est_redo_completion_time_min",
+            NativeUnit = "min", DefaultUnit = "min", UnitFamily = FamilyDuration,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = AgDatabaseDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "ag_est_send_drain_min", DisplayName = "AG estimated send drain time", Category = CatAvailabilityGroups, SourceTable = "ag_database_replica_states",
+            Archetype = MeasureArchetype.Gauge, Column = "est_send_drain_time_min",
+            NativeUnit = "min", DefaultUnit = "min", UnitFamily = FamilyDuration,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = AgDatabaseDims,
+        },
+
         /* ═══════════ Same-source ratios (design §2c) — the bread-and-butter derived metrics ═══════════ */
         /* Supporting execution-count scalars the "average per execution" ratios divide by (query_stats had no
            executions measure; procedure_stats already exposes proc_executions). */
@@ -1150,6 +1249,7 @@ public static class MeasureCatalog
     {
         (ComposeTimeBucket.None, "none", 0), (ComposeTimeBucket.Minute, "minute", 60),
         (ComposeTimeBucket.Hour, "hour", 3600), (ComposeTimeBucket.Day, "day", 86_400),
+        (ComposeTimeBucket.Auto, "auto", 0),
     };
 
     private static readonly (ComposeFilterOp Value, string Wire)[] s_opWire =
@@ -1188,6 +1288,25 @@ public static class MeasureCatalog
 
     /// <summary>Seconds per bucket (0 for <see cref="ComposeTimeBucket.None"/>) — drives the window×resolution ceiling.</summary>
     public static int BucketSeconds(ComposeTimeBucket value) => s_bucketWire.First(x => x.Value == value).Seconds;
+
+    /// <summary>Resolve <see cref="ComposeTimeBucket.Auto"/> to a concrete grain for a window of
+    /// <paramref name="windowSeconds"/>: minute up to 2 days, hour up to 60 days, day beyond — so any range
+    /// yields a readable, bounded point count (≤ ~2880, well under <see cref="ComposeLimits.MaxBuckets"/>).
+    /// Any non-Auto bucket is returned unchanged, so existing panels compile byte-for-byte as before.</summary>
+    public static ComposeTimeBucket ResolveBucket(ComposeTimeBucket value, double windowSeconds)
+    {
+        if (value != ComposeTimeBucket.Auto)
+        {
+            return value;
+        }
+
+        if (windowSeconds <= 2d * 86_400d)
+        {
+            return ComposeTimeBucket.Minute;
+        }
+
+        return windowSeconds <= 60d * 86_400d ? ComposeTimeBucket.Hour : ComposeTimeBucket.Day;
+    }
 
     /// <summary>The Postgres <c>date_trunc</c> field for a real bucket (a compile-time constant, never a user string).</summary>
     public static string DateTruncField(ComposeTimeBucket value) => value switch

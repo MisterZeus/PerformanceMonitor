@@ -234,6 +234,44 @@
                           Foreground="{DynamicResource ForegroundBrush}" Checked="AlertsEnabledCheckBox_Changed" Unchecked="AlertsEnabledCheckBox_Changed"/>
                 <CheckBox x:Name="NotifyConnectionCheckBox" Content="Connection lost / restored" Margin="20,6,0,0"
                           Foreground="{DynamicResource ForegroundBrush}"/>
+                <CheckBox x:Name="NotifyConnectionDownAtStartupCheckBox" Content="Alert if a server is already down when the service starts" Margin="36,4,0,0"
+                          Foreground="{DynamicResource ForegroundBrush}"
+                          ToolTip="Off = the classic behavior: the first connect attempt is a silent baseline, even when it fails."/>
+                <StackPanel Orientation="Horizontal" Margin="36,4,0,0"
+                            ToolTip="0 = off (one alert per outage). Re-alerts use the same 'Server Unreachable' metric name, so webhook automation keyed on it re-triggers.">
+                    <TextBlock Text="Re-alert while still down every" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="ConnectionRefireMinutesBox" Width="45" Text="0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="min (0 = off)" VerticalAlignment="Center" Margin="4,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                </StackPanel>
+                <CheckBox x:Name="NotifyAgHealthCheckBox" Content="Availability Group health" Margin="20,6,0,0"
+                          Foreground="{DynamicResource ForegroundBrush}"
+                          ToolTip="Failover, replica disconnected / reconnected, sync fell behind, and data movement suspended. Servers with no Availability Groups are unaffected."/>
+                <StackPanel Orientation="Horizontal" Margin="36,4,0,0"
+                            ToolTip="0 = off. How far a secondary may fall behind the primary before alerting.">
+                    <TextBlock Text="Alert when a secondary is behind by" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AgLagAlertSecondsBox" Width="55" Text="300" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="sec (0 = off)" VerticalAlignment="Center" Margin="4,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="36,4,0,0"
+                            ToolTip="0 = off. A healthy redo queue size is workload-specific, so this ships off — set it once you know your own baseline.">
+                    <TextBlock Text="…or its redo queue reaches" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AgRedoQueueAlertKbBox" Width="95" Text="0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="KB (0 = off)" VerticalAlignment="Center" Margin="4,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="36,4,0,0"
+                            ToolTip="0 = off (one alert per outage). Re-alerts use the same 'AG Replica Disconnected' metric name, so webhook automation keyed on it re-triggers.">
+                    <TextBlock Text="Re-alert while a replica is still disconnected every" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AgDisconnectRefireMinutesBox" Width="45" Text="0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="min (0 = off)" VerticalAlignment="Center" Margin="4,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <CheckBox x:Name="AlertCpuCheckBox" Content="CPU above" VerticalAlignment="Center"
                               Foreground="{DynamicResource ForegroundBrush}"/>

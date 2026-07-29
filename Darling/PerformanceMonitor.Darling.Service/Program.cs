@@ -90,11 +90,12 @@ if (args.Length > 0 && DarlingCliCommands.IsPrintViewerConnectionVerb(args[0]))
     return await DarlingCliCommands.PrintViewerConnectionAsync(configPath, Console.Out, Console.Error, CancellationToken.None);
 }
 
-/* CLI verb: the interactive --configure-network wizard (#1561) — guides the operator through the opt-in
-   store / MCP LAN exposure, validating every input by delegation to the SAME resolvers the running service
-   fail-closes on, then splicing a comment-preserving edit into darling.json behind a timestamped backup. It
-   generates + DPAPI-protects the MCP bearer token, so it is Windows-only (same guard shape as the two verbs
-   above). Optional second arg = an explicit config path. Console.In is the scripted-input testability lever. */
+/* CLI verb: the interactive --configure-network wizard (#1561; web surface #1617) — guides the operator
+   through the opt-in store / MCP / web-dashboard LAN exposure, validating every input by delegation to the
+   SAME resolvers the running service fail-closes on, then splicing a comment-preserving edit into
+   darling.json behind a timestamped backup. It generates + DPAPI-protects the MCP bearer / web access
+   tokens, so it is Windows-only (same guard shape as the two verbs above). Optional second arg = an
+   explicit config path. Console.In is the scripted-input testability lever. */
 if (args.Length > 0 && DarlingCliCommands.IsConfigureNetworkVerb(args[0]))
 {
     if (!OperatingSystem.IsWindows())
@@ -106,6 +107,23 @@ if (args.Length > 0 && DarlingCliCommands.IsConfigureNetworkVerb(args[0]))
     var configPath = args.Length > 1 ? args[1] : null;
     return await DarlingCliCommands.ConfigureNetworkAsync(
         configPath, Console.In, Console.Out, Console.Error, CancellationToken.None);
+}
+
+/* CLI verb: --configure-firewall (#1771) — create/remove every scoped Darling firewall rule so the live
+   firewall matches darling.json. The service account cannot write firewall rules by design, so this ELEVATED
+   verb owns them: install-darling.ps1 runs it after the service is up, uninstall-darling.ps1 removes them, and
+   the running service only verifies. Reads darling.json only (no store, no credentials), so it works at
+   install time before the store has ever booted. Optional second arg = an explicit config path. */
+if (args.Length > 0 && DarlingCliCommands.IsConfigureFirewallVerb(args[0]))
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        Console.Error.WriteLine("--configure-firewall requires Windows (Windows Firewall).");
+        return 1;
+    }
+
+    var configPath = args.Length > 1 ? args[1] : null;
+    return await DarlingCliCommands.ConfigureFirewallAsync(configPath, Console.Out, Console.Error, CancellationToken.None);
 }
 
 /* CLI verbs: enable/disable the embedded MCP + web-dashboard endpoints on a HEADLESS managed deployment. Each
@@ -163,6 +181,40 @@ if (args.Length > 0 && DarlingCliCommands.IsDisableWebVerb(args[0]))
     return await DarlingCliCommands.DisableWebAsync(configPath, Console.Out, Console.Error, CancellationToken.None);
 }
 
+/* CLI verb: --backfill-rollups (#1759 Phase 2) — materialize the query-acceleration rollups back over
+   pre-existing history so the #1680 arming gate can release the held raw retention policies by itself. An
+   OPERATOR verb, deliberately not a startup step: the gate is all-or-nothing, so a store with a year of raw
+   must materialize the whole history before the first purge reclaims anything, which puts peak disk BEFORE
+   any relief. It preflights free space and refuses with numbers rather than filling the volume. Runs while the
+   service is up, is resumable, and arms nothing itself. --dry-run prints the plan + estimate and stops.
+   Windows-only in managed mode (the DPAPI owner credential), same guard shape as the verbs above. */
+if (args.Length > 0 && DarlingCliCommands.IsBackfillRollupsVerb(args[0]))
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        Console.Error.WriteLine("--backfill-rollups requires Windows (DPAPI store credential).");
+        return 1;
+    }
+
+    var rest = args.AsSpan(1);
+    var dryRun = false;
+    string? backfillConfigPath = null;
+    foreach (var arg in rest)
+    {
+        if (string.Equals(arg, "--dry-run", StringComparison.OrdinalIgnoreCase))
+        {
+            dryRun = true;
+        }
+        else
+        {
+            backfillConfigPath = arg;
+        }
+    }
+
+    return await DarlingCliCommands.BackfillRollupsAsync(
+        backfillConfigPath, dryRun, Console.Out, Console.Error, CancellationToken.None);
+}
+
 var builder = Host.CreateApplicationBuilder(args);
 
 /* Windows-service lifetime is a no-op when run from a console, so the same exe
@@ -186,7 +238,7 @@ if (OperatingSystem.IsWindows())
        elevated console run or an install script that pre-created it; see the README install step).
        When the source does not exist, the Event Log provider silently drops events — which is why
        the file log above, not this, is the primary surface. */
-    builder.Logging.AddEventLog(settings => settings.SourceName = "PerformanceMonitor Darling");
+    builder.Logging.AddEventLog(ConfigureWindowsEventLogSource);
     try
     {
         if (!System.Diagnostics.EventLog.SourceExists("PerformanceMonitor Darling"))
@@ -258,4 +310,17 @@ try
 finally
 {
     instanceGuard?.Dispose();
+}
+
+/* The delegate is registered inside the OperatingSystem.IsWindows() block above, but the platform
+   analyzer does not carry that guard into a delegate body — an explicit in-body guard keeps
+   EventLogSettings.SourceName provably Windows-only. */
+static void ConfigureWindowsEventLogSource(Microsoft.Extensions.Logging.EventLog.EventLogSettings settings)
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        return;
+    }
+
+    settings.SourceName = "PerformanceMonitor Darling";
 }

@@ -117,7 +117,8 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// The Top-Queries-by-Duration read — Lite's <c>GetTopQueriesByCpuAsync</c> (despite the name it
     /// ranks by summed <c>delta_elapsed_time</c>, matching the grid's default TotalElapsedMs-descending
-    /// sort) ported to Postgres against the base <c>query_stats</c> table. Group by
+    /// sort) ported to Postgres against <c>v_query_stats</c> (the view resolves the #1767 payload
+    /// dimensions, so the text/plan columns read the same as they did inline). Group by
     /// (database_name, query_hash) over the window, sum the deltas + carry the min/max spreads, fetch
     /// each group's latest non-null query text via a LATERAL join, drop WAITFOR shells (over-fetch by 5
     /// exactly like Lite's <c>LIMIT top + 5</c> → filter → <c>LIMIT top</c>), and cap at top.
@@ -174,7 +175,13 @@ public sealed partial class ViewerDataService
                 MAX(total_clr_time) AS total_clr_time,
                 MAX(plan_generation_num) AS plan_generation_num,
                 MAX(CAST(delta_worker_time AS double precision) / NULLIF(sample_interval_seconds, 0) / 1000.0) AS worker_time_per_second,
-                bool_or(query_plan_xml IS NOT NULL) AS has_query_plan
+                /* A digest means the plan lives in query_plan_dim (#1767), so presence is testable
+                   without resolving it. Deliberately the base table here, not v_query_stats: this
+                   CTE aggregates the whole window and needs only a presence flag, and reading the
+                   resolving view would make Postgres join the plan dimension per row to evaluate
+                   it (it can drop an unreferenced unique join, but the COALESCE references it).
+                   The LATERAL below, which needs the actual text, does read the view. */
+                bool_or(query_plan_xml IS NOT NULL OR query_plan_digest IS NOT NULL) AS has_query_plan
             FROM query_stats
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -260,7 +267,7 @@ public sealed partial class ViewerDataService
         FROM ranked AS r
         LEFT JOIN LATERAL (
             SELECT query_text
-            FROM query_stats
+            FROM v_query_stats
             WHERE server_id = $1
             AND   query_hash = r.query_hash
             AND   database_name = r.database_name
@@ -403,7 +410,7 @@ public sealed partial class ViewerDataService
                    SUM(qs.delta_physical_reads)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) AS avg_reads,
                    MAX(qs.query_text) AS query_text
             FROM top_hashes th
-            INNER JOIN query_stats qs
+            INNER JOIN v_query_stats qs
               ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
               AND qs.database_name IS NOT DISTINCT FROM th.database_name
             WHERE qs.server_id = $1
@@ -419,7 +426,7 @@ public sealed partial class ViewerDataService
                    SUM(qs.delta_physical_reads)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) AS avg_reads,
                    MAX(qs.query_text) AS query_text
             FROM top_hashes th
-            INNER JOIN query_stats qs
+            INNER JOIN v_query_stats qs
               ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
               AND qs.database_name IS NOT DISTINCT FROM th.database_name
             WHERE qs.server_id = $1

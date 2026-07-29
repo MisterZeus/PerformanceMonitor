@@ -29,7 +29,7 @@ namespace PerformanceMonitorLite.Tests;
 /// deadlocks) returns "empty". Successful, data-bearing results are intentionally not exercised
 /// here — this change does not touch them.
 /// </summary>
-public class McpStatusEnvelopeTests : IDisposable
+public class McpStatusEnvelopeTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private readonly string _tempDir;
     private readonly DuckDbInitializer _duckDb;
@@ -37,16 +37,21 @@ public class McpStatusEnvelopeTests : IDisposable
     private readonly ServerManager _serverManager;
     private readonly int _serverId;
     private long _nextId = -1;
+    private DuckDBConnection? _seedConn;
 
-    public McpStatusEnvelopeTests()
+    public McpStatusEnvelopeTests(SharedDuckDbFixture fixture)
     {
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
+
+        /* The temp dir stays test-local for the ServerManager's config directory;
+           only the database is shared through the class fixture. */
         _tempDir = Path.Combine(Path.GetTempPath(), "McpStatusTests_" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(_tempDir);
 
         var configDir = Path.Combine(_tempDir, "config");
         Directory.CreateDirectory(configDir);
 
-        _duckDb = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
         _dataService = new LocalDataService(_duckDb);
 
         /* A real ServerManager with one enabled, Windows-auth server. Windows auth means AddServer
@@ -62,19 +67,31 @@ public class McpStatusEnvelopeTests : IDisposable
 
     public void Dispose()
     {
+        _seedConn?.Dispose();
         try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); }
         catch { /* best-effort cleanup */ }
+    }
+
+    /// <summary>
+    /// One connection reused for every seeded row — opening a fresh connection per
+    /// single-row INSERT measured ~90ms/row and dominated this class's runtime.
+    /// </summary>
+    private async Task<DuckDBConnection> SeedConnectionAsync()
+    {
+        if (_seedConn is null)
+        {
+            _seedConn = _duckDb.CreateConnection();
+            await _seedConn.OpenAsync();
+        }
+        return _seedConn;
     }
 
     // ── helpers ──
 
     private async Task SeedPerfmonCountersAsync(params string[] counterNames)
     {
-        await _duckDb.InitializeAsync();
-
         using var readLock = _duckDb.AcquireReadLock();
-        using var conn = _duckDb.CreateConnection();
-        await conn.OpenAsync();
+        var conn = await SeedConnectionAsync();
 
         foreach (var name in counterNames)
         {
@@ -94,11 +111,8 @@ public class McpStatusEnvelopeTests : IDisposable
 
     private async Task SeedWaitStatsAsync(params string[] waitTypes)
     {
-        await _duckDb.InitializeAsync();
-
         using var readLock = _duckDb.AcquireReadLock();
-        using var conn = _duckDb.CreateConnection();
-        await conn.OpenAsync();
+        var conn = await SeedConnectionAsync();
 
         foreach (var wt in waitTypes)
         {
@@ -158,7 +172,7 @@ public class McpStatusEnvelopeTests : IDisposable
     [Fact]
     public async Task GetPerfmonTrend_NoCountersCollectedAtAll_ReturnsUnavailable()
     {
-        await _duckDb.InitializeAsync(); // schema + views exist, but no perfmon rows seeded
+        // Schema + views come from the class fixture; no perfmon rows seeded.
 
         var json = await McpPerfmonTools.GetPerfmonTrend(_dataService, _serverManager, "Batch Requests/sec");
         var root = Parse(json);
@@ -185,7 +199,7 @@ public class McpStatusEnvelopeTests : IDisposable
     [Fact]
     public async Task GetDeadlocks_NoDeadlocks_ReturnsEmpty()
     {
-        await _duckDb.InitializeAsync(); // no deadlock rows seeded => a true negative
+        // Schema comes from the class fixture; no deadlock rows seeded => a true negative.
 
         var json = await McpBlockingTools.GetDeadlocks(_dataService, _serverManager);
         var root = Parse(json);

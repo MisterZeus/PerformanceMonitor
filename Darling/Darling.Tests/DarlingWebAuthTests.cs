@@ -30,10 +30,18 @@ public sealed class DarlingWebAuthTests
 
     /* ---- ROUTE AUTH MATRIX ---- */
 
+    /* #1649: loopback no longer passes tokenless. This method only runs in NETWORK mode, and the surface
+       stopped being read-only at Custom Views v2 (view CRUD + /api/compose/run), so a local process could
+       read and mutate with no credential while LAN-exposed. Loopback is now exempt from the CIDR test ONLY
+       — it authenticates like any other remote, mirroring the MCP host. The three loopback rows below are
+       the behavior change: same inputs, ShowLogin instead of Allow. */
     [Theory]
-    [InlineData("127.0.0.1", false, false, "Allow")]                  // loopback ALWAYS passes, tokenless (ratified)
-    [InlineData("::1", false, false, "Allow")]                        // IPv6 loopback
-    [InlineData("::ffff:127.0.0.1", false, false, "Allow")]           // IPv4-mapped loopback
+    [InlineData("127.0.0.1", false, false, "ShowLogin")]              // loopback, no credential -> login form, NOT a free pass
+    [InlineData("::1", false, false, "ShowLogin")]                    // IPv6 loopback
+    [InlineData("::ffff:127.0.0.1", false, false, "ShowLogin")]       // IPv4-mapped loopback
+    [InlineData("127.0.0.1", true, false, "Allow")]                   // loopback + valid cookie -> in
+    [InlineData("127.0.0.1", false, true, "SetCookieAndRedirect")]    // loopback + valid token -> cookie + 302, same exchange as a LAN client
+    [InlineData("::ffff:127.0.0.1", false, true, "SetCookieAndRedirect")] // the IPv4-mapped form takes the same path (no unwrap drift)
     [InlineData("192.168.1.50", false, true, "SetCookieAndRedirect")] // in-CIDR + valid token -> cookie + 302
     [InlineData("192.168.1.50", true, false, "Allow")]                // in-CIDR + valid cookie
     [InlineData("192.168.1.50", true, true, "Allow")]                 // cookie is checked before the token

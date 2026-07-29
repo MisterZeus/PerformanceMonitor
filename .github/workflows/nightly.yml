@@ -4,18 +4,55 @@ on:
   schedule:
     # 6:00 AM UTC (1:00 AM EST / 2:00 AM EDT)
     - cron: '0 6 * * *'
-  workflow_dispatch: # manual trigger
+  workflow_dispatch: # manual trigger — and the vehicle the scheduled re-dispatch below rides
+    inputs:
+      from_schedule:
+        description: 'Set true by the scheduled re-dispatch so the 24h new-commit check applies. Leave false for manual runs, which always build.'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
 
 jobs:
-  check:
+  # Scheduled workflows always execute the DEFAULT branch's copy of this file, while nightly
+  # artifacts deliberately build from dev's tree. That skew is how the 2026-07-26 nightly
+  # failed (run 30194606068): main's stale copy still read Dashboard/Dashboard.csproj, a path
+  # #1612 moved to deprecated/ on dev, so 'Set nightly version' died on a file missing from
+  # the tree it had just checked out — and the same trap bit before (#1550/#1551). The cure
+  # is structural, not another sync: on schedule this workflow does NOTHING but re-dispatch
+  # itself onto the dev REF, because a workflow_dispatch run executes the dispatched ref's
+  # copy of this file — dev's, current by definition. Once main carries this shape, its copy
+  # has exactly one job that must keep working, and that job references no tree paths at
+  # all; every future change to the real nightly logic lands on dev and takes effect the
+  # night it merges, no promotion to main needed. GITHUB_TOKEN can create workflow_dispatch
+  # runs (the Actions recursion guard exempts workflow_dispatch and repository_dispatch),
+  # and the dispatched run cannot loop back here because it arrives as workflow_dispatch,
+  # not schedule. Until main is synced once, the scheduled run still executes main's OLD
+  # copy and keeps failing nightly — the one-time sync is in the PR that introduced this.
+  redispatch:
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Re-dispatch this workflow onto the dev ref
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run nightly.yml --repo ${{ github.repository }} --ref dev -f from_schedule=true
+
+  # Everything below runs only in a workflow_dispatch run — the scheduled re-dispatch or a
+  # manual one — which executes from the dispatched ref (dev for the scheduled path).
+  check:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       has_changes: ${{ steps.check.outputs.has_changes }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: dev
           fetch-depth: 0
@@ -34,18 +71,25 @@ jobs:
 
   build:
     needs: check
-    if: needs.check.outputs.has_changes == 'true' || github.event_name == 'workflow_dispatch'
+    # Manual dispatches always build (from_schedule defaults false); the scheduled
+    # re-dispatch sets from_schedule=true and builds only when dev changed in the last
+    # 24h — the same policy the schedule applied when it ran these jobs directly.
+    if: needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true
     runs-on: windows-latest
+    # Full pipeline (restore, tests, four publishes, cold pg-runtime fetch, vpk pack,
+    # release upload) is well under an hour; 90 minutes means hung-not-slow. Nightly ships
+    # unsigned, so unlike build.yml's release path there is no manual signing gate to wait on.
+    timeout-minutes: 90
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: dev
 
       - name: Setup .NET 10.0
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: 10.0.x
+          global-json-file: global.json
           cache: true
           cache-dependency-path: '**/packages.lock.json'
 
@@ -53,7 +97,7 @@ jobs:
         id: version
         shell: pwsh
         run: |
-          $base = ([xml](Get-Content Dashboard/Dashboard.csproj)).Project.PropertyGroup.Version | Where-Object { $_ }
+          $base = ([xml](Get-Content Lite/PerformanceMonitorLite.csproj)).Project.PropertyGroup.Version | Where-Object { $_ }
           $date = Get-Date -Format "yyyyMMdd"
           $nightly = "$base-nightly.$date"
           echo "VERSION=$nightly" >> $env:GITHUB_OUTPUT
@@ -61,23 +105,15 @@ jobs:
 
       - name: Restore dependencies
         run: |
-          dotnet restore Dashboard/Dashboard.csproj --locked-mode
           dotnet restore Lite/PerformanceMonitorLite.csproj --locked-mode
-          dotnet restore Installer/PerformanceMonitorInstaller.csproj --locked-mode
           dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
           dotnet restore Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj --locked-mode
 
       - name: Run tests
         run: dotnet test Lite.Tests/Lite.Tests.csproj -c Release --verbosity normal
 
-      - name: Publish Dashboard
-        run: dotnet publish Dashboard/Dashboard.csproj -c Release -o publish/Dashboard
-
       - name: Publish Lite
         run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -o publish/Lite
-
-      - name: Publish CLI Installer
-        run: dotnet publish Installer/PerformanceMonitorInstaller.csproj -c Release
 
       - name: Publish Darling Service
         run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -o publish/DarlingService
@@ -97,7 +133,7 @@ jobs:
       # branch; nightly and release runs share the assembled zip whenever the cache is visible.
       - name: Cache Darling pg-runtime.zip
         id: cache-pg-runtime
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: Darling/artifacts/pg-runtime.zip
           key: pg-runtime-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-runtime.ps1') }}
@@ -113,23 +149,8 @@ jobs:
           $version = "${{ steps.version.outputs.VERSION }}"
           New-Item -ItemType Directory -Force -Path releases
 
-          Compress-Archive -Path 'publish/Dashboard/*' -DestinationPath "releases/PerformanceMonitorDashboard-$version.zip" -Force
           Compress-Archive -Path 'publish/Lite/*' -DestinationPath "releases/PerformanceMonitorLite-$version.zip" -Force
 
-          $instDir = 'publish/Installer'
-          New-Item -ItemType Directory -Force -Path $instDir
-          New-Item -ItemType Directory -Force -Path "$instDir/install"
-          New-Item -ItemType Directory -Force -Path "$instDir/upgrades"
-
-          Copy-Item 'Installer/bin/Release/net10.0/win-x64/publish/PerformanceMonitorInstaller.exe' $instDir
-          Copy-Item 'install/*.sql' "$instDir/install/"
-          if (Test-Path 'install/templates') { Copy-Item 'install/templates' "$instDir/install/templates" -Recurse -ErrorAction SilentlyContinue }
-          if (Test-Path 'upgrades') { Copy-Item 'upgrades/*' "$instDir/upgrades/" -Recurse -ErrorAction SilentlyContinue }
-          if (Test-Path 'README.md') { Copy-Item 'README.md' $instDir }
-          if (Test-Path 'LICENSE') { Copy-Item 'LICENSE' $instDir }
-          if (Test-Path 'THIRD_PARTY_NOTICES.md') { Copy-Item 'THIRD_PARTY_NOTICES.md' $instDir }
-
-          Compress-Archive -Path 'publish/Installer/*' -DestinationPath "releases/PerformanceMonitorInstaller-$version.zip" -Force
 
           # Same layout as the release zip (build.yml "Package Darling (signed)"): service at the
           # archive root with darling.sample.json alongside, viewer under viewer\, pg-runtime.zip
@@ -211,22 +232,27 @@ jobs:
   darling-pg:
     name: Darling PostgreSQL tests
     needs: check
-    if: needs.check.outputs.has_changes == 'true' || github.event_name == 'workflow_dispatch'
+    # Same gating as the build job: manual dispatches always run, the scheduled
+    # re-dispatch (from_schedule=true) runs only when dev changed in the last 24h.
+    if: needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true
     runs-on: windows-latest
+    # Cold pg-runtime fetch + build + the full live-PG suite fits well inside an hour; a
+    # cluster that never comes up (pg_ctl -w) is the hang this bounds.
+    timeout-minutes: 60
 
     steps:
       # Scheduled runs always test dev (schedules execute from the default branch, so ref_name
       # would be main). A manual dispatch tests the DISPATCHED ref — the only way to validate a
       # branch's gated-pg test changes before merge; the artifact-publishing build job stays
       # pinned to dev either way, so a branch dispatch can never ship branch binaries.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
 
       - name: Setup .NET 10.0
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: 10.0.x
+          global-json-file: global.json
           cache: true
           cache-dependency-path: '**/packages.lock.json'
 
@@ -236,7 +262,7 @@ jobs:
       # release share one cache entry, so a warm cache means no download here.
       - name: Cache Darling pg-runtime.zip
         id: cache-pg-runtime
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: Darling/artifacts/pg-runtime.zip
           key: pg-runtime-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-runtime.ps1') }}
@@ -258,6 +284,26 @@ jobs:
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $dest)
           if (-not (Test-Path "$dest\pgsql\bin\pg_ctl.exe")) { throw "pg-runtime missing pgsql\bin\pg_ctl.exe" }
+
+      # The PREVIOUS-major runtime, for the upgraded-in-place fixture (#1706). Without it the gated
+      # store-upgrade E2E skips, and with it skips the ONLY behavioral coverage of the in-place
+      # 17-to-18 path: the runtime rescue, the TimescaleDB bridge, the data-directory swap, the
+      # revert, and the loopback override that stops pg_upgrade dialing ::1 against our IPv4-only
+      # listen_addresses. String assertions catch that constant being deleted; nothing but this
+      # catches the override ceasing to TAKE EFFECT, and the failure mode is a fleet-wide hang.
+      # Only the DOWNLOADS are cached (~340MB of pinned archives): the script re-verifies them by
+      # SHA256 and re-assembles in seconds, so a warm cache costs no network.
+      - name: Cache upgrade-fixture downloads (previous-major runtime)
+        uses: actions/cache@v6
+        with:
+          path: Darling/artifacts/upgrade-fixture/work/downloads
+          key: upgrade-fixture-${{ runner.os }}-${{ hashFiles('Darling/tools/new-upgraded-store-fixture.ps1') }}
+
+      # -SkipNew: the CURRENT runtime is already built/cached above as pg-runtime.zip, which is what
+      # DARLING_TEST_PGRUNTIME_NEWZIP points at. This step only needs the old side.
+      - name: Build previous-major runtime for the upgrade fixture
+        shell: pwsh
+        run: ./Darling/tools/new-upgraded-store-fixture.ps1 -SkipNew
 
       - name: Restore Darling.Tests
         run: dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
@@ -300,6 +346,13 @@ jobs:
         env:
           DARLING_TEST_PG: "Host=127.0.0.1;Port=5541;Username=darling;Database=darling"
           DARLING_TEST_PGRUNTIME: ${{ github.workspace }}\Darling\artifacts\pg-runtime
+          # #1706: the pair that lights up the upgraded-in-place store-upgrade E2E — a real
+          # previous-major store (hypertable, TOAST-sized plan XML, continuous aggregate,
+          # compressed chunk) upgraded through the production bootstrap and compared by ordered
+          # row checksum before and after. This is the [#1705] CI gap: every other job only ever
+          # sees a FRESH store, so nothing else can catch an upgrade path that breaks.
+          DARLING_TEST_PGRUNTIME_OLD: ${{ github.workspace }}\Darling\artifacts\upgrade-fixture\old\pg-runtime
+          DARLING_TEST_PGRUNTIME_NEWZIP: ${{ github.workspace }}\Darling\artifacts\pg-runtime.zip
         run: dotnet test Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build --verbosity normal --logger "trx;LogFileName=darling-nightly.trx" --results-directory TestResults
 
       - name: Stop PostgreSQL

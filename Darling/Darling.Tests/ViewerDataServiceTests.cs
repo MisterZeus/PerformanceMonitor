@@ -404,28 +404,58 @@ public sealed class ViewerSchemaVersionGateTests
     }
 
     [Theory]
-    [InlineData(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, 31)]  // fully migrated V31 (config.custom_views, #1563)
-    [InlineData(true, true, true, true, true, true, true, true, true, true, true, true, true, true, false, 30)]  // V30: config_service web_enabled present, custom_views not yet (#1562)
-    [InlineData(true, true, true, true, true, true, true, true, true, true, true, true, true, false, false, 29)]  // V29: long_query_completions present, web config not yet (#1496)
-    [InlineData(true, true, true, true, true, true, true, true, true, true, true, true, false, false, false, 28)]  // V28: query_store_stats replica_role present, long_query_completions not yet (#1546)
-    [InlineData(true, true, true, true, true, true, true, true, true, true, true, false, false, false, false, 27)] // V27: deadlocks database_name present, replica_role not yet (#1535)
-    [InlineData(true, true, true, true, true, true, true, true, true, true, false, false, false, false, false, 26)] // V26: generic webhook present, deadlocks column not yet
-    [InlineData(true, true, true, true, true, true, true, true, true, false, false, false, false, false, false, 25)] // V25: agent_status present, generic webhook not yet
-    [InlineData(true, true, true, true, true, true, true, true, false, false, false, false, false, false, false, 24)] // V24: job_history present, agent_status not yet
-    [InlineData(true, true, true, true, true, true, true, false, false, false, false, false, false, false, false, 23)]    // V23 (collection_log hypertable, or plain-PG at V23)
-    [InlineData(true, true, true, true, true, true, false, false, false, false, false, false, false, false, false, 22)]   // Timescale store still at V22 (index present, collection_log not yet a hypertable)
-    [InlineData(true, true, true, true, true, false, false, false, false, false, false, false, false, false, false, 21)]  // pre-V22: has default_trace_events, no V22 index
-    [InlineData(true, true, true, true, false, false, false, false, false, false, false, false, false, false, false, 20)] // pre-V21: no default_trace_events
-    [InlineData(true, true, true, false, false, false, false, false, false, false, false, false, false, false, false, 19)]// pre-V20: no alert-tuning knobs
-    [InlineData(true, true, false, false, false, false, false, false, false, false, false, false, false, false, false, 18)]// pre-V19: no analysis_state
-    [InlineData(true, false, false, false, false, false, false, false, false, false, false, false, false, false, false, 17)]// pre-V18: no delivery-override column
-    [InlineData(false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, 16)]// pre-V17: no config control plane at all
+    [InlineData(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, 32)]  // fully migrated V32 (config.server_tags, fleet tags)
+    [InlineData(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, false, 31)]  // V31: config.custom_views present, server_tags not yet (#1563)
+    [InlineData(true, true, true, true, true, true, true, true, true, true, true, true, true, true, false, false, 30)]  // V30: config_service web_enabled present, custom_views not yet (#1562)
+    [InlineData(true, true, true, true, true, true, true, true, true, true, true, true, true, false, false, false, 29)]  // V29: long_query_completions present, web config not yet (#1496)
+    [InlineData(true, true, true, true, true, true, true, true, true, true, true, true, false, false, false, false, 28)]  // V28: query_store_stats replica_role present, long_query_completions not yet (#1546)
+    [InlineData(true, true, true, true, true, true, true, true, true, true, true, false, false, false, false, false, 27)] // V27: deadlocks database_name present, replica_role not yet (#1535)
+    [InlineData(true, true, true, true, true, true, true, true, true, true, false, false, false, false, false, false, 26)] // V26: generic webhook present, deadlocks column not yet
+    [InlineData(true, true, true, true, true, true, true, true, true, false, false, false, false, false, false, false, 25)] // V25: agent_status present, generic webhook not yet
+    [InlineData(true, true, true, true, true, true, true, true, false, false, false, false, false, false, false, false, 24)] // V24: job_history present, agent_status not yet
+    [InlineData(true, true, true, true, true, true, true, false, false, false, false, false, false, false, false, false, 23)]    // V23 (collection_log hypertable, or plain-PG at V23)
+    [InlineData(true, true, true, true, true, true, false, false, false, false, false, false, false, false, false, false, 22)]   // Timescale store still at V22 (index present, collection_log not yet a hypertable)
+    [InlineData(true, true, true, true, true, false, false, false, false, false, false, false, false, false, false, false, 21)]  // pre-V22: has default_trace_events, no V22 index
+    [InlineData(true, true, true, true, false, false, false, false, false, false, false, false, false, false, false, false, 20)] // pre-V21: no default_trace_events
+    [InlineData(true, true, true, false, false, false, false, false, false, false, false, false, false, false, false, false, 19)]// pre-V20: no alert-tuning knobs
+    [InlineData(true, true, false, false, false, false, false, false, false, false, false, false, false, false, false, false, 18)]// pre-V19: no analysis_state
+    [InlineData(true, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, 17)]// pre-V18: no delivery-override column
+    [InlineData(false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, 16)]// pre-V17: no config control plane at all
     public void MapProbedSchemaVersion_TakesTheHighestSatisfiedSentinel(
-        bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, int expected)
+        bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, int expected)
     {
         Assert.Equal(expected, ViewerDataService.MapProbedSchemaVersion(
-            hasConfigControlPlane, hasAlertDeliveryOverride, hasAnalysisState, hasAlertTuningKnobs, hasDefaultTraceEvents, hasIndexObjectStatsLatestIndex, hasCollectionLogHypertableOrPlainPg, hasJobHistory, hasAgentStatus, hasGenericWebhook, hasDeadlocksDatabaseName, hasQueryStoreReplicaRole, hasLongQueryCompletions, hasWebDashboardConfig, hasCustomViews));
+            hasConfigControlPlane, hasAlertDeliveryOverride, hasAnalysisState, hasAlertTuningKnobs, hasDefaultTraceEvents, hasIndexObjectStatsLatestIndex, hasCollectionLogHypertableOrPlainPg, hasJobHistory, hasAgentStatus, hasGenericWebhook, hasDeadlocksDatabaseName, hasQueryStoreReplicaRole, hasLongQueryCompletions, hasWebDashboardConfig, hasCustomViews, hasServerTags));
     }
+
+    /// <summary>An upgraded store mid-state: fleet tags present (V32) but the #1659 knobs not yet — the
+    /// probe reports 32, not 33, so the gate correctly blocks a V33 viewer until the service migrates.</summary>
+    [Fact]
+    public void MapProbedSchemaVersion_V33KnobsAbsent_CapsAt32() =>
+        Assert.Equal(32, ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+
+    /// <summary>The next rung: the #1659 knobs present (V33) but neither #991 sentinel yet — the probe reports
+    /// 33, so the gate blocks a V34/V35 viewer until the service migrates.</summary>
+    [Fact]
+    public void MapProbedSchemaVersion_AgSentinelsAbsent_CapsAt33() =>
+        Assert.Equal(33, ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+
+    /// <summary>The rung that only exists because #991 shipped as two stacked migrations: the AG collector
+    /// TABLES are present (V34) but the AG ALERT knobs are not (V35). The probe must report 34, not 35 — a
+    /// store that took the collector migration and not the alert one is genuinely mid-upgrade, and reporting
+    /// 35 would let a V35 viewer open against a store whose config_alert_settings has no notify_ag_health.</summary>
+    [Fact]
+    public void MapProbedSchemaVersion_AgCollectorsPresentButAlertKnobsAbsent_CapsAt34() =>
+        Assert.Equal(34, ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+
+    /// <summary>The #1767 rung: every sentinel through V37 present but query_plan_dim absent — the probe must
+    /// report 37, so the gate blocks a V38 viewer until the service migrates. Gating this matters more than
+    /// most: at V38 the collectors stop writing query_text/query_plan_xml inline, so a viewer that opened
+    /// against a store it thought was current would read NULL for every new row's text and plan and show
+    /// nothing, with no error to explain it.</summary>
+    [Fact]
+    public void MapProbedSchemaVersion_PayloadDimensionsAbsent_CapsAt37() =>
+        Assert.Equal(37, ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
 
     [Fact]
     public void MapProbedSchemaVersion_V23CompositeIsGatedBehindV22_NotAStandaloneTopArm()
@@ -434,7 +464,7 @@ public sealed class ViewerSchemaVersionGateTests
            but must NOT be reported as 23 — the composite only counts once the engine-agnostic V22 index is
            present. Here: pre-V22 (no index) with the composite true still maps to 21 (its real V21 sentinel),
            proving the composite is gated behind V22 rather than treated as a newest-first arm. */
-        Assert.Equal(21, ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, false, true, false, false, false, false, false, false, false, false));
+        Assert.Equal(21, ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, false, true, false, false, false, false, false, false, false, false, false));
     }
 
     [Fact]
@@ -444,11 +474,12 @@ public sealed class ViewerSchemaVersionGateTests
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         /* Pin: a fully-migrated store (all sentinels present) must map to exactly the required version. If a
-           future migration bumps StorageVersion past 30, this fails until a matching sentinel + map arm is
-           added — the guard against the probe silently under-reporting a newer store as skewed. */
+           future migration bumps StorageVersion, this fails until a matching sentinel + map arm is added —
+           the guard against the probe silently under-reporting a newer store as skewed, which would make
+           the connect-time gate refuse to open the viewer against a perfectly healthy store. */
         Assert.Equal(
             ViewerDataService.RequiredStoreSchemaVersion,
-            ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+            ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
     }
 }
 

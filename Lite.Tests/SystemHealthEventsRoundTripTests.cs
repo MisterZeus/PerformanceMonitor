@@ -7,13 +7,13 @@
  */
 
 using System;
-using System.IO;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Lite.Tests.Helpers;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitorLite.Tests;
 using Xunit;
 
 namespace Lite.Tests;
@@ -27,29 +27,14 @@ namespace Lite.Tests;
 /// (CreateAppender -> prefix -> WritePayload -> EndRow) against a freshly initialized schema, then
 /// reads the raw event columns back, including a NULL event row.
 /// </summary>
-public sealed class SystemHealthEventsRoundTripTests : IDisposable
+public sealed class SystemHealthEventsRoundTripTests : IClassFixture<SharedDuckDbFixture>
 {
-    private readonly string _tempDir;
+    private readonly DuckDbInitializer _duckDb;
 
-    public SystemHealthEventsRoundTripTests()
+    public SystemHealthEventsRoundTripTests(SharedDuckDbFixture fixture)
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "LiteSysHealthRt_" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(_tempDir);
-    }
-
-    public void Dispose()
-    {
-        try
-        {
-            if (Directory.Exists(_tempDir))
-            {
-                Directory.Delete(_tempDir, recursive: true);
-            }
-        }
-        catch
-        {
-            /* Best-effort cleanup */
-        }
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
     }
 
     [Fact]
@@ -91,12 +76,9 @@ public sealed class SystemHealthEventsRoundTripTests : IDisposable
     /// </summary>
     private async Task<DuckDBConnection> AppendOneRowAsync<TRow>(ICollectorDefinition<TRow> definition, TRow row)
     {
-        var dbPath = Path.Combine(_tempDir, $"{definition.TargetTable}.duckdb");
-        await new DuckDbInitializer(dbPath).InitializeAsync();
-
         var context = CollectorTestContext.Make(new RecordingCollectorDeltaCalculator());
 
-        var connection = new DuckDBConnection($"Data Source={dbPath}");
+        var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(TestContext.Current.CancellationToken);
 
         using (var appender = connection.CreateAppender(definition.TargetTable))

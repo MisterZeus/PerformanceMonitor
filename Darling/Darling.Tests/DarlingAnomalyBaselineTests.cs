@@ -104,10 +104,21 @@ public sealed class DarlingAnomalyBaselineTests
     {
         /* The stall/reads ratio must be DOUBLE PRECISION, not numeric (`* 1.0`): STDDEV_SAMP of a
            spurious-large ratio yields a numeric that overflows System.Decimal when Npgsql materializes
-           the aggregate, silently failing the io_latency baseline (found live via the error monitor). */
+           the aggregate, silently failing the io_latency baseline (found live via the error monitor).
+
+           #1757 moved the ratio into the baseline aggregate, so the cast is pinned where it now lives —
+           and the provider half is pinned too, because the reconstruction must stay in float arithmetic
+           all the way out or the same overflow returns by a different route. */
+        Assert.Contains("delta_stall_read_ms::DOUBLE PRECISION", TimescaleSupport.CreateFileIoBaselineSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("delta_stall_read_ms * 1.0", TimescaleSupport.CreateFileIoBaselineSql, StringComparison.Ordinal);
+
         var sql = PgBaselineProvider.GetBaselineQuery(MetricNames.IoLatency)!;
-        Assert.Contains("delta_stall_read_ms::DOUBLE PRECISION", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("delta_stall_read_ms * 1.0", sql, StringComparison.Ordinal);
+        Assert.Contains("file_io_baseline", sql, StringComparison.Ordinal);
+        Assert.Contains("SQRT(", sql, StringComparison.Ordinal);
+        /* sample_count must come from row_count, NOT ratio_count: the raw path counted rows whose ratio was
+           NULL (writes but no reads pass the filter and average to nothing), so counting only the non-null
+           ratios would silently under-report the sample size the baseline gate reads. */
+        Assert.Contains("SUM(row_count) AS sample_count", sql, StringComparison.Ordinal);
     }
 
     /* ---------------- ungated: method-surface pins vs Lite ---------------- */
@@ -226,8 +237,8 @@ public sealed class DarlingAnomalyBaselineTests
         Assert.True(exclusionAt > fromCteAt, "the exclusion must filter OUTSIDE the CTE — after the window is computed");
 
         /* The pre-window row filter is unchanged from Lite. */
-        Assert.Contains("counter_name = 'Batch Requests/sec'", sql, StringComparison.Ordinal);
-        Assert.Contains("delta_cntr_value >= 0", sql, StringComparison.Ordinal);
+        Assert.Contains("counter_name = 'Batch Requests/sec'", TimescaleSupport.CreatePerfmonBaselineSql, StringComparison.Ordinal);
+        Assert.Contains("delta_cntr_value >= 0", TimescaleSupport.CreatePerfmonBaselineSql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -240,17 +251,22 @@ public sealed class DarlingAnomalyBaselineTests
            windowing (with_lag) split into successive CTEs so LAG still sees every grouped row
            — a dropped row still serves as its successor's LAG value — and the identical
            predicate moves to the outer WHERE. Only the first 0-total right after a >10000ms
-           collection is excluded; consecutive zeros survive (their prior is 0). */
+           collection is excluded; consecutive zeros survive (their prior is 0).
+
+           #1757 moved the per-collection collapse into the baseline aggregate, so the grouping no longer
+           appears in this query -- the totals arrive already one row per collection_time. The INVARIANT is
+           unchanged and is what is pinned: LAG runs over the per-collection series, and the exclusion is
+           applied OUTSIDE the windowed CTE so a dropped row still serves as its successor's LAG value. */
         var sql = PgBaselineProvider.GetBaselineQuery(MetricNames.WaitStats)!;
 
         Assert.DoesNotContain("QUALIFY", sql, StringComparison.OrdinalIgnoreCase);
 
-        var groupAt = sql.IndexOf("GROUP BY collection_time", StringComparison.Ordinal);
+        var supplyAt = sql.IndexOf("FROM wait_stats_baseline", StringComparison.Ordinal);
         var lagAt = sql.IndexOf("COALESCE(LAG(total_wait_ms) OVER (ORDER BY collection_time), 0) AS prior_total_wait_ms", StringComparison.Ordinal);
         var fromCteAt = sql.IndexOf("FROM with_lag", StringComparison.Ordinal);
         var exclusionAt = sql.IndexOf("WHERE NOT (total_wait_ms = 0 AND prior_total_wait_ms > 10000)", StringComparison.Ordinal);
 
-        Assert.True(groupAt >= 0 && lagAt > groupAt, "LAG must run over the GROUPED per-collection totals (DuckDB's QUALIFY-after-GROUP-BY order)");
+        Assert.True(supplyAt >= 0 && lagAt > supplyAt, "LAG must run over the per-collection totals supplied by the baseline aggregate");
         Assert.True(fromCteAt > lagAt, "the aggregate must select FROM the with_lag CTE");
         Assert.True(exclusionAt > fromCteAt, "the exclusion must filter OUTSIDE the windowed CTE");
     }
@@ -268,7 +284,7 @@ public sealed class DarlingAnomalyBaselineTests
 
         Assert.DoesNotContain("QUALIFY", sql, StringComparison.OrdinalIgnoreCase);
 
-        var groupAt = sql.IndexOf("GROUP BY collection_time", StringComparison.Ordinal);
+        var groupAt = sql.IndexOf("FROM query_stats_baseline", StringComparison.Ordinal);
         var lagAt = sql.IndexOf("COALESCE(LAG(total_elapsed) OVER (ORDER BY collection_time), 0) AS prior_total_elapsed", StringComparison.Ordinal);
         var fromCteAt = sql.IndexOf("FROM with_lag", StringComparison.Ordinal);
         var exclusionAt = sql.IndexOf("WHERE NOT (total_elapsed = 0 AND prior_total_elapsed > 100000)", StringComparison.Ordinal);
@@ -278,8 +294,8 @@ public sealed class DarlingAnomalyBaselineTests
         Assert.True(exclusionAt > fromCteAt, "the exclusion must filter OUTSIDE the windowed CTE");
 
         /* Lite's pre-aggregation row filters are unchanged. */
-        Assert.Contains("delta_execution_count > 0", sql, StringComparison.Ordinal);
-        Assert.Contains("delta_elapsed_time >= 0", sql, StringComparison.Ordinal);
+        Assert.Contains("delta_execution_count > 0", TimescaleSupport.CreateQueryStatsBaselineSql, StringComparison.Ordinal);
+        Assert.Contains("delta_elapsed_time >= 0", TimescaleSupport.CreateQueryStatsBaselineSql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -367,6 +383,19 @@ public sealed class DarlingAnomalyBaselineTests
                     TestWaitType, 10L, delta);
             }
 
+            /* #1757 moved the baseline supply off the raw v_* views and onto named baseline relations, so
+               those relations have to EXIST for any of the assertions below to mean anything — a missing one
+               throws inside ComputeBaselinesAsync, which swallows it and hands back an empty baseline, and
+               every Assert below would then be comparing against zeroes.
+
+               Deliberately the PLAIN-POSTGRESQL fallback views rather than the continuous aggregates: both
+               are built from the same select body (that is the point of deriving one from the other), so they
+               compute the identical statistic, and an ordinary view is isolated — creating the aggregates here
+               would create all seventeen and change compose's tier routing for the live test that asserts a
+               10-day window lands on RAW. The continuous-aggregate half of this invariant is proven in
+               TimescaleSupportTests, which already owns the snapshot/restore machinery for that. */
+            Assert.Equal(9, await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct));
+
             /* The FOLLOWING Monday 10:00 UTC — same (hour, dow) bucket, 1-7 days back, still
                in the past. Both baseline reads and the detector window anchor here. */
             var analysisTime = historyStart.AddDays(7);
@@ -439,6 +468,7 @@ public sealed class DarlingAnomalyBaselineTests
         finally
         {
             await DeleteTestRowsAsync(connection);
+            await DropBaselineFallbackViewsAsync(connection);
         }
     }
 
@@ -457,5 +487,19 @@ public sealed class DarlingAnomalyBaselineTests
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM wait_stats WHERE server_id = {TestServerId};", connection);
         await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    /// <summary>
+    /// Restores the shared fixture by removing the plain baseline views this class creates. Uses the same
+    /// continuous-aggregate guard the product does, so it can never drop a real aggregate another live test
+    /// planted — a bare DROP VIEW would, because a continuous aggregate is also a relkind='v' view.
+    /// </summary>
+    private static async Task DropBaselineFallbackViewsAsync(NpgsqlConnection connection)
+    {
+        foreach (var (_, view) in TimescaleSupport.BaselineAggregates)
+        {
+            using var drop = new NpgsqlCommand(TimescaleSupport.DropBaselineFallbackViewSql(view), connection);
+            await drop.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
     }
 }

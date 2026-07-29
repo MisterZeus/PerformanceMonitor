@@ -13,9 +13,10 @@ namespace PerformanceMonitorLite.Analysis;
 /// so engine output is deterministic and verifiable.
 /// Only available when analysis is enabled.
 /// </summary>
-public class TestDataSeeder
+public class TestDataSeeder : IDisposable
 {
     private readonly DuckDbInitializer _duckDb;
+    private DuckDBConnection? _seedConn;
 
     /// <summary>
     /// Negative server_id to avoid collisions with real servers (hash-based positive IDs).
@@ -44,6 +45,53 @@ public class TestDataSeeder
     public TestDataSeeder(DuckDbInitializer duckDb)
     {
         _duckDb = duckDb;
+    }
+
+    public void Dispose() => _seedConn?.Dispose();
+
+    /// <summary>
+    /// One connection reused for every seeded row. Opening a fresh connection and
+    /// auto-committing one INSERT per row measured ~90ms/row and dominated the
+    /// analysis-heavy test classes' runtime; a scenario seeds 200-300 rows.
+    /// </summary>
+    private async Task<DuckDBConnection> SeedConnectionAsync()
+    {
+        if (_seedConn is null)
+        {
+            _seedConn = _duckDb.CreateConnection();
+            await _seedConn.OpenAsync();
+        }
+        return _seedConn;
+    }
+
+    /// <summary>
+    /// Wraps one helper's inserts in a single transaction so the rows share one WAL
+    /// flush instead of paying an auto-commit apiece. COMMIT on Dispose is best-effort:
+    /// if the helper threw, the test is already failing and a commit error must not
+    /// mask the real exception.
+    /// </summary>
+    private sealed class SeedBatch : IDisposable
+    {
+        private readonly DuckDBConnection _connection;
+
+        public SeedBatch(DuckDBConnection connection)
+        {
+            _connection = connection;
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "BEGIN TRANSACTION";
+            cmd.ExecuteNonQuery();
+        }
+
+        public void Dispose()
+        {
+            try
+            {
+                using var cmd = _connection.CreateCommand();
+                cmd.CommandText = "COMMIT";
+                cmd.ExecuteNonQuery();
+            }
+            catch { /* the test is already failing; don't mask its exception */ }
+        }
     }
 
     /// <summary>
@@ -453,8 +501,8 @@ public class TestDataSeeder
         };
 
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         for (var i = 0; i < plans.Length; i++)
         {
@@ -510,8 +558,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         };
 
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         foreach (var p in plans)
         {
@@ -737,8 +785,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         int avgCpu, int variance, int samples)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         var interval = (end - start).TotalMinutes / samples;
         var rng = new Random(42); // Deterministic for reproducibility
@@ -775,8 +823,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)";
         Dictionary<string, (long waitTimeMs, long waitingTasks, long signalMs)> waits, int samples)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         var interval = (end - start).TotalMinutes / samples;
 
@@ -832,9 +880,12 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
             "plan_cache_stats", "memory_pressure_events"
         };
 
+        /* Deliberately NOT wrapped in a SeedBatch: a DELETE that fails (table missing)
+           inside an explicit transaction puts the transaction into an aborted state and
+           every later statement fails too — the per-table catch would silently skip the
+           rest of the clear. Auto-commit DELETEs on empty tables write nothing anyway. */
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
 
         foreach (var table in tables)
         {
@@ -857,8 +908,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     internal async Task SeedTestServerAsync()
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
@@ -877,8 +928,8 @@ VALUES ($1, $2, $3, true, true)";
         int sleepingBlockerCount = 0, int distinctBlockers = 3)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         var intervalMinutes = 240.0 / count; // Spread across 4-hour window
 
@@ -927,8 +978,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)";
     internal async Task SeedBlockingChainAsync()
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         var baseTran = TestPeriodStart;
         DateTime Tran(int spid) => baseTran.AddSeconds(spid);
@@ -1018,8 +1069,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     internal async Task SeedDeadlocksAsync(int count)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         var intervalMinutes = 240.0 / count;
 
@@ -1055,8 +1106,8 @@ VALUES ($1, $2, $3, $4, $5)";
         const int collectionPoints = 16;
 
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         foreach (var (waitType, totals) in waits)
         {
@@ -1110,8 +1161,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     internal async Task SeedMemoryStatsAsync(double totalPhysicalMb, double bufferPoolMb, double targetMb)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         for (var i = 0; i < 16; i++)
         {
@@ -1145,8 +1196,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)";
     internal async Task SeedFileSizeAsync(double totalDataSizeMb)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
@@ -1175,8 +1226,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, 0, 0, 0, 0, 0)";
     internal async Task SeedServerEditionAsync(int edition, int majorVersion)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
@@ -1198,8 +1249,8 @@ WHERE server_id = $3";
     internal async Task SeedServerConfigAsync(int ctfp = 50, int maxdop = 8, int maxMemoryMb = 57344)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         var configs = new (string name, int value)[]
         {
@@ -1238,8 +1289,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)";
     internal async Task SeedCpuUtilizationAsync(int avgSqlCpu, int avgOtherCpu)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         for (var i = 0; i < 16; i++)
         {
@@ -1273,8 +1324,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)";
         long totalWrites, long stallWriteMs)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         var deltaReads = totalReads / 16;
         var deltaStallRead = stallReadMs / 16;
@@ -1326,8 +1377,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 0,
         if (versionStoreMb == 0) versionStoreMb = reservedMb * 0.1;
 
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         for (var i = 0; i < 16; i++)
         {
@@ -1361,8 +1412,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)";
         long timeoutErrors = 0, long forcedGrants = 0)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         var timeoutDeltaPerPoint = timeoutErrors / 16;
         var forcedDeltaPerPoint = forcedGrants / 16;
@@ -1399,8 +1450,8 @@ VALUES ($1, $2, $3, $4, 0, $5, $6, $7, $8)";
         long totalExecutions = 10_000)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         // Spilling queries
         var spillingQueries = Math.Max(1, (int)(totalSpills / 100)); // ~100 spills per query
@@ -1469,8 +1520,8 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8, $9)";
         long compilationsSec = 50, long recompilationsSec = 5)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         var counters = new (string name, long cntrValue, long deltaValue)[]
         {
@@ -1507,8 +1558,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 60)";
     internal async Task SeedMemoryClerksAsync(Dictionary<string, double> clerks)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         foreach (var (clerkType, memoryMb) in clerks)
         {
@@ -1537,8 +1588,8 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     internal async Task SeedPlanCacheStatsAsync(int totalPlans, int singleUsePlans, int totalSizeMb, int singleUseSizeMb)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
@@ -1568,8 +1619,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
     internal async Task SeedMemoryPressureEventsAsync(params (string notification, int processIndicator, int systemIndicator)[] events)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         for (var i = 0; i < events.Length; i++)
         {
@@ -1605,8 +1656,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
         params (string dbName, bool rcsiOn, bool autoShrink, bool autoClose, string pageVerify)[] databases)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         foreach (var (dbName, rcsiOn, autoShrink, autoClose, pageVerify) in databases)
         {
@@ -1639,8 +1690,8 @@ VALUES ($1, $2, $3, $4, $5, 'FULL', $6, $7, $8, true, true, $9, true)";
     internal async Task SeedProcedureStatsAsync(int distinctProcs, long totalExecs, long totalCpuUs)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         var execsPerProc = totalExecs / distinctProcs;
         var cpuPerProc = totalCpuUs / distinctProcs;
@@ -1677,8 +1728,8 @@ VALUES ($1, $2, $3, $4, $5, 'dbo', $6, $7, $8, $9, $10)";
         int parallel, long maxElapsedMs = 120_000, int maxDop = 8)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         var total = longRunning + blocked + parallel + 5; // +5 short normal queries
 
@@ -1719,8 +1770,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
         double maxPctAvg = 300, long maxDurationSeconds = 7200)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         for (var i = 0; i < totalJobs; i++)
         {
@@ -1759,8 +1810,8 @@ VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8, $9, 100, $10, $11)";
         params (string appName, int connections, int running, int sleeping)[] apps)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         foreach (var (appName, conns, running, sleeping) in apps)
         {
@@ -1790,8 +1841,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0)";
     internal async Task SeedTraceFlagsAsync(params int[] flags)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         foreach (var flag in flags)
         {
@@ -1823,8 +1874,8 @@ VALUES ($1, $2, $3, $4, $5, true, true, false)";
         if (coresPerSocket == 0) coresPerSocket = cpuCount / (socketCount * 2); // assume HT
 
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
@@ -1862,8 +1913,8 @@ VALUES ($1, $2, $3, $4, $5, '16.0.4150.1', 'RTM', $12,
         params (string mountPoint, double totalMb, double freeMb)[] volumes)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         foreach (var (mountPoint, totalMb, freeMb) in volumes)
         {
@@ -1899,8 +1950,8 @@ VALUES ($1, $2, $3, $4, 'UserDB', 5, 1, 'ROWS', 'UserDB', 'D:\Data\UserDB.mdf',
         params (string database, string logicalName, string fileType, double totalSizeMb, bool isPercentGrowth, int growthPct)[] files)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         var fileId = 1;
         foreach (var (database, logicalName, fileType, totalSizeMb, isPercentGrowth, growthPct) in files)
@@ -2071,8 +2122,8 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
     internal async Task SeedDatabaseSizesForIdleTestAsync()
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         var databases = new (string name, int dbId, decimal totalSizeMb)[]
         {
@@ -2113,8 +2164,8 @@ VALUES ($1, $2, $3, $4, $5, $6, 1, 'ROWS', $7, $8, $9, $10)";
     internal async Task SeedQueryStatsForDatabaseAsync(string databaseName, long executions, long cpuMs)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         // Spread across 16 collection points so it falls within time-range queries
         var execsPerPoint = executions / 16;
@@ -2158,8 +2209,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
     internal async Task SeedQueryStatsForHighImpactAsync()
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         var queries = new (string hash, long cpuMs, long executions, long reads, long writes, long memoryKb)[]
         {
@@ -2206,8 +2257,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)";
     internal async Task SeedDatabaseSizesWithNamesAsync(params string[] databaseNames)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         for (var i = 0; i < databaseNames.Length; i++)
         {
@@ -2245,8 +2296,8 @@ VALUES ($1, $2, $3, $4, $5, $6, 1, 'ROWS', $7, $8, $9, $10)";
     internal async Task SeedRunningJobsForMaintenanceTestAsync()
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         // "Weekly Index Rebuild" — ran long 5 times
         var jobId = Guid.NewGuid().ToString();
@@ -2405,8 +2456,8 @@ VALUES ($1, $2, $3, $4, $5, true, $6, 120, 100, 130, 200, false, 120.0)";
     internal async Task SeedCpuUtilizationWithVarianceAsync(int mean, int variance)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         // Pattern: mean-variance, mean, mean+variance, mean — repeating
         var offsets = new[] { -variance, 0, variance, 0 };
@@ -2443,8 +2494,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)";
     internal async Task SeedCpuUtilizationAlternatingAsync(int low, int high)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
 
         for (var i = 0; i < 32; i++)
         {

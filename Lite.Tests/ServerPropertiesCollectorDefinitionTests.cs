@@ -148,4 +148,67 @@ public sealed class ServerPropertiesCollectorDefinitionTests
            v42 (#1409): utc_offset_minutes(17). */
         new DateTime(2026, 6, 1), "Windows Server 2022", DBNull.Value, -300,
     };
+
+    /* ── #1591: the hardware read must stay isolated from the permission-free columns ── */
+
+    /// <summary>
+    /// #1591 regression guard. sys.dm_os_sys_info needs VIEW SERVER STATE (VIEW DATABASE STATE on
+    /// Azure SQL DB). It used to sit in the FROM clause of the main SELECT, so a login without that
+    /// grant lost the ENTIRE server_properties row — edition, version, patch level and all — not just
+    /// the hardware columns. The DMV read now happens up front inside TRY/CATCH into variables, and
+    /// the SELECT itself reads no table at all. This pins that split so it cannot silently re-couple.
+    /// </summary>
+    [Fact]
+    public void MainQuery_ReadsNoTable_SoAMissingGrantCannotLoseTheRow()
+    {
+        var text = ServerPropertiesCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas)).Text;
+
+        /* The DMV read still happens, but only inside the guard. */
+        Assert.Contains("BEGIN TRY", text, StringComparison.Ordinal);
+        Assert.Contains("END CATCH", text, StringComparison.Ordinal);
+        Assert.Contains("sys.dm_os_sys_info", text, StringComparison.Ordinal);
+
+        /* Everything after the guard is the projection. It must touch no table at all — that is what
+           makes a permission failure cost only the hardware columns instead of the whole row. */
+        var projection = text[(text.IndexOf("END CATCH", StringComparison.Ordinal) + "END CATCH".Length)..];
+        Assert.DoesNotContain("dm_os_sys_info", projection, StringComparison.Ordinal);
+        Assert.DoesNotContain("osi.", projection, StringComparison.Ordinal);
+        Assert.DoesNotContain("FROM ", projection, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The hardware columns must bind to the TRY/CATCH variables (NULL when the grant is missing),
+    /// while the permission-free identity columns stay direct SERVERPROPERTY reads.
+    /// </summary>
+    [Fact]
+    public void MainQuery_BindsHardwareToVariables_AndKeepsIdentityPermissionFree()
+    {
+        var text = ServerPropertiesCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas)).Text;
+
+        foreach (var variable in new[] { "@cpu_count", "@hyperthread_ratio", "@physical_memory_mb", "@socket_count", "@cores_per_socket", "@sqlserver_start_time" })
+        {
+            Assert.Contains(variable, text, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("SERVERPROPERTY(N'EngineEdition')", text, StringComparison.Ordinal);
+        Assert.Contains("SERVERPROPERTY(N'ProductVersion')", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The three hardware columns are nullable on the Row so "unknown" is representable. If any of
+    /// them reverts to a non-nullable type the reader's IsDBNull guards become dead code and a
+    /// permission-denied server throws InvalidCastException instead of collecting.
+    /// </summary>
+    [Fact]
+    public void Row_HardwareColumns_AreNullable()
+    {
+        foreach (var name in new[] { "CpuCount", "HyperthreadRatio", "PhysicalMemoryMb" })
+        {
+            var property = typeof(ServerPropertiesCollector.Row).GetProperty(name);
+            Assert.NotNull(property);
+            Assert.True(
+                Nullable.GetUnderlyingType(property!.PropertyType) is not null,
+                $"{name} must stay nullable — see #1591.");
+        }
+    }
 }

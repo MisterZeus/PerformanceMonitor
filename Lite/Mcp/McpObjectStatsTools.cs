@@ -20,7 +20,7 @@ public sealed class McpObjectStatsTools
 
         try
         {
-            var rows = await dataService.GetObjectSizeGrowthAsync(resolved.Value.ServerId);
+            var rows = await dataService.GetObjectSizeGrowthAsync(resolved.ServerId);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No object size data available. Index/object stats are collected daily.");
@@ -43,7 +43,7 @@ public sealed class McpObjectStatsTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 tables = result
             }, McpHelpers.JsonOptions);
         }
@@ -64,7 +64,7 @@ public sealed class McpObjectStatsTools
 
         try
         {
-            var rows = await dataService.GetIndexUsageAsync(resolved.Value.ServerId);
+            var rows = await dataService.GetIndexUsageAsync(resolved.ServerId);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No index usage data available. Index/object stats are collected daily.");
@@ -90,7 +90,7 @@ public sealed class McpObjectStatsTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 indexes = result
             }, McpHelpers.JsonOptions);
         }
@@ -111,7 +111,7 @@ public sealed class McpObjectStatsTools
 
         try
         {
-            var rows = await dataService.GetIndexLockingAsync(resolved.Value.ServerId);
+            var rows = await dataService.GetIndexLockingAsync(resolved.ServerId);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No locking/contention data recorded. Index/object stats are collected daily.");
@@ -137,7 +137,7 @@ public sealed class McpObjectStatsTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 objects = result
             }, McpHelpers.JsonOptions);
         }

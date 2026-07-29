@@ -39,10 +39,18 @@ namespace PerformanceMonitor.Darling.Service;
 public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
 {
     private readonly NpgsqlDataSource _postgres;
+    private readonly Func<int, int>? _runningJobsCadenceMinutes;
 
-    public DarlingAlertReadAdapter(NpgsqlDataSource postgres)
+    /// <param name="runningJobsCadenceMinutes">
+    /// Resolves a server's EFFECTIVE running_jobs collection cadence (minutes) for the #1812
+    /// snapshot-freshness bound — the worker supplies its own schedule resolution (the same
+    /// <c>StoreConfigProvider.ResolveSchedule</c> the sweep runs on). Null (test call sites) or a
+    /// non-positive answer falls back to the shared <see cref="CollectorScheduleDefaults"/> cadence.
+    /// </param>
+    public DarlingAlertReadAdapter(NpgsqlDataSource postgres, Func<int, int>? runningJobsCadenceMinutes = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
+        _runningJobsCadenceMinutes = runningJobsCadenceMinutes;
     }
 
     /* ---------------- blocking (XE-preferred + DMV fallback) ---------------- */
@@ -292,7 +300,12 @@ ORDER BY r.total_elapsed_time_ms DESC
 LIMIT $3";
 
     /// <summary>The five opt-out noise filters — Lite's clauses with the N'' prefixes dropped.</summary>
-    public const string SpServerDiagnosticsFilter = "AND r.wait_type NOT LIKE '%SP_SERVER_DIAGNOSTICS%'";
+    /* sp_server_diagnostics (the AG/FCI health-check session) usually sits in SP_SERVER_DIAGNOSTICS_SLEEP, but it
+       also does Extended Events work, so it can be captured in a different wait (e.g. PREEMPTIVE_XE_GETTARGETSTATE)
+       where the wait-type match alone misses it and the Long-Running Query alert fires anyway. The query-text
+       match (case-insensitive, NULL-safe) catches it regardless of the wait it happens to be in at capture time. */
+    public const string SpServerDiagnosticsFilter =
+        "AND r.wait_type NOT LIKE '%SP_SERVER_DIAGNOSTICS%'\n    AND (r.query_text IS NULL OR r.query_text NOT ILIKE '%sp_server_diagnostics%')";
     public const string WaitForFilter = "AND r.wait_type NOT IN ('WAITFOR', 'BROKER_RECEIVE_WAITFOR')";
     public const string BackupsFilter = "AND r.wait_type NOT IN ('BACKUPTHREAD', 'BACKUPIO')";
     public const string MiscWaitsFilter = "AND r.wait_type NOT IN ('XE_LIVE_TARGET_TVF')";
@@ -477,7 +490,7 @@ AND percent_of_average >= $2
 ORDER BY percent_of_average DESC
 LIMIT 5";
 
-    public async Task<List<AnomalousJobInfo>> GetAnomalousJobsAsync(
+    public async Task<AnomalousJobsResult> GetAnomalousJobsAsync(
         string serverKey, int multiplier, CancellationToken cancellationToken = default)
     {
         var serverId = ParseServerKey(serverKey);
@@ -485,6 +498,24 @@ LIMIT 5";
 
         var items = new List<AnomalousJobInfo>();
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+
+        /* #1812: the latest snapshot is only evidence when fresh — a stopped collector, missed cycles,
+           or lost msdb access leaves a stale "latest" that would otherwise read as NOW, and the engine's
+           per-run cooldown key expires each pass, so a stale snapshot re-fires the same historical run
+           every cooldown, forever. Same rule as Lite's adapter; parity is the point. */
+        using (var snapshotProbe = new NpgsqlCommand(
+            "SELECT MAX(collection_time) FROM running_jobs WHERE server_id = $1", connection))
+        {
+            snapshotProbe.Parameters.AddWithValue(serverId);
+            var snapshot = await snapshotProbe.ExecuteScalarAsync(cancellationToken);
+            var cadence = ResolveRunningJobsCadence(serverId);
+            if (snapshot is not DateTime snapshotTime
+                || DateTime.UtcNow - snapshotTime > AnomalousJobsResult.MaxSnapshotAge(cadence))
+            {
+                return AnomalousJobsResult.Stale;
+            }
+        }
+
         using var command = new NpgsqlCommand(AnomalousJobsSql, connection);
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(thresholdPercent);
@@ -504,7 +535,20 @@ LIMIT 5";
             });
         }
 
-        return items;
+        return new AnomalousJobsResult(SnapshotIsFresh: true, items);
+    }
+
+    private int ResolveRunningJobsCadence(int serverId)
+    {
+        var resolved = _runningJobsCadenceMinutes?.Invoke(serverId) ?? 0;
+        if (resolved > 0)
+        {
+            return resolved;
+        }
+
+        return PerformanceMonitor.Collectors.CollectorScheduleDefaults.All.TryGetValue("running_jobs", out var schedule)
+            ? schedule.FrequencyMinutes
+            : 2;
     }
 
     /* ---------------- helpers ---------------- */

@@ -23,6 +23,58 @@ namespace PerformanceMonitorLite.Services;
 /// </summary>
 public class DeltaCalculator : CollectorDeltaCalculator
 {
+    /* The four seed queries, mirrored verbatim in Darling's DarlingDeltaCalculator — deliberately
+       written in the shared dialect (the (server_id, collection_time) row-value latest-row form, and
+       the reused $1 positional placeholder, both run on either engine as-is). Held as constants so
+       LiteDeltaSeederTests can pin the same shape DarlingDeltaSeederTests pins on the other side.
+
+       $1 is CollectorDeltaCalculator.SeedCutoff(), bound on BOTH the outer read and the inner MAX():
+       either one left unbounded reads the whole table. #1772 was the Postgres half of that on a
+       276 GB store, where the unbounded form timed out and restart continuity silently degraded to
+       first-cycle-zero deltas; Lite carries the bound too because the seed is one shared design and a
+       long-lived local store grows the same shape of scan. */
+
+    public const string WaitStatsSeedSql = @"
+SELECT server_id, wait_type, waiting_tasks_count, wait_time_ms, signal_wait_time_ms, collection_time
+FROM wait_stats
+WHERE collection_time >= $1
+AND   (server_id, collection_time) IN (
+    SELECT server_id, MAX(collection_time) FROM wait_stats WHERE collection_time >= $1 GROUP BY server_id
+)";
+
+    public const string FileIoStatsSeedSql = @"
+SELECT server_id, database_name, file_name,
+       num_of_reads, num_of_writes, read_bytes, write_bytes,
+       io_stall_read_ms, io_stall_write_ms,
+       io_stall_queued_read_ms, io_stall_queued_write_ms,
+       collection_time
+FROM file_io_stats
+WHERE collection_time >= $1
+AND   (server_id, collection_time) IN (
+    SELECT server_id, MAX(collection_time) FROM file_io_stats WHERE collection_time >= $1 GROUP BY server_id
+)";
+
+    public const string PerfmonStatsSeedSql = @"
+SELECT server_id, object_name, counter_name, instance_name, cntr_value, collection_time
+FROM perfmon_stats
+WHERE collection_time >= $1
+AND   (server_id, collection_time) IN (
+    SELECT server_id, MAX(collection_time) FROM perfmon_stats WHERE collection_time >= $1 GROUP BY server_id
+)";
+
+    /* Also SELECTs collection_time, which the other three always did. Without it the memory-grant
+       baselines seeded with a null timestamp, which disarms the gap policy for exactly the two
+       counters where a stale baseline shows as a fabricated spike (grant timeouts and forced grants
+       are monotonic). Inside the bounded window the row is fresh anyway; carrying the timestamp is
+       what makes that a guarantee instead of an assumption. */
+    public const string MemoryGrantStatsSeedSql = @"
+SELECT server_id, pool_id, resource_semaphore_id, timeout_error_count, forced_grant_count, collection_time
+FROM memory_grant_stats
+WHERE collection_time >= $1
+AND   (server_id, collection_time) IN (
+    SELECT server_id, MAX(collection_time) FROM memory_grant_stats WHERE collection_time >= $1 GROUP BY server_id
+)";
+
     private readonly ILogger? _logger;
 
     public DeltaCalculator(ILogger? logger = null)
@@ -41,12 +93,17 @@ public class DeltaCalculator : CollectorDeltaCalculator
             using var connection = duckDb.CreateConnection();
             await connection.OpenAsync();
 
-            await SeedWaitStatsAsync(connection);
-            await SeedFileIoStatsAsync(connection);
-            await SeedPerfmonStatsAsync(connection);
-            await SeedMemoryGrantStatsAsync(connection);
+            /* One cutoff for all four reads, so they describe the same instant. */
+            var cutoff = SeedCutoff();
 
-            _logger?.LogInformation("Delta calculator seeded from database");
+            await SeedWaitStatsAsync(connection, cutoff);
+            await SeedFileIoStatsAsync(connection, cutoff);
+            await SeedPerfmonStatsAsync(connection, cutoff);
+            await SeedMemoryGrantStatsAsync(connection, cutoff);
+
+            _logger?.LogInformation(
+                "Delta calculator seeded from database (baselines from the last {Minutes} minutes)",
+                (int)SeedLookback.TotalMinutes);
         }
         catch (Exception ex)
         {
@@ -54,15 +111,11 @@ public class DeltaCalculator : CollectorDeltaCalculator
         }
     }
 
-    private async Task SeedWaitStatsAsync(DuckDBConnection connection)
+    private async Task SeedWaitStatsAsync(DuckDBConnection connection, DateTime cutoff)
     {
         using var cmd = connection.CreateCommand();
-        cmd.CommandText = @"
-SELECT server_id, wait_type, waiting_tasks_count, wait_time_ms, signal_wait_time_ms, collection_time
-FROM wait_stats
-WHERE (server_id, collection_time) IN (
-    SELECT server_id, MAX(collection_time) FROM wait_stats GROUP BY server_id
-)";
+        cmd.CommandText = WaitStatsSeedSql;
+        cmd.Parameters.Add(new DuckDBParameter { Value = cutoff });
         using var reader = await cmd.ExecuteReaderAsync();
         var count = 0;
         while (await reader.ReadAsync())
@@ -78,19 +131,11 @@ WHERE (server_id, collection_time) IN (
         if (count > 0) _logger?.LogDebug("Seeded {Count} wait_stats baseline rows", count);
     }
 
-    private async Task SeedFileIoStatsAsync(DuckDBConnection connection)
+    private async Task SeedFileIoStatsAsync(DuckDBConnection connection, DateTime cutoff)
     {
         using var cmd = connection.CreateCommand();
-        cmd.CommandText = @"
-SELECT server_id, database_name, file_name,
-       num_of_reads, num_of_writes, read_bytes, write_bytes,
-       io_stall_read_ms, io_stall_write_ms,
-       io_stall_queued_read_ms, io_stall_queued_write_ms,
-       collection_time
-FROM file_io_stats
-WHERE (server_id, collection_time) IN (
-    SELECT server_id, MAX(collection_time) FROM file_io_stats GROUP BY server_id
-)";
+        cmd.CommandText = FileIoStatsSeedSql;
+        cmd.Parameters.Add(new DuckDBParameter { Value = cutoff });
         using var reader = await cmd.ExecuteReaderAsync();
         var count = 0;
         while (await reader.ReadAsync())
@@ -113,15 +158,11 @@ WHERE (server_id, collection_time) IN (
         if (count > 0) _logger?.LogDebug("Seeded {Count} file_io_stats baseline rows", count);
     }
 
-    private async Task SeedPerfmonStatsAsync(DuckDBConnection connection)
+    private async Task SeedPerfmonStatsAsync(DuckDBConnection connection, DateTime cutoff)
     {
         using var cmd = connection.CreateCommand();
-        cmd.CommandText = @"
-SELECT server_id, object_name, counter_name, instance_name, cntr_value, collection_time
-FROM perfmon_stats
-WHERE (server_id, collection_time) IN (
-    SELECT server_id, MAX(collection_time) FROM perfmon_stats GROUP BY server_id
-)";
+        cmd.CommandText = PerfmonStatsSeedSql;
+        cmd.Parameters.Add(new DuckDBParameter { Value = cutoff });
         using var reader = await cmd.ExecuteReaderAsync();
         var count = 0;
         while (await reader.ReadAsync())
@@ -137,17 +178,13 @@ WHERE (server_id, collection_time) IN (
         if (count > 0) _logger?.LogDebug("Seeded {Count} perfmon_stats baseline rows", count);
     }
 
-    private async Task SeedMemoryGrantStatsAsync(DuckDBConnection connection)
+    private async Task SeedMemoryGrantStatsAsync(DuckDBConnection connection, DateTime cutoff)
     {
         try
         {
             using var cmd = connection.CreateCommand();
-            cmd.CommandText = @"
-SELECT server_id, pool_id, resource_semaphore_id, timeout_error_count, forced_grant_count
-FROM memory_grant_stats
-WHERE (server_id, collection_time) IN (
-    SELECT server_id, MAX(collection_time) FROM memory_grant_stats GROUP BY server_id
-)";
+            cmd.CommandText = MemoryGrantStatsSeedSql;
+            cmd.Parameters.Add(new DuckDBParameter { Value = cutoff });
             using var reader = await cmd.ExecuteReaderAsync();
             var count = 0;
             while (await reader.ReadAsync())
@@ -156,8 +193,9 @@ WHERE (server_id, collection_time) IN (
                 var poolId = reader.IsDBNull(1) ? 0 : reader.GetInt32(1);
                 var semaphoreId = reader.IsDBNull(2) ? (short)0 : reader.GetInt16(2);
                 var deltaKey = $"{poolId}_{semaphoreId}";
-                Seed(serverId, "memory_grants_timeouts", deltaKey, reader.IsDBNull(3) ? 0 : reader.GetInt64(3), null);
-                Seed(serverId, "memory_grants_forced", deltaKey, reader.IsDBNull(4) ? 0 : reader.GetInt64(4), null);
+                var ts = reader.IsDBNull(5) ? (DateTime?)null : reader.GetDateTime(5);
+                Seed(serverId, "memory_grants_timeouts", deltaKey, reader.IsDBNull(3) ? 0 : reader.GetInt64(3), ts);
+                Seed(serverId, "memory_grants_forced", deltaKey, reader.IsDBNull(4) ? 0 : reader.GetInt64(4), ts);
                 count++;
             }
             if (count > 0) _logger?.LogDebug("Seeded {Count} memory_grant_stats baseline rows", count);

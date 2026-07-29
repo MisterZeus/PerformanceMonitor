@@ -18,10 +18,17 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Pins the Plan Viewer host's stored-plan reads against the Darling store contract (no live Postgres):
-/// the two on-demand plan lookups (query_stats.query_plan_xml by db+query_hash;
+/// the on-demand plan lookups (query_stats' plan by db+query_hash; procedure_stats' by db+schema+object;
 /// query_store_stats.query_plan_text by db+query_id+plan_id) and the has_query_plan presence flag the Top
-/// Queries grid read now carries to gate its Query Plan column. Ordinal correctness + PG execution are
-/// covered by the gated live round-trips below.
+/// Queries grid read carries to gate its Query Plan column.
+///
+/// <para>Since #1767 the plan XML lives in <c>query_plan_dim</c> and the fact row carries only a digest,
+/// so each of these reads must resolve the dimension — query_stats' through <c>v_query_stats</c>,
+/// procedure_stats' through its own LEFT JOIN, since no v_procedure_stats exists. Every one of them fails
+/// SILENTLY if it does not: the raw column is not missing, it is NULL, so the read returns no rows and the
+/// product reports "no plan captured".</para>
+///
+/// <para>Ordinal correctness + PG execution are covered by the gated live round-trips below.</para>
 /// </summary>
 public sealed class ViewerPlanHostSqlTests
 {
@@ -30,7 +37,11 @@ public sealed class ViewerPlanHostSqlTests
     {
         var sql = ViewerDataService.QueryStatsPlanXmlSql;
         Assert.Contains("SELECT query_plan_xml", sql, StringComparison.Ordinal);
-        Assert.Contains("FROM query_stats", sql, StringComparison.Ordinal);
+
+        /* The RESOLVING view, not the base table (#1767): query_stats.query_plan_xml is NULL on every row
+           written since the migration, with the plan itself in query_plan_dim behind a digest. Reading the
+           base table here would not error — it would return NULL and look like "no plan captured". */
+        Assert.Contains("FROM v_query_stats", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("database_name = $2", sql, StringComparison.Ordinal);
         Assert.Contains("query_hash = $3", sql, StringComparison.Ordinal);
@@ -55,19 +66,33 @@ public sealed class ViewerPlanHostSqlTests
     }
 
     [Fact]
-    public void ProcedureStatsPlanXmlSql_ReadsStoredXml_KeyedByDatabaseSchemaObject_LatestNonNull()
+    public void ProcedureStatsPlanXmlSql_ResolvesThePlanDimensionItself_GuardingOnTheCoalescedExpression()
     {
         var sql = ViewerDataService.ProcedureStatsPlanXmlSql;
-        Assert.Contains("SELECT query_plan_xml", sql, StringComparison.Ordinal);
-        /* The base procedure_stats table (there is no v_procedure_stats view; the plan column is on the table). */
-        Assert.Contains("FROM procedure_stats", sql, StringComparison.Ordinal);
+
+        /* There is no v_procedure_stats to resolve the #1767 plan dimension (that view has never existed),
+           so this read joins query_plan_dim itself and coalesces. */
+        Assert.Contains("SELECT COALESCE(ps.query_plan_xml, qpd.query_plan_xml)", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM procedure_stats AS ps", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("v_procedure_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("database_name = $2", sql, StringComparison.Ordinal);
-        Assert.Contains("schema_name = $3", sql, StringComparison.Ordinal);
-        Assert.Contains("object_name = $4", sql, StringComparison.Ordinal); /* (database, schema, object) = the grid's group key */
-        Assert.Contains("query_plan_xml IS NOT NULL", sql, StringComparison.Ordinal); /* skip rows the collector left NULL */
-        Assert.Contains("ORDER BY collection_time DESC", sql, StringComparison.Ordinal); /* most-recent plan for the key */
+        Assert.Contains("LEFT JOIN query_plan_dim AS qpd", sql, StringComparison.Ordinal);
+        Assert.Contains("ON qpd.digest = ps.query_plan_digest", sql, StringComparison.Ordinal);
+
+        Assert.Contains("WHERE ps.server_id = $1", sql, StringComparison.Ordinal);
+        Assert.Contains("ps.database_name = $2", sql, StringComparison.Ordinal);
+        Assert.Contains("ps.schema_name = $3", sql, StringComparison.Ordinal);
+        Assert.Contains("ps.object_name = $4", sql, StringComparison.Ordinal); /* (database, schema, object) = the grid's group key */
+
+        /* THE regression to guard. The presence filter must ride the COALESCED expression, not the bare
+           inline column: rows written since #1767 leave query_plan_xml NULL and carry the plan in the
+           dimension, so `AND ps.query_plan_xml IS NOT NULL` would discard every new row BEFORE the join
+           could resolve it — zero rows back, no error, indistinguishable from "no plan captured". Putting
+           the guard back on the bare column is the single most likely way to break this read, and it fails
+           completely silently, so assert the coalesced form explicitly rather than by substring luck. */
+        Assert.Contains("AND   COALESCE(ps.query_plan_xml, qpd.query_plan_xml) IS NOT NULL", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("AND   ps.query_plan_xml IS NOT NULL", sql, StringComparison.Ordinal);
+
+        Assert.Contains("ORDER BY ps.collection_time DESC", sql, StringComparison.Ordinal); /* most-recent plan for the key */
         Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
     }
 
@@ -83,9 +108,11 @@ public sealed class ViewerPlanHostSqlTests
     public void TopQueriesSql_CarriesCheapHasPlanFlag_NotThePlanItself()
     {
         /* The grid gates its Query Plan column on a group-level presence flag; the multi-KB plan XML is
-           never pulled into the grid row (it is fetched on demand by GetQueryStatsPlanXmlAsync). */
+           never pulled into the grid row (it is fetched on demand by GetQueryStatsPlanXmlAsync). The digest
+           arm keeps that flag true for rows written since #1767, where the plan lives in query_plan_dim and
+           the fact row carries only the key — a digest answers presence without resolving the dimension. */
         var sql = ViewerDataService.TopQueriesSql;
-        Assert.Contains("bool_or(query_plan_xml IS NOT NULL) AS has_query_plan", sql, StringComparison.Ordinal);
+        Assert.Contains("bool_or(query_plan_xml IS NOT NULL OR query_plan_digest IS NOT NULL) AS has_query_plan", sql, StringComparison.Ordinal);
         Assert.Contains("r.has_query_plan", sql, StringComparison.Ordinal);
     }
 

@@ -37,6 +37,22 @@ public sealed class CpuUtilizationCollectorDefinitionTests
     }
 
     [Fact]
+    public void BuildQuery_RingBuffer_SuppressesOtherCpu_OnlyWhenSystemIdleIsZero()
+    {
+        /* Some Linux/SQL Server version combos report a non-zero SystemIdle, so
+           unconditionally nulling other-process CPU on @is_linux = 1 over-suppressed a
+           derivable value. The guard must require BOTH @is_linux = 1 AND system_idle = 0. */
+        var plan = CpuUtilizationCollector.Instance.BuildQuery(
+            CollectorTestContext.Make(s_deltas, isAzureSqlDb: false));
+
+        Assert.Contains("WHEN @is_linux = 1 AND x.system_idle = 0", plan.Text, StringComparison.Ordinal);
+
+        /* Normalize line endings first: on a CRLF checkout the template contains "= 1\r\n", which
+           the "\n"-suffixed needle would never match, making this guard vacuously pass. */
+        Assert.DoesNotContain("WHEN @is_linux = 1\n", plan.Text.Replace("\r\n", "\n"), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void BuildQuery_Azure_NoWatermark_UsesTop60()
     {
         var plan = CpuUtilizationCollector.Instance.BuildQuery(

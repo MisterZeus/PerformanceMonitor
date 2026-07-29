@@ -43,11 +43,12 @@ public sealed class CollectorViewerCoverageTests
     /// Every entry is Tier-1 unbuilt UI: Lite already collects the data, the Darling viewer already has
     /// the tab, and the Lite port is pending.
     ///
-    /// EMPTY (fully drained). The last two entries — <c>system_health_events</c> and
-    /// <c>default_trace_events</c> — shipped as the System Events tab (its nine parse-on-read grids read
-    /// <c>v_system_health_events</c>; the Default Trace lane reads <c>v_default_trace_events</c>), so the
-    /// ratchet retired them. Every collector table now has a Lite reader; a NEW collect-but-don't-show
-    /// table must add a reader/tab or re-open this list with a Tier-1 comment.
+    /// The list has been fully drained twice now. The two Availability Group tables (#991) re-opened it
+    /// while their v1 was deliberately collection-only, and #1696 drained them again by giving Lite a
+    /// reader for both grains to drive its AG alerts — which is exactly the transition this ratchet exists
+    /// to force: the moment a reader appears, <see cref="AllowList_HasNoEntryThatIsActuallyRead"/> goes red
+    /// and the entry has to go. Leave the set EMPTY rather than deleting it; an empty allow-list is the
+    /// goal state and re-adding an entry should be a deliberate, visible act.
     /// </summary>
     private static readonly HashSet<string> KnownStoreOnlyOrUnbuiltTables = new(StringComparer.OrdinalIgnoreCase);
 

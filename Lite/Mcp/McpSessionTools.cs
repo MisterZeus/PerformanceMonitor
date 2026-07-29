@@ -9,7 +9,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpSessionTools
 {
-    [McpServerTool(Name = "get_active_queries"), Description("Gets active query snapshots captured by sp_WhoIsActive. Shows what queries were running at each collection point: session ID, query text, wait type, CPU time, elapsed time, blocking info, DOP, and memory grants. Use hours_back to look at a specific time window — critical for finding what was running during a CPU spike or blocking event.")]
+    [McpServerTool(Name = "get_active_queries"), Description("Gets active query snapshots captured from sys.dm_exec_requests. Shows what queries were running at each collection point: session ID, query text, wait type, CPU time, elapsed time, blocking info, DOP, and memory grants. Use hours_back to look at a specific time window — critical for finding what was running during a CPU spike or blocking event.")]
     public static async Task<string> GetActiveQueries(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -27,7 +27,7 @@ public sealed class McpSessionTools
 
         try
         {
-            var rows = await dataService.GetLatestQuerySnapshotsAsync(resolved.Value.ServerId, hours_back);
+            var rows = await dataService.GetLatestQuerySnapshotsAsync(resolved.ServerId, hours_back);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No active query snapshots found in the requested time range.");
 
@@ -68,7 +68,7 @@ public sealed class McpSessionTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 hours_back,
                 total_snapshots = rows.Count,
                 shown = result.Count,
@@ -92,7 +92,7 @@ public sealed class McpSessionTools
 
         try
         {
-            var rows = await dataService.GetLatestSessionStatsAsync(resolved.Value.ServerId);
+            var rows = await dataService.GetLatestSessionStatsAsync(resolved.ServerId);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No session statistics available. The session collector may not have run yet.");
 
@@ -103,7 +103,7 @@ public sealed class McpSessionTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.Value.ServerName,
+                server = resolved.ServerName,
                 collection_time = rows[0].CollectionTime.ToString("o"),
                 summary = new
                 {

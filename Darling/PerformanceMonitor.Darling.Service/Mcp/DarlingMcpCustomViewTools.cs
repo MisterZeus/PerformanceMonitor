@@ -93,7 +93,8 @@ public sealed class DarlingMcpCustomViewTools
         "the exact authority create_custom_view / update_custom_view run before saving, so use it to iterate on a " +
         "generated definition until it is valid. The definition is a dashboard {\"panels\":[...]} or a notebook " +
         "{\"kind\":\"notebook\",\"cells\":[...]}; a composed panel names a catalog 'source' + 'measure'|'ratio', an " +
-        "'aggregate', an optional 'timeBucket' or 'topN', 'filters', 'groupBy', 'unit', and 'viz'.")]
+        "'aggregate', an optional 'timeBucket' or 'topN', 'filters', 'groupBy', 'unit', 'viz', and optionally an " +
+        "'overlay' second measure (scatter's y axis, or a dual-axis line/area).")]
     public static Task<string> ValidateCustomView(
         [Description("The view definition JSON to validate (NOT persisted).")] string definition)
     {
@@ -207,14 +208,17 @@ public sealed class DarlingMcpCustomViewTools
     }
 
     [McpServerTool(Name = "run_custom_view_panel"), Description(
-        "Runs a single composed (v2) panel and returns the DATA it produces — {sql, rows, annotations} — so a " +
+        "Runs a single composed (v2) panel and returns the DATA it produces — {sql, rows, annotations, notice?} " +
+        "(notice = a partial-window caveat when the store's retention cannot cover the whole requested range) — so a " +
         "generated view can be checked end-to-end without saving it. This is the SAME compile-and-run the web " +
         "composer's live preview uses: the panel is validated, compiled to catalog-only bound SQL, and executed " +
         "against the collected store under a statement_timeout. The spec is a JSON object " +
         "{\"panel\":{...}, \"variables\":[...], \"values\":{...}, \"server\":\"NAME\"|[\"A\",\"B\"], \"hours\":N} — only " +
         "'panel' is required (a composed panel, the same shape a dashboard panel or a notebook panel cell uses); " +
-        "omit 'server' (or use \"All\") for the whole fleet, and 'hours' defaults to 24. To read back a SAVED view, " +
-        "call get_custom_view and run each of its composed panels here.")]
+        "omit 'server' (or use \"All\") for the whole fleet, and 'hours' defaults to 24. For an ABSOLUTE window " +
+        "(historical analysis), pass ISO-8601 'windowStart' + 'windowEnd' instead — they win over 'hours', the span " +
+        "is capped at 90 days, and old windows are served from the retention rollups automatically. To read back a " +
+        "SAVED view, call get_custom_view and run each of its composed panels here.")]
     public static async Task<string> RunCustomViewPanel(
         NpgsqlDataSource postgres,
         [Description("The composed-panel run spec as JSON (see the tool description for the shape). Only 'panel' is required.")] string spec)
@@ -259,10 +263,13 @@ public sealed class DarlingMcpCustomViewTools
         "'validAggregates' and 'allowedDimensions' legal for it, its unit family + default/native unit, and " +
         "'appliesTo' (which server types — onPrem/azureSqlDb/azureMi/awsRds — can collect it). A panel then names a " +
         "'source' + 'measure'|'ratio', an 'aggregate' from that measure's validAggregates, a 'unit' from its family, " +
-        "an optional 'timeBucket' (time series) OR 'topN' (ranked, not both), 'groupBy'/'filters' from its " +
+        "an optional 'timeBucket' (time series; prefer 'auto', which adapts the grain minute/hour/day to the " +
+        "panel's window so any range renders) OR 'topN' (ranked, not both), 'groupBy'/'filters' from its " +
         "allowedDimensions (plus the universal 'server' axis), and a 'viz' coherent with the mode (line/area/" +
-        "stacked for time series; bar/pie for ranked; stat for a single value; table for any). Static reference " +
-        "data — no server or time window needed; it reads no monitored server and no collected data.")]
+        "stacked/stacked-bar for time series; bar/pie/scatter for ranked; stat for a single value; table for any). " +
+        "An optional 'overlay' {measure, aggregate?, unit?} adds a SECOND same-source measure: REQUIRED on scatter " +
+        "(the y axis; the primary ranks the points), or a dual right-hand axis on an UNGROUPED line/area. Static " +
+        "reference data — no server or time window needed; it reads no monitored server and no collected data.")]
     public static Task<string> DescribeCustomViewCatalog()
     {
         try

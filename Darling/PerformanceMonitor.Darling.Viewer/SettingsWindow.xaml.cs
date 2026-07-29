@@ -657,6 +657,14 @@ public partial class SettingsWindow : Window
         AlertsEnabledCheckBox.IsChecked = r.Enabled;
         /* V20: connection-change notify is store-backed now (the service gates the connect edge on it). */
         NotifyConnectionCheckBox.IsChecked = r.NotifyConnectionChanges;
+        /* #1659 (V33): the two connection opt-ins ride the same row. */
+        NotifyConnectionDownAtStartupCheckBox.IsChecked = r.NotifyConnectionDownAtStartup;
+        ConnectionRefireMinutesBox.Text = r.ConnectionRefireMinutes.ToString(CultureInfo.InvariantCulture);
+        /* #991 (V35): the Availability Group family's master switch and its two sync-behind triggers. */
+        NotifyAgHealthCheckBox.IsChecked = r.NotifyAgHealth;
+        AgLagAlertSecondsBox.Text = r.AgLagAlertSeconds.ToString(CultureInfo.InvariantCulture);
+        AgRedoQueueAlertKbBox.Text = r.AgRedoQueueAlertKb.ToString(CultureInfo.InvariantCulture);
+        AgDisconnectRefireMinutesBox.Text = r.AgDisconnectRefireMinutes.ToString(CultureInfo.InvariantCulture);
         AlertCpuCheckBox.IsChecked = r.CpuEnabled;
         AlertCpuThresholdBox.Text = r.CpuThresholdPercent.ToString(CultureInfo.InvariantCulture);
         AlertCpuModeBox.SelectedIndex = ViewerDataService.MapCpuModeFromStore(r.CpuMode) == "SqlOnly" ? 1 : 0;
@@ -705,6 +713,19 @@ public partial class SettingsWindow : Window
         {
             Enabled = AlertsEnabledCheckBox.IsChecked == true,
             NotifyConnectionChanges = NotifyConnectionCheckBox.IsChecked == true,
+            NotifyConnectionDownAtStartup = NotifyConnectionDownAtStartupCheckBox.IsChecked == true,
+            ConnectionRefireMinutes = int.TryParse(ConnectionRefireMinutesBox.Text, out var refire)
+                ? Math.Clamp(refire, 0, 1440) : 0,
+            NotifyAgHealth = NotifyAgHealthCheckBox.IsChecked == true,
+            /* Clamped to the same range DarlingAlertSettings clamps on read, so the stored row and the
+               service's effective value can never disagree. An unparseable box falls back to the DDL default
+               rather than to 0, which for the lag trigger would mean silently DISABLING it. */
+            AgLagAlertSeconds = int.TryParse(AgLagAlertSecondsBox.Text, out var agLag)
+                ? Math.Clamp(agLag, 0, 86400) : 300,
+            AgRedoQueueAlertKb = long.TryParse(AgRedoQueueAlertKbBox.Text, out var agRedo)
+                ? Math.Clamp(agRedo, 0L, 1073741824L) : 0L,
+            AgDisconnectRefireMinutes = int.TryParse(AgDisconnectRefireMinutesBox.Text, out var agRefire)
+                ? Math.Clamp(agRefire, 0, 1440) : 0,
             CpuEnabled = AlertCpuCheckBox.IsChecked == true,
             CpuMode = ViewerDataService.MapCpuModeToStore((AlertCpuModeBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "Total"),
             BlockingEnabled = AlertBlockingCheckBox.IsChecked == true,
@@ -869,6 +890,12 @@ public partial class SettingsWindow : Window
     {
         var enabled = AlertsEnabledCheckBox.IsChecked == true;
         NotifyConnectionCheckBox.IsEnabled = enabled;
+        NotifyConnectionDownAtStartupCheckBox.IsEnabled = enabled;
+        ConnectionRefireMinutesBox.IsEnabled = enabled;
+        NotifyAgHealthCheckBox.IsEnabled = enabled;
+        AgLagAlertSecondsBox.IsEnabled = enabled;
+        AgRedoQueueAlertKbBox.IsEnabled = enabled;
+        AgDisconnectRefireMinutesBox.IsEnabled = enabled;
         AlertCpuCheckBox.IsEnabled = enabled;
         AlertCpuThresholdBox.IsEnabled = enabled;
         AlertCpuModeBox.IsEnabled = enabled;

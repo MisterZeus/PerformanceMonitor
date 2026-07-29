@@ -35,22 +35,25 @@ namespace PerformanceMonitorLite.Tests;
 /// <c>LiteRecommendationsReaderTests</c>; this pins the MCP ENVELOPE carrying it, mirroring the
 /// Darling gated e2e assertion in <c>DarlingMcpToolsTests</c>.
 /// </summary>
-public sealed class McpAnalysisFindingsCommandTests : IDisposable
+public sealed class McpAnalysisFindingsCommandTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private readonly string _tempDir;
     private readonly DuckDbInitializer _duckDb;
     private readonly ServerManager _serverManager;
     private readonly int _serverId;
 
-    public McpAnalysisFindingsCommandTests()
+    public McpAnalysisFindingsCommandTests(SharedDuckDbFixture fixture)
     {
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
+
+        /* The temp dir stays test-local for the ServerManager's config directory;
+           only the database is shared through the class fixture. */
         _tempDir = Path.Combine(Path.GetTempPath(), "McpRemediationTests_" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(_tempDir);
 
         var configDir = Path.Combine(_tempDir, "config");
         Directory.CreateDirectory(configDir);
-
-        _duckDb = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
 
         /* A real ServerManager with one enabled, Windows-auth server — AddServer never touches the
            credential store, so no DPAPI / OS keychain side effects (the McpStatusEnvelopeTests pattern). */
@@ -72,9 +75,6 @@ public sealed class McpAnalysisFindingsCommandTests : IDisposable
     [Fact]
     public async Task GetAnalysisFindings_EmitsRemediationCommand_FromPersistedAction_WithRiskHeader_AndNullWhenNone()
     {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
         var store = new FindingStore(_duckDb);
         var analysisTime = DateTime.UtcNow;
         var context = new AnalysisContext

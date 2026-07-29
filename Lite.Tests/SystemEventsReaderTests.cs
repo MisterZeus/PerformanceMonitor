@@ -16,6 +16,7 @@ using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitorLite.Tests;
 using Xunit;
 
 namespace Lite.Tests;
@@ -29,29 +30,41 @@ namespace Lite.Tests;
 /// projection, (3) the Severe-Errors database_id -> name resolution (DuckDB QUALIFY), (4) the #1319 database
 /// filter, (5) the event_time window bounding, and (6) the Default Trace server-local -> UTC de-skew.
 /// </summary>
-public sealed class SystemEventsReaderTests : IDisposable
+/* ServerTimeHelper.UtcOffsetMinutes / CurrentDisplayMode are process-wide mutable statics, and the
+   server-time projection test below SETS them for its duration. xUnit runs test CLASSES in parallel, so
+   without this shared collection that write lands underneath any sibling class reading the offset —
+   CollectionHealthWindowTests computes a query window from it and would silently look for its seeded rows
+   hours away, failing "expected 2, actual 0" at random. The three classes that touch ServerTimeHelper share
+   one collection so they serialize against each other (and only each other). */
+[Collection("server-time-helper")]
+public sealed class SystemEventsReaderTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private const int ServerId = 7777;
 
-    private readonly string _tempDir;
     private readonly DuckDbInitializer _duckDb;
+    private DuckDBConnection? _seedConn;
     private long _nextId = 1;
 
-    public SystemEventsReaderTests()
+    public SystemEventsReaderTests(SharedDuckDbFixture fixture)
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "LiteSysEventsRt_" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(_tempDir);
-        _duckDb = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
     }
 
-    public void Dispose()
+    public void Dispose() => _seedConn?.Dispose();
+
+    /// <summary>
+    /// One connection reused for every seeded row — opening a fresh connection per
+    /// single-row INSERT measured ~90ms/row and dominated this class's runtime.
+    /// </summary>
+    private async Task<DuckDBConnection> SeedConnectionAsync()
     {
-        try
+        if (_seedConn is null)
         {
-            if (Directory.Exists(_tempDir))
-                Directory.Delete(_tempDir, recursive: true);
+            _seedConn = _duckDb.CreateConnection();
+            await _seedConn.OpenAsync();
         }
-        catch { /* Best-effort cleanup */ }
+        return _seedConn;
     }
 
     private static string LoadFixture(string name) =>
@@ -65,7 +78,6 @@ public sealed class SystemEventsReaderTests : IDisposable
     [Fact]
     public async Task SystemHealthCategories_ReadThroughVView_KeepOnlyTheSignificantSet()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         /* Store each fixture at a recent event_time so a 24h window includes it. The WINDOW filters on the
@@ -102,7 +114,6 @@ public sealed class SystemEventsReaderTests : IDisposable
     [Fact]
     public async Task SevereErrors_ProjectColumns_AndResolveDatabaseNameFromSizeStats()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         var eventTime = Truncate(DateTime.UtcNow.AddHours(-1));
@@ -124,7 +135,6 @@ public sealed class SystemEventsReaderTests : IDisposable
     [Fact]
     public async Task SevereErrors_UnmappedDatabaseId_SurfacesTheRawId()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         // No size-stats rows at all — database_id 6 can't resolve, so it surfaces as "database_id 6".
@@ -137,7 +147,6 @@ public sealed class SystemEventsReaderTests : IDisposable
     [Fact]
     public async Task SevereErrors_DatabaseFilter_1319_FiltersOnResolvedName()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         var eventTime = Truncate(DateTime.UtcNow.AddHours(-1));
@@ -152,7 +161,6 @@ public sealed class SystemEventsReaderTests : IDisposable
     [Fact]
     public async Task IoIssues_ProjectWarningRows_WithFilePathAndSummedDuration()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         await SeedHealthEventAsync(SystemHealthParser.SpServerDiagnosticsEvent, LoadFixture("sp_server_diagnostics_io_subsystem.xml"), Truncate(DateTime.UtcNow.AddHours(-1)));
@@ -166,7 +174,6 @@ public sealed class SystemEventsReaderTests : IDisposable
     [Fact]
     public async Task SystemHealthWindow_ExcludesEventsOutsideTheEventTimeBounds()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         // One in-window scheduler warning, one stored 48h ago — a 24h read must return only the recent one.
@@ -181,7 +188,6 @@ public sealed class SystemEventsReaderTests : IDisposable
     [Fact]
     public async Task DefaultTrace_KeepsSignificantSet_ProjectsCategoryAndGrowth()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         var offset = ServerTimeHelper.UtcOffsetMinutes;
@@ -206,7 +212,6 @@ public sealed class SystemEventsReaderTests : IDisposable
     [Fact]
     public async Task DefaultTrace_DeSkewsServerLocalStartTimeToUtc_RendersConsistentlyWithSystemHealth()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         /* Force a known non-zero offset + server-time display so the de-skew is genuinely exercised: the
@@ -236,7 +241,6 @@ public sealed class SystemEventsReaderTests : IDisposable
     [Fact]
     public async Task DefaultTrace_DatabaseFilter_1319_FiltersOnDatabaseNameInSql()
     {
-        await _duckDb.InitializeAsync();
         var service = new LocalDataService(_duckDb);
 
         var offset = ServerTimeHelper.UtcOffsetMinutes;
@@ -288,8 +292,7 @@ public sealed class SystemEventsReaderTests : IDisposable
     private async Task SeedHealthEventAsync(string eventType, string eventXml, DateTime eventTimeUtc)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
 INSERT INTO system_health_events
@@ -310,8 +313,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)";
         long? integerData, int? severity, int? errorNumber, string? textData)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
 INSERT INTO default_trace_events
@@ -336,8 +338,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
     private async Task SeedDatabaseSizeAsync(int databaseId, string databaseName, DateTime collectionTime)
     {
         using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await SeedConnectionAsync();
         using var cmd = connection.CreateCommand();
         /* database_size_stats is the id -> name mapping source; provide its NOT NULL columns. */
         cmd.CommandText = @"

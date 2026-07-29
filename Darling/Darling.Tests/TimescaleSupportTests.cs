@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
@@ -112,18 +114,25 @@ public sealed class TimescaleSupportTests
             "ALTER TABLE wait_stats SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')",
             TimescaleSupport.EnableCompressionSql(byName["wait_stats"]));
         Assert.Equal(
-            "SELECT add_compression_policy('wait_stats', compress_after => INTERVAL '1 days', if_not_exists => true)",
+            "SELECT add_compression_policy('wait_stats', compress_after => INTERVAL '1 days', schedule_interval => INTERVAL '1 hour', if_not_exists => true)",
             TimescaleSupport.AddCompressionPolicySql(byName["wait_stats"]));
 
         /* 1 day matches the 1-day chunk interval so chunks become compressible quickly, keeping the
            managed store compact (#1458). */
         Assert.Equal(1, TimescaleSupport.CompressAfterDays);
 
+        /* #1778: schedule_interval is passed EXPLICITLY on every table. Omitting it does not mean "some
+           sensible default" — TimescaleDB computes 12 hours for a 1-day chunk interval, which is the
+           twice-daily tick the field reported, so an omitted argument here is a silent half-day of latency. */
+        Assert.Equal("1 hour", TimescaleSupport.CompressScheduleInterval);
+
         foreach (var schema in CollectorCatalog.All)
         {
             Assert.Contains("timescaledb.compress_segmentby = 'server_id'",
                 TimescaleSupport.EnableCompressionSql(schema), StringComparison.Ordinal);
             Assert.Contains("if_not_exists => true",
+                TimescaleSupport.AddCompressionPolicySql(schema), StringComparison.Ordinal);
+            Assert.Contains($"schedule_interval => INTERVAL '{TimescaleSupport.CompressScheduleInterval}'",
                 TimescaleSupport.AddCompressionPolicySql(schema), StringComparison.Ordinal);
         }
 
@@ -132,7 +141,7 @@ public sealed class TimescaleSupportTests
             "ALTER TABLE collection_log SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')",
             TimescaleSupport.EnableCompressionSql(TimescaleSupport.CollectionLogTable));
         Assert.Equal(
-            "SELECT add_compression_policy('collection_log', compress_after => INTERVAL '1 days', if_not_exists => true)",
+            "SELECT add_compression_policy('collection_log', compress_after => INTERVAL '1 days', schedule_interval => INTERVAL '1 hour', if_not_exists => true)",
             TimescaleSupport.AddCompressionPolicySql(TimescaleSupport.CollectionLogTable));
     }
 
@@ -164,11 +173,18 @@ public sealed class TimescaleSupportTests
     [Fact]
     public void IsCompressionJobStuck_RunningPastBound_IsStuck()
     {
-        /* Running since well past max(2x interval, floor): 2x 1h = 2h == floor, and 5h elapsed > 2h -> hung. */
+        /* Running since well past max(2x interval, floor). At the #1778 tick the FLOOR dominates (2x 1h = 2h,
+           floor 6h), so it takes more than six hours to call a run hung — 8h elapsed does. */
         Assert.True(TimescaleSupport.IsCompressionJobStuck(
-            nextStartIsNegativeInfinity: false, jobStatus: "Running", lastRunStartedAtUtc: s_now.AddHours(-5),
+            nextStartIsNegativeInfinity: false, jobStatus: "Running", lastRunStartedAtUtc: s_now.AddHours(-8),
             scheduleInterval: TimeSpan.FromHours(1), nowUtc: s_now, out var reason));
         Assert.Contains("Running", reason, StringComparison.Ordinal);
+
+        /* And the run the field actually measured (1h33m) is NOT hung at that same tick — the regression #1778
+           would otherwise have introduced by shortening the interval without raising the floor. */
+        Assert.False(TimescaleSupport.IsCompressionJobStuck(
+            nextStartIsNegativeInfinity: false, jobStatus: "Running", lastRunStartedAtUtc: s_now.AddMinutes(-93),
+            scheduleInterval: TimeSpan.FromHours(1), nowUtc: s_now, out _));
     }
 
     [Fact]
@@ -190,15 +206,38 @@ public sealed class TimescaleSupportTests
     }
 
     [Fact]
+    public void IsCompressionJobStuck_RunningWithNeverRanSentinel_IsNotStuck()
+    {
+        /* #1760: TimescaleDB's never-ran sentinel is -infinity, which Npgsql maps to DateTime.MinValue. Read
+           literally that is a run "started" in year 1 — an elapsed of ~739,000 days that clears every bound —
+           so a healthy job got flagged as stuck for the whole of its FIRST run. StuckCompressionJobsSql NULLIFs
+           the sentinel; this is the second line of defence, so a future caller reading the column un-guarded
+           cannot resurrect the false positive. */
+        Assert.False(TimescaleSupport.IsCompressionJobStuck(
+            nextStartIsNegativeInfinity: false, jobStatus: "Running", lastRunStartedAtUtc: DateTime.MinValue,
+            scheduleInterval: TimeSpan.FromHours(12), nowUtc: s_now, out _));
+    }
+
+    [Fact]
+    public void StuckCompressionJobsSql_GuardsTheNeverRanSentinel()
+    {
+        /* The guard lives in the ONE query the detector and the live test both run. Containment, not shape:
+           the point is that last_run_started_at is never read raw. */
+        Assert.Contains("NULLIF(js.last_run_started_at, '-infinity'::timestamptz)",
+            TimescaleSupport.StuckCompressionJobsSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void StuckRunningBound_UsesMaxOfTwiceIntervalAndFloor()
     {
         /* 2x a large interval wins over the floor. */
         Assert.Equal(TimeSpan.FromHours(24), TimescaleSupport.StuckRunningBound(TimeSpan.FromHours(12)));
-        /* The 2-hour floor wins over 2x a tiny interval. */
-        Assert.Equal(TimeSpan.FromHours(2), TimescaleSupport.StuckRunningBound(TimeSpan.FromMinutes(1)));
+        /* The floor wins over 2x a tiny interval — and since #1778 shortened the tick to an hour, the floor is
+           what holds this bound up in production rather than a term that never bound anything. */
+        Assert.Equal(TimeSpan.FromHours(6), TimescaleSupport.StuckRunningBound(TimeSpan.FromMinutes(1)));
         /* A missing/zero interval falls back to the floor. */
-        Assert.Equal(TimeSpan.FromHours(2), TimescaleSupport.StuckRunningBound(null));
-        Assert.Equal(TimeSpan.FromHours(2), TimescaleSupport.StuckRunningBound(TimeSpan.Zero));
+        Assert.Equal(TimeSpan.FromHours(6), TimescaleSupport.StuckRunningBound(null));
+        Assert.Equal(TimeSpan.FromHours(6), TimescaleSupport.StuckRunningBound(TimeSpan.Zero));
     }
 
     [Fact]
@@ -409,6 +448,712 @@ WHERE hypertable_name = 'wait_stats'
            real end state on this fixture, and if_not_exists keeps every rerun a no-op. */
     }
 
+    /* ---------------- the compression TICK (#1778) ---------------- */
+
+    /// <summary>
+    /// The converge statements, pinned ungated. Scope is the thing that matters: a statement that retunes
+    /// "policy jobs" instead of COMPRESSION policy jobs would silently re-cadence the retention policies, whose
+    /// armed/paused state is #1680's whole guarantee.
+    /// </summary>
+    [Fact]
+    public void CompressionScheduleConverge_ScopesToCompressionJobs_AndCastsJobIdToInteger()
+    {
+        var probe = TimescaleSupport.StaleCompressionScheduleSql;
+
+        /* The same tolerant proc_name scoping the stuck-job reader uses — 'policy_compression' plus the 2.18+
+           columnstore rebrand — and NOTHING else. */
+        Assert.Contains("proc_name LIKE '%compression%'", probe, StringComparison.Ordinal);
+        Assert.Contains("proc_name LIKE '%columnstore%'", probe, StringComparison.Ordinal);
+        Assert.DoesNotContain("policy_retention", probe, StringComparison.Ordinal);
+
+        /* Compared as a typed INTERVAL by PostgreSQL, not as text in C#: '01:00:00' and '1 hour' are the same
+           interval and must not be seen as a difference to converge on every single start. */
+        Assert.Contains($"IS DISTINCT FROM INTERVAL '{TimescaleSupport.CompressScheduleInterval}'", probe, StringComparison.Ordinal);
+
+        /* #1586: alter_job takes job_id INTEGER and PostgreSQL will not down-cast a bigint bind during function
+           resolution — an un-cast parameter fails 42883 at runtime while every string pin still passes. */
+        Assert.Equal(
+            "SELECT alter_job($1::integer, schedule_interval => INTERVAL '1 hour')",
+            TimescaleSupport.SetCompressionScheduleSql);
+    }
+
+    /// <summary>
+    /// THE COUPLED CONSTANT (#1778). <see cref="TimescaleSupport.StuckRunningBound"/> is
+    /// <c>max(2x schedule_interval, floor)</c>, so shortening the tick shortens the bound. While the interval was
+    /// TimescaleDB's 12-hour default the first term dominated at 24h; at a 1-hour tick the FLOOR is the only
+    /// thing left holding it up. If the floor is not raised to compensate, the #1581 self-heal starts re-arming
+    /// compressions that are legitimately running — the field measured a query_stats compression still going at
+    /// 1h33m and characterized them as hours-long.
+    /// </summary>
+    [Fact]
+    public void StuckRunningBound_StaysAboveTheFieldsLongestLegitimateRun_UnderTheShorterTick()
+    {
+        var tick = TimeSpan.FromHours(1);
+        Assert.Equal("1 hour", TimescaleSupport.CompressScheduleInterval);
+
+        /* The longest legitimately-running compression #1778 recorded on the field box. The bound must clear it
+           with headroom, or the self-heal fights a healthy store. */
+        var longestObservedFieldRun = TimeSpan.FromMinutes(93);
+        var bound = TimescaleSupport.StuckRunningBound(tick);
+
+        Assert.True(bound > longestObservedFieldRun,
+            $"the stuck-Running bound at a {tick} tick is {bound}, which would flag the field's own {longestObservedFieldRun} compression as hung");
+
+        /* Specifically: the floor now dominates, and 2x the tick does not. */
+        Assert.Equal(TimeSpan.FromHours(6), bound);
+        Assert.Equal(TimeSpan.FromHours(6), TimescaleSupport.StuckRunningBound(null));
+
+        /* Still derived from the interval when the interval is the larger term — the shape is unchanged. */
+        Assert.Equal(TimeSpan.FromHours(24), TimescaleSupport.StuckRunningBound(TimeSpan.FromHours(12)));
+    }
+
+    /// <summary>The activity record's pure logic: a running job reports its elapsed time; a finished one reports
+    /// nothing to watch; store/service clock skew can never produce a negative elapsed.</summary>
+    [Fact]
+    public void CompressionActivity_ReportsElapsedForRunningJobsOnly_AndClampsClockSkew()
+    {
+        var now = new DateTime(2026, 7, 27, 12, 0, 0, DateTimeKind.Utc);
+
+        var running = new CompressionActivity("query_stats", "Running", now.AddMinutes(-93), null, 2);
+        Assert.True(running.IsRunning);
+        Assert.Equal(TimeSpan.FromMinutes(93), running.RunningFor(now));
+
+        var scheduled = new CompressionActivity("wait_stats", "Scheduled", now.AddMinutes(-5), TimeSpan.FromSeconds(12), 0);
+        Assert.False(scheduled.IsRunning);
+        Assert.Null(scheduled.RunningFor(now));
+
+        /* A store clock slightly ahead of the service must read as "just started", never as negative. */
+        var skewed = new CompressionActivity("procedure_stats", "Running", now.AddMinutes(3), null, 0);
+        Assert.Equal(TimeSpan.Zero, skewed.RunningFor(now));
+
+        /* A running job that never recorded a start has nothing to report rather than a bogus elapsed. */
+        Assert.Null(new CompressionActivity("deadlocks", "Running", null, null, 0).RunningFor(now));
+
+        /* THE SEAM WITH #1760. TimescaleDB's never-ran sentinel is -infinity, which Npgsql maps to
+           DateTime.MinValue, and job_status comes from pg_stat_activity INDEPENDENTLY of the start time — so a
+           policy's very first run genuinely reads Running with a MinValue start. That must read as "no elapsed
+           to report", never as ~739,000 days. Note the zero-clamp cannot catch this: the sentinel yields a huge
+           POSITIVE elapsed, so it needs its own guard. */
+        var neverRan = new CompressionActivity("query_stats", "Running", DateTime.MinValue, null, 1);
+        Assert.True(neverRan.IsRunning);
+        Assert.Null(neverRan.RunningFor(now));
+    }
+
+    /// <summary>
+    /// The #1760 guard belongs on BOTH compression queries, and this pins that it is on the one #1778 added.
+    /// The two were written in parallel branches and each was green alone; only the seam between them is where
+    /// the never-ran sentinel leaks back in.
+    /// </summary>
+    [Fact]
+    public void CompressionActivitySql_GuardsTheNeverRanSentinel_LikeTheStuckJobQuery()
+    {
+        /* EVERY read of the column is guarded, not merely the first one. Asserting Contains would pass while an
+           unguarded read sat further down the statement — which is exactly the state this query was in when the
+           SELECT list had the NULLIF and the duration CASE two lines below still read the column raw. Counting
+           makes the pin cover what it looks like it covers. */
+        foreach (var (name, sql) in new[]
+        {
+            ("CompressionActivitySql", TimescaleSupport.CompressionActivitySql),
+            ("StuckCompressionJobsSql", TimescaleSupport.StuckCompressionJobsSql),
+        })
+        {
+            var reads = CountOccurrences(sql, "js.last_run_started_at");
+            var guarded = CountOccurrences(sql, "NULLIF(js.last_run_started_at, '-infinity'::timestamptz)");
+
+            Assert.True(reads > 0, $"{name} is expected to read last_run_started_at at all");
+            Assert.True(reads == guarded,
+                $"{name} reads js.last_run_started_at {reads} time(s) but guards it {guarded} time(s) — an unguarded read lets TimescaleDB's -infinity never-ran sentinel through as DateTime.MinValue");
+        }
+    }
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        var count = 0;
+        for (var at = haystack.IndexOf(needle, StringComparison.Ordinal); at >= 0;
+             at = haystack.IndexOf(needle, at + needle.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
+    }
+
+    /// <summary>
+    /// THE LATENCY PIN (#1778), live. Two halves, and the second is the one that reaches real deployments:
+    /// <list type="number">
+    /// <item>A policy created by the product carries a 1-hour <c>schedule_interval</c> — not TimescaleDB's
+    /// computed default, which this test first MEASURES as 12 hours on a 1-day-chunk hypertable so the pin
+    /// rests on the shipped extension's behavior rather than on documentation.</item>
+    /// <item>A store that already has a 12-hour policy is CONVERGED to 1 hour. <c>add_compression_policy</c>
+    /// with <c>if_not_exists => true</c> returns -1 and skips against an existing policy, so without the
+    /// converge every store that ever ran an older build — including the one #1778 was reported from — keeps
+    /// the twice-daily tick forever.</item>
+    /// </list>
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_CompressionTick_IsHourly_AndConvergesAnExistingTwelveHourPolicy_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live compression-tick test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+
+        const string Legacy = "tick1778_legacy";
+        const string Fresh = "tick1778_fresh";
+
+        try
+        {
+            await DropTickTableAsync(connection, Legacy, ct);
+            await DropTickTableAsync(connection, Fresh, ct);
+
+            /* (1) A store as an OLDER BUILD left it: the policy created with no schedule_interval at all. */
+            await CreateTickTableAsync(connection, Legacy, ct);
+            await ExecAsync(connection,
+                $"SELECT add_compression_policy('collect.{Legacy}', compress_after => INTERVAL '{TimescaleSupport.CompressAfterDays} days', if_not_exists => true)", ct);
+
+            /* MEASURED, not assumed: this is the twice-daily tick the field reported, and it is TimescaleDB's
+               default for a 1-day chunk interval rather than anything the product chose. */
+            Assert.Equal(TimeSpan.FromHours(12), await ScheduleIntervalAsync(connection, Legacy, ct));
+
+            /* The create statement ALONE cannot fix it — if_not_exists skips an existing policy outright. */
+            await ExecAsync(connection, TimescaleSupport.AddCompressionPolicySql($"collect.{Legacy}"), ct);
+            Assert.Equal(TimeSpan.FromHours(12), await ScheduleIntervalAsync(connection, Legacy, ct));
+
+            /* (2) A fresh policy the product creates carries the tick from the start. */
+            await CreateTickTableAsync(connection, Fresh, ct);
+            await ExecAsync(connection, TimescaleSupport.AddCompressionPolicySql($"collect.{Fresh}"), ct);
+            Assert.Equal(TimeSpan.FromHours(1), await ScheduleIntervalAsync(connection, Fresh, ct));
+
+            /* THE ASSERTION THE WHOLE ISSUE COMES DOWN TO: the legacy store converges. Logged through a
+               capturing logger because that line IS the operator's evidence the cadence changed on their box,
+               and a structured-logging placeholder/argument mismatch would render it wrong with no error
+               anywhere — the one defect that cannot be caught by asserting on the return value. */
+            var convergeLog = new CapturingTestLogger();
+            var converged = await TimescaleSupport.ConvergeCompressionScheduleAsync(connection, convergeLog, ct);
+            Assert.True(converged >= 1, $"expected the 12-hour legacy policy to be retuned; {convergeLog.Joined}");
+            Assert.Equal(TimeSpan.FromHours(1), await ScheduleIntervalAsync(connection, Legacy, ct));
+
+            /* The rendered line names the table, the cadence it LEFT, and the cadence it is on now — all three,
+               or an operator cannot tell a converged store from an untouched one. */
+            Assert.Contains($"retuned {Legacy}'s compression policy from a 12:00:00 tick to 1 hour",
+                convergeLog.Joined, StringComparison.Ordinal);
+
+            /* Idempotent: a converged store finds nothing on the next start, so this never churns alter_job. */
+            Assert.Equal(0, await TimescaleSupport.ConvergeCompressionScheduleAsync(connection, null, ct));
+
+            /* Scope: retention policies keep their own cadence. Retuning those would re-cadence the armed/paused
+               machinery #1680 depends on.
+
+               The test plants its OWN retention policy rather than asserting over whatever the shared fixture
+               happens to hold: "no policy_retention job has a 1-hour cadence" is trivially satisfied on a store
+               with no retention jobs at all, so without this the scope check could pass while proving nothing. */
+            await ExecAsync(connection,
+                $"SELECT add_retention_policy('collect.{Fresh}', drop_after => INTERVAL '30 days', if_not_exists => true)", ct);
+
+            var retentionBefore = await RetentionScheduleIntervalAsync(connection, Fresh, ct);
+            Assert.NotNull(retentionBefore);
+            Assert.NotEqual(TimeSpan.FromHours(1), retentionBefore);
+
+            /* Converging again with a retention policy present must leave it exactly as it was. */
+            await TimescaleSupport.ConvergeCompressionScheduleAsync(connection, null, ct);
+            Assert.Equal(retentionBefore, await RetentionScheduleIntervalAsync(connection, Fresh, ct));
+
+            using var retention = new NpgsqlCommand(@"
+SELECT COUNT(*)
+FROM timescaledb_information.jobs
+WHERE proc_name = 'policy_retention'
+AND   schedule_interval = INTERVAL '1 hour'", connection);
+            Assert.Equal(0L, (long)(await retention.ExecuteScalarAsync(ct))!);
+        }
+        finally
+        {
+            await DropTickTableAsync(connection, Legacy, ct);
+            await DropTickTableAsync(connection, Fresh, ct);
+        }
+    }
+
+    /// <summary>
+    /// The CHECK logic the tick drives (#1778): when a compression policy fires it compresses the chunks that
+    /// are closed AND past the eligibility delay, and leaves a chunk that is still too young alone. Runs the
+    /// real policy body via <c>run_job</c> rather than waiting out a schedule — the cadence is pinned separately
+    /// by the latency test, and this pins what a firing actually does.
+    ///
+    /// <para>This is also the guard on the boundary between the two levers: #1768's eligibility DELAY decides
+    /// WHAT is eligible and this change only decides WHEN eligible chunks get taken. A change that compressed
+    /// the young chunk would be reaching across that line.</para>
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_CompressionRun_TakesEligibleChunksAndLeavesYoungOnes_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live compression-run test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+
+        const string Table = "tick1778_eligibility";
+
+        try
+        {
+            await DropTickTableAsync(connection, Table, ct);
+            await CreateTickTableAsync(connection, Table, ct);
+
+            /* One chunk five days back (closed, well past the 1-day delay) and one from right now (still open,
+               and young either way). */
+            await ExecAsync(connection,
+                $"INSERT INTO collect.{Table} SELECT now()::timestamp - INTERVAL '5 days' + (g || ' seconds')::interval, {TestServerId}, g FROM generate_series(1, 200) g", ct);
+            await ExecAsync(connection,
+                $"INSERT INTO collect.{Table} SELECT now()::timestamp - (g || ' seconds')::interval, {TestServerId}, g FROM generate_series(1, 200) g", ct);
+
+            await ExecAsync(connection, TimescaleSupport.AddCompressionPolicySql($"collect.{Table}"), ct);
+            await RunPolicyAsync(connection, Table, ct);
+
+            Assert.Equal(1, await ChunkCountAsync(connection, Table, compressed: true, ct));
+            Assert.Equal(1, await ChunkCountAsync(connection, Table, compressed: false, ct));
+
+            /* And the one left uncompressed is the YOUNG one, not an arbitrary survivor. */
+            using var young = new NpgsqlCommand($@"
+SELECT COUNT(*)
+FROM timescaledb_information.chunks
+WHERE hypertable_schema = 'collect'
+AND   hypertable_name = '{Table}'
+AND   NOT is_compressed
+AND   range_end > now() - INTERVAL '{TimescaleSupport.CompressAfterDays} days'", connection);
+            Assert.Equal(1L, (long)(await young.ExecuteScalarAsync(ct))!);
+        }
+        finally
+        {
+            await DropTickTableAsync(connection, Table, ct);
+        }
+    }
+
+    /// <summary>
+    /// FAILURE ISOLATION at the chunk level (#1778, the #1775 shape): one chunk that cannot be compressed must
+    /// not stop the policy from compressing the rest. Made deterministic by holding ACCESS EXCLUSIVE on the
+    /// middle chunk from a second connection while the policy runs under a short <c>lock_timeout</c> — the
+    /// compression of that chunk fails for real, exactly as a chunk locked by live collection would.
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_CompressionRun_OneUncompressibleChunkDoesNotBlockTheRest_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live compression-isolation test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+
+        const string Table = "tick1778_isolation";
+
+        try
+        {
+            await DropTickTableAsync(connection, Table, ct);
+            await CreateTickTableAsync(connection, Table, ct);
+
+            /* Three chunks, all eligible. */
+            foreach (var daysBack in new[] { 7, 5, 3 })
+            {
+                await ExecAsync(connection,
+                    $"INSERT INTO collect.{Table} SELECT now()::timestamp - INTERVAL '{daysBack} days' + (g || ' seconds')::interval, {TestServerId}, g FROM generate_series(1, 200) g", ct);
+            }
+
+            await ExecAsync(connection, TimescaleSupport.AddCompressionPolicySql($"collect.{Table}"), ct);
+
+            string middleChunk;
+            using (var probe = new NpgsqlCommand($@"
+SELECT chunk_schema || '.' || chunk_name
+FROM timescaledb_information.chunks
+WHERE hypertable_schema = 'collect' AND hypertable_name = '{Table}'
+ORDER BY range_start
+OFFSET 1 LIMIT 1", connection))
+            {
+                middleChunk = (string)(await probe.ExecuteScalarAsync(ct))!;
+            }
+
+            /* A second connection holds the middle chunk; its transaction is rolled back in the finally. */
+            using var blocker = new NpgsqlConnection(connectionString);
+            await blocker.OpenAsync(ct);
+            await using var blocking = await blocker.BeginTransactionAsync(ct);
+            using (var take = new NpgsqlCommand($"LOCK TABLE {middleChunk} IN ACCESS EXCLUSIVE MODE", blocker, blocking))
+            {
+                await take.ExecuteNonQueryAsync(ct);
+            }
+
+            await ExecAsync(connection, "SET lock_timeout = '3s'", ct);
+            try
+            {
+                await RunPolicyAsync(connection, Table, ct);
+            }
+            finally
+            {
+                await ExecAsync(connection, "SET lock_timeout = 0", ct);
+                await blocking.RollbackAsync(ct);
+            }
+
+            /* THE PIN: the two reachable chunks compressed anyway. A run that aborted on the first failure
+               would leave one or zero. */
+            Assert.Equal(2, await ChunkCountAsync(connection, Table, compressed: true, ct));
+            Assert.Equal(1, await ChunkCountAsync(connection, Table, compressed: false, ct));
+        }
+        finally
+        {
+            await DropTickTableAsync(connection, Table, ct);
+        }
+    }
+
+    /// <summary>
+    /// FAILURE ISOLATION in the converge loop itself (#1778): one policy whose <c>alter_job</c> fails — the
+    /// bring-your-own-store case where the login does not own that job — must leave the remaining policies
+    /// converged rather than abandoning the sweep partway. Made deterministic by row-locking one job's
+    /// <c>bgw_job</c> tuple from a second connection, which is what an <c>alter_job</c> failure looks like from
+    /// the caller's side.
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_ConvergeCompressionSchedule_OneFailingJobDoesNotBlockTheRest_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live converge-isolation test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+
+        const string Blocked = "tick1778_blocked";
+        const string Reachable = "tick1778_reachable";
+
+        try
+        {
+            await DropTickTableAsync(connection, Blocked, ct);
+            await DropTickTableAsync(connection, Reachable, ct);
+
+            /* Two stores-worth of legacy policies: both created the OLD way, so both are stale. */
+            foreach (var table in new[] { Blocked, Reachable })
+            {
+                await CreateTickTableAsync(connection, table, ct);
+                await ExecAsync(connection,
+                    $"SELECT add_compression_policy('collect.{table}', compress_after => INTERVAL '{TimescaleSupport.CompressAfterDays} days', if_not_exists => true)", ct);
+                Assert.Equal(TimeSpan.FromHours(12), await ScheduleIntervalAsync(connection, table, ct));
+            }
+
+            int blockedJobId;
+            using (var probe = new NpgsqlCommand($@"
+SELECT job_id
+FROM timescaledb_information.jobs
+WHERE hypertable_schema = 'collect' AND hypertable_name = '{Blocked}'
+AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", connection))
+            {
+                blockedJobId = Convert.ToInt32((await probe.ExecuteScalarAsync(ct))!, CultureInfo.InvariantCulture);
+            }
+
+            using var blocker = new NpgsqlConnection(connectionString);
+            await blocker.OpenAsync(ct);
+            await using var blocking = await blocker.BeginTransactionAsync(ct);
+            using (var take = new NpgsqlCommand("SELECT id FROM _timescaledb_config.bgw_job WHERE id = $1::integer FOR UPDATE", blocker, blocking))
+            {
+                take.Parameters.AddWithValue(blockedJobId);
+                await take.ExecuteNonQueryAsync(ct);
+            }
+
+            await ExecAsync(connection, "SET lock_timeout = '3s'", ct);
+            int converged;
+            try
+            {
+                converged = await TimescaleSupport.ConvergeCompressionScheduleAsync(connection, null, ct);
+            }
+            finally
+            {
+                await ExecAsync(connection, "SET lock_timeout = 0", ct);
+                await blocking.RollbackAsync(ct);
+            }
+
+            /* THE PIN: the reachable policy converged even though the other one threw. A sweep that let the
+               first failure escape would leave this at 12 hours. */
+            Assert.Equal(TimeSpan.FromHours(1), await ScheduleIntervalAsync(connection, Reachable, ct));
+            Assert.True(converged >= 1, "expected the reachable policy to be counted as converged");
+
+            /* And the failure is reported honestly rather than counted as success: the blocked one is untouched
+               and still stale, so the next start retries it. */
+            Assert.Equal(TimeSpan.FromHours(12), await ScheduleIntervalAsync(connection, Blocked, ct));
+        }
+        finally
+        {
+            await DropTickTableAsync(connection, Blocked, ct);
+            await DropTickTableAsync(connection, Reachable, ct);
+        }
+    }
+
+    /// <summary>Live activity read (#1778): the observability surface returns a row per compression policy and
+    /// reports the eligible-but-uncompressed backlog that the tick exists to keep at zero.</summary>
+    [Fact]
+    public async Task EndToEnd_CompressionActivity_ReportsBacklogAndClearsAfterARun_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live compression-activity test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+
+        const string Table = "tick1778_activity";
+
+        try
+        {
+            await DropTickTableAsync(connection, Table, ct);
+            await CreateTickTableAsync(connection, Table, ct);
+            await ExecAsync(connection,
+                $"INSERT INTO collect.{Table} SELECT now()::timestamp - INTERVAL '5 days' + (g || ' seconds')::interval, {TestServerId}, g FROM generate_series(1, 200) g", ct);
+            await ExecAsync(connection, TimescaleSupport.AddCompressionPolicySql($"collect.{Table}"), ct);
+
+            var before = await TimescaleSupport.ReadCompressionActivityAsync(connection, null, ct);
+            var waiting = Assert.Single(before, a => string.Equals(a.HypertableName, Table, StringComparison.Ordinal));
+            Assert.Equal(1, waiting.EligibleUncompressedChunks);
+
+            await RunPolicyAsync(connection, Table, ct);
+
+            var after = await TimescaleSupport.ReadCompressionActivityAsync(connection, null, ct);
+            var settled = Assert.Single(after, a => string.Equals(a.HypertableName, Table, StringComparison.Ordinal));
+            Assert.Equal(0, settled.EligibleUncompressedChunks);
+
+            /* Logging must survive every shape the store can hand back, including a null logger. */
+            TimescaleSupport.LogCompressionActivity(after, DateTime.UtcNow, null);
+        }
+        finally
+        {
+            await DropTickTableAsync(connection, Table, ct);
+        }
+    }
+
+    /* ---- #1778 live-test helpers: throwaway hypertables shaped like a collector table ---- */
+
+    private static async Task ExecAsync(NpgsqlConnection connection, string sql, System.Threading.CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(sql, connection);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task CreateTickTableAsync(NpgsqlConnection connection, string table, System.Threading.CancellationToken ct)
+    {
+        await ExecAsync(connection,
+            $"CREATE TABLE collect.{table} (collection_time timestamp NOT NULL, server_id integer NOT NULL, value bigint)", ct);
+        await ExecAsync(connection, TimescaleSupport.CreateHypertableSql($"collect.{table}", "collection_time"), ct);
+        await ExecAsync(connection, TimescaleSupport.EnableCompressionSql($"collect.{table}"), ct);
+    }
+
+    /* DROP TABLE takes the hypertable, its chunks and its compression policy with it. */
+    private static async Task DropTickTableAsync(NpgsqlConnection connection, string table, System.Threading.CancellationToken ct)
+        => await TryExecAsync(connection, $"DROP TABLE IF EXISTS collect.{table} CASCADE", ct);
+
+    private static async Task<TimeSpan?> ScheduleIntervalAsync(NpgsqlConnection connection, string table, System.Threading.CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand($@"
+SELECT schedule_interval
+FROM timescaledb_information.jobs
+WHERE hypertable_schema = 'collect' AND hypertable_name = '{table}'
+AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", connection);
+        return await command.ExecuteScalarAsync(ct) is TimeSpan interval ? interval : null;
+    }
+
+    /* The RETENTION policy's cadence on a table — the scope control for the compression converge. */
+    private static async Task<TimeSpan?> RetentionScheduleIntervalAsync(NpgsqlConnection connection, string table, System.Threading.CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand($@"
+SELECT schedule_interval
+FROM timescaledb_information.jobs
+WHERE hypertable_schema = 'collect' AND hypertable_name = '{table}'
+AND   proc_name = 'policy_retention'", connection);
+        return await command.ExecuteScalarAsync(ct) is TimeSpan interval ? interval : null;
+    }
+
+    /* Runs the policy body NOW instead of waiting out its schedule. job_id is INTEGER (#1586). */
+    private static async Task RunPolicyAsync(NpgsqlConnection connection, string table, System.Threading.CancellationToken ct)
+    {
+        int jobId;
+        using (var probe = new NpgsqlCommand($@"
+SELECT job_id
+FROM timescaledb_information.jobs
+WHERE hypertable_schema = 'collect' AND hypertable_name = '{table}'
+AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", connection))
+        {
+            jobId = Convert.ToInt32((await probe.ExecuteScalarAsync(ct))!, CultureInfo.InvariantCulture);
+        }
+
+        using var run = new NpgsqlCommand("CALL run_job($1::integer)", connection);
+        run.Parameters.AddWithValue(jobId);
+        await run.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task<int> ChunkCountAsync(NpgsqlConnection connection, string table, bool compressed, System.Threading.CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand($@"
+SELECT COUNT(*)
+FROM timescaledb_information.chunks
+WHERE hypertable_schema = 'collect'
+AND   hypertable_name = '{table}'
+AND   is_compressed = {(compressed ? "true" : "false")}", connection);
+        return Convert.ToInt32((await command.ExecuteScalarAsync(ct))!, CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// #1705: EXECUTES the retention policies instead of string-matching the SQL. The bug this replaces shipped
+    /// precisely because the only pin asserted the generated string contained <c>scheduled =&gt; false</c> — an
+    /// argument <c>add_retention_policy</c> has never had — so the pin passed while the statement failed 42883 on
+    /// every store and the per-policy catch downgraded it to a warning. Nothing that reads a string can catch
+    /// that; only running it can. Asserts every policy is created (not swallowed), lands in
+    /// <c>timescaledb_information.jobs</c>, and is created PAUSED so #1680's guarantee still holds.
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_RetentionPoliciesActuallyApply_AndAreCreatedPaused_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live retention test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+        Assert.Equal(CollectorCatalog.All.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
+
+        /* This test MUTATES the shared fixture's shape, so it restores it. Creating the hourly CAGGs changes
+           compose's tier routing (RunComposedPanel_OldWindow_AgainstPlainPostgres_RunsCleanOnRaw asserts a
+           10-day window lands on RAW, which only holds while no rollup exists), and leaving an ARMED raw
+           retention policy behind could drop chunks another live test planted. Snapshot what already exists,
+           and drop only what this test creates. */
+        var preexistingCaggs = await ExistingCaggsAsync(connection, ct);
+
+        try
+        {
+            /* Retention targets the hourly CAGGs as well as the raw tables, so the aggregates must exist first —
+               the same ordering EnsureRetentionPoliciesAsync documents. */
+            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+            /* THE assertion: every policy applied. A 42883 would be caught per-policy and counted as 0. */
+            var applied = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct);
+            Assert.True(applied == RetentionPolicyCount,
+                $"expected all {RetentionPolicyCount} retention policies to apply, got {applied} — a swallowed error means the policy SQL is invalid on this TimescaleDB");
+
+            /* Idempotent: the second pass hits if_not_exists (job_id -1) and must not throw on alter_job(-1). */
+            Assert.Equal(RetentionPolicyCount, await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct));
+
+            using var job = new NpgsqlCommand(@"
+SELECT COUNT(*)
+FROM timescaledb_information.jobs
+WHERE proc_name = 'policy_retention'
+AND   hypertable_schema = 'collect'", connection);
+            var jobs = (long)(await job.ExecuteScalarAsync(ct))!;
+            Assert.True(jobs >= RetentionPolicyCount,
+                $"expected at least {RetentionPolicyCount} policy_retention jobs on collect.*, found {jobs}");
+
+            /* Created PAUSED (#1680). The invariant that holds whether or not the safety check armed a policy:
+               none may be ARMED while its source still holds rows its coverage tier does not cover. An
+               un-paused creation is exactly what would violate it. */
+            using var unsafeArmed = new NpgsqlCommand(@"
+SELECT COUNT(*)
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.scheduled
+AND   j.hypertable_name = 'query_stats'
+AND   (SELECT min(collection_time) FROM collect.query_stats) IS NOT NULL
+AND   ((SELECT min(bucket) FROM collect.query_stats_hourly) IS NULL
+       OR (SELECT min(bucket) FROM collect.query_stats_hourly) > (SELECT min(collection_time) FROM collect.query_stats))", connection);
+            var bad = (long)(await unsafeArmed.ExecuteScalarAsync(ct))!;
+            Assert.True(bad == 0, "a retention policy is ARMED while its coverage tier does not cover everything the source holds — creation was not paused");
+        }
+        finally
+        {
+            /* Retention policies first (they reference the relations), then only the CAGGs this test created —
+               DROP ... CASCADE takes each aggregate's own policy with it. */
+            foreach (var relation in RetentionRelations)
+            {
+                await TryExecAsync(connection, $"SELECT remove_retention_policy('collect.{relation}', if_exists => true)", ct);
+            }
+
+            foreach (var cagg in (await ExistingCaggsAsync(connection, ct)).Except(preexistingCaggs, StringComparer.Ordinal))
+            {
+                await TryExecAsync(connection, $"DROP MATERIALIZED VIEW IF EXISTS collect.{cagg} CASCADE", ct);
+            }
+        }
+    }
+
+    /// <summary>The continuous aggregates present in <c>collect</c> right now, so the retention test can drop
+    /// exactly the ones it created and leave a pre-existing store's shape alone.</summary>
+    private static async Task<string[]> ExistingCaggsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(
+            "SELECT view_name FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect'", connection);
+        using var reader = await command.ExecuteReaderAsync(ct);
+        var names = new System.Collections.Generic.List<string>();
+        while (await reader.ReadAsync(ct))
+        {
+            names.Add(reader.GetString(0));
+        }
+
+        return names.ToArray();
+    }
+
+    /// <summary>Best-effort cleanup statement — a teardown failure must not mask the assertion that already ran.</summary>
+    private static async Task TryExecAsync(NpgsqlConnection connection, string sql, System.Threading.CancellationToken ct)
+    {
+        try
+        {
+            using var command = new NpgsqlCommand(sql, connection);
+            await command.ExecuteNonQueryAsync(ct);
+        }
+        catch (PostgresException)
+        {
+        }
+    }
+
+    /// <summary>
+    /// The relations EnsureRetentionPoliciesAsync attaches policies to, for teardown: the three raw tables,
+    /// the four hourly CAGGs, and the nine baseline aggregates (#1757). The last group is DERIVED from the
+    /// product's own list rather than restated, so adding a baseline aggregate cannot leave an armed retention
+    /// policy behind on this shared fixture.
+    /// </summary>
+    private static readonly string[] RetentionRelations = new[]
+    {
+        "query_stats", "procedure_stats", "query_store_stats",
+        "query_stats_hourly", "procedure_stats_hourly", "query_store_stats_hourly", "query_stats_db_hourly",
+    }
+    .Concat(TimescaleSupport.BaselineAggregates.Select(a => a.View))
+    .ToArray();
+
+    /// <summary>The policy set EnsureRetentionPoliciesAsync attaches, derived so the two cannot drift.</summary>
+    private static readonly int RetentionPolicyCount = RetentionRelations.Length;
+
     [Fact]
     public async Task CompressionJobSelfHeal_DetectionQueryValid_AndRearmSucceeds_AgainstDevPostgres()
     {
@@ -458,7 +1203,16 @@ LIMIT 1", connection))
             arm.Parameters.Add(new NpgsqlParameter { Value = jobId });
             await arm.ExecuteNonQueryAsync(ct);
         }
-        await WaitForSettledNextStartAsync(connection, jobId, ct);
+        await WaitUntilDetectorReportsHealthyAsync(connection, jobId, ct);
+
+        /* The SQL really is valid against the live catalog, and this job really is in its result set.
+           ReadStuckCompressionJobsAsync is failure-isolated (a broken query is swallowed and returns an EMPTY
+           list), so DoesNotContain ALONE would pass just as happily against SQL that never compiled — the one
+           thing this leg claims to prove. Run the production const directly, where a syntax or column error
+           throws, and require the job to be present: only then does "not flagged" mean the detector looked at
+           this job and judged it healthy. */
+        var observed = await ReadObservedJobIdsAsync(connection, ct);
+        Assert.Contains(jobId, observed);
 
         var healthy = await TimescaleSupport.ReadStuckCompressionJobsAsync(connection, DateTime.UtcNow, null, ct);
         Assert.DoesNotContain(healthy, s => s.JobId == jobId);
@@ -483,36 +1237,179 @@ LIMIT 1", connection))
     }
 
     /// <summary>
-    /// Wait until a compression policy job's <c>next_start</c> in <c>timescaledb_information.job_stats</c> has
-    /// settled to a real value (not <c>-infinity</c>, and a row exists). A just-added or just-altered
-    /// TimescaleDB job can momentarily read <c>next_start = '-infinity'</c> before its background scheduler
-    /// assigns the real next run; the stuck-job detector is CORRECT to flag <c>-infinity</c>, so a live test
-    /// asserting "healthy, not flagged" must first let that transient window close — else it races the
-    /// scheduler and false-fails intermittently on a slow runner. Bounded; fails loudly if it never settles
-    /// (a job that stays <c>-infinity</c> IS genuinely stuck and the assertion should not silently pass).
+    /// Wait until <see cref="TimescaleSupport.ReadStuckCompressionJobsAsync"/> — the DETECTION QUERY ITSELF,
+    /// the thing under test — stops flagging this job. #1760: the predecessor polled
+    /// <c>next_start &lt;&gt; '-infinity'</c> directly, which is only ONE of the two arms the detector
+    /// evaluates, so "settled" and "the assertion will pass" were different statements and the gap between
+    /// them was the flake. Worse, the value it polled was the one the caller's own
+    /// <c>alter_job(next_start =&gt; …)</c> had just written, so it was satisfied on its first poll and waited
+    /// for nothing at all — no timeout increase could ever have helped.
+    ///
+    /// <para>Polling the detector closes that by construction: there is one predicate, not two copies that
+    /// drift, so settled-according-to-the-wait IS settled-according-to-the-assertion. Bounded, and it fails
+    /// loudly carrying the detector's OWN reason string — a job that never settles is genuinely stuck and must
+    /// not silently pass, and the reason names which arm held it rather than assuming <c>next_start</c>.</para>
     /// </summary>
-    private static async Task WaitForSettledNextStartAsync(NpgsqlConnection connection, long jobId, System.Threading.CancellationToken ct)
+    private static async Task WaitUntilDetectorReportsHealthyAsync(
+        NpgsqlConnection connection, long jobId, System.Threading.CancellationToken ct)
     {
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
         while (true)
         {
-            using var probe = new NpgsqlCommand(
-                "SELECT next_start = '-infinity'::timestamptz FROM timescaledb_information.job_stats WHERE job_id = $1::integer",
-                connection);
-            probe.Parameters.Add(new NpgsqlParameter { Value = jobId });
-            var negInfinity = await probe.ExecuteScalarAsync(ct);
-
-            /* A present, non-(-infinity) next_start means the scheduler settled the job into its scheduled
-               state. A null result (no job_stats row yet) is also "not settled yet" — keep waiting. */
-            if (negInfinity is bool isNegInfinity && !isNegInfinity)
+            var flagged = await TimescaleSupport.ReadStuckCompressionJobsAsync(connection, DateTime.UtcNow, null, ct);
+            var mine = flagged.FirstOrDefault(s => s.JobId == jobId);
+            if (mine is null)
             {
                 return;
             }
 
             Assert.True(DateTime.UtcNow < deadline,
-                $"compression job {jobId} never settled to a real next_start within 30s (stayed at -infinity).");
+                $"compression job {jobId} was still flagged as stuck after 30s: {mine.Reason}");
             await Task.Delay(250, ct);
         }
+    }
+
+    /// <summary>
+    /// Every job_id the production detection query OBSERVES — not just the ones it flags — by running
+    /// <see cref="TimescaleSupport.StuckCompressionJobsSql"/> itself. Sharing the const is the whole point: a
+    /// paraphrase here could compile happily while the real query did not.
+    /// </summary>
+    private static async Task<List<long>> ReadObservedJobIdsAsync(
+        NpgsqlConnection connection, System.Threading.CancellationToken ct)
+    {
+        var ids = new List<long>();
+        using var command = new NpgsqlCommand(TimescaleSupport.StuckCompressionJobsSql, connection);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            ids.Add(Convert.ToInt64(reader.GetValue(0), System.Globalization.CultureInfo.InvariantCulture));
+        }
+
+        return ids;
+    }
+
+    /// <summary>
+    /// #1760 root cause, pinned deterministically: TimescaleDB's never-ran sentinel in
+    /// <c>last_run_started_at</c> is <b>-infinity</b>, not NULL, and Npgsql maps that to
+    /// <see cref="DateTime.MinValue"/>. Un-guarded, that turned "never ran" into "started in year 1" — an
+    /// elapsed of ~739,000 days that clears every <see cref="TimescaleSupport.StuckRunningBound"/> — so a
+    /// healthy job was flagged stuck for the whole of its FIRST run, whenever the detector's read landed while
+    /// <c>job_status</c> already said <c>Running</c>. Those two fields come from independent sources in
+    /// TimescaleDB's own view (<c>pg_stat_activity.state</c> vs <c>bgw_job_stat.last_start</c>), so that window
+    /// is structural, not hypothetical.
+    ///
+    /// <para>Deterministic, not timing-dependent: a freshly added policy has no <c>bgw_job_stat</c> row at all
+    /// (every column NULL), and it is <c>alter_job</c> that materialises the row carrying the -infinity
+    /// sentinel — so arming it an hour out both creates the row and guarantees the scheduler cannot run the job
+    /// out from under the assertion. Asserts the raw column really does carry the sentinel (otherwise the
+    /// NULLIF guard would be dead code that passes for the wrong reason) AND that the production query hands
+    /// back NULL for it.</para>
+    /// </summary>
+    [Fact]
+    public async Task StuckCompressionJobsSql_NeverRunJob_ReadsNullLastRunStartedAt_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the never-ran sentinel pin.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+
+        /* Migrate first, as every other gated test in this class does. It is not the schema this test wants —
+           it is the search_path: the migration sets the database to collect, config, public, and WITHOUT public
+           on the path TimescaleDB's own by_range is unresolvable, so create_hypertable fails to resolve its
+           argument and the whole statement dies as 42883 by_range(unknown, interval) does not exist. Skipping
+           this line is what made the test pass on a rig whose search_path a previous run had already set, and
+           fail on CI's throwaway cluster. */
+        /* Migrate first, as every other gated test in this class does. It is not the schema this test wants -
+           it is the search_path. TimescaleDB'''s by_range lives in PUBLIC, so a session whose search_path omits
+           public cannot resolve it, create_hypertable never resolves its argument, and the statement dies as
+           42883 by_range(unknown, interval) does not exist. Skipping this line passed on a rig whose connection
+           carried the default "$user", public and failed on CI, whose connection pins collect,config. */
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+
+        const string table = "stuck_sentinel_probe_1760";
+        try
+        {
+            await ExecuteAsync(connection, $"DROP TABLE IF EXISTS {table} CASCADE", ct);
+            await ExecuteAsync(connection,
+                $"CREATE TABLE {table} (collection_time timestamptz NOT NULL, server_id integer NOT NULL)", ct);
+            /* The product's own SQL builders, not hand-rolled equivalents: a one-argument by_range('col') is
+               accepted by TimescaleDB 2.28 but not by the older version CI's fixture carries, and the point of
+               this test is the catalog's behaviour rather than a second dialect of the same DDL. */
+            await ExecuteAsync(connection, TimescaleSupport.CreateHypertableSql(table, "collection_time"), ct);
+            await ExecuteAsync(connection, TimescaleSupport.EnableCompressionSql(table), ct);
+            await ExecuteAsync(connection, TimescaleSupport.AddCompressionPolicySql(table), ct);
+
+            long jobId;
+            using (var find = new NpgsqlCommand(
+                $"SELECT job_id FROM timescaledb_information.jobs WHERE hypertable_name = '{table}' "
+                + "AND (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%') ORDER BY job_id LIMIT 1",
+                connection))
+            {
+                var found = await find.ExecuteScalarAsync(ct);
+                Assert.NotNull(found);
+                jobId = Convert.ToInt64(found, System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            /* Materialise the stat row and park the job an hour out so it cannot run mid-assertion. */
+            using (var arm = new NpgsqlCommand(
+                "SELECT alter_job($1::integer, next_start => now() + interval '1 hour')", connection))
+            {
+                arm.Parameters.Add(new NpgsqlParameter { Value = jobId });
+                await arm.ExecuteNonQueryAsync(ct);
+            }
+
+            /* The sentinel is really there — the guard is not dead code. */
+            using (var raw = new NpgsqlCommand(
+                "SELECT last_run_started_at = '-infinity'::timestamptz FROM timescaledb_information.job_stats WHERE job_id = $1::integer",
+                connection))
+            {
+                raw.Parameters.Add(new NpgsqlParameter { Value = jobId });
+                Assert.Equal(true, await raw.ExecuteScalarAsync(ct));
+            }
+
+            /* ...and the production query neutralises it, so the stuck-Running arm cannot fire on a job that
+               has never run. Without the NULLIF this reads DateTime.MinValue. */
+            using (var guarded = new NpgsqlCommand(TimescaleSupport.StuckCompressionJobsSql, connection))
+            {
+                await using var reader = await guarded.ExecuteReaderAsync(ct);
+                var sawJob = false;
+                while (await reader.ReadAsync(ct))
+                {
+                    if (Convert.ToInt64(reader.GetValue(0), System.Globalization.CultureInfo.InvariantCulture) != jobId)
+                    {
+                        continue;
+                    }
+
+                    sawJob = true;
+                    Assert.True(reader.IsDBNull(3),
+                        "a never-run compression job must read a NULL last_run_started_at through the production "
+                        + "query; a non-null value here is the year-1 elapsed that flagged healthy jobs as stuck.");
+                }
+
+                Assert.True(sawJob, $"the production query did not observe compression job {jobId}.");
+            }
+
+            /* The pure predicate agrees end to end: never-ran + Running is NOT stuck. */
+            Assert.False(
+                TimescaleSupport.IsCompressionJobStuck(false, "Running", null, TimeSpan.FromHours(12), DateTime.UtcNow, out _));
+        }
+        finally
+        {
+            await ExecuteAsync(connection, $"DROP TABLE IF EXISTS {table} CASCADE", ct);
+        }
+    }
+
+    private static async Task ExecuteAsync(NpgsqlConnection connection, string sql, System.Threading.CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(sql, connection);
+        await command.ExecuteNonQueryAsync(ct);
     }
 
     private static async Task DeleteTestRowsAsync(NpgsqlConnection connection)

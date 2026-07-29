@@ -8,10 +8,17 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
+using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -244,6 +251,8 @@ public sealed class DarlingComposeTests
     [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"nope\",\"viz\":\"table\"}", "unknown aggregate")]
     /* SUM on a gauge — the grain-trap the archetype gate blocks. */
     [InlineData("{\"source\":\"cpu_utilization_stats\",\"measure\":\"sqlserver_cpu_utilization\",\"aggregate\":\"sum\",\"viz\":\"table\"}", "not valid for measure")]
+    /* Same trap on an AG backlog gauge (#991): summing queue depth over a window is meaningless. */
+    [InlineData("{\"source\":\"ag_database_replica_states\",\"measure\":\"ag_redo_queue\",\"aggregate\":\"sum\",\"viz\":\"table\"}", "not valid for measure")]
     /* percentile on a non-per-event measure. */
     [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"percentile_cont\",\"viz\":\"table\"}", "not valid for measure")]
     [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"unit\":\"gb\",\"viz\":\"table\"}", "not valid for measure")]
@@ -302,7 +311,7 @@ public sealed class DarlingComposeTests
     private static string Compile(PanelPlan plan, IReadOnlyList<string>? servers = null, IReadOnlyDictionary<string, string?>? variables = null)
     {
         var (compiled, error) = ComposeCompiler.Compile(
-            plan, new ComposeRunContext(servers, WindowStart, WindowEnd, variables ?? ComposeRunContext.NoVariables));
+            plan, new ComposeRunContext(servers, WindowStart, WindowEnd, variables ?? ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown));
         Assert.True(error is null, error);
         Assert.NotNull(compiled);
         return compiled!.Sql;
@@ -364,6 +373,39 @@ public sealed class DarlingComposeTests
         Assert.Contains("percentile_cont(0.95)", sql, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(ComposeTimeBucket.None)]
+    [InlineData(ComposeTimeBucket.Minute)]
+    [InlineData(ComposeTimeBucket.Hour)]
+    [InlineData(ComposeTimeBucket.Day)]
+    public void ResolveBucket_LeavesNonAutoUnchanged(ComposeTimeBucket bucket)
+    {
+        Assert.Equal(bucket, MeasureCatalog.ResolveBucket(bucket, 3600d));
+    }
+
+    [Fact]
+    public void ResolveBucket_Auto_PicksGrainFromWindow()
+    {
+        Assert.Equal(ComposeTimeBucket.Minute, MeasureCatalog.ResolveBucket(ComposeTimeBucket.Auto, 2d * 86_400d));       // 2 days -> minute
+        Assert.Equal(ComposeTimeBucket.Hour, MeasureCatalog.ResolveBucket(ComposeTimeBucket.Auto, 2d * 86_400d + 1d));   // just over 2 days -> hour
+        Assert.Equal(ComposeTimeBucket.Hour, MeasureCatalog.ResolveBucket(ComposeTimeBucket.Auto, 60d * 86_400d));       // 60 days -> hour
+        Assert.Equal(ComposeTimeBucket.Day, MeasureCatalog.ResolveBucket(ComposeTimeBucket.Auto, 60d * 86_400d + 1d));   // over 60 days -> day
+    }
+
+    [Theory]
+    [InlineData(6, "date_trunc('minute'")]      // 6h window -> minute grain
+    [InlineData(24 * 10, "date_trunc('hour'")]  // 10 days -> hour grain
+    [InlineData(24 * 90, "date_trunc('day'")]   // 90 days -> day grain
+    public void Compile_AutoBucket_ResolvesGrainFromWindow(int windowHours, string expectedTrunc)
+    {
+        var plan = ValidPlan("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"auto\",\"viz\":\"line\"}");
+        var end = WindowEnd;
+        var start = end.AddHours(-windowHours);
+        var (compiled, error) = ComposeCompiler.Compile(plan, new ComposeRunContext(null, start, end, ComposeRunContext.NoVariables, RollupAvailability.All, end, RollupCoverage.Unknown));
+        Assert.True(error is null, error);
+        Assert.Contains(expectedTrunc, compiled!.Sql, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Compile_UnitConversion_ScalesMicrosecondsToMilliseconds()
     {
@@ -408,9 +450,120 @@ public sealed class DarlingComposeTests
         var plan = ValidPlan("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"minute\",\"viz\":\"line\"}");
         var start = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
         var end = start.AddDays(60); /* 60 days of minutes >> MaxBuckets */
-        var (compiled, error) = ComposeCompiler.Compile(plan, new ComposeRunContext(null, start, end, ComposeRunContext.NoVariables));
+        var (compiled, error) = ComposeCompiler.Compile(plan, new ComposeRunContext(null, start, end, ComposeRunContext.NoVariables, RollupAvailability.All, end, RollupCoverage.Unknown));
         Assert.Null(compiled);
         Assert.Contains("points", error!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /* ─────────────── CAGG read-routing (age-based source selection) ─────────────── */
+
+    private static (ComposeCompiled? Compiled, string? Error) CompileAged(string planJson, int daysOld, string[]? servers = null)
+    {
+        var plan = ValidPlan(planJson);
+        var end = WindowEnd;                 /* EndUtc serves as "now" in the compiler */
+        var start = end.AddDays(-daysOld);
+        /* NowUtc = end here on purpose: these pins predate #1606 and reason about age relative to the window end. */
+        return ComposeCompiler.Compile(plan, new ComposeRunContext(servers, start, end, ComposeRunContext.NoVariables, RollupAvailability.All, end, RollupCoverage.Unknown));
+    }
+
+    [Fact]
+    public void Compile_OldWindow_RoutesQueryStatsToHourlyCagg_RemappingColumns()
+    {
+        var (compiled, error) = CompileAged(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 10);
+        Assert.True(error is null, error);
+        var sql = compiled!.Sql;
+        Assert.Contains("FROM collect.query_stats_hourly AS f", sql, StringComparison.Ordinal);
+        Assert.Contains("CAST(SUM(f.worker_time_sum) AS double precision)", sql, StringComparison.Ordinal);
+        Assert.Contains("date_trunc('hour', f.bucket)", sql, StringComparison.Ordinal);  /* the CAGG time column */
+        Assert.DoesNotContain("delta_worker_time", sql, StringComparison.Ordinal);       /* not the raw column */
+    }
+
+    [Fact]
+    public void Compile_VeryOldWindow_RoutesToDailyCagg_AndCoarsensDisplayGrainToDay()
+    {
+        /* hour requested, but 40 days old -> daily CAGG, and the grain clamps up to day (can't render finer). */
+        var (compiled, error) = CompileAged(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 40);
+        Assert.True(error is null, error);
+        Assert.Contains("FROM collect.query_stats_daily AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("date_trunc('day', f.bucket)", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_OldWindow_AvgRemapsToSumOverSampleCount()
+    {
+        var (compiled, error) = CompileAged(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"avg\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 10);
+        Assert.True(error is null, error);
+        Assert.Contains("CAST(SUM(f.worker_time_sum) AS double precision) / NULLIF(SUM(f.sample_count), 0)", compiled!.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_OldWindow_SumRatio_RemapsBothOperands()
+    {
+        var (compiled, error) = CompileAged(
+            "{\"source\":\"query_stats\",\"ratio\":\"query_avg_elapsed_us\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 10);
+        Assert.True(error is null, error);
+        Assert.Contains("SUM(f.elapsed_time_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0)", compiled!.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_OldWindow_QueryStore_WeightedRatio_RoutesToCagg_RemapsWeightedMean()
+    {
+        /* A 10-day window routes QS to the hourly CAGG; the weighted mean remaps to the reshaped weighted-sum over
+           execution_count_sum (exact, not an avg-of-avgs). A >21d window would route to query_store_stats_daily. */
+        var (compiled, error) = CompileAged(
+            "{\"source\":\"query_store_stats\",\"ratio\":\"qs_avg_duration_us\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 10);
+        Assert.True(error is null, error);
+        Assert.Contains("FROM collect.query_store_stats_hourly AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(f.duration_us_weighted_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0)", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_VeryOldWindow_QueryStore_RoutesToDailyCagg()
+    {
+        /* A 40-day QS window now routes to query_store_stats_daily (same weighted-sum columns as the hourly). */
+        var (compiled, error) = CompileAged(
+            "{\"source\":\"query_store_stats\",\"ratio\":\"qs_avg_duration_us\",\"timeBucket\":\"day\",\"viz\":\"line\"}", daysOld: 40);
+        Assert.True(error is null, error);
+        Assert.Contains("FROM collect.query_store_stats_daily AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(f.duration_us_weighted_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0)", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_OldWindow_NonCaggTable_StaysRaw()
+    {
+        var (compiled, _) = CompileAged(
+            "{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 40);
+        Assert.Contains("FROM collect.wait_stats AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("_hourly", compiled.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("_daily", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_OldWindow_ObjectName_RoutesToCagg_JoinsModuleMap()
+    {
+        /* object_name on query_stats now routes to the CAGG (40d -> daily) and joins the retained module_map for
+           attribution, instead of the window-bounded procedure_stats #1568 CTE. */
+        var (compiled, error) = CompileAged(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"object_name\"],\"viz\":\"bar\"}",
+            daysOld: 40, servers: new[] { "PROD-01" });
+        Assert.True(error is null, error);
+        Assert.Contains("FROM collect.query_stats_daily AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN collect.module_map AS m ON m.sql_handle = f.sql_handle AND m.server_name = f.server_name", compiled.Sql, StringComparison.Ordinal);
+        Assert.Contains("m.object_name", compiled.Sql, StringComparison.Ordinal);        /* attribution from the map */
+        Assert.DoesNotContain("ROW_NUMBER()", compiled.Sql, StringComparison.Ordinal);   /* not the raw #1568 CTE */
+    }
+
+    [Fact]
+    public void Compile_RecentWindow_QueryStats_StaysRaw()
+    {
+        /* The 6-hour helper window is well inside the raw horizon -> raw columns, byte-for-byte as before. */
+        var sql = Compile(ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}"));
+        Assert.Contains("FROM collect.query_stats AS f", sql, StringComparison.Ordinal);
+        Assert.Contains("delta_worker_time", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("worker_time_sum", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -646,6 +799,7 @@ public sealed class DarlingComposeTests
             "session_stats", "session_summary_stats", "waiting_tasks", "query_snapshots",
             "blocked_process_reports", "dmv_blocking_snapshots", "deadlocks", "system_health_events",
             "default_trace_events", "running_jobs", "job_history", "perfmon_stats", "query_store_stats",
+            "ag_database_replica_states",
         })
         {
             Assert.True(sources.Contains(expected), $"catalog is missing a measure for '{expected}'.");
@@ -692,6 +846,214 @@ public sealed class DarlingComposeTests
         Assert.Contains("NULLIF(SUM(", sql, StringComparison.Ordinal);
         Assert.Contains("delta_elapsed_time", sql, StringComparison.Ordinal);
         Assert.Contains("delta_execution_count", sql, StringComparison.Ordinal);
+    }
+
+    /* ─────────────────────── #1687: the row cap keeps the NEWEST slice, and says so ─────────────────────── */
+
+    [Fact]
+    public void TimeSeries_RowCap_KeepsTheNewestBuckets_ViaADescLimitedSubquery()
+    {
+        /* The bug: "ORDER BY bucket LIMIT 10000" returns the EARLIEST 10,000 rows, so a grouped
+           minute-grain 24h panel rendered its first ~87 minutes as if that were the window. The cap now
+           applies DESC inside a subquery, and the survivors are re-sorted ascending for the renderer. */
+        var sql = Compile(ValidPlan("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"minute\",\"groupBy\":[\"wait_type\"],\"viz\":\"stacked\"}"));
+
+        Assert.Contains("SELECT * FROM (", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY bucket DESC\nLIMIT " + ComposeLimits.HardRowCap + "\n) AS capped\nORDER BY bucket", sql, StringComparison.Ordinal);
+
+        /* The inner ORDER BY must be the DESC one — an ascending inner sort would re-introduce the bug
+           while still looking wrapped. */
+        Assert.DoesNotContain("ORDER BY bucket\nLIMIT", sql, StringComparison.Ordinal);
+
+        /* The cap survives as the LAST thing applied inside the subquery, and the outer sort is what the
+           renderer consumes. */
+        Assert.EndsWith("ORDER BY bucket", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TimeSeries_RowCap_WrapperOpensAfterTheCte_SoTheWithStaysTopLevel()
+    {
+        /* A module-join panel emits "WITH m AS (...)" first. The wrapper must open AFTER it: swallowing
+           the CTE into the subquery would be a different (and in some engines invalid) statement, and
+           the join would lose its source. */
+        var sql = Compile(ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"groupBy\":[\"object_name\"],\"viz\":\"line\"}"));
+
+        Assert.StartsWith("WITH ", sql, StringComparison.Ordinal);
+        Assert.True(
+            sql.IndexOf("WITH ", StringComparison.Ordinal) < sql.IndexOf("SELECT * FROM (", StringComparison.Ordinal),
+            "the row-cap wrapper must open after the CTE, not before it");
+    }
+
+    [Fact]
+    public void RankedAndScalar_AreUntouchedByTheRowCapWrapper()
+    {
+        /* Ranked's LIMIT is the caller's own topN — reaching it is the request being honored, not
+           truncation — and Scalar is one row. Neither gets the wrapper. */
+        var ranked = Compile(ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"bar\"}"));
+        Assert.DoesNotContain("SELECT * FROM (", ranked, StringComparison.Ordinal);
+        Assert.DoesNotContain(") AS capped", ranked, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY value DESC", ranked, StringComparison.Ordinal);
+
+        var scalar = Compile(ValidPlan("{\"source\":\"cpu_utilization_stats\",\"measure\":\"sqlserver_cpu_utilization\",\"aggregate\":\"avg\",\"viz\":\"stat\"}"));
+        Assert.DoesNotContain("SELECT * FROM (", scalar, StringComparison.Ordinal);
+        Assert.EndsWith("LIMIT 1", scalar, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RowCapNotice_FiresAtExactlyTheCap_AndNotBelowIt()
+    {
+        /* Exactly-at-cap is the only detectable signal: the compiler cannot know buckets x groups ahead
+           of time, because group cardinality is a property of the DATA, not the spec. */
+        Assert.Null(ComposeStoreAvailability.BuildRowCapNotice(PanelMode.TimeSeries, ComposeLimits.HardRowCap - 1));
+        Assert.Null(ComposeStoreAvailability.BuildRowCapNotice(PanelMode.TimeSeries, 0));
+
+        var notice = ComposeStoreAvailability.BuildRowCapNotice(PanelMode.TimeSeries, ComposeLimits.HardRowCap);
+        Assert.NotNull(notice);
+        Assert.Contains("row cap reached", notice, StringComparison.Ordinal);
+        Assert.Contains("most recent", notice, StringComparison.Ordinal);
+
+        /* Names both escape hatches, because "it was truncated" without "here is what to do" is only
+           half the fix. */
+        Assert.Contains("Coarsen the time bucket", notice, StringComparison.Ordinal);
+        Assert.Contains("narrow the group-by", notice, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CombineNotices_ShowsEveryNoticeThatApplies_NotJustTheFirst()
+    {
+        /* Retention truncates the OLD end of a window and the row cap now truncates the old end too (by
+           keeping the newest buckets) — a long grouped panel on a retention-active store hits both. The
+           panel in the most trouble is exactly the one that must not have half its explanation dropped. */
+        Assert.Null(ComposeStoreAvailability.CombineNotices(null, null));
+        Assert.Equal("only one", ComposeStoreAvailability.CombineNotices(null, "only one"));
+        Assert.Equal("only one", ComposeStoreAvailability.CombineNotices("only one", null));
+        Assert.Equal("first second", ComposeStoreAvailability.CombineNotices("first", "second"));
+
+        /* An empty or whitespace notice is not a notice — it must not produce a stray separator or an
+           empty strip on the page. */
+        Assert.Null(ComposeStoreAvailability.CombineNotices("", "   "));
+        Assert.Equal("real", ComposeStoreAvailability.CombineNotices("", "real"));
+    }
+
+    [Fact]
+    public void RowCapNotice_IsTimeSeriesOnly()
+    {
+        /* A Ranked panel returning exactly topN rows is the request being satisfied. Warning there would
+           be a false alarm on the most ordinary result there is. */
+        Assert.Null(ComposeStoreAvailability.BuildRowCapNotice(PanelMode.Ranked, ComposeLimits.HardRowCap));
+        Assert.Null(ComposeStoreAvailability.BuildRowCapNotice(PanelMode.Scalar, ComposeLimits.HardRowCap));
+    }
+
+    /* ─────────────────────────── #991 Availability Group measures ─────────────────────────── */
+
+    [Fact]
+    public void Ag_Measures_AreAllGaugesOnTheDatabaseGrainTable()
+    {
+        /* The queues, rates and lag are recomputed from the CURRENT backlog on every read, so every one is
+           a Gauge — non-summable, avg/min/max only. A Cumulative or Delta archetype here would let the
+           composer SUM a backlog over a window and report a number that means nothing. */
+        var agMeasures = MeasureCatalog.Measures
+            .Where(m => string.Equals(m.SourceTable, "ag_database_replica_states", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.Equal(7, agMeasures.Count);
+
+        foreach (var measure in agMeasures)
+        {
+            Assert.Equal(MeasureKind.Scalar, measure.Kind);
+            Assert.Equal(MeasureArchetype.Gauge, measure.Archetype);
+            Assert.Null(measure.AggregationColumn);
+            Assert.Null(measure.DeltaColumn);
+            Assert.Equal(new[] { ComposeAggregate.Avg, ComposeAggregate.Min, ComposeAggregate.Max }, measure.ValidAggs);
+            Assert.DoesNotContain(ComposeAggregate.Sum, measure.ValidAggs);
+            Assert.Equal("Availability Groups", measure.Category);
+        }
+
+        Assert.Equal(
+            new[] { "ag_est_redo_drain_min", "ag_est_send_drain_min", "ag_log_send_queue", "ag_log_send_rate", "ag_redo_queue", "ag_redo_rate", "ag_secondary_lag" },
+            agMeasures.Select(m => m.Key).OrderBy(k => k, StringComparer.Ordinal).ToArray());
+    }
+
+    [Fact]
+    public void Ag_Measures_CarryTheDmvsNativeUnits()
+    {
+        /* Straight from the DMV: the queues are KB, the rates KB/second, the lag seconds. Getting a unit
+           wrong here silently mis-scales every chart built on it. The two rates ride the bytes family
+           because the catalog has no per-second family — the display name carries the "per second". */
+        foreach (var key in new[] { "ag_log_send_queue", "ag_redo_queue", "ag_log_send_rate", "ag_redo_rate" })
+        {
+            var measure = MeasureCatalog.Measure(key)!;
+            Assert.Equal("kb", measure.NativeUnit);
+            Assert.Equal(MeasureCatalog.FamilyBytes, measure.UnitFamily);
+        }
+
+        Assert.Contains("per second", MeasureCatalog.Measure("ag_log_send_rate")!.DisplayName, StringComparison.Ordinal);
+        Assert.Contains("per second", MeasureCatalog.Measure("ag_redo_rate")!.DisplayName, StringComparison.Ordinal);
+
+        var lag = MeasureCatalog.Measure("ag_secondary_lag")!;
+        Assert.Equal("s", lag.NativeUnit);
+        Assert.Equal(MeasureCatalog.FamilyDuration, lag.UnitFamily);
+
+        /* Backlog and lag default to the worst reading in the bucket; the rates to the sustained average. */
+        Assert.Equal(ComposeAggregate.Max, MeasureCatalog.Measure("ag_log_send_queue")!.DefaultTimeAgg);
+        Assert.Equal(ComposeAggregate.Max, MeasureCatalog.Measure("ag_redo_queue")!.DefaultTimeAgg);
+        Assert.Equal(ComposeAggregate.Max, lag.DefaultTimeAgg);
+        Assert.Equal(ComposeAggregate.Avg, MeasureCatalog.Measure("ag_log_send_rate")!.DefaultTimeAgg);
+        Assert.Equal(ComposeAggregate.Avg, MeasureCatalog.Measure("ag_redo_rate")!.DefaultTimeAgg);
+    }
+
+    [Fact]
+    public void Ag_Dimensions_AreTheGrainColumnsPlusTheSuspensionState()
+    {
+        foreach (var name in new[] { "ag_name", "database_name", "replica_server_name", "synchronization_state_desc", "suspend_reason_desc" })
+        {
+            var dimension = MeasureCatalog.Dimension("ag_database_replica_states", name);
+            Assert.NotNull(dimension);
+            Assert.Equal(name, dimension!.Column);
+            Assert.True(dimension.Likeable);
+        }
+
+        /* Every AG measure allows all five, so any of them can slice or group a panel. */
+        foreach (var measure in MeasureCatalog.Measures.Where(m => m.SourceTable == "ag_database_replica_states"))
+        {
+            Assert.Equal(
+                new[] { "ag_name", "database_name", "replica_server_name", "synchronization_state_desc", "suspend_reason_desc" },
+                measure.AllowedDimensions);
+        }
+
+        /* The universal server dimension resolves for this source too (fleet-wide AG views). */
+        Assert.NotNull(MeasureCatalog.Dimension("ag_database_replica_states", MeasureCatalog.ServerDimensionName));
+
+        /* The replica-grain table is all state strings — no numeric column worth aggregating — so it
+           deliberately contributes no measures and therefore no dimensions. */
+        Assert.False(MeasureCatalog.IsKnownSource("ag_replica_states"));
+    }
+
+    [Fact]
+    public void Ag_LagPanel_CanExcludeSuspendedReplicas()
+    {
+        /* The reason synchronization_state_desc is a dimension at all: secondary_lag_seconds reads 0 while
+           data movement is suspended, so an unfiltered lag panel shows a suspended replica as perfectly
+           healthy. Filtering it out has to actually compile, or the trap is documented but unavoidable. */
+        var sql = Compile(ValidPlan("{\"source\":\"ag_database_replica_states\",\"measure\":\"ag_secondary_lag\",\"aggregate\":\"max\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"filters\":[{\"dimension\":\"synchronization_state_desc\",\"op\":\"neq\",\"value\":\"NOT SYNCHRONIZING\"}]}"));
+
+        Assert.Contains("collect.ag_database_replica_states", sql, StringComparison.Ordinal);
+        Assert.Contains("synchronization_state_desc", sql, StringComparison.Ordinal);
+
+        /* The filter value is a bound parameter, never inlined. */
+        Assert.DoesNotContain("NOT SYNCHRONIZING", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Ag_LagMeasure_CompilesAndGroupsByReplica()
+    {
+        /* The headline AG panel: worst secondary lag per replica over time. */
+        var sql = Compile(ValidPlan("{\"source\":\"ag_database_replica_states\",\"measure\":\"ag_secondary_lag\",\"aggregate\":\"max\",\"timeBucket\":\"hour\",\"groupBy\":[\"replica_server_name\"],\"viz\":\"line\"}"));
+
+        Assert.Contains("collect.ag_database_replica_states", sql, StringComparison.Ordinal);
+        Assert.Contains("MAX(", sql, StringComparison.Ordinal);
+        Assert.Contains("replica_server_name", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("config.", sql, StringComparison.Ordinal);
     }
 
     /* ─────────────────────────── D1: gauge-operand (Avg) ratios (#1563 follow-ups) ─────────────────────────── */
@@ -947,7 +1309,7 @@ public sealed class DarlingComposeTests
 
     private static IReadOnlyList<(string Source, ComposeCompiled Compiled)> CompileAnnotations(
         PanelPlan plan, IReadOnlyList<string>? servers = null) =>
-        ComposeCompiler.CompileAnnotations(plan, new ComposeRunContext(servers, WindowStart, WindowEnd, ComposeRunContext.NoVariables));
+        ComposeCompiler.CompileAnnotations(plan, new ComposeRunContext(servers, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown));
 
     [Fact]
     public void CompileAnnotations_ReturnsEmpty_WhenNoneRequested()
@@ -1220,8 +1582,7 @@ public sealed class DarlingComposeTests
 
         var node = DarlingWebEndpoints.BuildSummariesNode(new[] { summary });
 
-        Assert.Equal(1, node.Count);
-        var one = Assert.IsType<JsonObject>(node[0]);
+        var one = Assert.IsType<JsonObject>(Assert.Single(node));
         Assert.Equal(expectedWireKind, one["kind"]!.GetValue<string>());
     }
 
@@ -1288,6 +1649,27 @@ public sealed class DarlingComposeTests
                 "{\"type\":\"markdown\",\"text\":\"## Top memory clerks\"}," +
                 "{\"type\":\"panel\",\"source\":\"memory_clerks\",\"viz\":\"bar\",\"topN\":10,\"title\":\"Top memory clerks\",\"groupBy\":[\"clerk_type\"],\"measure\":\"clerk_memory_mb\",\"aggregate\":\"max\",\"unit\":\"mb\"}," +
                 "{\"type\":\"markdown\",\"text\":\"RESOURCE_SEMAPHORE notes\"}]}"),
+
+            /* #991: the AG Health seed. Exercises three shapes the other four seeds do not — a dual-axis
+               overlay (ungrouped line + second measure), a stacked time series, and a scalar stat tile —
+               so this entry is also the drift guard for those panel modes staying valid. */
+            ("ag-health",
+                "{\"kind\":\"notebook\",\"cells\":[" +
+                "{\"type\":\"markdown\",\"text\":\"# Availability Group health\"}," +
+                "{\"type\":\"markdown\",\"text\":\"## 1. How far behind is each secondary?\"}," +
+                "{\"type\":\"panel\",\"source\":\"ag_database_replica_states\",\"viz\":\"line\",\"timeBucket\":\"hour\",\"title\":\"Secondary lag by replica\",\"measure\":\"ag_secondary_lag\",\"aggregate\":\"max\",\"unit\":\"s\",\"groupBy\":[\"replica_server_name\"]}," +
+                "{\"type\":\"markdown\",\"text\":\"Reading the lag panel\"}," +
+                "{\"type\":\"markdown\",\"text\":\"## 2. Send vs redo: which side is the bottleneck?\"}," +
+                "{\"type\":\"panel\",\"source\":\"ag_database_replica_states\",\"viz\":\"line\",\"timeBucket\":\"hour\",\"title\":\"Log send rate vs redo rate\",\"measure\":\"ag_log_send_rate\",\"aggregate\":\"avg\",\"unit\":\"kb\",\"overlay\":{\"measure\":\"ag_redo_rate\",\"aggregate\":\"avg\",\"unit\":\"kb\"}}," +
+                "{\"type\":\"markdown\",\"text\":\"Reading the rate panel\"}," +
+                "{\"type\":\"markdown\",\"text\":\"## 3. Where is the redo backlog?\"}," +
+                "{\"type\":\"panel\",\"source\":\"ag_database_replica_states\",\"viz\":\"stacked\",\"timeBucket\":\"hour\",\"title\":\"Redo queue by database\",\"measure\":\"ag_redo_queue\",\"aggregate\":\"max\",\"unit\":\"kb\",\"groupBy\":[\"database_name\"]}," +
+                "{\"type\":\"markdown\",\"text\":\"## 4. How long until the redo queue clears?\"}," +
+                "{\"type\":\"panel\",\"source\":\"ag_database_replica_states\",\"viz\":\"stat\",\"title\":\"Estimated redo drain (worst, minutes)\",\"measure\":\"ag_est_redo_drain_min\",\"aggregate\":\"max\",\"unit\":\"min\"}," +
+                "{\"type\":\"markdown\",\"text\":\"Blank means no drain rate\"}," +
+                "{\"type\":\"markdown\",\"text\":\"## 5. Which databases are backing up on the send side?\"}," +
+                "{\"type\":\"panel\",\"source\":\"ag_database_replica_states\",\"viz\":\"bar\",\"topN\":10,\"title\":\"Log send queue by database\",\"groupBy\":[\"database_name\"],\"measure\":\"ag_log_send_queue\",\"aggregate\":\"max\",\"unit\":\"kb\"}," +
+                "{\"type\":\"markdown\",\"text\":\"Next steps\"}]}"),
         };
 
         foreach (var (name, definition) in templates)
@@ -1295,5 +1677,277 @@ public sealed class DarlingComposeTests
             var result = DarlingWebEndpoints.ValidateDefinition(definition);
             Assert.True(result.IsValid, $"seed template '{name}' failed validation: {result.Error}");
         }
+
+        /* The hole a hand-written mirror always has: it protects the templates it happens to list. Read the
+           REAL key list out of notebook.js and require the mirror to cover exactly it, so a sixth template
+           added without a mirror entry fails here instead of silently going unvalidated until it 400s in
+           someone's browser. Source-scanned rather than executed — Darling.Tests has no JS runtime, and the
+           same read-the-source idiom already backs the cross-app preset pin. */
+        var declaredKeys = NotebookTemplateKeys();
+        Assert.NotEmpty(declaredKeys);
+        Assert.Equal(declaredKeys, templates.Select(t => t.Name).OrderBy(k => k, StringComparer.Ordinal).ToArray());
+    }
+
+    /// <summary>Every <c>key:</c> declared in <c>NOTEBOOK_TEMPLATES</c> (wwwroot/js/notebook.js), sorted.
+    /// <c>key:</c> appears nowhere else in that file, so a plain line scan is unambiguous.</summary>
+    private static string[] NotebookTemplateKeys([CallerFilePath] string thisFile = "")
+    {
+        var testDir = Path.GetDirectoryName(thisFile)!;
+        var notebookJs = Path.GetFullPath(Path.Combine(
+            testDir, "..", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "notebook.js"));
+
+        Assert.True(File.Exists(notebookJs), $"notebook.js not found at {notebookJs} (did the frontend move?)");
+
+        return Regex.Matches(File.ReadAllText(notebookJs), @"^\s*key:\s*""([^""]+)""", RegexOptions.Multiline)
+            .Select(m => m.Groups[1].Value)
+            .OrderBy(k => k, StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    /* ─────────────── #1665: availability-gated routing + the partial-window notice ─────────────── */
+
+    /// <summary>
+    /// The compile-level 42P01 repro: a store with NO rollups (plain PostgreSQL, or a probe that failed)
+    /// must compile an old window against the raw table — never against a rollup relation that does not
+    /// exist there. Raw is complete on that store shape, so this is the correct route, not a degraded one.
+    /// </summary>
+    [Fact]
+    public void Compile_OldWindow_NoRollupsInStore_CompilesRaw()
+    {
+        var plan = ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"day\",\"viz\":\"line\"}");
+        var end = WindowEnd;
+        var (compiled, error) = ComposeCompiler.Compile(
+            plan, new ComposeRunContext(null, end.AddDays(-10), end, ComposeRunContext.NoVariables, RollupAvailability.None, end, RollupCoverage.Unknown));
+        Assert.True(error is null, error);
+        Assert.Contains("FROM collect.query_stats AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("_hourly", compiled.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("_daily", compiled.Sql, StringComparison.Ordinal);
+        Assert.Equal(ComposeSourceTier.Raw, compiled.Route.Tier);
+    }
+
+    /// <summary>The compiled result carries the route it took — the runner's input for the notice.</summary>
+    [Fact]
+    public void Compile_CarriesTheRouteItTook()
+    {
+        var (compiled, error) = CompileAged("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"day\",\"viz\":\"line\"}", 10);
+        Assert.True(error is null, error);
+        Assert.Equal(ComposeSourceTier.Hourly, compiled!.Route.Tier);
+    }
+
+    /// <summary>
+    /// The "partial window, and says so" notice (#1665): fires only when the route's tier cannot RETAIN the
+    /// window's start on a retention-active store. Plain PG (no rollups) is silent — raw is complete there —
+    /// and the daily tier is silent always (kept indefinitely).
+    /// </summary>
+    [Fact]
+    public void RetentionNotice_FiresOnlyWhenTheTierCannotRetainTheWindow()
+    {
+        var now = new DateTime(2026, 7, 23, 12, 0, 0, DateTimeKind.Utc);
+        var rawRoute = ComposeRoute.Raw;
+        var hourlyRoute = new ComposeRoute(ComposeSourceTier.Hourly, "query_stats_hourly");
+        var dailyRoute = new ComposeRoute(ComposeSourceTier.Daily, "query_stats_daily");
+
+        /* Plain PG: silent even for a 40-day raw window — nothing ever dropped raw. */
+        Assert.Null(ComposeStoreAvailability.BuildRetentionNotice("query_stats", rawRoute, now.AddDays(-40), now, RollupAvailability.None, RollupCoverage.Unknown));
+
+        /* Retention-active store, raw route, window fits raw's ~4 days: silent. */
+        Assert.Null(ComposeStoreAvailability.BuildRetentionNotice("query_stats", rawRoute, now.AddDays(-1), now, RollupAvailability.All, RollupCoverage.Unknown));
+
+        /* Retention-active store, raw route, 10-day window: partial — says so, with the tier's horizon. */
+        var rawNotice = ComposeStoreAvailability.BuildRetentionNotice("query_stats", rawRoute, now.AddDays(-10), now, RollupAvailability.All, RollupCoverage.Unknown);
+        Assert.NotNull(rawNotice);
+        Assert.Contains("partial window", rawNotice, StringComparison.Ordinal);
+        Assert.Contains("4 days", rawNotice, StringComparison.Ordinal);
+        Assert.Contains("10 days back", rawNotice, StringComparison.Ordinal);
+
+        /* Hourly route past its 21-day horizon (daily view missing on this store): partial. */
+        var partial = RollupAvailability.All with { QueryGrainDaily = false };
+        var hourlyNotice = ComposeStoreAvailability.BuildRetentionNotice("query_stats", hourlyRoute, now.AddDays(-40), now, partial, RollupCoverage.Unknown);
+        Assert.NotNull(hourlyNotice);
+        Assert.Contains("21 days", hourlyNotice, StringComparison.Ordinal);
+
+        /* Hourly route, window inside 21 days: silent. */
+        Assert.Null(ComposeStoreAvailability.BuildRetentionNotice("query_stats", hourlyRoute, now.AddDays(-10), now, RollupAvailability.All, RollupCoverage.Unknown));
+
+        /* Daily route: kept indefinitely — silent no matter the window. */
+        Assert.Null(ComposeStoreAvailability.BuildRetentionNotice("query_stats", dailyRoute, now.AddDays(-400), now, RollupAvailability.All, RollupCoverage.Unknown));
+
+        /* A NON-TIERED table (no CAGG pair) reaches Raw via the no-CAGG early return and lives on the
+           30-day collector purge, not the 4-day tier — a 7-day wait_stats window is complete on raw, so
+           a notice would be a false alarm even on a fully-built TimescaleDB store. */
+        Assert.Null(ComposeStoreAvailability.BuildRetentionNotice("wait_stats", rawRoute, now.AddDays(-7), now, RollupAvailability.All, RollupCoverage.Unknown));
+    }
+
+
+    /* ─────────────── #1606 reporting layer: overlay (second measure), scatter, absolute windows ─────────────── */
+
+    /// <summary>The overlay validation matrix: same-source only, coherent with viz/mode/groupBy, the same
+    /// aggregate/unit rulebook as the primary, and scatter REQUIRES one.</summary>
+    [Theory]
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"overlay\":{\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\"}}", "must share the panel's source")]
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"scatter\"}", "needs an 'overlay'")]
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"groupBy\":[\"database_name\"],\"viz\":\"line\",\"overlay\":{\"measure\":\"query_elapsed_us\",\"aggregate\":\"sum\"}}", "cannot also group")]
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"groupBy\":[\"database_name\"],\"viz\":\"stacked\",\"overlay\":{\"measure\":\"query_elapsed_us\",\"aggregate\":\"sum\"}}", "cannot carry an overlay")]
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"bar\",\"overlay\":{\"measure\":\"query_elapsed_us\",\"aggregate\":\"sum\"}}", "cannot carry an overlay")]
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"scatter\",\"overlay\":{\"measure\":\"query_avg_elapsed_us\",\"aggregate\":\"sum\"}}", "aggregation is fixed")]
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"scatter\",\"overlay\":{\"measure\":\"query_elapsed_us\",\"aggregate\":\"percentile_cont\"}}", "not valid for measure")]
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"scatter\",\"overlay\":{\"measure\":\"nope\"}}", "unknown measure")]
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"scatter\",\"overlay\":{\"measure\":\"query_elapsed_us\",\"aggregate\":\"sum\"}}", "not a time series")]
+    public void TryParsePanel_RejectsIncoherentOverlays(string json, string expectedFragment)
+    {
+        Assert.Contains(expectedFragment, RejectReason(json), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void TryParsePanel_AcceptsAScatter_AndADualAxisLine()
+    {
+        var (scatter, scatterError) = ComposeSpec.TryParsePanel(PanelJson("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":25,\"groupBy\":[\"query_hash\"],\"viz\":\"scatter\",\"overlay\":{\"measure\":\"query_executions\",\"aggregate\":\"sum\"}}"), Array.Empty<string>());
+        Assert.True(scatterError is null, scatterError);
+        Assert.NotNull(scatter!.Overlay);
+        Assert.Equal("query_executions", scatter.Overlay!.Measure.Key);
+
+        /* A ratio overlay takes its fixed aggregation and needs no 'aggregate'. */
+        var (dual, dualError) = ComposeSpec.TryParsePanel(PanelJson("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"overlay\":{\"measure\":\"query_avg_elapsed_us\"}}"), Array.Empty<string>());
+        Assert.True(dualError is null, dualError);
+        Assert.NotNull(dual!.Overlay);
+        Assert.Equal(MeasureKind.Ratio, dual.Overlay!.Measure.Kind);
+    }
+
+    /// <summary>The overlay compiles as ONE more select expression over the same fact rows — never a join,
+    /// never a parameter (the param-order pin: identical $n count with and without the overlay).</summary>
+    [Fact]
+    public void Compile_Overlay_EmitsValue2_AndBindsNoExtraParameters()
+    {
+        var with = ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"overlay\":{\"measure\":\"query_elapsed_us\",\"aggregate\":\"sum\"}}");
+        var without = ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}");
+        var context = new ComposeRunContext(null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown);
+
+        var (compiledWith, e1) = ComposeCompiler.Compile(with, context);
+        var (compiledWithout, e2) = ComposeCompiler.Compile(without, context);
+        Assert.True(e1 is null, e1);
+        Assert.True(e2 is null, e2);
+
+        Assert.Contains("AS value2", compiledWith!.Sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(f.delta_elapsed_time)", compiledWith.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("value2", compiledWithout!.Sql, StringComparison.Ordinal);
+        Assert.Equal(compiledWithout.Parameters.Count, compiledWith.Parameters.Count);
+    }
+
+    [Fact]
+    public void Compile_Scatter_RanksByPrimary_AndCarriesValue2()
+    {
+        var plan = ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":25,\"groupBy\":[\"query_hash\"],\"viz\":\"scatter\",\"overlay\":{\"measure\":\"query_executions\",\"aggregate\":\"sum\"}}");
+        var context = new ComposeRunContext(null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown);
+        var (compiled, error) = ComposeCompiler.Compile(plan, context);
+        Assert.True(error is null, error);
+        Assert.Contains("AS value2", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY value DESC", compiled.Sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>The CAGG gate with an overlay (#1606): one route serves both value expressions, and a
+    /// remappable pair rides the rollup with BOTH expressions remapped to the pre-aggregated columns.</summary>
+    [Fact]
+    public void Compile_OverlayCaggGate_RemappablePairRidesTheRollup()
+    {
+        var context = new ComposeRunContext(
+            null, WindowEnd.AddDays(-10), WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown);
+
+        var both = ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"overlay\":{\"measure\":\"query_elapsed_us\",\"aggregate\":\"sum\"}}");
+        var (compiledBoth, e1) = ComposeCompiler.Compile(both, context);
+        Assert.True(e1 is null, e1);
+        Assert.Contains("query_stats_hourly", compiledBoth!.Sql, StringComparison.Ordinal);
+        Assert.Contains("AS value2", compiledBoth.Sql, StringComparison.Ordinal);
+        Assert.Contains("_sum", compiledBoth.Sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>#1606 NowUtc decoupling: a purely-historical absolute window (30→25 days ago) must route by
+    /// age from NOW — the daily rollup — never by age from the window's end (which would claim recency the
+    /// retention tiers no longer have). This is the pin that keeps zoomed/historical windows honest.</summary>
+    [Fact]
+    public void Compile_HistoricalAbsoluteWindow_RoutesByAgeFromNow()
+    {
+        var now = WindowEnd;
+        var plan = ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"day\",\"viz\":\"line\"}");
+        var context = new ComposeRunContext(
+            null, now.AddDays(-30), now.AddDays(-25), ComposeRunContext.NoVariables, RollupAvailability.All, now, RollupCoverage.Unknown);
+        var (compiled, error) = ComposeCompiler.Compile(plan, context);
+        Assert.True(error is null, error);
+        Assert.Contains("query_stats_daily", compiled!.Sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>The absolute-window request validation (#1606): both-or-neither, parseable ISO, start
+    /// strictly before end, span under the 90-day ceiling. All reject BEFORE any store round trip, so no
+    /// live database is needed.</summary>
+    [Theory]
+    [InlineData("{\"windowStart\":\"2026-07-01T00:00:00Z\"}", "together")]
+    [InlineData("{\"windowStart\":\"not-a-date\",\"windowEnd\":\"2026-07-02T00:00:00Z\"}", "ISO-8601")]
+    [InlineData("{\"windowStart\":\"2026-07-02T00:00:00Z\",\"windowEnd\":\"2026-07-01T00:00:00Z\"}", "earlier than")]
+    [InlineData("{\"windowStart\":\"2025-01-01T00:00:00Z\",\"windowEnd\":\"2026-07-01T00:00:00Z\"}", "ceiling")]
+    public async Task RunComposedPanel_RejectsBadAbsoluteWindows(string windowJson, string expectedFragment)
+    {
+        var body = (JsonObject)JsonNode.Parse("{\"panel\":{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"day\",\"viz\":\"line\"}}")!;
+        foreach (var kv in (JsonObject)JsonNode.Parse(windowJson)!)
+        {
+            body[kv.Key] = kv.Value!.DeepClone();
+        }
+
+        await using var postgres = NpgsqlDataSource.Create("Host=localhost;Port=1;Database=never_reached;Username=x");
+        var outcome = await DarlingWebEndpoints.RunComposedPanelAsync(postgres, body, CancellationToken.None);
+        Assert.NotNull(outcome.Error);
+        Assert.Contains(expectedFragment, outcome.Error!, StringComparison.OrdinalIgnoreCase);
+    }
+}
+
+/// <summary>
+/// The ONE live compose round-trip, split out of <see cref="DarlingComposeTests"/> (#1776). It connects to the
+/// shared <c>DARLING_TEST_PG</c> store and runs <c>PgMigrations.MigrateAsync</c> against it, so it must serialize
+/// with the rest of the live collection. Its 126 siblings are pure and must NOT: dragging a 127-test class into
+/// the serialized collection to protect one test would cost the suite far more than the race it prevents, and the
+/// established shape here is exactly this pair (more than forty files already split
+/// <c>...SurfaceAndSqlTests</c> from <c>...LivePostgresTests</c> for the same reason).
+/// </summary>
+[Collection("live-postgres")]
+public sealed class DarlingComposeLivePostgresTests
+{
+    /// <summary>
+    /// The live #1665 repro, end-to-end through the ONE shared runner: a >3-day window against a plain
+    /// PostgreSQL store (the darling-pg CI service container — no TimescaleDB, so no rollups exist). Before
+    /// the availability gate this compiled <c>collect.query_stats_hourly</c> and failed 42P01 at run time;
+    /// now it routes raw, runs clean, and carries NO notice (raw is complete on this store shape).
+    /// </summary>
+    [Fact]
+    public async Task RunComposedPanel_OldWindow_AgainstPlainPostgres_RunsCleanOnRaw()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live compose-routing test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using (var connection = new NpgsqlConnection(connectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+
+        var body = new JsonObject
+        {
+            ["panel"] = JsonNode.Parse(
+                "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"day\",\"viz\":\"line\"}"),
+            ["hours"] = 240, /* 10 days — far past the 3-day raw route horizon */
+        };
+
+        var outcome = await DarlingWebEndpoints.RunComposedPanelAsync(postgres, body, ct);
+
+        Assert.True(outcome.Error is null, $"compose run failed: {outcome.Error}");
+        Assert.NotNull(outcome.Payload);
+        var sql = (string)outcome.Payload!["sql"]!;
+        Assert.Contains("collect.query_stats", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("_hourly", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("_daily", sql, StringComparison.Ordinal);
+        Assert.Null(outcome.Payload["notice"]);
     }
 }

@@ -20,8 +20,8 @@
  * inert. The chart SVG lives entirely in charts.js (one SVG_NS occurrence, the air-gap allowlist); this file has no SVG.
  */
 
-import { el, mount, loadingStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, apiSend } from "./util.js";
-import { renderLineChart, renderBarChart, renderPieChart, CATEGORICAL_COLORS } from "./charts.js";
+import { el, mount, loadingStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, apiSend, noticeStrip } from "./util.js";
+import { renderLineChart, renderBarChart, renderPieChart, renderScatterChart, CATEGORICAL_COLORS } from "./charts.js";
 import { navigateServer } from "./panels.js";
 import { getCatalog } from "./views-api.js";
 
@@ -53,13 +53,18 @@ export function renderComposedPanelCard(panelSpec, scope) {
  */
 function driveComposedPanel(body, panelSpec, scope) {
   let drill = null; // { keys: [{dimension, value}] } or null
+  let zoom = null; // { startIso, endIso } or null (#1606 brush-zoom — view-state only, like the drill)
   function onDrill(next) {
     drill = next && Array.isArray(next.keys) && next.keys.length ? next : null;
     run();
   }
+  function onZoomChange(next) {
+    zoom = next && next.startIso && next.endIso ? next : null;
+    run();
+  }
   function run() {
     const spec = drill ? withDrillFilters(panelSpec, drill) : panelSpec;
-    renderComposedInto(body, spec, scope, { drill, onDrill });
+    renderComposedInto(body, spec, scope, { drill, onDrill, zoom, onZoomChange });
   }
   run();
 }
@@ -76,10 +81,12 @@ function withDrillFilters(spec, drill) {
  *  preview. `opts` (design D5/D6): {drill, onDrill} drive the transient drill-down chip + mark clicks. */
 export async function renderComposedInto(body, panelSpec, scope, opts = {}) {
   mount(body, loadingStrip());
-  const res = await runCompose(panelSpec, scope);
+  const res = await runCompose(panelSpec, scope, opts.zoom);
   if (res.kind === "error") {
-    /* Keep the drill chip (with its clear) above a failed drill so the viewer can always pop back. */
+    /* Keep the drill AND zoom chips (with their clears) above a failed run so the viewer can always pop
+       back — a historical zoom can legitimately land on a window this store can't serve. */
     const nodes = [errorStrip(res.message || "Could not run this panel.")];
+    if (opts.zoom && opts.onZoomChange) nodes.unshift(zoomChip(opts.zoom, opts.onZoomChange));
     if (opts.drill && opts.onDrill) nodes.unshift(drillChip(opts.drill, opts.onDrill));
     mount(body, nodes);
     return;
@@ -92,20 +99,30 @@ export async function renderComposedInto(body, panelSpec, scope, opts = {}) {
     annotationMeta = await annotationMetaMap().catch(() => null);
   }
   try {
-    mount(body, renderComposedResult(data, panelSpec, { ...opts, annotationMeta }));
+    const nodes = [renderComposedResult(data, panelSpec, { ...opts, annotationMeta })];
+    /* The run endpoint's partial-window notice (#1665): the chosen tier could not retain the whole
+       requested window on this store — good data, honestly caveated, above the chart. */
+    if (typeof data.notice === "string" && data.notice) nodes.unshift(noticeStrip(data.notice));
+    mount(body, nodes);
   } catch (e) {
     mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
   }
 }
 
 /** POST the composed panel to /api/compose/run with the view scope; returns the apiSend result ({sql, rows} on data). */
-export function runCompose(panelSpec, scope) {
-  return apiSend("POST", "/api/compose/run", buildRunBody(panelSpec, scope));
+export function runCompose(panelSpec, scope, zoom = null) {
+  return apiSend("POST", "/api/compose/run", buildRunBody(panelSpec, scope, zoom));
 }
 
 /** Build the /api/compose/run body from a panel spec + scope (a per-panel `hours` overrides the view range). */
-function buildRunBody(panelSpec, scope) {
+function buildRunBody(panelSpec, scope, zoom = null) {
   const body = { panel: toRunPanel(panelSpec) };
+  /* Brush-zoom (#1606): an absolute window wins over `hours` server-side; hours still rides along
+     untouched so clearing the zoom needs no special casing. */
+  if (zoom && zoom.startIso && zoom.endIso) {
+    body.windowStart = zoom.startIso;
+    body.windowEnd = zoom.endIso;
+  }
   const s = scope || {};
   if (Array.isArray(s.variables) && s.variables.length) body.variables = s.variables;
   if (s.values && Object.keys(s.values).length) body.values = s.values;
@@ -126,6 +143,8 @@ function toRunPanel(p) {
   if (p.topN != null && p.topN !== "") out.topN = p.topN;
   if (Array.isArray(p.filters) && p.filters.length) out.filters = p.filters;
   if (Array.isArray(p.groupBy) && p.groupBy.length) out.groupBy = p.groupBy;
+  /* The second measure (#1606) — passed through verbatim; the run endpoint validates coherence. */
+  if (p.overlay && typeof p.overlay === "object" && p.overlay.measure) out.overlay = p.overlay;
   /* Event-annotation sources (design D5) ride only on a time-series spec — the run endpoint rejects them on a
      ranked/scalar panel — so gate on the emitted timeBucket, mirroring the server's rule. */
   if (out.timeBucket && Array.isArray(p.annotations) && p.annotations.length) out.annotations = p.annotations;
@@ -144,11 +163,15 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
   const nodes = [];
 
   /* The transient drill-down chip (design D6) sits above the chart whenever a drill is active — with the pinned
-     filter(s), a clear, and (for a server dimension) a jump to that server's detail page. */
+     filter(s), a clear, and (for a server dimension) a jump to that server's detail page. The zoom chip (#1606)
+     does the same for a brushed window — BOTH must survive the empty state (a historical zoom legitimately
+     returns one coarse bucket or nothing, and the viewer must be able to pop back out). */
   const drillNode = opts.drill && opts.onDrill ? drillChip(opts.drill, opts.onDrill) : null;
+  const zoomNode = opts.zoom && opts.onZoomChange ? zoomChip(opts.zoom, opts.onZoomChange) : null;
 
   if (!rows.length) {
     if (drillNode) nodes.push(drillNode);
+    if (zoomNode) nodes.push(zoomNode);
     nodes.push(emptyStrip("No data in this window."));
     nodes.push(sqlDisclosure(result.sql));
     return nodes;
@@ -164,6 +187,26 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
   const onSelect = opts.onDrill ? (keys) => opts.onDrill(keys && keys.length ? { keys } : null) : null;
 
   if (drillNode) nodes.push(drillNode);
+  if (zoomNode) nodes.push(zoomNode);
+
+  /* Brush-zoom (#1606): available on every time-series viz; the brushed range re-RUNS the panel on that
+     absolute window (bucket resolution + tier routing + the partial-window notice all stay honest). */
+  const onZoom = opts.onZoomChange
+    ? (fromMs, toMs) => opts.onZoomChange({ startIso: new Date(fromMs).toISOString(), endIso: new Date(toMs).toISOString() })
+    : null;
+
+  /* Dual-axis overlay (#1606): an ungrouped line/area with an overlay draws the second measure against its
+     own right-hand axis; the rows carry it as `value2`. */
+  const overlaySeries =
+    panelSpec.overlay && !groupDims.length && (panelSpec.viz === "line" || panelSpec.viz === "area")
+      ? {
+          key: "value2",
+          label: humanize(panelSpec.overlay.measure || "overlay"),
+          color: OVERLAY_COLOR,
+          formatValue: (v) => formatComposedValue(v, panelSpec.overlay.unit || ""),
+          unit: axisUnit(panelSpec.overlay.unit || ""),
+        }
+      : null;
 
   switch (panelSpec.viz) {
     case "line":
@@ -183,6 +226,8 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
           thresholds,
           annotations: annotationLayers(result.annotations, opts.annotationMeta),
           onSelect,
+          series2: overlaySeries,
+          onZoom,
         })
       );
       if (hidden > 0) nodes.push(el("div", { class: "chart-note", text: `+${hidden} more series not shown.` }));
@@ -194,6 +239,22 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
     case "pie":
       nodes.push(renderPieChart({ items: rankedItems(rows, groupDims), formatValue: fmt, onSelect }));
       break;
+    case "scatter": {
+      /* Two-measure scatter (#1606): x = the primary (ranked) value, y = the overlay's value2, one point
+         per group. Formatters/captions follow each measure's own unit. */
+      const overlayUnit = panelSpec.overlay ? panelSpec.overlay.unit || "" : "";
+      nodes.push(
+        renderScatterChart({
+          items: scatterItems(rows, groupDims),
+          formatX: fmt,
+          formatY: (v) => formatComposedValue(v, overlayUnit),
+          unitX: axisUnit(unit),
+          unitY: axisUnit(overlayUnit),
+          onSelect,
+        })
+      );
+      break;
+    }
     case "stat":
       nodes.push(renderScalar(rows, panelSpec, fmt));
       break;
@@ -218,7 +279,8 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
  */
 export function pivotTimeSeries(rows, groupDims, label) {
   if (!groupDims.length) {
-    const points = rows.map((r) => ({ bucket: r.bucket, value: numOrNull(r.value) }));
+    /* value2 (#1606) rides into each point so a dual-axis overlay can read it; absent = undefined = inert. */
+    const points = rows.map((r) => ({ bucket: r.bucket, value: numOrNull(r.value), value2: numOrNull(r.value2) }));
     return { points, series: [{ key: "value", label, color: CATEGORICAL_COLORS[0] }], hidden: 0 };
   }
 
@@ -287,9 +349,21 @@ function comboLabel(row, dims) {
     .join(" / ");
 }
 
-/** The non-`value` columns of a row (the fallback category keys when a ranked result carries no declared group-by). */
+/** The non-`value` columns of a row (the fallback category keys when a ranked result carries no declared group-by).
+ *  `value2` (#1606, the overlay's column) is excluded the same way — it is a measure, never a category. */
 function otherColumns(row) {
-  return row ? Object.keys(row).filter((k) => k !== "value" && k !== "bucket") : [];
+  return row ? Object.keys(row).filter((k) => k !== "value" && k !== "bucket" && k !== "value2") : [];
+}
+
+/** Shape scatter rows (#1606) into charts.js's items[]: x = the primary value, y = the overlay's value2, one
+ *  point per ranked group; `drill` carries the declared group-dimension values exactly like rankedItems. */
+function scatterItems(rows, groupDims) {
+  return rows.map((r) => ({
+    label: groupDims.length ? comboLabel(r, groupDims) : "value",
+    x: numOrNull(r.value),
+    y: numOrNull(r.value2),
+    drill: groupDims.length ? buildDrillKeys(r, groupDims) : null,
+  }));
 }
 
 /* ─────────────────────────── scalar + table renderers ─────────────────────────── */
@@ -452,6 +526,29 @@ function annotationMetaMap() {
  * spec, and — when a pinned dimension is `server` — a jump to that server's existing detail page. Every value is
  * textContent (R4/XSS); the chip is view-state only (the stored definition is never touched).
  */
+/** The dual-axis overlay's FIXED series color (#1606) — the tail of CATEGORICAL_COLORS, so it can never
+ *  collide with the primary series' CATEGORICAL_COLORS[0] on an ungrouped chart. */
+const OVERLAY_COLOR = "#ba68c8";
+
+/**
+ * The transient zoom chip (#1606): the brushed window as local time, plus a clear that re-runs the panel on
+ * its original window. View-state only — the stored definition is never touched (the drill-chip idiom).
+ */
+function zoomChip(zoom, onZoomChange) {
+  const from = new Date(zoom.startIso);
+  const to = new Date(zoom.endIso);
+  const label = isNaN(from.getTime()) || isNaN(to.getTime())
+    ? "custom window"
+    : from.toLocaleString() + " → " + to.toLocaleString();
+  const chip = el("div", { class: "drill-chip zoom-chip" }, [
+    el("span", { class: "drill-label", text: "Zoomed: " + label }),
+  ]);
+  const clear = el("button", { class: "btn small drill-clear", type: "button", title: "Reset zoom", "aria-label": "Reset zoom", text: "×" });
+  clear.addEventListener("click", () => onZoomChange(null));
+  chip.appendChild(clear);
+  return chip;
+}
+
 function drillChip(drill, onDrill) {
   const parts = drill.keys.map((k) => humanize(k.dimension) + " = " + k.value);
   const chip = el("div", { class: "drill-chip" }, [

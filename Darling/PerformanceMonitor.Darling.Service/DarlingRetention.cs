@@ -7,8 +7,10 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -25,9 +27,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// purge via hypertable <c>drop_chunks</c> instead, which detaches whole expired chunks in O(1)
 /// instead of scanning rows. collection_log — a hypertable since V23, though converted directly by the
 /// V23 migration rather than the catalog loop — purges the SAME way (drop_chunks with a DELETE fallback for
-/// a plain-PostgreSQL store). config_alert_log stays DELETE-based either way (never converted — a plain
-/// config-side registry table), as do the analysis tables (PgFindingStore.CleanupOldFindingsAsync owns
-/// those). Retention horizons are the shared
+/// a plain-PostgreSQL store). config_alert_log and config.config_command stay DELETE-based either way
+/// (never converted — plain config-side registry tables), as do the analysis tables
+/// (PgFindingStore.CleanupOldFindingsAsync owns those). Retention horizons are the shared
 /// per-collector <see cref="CollectorScheduleDefaults"/> (identity-pinned to Lite's
 /// ScheduleManager table), so both SKUs keep the same data horizons out of the box. NOTE: Lite
 /// archives expired rows to parquet before deleting (ArchiveService); Darling deliberately
@@ -72,6 +74,28 @@ public static class DarlingRetention
     /// </summary>
     internal const int AlertHistoryRetentionDays = 90;
 
+    /// <summary>
+    /// config.config_command (the imperative command queue the Viewer/MCP/CLI enqueue into and the service
+    /// executes) keeps its TERMINAL rows this long. Unlike config_alert_log this is not an audit surface
+    /// anyone reads — nothing in the viewer or the MCP tools queries command HISTORY; a caller polls its own
+    /// command_id for a terminal result and moves on — so the retained rows exist purely for post-hoc "what did
+    /// the service actually do" forensics, which is worth exactly as long as the metric data they would be
+    /// correlated against (<see cref="DataRetentionBaseDays"/>). It is also higher-volume than alert history:
+    /// every viewer live-plan / actual-plan / active-queries fetch enqueues a row, which is why it gets the
+    /// base window rather than the alert log's generous 90 days.
+    /// </summary>
+    internal const int CommandHistoryRetentionDays = DataRetentionBaseDays;
+
+    /// <summary>
+    /// The terminal-status filter for the command purge — the two states
+    /// <c>ViewerDataService.IsTerminal</c> recognizes, which are also the only two
+    /// <c>DarlingCommandExecutor</c> ever writes (its report path and its stale-command reaper). A
+    /// <c>pending</c> or <c>in_progress</c> row is NEVER purged no matter how old: deleting a live command
+    /// would strand the caller polling it, and an ancient pending row means an operator queued something the
+    /// service has not run yet — the reaper's job, not retention's.
+    /// </summary>
+    internal const string TerminalCommandStatuses = "status IN ('succeeded', 'failed')";
+
     /* Each one-day slice is bounded work (see TimeSlicedDeleteSql); the generous 300s per-slice command
        timeout (well above Npgsql's 30s default) is belt-and-suspenders for a slow disk. Slicing is also what
        keeps a large first purge from ever hitting a timeout at all — a single unbounded DELETE could roll
@@ -80,8 +104,9 @@ public static class DarlingRetention
 
     /// <summary>
     /// Purges every collector table past its shared <see cref="CollectorScheduleDefaults"/>
-    /// RetentionDays, plus collection_log past <see cref="CollectionLogRetentionDays"/> and
-    /// config_alert_log past <see cref="AlertHistoryRetentionDays"/>.
+    /// RetentionDays, plus collection_log past <see cref="CollectionLogRetentionDays"/>,
+    /// config_alert_log past <see cref="AlertHistoryRetentionDays"/>, and terminal
+    /// config.config_command rows past <see cref="CommandHistoryRetentionDays"/>.
     /// When <paramref name="timescaleAvailable"/> (the worker's startup detection), the
     /// collector tables purge via <c>drop_chunks</c> (<see cref="DropChunksSqlFor"/>) with a
     /// per-table DELETE fallback so a table that failed hypertable conversion still honors its
@@ -134,6 +159,30 @@ public static class DarlingRetention
                    DELETE the entire table. Never purge with a horizon under 1 day. */
                 var retentionDays = Math.Max(1, retentionDaysFor?.Invoke(definition.Name) ?? schedule.RetentionDays);
 
+                /* #1784: this sweep and the tiered retention POLICY drop the same chunks, but only the policy
+                   was coverage-gated. On a store where the #1680 gate is deliberately holding that policy —
+                   because the rollup does not reach back over raw's history — this path dropped those very
+                   chunks at the catalog horizon anyway, destroying exactly the uncovered history the gate
+                   exists to protect. The gate was not bypassed by a bug in the gate; it was bypassed by an
+                   older path that never learned the invariant.
+
+                   So the same predicate now guards both. It is binary rather than a clamped cutoff because
+                   drop_chunks can only remove the OLDEST chunks, and when coverage lags those ARE the
+                   uncovered ones — there is no cutoff that drops the covered tail while sparing the uncovered
+                   head. NOT an outright exclusion of tiered tables either: the moment coverage reaches back,
+                   the normal horizon applies again, so a never-armed policy cannot mean unbounded growth. */
+                if (timescaleAvailable && !await IsTieredDropSafeAsync(postgres, definition.TargetTable, logger, cancellationToken))
+                {
+                    logger?.LogWarning(
+                        "Retention purge SKIPPED for {Table}: its rollup does not yet cover the oldest rows, so dropping would delete history no aggregate holds. Resumes by itself once a backfill extends coverage.",
+                        definition.TargetTable);
+
+                    /* Those rows are still there past their horizon — which is fine for the dimension GC
+                       below (#1795): its cutoff is MEASURED from the oldest surviving digest-carrying fact
+                       row, so held history bounds the GC instead of deferring it. */
+                    continue;
+                }
+
                 if (timescaleAvailable)
                 {
                     var dropped = await DropChunksOneAsync(
@@ -162,6 +211,162 @@ public static class DarlingRetention
                 else
                 {
                     tablesFailed++;
+
+                    /* Both paths failed for this table, so its rows are still there past their horizon.
+                       The dimension GC below stays safe anyway (#1795): its cutoff is measured from the
+                       oldest surviving digest-carrying fact row, which those rows ARE. */
+                }
+            }
+
+            /* #1767 payload dimensions. query_text_dim / query_plan_dim are plain tables holding one copy
+               of each distinct query text / plan XML; the fact rows carry only a digest. They must be
+               bounded or they re-create the very problem they solve — ~23 MB/hour of distinct plans on the
+               measured field instance is ~200 GB/year if nothing ever expires.
+
+               The obvious sweep (delete dim rows no live fact references) is an anti-join against two
+               hypertables per dim row and is not affordable at this size. Instead the write path stamps
+               last_seen on every cycle that references a digest, so last_seen is never older than the newest
+               fact row pointing at it, and the GC is an index range scan on last_seen — run through the SAME
+               time-sliced DELETE every sibling purge uses, rather than one unbounded statement. That matters
+               most on the FIRST sweep after an upgrade, which is the one with a whole retention window of
+               expired content to clear: unsliced, that is a single transaction holding a lock and generating
+               WAL proportional to the entire backlog, which is exactly what the slicing exists to bound.
+
+               The horizon is the WIDEST effective fact retention of the two tables — resolved through the
+               same resolver the fact purge above uses, so a raised per-collector override can never outlive
+               the dims and orphan a reader — plus a margin covering the two ways a fact can outlive its
+               nominal horizon: drop_chunks only drops a chunk once its WHOLE range is past the cutoff (up to
+               one ChunkIntervalDays of extra rows), and the upsert refreshes last_seen at most hourly. */
+            var widestFactRetentionDays = 1;
+            foreach (var definition in CollectorCatalog.All)
+            {
+                if (PayloadDimensions.ForTable(definition.TargetTable).Count == 0)
+                {
+                    continue;
+                }
+
+                var factRetentionDays = Math.Max(1, retentionDaysFor?.Invoke(definition.Name)
+                    ?? (CollectorScheduleDefaults.All.TryGetValue(definition.Name, out var dimSchedule)
+                        ? dimSchedule.RetentionDays
+                        : 1));
+                widestFactRetentionDays = Math.Max(widestFactRetentionDays, factRetentionDays);
+            }
+
+            /* That assumed cutoff embeds one assumption: facts older than their retention are GONE. Two
+               legitimate mechanisms break it — a dim-feeding table whose purge FAILED (#1782), and one the
+               coverage clamp above deliberately SKIPPED (#1784). The old response deferred the whole GC
+               whenever either happened, which was correct but blunt: on a coverage-lagging store the clamp
+               holds every sweep until a backfill lands, so the GC deferred every sweep and a 400-day-old
+               orphan survived with nothing failed anywhere (#1795).
+
+               The true safety boundary is MEASURED instead: content older than the oldest SURVIVING
+               digest-carrying fact row cannot be referenced by anything, whatever the reason those facts
+               are still there. Measure each dim-feeding table's floor once per sweep, take the MINIMUM
+               across tables (same reasoning as the widest retention above), and clamp the assumed cutoff
+               to it. The blunt guard becomes unnecessary rather than dormant: a store whose purges are
+               blocked for weeks still reclaims dimension content for queries that stopped running long
+               before, and held history bounds the GC instead of stopping it.
+
+               HOW the floor is measured differs by store shape (#1815, from the first field run):
+               - On a HYPERTABLE, the floor is the oldest surviving chunk's range_start, read from the
+                 chunk catalog — one instant metadata row, immune to compression. The exact per-row probe
+                 shipped first and timed out in the field: compressed chunks carry NO btree indexes, so
+                 the V39 partial index only serves uncompressed chunks and months of compressed history
+                 turned min() into a full decompress-scan. The chunk floor is CONSERVATIVE in the safe
+                 direction — every surviving fact row sits at or above its chunk's range_start, so the
+                 cutoff can only land older than strictly necessary: prunes less, never dangles. The
+                 ancient-orphan pathology #1795 targeted still dies (those sit far below any surviving
+                 chunk), and precision improves automatically as purges/backfill advance the chunk floor.
+               - On a PLAIN table (a plain-PostgreSQL store, or a table whose hypertable conversion
+                 failed — the catalog answers empty either way), the exact V39-indexed probe runs as
+                 designed — small, uncompressed, index-edge — now with the sweep's own generous command
+                 timeout instead of the driver's 30-second default that cancelled it in the field.
+
+               A floor that cannot be MEASURED (the table missing/renamed/unreachable) is unchanged: the
+               safety boundary is then unknown, so the GC defers for the cycle — fail toward the
+               recoverable side, exactly as the old guard did. Bounded growth beats silently dangled
+               digests. */
+            DateTime? oldestSurvivingDigestFact = null;
+            var floorUnmeasurable = false;
+            foreach (var (factTable, digestPredicate) in PayloadDimensions.DigestPredicateByTable)
+            {
+                try
+                {
+                    await using var floorConnection = await postgres.OpenConnectionAsync(cancellationToken);
+
+                    DateTime? floor = null;
+                    if (timescaleAvailable)
+                    {
+                        /* AT TIME ZONE 'UTC' collapses the catalog's timestamptz to the naive-UTC
+                           discipline every stored timestamp follows (see PgCollectorRowWriter). */
+                        await using var chunkProbe = new NpgsqlCommand(
+                            "SELECT range_start AT TIME ZONE 'UTC' FROM timescaledb_information.chunks " +
+                            "WHERE hypertable_schema = 'collect' AND hypertable_name = $1 " +
+                            "ORDER BY range_start LIMIT 1", floorConnection)
+                        { CommandTimeout = DeleteTimeoutSeconds };
+                        chunkProbe.Parameters.AddWithValue(factTable);
+                        if (await chunkProbe.ExecuteScalarAsync(cancellationToken) is DateTime chunkFloor)
+                        {
+                            floor = chunkFloor;
+                        }
+                    }
+
+                    if (floor is null)
+                    {
+                        /* Plain table, failed conversion, or an empty hypertable (no chunks) — all of
+                           which the exact probe answers instantly or via the V39 partial index. */
+                        await using var probe = new NpgsqlCommand(
+                            $"SELECT min({PrefixTimeColumn(factTable)}) FROM {factTable} WHERE {digestPredicate}", floorConnection)
+                        { CommandTimeout = DeleteTimeoutSeconds };
+                        floor = await probe.ExecuteScalarAsync(cancellationToken) as DateTime?;
+                    }
+
+                    if (floor is DateTime floorTime
+                        && (oldestSurvivingDigestFact is null || floorTime < oldestSurvivingDigestFact.Value))
+                    {
+                        oldestSurvivingDigestFact = floorTime;
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    floorUnmeasurable = true;
+                    logger?.LogWarning("Retention purge: could not measure {Table}'s digest-carrying fact floor: {Message}",
+                        factTable, ex.Message);
+                }
+            }
+
+            if (floorUnmeasurable)
+            {
+                /* One line, deliberately a fixed string never interpolated: the field signature an operator
+                   greps for when the dimensions stop shrinking. The per-table warning above names which
+                   table and why. */
+                logger?.LogWarning("dimension GC deferred: a dim-feeding table's fact floor was unmeasurable this cycle; dimension content is retained until it can be measured");
+            }
+            else
+            {
+                var dimensionCutoff = ComputeDimensionCutoff(utcNow, widestFactRetentionDays, oldestSurvivingDigestFact);
+                if (dimensionCutoff < utcNow.AddDays(-(widestFactRetentionDays + TimescaleSupport.ChunkIntervalDays + 1)))
+                {
+                    /* Fixed string, same reasoning as the defer line: the greppable signature of a store
+                       whose GC is bounded by held history (clamped or failed purges) rather than by the
+                       nominal horizon. Informational — this state is the fix working, not a problem. */
+                    logger?.LogInformation("dimension GC bounded by surviving facts: dimension content newer than the oldest digest-carrying fact row is retained");
+                }
+
+                foreach (var dimTable in PayloadDimensions.DimTables)
+                {
+                    var dimDeleted = await PurgeOneAsync(
+                        postgres, dimTable, TimeSlicedDeleteSql(dimTable, PayloadDimensions.LastSeenColumn),
+                        dimensionCutoff, logger, cancellationToken);
+                    if (dimDeleted is not null)
+                    {
+                        tablesPurged++;
+                        totalRowsDeleted += dimDeleted.Value;
+                    }
+                    else
+                    {
+                        tablesFailed++;
+                    }
                 }
             }
 
@@ -216,6 +421,33 @@ public static class DarlingRetention
             {
                 tablesPurged++;
                 totalRowsDeleted += alertLogDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
+            /* config.config_command (the imperative command queue) — the backstop the viewer's per-command
+               cleanup already ASSUMED existed ("the service-side purge is the backstop",
+               ViewerDataService.RunTestConnectAsync) but which nothing implemented (#1651). The viewer deletes
+               its own row for exactly four self-cleaning flows, best-effort with the exception swallowed; every
+               other command type (pause/resume, snapshot_now, analyze_now, purge_now, the enable/firewall
+               verbs, collector toggles, anything from MCP or the CLI) left a terminal row and its result_json
+               behind forever, as did those four whenever the delete failed or the viewer died mid-poll.
+               SCHEMA-QUALIFIED deliberately: unlike collection_log / config_alert_log (created bare, so they
+               live in `collect` under search_path = collect, config, public), this table really is in `config`,
+               and a bare name here would resolve to a nonexistent collect.config_command — a purge that fails
+               every night into a warning nobody reads. Keyed on created_at (NOT NULL, so no row can slip past
+               the horizon by never being stamped) and filtered to terminal rows, never a live command.
+               Failure-isolated like every sibling. */
+            var commandsDeleted = await PurgeOneAsync(
+                postgres, "config.config_command",
+                TimeSlicedDeleteSql("config.config_command", "created_at", TerminalCommandStatuses),
+                utcNow.AddDays(-CommandHistoryRetentionDays), logger, cancellationToken);
+            if (commandsDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += commandsDeleted.Value;
             }
             else
             {
@@ -303,11 +535,54 @@ public static class DarlingRetention
     /// <c>drop_chunks</c> failed — where compressed chunks are LIKELY, which is what makes the
     /// compressed-safe shape load-bearing. <c>$1</c> is bound once and referenced by all three positions.
     /// Table/column come from catalog constants (never user input), so interpolation is safe.</para>
+    /// <para><paramref name="extraPredicate"/> narrows WHICH rows are eligible — currently only
+    /// <see cref="TerminalCommandStatuses"/>, so the command purge cannot touch a live command. It is
+    /// applied to the DELETE <b>and to both <c>min()</c> subqueries</b>, which is load-bearing, not cosmetic:
+    /// with the predicate on the DELETE alone, a slice anchored on an INELIGIBLE row's timestamp would
+    /// delete zero rows, and the drain loop's "a slice that clears nothing means we are done" termination
+    /// would stop the purge with older eligible rows still in the table. Like the table and column it is a
+    /// compile-time constant, never user input.</para>
     /// </summary>
-    internal static string TimeSlicedDeleteSql(string table, string timeColumn)
-        => $"DELETE FROM {table} WHERE {timeColumn} < $1"
-         + $" AND {timeColumn} >= (SELECT min({timeColumn}) FROM {table} WHERE {timeColumn} < $1)"
-         + $" AND {timeColumn} < (SELECT min({timeColumn}) FROM {table} WHERE {timeColumn} < $1) + INTERVAL '{TimescaleSupport.ChunkIntervalDays} days'";
+    internal static string TimeSlicedDeleteSql(string table, string timeColumn, string? extraPredicate = null)
+    {
+        var and = extraPredicate is null ? string.Empty : $" AND {extraPredicate}";
+        var expired = $"{timeColumn} < $1{and}";
+
+        return $"DELETE FROM {table} WHERE {expired}"
+             + $" AND {timeColumn} >= (SELECT min({timeColumn}) FROM {table} WHERE {expired})"
+             + $" AND {timeColumn} < (SELECT min({timeColumn}) FROM {table} WHERE {expired}) + INTERVAL '{TimescaleSupport.ChunkIntervalDays} days'";
+    }
+
+    /// <summary>
+    /// The dimension GC's cutoff (#1795): the ASSUMED horizon (widest dim-feeding fact retention +
+    /// <see cref="TimescaleSupport.ChunkIntervalDays"/> drop_chunks granularity + 1 day for the hourly
+    /// <c>last_seen</c> refresh guard), CLAMPED to one day before the oldest surviving digest-carrying
+    /// fact row when that measured floor reaches further back — held history bounds the GC instead of
+    /// deferring it. The measured side carries the SAME one-day margin, for the same reason: a dim row's
+    /// <c>last_seen</c> can trail its newest referencing fact by up to the hourly refresh guard, so
+    /// pruning right AT the floor could take content the floor row still references. A null floor (no
+    /// digest-carrying facts anywhere — a fresh or fully-aged store) leaves the assumed horizon alone:
+    /// with no facts, nothing can dangle, and last_seen still bounds what is old enough to take.
+    /// </summary>
+    internal static DateTime ComputeDimensionCutoff(DateTime utcNow, int widestFactRetentionDays, DateTime? oldestSurvivingDigestFact)
+    {
+        var assumed = utcNow.AddDays(-(widestFactRetentionDays + TimescaleSupport.ChunkIntervalDays + 1));
+        if (oldestSurvivingDigestFact is null)
+        {
+            return assumed;
+        }
+
+        var measured = oldestSurvivingDigestFact.Value.AddDays(-1);
+        return measured < assumed ? measured : assumed;
+    }
+
+    /// <summary>
+    /// The prefix time column of a dim-feeding fact table, resolved from the catalog so the floor probe
+    /// can never disagree with the table's actual schema (both current dim-feeding tables use
+    /// <c>collection_time</c>; the resolver keeps that true by construction rather than by assertion).
+    /// </summary>
+    private static string PrefixTimeColumn(string factTable) =>
+        CollectorCatalog.All.First(c => string.Equals(c.TargetTable, factTable, StringComparison.Ordinal)).PrefixTimeColumnName;
 
     /// <summary>
     /// The Timescale purge statement for one collector table — <c>drop_chunks</c> detaches every
@@ -364,6 +639,44 @@ public static class DarlingRetention
             logger?.LogWarning("Retention purge (drop_chunks) failed for {Table} — falling back to DELETE: {Message}",
                 tableName, ex.Message);
             return null;
+        }
+    }
+
+    /// <summary>
+    /// May this table's expired chunks be dropped, per the #1680 coverage gate (#1784)? Delegates to
+    /// <see cref="TimescaleSupport.IsRawTierDropSafeAsync"/> so the sweep and the tiered policy cannot judge
+    /// the same drop differently; non-tiered tables are always safe.
+    ///
+    /// <para>A connection failure answers "not safe" — for a DROP the fail-closed direction is to leave the
+    /// data alone and re-judge next cycle, which is the same instinct the gate itself follows. That does mean
+    /// a store that cannot reach its own catalogs stops purging these three tables; the skip is logged every
+    /// cycle, and the alternative is deleting history on a guess.</para>
+    /// </summary>
+    private static async Task<bool> IsTieredDropSafeAsync(
+        NpgsqlDataSource postgres,
+        string tableName,
+        ILogger? logger,
+        CancellationToken cancellationToken)
+    {
+        /* Membership first: the sweep calls this for EVERY catalog table, and only the three raw tiers are
+           gated. Opening a pooled connection just to have the predicate return true for the other thirty is
+           avoidable work on a path that already runs per table per day. */
+        if (!TimescaleSupport.IsCoverageGatedRelation(tableName))
+        {
+            return true;
+        }
+
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            return await TimescaleSupport.IsRawTierDropSafeAsync(connection, tableName, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "Could not establish rollup coverage for {Table} ({Message}) — skipping its drop this cycle rather than deleting history on an assumption.",
+                tableName, ex.Message);
+            return false;
         }
     }
 
