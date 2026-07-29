@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **CI: the version-bump check survives the deprecated/ layout transition** ([#1821]) - the check compares the PR's Dashboard.csproj version against MAIN's copy, but read main's copy only at the NEW deprecated/ path - which does not exist on main until the v3.3.0 promotion itself lands, so the release PR failed the check on a path error rather than a version verdict. The main-side read now falls back to the pre-move location; removable once main carries the new layout.
 
+### Fixed
+
+- **Darling installs re-homed to a domain account or gMSA survive upgrades and get correct remediation text** ([#1823], also [#1802]) - with `"auth": "integrated"` the service connects to monitored servers as its Log On account, and operators change that account for exactly that reason - but two paths still assumed the default virtual account. `install-darling.ps1`'s upgrade path preserves a custom Log On account, then rebuilt `darling.json`'s DACL around `NT SERVICE\PerformanceMonitor Darling` anyway, stripping the operator's grant and locking the re-homed service out of its own config on the next start; the hardening (and its printed `icacls` hint) now targets the account the service actually runs as. The service's own ACL-failure log lines had the same defect baked into their remediation - an `icacls /grant` naming the virtual account, which on a re-homed install is a fix that cannot work - and now name the running identity. The Darling README also gains the full account-switch runbook that previously lived only in an issue answer: Services.msc/`sc config` routes (gMSA included), the Windows-login grants, the one-time file re-grant that bites everyone who skips it, and the caveat that `--test-connection` runs as the console user, not the service account.
+
 ## [3.3.0] - 2026-07-29
 
 ### Important
@@ -1944,3 +1948,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#1806]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1806
 [#1758]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1758
 [#1807]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1807
+[#1802]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1802
+[#1823]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1823
