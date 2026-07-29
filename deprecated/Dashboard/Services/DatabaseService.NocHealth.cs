@@ -930,14 +930,20 @@ namespace PerformanceMonitorDashboard.Services
             // its SQL Agent program_name ('SQLAgent - TSQL JobStep (Job 0x<job_id> : Step N)'). This is CDC-specific
             // and never hides unrelated Agent jobs. The msdb reference is deferred through sp_executesql inside
             // TRY/CATCH so a login without msdb access gets a *catchable* error (not an uncatchable cross-db 916) and
-            // cleanly falls back to a text match on the whole batch/object text.
+            // cleanly falls back to a text match on the whole batch/object text. The OBJECT_ID pre-guard exists
+            // because cdc_jobs is created lazily on first CDC configuration and TRY/CATCH suppresses the failure,
+            // not the server-side error_reported EVENT - without it, every no-CDC server fed fleet error monitoring
+            // a once-per-cycle "Invalid object name" (mirrors the shared QuerySnapshotsCollector).
             string cdcSetup = excludeCdc ? @"
                 DECLARE @cdc_capture_jobs TABLE (job_id uniqueidentifier PRIMARY KEY);
                 DECLARE @cdc_readable bit = 0;
                 BEGIN TRY
-                    INSERT @cdc_capture_jobs (job_id)
-                    EXEC sys.sp_executesql N'SELECT cj.job_id FROM msdb.dbo.cdc_jobs AS cj WHERE cj.job_type = N''capture'';';
-                    SET @cdc_readable = 1;
+                    IF OBJECT_ID(N'msdb.dbo.cdc_jobs') IS NOT NULL
+                    BEGIN
+                        INSERT @cdc_capture_jobs (job_id)
+                        EXEC sys.sp_executesql N'SELECT cj.job_id FROM msdb.dbo.cdc_jobs AS cj WHERE cj.job_type = N''capture'';';
+                        SET @cdc_readable = 1;
+                    END;
                 END TRY
                 BEGIN CATCH
                     SET @cdc_readable = 0;
