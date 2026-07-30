@@ -64,11 +64,11 @@
                 <ComboBoxItem Content="Balanced"/>
                 <ComboBoxItem Content="Low-Impact"/>
             </ComboBox>
-            <Button x:Name="ResetDefaultsButton" Content="Reset to Defaults" Margin="16,0,0,0" Click="ResetDefaults_Click"
+            <Button x:Name="ResetDefaultsButton" Content="_Reset to Defaults" Margin="16,0,0,0" Click="ResetDefaults_Click"
                     ToolTip="Replace the current values with the built-in default frequencies and retention"/>
             <TextBlock Text="Copy from:" VerticalAlignment="Center" Margin="20,0,8,0"/>
             <ComboBox x:Name="CopyFromServerCombo" Width="180" VerticalAlignment="Center"/>
-            <Button x:Name="CopyFromServerButton" Content="Copy" Margin="8,0,0,0" Click="CopyFromServer_Click"
+            <Button x:Name="CopyFromServerButton" Content="Cop_y" Margin="8,0,0,0" Click="CopyFromServer_Click"
                     ToolTip="Replace these values with a copy of another server's effective schedule"/>
         </StackPanel>
 
@@ -94,12 +94,12 @@
             <!-- Fleet-scale bulk reset: clears every server's per-server override in one write so they all fall
                  back to the fleet-wide default (the shortcut over reverting servers one at a time). Confirmed +
                  applied immediately, separate from the per-scope Save. -->
-            <Button x:Name="ApplyDefaultToAllButton" DockPanel.Dock="Left" Content="Apply Default to All Servers"
+            <Button x:Name="ApplyDefaultToAllButton" DockPanel.Dock="Left" Content="_Apply Default to All Servers"
                     Click="ApplyDefaultToAll_Click" MinWidth="80"
                     ToolTip="Remove every server's custom schedule so they all follow the fleet-wide default"/>
             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-                <Button x:Name="SaveButton" Content="Save" Click="SaveButton_Click" Margin="0,0,8,0" MinWidth="80"/>
-                <Button Content="Cancel" Click="CancelButton_Click" MinWidth="80"/>
+                <Button x:Name="SaveButton" Content="_Save" Click="SaveButton_Click" Margin="0,0,8,0" MinWidth="80"/>
+                <Button Content="_Cancel" Click="CancelButton_Click" MinWidth="80" IsCancel="True"/>
             </StackPanel>
         </DockPanel>
     </Grid>

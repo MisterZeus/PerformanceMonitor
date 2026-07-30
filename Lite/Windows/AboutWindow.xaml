@@ -47,7 +47,7 @@
                 </Hyperlink>
             </TextBlock>
             <StackPanel Orientation="Horizontal" Margin="0,4,0,5">
-                <Button Content="Check for Updates" Click="CheckUpdatesLink_Click" Padding="10,4" FontSize="12"/>
+                <Button Content="Check for _Updates" Click="CheckUpdatesLink_Click" Padding="10,4" FontSize="12"/>
                 <TextBlock x:Name="UpdateStatusText" FontSize="11" VerticalAlignment="Center" Margin="8,0,0,0"
                            Foreground="{DynamicResource ForegroundMutedBrush}" Visibility="Collapsed"/>
             </StackPanel>
@@ -58,7 +58,7 @@
             </TextBlock>
         </StackPanel>
 
-        <Button Grid.Row="5" Content="Close" Click="CloseButton_Click"
+        <Button Grid.Row="5" Content="_Close" Click="CloseButton_Click" IsCancel="True"
                 HorizontalAlignment="Right" Padding="16,4"/>
     </Grid>
 </Window>

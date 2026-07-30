@@ -139,12 +139,12 @@
 
         <!-- Buttons -->
         <StackPanel Grid.Row="7" Orientation="Horizontal" HorizontalAlignment="Right">
-            <Button x:Name="TestAllButton" Content="Test All" Height="30" MinWidth="90" Click="TestAllButton_Click" Margin="0,0,8,0"
+            <Button x:Name="TestAllButton" Content="_Test All" Height="30" MinWidth="90" Click="TestAllButton_Click" Margin="0,0,8,0"
                     ToolTip="Ask each server to answer a connection probe with the shared credentials. Informational only — no server is added."/>
-            <Button x:Name="CancelTestButton" Content="Cancel Test" Height="30" MinWidth="90" Click="CancelTestButton_Click"
+            <Button x:Name="CancelTestButton" Content="Cancel Te_st" Height="30" MinWidth="90" Click="CancelTestButton_Click"
                     Visibility="Collapsed" Margin="0,0,8,0"/>
-            <Button x:Name="AddButton" Content="Add" Width="90" Height="30" Click="AddButton_Click" Style="{StaticResource AccentButton}" Margin="0,0,8,0"/>
-            <Button Content="Cancel" Width="80" Height="30" Click="CancelButton_Click" IsCancel="True"/>
+            <Button x:Name="AddButton" Content="_Add" Width="90" Height="30" Click="AddButton_Click" Style="{StaticResource AccentButton}" Margin="0,0,8,0"/>
+            <Button Content="_Cancel" Width="80" Height="30" Click="CancelButton_Click" IsCancel="True"/>
         </StackPanel>
     </Grid>
 </Window>
