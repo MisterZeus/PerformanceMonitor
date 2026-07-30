@@ -91,7 +91,24 @@ public sealed partial class ViewerDataService
         ORDER BY collection_time
         """;
 
-    /// <summary>Query Store duration trend: execution_count·avg_duration_us → ms/sec + executions/sec.</summary>
+    /// <summary>
+    /// Query Store duration trend: execution_count·avg_duration_us → ms/sec + executions/sec.
+    ///
+    /// <para>KNOWN OVERSTATEMENT, deliberately still here (#1841 tier 2), and the one Query Store
+    /// aggregate the per-interval dedup was NOT applied to. The three trends above sum per-cycle DELTA
+    /// columns; Query Store has none, so its cumulative per-interval snapshots — re-fetched every cycle
+    /// while the interval stays open — make an interval that reached 40 executions charge 10, then 25,
+    /// then 40 to three successive points, overstating the area under the curve.</para>
+    ///
+    /// <para>Deduping to the latest snapshot per interval fixes the magnitude but destroys the series:
+    /// it keeps ONE row per interval, at the collection where that interval closed, and Query Store's
+    /// default INTERVAL_LENGTH_MINUTES is 60 against a 5-minute cadence — so every query's twelve
+    /// snapshots collapse onto one collection_time (Query Store interval boundaries are globally
+    /// aligned, so they collapse together) and a 1-hour window renders a SINGLE point, valued 0 because
+    /// the LAG has no predecessor. Placing the work when it actually ran needs first_execution_time,
+    /// which is the monitored server's LOCAL wall clock while this axis is UTC — trading a magnitude
+    /// bug for a timezone bug. Tier 2 owns both halves. Mirrors Lite's GetQueryStoreDurationTrendAsync.</para>
+    /// </summary>
     public const string QueryStoreDurationTrendSql = """
         WITH raw AS
         (

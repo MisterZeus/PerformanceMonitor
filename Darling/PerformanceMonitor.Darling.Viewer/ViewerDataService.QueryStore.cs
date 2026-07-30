@@ -113,7 +113,33 @@ public sealed partial class ViewerDataService
     /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 top.
     /// </summary>
     public const string QueryStoreTopSql = """
-        WITH ranked AS (
+        WITH deduped AS (
+            /* LOAD-BEARING (correctness, not just perf) — #1841. query_store_stats rows are CUMULATIVE
+               per-Query-Store-interval snapshots, and the collector re-fetches the OPEN interval every
+               cycle as its last_execution_time advances, so the SAME interval (same first_execution_time)
+               is stored repeatedly with a growing execution_count. SUM(execution_count) over the raw rows
+               reports 10 + 25 + 40 for an interval that reached 40, and AVG(avg_*) becomes an avg-of-avgs
+               weighted by how many times each interval happened to be re-collected. Keep the LATEST
+               snapshot per interval. Matches the dedup convention in PgFactCollector.QueryPerf and
+               PgDrillDownCollector.Queries, and Lite's GetQueryStoreTopQueriesAsync.
+
+               replica_role and execution_type_desc are in the partition because the aggregate below is
+               grouped (or MAXed) on them: the dedup key must be at least as fine as the read's own row
+               identity, or dedup would silently drop a row the grid must show rather than de-duplicate one. */
+            SELECT
+                *,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc, replica_role
+                    ORDER BY collection_time DESC
+                ) AS rn
+            FROM query_store_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        ),
+        ranked AS (
             SELECT
                 database_name,
                 query_id,
@@ -173,11 +199,8 @@ public sealed partial class ViewerDataService
                 AVG(CAST(avg_num_physical_io_reads AS double precision)) AS avg_num_physical_io_reads,
                 MIN(CAST(min_num_physical_io_reads AS double precision)) AS min_num_physical_io_reads,
                 MAX(CAST(max_num_physical_io_reads AS double precision)) AS max_num_physical_io_reads
-            FROM query_store_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            FROM deduped
+            WHERE rn = 1
             GROUP BY database_name, query_id, plan_id, query_hash, replica_role
             ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC
             LIMIT $4 + 5
@@ -337,12 +360,59 @@ public sealed partial class ViewerDataService
     /// $1 server_id, $2/$3 current window, $4/$5 baseline window (naive UTC).
     /// </summary>
     public const string QueryStoreComparisonSql = """
-        WITH top_current AS (
-            SELECT database_name, query_hash
+        WITH deduped_current AS (
+            /* LOAD-BEARING (correctness, not just perf) — #1841. The rows are CUMULATIVE per-interval
+               snapshots and the collector re-fetches the OPEN interval every cycle, so the SAME interval
+               (same first_execution_time) is stored repeatedly with a growing execution_count. Keep the
+               LATEST snapshot per interval before aggregating.
+
+               The execution-count weighting below does NOT rescue this on its own: the repeated snapshots
+               of one interval carry DIFFERENT (growing) weights AND different avg_* values, so an open
+               interval is weighted by the triangular sum of its own growth. That bias is stronger in the
+               recent window than in the baseline window (recent windows hold more still-open intervals),
+               which skews the very delta this comparison exists to compute. One deduped CTE per window,
+               so both arms are treated identically. */
+            SELECT
+                database_name,
+                query_hash,
+                query_text,
+                execution_count,
+                avg_duration_us,
+                avg_cpu_time_us,
+                avg_logical_io_reads,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc, replica_role
+                    ORDER BY collection_time DESC
+                ) AS rn
             FROM query_store_stats
             WHERE server_id = $1
             AND   collection_time >= $2 AND collection_time <= $3
             AND   ($6::text[] IS NULL OR database_name = ANY($6))
+        ),
+        deduped_baseline AS (
+            SELECT
+                database_name,
+                query_hash,
+                query_text,
+                execution_count,
+                avg_duration_us,
+                avg_cpu_time_us,
+                avg_logical_io_reads,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc, replica_role
+                    ORDER BY collection_time DESC
+                ) AS rn
+            FROM query_store_stats
+            WHERE server_id = $1
+            AND   collection_time >= $4 AND collection_time <= $5
+            AND   ($6::text[] IS NULL OR database_name = ANY($6))
+        ),
+        top_current AS (
+            SELECT database_name, query_hash
+            FROM deduped_current
+            WHERE rn = 1
             AND   execution_count > 0
             GROUP BY database_name, query_hash
             ORDER BY SUM(execution_count) DESC
@@ -350,10 +420,8 @@ public sealed partial class ViewerDataService
         ),
         top_baseline AS (
             SELECT database_name, query_hash
-            FROM query_store_stats
-            WHERE server_id = $1
-            AND   collection_time >= $4 AND collection_time <= $5
-            AND   ($6::text[] IS NULL OR database_name = ANY($6))
+            FROM deduped_baseline
+            WHERE rn = 1
             AND   execution_count > 0
             GROUP BY database_name, query_hash
             ORDER BY SUM(execution_count) DESC
@@ -375,11 +443,10 @@ public sealed partial class ViewerDataService
                    SUM(qs.execution_count * qs.avg_logical_io_reads::double precision) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads,
                    MAX(qs.query_text) AS query_text
             FROM top_hashes th
-            INNER JOIN query_store_stats qs
+            INNER JOIN deduped_current qs
               ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
               AND qs.database_name IS NOT DISTINCT FROM th.database_name
-            WHERE qs.server_id = $1
-            AND   qs.collection_time >= $2 AND qs.collection_time <= $3
+            WHERE qs.rn = 1
             AND   qs.execution_count > 0
             GROUP BY th.database_name, th.query_hash
         ),
@@ -391,11 +458,10 @@ public sealed partial class ViewerDataService
                    SUM(qs.execution_count * qs.avg_logical_io_reads::double precision) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads,
                    MAX(qs.query_text) AS query_text
             FROM top_hashes th
-            INNER JOIN query_store_stats qs
+            INNER JOIN deduped_baseline qs
               ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
               AND qs.database_name IS NOT DISTINCT FROM th.database_name
-            WHERE qs.server_id = $1
-            AND   qs.collection_time >= $4 AND qs.collection_time <= $5
+            WHERE qs.rn = 1
             AND   qs.execution_count > 0
             GROUP BY th.database_name, th.query_hash
         )
@@ -456,6 +522,40 @@ public sealed partial class ViewerDataService
     /// $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
     public const string QueryStoreSlicerSql = """
+        WITH deduped AS (
+            /* LOAD-BEARING (correctness, not just perf) — #1841. The rows are CUMULATIVE per-interval
+               snapshots and the collector re-fetches the OPEN interval every cycle, so summing the raw
+               rows counts one interval's work once per collection. The bucket is an HOUR and the cadence
+               is ~5 minutes, so an open interval is summed up to ~12 times per bar — and a live store
+               showed 496 collections of a single interval inside one hour bucket. Keep the LATEST
+               snapshot per interval, then bucket, so the bars sum to the true total across the window.
+
+               Bucketing still happens on collection_time, so an interval is attributed to the hour it was
+               last COLLECTED in, not the hour it ran: on Query Store's default 60-minute interval that is
+               reliably one bucket late, because the closing fetch lands in the cycle after the interval
+               ends. The window totals are right and only the placement lags. Fixing the placement needs
+               first_execution_time, which is the monitored server's LOCAL wall clock while these bounds
+               are UTC — a timezone bug traded for a placement bug. Tier 2 (#1841) owns it. */
+            SELECT
+                collection_time,
+                query_id,
+                execution_count,
+                avg_cpu_time_us,
+                avg_duration_us,
+                avg_logical_io_reads,
+                avg_logical_io_writes,
+                avg_physical_io_reads,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc, replica_role
+                    ORDER BY collection_time DESC
+                ) AS rn
+            FROM query_store_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   ($4::text[] IS NULL OR database_name = ANY($4))
+        )
         SELECT
             date_trunc('hour', collection_time) AS bucket,
             COUNT(DISTINCT query_id) AS query_count,
@@ -464,11 +564,8 @@ public sealed partial class ViewerDataService
             COALESCE(SUM(CAST(avg_logical_io_reads AS double precision) * execution_count), 0) AS total_reads,
             COALESCE(SUM(CAST(avg_logical_io_writes AS double precision) * execution_count), 0) AS total_writes,
             COALESCE(SUM(CAST(avg_physical_io_reads AS double precision) * execution_count), 0) AS total_physical_reads
-        FROM query_store_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
-        AND   ($4::text[] IS NULL OR database_name = ANY($4))
+        FROM deduped
+        WHERE rn = 1
         GROUP BY date_trunc('hour', collection_time)
         ORDER BY bucket
         """;

@@ -701,7 +701,33 @@ internal static class DarlingDataReader
     /// (naive UTC), $4 top.
     /// </summary>
     public const string QueryStoreTopSql = """
-        WITH ranked AS (
+        WITH deduped AS (
+            /* LOAD-BEARING (correctness, not just perf) — #1841. query_store_stats rows are CUMULATIVE
+               per-Query-Store-interval snapshots, and the collector re-fetches the OPEN interval every
+               cycle as its last_execution_time advances, so the SAME interval (same first_execution_time)
+               is stored repeatedly with a growing execution_count. SUM(execution_count) over the raw rows
+               reports 10 + 25 + 40 for an interval that reached 40, and AVG(avg_*) becomes an avg-of-avgs
+               weighted by how many times each interval happened to be re-collected. This surface feeds
+               BOTH the MCP tool and the REST route, so un-deduped numbers reach an agent's reasoning as
+               readily as the web dashboard. Twins the viewer's QueryStoreTopSql.
+
+               replica_role and execution_type_desc are in the partition because the aggregate below is
+               grouped (or MAXed) on them: the dedup key must be at least as fine as the read's own row
+               identity, or dedup would drop a row the read must return rather than de-duplicate one. */
+            SELECT
+                *,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc, replica_role
+                    ORDER BY collection_time DESC
+                ) AS rn
+            FROM query_store_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   ($5::text IS NULL OR database_name = $5)
+        ),
+        ranked AS (
             SELECT
                 database_name,
                 query_id,
@@ -721,11 +747,8 @@ internal static class DarlingDataReader
                 AVG(CAST(avg_rowcount AS double precision)) AS avg_rowcount,
                 MAX(last_execution_time) AS last_execution_time,
                 MAX(query_plan_hash) AS query_plan_hash
-            FROM query_store_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            AND   ($5::text IS NULL OR database_name = $5)
+            FROM deduped
+            WHERE rn = 1
             GROUP BY database_name, query_id, plan_id, query_hash, replica_role
             ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC
             LIMIT $4 + 5

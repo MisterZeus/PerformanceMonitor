@@ -91,7 +91,59 @@ public sealed partial class ViewerDataService
     /// <para>$1 server_id, $2 window start (baseline is &lt; $2), $3 window end, $4 database filter (text[]).</para>
     /// </summary>
     public const string QueryStoreRegressionsSql = """
-        WITH baseline_performance AS (
+        WITH deduped_baseline AS (
+            /* LOAD-BEARING (correctness, not just perf) — #1841. The rows are CUMULATIVE per-interval
+               snapshots and the collector re-fetches the OPEN interval every cycle, so the SAME interval
+               (same first_execution_time) is stored repeatedly with a growing execution_count. Keep the
+               LATEST snapshot per interval before aggregating.
+
+               This read is especially exposed: the baseline arm is UNBOUNDED (collection_time < $2,
+               potentially months) while the recent arm is a short window, so the two arms have
+               systematically different re-collection density per interval. Un-deduped, that alone moves
+               the AVG(avg_*) values the regression percent is computed from, and the > 25% CPU gate —
+               manufacturing and hiding regressions in a direction that has nothing to do with the query.
+               It also multiplies exec_count, which feeds additional_duration_ms, the sort key. */
+            SELECT
+                database_name,
+                query_id,
+                plan_id,
+                execution_count,
+                avg_duration_us,
+                avg_cpu_time_us,
+                avg_logical_io_reads,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc, replica_role
+                    ORDER BY collection_time DESC
+                ) AS rn
+            FROM query_store_stats
+            WHERE server_id = $1
+            AND   collection_time < $2
+            AND   ($4::text[] IS NULL OR database_name = ANY($4))
+        ),
+        deduped_recent AS (
+            SELECT
+                database_name,
+                query_id,
+                plan_id,
+                query_text,
+                execution_count,
+                avg_duration_us,
+                avg_cpu_time_us,
+                avg_logical_io_reads,
+                last_execution_time,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc, replica_role
+                    ORDER BY collection_time DESC
+                ) AS rn
+            FROM query_store_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   ($4::text[] IS NULL OR database_name = ANY($4))
+        ),
+        baseline_performance AS (
             SELECT
                 database_name,
                 query_id,
@@ -100,10 +152,8 @@ public sealed partial class ViewerDataService
                 AVG(CAST(avg_logical_io_reads AS double precision)) AS avg_logical_io_reads,
                 CAST(SUM(execution_count) AS bigint) AS exec_count,
                 CAST(COUNT(DISTINCT plan_id) AS integer) AS plan_count
-            FROM query_store_stats
-            WHERE server_id = $1
-            AND   collection_time < $2
-            AND   ($4::text[] IS NULL OR database_name = ANY($4))
+            FROM deduped_baseline
+            WHERE rn = 1
             GROUP BY database_name, query_id
         ),
         recent_performance AS (
@@ -117,11 +167,8 @@ public sealed partial class ViewerDataService
                 CAST(SUM(execution_count) AS bigint) AS exec_count,
                 CAST(COUNT(DISTINCT plan_id) AS integer) AS plan_count,
                 MAX(last_execution_time) AS last_execution_time
-            FROM query_store_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            AND   ($4::text[] IS NULL OR database_name = ANY($4))
+            FROM deduped_recent
+            WHERE rn = 1
             GROUP BY database_name, query_id
         )
         SELECT

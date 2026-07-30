@@ -296,6 +296,14 @@ public sealed partial class ViewerDataService
     /// draw as separate chart series, exactly like Lite. Duration / CPU / CLR convert us → ms and memory pages
     /// → MB in SQL (mirroring the DuckDB casts). $1 server_id, $2 database_name, $3 query_id, $4 window start,
     /// $5 window end (naive UTC).
+    ///
+    /// <para>Deliberately NOT deduped per interval (#1841), unlike every Query Store AGGREGATE read: this is
+    /// the "show me every snapshot" surface — a raw per-collection projection with no SUM, AVG or COUNT, so
+    /// nothing is multiply-counted. What it does show is the cumulative restatement itself (one interval
+    /// re-collected N times appears as N rows with a growing execution_count), and first_execution_time is
+    /// already projected so a reader can tell those rows apart. Collapsing them would change what this
+    /// drilldown displays, which is a product call rather than an arithmetic fix — left to #1841 tier 2 along
+    /// with storing the real interval identity. Mirrors Lite's GetQueryStoreHistoryAsync.</para>
     /// </summary>
     public const string QueryStoreHistorySql = """
         SELECT
