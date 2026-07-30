@@ -37,9 +37,12 @@ public partial class RemoteCollectorService
     {
         var serverId = GetServerId(server);
         var collectionTime = DateTime.UtcNow;
-        _lastSqlMs = 0;
-        _lastDuckDbMs = 0;
-        _lastCollectionNote = null;
+
+        /* This server's slot, not a shared field: servers collect in parallel (see RunTelemetry). */
+        var telemetry = TelemetryFor(serverId);
+        telemetry.SqlMs = 0;
+        telemetry.StorageMs = 0;
+        telemetry.Note = null;
 
         var status = _serverManager.GetConnectionStatus(server.Id);
         var target = new CollectorTargetInfo
@@ -97,7 +100,8 @@ public partial class RemoteCollectorService
 
         /* Two accumulators, not one contiguous read-then-write pair: the enumeration and Azure paths now
            FLUSH each database's rows before reading the next (#1556), so SQL and storage slices interleave.
-           _lastSqlMs / _lastDuckDbMs stay the #1180 fetch/store split — now sums of interleaved slices. */
+           The telemetry slot's SqlMs / StorageMs stay the #1180 fetch/store split — now sums of
+           interleaved slices. */
         long sqlMs = 0;
         long storageMs = 0;
         var rowsWritten = 0;
@@ -234,26 +238,33 @@ public partial class RemoteCollectorService
                    run one query per item ON THE SAME CONNECTION; an item that fails with a
                    SqlException is skipped with a warning, matching the original collectors. */
                 var listSlice = Stopwatch.StartNew();
-                var items = new List<string>();
+                EnumerationOutcome enumeration;
                 /* Enumeration always uses the host default timeout, matching the originals —
                    the per-collector override applies only to the heavy per-item commands. */
                 using (var enumerationCommand = CreateCollectorCommand(enumerationPlan, sqlConnection, CommandTimeoutSeconds))
                 using (var enumerationReader = await enumerationCommand.ExecuteReaderAsync(cancellationToken))
                 {
-                    while (await enumerationReader.ReadAsync(cancellationToken))
-                    {
-                        items.Add(enumerationReader.GetString(0));
-                    }
+                    /* Shared read (#1837): the item list, then the OPTIONAL second result set of items the
+                       enumeration could not probe. Both hosts route through it so the item read, the
+                       failure read, and the note wording cannot drift. */
+                    enumeration = await EnumeratedCollectorDriver.ReadEnumerationAsync(enumerationReader, cancellationToken);
                 }
                 sqlMs += listSlice.ElapsedMilliseconds;
+
+                var items = enumeration.Items;
+
+                /* Null on the ordinary path; the empty-enumeration breadcrumb, the probe-failure summary,
+                   or both otherwise. Assigned BEFORE the zero-item early return so that cycle — the one
+                   that used to log a bare SUCCESS indistinguishable from healthy — carries it too. */
+                telemetry.Note = enumeration.Note;
+                LogEnumerationProbeFailures(definition, server, enumeration.ProbeFailures);
 
                 if (items.Count == 0)
                 {
                     /* No items → no storage phase, matching the original's early return. The cycle still
-                       records SUCCESS/0 rows (nothing failed), but it leaves a note on the collection_log
-                       row so that row is distinguishable from a healthy collector whose databases were
-                       just quiet — the silent-empty shape this codebase keeps paying for (#1837). */
-                    _lastCollectionNote = EnumeratedCollectorDriver.EmptyEnumerationMessage;
+                       records SUCCESS/0 rows (nothing failed outright), and the note above is what makes
+                       that row distinguishable from a healthy collector whose databases were just quiet —
+                       the silent-empty shape this codebase keeps paying for (#1837). */
                     return 0;
                 }
 
@@ -391,11 +402,42 @@ public partial class RemoteCollectorService
             }
         }
 
-        _lastSqlMs = sqlMs;
-        _lastDuckDbMs = storageMs;
+        telemetry.SqlMs = sqlMs;
+        telemetry.StorageMs = storageMs;
 
         _logger?.LogDebug("Collected {RowCount} {Collector} rows for server '{Server}'", rowsWritten, definition.Name, server.DisplayName);
         return rowsWritten;
+    }
+
+    /// <summary>
+    /// Writes the per-item app-log lines for an enumeration's probe failures (#1837), capped at
+    /// <see cref="EnumeratedCollectorDriver.MaxLoggedProbeFailures"/> with the suppressed remainder
+    /// reported as a count. The collection_log row already carries the summary note; this is where the
+    /// actual per-database error text lands, and it is why that note says "see the app log". Darling's
+    /// twin is <c>DarlingCollectorRunner.LogEnumerationProbeFailures</c> — same shared templates.
+    /// </summary>
+    private void LogEnumerationProbeFailures<TRow>(
+        ICollectorDefinition<TRow> definition,
+        ServerConnection server,
+        IReadOnlyList<EnumerationProbeFailure> probeFailures)
+    {
+        if (probeFailures.Count == 0)
+        {
+            return;
+        }
+
+        var shown = Math.Min(probeFailures.Count, EnumeratedCollectorDriver.MaxLoggedProbeFailures);
+        for (var i = 0; i < shown; i++)
+        {
+            _logger?.LogWarning(EnumeratedCollectorDriver.ProbeFailureLogTemplate,
+                definition.Name, server.DisplayName, probeFailures[i].Item, probeFailures[i].Error);
+        }
+
+        if (probeFailures.Count > shown)
+        {
+            _logger?.LogWarning(EnumeratedCollectorDriver.ProbeFailureOverflowLogTemplate,
+                definition.Name, server.DisplayName, probeFailures.Count, probeFailures.Count - shown, shown);
+        }
     }
 
     /// <summary>

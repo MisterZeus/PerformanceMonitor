@@ -62,7 +62,18 @@ public sealed partial class ViewerDataService
             -- YIELDED = the 1s LOCK_TIMEOUT guard fired (#1805): deliberate, benign for collection,
             -- counted apart from errors because clustering here is a signal about the TARGET's lock
             -- contention rather than a monitoring fault.
-            SUM(CASE WHEN status = 'YIELDED' THEN 1 ELSE 0 END) AS yield_count
+            SUM(CASE WHEN status = 'YIELDED' THEN 1 ELSE 0 END) AS yield_count,
+            -- #1837: the note a SUCCEEDING run can leave behind (an enumeration that yielded 0 items,
+            -- items whose enumeration probe failed). Gated on SUCCESS specifically, rather than on
+            -- every non-failure status: the runners attach a note only to the SUCCESS write, and the looser
+            -- complement would drag SESSION_MISSING and CANCELLED messages into a column whose whole
+            -- claim is that it is NOT an error. MAX ignores NULLs, so a collector whose runs left no
+            -- note reads blank. Display text only: no band, no count, no threshold reads it, and a
+            -- legitimately empty target stays HEALTHY exactly as before.
+            MAX(CASE WHEN status = 'SUCCESS' THEN error_message END) AS last_note,
+            -- How many of the window's runs carried one. note_count = total_runs is the
+            -- persistently-empty signal: EVERY run this week came back with nothing.
+            COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count
         FROM v_collection_log
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -118,7 +129,9 @@ public sealed partial class ViewerDataService
             MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN error_message END) AS last_error,
             MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN collection_time END) AS last_error_time,
             SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
-            SUM(CASE WHEN status = 'YIELDED' THEN 1 ELSE 0 END) AS yield_count
+            SUM(CASE WHEN status = 'YIELDED' THEN 1 ELSE 0 END) AS yield_count,
+            MAX(CASE WHEN status = 'SUCCESS' THEN error_message END) AS last_note,
+            COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count
         FROM v_collection_log
         WHERE collection_time >= $1
         AND   server_id IN (SELECT server_id FROM config_monitored_servers WHERE is_enabled)
@@ -227,7 +240,7 @@ public sealed partial class ViewerDataService
         return items;
     }
 
-    /// <summary>Maps one row of the shared 11-column health projection (per-server or fleet) to a <see cref="CollectorHealthRow"/>.</summary>
+    /// <summary>Maps one row of the shared 13-column health projection (per-server or fleet) to a <see cref="CollectorHealthRow"/>.</summary>
     private static CollectorHealthRow MapHealthRow(NpgsqlDataReader reader) => new()
     {
         CollectorName = reader.GetString(0),
@@ -241,6 +254,8 @@ public sealed partial class ViewerDataService
         LastErrorTime = reader.IsDBNull(8) ? null : reader.GetDateTime(8),
         PermissionDeniedCount = reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9)),
         YieldCount = reader.IsDBNull(10) ? 0 : Convert.ToInt64(reader.GetValue(10)),
+        LastNote = reader.IsDBNull(11) ? null : reader.GetString(11),
+        NoteCount = reader.IsDBNull(12) ? 0 : Convert.ToInt64(reader.GetValue(12)),
     };
 
     /// <summary>
@@ -373,6 +388,16 @@ public class CollectorHealthRow
     /// <summary>1s lock-timeout yields (#1805) — deliberate, benign, counted apart from errors.</summary>
     public long YieldCount { get; set; }
 
+    /// <summary>
+    /// The note a non-failing run left behind (#1837): an enumeration that yielded 0 items, items whose
+    /// enumeration probe failed. Null for the ordinary run, which is why the column reads blank for a
+    /// plainly healthy collector. Informational only — see <see cref="NoteFormatted"/>.
+    /// </summary>
+    public string? LastNote { get; set; }
+
+    /// <summary>How many of <see cref="TotalRuns"/> carried a <see cref="LastNote"/>.</summary>
+    public long NoteCount { get; set; }
+
     public double FailureRatePercent => TotalRuns > 0 ? (double)ErrorCount / TotalRuns * 100 : 0;
     public double HoursSinceLastSuccess => LastSuccessTime.HasValue
         ? (DateTime.UtcNow - LastSuccessTime.Value).TotalHours
@@ -404,4 +429,11 @@ public class CollectorHealthRow
     public string LastErrorFormatted => LastErrorTime.HasValue
         ? ViewerTimeHelper.ForDisplay(LastErrorTime.Value).ToString("g")
         : "";
+
+    /// <summary>
+    /// The informational note plus its "all N runs" / "N of M runs" qualifier (#1837), or blank. Shared
+    /// with Lite through <see cref="CollectorHealthClassifier.FormatCollectionNote"/> so the two apps'
+    /// health grids read identically. Never feeds <see cref="HealthStatus"/>.
+    /// </summary>
+    public string NoteFormatted => CollectorHealthClassifier.FormatCollectionNote(LastNote, NoteCount, TotalRuns);
 }

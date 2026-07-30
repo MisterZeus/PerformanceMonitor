@@ -236,4 +236,8 @@ const COLLECTOR_COLUMNS = [
   { key: "avg_duration_ms", label: "Avg Dur", format: "ms" },
   { key: "last_success", label: "Last Success", format: "time" },
   { key: "last_error", label: "Last Error", wrap: true },
+  /* #1837: what a NON-failing run reported (an enumeration that came back with 0 items). Blank for a
+     plainly healthy collector; the same column the two WPF grids carry, so the web view is not the one
+     Collection Health surface that still hides it. */
+  { key: "last_note", label: "Note", wrap: true },
 ];

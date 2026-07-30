@@ -8,7 +8,10 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
 using System.Diagnostics;
+using System.Globalization;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -16,6 +19,24 @@ namespace PerformanceMonitor.Collectors;
 
 /// <summary>Per-run outcome of the enumeration driver: rows written and the summed SQL/storage slice times.</summary>
 public readonly record struct EnumeratedRunResult(int Rows, long SqlMs, long StorageMs);
+
+/// <summary>
+/// One item the enumeration query could not PROBE (#1837): the enumeration reached the item but the
+/// per-item eligibility check failed — a database mid-restore, a login that cannot enter it, a
+/// cross-database reference the target rejected. Distinct from a per-item COLLECTION failure, which the
+/// driver's own <c>onItemError</c> already reports: this one happens before the item ever reaches the
+/// driver, so without this contract it can only vanish.
+/// </summary>
+public readonly record struct EnumerationProbeFailure(string Item, string Error);
+
+/// <summary>
+/// What the shared enumeration read produced: the item list both runners iterate, the items whose probe
+/// failed, and the collection-log note (null on the ordinary path) the host attaches to the run's row.
+/// </summary>
+public sealed record EnumerationOutcome(
+    IReadOnlyList<string> Items,
+    IReadOnlyList<EnumerationProbeFailure> ProbeFailures,
+    string? Note);
 
 /// <summary>
 /// The shared control-flow driver for the enumeration collectors' per-item loop (#1556). Both hosts
@@ -47,6 +68,149 @@ public static class EnumeratedCollectorDriver
     /// drift on the wording the operator greps for.
     /// </summary>
     public const string EmptyEnumerationMessage = "enumeration yielded 0 items - nothing to collect this cycle";
+
+    /// <summary>
+    /// The collection-log note for an enumeration that reported PROBE failures (#1837), <c>{0}</c> = how
+    /// many items failed. Deliberately a count and a pointer rather than the errors themselves: the note
+    /// column is a one-line summary read at a glance in Collection Health, and one unlucky server can fail
+    /// to probe hundreds of databases. The per-item text goes to the app log (capped at
+    /// <see cref="MaxLoggedProbeFailures"/> lines), which is what "see the app log" means.
+    /// </summary>
+    public const string ProbeFailureNoteFormat = "{0} item(s) failed their enumeration probe - see the app log for the per-item errors";
+
+    /// <summary>
+    /// How many per-item probe failures each host writes to the app log before collapsing the rest into the
+    /// count. A server whose login cannot enter ANY database fails every database's probe, and neither host
+    /// should turn that into hundreds of log lines per cycle.
+    /// </summary>
+    public const int MaxLoggedProbeFailures = 5;
+
+    /// <summary>
+    /// The per-item app-log line for one probe failure, written by both hosts (at most
+    /// <see cref="MaxLoggedProbeFailures"/> of them per cycle). Shared as a const so the wording an
+    /// operator greps for is identical in Lite and Darling, and so each host's logging call keeps a
+    /// constant message template.
+    /// </summary>
+    public const string ProbeFailureLogTemplate =
+        "{Collector} on '{Server}': enumeration could not probe [{Item}] - {Error}";
+
+    /// <summary>
+    /// The one line that closes out a capped probe-failure burst, so the suppressed remainder is never
+    /// silent — the failure mode this whole contract exists to end.
+    /// </summary>
+    public const string ProbeFailureOverflowLogTemplate =
+        "{Collector} on '{Server}': {Total} item(s) failed their enumeration probe; {Suppressed} beyond the first {Shown} not logged.";
+
+    /// <summary>
+    /// The item name reported for a malformed probe-failure result set — see
+    /// <see cref="ReadEnumerationAsync"/>. Not a database name, so it cannot collide with one.
+    /// </summary>
+    public const string ContractViolationItem = "(enumeration)";
+
+    /// <summary>
+    /// What a probe-failure result set with the wrong shape reports. It is turned into a probe failure
+    /// rather than thrown so that a bad enumeration surfaces through the very mechanism this contract
+    /// exists for — a note in Collection Health plus an app-log line — instead of failing an otherwise
+    /// working collection cycle.
+    /// </summary>
+    public const string ContractViolationError =
+        "the enumeration's second result set must be (item_name, error_text); probe failures were not read";
+
+    /// <summary>Stand-in for a probe failure whose error column came back NULL — the failure still counts.</summary>
+    public const string NoErrorText = "(no error text)";
+
+    /// <summary><see cref="ProbeFailureNoteFormat"/> parsed once (CA1863) — the const stays the greppable, pinnable text.</summary>
+    private static readonly CompositeFormat s_probeFailureNote = CompositeFormat.Parse(ProbeFailureNoteFormat);
+
+    /// <summary>
+    /// Reads an enumeration query's result: the item list, then the OPTIONAL SECOND RESULT SET of
+    /// (item_name, error_text) rows describing items the enumeration could not probe (#1837).
+    ///
+    /// <para>
+    /// The second result set exists because probe failures cannot ride the first one: the first result set
+    /// IS the item list both runners consume as database names, so anything added to it would be collected
+    /// from. Before this contract, the on-prem query_store enumeration swallowed every per-database probe
+    /// failure in an empty CATCH and reported the survivors — a login that could not enter a single
+    /// database produced zero items, one SUCCESS row, and no evidence anywhere.
+    /// </para>
+    ///
+    /// <para>
+    /// An enumeration that returns ONE result set behaves exactly as before: no second set means no probe
+    /// failures, no note, nothing logged. Shared between the hosts so the item read, the failure read, and
+    /// the note WORDING cannot drift — the reason #1556 moved the per-item loop here in the first place.
+    /// </para>
+    /// </summary>
+    /// <param name="reader">An open reader positioned on the enumeration's first result set.</param>
+    public static async Task<EnumerationOutcome> ReadEnumerationAsync(DbDataReader reader, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(reader);
+
+        var items = new List<string>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            items.Add(reader.GetString(0));
+        }
+
+        var probeFailures = await ReadProbeFailuresAsync(reader, cancellationToken);
+        return new EnumerationOutcome(items, probeFailures, BuildNote(items.Count == 0, probeFailures.Count));
+    }
+
+    /// <summary>
+    /// Composes the collection-log note for one enumeration: the empty-enumeration breadcrumb, the
+    /// probe-failure summary, both (all probes failed, so nothing was enumerable), or null for the
+    /// ordinary path. The single place either note text is built, so the two hosts write the same string
+    /// and an operator can grep for one wording.
+    /// </summary>
+    public static string? BuildNote(bool enumerationWasEmpty, int probeFailureCount)
+    {
+        var probeNote = probeFailureCount > 0
+            ? string.Format(CultureInfo.InvariantCulture, s_probeFailureNote, probeFailureCount)
+            : null;
+
+        return (enumerationWasEmpty, probeNote) switch
+        {
+            (true, null) => EmptyEnumerationMessage,
+            (true, not null) => $"{EmptyEnumerationMessage}; {probeNote}",
+            (false, _) => probeNote,
+        };
+    }
+
+    /// <summary>
+    /// Advances to the optional second result set and reads its (item_name, error_text) rows. No second
+    /// result set — the shape every enumeration had before #1837 — returns an empty list.
+    /// </summary>
+    private static async Task<IReadOnlyList<EnumerationProbeFailure>> ReadProbeFailuresAsync(
+        DbDataReader reader,
+        CancellationToken cancellationToken)
+    {
+        if (!await reader.NextResultAsync(cancellationToken))
+        {
+            return Array.Empty<EnumerationProbeFailure>();
+        }
+
+        /* A second result set that is not (item_name, error_text) is a first-party SQL defect. Report it
+           AS a probe failure instead of throwing: this contract exists so silent enumeration problems
+           become visible, and killing the collection cycle to say so would trade one invisible defect for
+           a loud unrelated one. */
+        if (reader.FieldCount < 2)
+        {
+            return new[] { new EnumerationProbeFailure(ContractViolationItem, ContractViolationError) };
+        }
+
+        var failures = new List<EnumerationProbeFailure>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            /* GetValue().ToString() rather than GetString(): a second result set with the right column
+               COUNT but a non-string column would throw InvalidCastException out of here and fail the
+               whole collection cycle — the outcome the arity check above deliberately avoids. Read
+               loosely and the malformed set still reports itself as a probe failure. */
+            var item = reader.IsDBNull(0) ? ContractViolationItem : reader.GetValue(0).ToString() ?? ContractViolationItem;
+            var error = reader.IsDBNull(1) ? NoErrorText : reader.GetValue(1).ToString() ?? NoErrorText;
+            failures.Add(new EnumerationProbeFailure(item, error));
+        }
+
+        return failures;
+    }
 
     /// <summary>
     /// Runs the per-item loop: for each item, (optionally) refresh its per-database watermark, read its
