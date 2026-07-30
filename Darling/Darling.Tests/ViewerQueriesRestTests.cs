@@ -59,6 +59,25 @@ public sealed class ViewerQueryTrendsSqlTests
         Assert.Contains("SUM(delta_execution_count)", ViewerDataService.ExecutionCountTrendSql, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void QueryStoreDurationTrendSql_IsTheOneQueryStoreAggregateLeftUndeduped()
+    {
+        /* #1841 tier 2, pinned so the exclusion stays DELIBERATE rather than looking like an oversight
+           next to the four Query Store reads that DO dedup. Deduping to the latest snapshot per interval
+           is right for totals but destroys this series: it keeps one row per interval, at the collection
+           where the interval closed, and Query Store's default 60-minute interval against a 5-minute
+           cadence collapses twelve snapshots onto one collection_time — a 1-hour window would render a
+           single point, valued 0 because the LAG has no predecessor. Fixing it needs the work placed at
+           first_execution_time, which is server-LOCAL while this axis is UTC. */
+        var sql = ViewerDataService.QueryStoreDurationTrendSql;
+        Assert.DoesNotContain("rn = 1", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY collection_time", sql, StringComparison.Ordinal);
+
+        /* The delta-based trends never needed one either: their columns are already per-cycle increments. */
+        Assert.DoesNotContain("first_execution_time", ViewerDataService.QueryDurationTrendSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("first_execution_time", ViewerDataService.ExecutionCountTrendSql, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(nameof(ViewerDataService.QueryDurationTrendSql))]
     [InlineData(nameof(ViewerDataService.ProcedureDurationTrendSql))]

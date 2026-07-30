@@ -84,6 +84,57 @@ public static class ComposeCompiler
 
     private const char ModuleAlias = 'm';
 
+    /// <summary>The one source table whose RAW rows need a per-interval dedup before aggregation (#1841).</summary>
+    private const string QueryStoreTable = "query_store_stats";
+
+    /// <summary>
+    /// The relation the panel aggregates: the routed CAGG, or the raw source table — except
+    /// <c>query_store_stats</c> on the RAW route, which is wrapped in a per-interval dedup first (#1841).
+    ///
+    /// <para>Its rows are CUMULATIVE per-Query-Store-interval snapshots and the collector re-fetches the OPEN
+    /// interval every cycle, so <c>qs_executions</c> (SUM) and the weighted <c>qs_avg_*</c> ratios would count
+    /// one interval's work once per collection. The dedup keeps the LATEST snapshot per interval — the same
+    /// ROW_NUMBER convention the analysis collectors and both apps' Query Store readers use.</para>
+    ///
+    /// <para><c>server_id</c> is in the partition because a composed panel spans the fleet, not one server —
+    /// and <c>server_name</c> is there too, which is NOT redundant: Postgres can push a qual through a
+    /// subquery containing a window function only when the qual's columns appear in EVERY window's
+    /// PARTITION BY, and the panel's server scope is expressed as <c>server_name = ANY(...)</c> in the outer
+    /// WHERE. Without it a fleet store would rank every server's rows before narrowing to the panel's. It is
+    /// 1:1 with <c>server_id</c>, so it only ever makes the partition finer, never over-collapses. The
+    /// grouped/filtered dimensions (<c>database_name</c>) push down for the same reason.</para>
+    ///
+    /// <para>The window is pushed INSIDE so "latest" means latest within the panel's window (the outer WHERE
+    /// re-applies it harmlessly). <c>SELECT *</c> keeps every dimension and filter column available, which a
+    /// compiler that may reference any catalog column needs; the extra <c>qs_rn</c> column is never selected
+    /// or grouped. The cost is that unreferenced columns ride through the window sort — acceptable here
+    /// because the raw route only ever covers the raw retention tier and the result is row-capped, and the
+    /// alternative is hardcoding a column list a new measure would silently outgrow. Composed SQL still names
+    /// only catalog identifiers, and every value is one of the two already-bound window parameters.</para>
+    ///
+    /// <para>NOT a fix for the CAGG route: <c>query_store_stats_hourly</c> materialized its sums from
+    /// un-deduped raw rows, so a panel whose window reaches past the raw tier still reads inflated numbers
+    /// and cannot be repaired at read time. That is #1841 tier 2.</para>
+    /// </summary>
+    private static string BuildFactRelation(
+        string sourceTable, ComposeRoute route, string timeColumn, string startParam, string endParam)
+    {
+        if (route.IsCagg)
+        {
+            return $"{PgSchemaGenerator.CollectSchema}.{route.CaggRelation!}";
+        }
+
+        if (!string.Equals(sourceTable, QueryStoreTable, StringComparison.Ordinal))
+        {
+            return $"{PgSchemaGenerator.CollectSchema}.{sourceTable}";
+        }
+
+        return "(SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY server_id, server_name, database_name, "
+            + $"query_id, plan_id, first_execution_time, execution_type_desc, replica_role ORDER BY {timeColumn} DESC) AS qs_rn "
+            + $"FROM {PgSchemaGenerator.CollectSchema}.{QueryStoreTable} "
+            + $"WHERE {timeColumn} >= {startParam} AND {timeColumn} <= {endParam}) AS qs_ranked WHERE qs_rn = 1)";
+    }
+
     /// <summary>
     /// Compiles <paramref name="plan"/> against <paramref name="context"/>. Returns the parameterized SQL,
     /// or a caller-facing error for the one runtime-only check (the window×resolution bucket ceiling).
@@ -212,8 +263,7 @@ public static class ComposeCompiler
         }
 
         sql.Append("SELECT ").Append(string.Join(", ", selectExprs)).Append('\n');
-        sql.Append("FROM ").Append(PgSchemaGenerator.CollectSchema).Append('.')
-            .Append(route.IsCagg ? route.CaggRelation! : plan.Measure.SourceTable)
+        sql.Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam))
             .Append(" AS ").Append(FactAlias).Append('\n');
 
         if (plan.UsesModuleJoin)

@@ -32,6 +32,40 @@ public partial class LocalDataService
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
+WITH deduped AS
+(
+    -- LOAD-BEARING (correctness, not just perf) — #1841. query_store_stats rows are CUMULATIVE
+    -- per-Query-Store-interval snapshots. The QueryStoreCollector is incremental and re-fetches the
+    -- OPEN interval every cycle as its last_execution_time advances, so the SAME interval (same
+    -- first_execution_time) is stored repeatedly with a growing execution_count. Summing the raw rows
+    -- counts one interval's work once per collection: a live store showed 496 collections of a single
+    -- interval inside ONE hour bucket. Keep only the LATEST snapshot per interval, then aggregate.
+    --
+    -- Bucketing still happens on collection_time, so an interval is attributed to the hour it was last
+    -- COLLECTED in, not the hour it ran: on Query Store's default 60-minute interval that is reliably one
+    -- bucket late, because the closing fetch lands in the cycle after the interval ends. The window totals
+    -- are right and only the placement lags. Fixing the placement needs first_execution_time, which is the
+    -- monitored server's LOCAL wall clock while these bounds are UTC — a timezone bug traded for a
+    -- placement bug. Tier 2 (#1841) owns it, together with storing a real interval identity.
+    SELECT
+        collection_time,
+        query_id,
+        execution_count,
+        avg_cpu_time_us,
+        avg_duration_us,
+        avg_logical_io_reads,
+        avg_logical_io_writes,
+        avg_physical_io_reads,
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc, replica_role
+            ORDER BY collection_time DESC
+        ) AS rn
+    FROM v_query_store_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3" + dbClause + @"
+)
 SELECT
     date_trunc('hour', collection_time) AS bucket,
     COUNT(DISTINCT query_id) AS query_count,
@@ -40,10 +74,8 @@ SELECT
     COALESCE(SUM(CAST(avg_logical_io_reads AS DOUBLE PRECISION) * execution_count), 0) AS total_reads,
     COALESCE(SUM(CAST(avg_logical_io_writes AS DOUBLE PRECISION) * execution_count), 0) AS total_writes,
     COALESCE(SUM(CAST(avg_physical_io_reads AS DOUBLE PRECISION) * execution_count), 0) AS total_physical_reads
-FROM v_query_store_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3" + dbClause + @"
+FROM deduped
+WHERE rn = 1
 GROUP BY date_trunc('hour', collection_time)
 ORDER BY bucket";
 
@@ -82,7 +114,31 @@ ORDER BY bucket";
         var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
 
         command.CommandText = @"
-WITH ranked AS (
+WITH deduped AS (
+    /* LOAD-BEARING (correctness, not just perf) — #1841. query_store_stats rows are CUMULATIVE
+       per-Query-Store-interval snapshots, and the collector re-fetches the OPEN interval every cycle
+       as its last_execution_time advances, so the SAME interval (same first_execution_time) is stored
+       repeatedly with a growing execution_count. SUM(execution_count) over the raw rows reports
+       10 + 25 + 40 for an interval that reached 40, and AVG(avg_*) becomes an avg-of-avgs weighted by
+       how many times each interval happened to be re-collected. Keep the LATEST snapshot per interval.
+       SELECT * because the aggregate below projects nearly every payload column.
+
+       replica_role and execution_type_desc are in the partition because the aggregate below is grouped
+       (or MAXed) on them: the dedup key must be at least as fine as the read's own row identity, or
+       dedup would silently drop a row the grid is supposed to show rather than de-duplicate one. */
+    SELECT
+        *,
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc, replica_role
+            ORDER BY collection_time DESC
+        ) AS rn
+    FROM v_query_store_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3" + dbClause + @"
+),
+ranked AS (
     SELECT
         database_name,
         query_id,
@@ -142,10 +198,8 @@ WITH ranked AS (
         AVG(CAST(avg_num_physical_io_reads AS DOUBLE PRECISION)) AS avg_num_physical_io_reads,
         MIN(CAST(min_num_physical_io_reads AS DOUBLE PRECISION)) AS min_num_physical_io_reads,
         MAX(CAST(max_num_physical_io_reads AS DOUBLE PRECISION)) AS max_num_physical_io_reads
-    FROM v_query_store_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3" + dbClause + @"
+    FROM deduped
+    WHERE rn = 1
     GROUP BY database_name, query_id, plan_id, query_hash, replica_role
     ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS DOUBLE PRECISION)) DESC
     LIMIT $4 + 5
@@ -309,11 +363,57 @@ LIMIT $4";
         var dbClause = BuildDbInClause(databaseNames, "database_name", 6, out var dbValues);
 
         command.CommandText = @"
-WITH top_current AS (
-    SELECT database_name, query_hash
+WITH deduped_current AS (
+    /* LOAD-BEARING (correctness, not just perf) — #1841. query_store_stats rows are CUMULATIVE
+       per-Query-Store-interval snapshots and the collector re-fetches the OPEN interval every cycle,
+       so the SAME interval (same first_execution_time) is stored repeatedly with a growing
+       execution_count. Keep the LATEST snapshot per interval before aggregating.
+
+       The execution-count weighting below does NOT rescue this on its own: the repeated snapshots of
+       one interval carry DIFFERENT (growing) weights AND different avg_* values, so an open interval
+       is weighted by the triangular sum of its own growth. That bias is stronger in the recent window
+       than in the baseline window (recent windows hold more still-open intervals), which skews the
+       delta this comparison exists to compute. One deduped CTE per window, so both arms are treated
+       identically. */
+    SELECT
+        database_name,
+        query_hash,
+        query_text,
+        execution_count,
+        avg_duration_us,
+        avg_cpu_time_us,
+        avg_logical_io_reads,
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc, replica_role
+            ORDER BY collection_time DESC
+        ) AS rn
     FROM v_query_store_stats
     WHERE server_id = $1
     AND   collection_time >= $2 AND collection_time <= $3" + dbClause + @"
+),
+deduped_baseline AS (
+    SELECT
+        database_name,
+        query_hash,
+        query_text,
+        execution_count,
+        avg_duration_us,
+        avg_cpu_time_us,
+        avg_logical_io_reads,
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc, replica_role
+            ORDER BY collection_time DESC
+        ) AS rn
+    FROM v_query_store_stats
+    WHERE server_id = $1
+    AND   collection_time >= $4 AND collection_time <= $5" + dbClause + @"
+),
+top_current AS (
+    SELECT database_name, query_hash
+    FROM deduped_current
+    WHERE rn = 1
     AND   execution_count > 0
     GROUP BY database_name, query_hash
     ORDER BY SUM(execution_count) DESC
@@ -321,9 +421,8 @@ WITH top_current AS (
 ),
 top_baseline AS (
     SELECT database_name, query_hash
-    FROM v_query_store_stats
-    WHERE server_id = $1
-    AND   collection_time >= $4 AND collection_time <= $5" + dbClause + @"
+    FROM deduped_baseline
+    WHERE rn = 1
     AND   execution_count > 0
     GROUP BY database_name, query_hash
     ORDER BY SUM(execution_count) DESC
@@ -345,11 +444,10 @@ current_period AS (
            SUM(qs.execution_count * qs.avg_logical_io_reads::DOUBLE PRECISION) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads,
            MAX(qs.query_text) AS query_text
     FROM top_hashes th
-    INNER JOIN v_query_store_stats qs
+    INNER JOIN deduped_current qs
       ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
       AND qs.database_name IS NOT DISTINCT FROM th.database_name
-    WHERE qs.server_id = $1
-    AND   qs.collection_time >= $2 AND qs.collection_time <= $3
+    WHERE qs.rn = 1
     AND   qs.execution_count > 0
     GROUP BY th.database_name, th.query_hash
 ),
@@ -361,11 +459,10 @@ baseline_period AS (
            SUM(qs.execution_count * qs.avg_logical_io_reads::DOUBLE PRECISION) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads,
            MAX(qs.query_text) AS query_text
     FROM top_hashes th
-    INNER JOIN v_query_store_stats qs
+    INNER JOIN deduped_baseline qs
       ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
       AND qs.database_name IS NOT DISTINCT FROM th.database_name
-    WHERE qs.server_id = $1
-    AND   qs.collection_time >= $4 AND qs.collection_time <= $5
+    WHERE qs.rn = 1
     AND   qs.execution_count > 0
     GROUP BY th.database_name, th.query_hash
 )
@@ -416,6 +513,14 @@ FULL OUTER JOIN baseline_period b
     /// <summary>
     /// Gets collection-level history for ALL plans of a Query Store query (query-scoped, matching
     /// the Dashboard drilldown) so plan switches and regressions are visible over time.
+    ///
+    /// <para>Deliberately NOT deduped per interval (#1841), unlike every aggregate read in this file:
+    /// this is the "show me every snapshot" surface — a raw per-collection projection with no SUM, AVG
+    /// or COUNT, so nothing is multiply-counted. What it does show is the cumulative restatement itself
+    /// (one interval re-collected N times appears as N rows with a growing execution_count), and
+    /// first_execution_time is already projected so a reader can tell those rows apart. Collapsing them
+    /// would change what this drilldown displays, which is a product call rather than an arithmetic
+    /// fix — left to #1841 tier 2 along with storing the real interval identity.</para>
     /// </summary>
     public async Task<List<QueryStoreHistoryRow>> GetQueryStoreHistoryAsync(int serverId, string databaseName, long queryId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
@@ -592,6 +697,23 @@ OPTION(RECOMPILE);',
     }
     /// <summary>
     /// Gets Query Store duration trend — SUM(execution_count * avg_duration) per collection snapshot.
+    ///
+    /// <para>KNOWN OVERSTATEMENT, deliberately still here (#1841 tier 2). Unlike the query_stats and
+    /// procedure_stats trends, which sum per-cycle DELTA columns, Query Store rows are cumulative
+    /// per-interval snapshots that the collector re-fetches every cycle — so an interval that reached
+    /// 40 executions charges 10, then 25, then 40 to three successive points and the area under this
+    /// curve overstates the real work.</para>
+    ///
+    /// <para>The per-interval dedup that fixes every OTHER Query Store aggregate cannot fix this one:
+    /// it keeps a single row per interval, at the collection where the interval CLOSED, and Query
+    /// Store's default INTERVAL_LENGTH_MINUTES is 60 against a 5-minute collection cadence — so every
+    /// query's twelve snapshots collapse onto one collection_time and the whole series degenerates to
+    /// one point per interval (measured: a 1-hour window renders a SINGLE point, valued 0 because the
+    /// LAG has no predecessor). Correcting it means placing the work at the time it actually ran,
+    /// which is what first_execution_time carries — but that column is the monitored server's LOCAL
+    /// wall clock while this axis is UTC, so bucketing on it would trade a magnitude bug for a
+    /// timezone bug. Both halves need the interval identity + a UTC interval clock the schema does
+    /// not store yet, which is tier 2's job.</para>
     /// </summary>
     public async Task<List<QueryTrendPoint>> GetQueryStoreDurationTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
     {

@@ -10,6 +10,7 @@ using System;
 using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using PerformanceMonitor.Ui;
@@ -194,6 +195,52 @@ public sealed class ViewerQueriesSqlTests
         Assert.Contains("AVG(CAST(avg_query_max_used_memory AS double precision)) * 8.0 / 1024.0", sql, StringComparison.Ordinal);
         /* View-Plan deferred: the collected query_plan_text column is not read this wave. */
         Assert.DoesNotContain("query_plan_text", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #1841. query_store_stats rows are CUMULATIVE per-Query-Store-interval snapshots: the collector is
+    /// incremental on last_execution_time, so the OPEN interval is re-fetched every cycle and stored again
+    /// with a growing execution_count. A live store held 496 collections of ONE interval inside a single
+    /// hour bucket. Every Query Store read that aggregates across collections must therefore collapse each
+    /// interval to its LATEST snapshot BEFORE aggregating, keyed on first_execution_time (the interval
+    /// identity the schema exposes — there is no runtime_stats_interval_id column).
+    ///
+    /// <para>Pinned as one theory over every affected constant so a new Query Store read, or an edit that
+    /// drops the CTE from an existing one, fails here rather than silently shipping inflated totals. The
+    /// two reads deliberately left un-deduped are NOT in this list: QueryStoreHistorySql (a raw
+    /// per-collection projection with no aggregate — the "show me every snapshot" surface) and the CAGG
+    /// route, whose sums were materialized from un-deduped rows and cannot be repaired at read time.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(nameof(ViewerDataService.QueryStoreTopSql))]
+    [InlineData(nameof(ViewerDataService.QueryStoreComparisonSql))]
+    [InlineData(nameof(ViewerDataService.QueryStoreSlicerSql))]
+    [InlineData(nameof(ViewerDataService.QueryStoreRegressionsSql))]
+    public void QueryStoreAggregates_DedupToTheLatestSnapshotPerInterval_BeforeAggregating(string sqlName)
+    {
+        var sql = SqlByName(sqlName);
+
+        /* first_execution_time is the load-bearing part of the key: without it the dedup would collapse
+           SEPARATE intervals of the same query+plan and under-count instead of double-count. */
+        Assert.Contains(
+            "PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc",
+            sql, StringComparison.Ordinal);
+        /* "Latest" is decided by collection_time, never by execution_count — an interval can be
+           re-collected many times without its count ever moving (the 496x shape). */
+        Assert.Contains("ORDER BY collection_time DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("AS rn", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE rn = 1", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void QueryStoreTopSql_KeepsReplicaRoleInTheDedupKey_BecauseItGroupsOnIt()
+    {
+        /* The dedup key must be at least as fine as the read's own row identity. This grid GROUPs BY
+           replica_role, so a dedup without it could drop a replica's row entirely rather than
+           de-duplicate a re-collection — turning a double-count into a silent under-count. */
+        Assert.Contains(
+            "PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc, replica_role",
+            ViewerDataService.QueryStoreTopSql, StringComparison.Ordinal);
     }
 
     // ── Comparisons ──
@@ -429,6 +476,7 @@ public sealed class ViewerQueriesLivePostgresTests
     private const int ProcedureStatsPlanServerId = -970806;
     private const int RegressionsServerId = -970807;
     private const int ModuleAttributionServerId = -970808;
+    private const int DedupServerId = -970809;
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -639,6 +687,131 @@ public sealed class ViewerQueriesLivePostgresTests
         finally
         {
             await DeleteRowsAsync(connection, "query_store_stats", QueryStoreServerId);
+        }
+    }
+
+    /// <summary>
+    /// #1841 end-to-end on real Postgres: ONE runtime-stats interval re-collected across several cycles
+    /// must be counted ONCE, at its latest cumulative values, by every Query Store aggregate read.
+    ///
+    /// <para>Seeds both live shapes from issue #1841 inside a single hour: interval A collected four times
+    /// with a FLAT execution_count of 1 (the 496x shape — one interval, many collections, no growth), and
+    /// interval B collected three times with a GROWING cumulative count (10 → 25 → 40). The expected
+    /// numbers are the true totals, so an un-deduped read fails loudly rather than drifting.</para>
+    ///
+    /// <para>Deliberately exercises the four reads that had no live coverage at all (slicer, comparison,
+    /// duration trend, item timeline) alongside the top-queries grid: the string pins cannot catch a
+    /// column the dedup CTE forgot to project, which only shows up when Postgres actually runs it.</para>
+    /// </summary>
+    [Fact]
+    public async Task QueryStoreAggregates_CountARecollectedIntervalOnce_AtItsLatestValues_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live Query Store dedup test.");
+
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "query_store_stats", DedupServerId);
+
+        await using var viewer = new ViewerDataService(cs!);
+
+        /* One hour bucket, so the slicer assertion is about dedup rather than bucket boundaries. */
+        var bucketStart = TruncateToSeconds(DateTime.UtcNow).AddHours(-3);
+        bucketStart = bucketStart.AddMinutes(-bucketStart.Minute).AddSeconds(-bucketStart.Second);
+        var firstExecA = bucketStart.AddMinutes(1);
+        var firstExecB = bucketStart.AddMinutes(2);
+        var start = bucketStart.AddMinutes(-1);
+        var end = bucketStart.AddMinutes(59);
+
+        try
+        {
+            /* Interval A: execution_count never moves off 1, collected four times. True work: 1 execution
+               at 1,000us CPU / 2,000us duration. Un-deduped a read reports 4x that. */
+            foreach (var minute in new[] { 5, 10, 15, 20 })
+            {
+                await InsertQueryStoreAsync(connection, DedupServerId, bucketStart.AddMinutes(minute), "DedupDb",
+                    queryId: 1, planId: 11, execCount: 1, avgDurationUs: 2000, avgCpuUs: 1000, forced: false,
+                    maxMemPages: 0, queryText: "SELECT flat", firstExecutionTimeUtc: firstExecA);
+            }
+
+            /* Interval B: the cumulative shape — count and averages both grow as the interval accumulates.
+               True work is the LAST snapshot only: 40 executions at 300us CPU / 7,000us duration.
+               Un-deduped: 10x100 + 25x200 + 40x300 = 18,000us CPU against a true 12,000us. */
+            var growth = new (int Minute, long Execs, long Cpu, long Dur)[]
+            {
+                (5, 10L, 100L, 5_000L),
+                (10, 25L, 200L, 6_000L),
+                (15, 40L, 300L, 7_000L),
+            };
+            foreach (var g in growth)
+            {
+                await InsertQueryStoreAsync(connection, DedupServerId, bucketStart.AddMinutes(g.Minute), "DedupDb",
+                    queryId: 2, planId: 22, execCount: g.Execs, avgDurationUs: g.Dur, avgCpuUs: g.Cpu, forced: false,
+                    maxMemPages: 0, queryText: "SELECT growing", firstExecutionTimeUtc: firstExecB);
+            }
+
+            /* ── the top-queries grid ── */
+            var top = await viewer.GetQueryStoreTopQueriesAsync(DedupServerId, start, end);
+            var a = Assert.Single(top, r => r.QueryId == 1);
+            var b = Assert.Single(top, r => r.QueryId == 2);
+            Assert.Equal(1, a.TotalExecutions);            /* four collections of a 1-execution interval is ONE */
+            Assert.Equal(40, b.TotalExecutions);           /* 10 → 25 → 40 reached 40, it did not run 75 times */
+            Assert.Equal(2.0, a.AvgDurationMs, 3);
+            Assert.Equal(7.0, b.AvgDurationMs, 3);         /* the latest snapshot, not AVG(5000,6000,7000) */
+
+            /* ── the slicer bars ── CPU (1x1000 + 40x300)/1000 = 13 ms; un-deduped 22 ms.
+                  Duration (1x2000 + 40x7000)/1000 = 282 ms; un-deduped 488 ms. */
+            var buckets = await viewer.GetQueryStoreSlicerDataAsync(DedupServerId, start, end);
+            var bucket = Assert.Single(buckets);
+            Assert.Equal(2, bucket.SessionCount);           /* COUNT(DISTINCT query_id), guards the seed */
+            Assert.Equal(13.0, bucket.TotalCpu, 3);
+            Assert.Equal(282.0, bucket.TotalElapsed, 3);
+
+            /* ── the comparison ── this read groups by (database, query_hash), which is COARSER than the
+                  interval grain, and the seed gives both queries the same hash — so it is also the pin that
+                  dedup happens at the INTERVAL grain FIRST and only then re-aggregates up to the hash.
+                  One row: 1 + 40 = 41 executions (un-deduped: 4 + 75 = 79), and the execution-weighted mean
+                  duration is (1x2000 + 40x7000) / 41 = 6.878 ms.
+
+                  Both arms cover the same window, so a correct read reports identical current and baseline
+                  numbers; any dedup asymmetry between the arms would surface here as a false delta. */
+            var comparison = await viewer.GetQueryStoreComparisonAsync(DedupServerId, start, end, start, end);
+            var cb = Assert.Single(comparison);
+            Assert.Equal(41, cb.ExecutionCount);
+            Assert.Equal(41, cb.BaselineExecutionCount);
+            Assert.Equal(6.878, cb.AvgDurationMs, 3);
+            Assert.Equal(cb.ExecutionCount, cb.BaselineExecutionCount);
+            Assert.Equal(0.317, cb.AvgCpuMs, 3);           /* (1x1000 + 40x300) / 41 us -> ms */
+
+            /* ── the duration trend ── the ONE deliberate exclusion (#1841 tier 2), pinned so it stays a
+                  decision rather than looking like a missed read: it still emits one point per COLLECTION
+                  (four here) and still overstates. Deduping it collapses the series to one point per
+                  interval-close, which on Query Store's default 60-minute interval means a 1-hour window
+                  renders a single zero-valued point; placing the work when it ran needs the server-LOCAL
+                  first_execution_time against this UTC axis. */
+            var trend = await viewer.GetQueryStoreDurationTrendAsync(DedupServerId, start, end);
+            Assert.Equal(4, trend.Count);
+
+            /* ── the slicer overlay ── one point for the one interval, at its final values, so the overlay
+                  agrees with the deduped bars it is drawn over instead of showing a rising staircase. */
+            var timeline = await viewer.GetQueryStoreItemTimelineAsync(DedupServerId, "DedupDb", queryId: 2, planId: 22, start, end);
+            var point = Assert.Single(timeline);
+            Assert.Equal(bucketStart.AddMinutes(15), point.CollectionTime);
+            Assert.Equal(280.0, point.ElapsedMs, 3);       /* 40 x 7,000us; un-deduped this is 3 points, 50/150/280 */
+            Assert.Equal(12.0, point.CpuMs, 3);            /* 40 x 300us */
+
+            /* ── the MCP / REST surface ── the same dedup, so an agent and the web dashboard see the grid's
+                  numbers rather than the inflated ones. */
+            await using var postgres = NpgsqlDataSource.Create(cs!);
+            var mcp = await DarlingDataReader.GetQueryStoreTopAsync(
+                postgres, DedupServerId, start, end, top: 10, databaseName: null, TestContext.Current.CancellationToken);
+            Assert.Equal(40, Assert.Single(mcp, r => r.QueryId == 2).TotalExecutions);
+            Assert.Equal(1, Assert.Single(mcp, r => r.QueryId == 1).TotalExecutions);
+        }
+        finally
+        {
+            await DeleteRowsAsync(connection, "query_store_stats", DedupServerId);
         }
     }
 
@@ -857,9 +1030,16 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 
+    /// <param name="firstExecutionTimeUtc">
+    /// The runtime-stats INTERVAL identity (#1841). Defaults to one hour before the collection, so each
+    /// collection models a distinct interval — the shape most tests want. Pass the SAME value across
+    /// several collection times to model one interval being re-collected, which is what the dedup exists
+    /// to collapse.
+    /// </param>
     private static async Task InsertQueryStoreAsync(
         NpgsqlConnection connection, int serverId, DateTime collectionTimeUtc, string databaseName,
-        long queryId, long planId, long execCount, long avgDurationUs, long avgCpuUs, bool forced, long maxMemPages, string queryText)
+        long queryId, long planId, long execCount, long avgDurationUs, long avgCpuUs, bool forced, long maxMemPages, string queryText,
+        DateTime? firstExecutionTimeUtc = null)
     {
         using var command = new NpgsqlCommand(@"
 INSERT INTO query_store_stats
@@ -884,7 +1064,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         command.Parameters.AddWithValue(queryText);
         command.Parameters.AddWithValue("dbo.usp_Qs");
         command.Parameters.AddWithValue("Regular");
-        command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc.AddHours(-1), DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(firstExecutionTimeUtc ?? collectionTimeUtc.AddHours(-1), DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(execCount);
         command.Parameters.AddWithValue(avgDurationUs);

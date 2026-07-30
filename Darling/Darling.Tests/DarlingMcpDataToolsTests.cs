@@ -273,6 +273,23 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     }
 
     [Fact]
+    public void QueryStoreSql_DedupsPerIntervalBeforeAggregating()
+    {
+        /* #1841. query_store_stats rows are CUMULATIVE per-interval snapshots and the collector re-fetches
+           the OPEN interval every cycle, so SUM(execution_count) over the raw rows reports 10 + 25 + 40
+           for an interval that reached 40, and the AVG(avg_*) columns become an avg-of-avgs weighted by
+           re-collection frequency. This surface feeds BOTH the MCP tool and the REST route, so inflated
+           numbers would reach an agent's reasoning as readily as the web dashboard. replica_role is in the
+           key because the aggregate GROUPs BY it — the dedup must never drop a row the read must return. */
+        var sql = DarlingDataReader.QueryStoreTopSql;
+        Assert.Contains(
+            "PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc, replica_role",
+            sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY collection_time DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE rn = 1", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ServerListSql_EnabledServers_WithLastCollection()
     {
         var sql = DarlingDataReader.ServerListSql;
