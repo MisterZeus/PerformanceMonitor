@@ -197,13 +197,28 @@ public sealed class DarlingCollectorRunner
                     if (dbPlan is null)
                     {
                         /* Null (no rows for this database yet) falls back to the definition's
-                           documented first-run window, per database. This is the XE ring-buffer path
-                           (deadlocks / BPR), NOT query_store — no 24h clamp here (those sources roll
-                           past 24h on their own; the clamp is scoped to query_store's enumeration path). */
+                           documented first-run window, per database. No clamp is applied HERE because
+                           this branch also serves the XE ring-buffer collectors (deadlocks / BPR),
+                           where flooring a stale watermark would WRONGLY truncate legitimate catch-up
+                           — those sources roll past 24h on their own. query_store also reaches this
+                           branch on Azure SQL DB (#1836) and does need the bound, so it applies
+                           WatermarkPolicy.ClampCatchup inside its own cutoff computation: the clamp
+                           travels with the collector that needs it instead of with the path. */
                         context.Watermark = await GetLastCollectedTimeForDatabaseAsync(
                             server.ServerId, definition.TargetTable, definition.WatermarkColumn!,
                             definition.PerDatabaseWatermarkColumn!, databaseName, cancellationToken);
                         dbPlan = definition.BuildQuery(context);
+
+                        /* The definition clamped its own cutoff — surface the same WARNING the
+                           enumeration path emits, so the bounded history hole stays LOGGED and does
+                           not become the one silent hole in a policy whose whole premise is that it
+                           is visible. Mirrors Lite. */
+                        if (context.CatchupClampApplied)
+                        {
+                            _logger?.LogWarning(
+                                "{Collector} on '{Server}' database [{Database}] catch-up clamped to {Hours}h (stored watermark {Raw:o} is older) — a bounded, logged history hole.",
+                                definition.Name, server.Config.DisplayName, databaseName, WatermarkPolicy.MaxCatchup.TotalHours, context.Watermark);
+                        }
                     }
 
                     var sqlSlice = Stopwatch.StartNew();
@@ -222,6 +237,21 @@ public sealed class DarlingCollectorRunner
                         var storageSlice = Stopwatch.StartNew();
                         rowsWritten += await WriteBatchAsync(pgConnection, definition, batch, server, collectionTime, context, cancellationToken);
                         storageMs += storageSlice.ElapsedMilliseconds;
+                    }
+
+                    /* Same per-database truncation WARNING the enumeration path emits from
+                       onItemComplete, mirroring Lite. Reachable here since #1836 put query_store — the
+                       only collector that declares either bound — on this branch for Azure SQL DB;
+                       without it a database whose oldest rows were dropped this cycle would look like
+                       a clean collection. Read after the flush, as on the other path: the context
+                       signal stays this database's until the next read resets it. */
+                    var capHit = definition.PerItemRowCountWarnThreshold is int cap && batch.Count >= cap;
+                    if (capHit || context.PerItemTextBudgetExceeded)
+                    {
+                        _logger?.LogWarning(
+                            "{Collector} on '{Server}' database [{Database}] hit its per-database collection bound ({Reason}) — oldest rows dropped this cycle.",
+                            definition.Name, server.Config.DisplayName, databaseName,
+                            capHit ? $"row cap {definition.PerItemRowCountWarnThreshold}" : "256MB text budget");
                     }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)

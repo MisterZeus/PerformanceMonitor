@@ -22,10 +22,19 @@ namespace PerformanceMonitor.Collectors;
 /// deliberate, logged, BOUNDED hole (the source still retains the older data; the viewer's windows
 /// are 24h anyway). This is deliberately NOT applied to every timestamp watermark — for a ring-buffer
 /// or rolling-trace source the clamp is a no-op at best and, on a quiet <c>default_trace</c> whose
-/// 100MB ring can span days, a WRONG truncation of legitimate catch-up. The runner therefore applies
-/// it at exactly ONE site: query_store's per-database cutoff computation (the only unbounded-persisted
-/// source among the collectors). It lives here as a pure function purely so that placement is unit-
-/// testable in isolation.
+/// 100MB ring can span days, a WRONG truncation of legitimate catch-up. It is therefore scoped to
+/// exactly ONE collector: query_store's per-database cutoff (the only unbounded-persisted source among
+/// the collectors). It lives here as a pure function purely so that placement is unit-testable in
+/// isolation.
+/// </para>
+///
+/// <para>
+/// Two call sites, one collector. The hosts apply it in the enumeration loop's per-database watermark
+/// refresh, where they also emit the operator-visible WARNING; and <c>QueryStoreCollector</c> applies it
+/// again inside its own cutoff computation, which is what makes the bound hold on the Azure SQL DB
+/// per-database path (#1836) — that host branch is shared with the XE ring-buffer collectors and so
+/// deliberately does not clamp. Applying it twice is a no-op by construction: clamping an
+/// already-clamped value returns it unchanged.
 /// </para>
 /// </summary>
 public static class WatermarkPolicy
