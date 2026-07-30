@@ -51,7 +51,7 @@ public class StoreRoundTripTests : IClassFixture<SharedDuckDbFixture>, IDisposab
         var before = DateTime.UtcNow;
 
         /* No numerics supplied → store resolves the doubles from the display
-           text (stripping the trailing %), exactly the pre-E2 ?? fallback. */
+           text through AlertValueParser's leading-numeric extraction (#1830). */
         await store.RecordAlertAsync(new AlertHistoryRecord(
             ServerId: "7", ServerName: "Srv", MetricName: "CPU",
             CurrentValueText: "92.5%", ThresholdValueText: "80%",
@@ -75,6 +75,28 @@ public class StoreRoundTripTests : IClassFixture<SharedDuckDbFixture>, IDisposab
         Assert.False(row.Muted);
         Assert.Equal("detail text", row.DetailText);
         Assert.Equal("{\"k\":1}", row.ContextJson);
+    }
+
+    [Fact]
+    public async Task RecordAlert_DecoratedText_WithoutNumerics_StoresTheLeadingNumber_NotZero()
+    {
+        /* #1830 regression pin, at the exact seam that shipped broken: a High CPU record whose
+           text carries a parenthesized label and NO numerics. The old TrimEnd('%') fallback
+           failed on the ')' and stored 0 for every such row in the field. */
+        var store = new DuckDbAlertHistoryStore(_duckDb);
+
+        await store.RecordAlertAsync(new AlertHistoryRecord(
+            ServerId: "7", ServerName: "Srv", MetricName: "High CPU",
+            CurrentValueText: "87% (Total CPU)", ThresholdValueText: "80%",
+            NumericCurrentValue: null, NumericThresholdValue: null,
+            AlertSent: true, NotificationType: "toast", SendError: null,
+            Muted: false, DetailText: null, ContextJson: null));
+
+        var row = await ReadSingleAlertRowAsync();
+
+        Assert.NotNull(row);
+        Assert.Equal(87.0, row!.CurrentValue);
+        Assert.Equal(80.0, row.ThresholdValue);
     }
 
     [Fact]

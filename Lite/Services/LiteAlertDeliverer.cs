@@ -153,7 +153,8 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
             {
                 await SendDetectedAlertAsync(
                     outcome.MetricName, outcome.ServerName, outcome.CurrentValue, outcome.ThresholdValue,
-                    serverId, outcome.Context, outcome.Muted, outcome.DetailText);
+                    serverId, outcome.Context, outcome.NumericCurrentValue, outcome.NumericThresholdValue,
+                    outcome.Muted, outcome.DetailText);
             }
             else
             {
@@ -188,7 +189,8 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
        MainWindow.SendDetectedAlertAsync. */
     private async Task SendDetectedAlertAsync(
         string metricName, string serverName, string summaryCurrentValue, string thresholdValue,
-        int serverId, AlertContext? context, bool isMuted, string? summaryDetailText)
+        int serverId, AlertContext? context, double? numericCurrentValue, double? numericThresholdValue,
+        bool isMuted, string? summaryDetailText)
     {
         /* #1236: a per-server override (Manage Servers -> Edit) wins over the global delivery mode;
            null inherits App.AlertDeliveryMode. */
@@ -197,15 +199,18 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
         {
             foreach (var msg in PerEventNotification.Split(context, App.AlertPerEventMaxPerCycle))
             {
+                /* Each per-event row stores its OWN numeric (#1830): the overflow message's
+                   "+N more incident(s)" text is unparseable, and the history store's text fallback
+                   silently recorded 0 for it. The threshold is the outcome's, unchanged. */
                 await _sendAlert(
                     metricName, serverName, msg.CurrentValue, thresholdValue, serverId,
-                    msg.Context, null, null, isMuted, AlertContextBuilders.ContextToDetailText(msg.Context));
+                    msg.Context, msg.NumericValue, numericThresholdValue, isMuted, AlertContextBuilders.ContextToDetailText(msg.Context));
             }
             return;
         }
 
         await _sendAlert(
             metricName, serverName, summaryCurrentValue, thresholdValue, serverId,
-            context, null, null, isMuted, summaryDetailText);
+            context, numericCurrentValue, numericThresholdValue, isMuted, summaryDetailText);
     }
 }
