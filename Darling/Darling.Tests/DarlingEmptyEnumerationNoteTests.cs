@@ -176,7 +176,29 @@ public sealed class DarlingEmptyEnumerationNoteTests
         columns = columns[..columns.IndexOf("];", System.StringComparison.Ordinal)];
 
         Assert.Contains("last_error", columns);
-        Assert.Contains("last_note", columns);
+
+        /* note_summary, not the raw last_note: the table must carry the SAME qualified text the two WPF
+           grids render, or a collector empty all week and one empty once read identically here - the
+           exact ambiguity this feature exists to resolve. Composed server-side from the shared
+           formatter, so the browser never re-derives it. */
+        Assert.Contains("note_summary", columns);
+        Assert.DoesNotContain("\"last_note\"", columns);
+    }
+
+    [Fact]
+    public void Both_Apps_Mcp_Tools_Emit_The_Composed_Note_Summary()
+    {
+        /* The MCP response shape is deliberately identical across the SKUs, and this field is what the
+           web table binds to - added to one app only, the web surface would break or drift. */
+        foreach (var relative in new[]
+        {
+            Path.Combine("Lite", "Mcp", "McpHealthTools.cs"),
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs"),
+        })
+        {
+            var source = ReadRepoFile(relative);
+            Assert.Contains("note_summary = CollectorHealthClassifier.FormatCollectionNote(r.LastNote, r.NoteCount, r.TotalRuns)", source);
+        }
     }
 
     [Fact]

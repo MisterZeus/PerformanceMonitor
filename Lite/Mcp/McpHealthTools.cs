@@ -134,7 +134,10 @@ public sealed class McpHealthTools
                    window came back that way, which is the "collecting nothing for weeks" case that reads
                    as HEALTHY (correctly — an empty target is not a fault) and needs saying out loud. */
                 last_note = r.LastNote,
-                note_count = r.NoteCount
+                note_count = r.NoteCount,
+                /* The same string both WPF grids render, composed on this side so the web dashboard and
+                   any other consumer cannot re-derive it differently. */
+                note_summary = CollectorHealthClassifier.FormatCollectionNote(r.LastNote, r.NoteCount, r.TotalRuns)
             });
 
             return JsonSerializer.Serialize(new

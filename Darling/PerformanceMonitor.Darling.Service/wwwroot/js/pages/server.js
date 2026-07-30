@@ -238,6 +238,8 @@ const COLLECTOR_COLUMNS = [
   { key: "last_error", label: "Last Error", wrap: true },
   /* #1837: what a NON-failing run reported (an enumeration that came back with 0 items). Blank for a
      plainly healthy collector; the same column the two WPF grids carry, so the web view is not the one
-     Collection Health surface that still hides it. */
-  { key: "last_note", label: "Note", wrap: true },
+     Collection Health surface that still hides it. note_summary, not the raw last_note: it carries the
+     "(all N runs)" qualifier that separates a persistently empty collector from an occasionally quiet
+     one, composed server-side from the shared formatter so this table cannot render it a third way. */
+  { key: "note_summary", label: "Note", wrap: true },
 ];

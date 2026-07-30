@@ -511,7 +511,15 @@ namespace PerformanceMonitor.Common
         /// no signal, no query, and no cross-collector join.
         /// </para>
         /// </summary>
-        /// <param name="lastNote">The note text (health SQL's <c>last_note</c>); null/blank = nothing to render.</param>
+        /// <param name="lastNote">
+        /// The note text (health SQL's <c>last_note</c>); null/blank = nothing to render. It is an
+        /// EXEMPLAR from the window, not guaranteed to be the newest: the read takes a <c>MAX</c> over
+        /// the message text, which orders lexicographically, so a probe note whose count varies across
+        /// the window can show an earlier cycle's number. The empty-enumeration note carries no number
+        /// and is unaffected; the per-cycle count is exact on the Collection Log detail grid. Tracked as
+        /// #1855 - there is no portable "value at the greatest timestamp" aggregate across DuckDB and
+        /// Postgres, and these reads are deliberately one byte-portable string.
+        /// </param>
         /// <param name="noteCount">Runs in the window that carried a note (<c>note_count</c>).</param>
         /// <param name="totalRuns">Runs in the window (<c>total_runs</c>).</param>
         public static string FormatCollectionNote(string? lastNote, long noteCount, long totalRuns)
