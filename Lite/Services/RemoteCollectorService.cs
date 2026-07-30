@@ -136,6 +136,15 @@ public partial class RemoteCollectorService
     private long _lastDuckDbMs;
 
     /// <summary>
+    /// Set alongside the timing fields when a run SUCCEEDED but is worth annotating on its
+    /// collection_log row — today only the empty-enumeration case (see
+    /// <see cref="EnumeratedCollectorDriver.EmptyEnumerationMessage"/>). Cleared with them at the top of
+    /// every run, and only ever read on the success path (a run that threw has a real error message of
+    /// its own), so it can never carry a stale note onto another collector's row.
+    /// </summary>
+    private string? _lastCollectionNote;
+
+    /// <summary>
     /// Tracks health state per collector per server.
     /// </summary>
     private readonly Dictionary<(int ServerId, string CollectorName), CollectorHealthEntry> _collectorHealth = new();
@@ -451,6 +460,15 @@ public partial class RemoteCollectorService
         int rowsCollected = 0;
         bool xeSessionUnavailable = false;
 
+        /* Clear the per-call fields HERE, not only inside the definition runner: everything below can
+           throw before the runner is ever entered — the XE session ensure for deadlocks /
+           blocked_process_report is the live example — and the catches all fall through to the
+           LogCollectionAsync at the end of this method. Reset only in the runner, such a row carried the
+           PREVIOUS collector's sql/storage milliseconds as if they were its own. */
+        _lastSqlMs = 0;
+        _lastDuckDbMs = 0;
+        _lastCollectionNote = null;
+
         try
         {
             /* Target-gate collectors through the shared AppliesTo — the single authoritative gate surface
@@ -552,6 +570,13 @@ public partial class RemoteCollectorService
             };
 
             _scheduleManager.MarkCollectorRunForServer(server.Id, collectorName, startTime);
+
+            /* Annotate a successful-but-empty run (#1837): errorMessage is provably null here — only the
+               catches below assign it — so this carries the runner's note (today: an enumeration that
+               listed zero databases) onto the collection_log row without touching the SUCCESS status.
+               Health tracking and every band/count read key on status, never on error_message, so the
+               note is visible in the Collection Log detail grid and inert everywhere else. */
+            errorMessage = _lastCollectionNote;
 
             var elapsed = (int)(DateTime.UtcNow - startTime).TotalMilliseconds;
             AppLogger.Info("Collector", $"  [{server.DisplayName}] {collectorName} => {rowsCollected} rows in {elapsed}ms (sql:{_lastSqlMs}ms, duck:{_lastDuckDbMs}ms)");

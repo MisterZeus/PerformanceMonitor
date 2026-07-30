@@ -23,8 +23,14 @@ using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
-/// <summary>Per-run outcome the worker logs (mirrors Lite's fetch/store phase split, #1180).</summary>
-public sealed record CollectorRunResult(int Rows, long SqlMs, long StorageMs);
+/// <summary>
+/// Per-run outcome the worker logs (mirrors Lite's fetch/store phase split, #1180). <paramref name="Note"/>
+/// annotates a run that SUCCEEDED but is worth explaining on its collection_log row — today only the
+/// empty-enumeration case (see <see cref="EnumeratedCollectorDriver.EmptyEnumerationMessage"/>). It is the
+/// Darling twin of Lite's <c>_lastCollectionNote</c>; null (the default) leaves the row's message column
+/// null exactly as before.
+/// </summary>
+public sealed record CollectorRunResult(int Rows, long SqlMs, long StorageMs, string? Note = null);
 
 /// <summary>
 /// Runs a shared collector definition against one monitored server and binary-COPYs the rows
@@ -268,7 +274,10 @@ public sealed class DarlingCollectorRunner
 
                 if (items.Count == 0)
                 {
-                    return new CollectorRunResult(0, sqlMs, 0);
+                    /* Nothing failed, so this stays SUCCESS/0 rows — but it carries a note onto the
+                       collection_log row so it is distinguishable from a healthy collector whose
+                       databases were simply quiet (#1837). Mirrors Lite's _lastCollectionNote. */
+                    return new CollectorRunResult(0, sqlMs, 0, EnumeratedCollectorDriver.EmptyEnumerationMessage);
                 }
 
                 /* Optional quick scalar probe (query_store's live PRODUCTVERSION check) —

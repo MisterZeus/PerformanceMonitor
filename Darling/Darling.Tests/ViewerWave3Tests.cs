@@ -194,6 +194,19 @@ public sealed class ViewerWave3DisplayTests
         Assert.Equal(expected, AlertRow(metric: metric, current: value).CurrentValueDisplay);
     }
 
+    [Fact]
+    public void LegacyTempDbSpaceName_StillRendersAsPercent()
+    {
+        /* Lite's twin pin (AlertHistoryValueFormatTests). The tempdb token was lowercased across both
+           apps' UI (c0109f34), changing this metric's metric_name KEY from "TempDB Space" to
+           "tempdb Space"; stored alert-history rows keep the old name, and ordinal matching sent them to
+           the :F2 default with no unit. Both spellings must format identically, in both apps. */
+        Assert.Equal("87.3%", AlertRow(metric: "TempDB Space", current: 87.3).CurrentValueDisplay);
+        Assert.Equal(
+            AlertRow(metric: "tempdb Space", current: 87.3).CurrentValueDisplay,
+            AlertRow(metric: "TempDB Space", current: 87.3).CurrentValueDisplay);
+    }
+
     [Theory]
     [InlineData("email", true, null, "Sent")]
     [InlineData("email", false, "smtp exploded", "Failed")]
