@@ -874,7 +874,13 @@ internal static class DarlingDataReader
             MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN error_message END) AS last_error,
             MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN collection_time END) AS last_error_time,
             SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
-            SUM(CASE WHEN status = 'YIELDED' THEN 1 ELSE 0 END) AS yield_count
+            SUM(CASE WHEN status = 'YIELDED' THEN 1 ELSE 0 END) AS yield_count,
+            -- #1837: the note a SUCCEEDING run can leave behind (an enumeration that yielded 0 items,
+            -- items whose enumeration probe failed) and how many runs carried one. Gated on SUCCESS
+            -- specifically — the runners attach a note only to the SUCCESS write. Informational: it
+            -- feeds no band, and a legitimately empty target stays HEALTHY.
+            MAX(CASE WHEN status = 'SUCCESS' THEN error_message END) AS last_note,
+            COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count
         FROM v_collection_log
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -905,6 +911,8 @@ internal static class DarlingDataReader
                 LastErrorTime = reader.IsDBNull(8) ? null : reader.GetDateTime(8),
                 PermissionDeniedCount = reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9)),
                 YieldCount = reader.IsDBNull(10) ? 0 : Convert.ToInt64(reader.GetValue(10)),
+                LastNote = reader.IsDBNull(11) ? null : reader.GetString(11),
+                NoteCount = reader.IsDBNull(12) ? 0 : Convert.ToInt64(reader.GetValue(12)),
             });
         }
 
@@ -1019,6 +1027,16 @@ internal sealed class CollectorHealth
     public long PermissionDeniedCount { get; set; }
     /// <summary>1s lock-timeout yields (#1805) — deliberate, benign, counted apart from errors.</summary>
     public long YieldCount { get; set; }
+
+    /// <summary>
+    /// The note a non-failing run left behind (#1837): an enumeration that yielded 0 items, items whose
+    /// enumeration probe failed. Null for the ordinary run. Informational — never an input to
+    /// <see cref="HealthStatus"/>.
+    /// </summary>
+    public string? LastNote { get; set; }
+
+    /// <summary>How many of <see cref="TotalRuns"/> carried a <see cref="LastNote"/>.</summary>
+    public long NoteCount { get; set; }
 
     public double FailureRatePercent => TotalRuns > 0 ? (double)ErrorCount / TotalRuns * 100 : 0;
 

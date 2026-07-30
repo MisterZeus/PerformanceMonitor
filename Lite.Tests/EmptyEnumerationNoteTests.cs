@@ -9,6 +9,7 @@
 using System;
 using System.IO;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Services;
 using Xunit;
 
@@ -46,28 +47,85 @@ public class EmptyEnumerationNoteTests
     /* ── the runner wiring (source pins — the branch is the tail of a live enumeration read) ── */
 
     [Fact]
-    public void Runner_Annotates_The_Zero_Items_Branch_With_The_Shared_Message()
+    public void Runner_Takes_Its_Note_From_The_Shared_Enumeration_Read()
     {
         var source = File.ReadAllText(FindRepoFile(
             Path.Combine("Lite", "Services", "RemoteCollectorService.DefinitionRunner.cs")));
 
-        Assert.Contains("_lastCollectionNote = EnumeratedCollectorDriver.EmptyEnumerationMessage;", source);
+        /* Strengthened from the original "assigns the shared constant" pin when #1837's probe-failure
+           contract landed: the note can now be the empty-enumeration message, the probe-failure summary,
+           or both, so pinning ONE of those literals would no longer prove the host cannot drift. Routing
+           the whole enumeration read — items, probe failures, and the composed note — through the shared
+           driver does, because there is then no host-side text at all. */
+        Assert.Contains("EnumeratedCollectorDriver.ReadEnumerationAsync(enumerationReader, cancellationToken)", source);
+        Assert.Contains("telemetry.Note = enumeration.Note;", source);
 
-        /* Via the shared constant, never a copy of the text — a literal here is exactly the drift this
+        /* Via the shared driver, never a copy of the text — a literal here is exactly the drift this
            fix exists to prevent. */
         Assert.DoesNotContain("\"enumeration yielded 0 items", source);
+        Assert.DoesNotContain("failed their enumeration probe", source);
+    }
+
+    [Fact]
+    public void The_Note_Is_Assigned_Before_The_Zero_Item_Early_Return()
+    {
+        /* The ordering that makes the whole fix work: the zero-item branch RETURNS, so a note assigned
+           after it would annotate every cycle except the one that needed it. Pinned by position because
+           the branch itself is the tail of a live enumeration read. */
+        var source = File.ReadAllText(FindRepoFile(
+            Path.Combine("Lite", "Services", "RemoteCollectorService.DefinitionRunner.cs")));
+
+        var assignment = source.IndexOf("telemetry.Note = enumeration.Note;", StringComparison.Ordinal);
+        var earlyReturn = source.IndexOf("if (items.Count == 0)", StringComparison.Ordinal);
+
+        Assert.True(assignment >= 0 && earlyReturn >= 0, "both the note assignment and the zero-item branch must exist");
+        Assert.True(assignment < earlyReturn, "the note must be assigned before the zero-item early return");
     }
 
     [Fact]
     public void Runner_Resets_The_Note_With_The_Timing_Fields_Every_Run()
     {
-        /* The note rides the same per-call field convention as _lastSqlMs/_lastDuckDbMs, so it must be
+        /* The note rides the same per-run telemetry slot as the sql/storage timings, so it must be
            cleared at the top of every definition run — otherwise one empty enumeration would annotate
-           the NEXT collector's row too. */
+           the NEXT collector's row too. The slot is keyed by SERVER because servers collect in parallel;
+           a plain field would let one server's note land on another's row. */
         var source = File.ReadAllText(FindRepoFile(
             Path.Combine("Lite", "Services", "RemoteCollectorService.DefinitionRunner.cs")));
 
-        Assert.Contains("_lastCollectionNote = null;", source);
+        Assert.Contains("telemetry.Note = null;", source);
+
+        var service = File.ReadAllText(FindRepoFile(
+            Path.Combine("Lite", "Services", "RemoteCollectorService.cs")));
+        Assert.Contains("ConcurrentDictionary<int, RunTelemetry> _runTelemetry", service);
+    }
+
+    [Fact]
+    public void One_Servers_Note_Cannot_Land_On_Another_Servers_Row()
+    {
+        /* A collection cycle runs the monitored servers in PARALLEL on this one service instance, so
+           while the note lived in a plain field, server B's reset at the top of its run could blank
+           server A's pending note, and A's "enumeration yielded 0 items" could be read onto B's row for
+           a collector that does not even enumerate. The slot is keyed by server; the cycle's other rule
+           (collectors within one server run sequentially) is what makes that key sufficient. */
+        var service = CreateService();
+
+        var serverA = service.TelemetryFor(1);
+        var serverB = service.TelemetryFor(2);
+        Assert.NotSame(serverA, serverB);
+
+        serverA.Note = EnumeratedCollectorDriver.EmptyEnumerationMessage;
+        serverA.SqlMs = 1234;
+
+        /* Server B starting its own run resets ITS slot — the shape RunCollectorAsync uses. */
+        serverB.Note = null;
+        serverB.SqlMs = 0;
+
+        Assert.Equal(EnumeratedCollectorDriver.EmptyEnumerationMessage, serverA.Note);
+        Assert.Equal(1234, serverA.SqlMs);
+
+        /* And the same server always gets the same slot back, or the reset and the read would target
+           different objects within one run. */
+        Assert.Same(serverA, service.TelemetryFor(1));
     }
 
     [Fact]
@@ -79,7 +137,7 @@ public class EmptyEnumerationNoteTests
         var source = File.ReadAllText(FindRepoFile(
             Path.Combine("Lite", "Services", "RemoteCollectorService.cs")));
 
-        Assert.Contains("errorMessage = _lastCollectionNote;", source);
+        Assert.Contains("errorMessage = telemetry.Note;", source);
     }
 
     /* ── the neutrality this fix depends on (real assertions) ── */
@@ -127,6 +185,86 @@ public class EmptyEnumerationNoteTests
 
         Assert.Contains("MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN error_message END) AS last_error", source);
         Assert.DoesNotContain("error_message IS NOT NULL", source);
+    }
+
+    /* ── #1837 health visibility: the note gets its own column, and it is NOT an error ── */
+
+    [Fact]
+    public void Health_Read_Surfaces_The_Note_Gated_On_SUCCESS()
+    {
+        /* Gated on SUCCESS, not on "not a failure status": the runners attach a note only to the SUCCESS
+           write, and the looser complement of last_error would drag SESSION_MISSING and CANCELLED
+           messages into a column whose tooltip promises it is NOT an error. Written as MAX/COUNT over a
+           CASE rather than a NULL test on purpose: no read on this surface may key on message PRESENCE
+           (the pin above), and MAX/COUNT skip NULLs anyway. */
+        var source = File.ReadAllText(FindRepoFile(
+            Path.Combine("Lite", "Services", "LocalDataService.CollectionHealth.cs")));
+
+        Assert.Contains("MAX(CASE WHEN status = 'SUCCESS' THEN error_message END) AS last_note", source);
+        Assert.Contains("COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count", source);
+    }
+
+    [Fact]
+    public void The_Note_Never_Reaches_The_Banding()
+    {
+        /* Constraint (a)/(b) of #1837's design: the band order and its inputs are untouched, so a target
+           that is legitimately empty — no user databases, no AGs, nothing matching a filter — keeps
+           reading HEALTHY. Two collectors identical except for the note must band identically. */
+        var quiet = new CollectorHealthRow
+        {
+            CollectorName = "query_store",
+            TotalRuns = 96,
+            SuccessCount = 96,
+            LastSuccessTime = DateTime.UtcNow.AddMinutes(-5),
+            LastRunTime = DateTime.UtcNow.AddMinutes(-5),
+        };
+        var annotated = new CollectorHealthRow
+        {
+            CollectorName = "query_store",
+            TotalRuns = 96,
+            SuccessCount = 96,
+            LastSuccessTime = quiet.LastSuccessTime,
+            LastRunTime = quiet.LastRunTime,
+            LastNote = EnumeratedCollectorDriver.EmptyEnumerationMessage,
+            NoteCount = 96,
+        };
+
+        Assert.Equal(CollectorHealthClassifier.Healthy, quiet.HealthStatus);
+        Assert.Equal(quiet.HealthStatus, annotated.HealthStatus);
+    }
+
+    [Theory]
+    /* Nothing to say — the overwhelmingly common row — stays blank rather than shouting "OK". */
+    [InlineData(null, 0L, 96L, "")]
+    [InlineData("", 0L, 96L, "")]
+    /* A note counted zero times is incoherent input; blank beats a "(0 of N)" that reads like a defect. */
+    [InlineData("note", 0L, 96L, "")]
+    /* The distinction the issue asks for: sometimes-empty is normal, always-empty is the signal. */
+    [InlineData("note", 3L, 96L, "note (3 of 96 runs)")]
+    [InlineData("note", 96L, 96L, "note (all 96 runs)")]
+    public void Note_Qualifier_Says_How_Much_Of_The_Window_Was_Empty(string? note, long noteCount, long totalRuns, string expected)
+    {
+        Assert.Equal(expected, CollectorHealthClassifier.FormatCollectionNote(note, noteCount, totalRuns));
+    }
+
+    [Fact]
+    public void Note_Qualifier_Is_The_Shared_One_Both_Apps_Render()
+    {
+        /* Erik's parity rule in test form: the grid text lives in PerformanceMonitor.Common, so Lite and
+           the Darling Viewer cannot render the same store row two different ways. Darling.Tests pins the
+           identical expectations against the identical helper. */
+        var row = new CollectorHealthRow
+        {
+            CollectorName = "query_store",
+            TotalRuns = 96,
+            LastNote = EnumeratedCollectorDriver.EmptyEnumerationMessage,
+            NoteCount = 96,
+        };
+
+        Assert.Equal(
+            CollectorHealthClassifier.FormatCollectionNote(row.LastNote, row.NoteCount, row.TotalRuns),
+            row.NoteFormatted);
+        Assert.Contains("(all 96 runs)", row.NoteFormatted);
     }
 
     /* ── helpers ── */

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 
 namespace PerformanceMonitor.Common
 {
@@ -486,6 +487,53 @@ namespace PerformanceMonitor.Common
             }
 
             return Healthy;
+        }
+
+        /// <summary>
+        /// Renders the informational note a collector's NON-failing runs left behind (#1837) — an
+        /// enumeration that yielded 0 items, items whose enumeration probe failed — qualified by how much
+        /// of the window carried it. Empty string when there is nothing to say, which is the overwhelmingly
+        /// common case and keeps the column blank for a plainly healthy collector.
+        ///
+        /// <para>
+        /// Deliberately NOT a band and deliberately not an input to <see cref="Classify"/>. A target with
+        /// no user databases, no AGs, or nothing matching a collector's filter is legitimately empty and
+        /// must keep reading HEALTHY; making "empty" a band would cry wolf on exactly those installs. What
+        /// an operator actually needs is the DISTINCTION — "this collector has been coming back with
+        /// nothing" as a fact next to the green band, so a zero-row week is a thing you can see instead of
+        /// something you have to already suspect. The qualifier carries that: <c>all N runs</c> means every
+        /// run in the window came back empty, which is the persistently-empty signal; a fraction means it
+        /// happens sometimes, which is normal for a collector whose databases go quiet.
+        /// </para>
+        ///
+        /// <para>
+        /// Both counts come from the collection_log aggregate the health grid already reads, so this adds
+        /// no signal, no query, and no cross-collector join.
+        /// </para>
+        /// </summary>
+        /// <param name="lastNote">
+        /// The note text (health SQL's <c>last_note</c>); null/blank = nothing to render. It is an
+        /// EXEMPLAR from the window, not guaranteed to be the newest: the read takes a <c>MAX</c> over
+        /// the message text, which orders lexicographically, so a probe note whose count varies across
+        /// the window can show an earlier cycle's number. The empty-enumeration note carries no number
+        /// and is unaffected; the per-cycle count is exact on the Collection Log detail grid. Tracked as
+        /// #1855 - there is no portable "value at the greatest timestamp" aggregate across DuckDB and
+        /// Postgres, and these reads are deliberately one byte-portable string.
+        /// </param>
+        /// <param name="noteCount">Runs in the window that carried a note (<c>note_count</c>).</param>
+        /// <param name="totalRuns">Runs in the window (<c>total_runs</c>).</param>
+        public static string FormatCollectionNote(string? lastNote, long noteCount, long totalRuns)
+        {
+            if (string.IsNullOrWhiteSpace(lastNote) || noteCount <= 0)
+            {
+                return string.Empty;
+            }
+
+            /* >= rather than ==: the counts come from one GROUP BY over the same window, so they cannot
+               disagree, but "all" must never be the branch that a future off-by-one turns into "97 of 96". */
+            return noteCount >= totalRuns && totalRuns > 0
+                ? string.Format(CultureInfo.InvariantCulture, "{0} (all {1} runs)", lastNote, totalRuns)
+                : string.Format(CultureInfo.InvariantCulture, "{0} ({1} of {2} runs)", lastNote, noteCount, totalRuns);
         }
     }
 }

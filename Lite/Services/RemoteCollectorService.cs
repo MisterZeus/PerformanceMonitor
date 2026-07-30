@@ -129,20 +129,32 @@ public partial class RemoteCollectorService
     private static int ConnectionTimeoutSeconds => App.ConnectionTimeoutSeconds;
 
     /// <summary>
-    /// Per-call timing fields set by each collector method.
-    /// Read by RunCollectorAsync after the collector completes.
+    /// What one collector run has to hand its own collection_log row: the #1180 fetch/store split each
+    /// collector method sets, and the #1837 note a run that SUCCEEDED but collected nothing leaves behind
+    /// (an enumeration that yielded 0 items, items whose enumeration probe failed). Read by
+    /// <see cref="RunCollectorAsync"/> once the collector completes.
     /// </summary>
-    private long _lastSqlMs;
-    private long _lastDuckDbMs;
+    internal sealed class RunTelemetry
+    {
+        public long SqlMs { get; set; }
+        public long StorageMs { get; set; }
+        public string? Note { get; set; }
+    }
 
     /// <summary>
-    /// Set alongside the timing fields when a run SUCCEEDED but is worth annotating on its
-    /// collection_log row — today only the empty-enumeration case (see
-    /// <see cref="EnumeratedCollectorDriver.EmptyEnumerationMessage"/>). Cleared with them at the top of
-    /// every run, and only ever read on the success path (a run that threw has a real error message of
-    /// its own), so it can never carry a stale note onto another collector's row.
+    /// Per-run telemetry keyed by SERVER, because a collection cycle runs the servers in PARALLEL (one
+    /// task each, see RunCollectionCycleAsync) while the collectors within one server run sequentially.
+    /// As plain instance fields these three were shared across those parallel tasks: server B's reset at
+    /// the top of its run could blank server A's timings between A's write and A's collection_log read,
+    /// and once #1837 gave every enumeration run a note, A's "enumeration yielded 0 items" could land on
+    /// B's row for a collector that does not even enumerate. Keying by server is sufficient precisely
+    /// because of the sequential-within-a-server rule — two collectors on one server never overlap.
     /// </summary>
-    private string? _lastCollectionNote;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, RunTelemetry> _runTelemetry = new();
+
+    /// <summary>This server's telemetry slot, created on first use.</summary>
+    internal RunTelemetry TelemetryFor(int serverId) =>
+        _runTelemetry.GetOrAdd(serverId, static _ => new RunTelemetry());
 
     /// <summary>
     /// Tracks health state per collector per server.
@@ -465,9 +477,10 @@ public partial class RemoteCollectorService
            blocked_process_report is the live example — and the catches all fall through to the
            LogCollectionAsync at the end of this method. Reset only in the runner, such a row carried the
            PREVIOUS collector's sql/storage milliseconds as if they were its own. */
-        _lastSqlMs = 0;
-        _lastDuckDbMs = 0;
-        _lastCollectionNote = null;
+        var telemetry = TelemetryFor(GetServerId(server));
+        telemetry.SqlMs = 0;
+        telemetry.StorageMs = 0;
+        telemetry.Note = null;
 
         try
         {
@@ -572,14 +585,15 @@ public partial class RemoteCollectorService
             _scheduleManager.MarkCollectorRunForServer(server.Id, collectorName, startTime);
 
             /* Annotate a successful-but-empty run (#1837): errorMessage is provably null here — only the
-               catches below assign it — so this carries the runner's note (today: an enumeration that
-               listed zero databases) onto the collection_log row without touching the SUCCESS status.
-               Health tracking and every band/count read key on status, never on error_message, so the
-               note is visible in the Collection Log detail grid and inert everywhere else. */
-            errorMessage = _lastCollectionNote;
+               catches below assign it — so this carries the runner's note (an enumeration that listed
+               zero databases, items whose enumeration probe failed) onto the collection_log row without
+               touching the SUCCESS status. Health tracking and every band/count read key on status, never
+               on error_message, so the note reaches the Collection Health Note column and the Collection
+               Log detail grid, and is inert everywhere else. */
+            errorMessage = telemetry.Note;
 
             var elapsed = (int)(DateTime.UtcNow - startTime).TotalMilliseconds;
-            AppLogger.Info("Collector", $"  [{server.DisplayName}] {collectorName} => {rowsCollected} rows in {elapsed}ms (sql:{_lastSqlMs}ms, duck:{_lastDuckDbMs}ms)");
+            AppLogger.Info("Collector", $"  [{server.DisplayName}] {collectorName} => {rowsCollected} rows in {elapsed}ms (sql:{telemetry.SqlMs}ms, duck:{telemetry.StorageMs}ms)");
         }
         catch (XeSessionEnsureException ex)
         {
@@ -660,7 +674,7 @@ public partial class RemoteCollectorService
         RecordCollectorResult(GetServerId(server), collectorName, status, errorMessage, xeSessionUnavailable);
 
         // Log the collection attempt
-        await LogCollectionAsync(GetServerId(server), server.DisplayName, collectorName, startTime, status, errorMessage, rowsCollected, _lastSqlMs, _lastDuckDbMs);
+        await LogCollectionAsync(GetServerId(server), server.DisplayName, collectorName, startTime, status, errorMessage, rowsCollected, telemetry.SqlMs, telemetry.StorageMs);
     }
 
     /// <summary>

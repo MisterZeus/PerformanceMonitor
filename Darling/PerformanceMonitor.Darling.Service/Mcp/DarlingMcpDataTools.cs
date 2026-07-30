@@ -663,7 +663,7 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_collection_health"), Description("Shows the health status of all data collectors for a server — whether they're running successfully, failing, or stale. Check this before investigating data to ensure collectors are working properly.")]
+    [McpServerTool(Name = "get_collection_health"), Description("Shows the health status of all data collectors for a server — whether they're running successfully, failing, or stale. Check this before investigating data to ensure collectors are working properly. Each row also carries last_note/note_count: what a NON-failing run reported, e.g. an enumeration that came back with 0 items. note_count equal to total_runs means the collector has been collecting nothing all window — not a fault (the target may be legitimately empty), but the reason a HEALTHY collector can still have no data.")]
     public static async Task<string> GetCollectionHealth(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null)
@@ -689,7 +689,16 @@ public sealed class DarlingMcpDataTools
                 failure_rate_pct = Math.Round(r.FailureRatePercent, 1),
                 avg_duration_ms = Math.Round(r.AvgDurationMs, 0),
                 last_success = r.LastSuccessTime?.ToString("o"),
-                last_error = r.LastError
+                last_error = r.LastError,
+                /* #1837: what a NON-failing run reported — an enumeration that came back with 0 items,
+                   items whose enumeration probe failed. note_count == total_runs means every run in the
+                   window came back that way, which is the "collecting nothing for weeks" case that reads
+                   as HEALTHY (correctly — an empty target is not a fault) and needs saying out loud. */
+                last_note = r.LastNote,
+                note_count = r.NoteCount,
+                /* The same string both WPF grids render, composed on this side so the web dashboard and
+                   any other consumer cannot re-derive it differently. */
+                note_summary = CollectorHealthClassifier.FormatCollectionNote(r.LastNote, r.NoteCount, r.TotalRuns)
             });
 
             return JsonSerializer.Serialize(new

@@ -144,6 +144,13 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 DECLARE
     @result TABLE (name sysname);
 
+/* #1837: every probe failure below used to die in an empty CATCH, so a login that could not enter a
+   single database enumerated 0 items and logged one indistinguishable SUCCESS row. These rows come back
+   as the enumeration's SECOND result set — the driver's probe-failure contract — because the FIRST one
+   is the item list the runners collect from. */
+DECLARE
+    @probe_failures TABLE (name sysname, error_text nvarchar(4000));
+
 DECLARE
     @db sysname,
     @sql NVARCHAR(500),
@@ -160,6 +167,7 @@ DECLARE db_check CURSOR LOCAL FAST_FORWARD FOR
     AND   d.database_id < 32761
     AND   d.state_desc = N'ONLINE'
     AND   d.name <> N'PerformanceMonitor'
+    AND   HAS_DBACCESS(d.name) = 1 /*#1823's screen, which this collector never got: without it a least-privilege login probes every database it cannot enter and takes a 916 per database per cycle. Harmless while those failures were swallowed; with #1837 recording them they would be a permanent probe-failure note and a warning burst every cycle for a permission posture that is not changing. Its three siblings (database_scoped_config, index_object_stats, database_size_stats) already filter this way. On-prem only - from master on Azure SQL DB this returns 0 for every user database, and Azure does not use this enumeration.*/
     /* Default screen (#1565): vendor/system-adjacent databases with no customer workload. First group =
        vendor-controlled names (cannot collide with real customer data): cloud-provider management dbs,
        SSRS catalogs, PolyBase/DW artifacts, plus the id>4 system four as a name-based belt for clarity.
@@ -217,6 +225,12 @@ BEGIN
         EXECUTE @exec_sp @sql;
     END TRY
     BEGIN CATCH
+        /* The failure modes this catches are ordinary and per-database (mid-restore, an AG failover
+           mid-cursor, a login without access, a database that went offline between the cursor and the
+           probe), so the cursor keeps going — but the database is now MISSING from a collection that
+           still reports SUCCESS, which is exactly the hole #1837 closes. */
+        INSERT @probe_failures (name, error_text)
+        VALUES (@db, ERROR_MESSAGE());
     END CATCH;
 
     FETCH NEXT
@@ -230,6 +244,15 @@ DEALLOCATE db_check;
 SELECT
     name
 FROM @result
+ORDER BY
+    name;
+
+/* Second result set = the driver's probe-failure contract (EnumeratedCollectorDriver.ReadEnumerationAsync).
+   Always returned, normally empty; the driver reads zero rows and attaches no note. */
+SELECT
+    name,
+    error_text
+FROM @probe_failures
 ORDER BY
     name;";
 

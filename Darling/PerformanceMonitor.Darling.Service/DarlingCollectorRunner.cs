@@ -153,6 +153,11 @@ public sealed class DarlingCollectorRunner
         long storageMs = 0;
         var rowsWritten = 0;
 
+        /* The collection_log note for this run (#1837) — null on every ordinary path. Only the enumeration
+           branch sets it, but it is declared here so the note reaches the single success return below when
+           items WERE found and merely some of their probes failed. Lite's twin is _lastCollectionNote. */
+        string? collectionNote = null;
+
         if (definition.RunsPerDatabase(context.Target))
         {
             /* Azure SQL DB scopes some DMVs to the connected database — run the query once per
@@ -291,23 +296,28 @@ public sealed class DarlingCollectorRunner
                    run one query per item ON THE SAME CONNECTION; an item that fails is skipped
                    with a warning, matching Lite. */
                 var listSlice = Stopwatch.StartNew();
-                var items = new List<string>();
+                EnumerationOutcome enumeration;
                 using (var enumerationCommand = CreateCollectorCommand(enumerationPlan, sqlConnection, CommandTimeoutSeconds))
                 using (var enumerationReader = await enumerationCommand.ExecuteReaderAsync(cancellationToken))
                 {
-                    while (await enumerationReader.ReadAsync(cancellationToken))
-                    {
-                        items.Add(enumerationReader.GetString(0));
-                    }
+                    /* Shared read (#1837): the item list, then the OPTIONAL second result set of items the
+                       enumeration could not probe. Both hosts route through it so the item read, the
+                       failure read, and the note wording cannot drift. */
+                    enumeration = await EnumeratedCollectorDriver.ReadEnumerationAsync(enumerationReader, cancellationToken);
                 }
                 sqlMs += listSlice.ElapsedMilliseconds;
 
+                var items = enumeration.Items;
+                collectionNote = enumeration.Note;
+                LogEnumerationProbeFailures(definition, server, enumeration.ProbeFailures);
+
                 if (items.Count == 0)
                 {
-                    /* Nothing failed, so this stays SUCCESS/0 rows — but it carries a note onto the
-                       collection_log row so it is distinguishable from a healthy collector whose
-                       databases were simply quiet (#1837). Mirrors Lite's _lastCollectionNote. */
-                    return new CollectorRunResult(0, sqlMs, 0, EnumeratedCollectorDriver.EmptyEnumerationMessage);
+                    /* Nothing failed outright, so this stays SUCCESS/0 rows — but the note (the
+                       empty-enumeration breadcrumb, the probe-failure summary, or both) rides onto the
+                       collection_log row so it is distinguishable from a healthy collector whose databases
+                       were simply quiet (#1837). Mirrors Lite's _lastCollectionNote. */
+                    return new CollectorRunResult(0, sqlMs, 0, enumeration.Note);
                 }
 
                 /* Optional quick scalar probe (query_store's live PRODUCTVERSION check) —
@@ -441,7 +451,38 @@ public sealed class DarlingCollectorRunner
 
         _logger?.LogDebug("Collected {RowCount} {Collector} rows for server '{Server}'",
             rowsWritten, definition.Name, server.Config.DisplayName);
-        return new CollectorRunResult(rowsWritten, sqlMs, storageMs);
+        return new CollectorRunResult(rowsWritten, sqlMs, storageMs, collectionNote);
+    }
+
+    /// <summary>
+    /// Writes the per-item app-log lines for an enumeration's probe failures (#1837), capped at
+    /// <see cref="EnumeratedCollectorDriver.MaxLoggedProbeFailures"/> with the suppressed remainder
+    /// reported as a count. The collection_log row already carries the summary note; this is where the
+    /// actual per-database error text lands, and it is why that note says "see the app log". Lite's twin
+    /// is <c>RemoteCollectorService.LogEnumerationProbeFailures</c> — same shared templates.
+    /// </summary>
+    private void LogEnumerationProbeFailures<TRow>(
+        ICollectorDefinition<TRow> definition,
+        ServerRuntime server,
+        IReadOnlyList<EnumerationProbeFailure> probeFailures)
+    {
+        if (probeFailures.Count == 0)
+        {
+            return;
+        }
+
+        var shown = Math.Min(probeFailures.Count, EnumeratedCollectorDriver.MaxLoggedProbeFailures);
+        for (var i = 0; i < shown; i++)
+        {
+            _logger?.LogWarning(EnumeratedCollectorDriver.ProbeFailureLogTemplate,
+                definition.Name, server.Config.DisplayName, probeFailures[i].Item, probeFailures[i].Error);
+        }
+
+        if (probeFailures.Count > shown)
+        {
+            _logger?.LogWarning(EnumeratedCollectorDriver.ProbeFailureOverflowLogTemplate,
+                definition.Name, server.Config.DisplayName, probeFailures.Count, probeFailures.Count - shown, shown);
+        }
     }
 
     /// <summary>
