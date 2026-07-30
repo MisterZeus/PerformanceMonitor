@@ -40,13 +40,14 @@ public sealed class DuckDbAlertHistoryStore : IAlertHistoryStore
     /// </summary>
     public async Task RecordAlertAsync(AlertHistoryRecord record)
     {
-        /* Resolve the DuckDB current_value/threshold_value doubles from the
-           optional numerics, falling back to parsing the display text — exactly
-           the ?? fallback EmailAlertService.TrySendAlertEmailAsync used today. */
+        /* Resolve the DuckDB current_value/threshold_value doubles from the optional numerics,
+           falling back to the display text through the shared leading-numeric parser (#1830): the
+           old TrimEnd('%') parse failed on any decorated value ("87% (Total CPU)") and silently
+           stored 0 for every High CPU row. */
         var currentValue = record.NumericCurrentValue
-            ?? (double.TryParse(record.CurrentValueText.TrimEnd('%'), out var cv) ? cv : 0);
+            ?? PerformanceMonitor.Notifications.AlertValueParser.ParseOrDefault(record.CurrentValueText);
         var thresholdValue = record.NumericThresholdValue
-            ?? (double.TryParse(record.ThresholdValueText.TrimEnd('%'), out var tv) ? tv : 0);
+            ?? PerformanceMonitor.Notifications.AlertValueParser.ParseOrDefault(record.ThresholdValueText);
         var serverId = int.TryParse(record.ServerId, out var sid) ? sid : 0;
 
         try

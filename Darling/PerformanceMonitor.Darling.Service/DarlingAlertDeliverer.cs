@@ -85,12 +85,15 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
             {
                 foreach (var message in PerEventNotification.Split(outcome.Context, _settings.PerEventMax))
                 {
-                    /* Per-incident card: msg.CurrentValue is the incident's occurrence count; no server-level
-                       numerics (matching Lite/Dashboard's per-event sends), detail text rebuilt from the split context. */
+                    /* Per-incident card: msg.CurrentValue is the incident's occurrence count, and
+                       msg.NumericValue carries it as a number for the history row (#1830 — the
+                       overflow message's "+N more" text is unparseable, so the store's text fallback
+                       silently recorded 0). Threshold is the outcome's, unchanged. Matches Lite's
+                       per-event sends; detail text rebuilt from the split context. */
                     await SendAndRecordAsync(
                         outcome, message.CurrentValue, message.Context,
                         AlertContextBuilders.ContextToDetailText(message.Context),
-                        numericCurrentValue: null, numericThresholdValue: null);
+                        numericCurrentValue: message.NumericValue, numericThresholdValue: outcome.NumericThresholdValue);
                 }
 
                 return;
