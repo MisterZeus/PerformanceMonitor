@@ -93,7 +93,7 @@ All editions include real-time alerts (system tray + email + webhooks), charts a
 ## Quick Start — Lite
 
 1. Download **[`PerformanceMonitorLite-win-Setup.exe`](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** (requires [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/en-us/download/dotnet/10.0))
-2. Run the installer — it installs to `%LocalAppData%\PerformanceMonitorLite`, adds **Start Menu** and **Desktop** shortcuts, and registers the app under **Apps & Features** so it shows up in Windows search and can be uninstalled normally. Auto-update is wired in.
+2. Run the installer — it installs to `%LocalAppData%\PerformanceMonitorLite`, adds **Start Menu** and **Desktop** shortcuts, and registers the app under **Apps & Features** so it shows up in Windows search and can be uninstalled normally. Auto-update is wired in. Your data goes in `%LocalAppData%\PerformanceMonitorLite-Data`, a separate folder the installer never touches.
 3. Launch from the Start Menu or Desktop shortcut.
 4. Click **+ Add Server**, enter connection details, test, save.
 5. Double-click the server in the sidebar to connect.
@@ -101,6 +101,8 @@ All editions include real-time alerts (system tray + email + webhooks), charts a
 Data starts flowing within 1–5 minutes. That's it. No installation on your server, no Agent jobs, no sysadmin required.
 
 **Upgrading from zip?** Click **Import Settings** then **Import Data** in the sidebar and point both at your old Lite folder. Settings imports server connections, alert thresholds, SMTP config, and schedules. Data imports historical DuckDB + Parquet archives. **Auto-update users** (installed via Setup.exe) get updates automatically — no manual import needed.
+
+> **Warning — upgrading an install older than the data-relocation fix:** on those versions Lite kept its data *inside* the install directory, and re-running `Setup.exe` over an existing install deletes that directory before the new build ever runs. It takes the DuckDB store, the Parquet archive, the logs, and `settings.json` with it. Upgrade **in place** instead: **Help > About** downloads and applies the update without touching your data, or extract the portable ZIP over your existing copy. From this release on, data lives outside the install directory and is moved there automatically on first start, so `Setup.exe` is safe again. (Your monitored-server list is unaffected either way — it lives in `%ProgramData%\PerformanceMonitorLite\config` — and so are the passwords in Windows Credential Manager.)
 
 **Always On AG?** Enable **ReadOnlyIntent** in the connection settings to route Lite's monitoring queries to a readable secondary, keeping the primary clear. Enable **MultiSubnetFailover** for multi-subnet failover scenarios.
 
@@ -153,7 +155,7 @@ Darling runs this same shared collector set across a fleet of servers (latch sta
 
 ### Lite Data Storage
 
-All data is stored in `%LOCALAPPDATA%\PerformanceMonitorLite\` — separate from the executable, so auto-updates don't affect your data.
+All data is stored in `%LOCALAPPDATA%\PerformanceMonitorLite-Data\` — a different folder from the install directory (`%LOCALAPPDATA%\PerformanceMonitorLite\`), so neither an in-app update nor re-running `Setup.exe` can disturb it. Data from an older install is moved into the new folder automatically the first time this version starts.
 
 - **Hot data** in DuckDB 1.5.2 — non-blocking checkpoints, free block reuse, stable file size without periodic resets
 - **Archive** to Parquet with ZSTD compression (~10x reduction) — automatic monthly compaction keeps file count low (~75 files vs thousands)
@@ -165,9 +167,9 @@ All data is stored in `%LOCALAPPDATA%\PerformanceMonitorLite\` — separate from
 | File | Location | Purpose |
 |---|---|---|
 | `servers.json` | `%ProgramData%\PerformanceMonitorLite\config\` (machine-wide) | Server connections, shared across all Windows users on the machine. Passwords stay per-user in Windows Credential Manager. Optional **Utility Database** per server for community procs installed outside master. |
-| `settings.json` | `%LOCALAPPDATA%\PerformanceMonitorLite\config\` (per-user) | Retention, MCP server, startup behavior, alert thresholds, SMTP configuration |
-| `collection_schedule.json` | `%LOCALAPPDATA%\PerformanceMonitorLite\config\` (per-user) | Per-collector enable/disable and frequency |
-| `ignored_wait_types.json` | `%LOCALAPPDATA%\PerformanceMonitorLite\config\` (per-user) | 124 benign wait types excluded by default |
+| `settings.json` | `%LOCALAPPDATA%\PerformanceMonitorLite-Data\config\` (per-user) | Retention, MCP server, startup behavior, alert thresholds, SMTP configuration |
+| `collection_schedule.json` | `%LOCALAPPDATA%\PerformanceMonitorLite-Data\config\` (per-user) | Per-collector enable/disable and frequency |
+| `ignored_wait_types.json` | `%LOCALAPPDATA%\PerformanceMonitorLite-Data\config\` (per-user) | 124 benign wait types excluded by default |
 
 When a second Windows user on the same machine launches Lite, they see the shared `servers.json` immediately. SQL Auth and Entra MFA passwords are scoped to each user's own Credential Manager, so they'll be prompted once per server; Windows Auth works without any prompt.
 

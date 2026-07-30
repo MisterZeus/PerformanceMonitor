@@ -166,7 +166,7 @@ Once a day, the `PerformanceMonitor - Data Retention` job runs a `DELETE` loop p
 
 ### What's different
 
-Lite is a standalone WPF app — **no SQL Agent involved, no PerformanceMonitor database**. The app itself is the collector, and the storage is a local DuckDB file (`%LocalAppData%\PerformanceMonitorLite\pm_lite.duckdb`).
+Lite is a standalone WPF app — **no SQL Agent involved, no PerformanceMonitor database**. The app itself is the collector, and the storage is a local DuckDB file (`%LocalAppData%\PerformanceMonitorLite-Data\monitor.duckdb`).
 
 The shape still mirrors Full: a dispatcher picks collectors, each collector pulls from DMVs and writes to a destination table, and a reader service hands data to the UI.
 
