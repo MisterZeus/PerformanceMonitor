@@ -90,6 +90,8 @@ public sealed class ViewerAlertRow
         "High CPU" or "tempdb Space" or "Volume Free Space" or "Long-Running Job" => $"{value:F1}%",
         "Poison Wait" => $"{value:F0} ms",
         "Long-Running Query" => $"{value:F0} m",
+        /* #1839 total blocked wait — seconds, whole (the numeric is already seconds, not ms). */
+        "Blocking Wait Time" => $"{value:F0} s",
         "Blocking Detected" or "Deadlocks Detected" or "Failed Agent Job" => $"{value:F0}",
         _ => $"{value:F2}",
     };

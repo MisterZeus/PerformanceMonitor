@@ -329,6 +329,7 @@ The shared alert engine's switches and thresholds. Every default mirrors Lite's 
 | `cpuMode` | `"total"` | `"total"` = SQL + other processes; `"sql"` = SQL process only |
 | `blockingEnabled` | `true` | |
 | `blockingCountThreshold` | `1` | Blocked-process count (rolling window) that trips the alert |
+| `blockingWaitSecondsThreshold` | `0` | Total blocked wait, in seconds, summed across the latest blocking snapshot; `0` = off. A second gate beside the count one, because a count cannot tell one session blocked for an hour from one blocked for a second. Reports as its own "Blocking Wait Time" alert, and unlike the count gate it is level-triggered: it re-fires every cooldown while the wait stays above the threshold and clears when it drops below |
 | `deadlockEnabled` | `true` | |
 | `deadlockCountThreshold` | `1` | Deadlock count (rolling window) that trips the alert |
 | `poisonWaitEnabled` | `true` | THREADPOOL / RESOURCE_SEMAPHORE / RESOURCE_SEMAPHORE_QUERY_COMPILE |

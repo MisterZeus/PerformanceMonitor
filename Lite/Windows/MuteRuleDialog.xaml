@@ -68,6 +68,7 @@
                   SelectionChanged="MetricCombo_SelectionChanged">
             <ComboBoxItem Content="(any)"/>
             <ComboBoxItem Content="Blocking Detected"/>
+            <ComboBoxItem Content="Blocking Wait Time"/>
             <ComboBoxItem Content="Deadlocks Detected"/>
             <ComboBoxItem Content="High CPU"/>
             <ComboBoxItem Content="Poison Wait"/>

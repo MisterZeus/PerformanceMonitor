@@ -143,9 +143,11 @@ public partial class MuteRuleDialog : Window
 
         var metric = (MetricCombo.SelectedItem as ComboBoxItem)?.Content?.ToString();
 
-        bool showDatabase = metric is null or "(any)" or "Blocking Detected" or "Deadlocks Detected" or "Long-Running Query";
+        /* #1839's "Blocking Wait Time" carries the same blocked-process context as "Blocking Detected",
+           so it offers the same database/query-text pattern fields. */
+        bool showDatabase = metric is null or "(any)" or "Blocking Detected" or "Blocking Wait Time" or "Deadlocks Detected" or "Long-Running Query";
         bool showWaitType = metric is null or "(any)" or "Poison Wait" or "Long-Running Query";
-        bool showQueryText = metric is null or "(any)" or "Blocking Detected" or "Long-Running Query";
+        bool showQueryText = metric is null or "(any)" or "Blocking Detected" or "Blocking Wait Time" or "Long-Running Query";
         bool showJobName = metric is null or "(any)" or "Long-Running Job";
 
         DatabaseLabel.Visibility = DatabasePatternBox.Visibility = showDatabase ? Visibility.Visible : Visibility.Collapsed;

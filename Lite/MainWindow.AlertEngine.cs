@@ -192,6 +192,22 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
+    /// Resolves a server's EFFECTIVE cadence (minutes) for one collector, feeding the read adapter's
+    /// snapshot-freshness bounds (#1812 running_jobs, #1839 dmv_blocking_snapshot). The adapter keys
+    /// servers by the deterministic int hash while ScheduleManager keys by the connection GUID, so this
+    /// does the same hash-match <see cref="FetchFailedJobsForAlertAsync"/> does. Returns 0 — "no answer,
+    /// use the shipped default" — for an unknown server or an unscheduled collector.
+    /// </summary>
+    private int ResolveCollectorCadenceForAlerts(int serverId, string collectorName)
+    {
+        var server = _serverManager.GetAllServers().FirstOrDefault(s =>
+            RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s)) == serverId);
+        return server is null
+            ? 0
+            : _scheduleManager.GetScheduleForServer(server.Id, collectorName)?.FrequencyMinutes ?? 0;
+    }
+
+    /// <summary>
     /// The engine's live-msdb failed-jobs fetcher. Failure outcomes aren't part of the collected
     /// running_jobs snapshot, so this queries the monitored server directly at alert-check time via
     /// the collector's connection path (async SqlClient, already off the UI thread; MFA

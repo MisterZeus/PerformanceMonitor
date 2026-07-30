@@ -150,7 +150,13 @@ public sealed class DarlingMcpAlertTools
         alerts_enabled = s.Enabled,
         notify_connection_changes = s.NotifyConnectionChanges,
         cpu = new { enabled = s.CpuEnabled, threshold_percent = s.CpuThresholdPercent, mode = s.CpuMode },
-        blocking = new { enabled = s.BlockingEnabled, count_threshold = s.BlockingCountThreshold },
+        blocking = new
+        {
+            enabled = s.BlockingEnabled,
+            count_threshold = s.BlockingCountThreshold,
+            /* #1839: the second gate — total blocked wait in the latest snapshot (0 = off). */
+            wait_threshold_seconds = s.BlockingWaitSecondsThreshold
+        },
         deadlocks = new { enabled = s.DeadlockEnabled, count_threshold = s.DeadlockCountThreshold },
         poison_wait = new { enabled = s.PoisonWaitEnabled, threshold_ms = s.PoisonWaitThresholdMs },
         long_running_query = new

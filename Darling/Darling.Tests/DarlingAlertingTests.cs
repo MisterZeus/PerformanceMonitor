@@ -66,6 +66,8 @@ public sealed class DarlingAlertingTests
         Assert.Equal(80, settings.CpuThresholdPercent);
         Assert.Equal(CpuAlertMode.TotalServer, settings.CpuAlertMode); /* Lite default CpuAlertMode.Total */
         Assert.Equal(1, settings.BlockingCountThreshold);
+        /* #1839 ships OFF (0) in both SKUs — a new alert must not start firing on upgrade. */
+        Assert.Equal(0, settings.BlockingWaitSecondsThreshold);
         Assert.Equal(1, settings.DeadlockCountThreshold);
         Assert.Equal(500, settings.PoisonWaitThresholdMs);
         Assert.Equal(30, settings.LongRunningQueryThresholdMinutes);

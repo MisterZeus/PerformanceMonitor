@@ -132,6 +132,12 @@
     "notifyConnectionChanges": true,
     "cpuThresholdPercent": 80,
     "cpuMode": "total", // "total" (SQL + other processes) or "sql" (SQL process only)
+    // Total blocked wait, in seconds, summed across the LATEST blocking snapshot. 0 = off (the default),
+    // so nothing starts alerting because you took an update. A second gate beside blockingCountThreshold:
+    // a count cannot tell one session blocked for an hour from one blocked for a second. It reports as its
+    // own "Blocking Wait Time" alert and is level-triggered - it re-fires every cooldown while the wait
+    // stays above the threshold, and clears when it drops below. Needs "blockingEnabled" (default true).
+    "blockingWaitSecondsThreshold": 0,
     // How deadlock/blocking alerts are delivered: "Summary" (one batched card per cycle, the default)
     // or "PerEvent" (one notification per distinct incident, so downstream automation can open one
     // ticket per incident). A per-server "alertDeliveryModeOverride" (see servers[]) wins over this.

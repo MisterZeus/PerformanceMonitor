@@ -76,7 +76,12 @@ public sealed class McpAlertTools
                 blocking = new
                 {
                     enabled = App.AlertBlockingEnabled,
-                    threshold_seconds = App.AlertBlockingThreshold
+                    /* Renamed from threshold_seconds (#1839): this gate has always been a COUNT of
+                       blocked-process events — the seconds name was copied from the Dashboard, whose
+                       blocking threshold really is seconds. Leaving it would now collide with the real
+                       seconds threshold below. */
+                    threshold_count = App.AlertBlockingThreshold,
+                    wait_threshold_seconds = App.AlertBlockingWaitSecondsThreshold
                 },
                 deadlocks = new
                 {

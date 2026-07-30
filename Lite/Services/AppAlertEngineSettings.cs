@@ -44,6 +44,8 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
 
     public int CpuThresholdPercent => App.AlertCpuThreshold;
     public int BlockingCountThreshold => App.AlertBlockingThreshold;
+
+    public int BlockingWaitSecondsThreshold => App.AlertBlockingWaitSecondsThreshold;
     public int DeadlockCountThreshold => App.AlertDeadlockThreshold;
     public int PoisonWaitThresholdMs => App.AlertPoisonWaitThresholdMs;
     public int LongRunningQueryThresholdMinutes => App.AlertLongRunningQueryThresholdMinutes;
