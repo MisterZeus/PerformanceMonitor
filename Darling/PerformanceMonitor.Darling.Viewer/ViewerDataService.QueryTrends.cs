@@ -92,44 +92,95 @@ public sealed partial class ViewerDataService
         """;
 
     /// <summary>
-    /// Query Store duration trend: execution_count·avg_duration_us → ms/sec + executions/sec.
+    /// Query Store duration trend: each interval's work, placed at the time that work RAN.
     ///
-    /// <para>KNOWN OVERSTATEMENT, deliberately still here (#1841 tier 2), and the one Query Store
-    /// aggregate the per-interval dedup was NOT applied to. The three trends above sum per-cycle DELTA
-    /// columns; Query Store has none, so its cumulative per-interval snapshots — re-fetched every cycle
-    /// while the interval stays open — make an interval that reached 40 executions charge 10, then 25,
-    /// then 40 to three successive points, overstating the area under the curve.</para>
+    /// <para>#1841 tier 2 corrected this, and the fix is a different shape from the other four Query
+    /// Store reads. The three trends above sum per-cycle DELTA columns; Query Store has none, so its
+    /// cumulative per-interval snapshots — re-fetched every cycle while the interval stays open — used to
+    /// make an interval that reached 40 executions charge 10, then 25, then 40 to three successive
+    /// points. Tier 1 deliberately left that in, because dedup ALONE makes this chart worse: it keeps ONE
+    /// row per interval at the collection where the interval closed, and Query Store's default
+    /// INTERVAL_LENGTH_MINUTES is 60 against a 5-minute cadence, so twelve snapshots collapse onto one
+    /// collection_time and a 1-hour window renders a SINGLE point valued 0.</para>
     ///
-    /// <para>Deduping to the latest snapshot per interval fixes the magnitude but destroys the series:
-    /// it keeps ONE row per interval, at the collection where that interval closed, and Query Store's
-    /// default INTERVAL_LENGTH_MINUTES is 60 against a 5-minute cadence — so every query's twelve
-    /// snapshots collapse onto one collection_time (Query Store interval boundaries are globally
-    /// aligned, so they collapse together) and a 1-hour window renders a SINGLE point, valued 0 because
-    /// the LAG has no predecessor. Placing the work when it actually ran needs first_execution_time,
-    /// which is the monitored server's LOCAL wall clock while this axis is UTC — trading a magnitude
-    /// bug for a timezone bug. Tier 2 owns both halves. Mirrors Lite's GetQueryStoreDurationTrendAsync.</para>
+    /// <para>What unlocks it is the x-axis, not the dedup: <c>interval_start_time_utc</c> is the
+    /// interval's own start boundary, converted to UTC AT COLLECTION, so it shares the clock with
+    /// collection_time. (The premise this was blocked on — that the interval clock is server-LOCAL — was
+    /// wrong on both halves: Query Store's interval start_time and first_execution_time are both
+    /// <c>datetimeoffset</c>, and the collector already normalized them through
+    /// <c>DateTimeOffset.UtcDateTime</c> before storing.) Deduped and placed at its start, each interval
+    /// contributes its true total exactly once at the hour it ran, and the series resolution becomes
+    /// Query Store's OWN interval length — the honest resolution of this source.</para>
+    ///
+    /// <para><b>The legacy boundary.</b> Rows collected before tier 2 carry no interval start and none can
+    /// be reconstructed, so they keep the pre-tier-2 treatment exactly: un-deduped, at collection_time,
+    /// still overstating. The arms split on <c>interval_start_time_utc IS NULL</c>, which partitions the
+    /// rows with no overlap and no gap. Mirrors Lite's GetQueryStoreDurationTrendAsync.</para>
     /// </summary>
     public const string QueryStoreDurationTrendSql = """
-        WITH raw AS
+        WITH placed AS
         (
+            /* Arm 1 (#1841 tier 2) — rows carrying the interval identity. Dedup to the interval's FINAL
+               cumulative snapshot, then place it at interval_start_time_utc: the hour the work ran, not
+               the cycle that last fetched it. Both halves are needed; see the remarks for why dedup alone
+               collapses this series and placement alone leaves it inflated. */
             SELECT
-                collection_time,
-                SUM(execution_count * avg_duration_us / 1000.0) AS total_duration_ms,
-                SUM(execution_count) AS total_executions,
-                extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_seconds
+                interval_start_time_utc AS point_time,
+                execution_count,
+                avg_duration_us
+            FROM
+            (
+                SELECT
+                    interval_start_time_utc,
+                    execution_count,
+                    avg_duration_us,
+                    ROW_NUMBER() OVER
+                    (
+                        PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
+                        ORDER BY collection_time DESC
+                    ) AS rn
+                FROM query_store_stats
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   collection_time <= $3
+                AND   interval_start_time_utc IS NOT NULL
+                AND   ($4::text[] IS NULL OR database_name = ANY($4))
+            ) AS identified
+            WHERE rn = 1
+
+            UNION ALL
+
+            /* Arm 2 — rows collected before tier 2. No interval start exists and none can be
+               reconstructed, so these keep the pre-tier-2 treatment byte for byte: un-deduped, placed at
+               collection_time, still overstating. The split is on IS NULL / IS NOT NULL, so the two arms
+               partition the rows exactly — nothing counted twice, nothing dropped. */
+            SELECT
+                collection_time AS point_time,
+                execution_count,
+                avg_duration_us
             FROM query_store_stats
             WHERE server_id = $1
             AND   collection_time >= $2
             AND   collection_time <= $3
+            AND   interval_start_time_utc IS NULL
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
-            GROUP BY collection_time
+        ),
+        raw AS
+        (
+            SELECT
+                point_time,
+                SUM(execution_count * avg_duration_us / 1000.0) AS total_duration_ms,
+                SUM(execution_count) AS total_executions,
+                extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time)))) AS interval_seconds
+            FROM placed
+            GROUP BY point_time
         )
         SELECT
-            collection_time,
+            point_time AS collection_time,
             CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds ELSE 0 END AS duration_ms_per_second,
             CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS executions_per_second
         FROM raw
-        ORDER BY collection_time
+        ORDER BY point_time
         """;
 
     /// <summary>Execution-count trend: executions/sec per collection snapshot from query_stats.</summary>

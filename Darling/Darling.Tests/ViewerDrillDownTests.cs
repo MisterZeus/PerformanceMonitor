@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -225,7 +225,7 @@ public sealed class ViewerDrillDownTests
            raw would make the overlay contradict the bars it annotates. */
         var sql = ViewerDataService.QueryStoreItemTimelineSql;
         Assert.Contains(
-            "PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc",
+            "PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc",
             sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY collection_time DESC", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE rn = 1", sql, StringComparison.Ordinal);

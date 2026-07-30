@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -202,8 +202,9 @@ public sealed class ViewerQueriesSqlTests
     /// incremental on last_execution_time, so the OPEN interval is re-fetched every cycle and stored again
     /// with a growing execution_count. A live store held 496 collections of ONE interval inside a single
     /// hour bucket. Every Query Store read that aggregates across collections must therefore collapse each
-    /// interval to its LATEST snapshot BEFORE aggregating, keyed on first_execution_time (the interval
-    /// identity the schema exposes — there is no runtime_stats_interval_id column).
+    /// interval to its LATEST snapshot BEFORE aggregating, keyed on runtime_stats_interval_id — the REAL
+    /// interval identity, collected since #1841 tier 2 — with first_execution_time kept beside it as the
+    /// tier-1 proxy for rows collected before it existed.
     ///
     /// <para>Pinned as one theory over every affected constant so a new Query Store read, or an edit that
     /// drops the CTE from an existing one, fails here rather than silently shipping inflated totals. The
@@ -220,10 +221,12 @@ public sealed class ViewerQueriesSqlTests
     {
         var sql = SqlByName(sqlName);
 
-        /* first_execution_time is the load-bearing part of the key: without it the dedup would collapse
-           SEPARATE intervals of the same query+plan and under-count instead of double-count. */
+        /* The interval identity is the load-bearing part of the key: without it the dedup would collapse
+           SEPARATE intervals of the same query+plan and under-count instead of double-count. Both the real
+           id and the legacy proxy are present, and NEITHER may be dropped — the id is NULL on every
+           pre-tier-2 row, the proxy is NULL on rows Query Store never attributed a first execution to. */
         Assert.Contains(
-            "PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc",
+            "PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc",
             sql, StringComparison.Ordinal);
         /* "Latest" is decided by collection_time, never by execution_count — an interval can be
            re-collected many times without its count ever moving (the 496x shape). */
@@ -239,7 +242,7 @@ public sealed class ViewerQueriesSqlTests
            replica_role, so a dedup without it could drop a replica's row entirely rather than
            de-duplicate a re-collection — turning a double-count into a silent under-count. */
         Assert.Contains(
-            "PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc, replica_role",
+            "PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role",
             ViewerDataService.QueryStoreTopSql, StringComparison.Ordinal);
     }
 
@@ -274,14 +277,21 @@ public sealed class ViewerQueriesSqlTests
 
     // ── Slicers ──
 
+    /// <param name="bucketExpression">
+    /// What the bars are keyed on. The delta-based slicers bucket on <c>collection_time</c>, because a
+    /// per-cycle delta IS the work done in that cycle. Query Store's rows are per-interval snapshots, so
+    /// since #1841 tier 2 it buckets on the interval's own start when there is one — an interval was
+    /// otherwise drawn in the hour it was last COLLECTED, reliably one bar late on Query Store's default
+    /// 60-minute interval. COALESCE, not a bare column, so pre-tier-2 rows keep collection_time.
+    /// </param>
     [Theory]
-    [InlineData(nameof(ViewerDataService.QueryStatsSlicerSql), "query_stats", "COUNT(DISTINCT query_hash)")]
-    [InlineData(nameof(ViewerDataService.ProcStatsSlicerSql), "procedure_stats", "COUNT(DISTINCT object_name)")]
-    [InlineData(nameof(ViewerDataService.QueryStoreSlicerSql), "query_store_stats", "COUNT(DISTINCT query_id)")]
-    public void SlicerSql_BucketsByHour_SevenColumnShape(string sqlName, string table, string distinctCount)
+    [InlineData(nameof(ViewerDataService.QueryStatsSlicerSql), "query_stats", "COUNT(DISTINCT query_hash)", "date_trunc('hour', collection_time)")]
+    [InlineData(nameof(ViewerDataService.ProcStatsSlicerSql), "procedure_stats", "COUNT(DISTINCT object_name)", "date_trunc('hour', collection_time)")]
+    [InlineData(nameof(ViewerDataService.QueryStoreSlicerSql), "query_store_stats", "COUNT(DISTINCT query_id)", "date_trunc('hour', COALESCE(interval_start_time_utc, collection_time))")]
+    public void SlicerSql_BucketsByHour_SevenColumnShape(string sqlName, string table, string distinctCount, string bucketExpression)
     {
         var sql = SqlByName(sqlName);
-        Assert.Contains("date_trunc('hour', collection_time)", sql, StringComparison.Ordinal);
+        Assert.Contains(bucketExpression, sql, StringComparison.Ordinal);
         Assert.Contains($"FROM {table}", sql, StringComparison.Ordinal);
         Assert.Contains(distinctCount, sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
@@ -477,6 +487,7 @@ public sealed class ViewerQueriesLivePostgresTests
     private const int RegressionsServerId = -970807;
     private const int ModuleAttributionServerId = -970808;
     private const int DedupServerId = -970809;
+    private const int IntervalIdentityServerId = -970810;
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -784,12 +795,11 @@ public sealed class ViewerQueriesLivePostgresTests
             Assert.Equal(cb.ExecutionCount, cb.BaselineExecutionCount);
             Assert.Equal(0.317, cb.AvgCpuMs, 3);           /* (1x1000 + 40x300) / 41 us -> ms */
 
-            /* ── the duration trend ── the ONE deliberate exclusion (#1841 tier 2), pinned so it stays a
-                  decision rather than looking like a missed read: it still emits one point per COLLECTION
-                  (four here) and still overstates. Deduping it collapses the series to one point per
-                  interval-close, which on Query Store's default 60-minute interval means a 1-hour window
-                  renders a single zero-valued point; placing the work when it ran needs the server-LOCAL
-                  first_execution_time against this UTC axis. */
+            /* ── the duration trend, LEGACY arm ── this whole seed is pre-tier-2 (no interval identity),
+                  so it exercises the fallback: un-deduped, one point per COLLECTION, still overstating.
+                  That is deliberate and it is what a store holding pre-upgrade history must keep doing —
+                  nothing can reconstruct an interval start for these rows. Four points, exactly as before
+                  tier 2. The corrected arm has its own live test below. */
             var trend = await viewer.GetQueryStoreDurationTrendAsync(DedupServerId, start, end);
             Assert.Equal(4, trend.Count);
 
@@ -812,6 +822,97 @@ public sealed class ViewerQueriesLivePostgresTests
         finally
         {
             await DeleteRowsAsync(connection, "query_store_stats", DedupServerId);
+        }
+    }
+
+    [Fact]
+    public async Task QueryStoreIntervalIdentity_PlacesWorkWhenItRan_AndMixesWithLegacyRows_AgainstDevPostgres()
+    {
+        /* #1841 tier 2, against a REAL store — the half a string pin cannot reach. Three things at once:
+           the slicer's one-bucket lag is gone, the duration trend places each interval's final total at
+           the hour that work ran, and a window holding BOTH generations counts every row exactly once.
+
+           The seed makes collection time and interval time genuinely disagree, which is the whole point:
+           interval 1 RAN in hour 0 but every one of its collections landed in hour 1, so a
+           collection_time bucket drew it one bar late. */
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live Query Store interval-identity test.");
+
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "query_store_stats", IntervalIdentityServerId);
+
+        await using var viewer = new ViewerDataService(cs!);
+
+        var h0 = TruncateToHour(TruncateToSeconds(DateTime.UtcNow).AddHours(-5));
+        var h1 = h0.AddHours(1);
+        var start = h0.AddMinutes(-1);
+        var end = h0.AddHours(4);
+
+        try
+        {
+            /* Interval 1 — ran in hour 0, collected twice inside hour 1, growing 10 -> 40 cumulatively. */
+            await InsertQueryStoreAsync(connection, IntervalIdentityServerId, h1.AddMinutes(5), "IdentityDb",
+                queryId: 1, planId: 11, execCount: 10, avgDurationUs: 1_000, avgCpuUs: 100, forced: false,
+                maxMemPages: 0, queryText: "SELECT ran_in_h0", firstExecutionTimeUtc: h0.AddMinutes(3),
+                intervalId: 5001, intervalStartUtc: h0);
+            await InsertQueryStoreAsync(connection, IntervalIdentityServerId, h1.AddMinutes(10), "IdentityDb",
+                queryId: 1, planId: 11, execCount: 40, avgDurationUs: 7_000, avgCpuUs: 300, forced: false,
+                maxMemPages: 0, queryText: "SELECT ran_in_h0", firstExecutionTimeUtc: h0.AddMinutes(3),
+                intervalId: 5001, intervalStartUtc: h0);
+
+            /* Interval 2 — ran in hour 1, collected once in hour 2. */
+            await InsertQueryStoreAsync(connection, IntervalIdentityServerId, h1.AddHours(1).AddMinutes(5), "IdentityDb",
+                queryId: 2, planId: 22, execCount: 5, avgDurationUs: 2_000, avgCpuUs: 200, forced: false,
+                maxMemPages: 0, queryText: "SELECT ran_in_h1", firstExecutionTimeUtc: h1.AddMinutes(4),
+                intervalId: 5002, intervalStartUtc: h1);
+
+            /* ── the slicer ── two bars, at the hours the work RAN (h0 and h1), not the hours it was
+                  collected (h1 and h2). Interval 1's bar carries its FINAL snapshot only: 40 x 300us =
+                  12 ms of CPU, not 10x100 + 40x300 = 13 ms. */
+            var buckets = await viewer.GetQueryStoreSlicerDataAsync(IntervalIdentityServerId, start, end);
+            Assert.Equal(2, buckets.Count);
+            Assert.Equal(h0, buckets[0].BucketTime);
+            Assert.Equal(h1, buckets[1].BucketTime);
+            Assert.Equal(12.0, buckets[0].TotalCpu, 3);
+            Assert.Equal(1.0, buckets[1].TotalCpu, 3);     /* 5 x 200us */
+
+            /* ── the duration trend ── one point per interval, at its start. The first has no predecessor
+                  so its rate is 0 (the same convention the delta trends use); the second divides interval
+                  2's true total (5 x 2,000us = 10 ms) by the 3,600s between interval starts. */
+            var trend = await viewer.GetQueryStoreDurationTrendAsync(IntervalIdentityServerId, start, end);
+            Assert.Equal(2, trend.Count);
+            Assert.Equal(h0, trend[0].CollectionTime);
+            Assert.Equal(h1, trend[1].CollectionTime);
+            Assert.Equal(0d, trend[0].Value);
+            Assert.Equal(10.0 / 3600.0, trend[1].Value, 9);
+
+            /* ── the mixed window ── add a LEGACY row (no identity) in hour 2 and nothing already counted
+                  may move: the two identified bars keep their placement and values, and the legacy row
+                  gets its own collection_time bar. The arms split on IS NULL / IS NOT NULL, so a row can
+                  neither land in both nor fall between them. */
+            await InsertQueryStoreAsync(connection, IntervalIdentityServerId, h1.AddHours(1).AddMinutes(30), "IdentityDb",
+                queryId: 3, planId: 33, execCount: 7, avgDurationUs: 1_000, avgCpuUs: 1_000, forced: false,
+                maxMemPages: 0, queryText: "SELECT legacy", firstExecutionTimeUtc: h1.AddHours(1).AddMinutes(20));
+
+            var mixed = await viewer.GetQueryStoreSlicerDataAsync(IntervalIdentityServerId, start, end);
+            Assert.Equal(3, mixed.Count);
+            Assert.Equal(h0, mixed[0].BucketTime);
+            Assert.Equal(h1, mixed[1].BucketTime);
+            Assert.Equal(h1.AddHours(1), mixed[2].BucketTime);   /* legacy: placed at its COLLECTION hour */
+            Assert.Equal(12.0, mixed[0].TotalCpu, 3);            /* unchanged by the legacy row */
+            Assert.Equal(1.0, mixed[1].TotalCpu, 3);
+            Assert.Equal(7.0, mixed[2].TotalCpu, 3);             /* 7 x 1,000us */
+
+            /* And the top-queries grid still dedups interval 1 to its final total across both generations. */
+            var top = await viewer.GetQueryStoreTopQueriesAsync(IntervalIdentityServerId, start, end);
+            Assert.Equal(40, Assert.Single(top, r => r.QueryId == 1).TotalExecutions);
+            Assert.Equal(7, Assert.Single(top, r => r.QueryId == 3).TotalExecutions);
+        }
+        finally
+        {
+            await DeleteRowsAsync(connection, "query_store_stats", IntervalIdentityServerId);
         }
     }
 
@@ -1031,15 +1132,25 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     }
 
     /// <param name="firstExecutionTimeUtc">
-    /// The runtime-stats INTERVAL identity (#1841). Defaults to one hour before the collection, so each
+    /// The tier-1 interval-identity PROXY (#1841). Defaults to one hour before the collection, so each
     /// collection models a distinct interval — the shape most tests want. Pass the SAME value across
     /// several collection times to model one interval being re-collected, which is what the dedup exists
     /// to collapse.
     /// </param>
+    /// <param name="intervalId">
+    /// The REAL interval identity (#1841 tier 2). Left NULL by default so the existing callers keep
+    /// seeding the LEGACY generation — rows collected before tier 2, which every read still has to handle.
+    /// Pass it to model a post-tier-2 row.
+    /// </param>
+    /// <param name="intervalStartUtc">
+    /// When the interval STARTED, in UTC. NULL alongside a NULL <paramref name="intervalId"/> is the
+    /// legacy shape, and it is what the reads key their legacy fallbacks on: bucket and trend placement
+    /// both revert to collection_time for exactly these rows.
+    /// </param>
     private static async Task InsertQueryStoreAsync(
         NpgsqlConnection connection, int serverId, DateTime collectionTimeUtc, string databaseName,
         long queryId, long planId, long execCount, long avgDurationUs, long avgCpuUs, bool forced, long maxMemPages, string queryText,
-        DateTime? firstExecutionTimeUtc = null)
+        DateTime? firstExecutionTimeUtc = null, long? intervalId = null, DateTime? intervalStartUtc = null)
     {
         using var command = new NpgsqlCommand(@"
 INSERT INTO query_store_stats
@@ -1049,9 +1160,10 @@ INSERT INTO query_store_stats
      execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes,
      avg_physical_io_reads, avg_rowcount, avg_clr_time_us, avg_log_bytes_used, avg_tempdb_space_used,
      avg_num_physical_io_reads, avg_query_max_used_memory, min_dop, max_dop,
-     plan_type, plan_forcing_type, is_forced_plan, force_failure_count, compatibility_level)
+     plan_type, plan_forcing_type, is_forced_plan, force_failure_count, compatibility_level,
+     runtime_stats_interval_id, interval_start_time_utc)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-        $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)", connection);
+        $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35)", connection);
         command.Parameters.AddWithValue(1L);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(serverId);
@@ -1085,6 +1197,10 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         command.Parameters.AddWithValue(forced);
         command.Parameters.AddWithValue(0L);
         command.Parameters.AddWithValue(160);
+        command.Parameters.AddWithValue((object?)intervalId ?? DBNull.Value);
+        command.Parameters.AddWithValue(intervalStartUtc is null
+            ? DBNull.Value
+            : DateTime.SpecifyKind(intervalStartUtc.Value, DateTimeKind.Unspecified));
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 

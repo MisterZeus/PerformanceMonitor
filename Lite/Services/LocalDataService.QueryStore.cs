@@ -36,19 +36,22 @@ WITH deduped AS
 (
     -- LOAD-BEARING (correctness, not just perf) — #1841. query_store_stats rows are CUMULATIVE
     -- per-Query-Store-interval snapshots. The QueryStoreCollector is incremental and re-fetches the
-    -- OPEN interval every cycle as its last_execution_time advances, so the SAME interval (same
-    -- first_execution_time) is stored repeatedly with a growing execution_count. Summing the raw rows
-    -- counts one interval's work once per collection: a live store showed 496 collections of a single
-    -- interval inside ONE hour bucket. Keep only the LATEST snapshot per interval, then aggregate.
+    -- OPEN interval every cycle as its last_execution_time advances, so the SAME interval is stored
+    -- repeatedly with a growing execution_count. Summing the raw rows counts one interval's work once per
+    -- collection: a live store showed 496 collections of a single interval inside ONE hour bucket. Keep
+    -- only the LATEST snapshot per interval, then aggregate.
     --
-    -- Bucketing still happens on collection_time, so an interval is attributed to the hour it was last
-    -- COLLECTED in, not the hour it ran: on Query Store's default 60-minute interval that is reliably one
-    -- bucket late, because the closing fetch lands in the cycle after the interval ends. The window totals
-    -- are right and only the placement lags. Fixing the placement needs first_execution_time, which is the
-    -- monitored server's LOCAL wall clock while these bounds are UTC — a timezone bug traded for a
-    -- placement bug. Tier 2 (#1841) owns it, together with storing a real interval identity.
+    -- runtime_stats_interval_id is the REAL interval identity (tier 2); first_execution_time stays beside
+    -- it as the tier-1 PROXY. Both are in the key rather than a COALESCE of the two: the id is NULL on
+    -- every row collected before tier 2 and non-NULL on every row after, so the two generations can never
+    -- collide, and on a legacy-only window the id is a constant and the key degrades to exactly tier 1's.
+    -- Where the id IS present it also fixes what the proxy could not — a row whose first_execution_time is
+    -- NULL had no identity at all under tier 1 and collapsed with every other such interval of the same
+    -- plan, which UNDER-counts. The id is per-DATABASE (each database has its own Query Store and its own
+    -- interval sequence), which is why database_name must stay in the key.
     SELECT
         collection_time,
+        interval_start_time_utc,
         query_id,
         execution_count,
         avg_cpu_time_us,
@@ -58,7 +61,7 @@ WITH deduped AS
         avg_physical_io_reads,
         ROW_NUMBER() OVER
         (
-            PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc, replica_role
+            PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
             ORDER BY collection_time DESC
         ) AS rn
     FROM v_query_store_stats
@@ -67,7 +70,14 @@ WITH deduped AS
     AND   collection_time <= $3" + dbClause + @"
 )
 SELECT
-    date_trunc('hour', collection_time) AS bucket,
+    -- The bar sits in the hour the work RAN, not the hour it was last COLLECTED (#1841 tier 2). Query
+    -- Store's default interval is 60 minutes and the closing fetch lands in the cycle AFTER the interval
+    -- ends, so a collection_time bucket was reliably one bar late. interval_start_time_utc is the
+    -- interval's own start boundary, converted to UTC at collection (the same clock as collection_time),
+    -- so this is a placement fix and not a timezone trade. Legacy rows have no interval start and keep
+    -- collection_time placement, so a window spanning the upgrade renders correctly on both sides and the
+    -- lag simply disappears as the pre-upgrade rows age out.
+    date_trunc('hour', COALESCE(interval_start_time_utc, collection_time)) AS bucket,
     COUNT(DISTINCT query_id) AS query_count,
     COALESCE(SUM(CAST(avg_cpu_time_us AS DOUBLE PRECISION) * execution_count), 0) / 1000.0 AS total_cpu_ms,
     COALESCE(SUM(CAST(avg_duration_us AS DOUBLE PRECISION) * execution_count), 0) / 1000.0 AS total_duration_ms,
@@ -76,7 +86,7 @@ SELECT
     COALESCE(SUM(CAST(avg_physical_io_reads AS DOUBLE PRECISION) * execution_count), 0) AS total_physical_reads
 FROM deduped
 WHERE rn = 1
-GROUP BY date_trunc('hour', collection_time)
+GROUP BY date_trunc('hour', COALESCE(interval_start_time_utc, collection_time))
 ORDER BY bucket";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -117,11 +127,15 @@ ORDER BY bucket";
 WITH deduped AS (
     /* LOAD-BEARING (correctness, not just perf) — #1841. query_store_stats rows are CUMULATIVE
        per-Query-Store-interval snapshots, and the collector re-fetches the OPEN interval every cycle
-       as its last_execution_time advances, so the SAME interval (same first_execution_time) is stored
-       repeatedly with a growing execution_count. SUM(execution_count) over the raw rows reports
-       10 + 25 + 40 for an interval that reached 40, and AVG(avg_*) becomes an avg-of-avgs weighted by
-       how many times each interval happened to be re-collected. Keep the LATEST snapshot per interval.
-       SELECT * because the aggregate below projects nearly every payload column.
+       as its last_execution_time advances, so the SAME interval is stored repeatedly with a growing
+       execution_count. SUM(execution_count) over the raw rows reports 10 + 25 + 40 for an interval that
+       reached 40, and AVG(avg_*) becomes an avg-of-avgs weighted by how many times each interval happened
+       to be re-collected. Keep the LATEST snapshot per interval. SELECT * because the aggregate below
+       projects nearly every payload column.
+
+       runtime_stats_interval_id is the REAL interval identity (tier 2), with first_execution_time kept
+       beside it as the tier-1 proxy for rows collected before it existed — see the slicer above for why
+       both are in the key rather than a COALESCE of the two.
 
        replica_role and execution_type_desc are in the partition because the aggregate below is grouped
        (or MAXed) on them: the dedup key must be at least as fine as the read's own row identity, or
@@ -130,7 +144,7 @@ WITH deduped AS (
         *,
         ROW_NUMBER() OVER
         (
-            PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc, replica_role
+            PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
             ORDER BY collection_time DESC
         ) AS rn
     FROM v_query_store_stats
@@ -385,7 +399,7 @@ WITH deduped_current AS (
         avg_logical_io_reads,
         ROW_NUMBER() OVER
         (
-            PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc, replica_role
+            PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
             ORDER BY collection_time DESC
         ) AS rn
     FROM v_query_store_stats
@@ -403,7 +417,7 @@ deduped_baseline AS (
         avg_logical_io_reads,
         ROW_NUMBER() OVER
         (
-            PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc, replica_role
+            PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
             ORDER BY collection_time DESC
         ) AS rn
     FROM v_query_store_stats
@@ -518,9 +532,10 @@ FULL OUTER JOIN baseline_period b
     /// this is the "show me every snapshot" surface — a raw per-collection projection with no SUM, AVG
     /// or COUNT, so nothing is multiply-counted. What it does show is the cumulative restatement itself
     /// (one interval re-collected N times appears as N rows with a growing execution_count), and
-    /// first_execution_time is already projected so a reader can tell those rows apart. Collapsing them
-    /// would change what this drilldown displays, which is a product call rather than an arithmetic
-    /// fix — left to #1841 tier 2 along with storing the real interval identity.</para>
+    /// first_execution_time is already projected so a reader can tell those rows apart. Tier 2 stored the
+    /// real interval identity, which would now make collapsing them trivial — and the exclusion STANDS
+    /// anyway, because whether this drilldown should show every snapshot or one row per interval is a
+    /// product call, not an arithmetic one, and the arithmetic was never wrong here.</para>
     /// </summary>
     public async Task<List<QueryStoreHistoryRow>> GetQueryStoreHistoryAsync(int serverId, string databaseName, long queryId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
@@ -696,24 +711,35 @@ OPTION(RECOMPILE);',
         return result as string;
     }
     /// <summary>
-    /// Gets Query Store duration trend — SUM(execution_count * avg_duration) per collection snapshot.
+    /// Gets Query Store duration trend — each interval's work, placed at the time that work RAN.
     ///
-    /// <para>KNOWN OVERSTATEMENT, deliberately still here (#1841 tier 2). Unlike the query_stats and
-    /// procedure_stats trends, which sum per-cycle DELTA columns, Query Store rows are cumulative
-    /// per-interval snapshots that the collector re-fetches every cycle — so an interval that reached
-    /// 40 executions charges 10, then 25, then 40 to three successive points and the area under this
-    /// curve overstates the real work.</para>
+    /// <para>#1841 tier 2 corrected this, and it is the one Query Store read whose FIX is a different
+    /// shape from the other four. Query Store rows are cumulative per-interval snapshots that the
+    /// collector re-fetches every cycle, so an interval that reached 40 executions used to charge 10,
+    /// then 25, then 40 to three successive points. Tier 1 deliberately left the overstatement in,
+    /// because dedup ALONE makes this chart worse rather than better: it keeps one row per interval at
+    /// the collection where the interval CLOSED, and Query Store's default INTERVAL_LENGTH_MINUTES is
+    /// 60 against a 5-minute cadence, so twelve snapshots collapse onto one collection_time and a
+    /// 1-hour window renders a SINGLE point valued 0.</para>
     ///
-    /// <para>The per-interval dedup that fixes every OTHER Query Store aggregate cannot fix this one:
-    /// it keeps a single row per interval, at the collection where the interval CLOSED, and Query
-    /// Store's default INTERVAL_LENGTH_MINUTES is 60 against a 5-minute collection cadence — so every
-    /// query's twelve snapshots collapse onto one collection_time and the whole series degenerates to
-    /// one point per interval (measured: a 1-hour window renders a SINGLE point, valued 0 because the
-    /// LAG has no predecessor). Correcting it means placing the work at the time it actually ran,
-    /// which is what first_execution_time carries — but that column is the monitored server's LOCAL
-    /// wall clock while this axis is UTC, so bucketing on it would trade a magnitude bug for a
-    /// timezone bug. Both halves need the interval identity + a UTC interval clock the schema does
-    /// not store yet, which is tier 2's job.</para>
+    /// <para>What unlocks it is the x-axis, not the dedup: <c>interval_start_time_utc</c> is the
+    /// interval's own start boundary, converted to UTC AT COLLECTION, so it is the same clock as
+    /// collection_time. (The premise this was blocked on — that the interval clock is the monitored
+    /// server's LOCAL wall time — was wrong on both halves: Query Store's interval start_time and
+    /// first_execution_time are both <c>datetimeoffset</c>, and the collector already normalized them
+    /// through <c>DateTimeOffset.UtcDateTime</c> before storing.) Deduped and placed at its start, each
+    /// interval contributes its true final total exactly once, at the hour it ran, and the series
+    /// resolution becomes Query Store's OWN interval length — which is the honest resolution of this
+    /// source. A window shorter than one interval showing one or two points is the data's resolution,
+    /// not a defect.</para>
+    ///
+    /// <para><b>The legacy boundary.</b> Rows collected before tier 2 carry no interval start, and
+    /// nothing can reconstruct one — so they keep the pre-tier-2 treatment exactly: un-deduped, placed
+    /// at collection_time, still overstating. The two arms are split on
+    /// <c>interval_start_time_utc IS NULL</c>, which partitions the rows with no overlap and no gap, so
+    /// no row is counted twice and none is dropped. A window spanning the upgrade therefore renders a
+    /// corrected recent section and an un-corrected older one, each behaving as its own generation
+    /// always did, and the mixture resolves itself as the pre-upgrade rows age out of retention.</para>
     /// </summary>
     public async Task<List<QueryTrendPoint>> GetQueryStoreDurationTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
     {
@@ -724,25 +750,67 @@ OPTION(RECOMPILE);',
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
-WITH raw AS
+WITH placed AS
 (
+    -- Arm 1 (#1841 tier 2) — rows carrying the interval identity. Dedup to the interval's FINAL
+    -- cumulative snapshot, then place it at interval_start_time_utc: the hour the work ran, not the
+    -- cycle that last fetched it. Both halves are needed; see the method remarks for why dedup alone
+    -- collapses this series and placement alone leaves it inflated.
     SELECT
-        collection_time,
-        SUM(execution_count * avg_duration_us / 1000.0) AS total_duration_ms,
-        SUM(execution_count) AS total_executions,
-        extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_seconds
+        interval_start_time_utc AS point_time,
+        execution_count,
+        avg_duration_us
+    FROM
+    (
+        SELECT
+            interval_start_time_utc,
+            execution_count,
+            avg_duration_us,
+            ROW_NUMBER() OVER
+            (
+                PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
+                ORDER BY collection_time DESC
+            ) AS rn
+        FROM v_query_store_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        AND   interval_start_time_utc IS NOT NULL" + dbClause + @"
+    ) identified
+    WHERE rn = 1
+
+    UNION ALL
+
+    -- Arm 2 — rows collected before tier 2. No interval start exists and none can be reconstructed, so
+    -- these keep the pre-tier-2 treatment byte for byte: un-deduped, placed at collection_time, still
+    -- overstating. The split is on IS NULL / IS NOT NULL, so the two arms partition the rows exactly —
+    -- nothing is counted twice and nothing is dropped.
+    SELECT
+        collection_time AS point_time,
+        execution_count,
+        avg_duration_us
     FROM v_query_store_stats
     WHERE server_id = $1
     AND   collection_time >= $2
-    AND   collection_time <= $3" + dbClause + @"
-    GROUP BY collection_time
+    AND   collection_time <= $3
+    AND   interval_start_time_utc IS NULL" + dbClause + @"
+),
+raw AS
+(
+    SELECT
+        point_time,
+        SUM(execution_count * avg_duration_us / 1000.0) AS total_duration_ms,
+        SUM(execution_count) AS total_executions,
+        extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time)))) AS interval_seconds
+    FROM placed
+    GROUP BY point_time
 )
 SELECT
-    collection_time,
+    point_time AS collection_time,
     CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds ELSE 0 END AS duration_ms_per_second,
     CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS executions_per_second
 FROM raw
-ORDER BY collection_time";
+ORDER BY point_time";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });

@@ -3,11 +3,18 @@
 // exactly as they existed in Lite/Database/Schema.cs immediately BEFORE the catalog-driven
 // DuckDbSchemaGenerator replaced them (feature/parity-collapse-lite-schema base = origin/dev).
 //
-// DO NOT EDIT. This is the equivalence ORACLE: DuckDbSchemaEquivalenceTests executes each of these
+// DO NOT REWRITE. This is the equivalence ORACLE: DuckDbSchemaEquivalenceTests executes each of these
 // against a fresh DuckDB database and asserts the generated schema produces a byte-identical
 // PRAGMA table_info (columns, DuckDB types, order, NOT NULL, DEFAULT, PRIMARY KEY) and matching
-// indexes. Editing this file would defeat the proof that existing DuckDB stores are safe.
+// indexes. Rewriting an existing shape here would defeat the proof that existing DuckDB stores are safe.
 // Extracted mechanically from the pre-change Schema.cs constants to guarantee byte-exactness.
+//
+// APPENDING is the one legal edit, and only for a collector column that a numbered DuckDbInitializer
+// migration also adds by ALTER TABLE ADD COLUMN. Both writers are positional, so such a column can only
+// ever land at the END of its table; reflecting it here keeps the oracle describing the schema a fresh
+// store is actually built with, while every pre-existing column stays frozen. Precedent: ag_replica_role
+// (v36), replica_role (v47), runtime_stats_interval_id + interval_start_time_utc (v49, #1841 tier 2). A
+// NOT NULL relaxation is NOT an append — that goes in IntentionalStorageDivergences instead.
 // </auto-generated>
 
 using System.Collections.Generic;
@@ -16,8 +23,9 @@ namespace PerformanceMonitorLite.Tests;
 
 internal static class GoldenCollectorSchema
 {
-    /// <summary>Pre-change CREATE TABLE DDL, keyed by collector target table (36 entries — the original
-    /// 35 pre-generation tables plus long_query_completions, #1496, added at its post-collapse migration).</summary>
+    /// <summary>Pre-change CREATE TABLE DDL, keyed by collector target table (38 entries — the original
+    /// 35 pre-generation tables plus the three collectors added at their own post-collapse migrations:
+    /// long_query_completions (#1496) and the two Availability Group tables (#991)).</summary>
     public static readonly IReadOnlyDictionary<string, string> Tables = new Dictionary<string, string>
     {
         ["wait_stats"] = @"CREATE TABLE IF NOT EXISTS wait_stats (
@@ -694,7 +702,9 @@ internal static class GoldenCollectorSchema
     compatibility_level INTEGER,
     query_plan_text VARCHAR,
     query_plan_hash VARCHAR,
-    replica_role VARCHAR
+    replica_role VARCHAR,
+    runtime_stats_interval_id BIGINT,
+    interval_start_time_utc TIMESTAMP
 )",
         ["deadlocks"] = @"CREATE TABLE IF NOT EXISTS deadlocks (
     deadlock_id BIGINT PRIMARY KEY,

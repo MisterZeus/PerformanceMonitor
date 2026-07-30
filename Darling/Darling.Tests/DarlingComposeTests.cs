@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -1128,9 +1128,10 @@ public sealed class DarlingComposeTests
     public void Compile_QueryStoreRawRoute_DedupsPerIntervalBeforeAggregating()
     {
         /* #1841. query_store_stats rows are CUMULATIVE per-interval snapshots re-collected every cycle,
-           so the raw route must aggregate the LATEST snapshot per interval, not every stored row. The
-           interval identity is first_execution_time; server_id is in the partition because a composed
-           panel spans the fleet. */
+           so the raw route must aggregate the LATEST snapshot per interval, not every stored row. Tier 2
+           made runtime_stats_interval_id the real interval identity, with first_execution_time kept
+           beside it as the tier-1 proxy for rows collected before it existed; server_id is in the
+           partition because a composed panel spans the fleet. */
         /* Scoped to specific servers on purpose — that is what puts server_name in the outer WHERE, which
            is the whole reason it has to be in the partition too. */
         var sql = Compile(
@@ -1138,8 +1139,8 @@ public sealed class DarlingComposeTests
             servers: ["srv-a", "srv-b"]);
 
         Assert.Contains(
-            "PARTITION BY server_id, server_name, database_name, query_id, plan_id, first_execution_time, "
-            + "execution_type_desc, replica_role ORDER BY collection_time DESC",
+            "PARTITION BY server_id, server_name, database_name, query_id, plan_id, runtime_stats_interval_id, "
+            + "first_execution_time, execution_type_desc, replica_role ORDER BY collection_time DESC",
             sql, StringComparison.Ordinal);
         Assert.Contains("AS qs_rn", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE qs_rn = 1", sql, StringComparison.Ordinal);
