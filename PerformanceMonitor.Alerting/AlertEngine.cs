@@ -298,14 +298,18 @@ public sealed class AlertEngine
 
                 var cpuDetailText = $"  {cpuMetricLabel}: {alertCpuValue:F0}%\n  Threshold: {_settings.CpuThresholdPercent}%"; /* :89 */
 
-                /* :91-98 — CPU passes no context and no numerics, exactly Lite.
-                   ShortMessage = the toast body of :84 minus the server-name prefix. */
+                /* :91-98 — CPU passes no context; ShortMessage = the toast body of :84 minus the
+                   server-name prefix. The numerics are REQUIRED, not optional (#1830): the ported
+                   no-numerics form left the history stores parsing "87% (Total CPU)", which fails on
+                   the parenthesized label, so every High CPU row stored current_value 0 in Lite AND
+                   Darling while the toast/email/webhook text stayed correct. HasValue is guaranteed
+                   here — cpuExceeded requires it. */
                 await FireAsync(new AlertOutcome(
                     key, serverName, "High CPU",
                     $"{alertCpuValue:F0}% ({cpuMetricLabel})",
                     $"{_settings.CpuThresholdPercent}%",
                     Context: null, DetailText: cpuDetailText,
-                    NumericCurrentValue: null, NumericThresholdValue: null,
+                    NumericCurrentValue: alertCpuValue, NumericThresholdValue: _settings.CpuThresholdPercent,
                     Muted: isMuted, Severity: null,
                     ShortMessage: $"{cpuMetricLabel} at {alertCpuValue:F0}% (threshold: {_settings.CpuThresholdPercent}%)"), ct);
             }
@@ -400,14 +404,15 @@ public sealed class AlertEngine
             var detailText = AlertContextBuilders.ContextToDetailText(blockingContext);
 
             /* :175-183 — SendDetectedAlertAsync's #1141/#1236 delivery-mode fan-out is an
-               IAlertDeliverer concern; the engine emits one outcome. No numerics, exactly Lite.
-               ShortMessage = the toast body of :167. */
+               IAlertDeliverer concern; the engine emits one outcome. ShortMessage = the toast body
+               of :167. Numerics carried explicitly (#1830): the count text happens to parse today,
+               but the stored value must not depend on parse luck. */
             await FireAsync(new AlertOutcome(
                 key, serverName, "Blocking Detected",
                 effectiveBlockingCount.ToString(),
                 _settings.BlockingCountThreshold.ToString(),
                 blockingContext, detailText,
-                NumericCurrentValue: null, NumericThresholdValue: null,
+                NumericCurrentValue: effectiveBlockingCount, NumericThresholdValue: _settings.BlockingCountThreshold,
                 Muted: isMuted, Severity: blockingContext?.SeverityOverride,
                 ShortMessage: $"{effectiveBlockingCount} blocking session(s)"), ct);
         }
@@ -486,13 +491,14 @@ public sealed class AlertEngine
             var deadlockContext = AlertContextBuilders.BuildDeadlockContext(serverName, deadlockRows, _settings.ExcludedDatabases);
             var detailText = AlertContextBuilders.ContextToDetailText(deadlockContext);
 
-            /* :252-260 — no numerics, exactly Lite. ShortMessage = the toast body of :244. */
+            /* :252-260 — ShortMessage = the toast body of :244. Numerics carried explicitly (#1830):
+               the count text happens to parse today, but the stored value must not depend on parse luck. */
             await FireAsync(new AlertOutcome(
                 key, serverName, "Deadlocks Detected",
                 effectiveDeadlockCount.ToString(),
                 _settings.DeadlockCountThreshold.ToString(),
                 deadlockContext, detailText,
-                NumericCurrentValue: null, NumericThresholdValue: null,
+                NumericCurrentValue: effectiveDeadlockCount, NumericThresholdValue: _settings.DeadlockCountThreshold,
                 Muted: isMuted, Severity: deadlockContext?.SeverityOverride,
                 ShortMessage: $"{effectiveDeadlockCount} deadlock(s) in the last hour"), ct);
         }

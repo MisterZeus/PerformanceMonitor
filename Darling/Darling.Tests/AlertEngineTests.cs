@@ -245,7 +245,10 @@ public sealed class AlertEngineTests
         Assert.Equal("80% (Total CPU)", fired.CurrentValue);    /* :82 current-value shape, :64 label */
         Assert.Equal("80%", fired.ThresholdValue);
         Assert.Null(fired.Context);                              /* :91-98 — CPU passes no context */
-        Assert.Null(fired.NumericCurrentValue);                  /* ...and no numerics */
+        /* #1830: the numerics are REQUIRED — without them the history stores text-parsed
+           "80% (Total CPU)", failed on the parenthesized label, and stored 0 for every row. */
+        Assert.Equal(80d, fired.NumericCurrentValue);
+        Assert.Equal(80d, fired.NumericThresholdValue);
         Assert.False(fired.Muted);
 
         /* Same breach 1 minute later: inside the 5-minute cooldown — no repeat (:72). */
