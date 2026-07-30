@@ -16,7 +16,7 @@ namespace PerformanceMonitorLite.Services;
 
 /// <summary>
 /// Single source for the configured "ignored" (benign/idle) wait types — the per-user editable
-/// %LOCALAPPDATA%\PerformanceMonitorLite\config\ignored_wait_types.json, falling back to the copy
+/// %LOCALAPPDATA%\PerformanceMonitorLite-Data\config\ignored_wait_types.json, falling back to the copy
 /// bundled next to the exe. Used by BOTH the collector (skip at collection) and the wait-stats tab
 /// queries (skip at display) so the two can't drift. Display-side filtering is what hides waits already
 /// collected before the filter was active — copying the JSON only stops NEW collection, it can't remove

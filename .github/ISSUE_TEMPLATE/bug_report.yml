@@ -85,7 +85,7 @@ body:
     id: errors
     attributes:
       label: Error Messages / Log Output
-      description: Paste any error messages or relevant log entries. Dashboard logs are in %LOCALAPPDATA%\PerformanceMonitor\Logs\; Lite logs are in %LOCALAPPDATA%\PerformanceMonitorLite\Logs\.
+      description: Paste any error messages or relevant log entries. Dashboard logs are in %LOCALAPPDATA%\PerformanceMonitor\Logs\; Lite logs are in %LOCALAPPDATA%\PerformanceMonitorLite-Data\logs\ (on versions before the data-root move, %LOCALAPPDATA%\PerformanceMonitorLite\logs\).
       render: text
     validations:
       required: false
