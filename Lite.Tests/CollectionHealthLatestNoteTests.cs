@@ -153,6 +153,28 @@ public sealed class CollectionHealthLatestNoteTests : IClassFixture<SharedDuckDb
     }
 
     [Fact]
+    public async Task APayloadCollectorsProbeNoteRanksAndReadsLikeAnEnumerationsNote()
+    {
+        var service = new LocalDataService(_duckDb);
+
+        /* #1851 made database_size_stats — a collector with no enumeration at all — the first NON-enumerating
+           source of a note. The read must treat it identically: same newest-first rank over the same
+           counted text, same qualifier, and still nowhere near last_error, because the note rides a SUCCESS
+           row and every band and count keys on status. A rank or a gate that had quietly assumed "notes come
+           from enumerations" would pass every #1854 test and fail here. */
+        await SeedAsync("database_size_stats", MinutesAgo(30), "SUCCESS", ProbeNote(12));
+        await SeedAsync("database_size_stats", MinutesAgo(20), "SUCCESS", ProbeNote(3));
+        await SeedAsync("database_size_stats", MinutesAgo(10), "SUCCESS", null);
+
+        var row = await ReadAsync(service, "database_size_stats");
+
+        Assert.Equal(ProbeNote(3), row.LastNote);
+        Assert.Equal(ProbeNote(3) + " (2 of 3 runs)", row.NoteFormatted);
+        Assert.Equal(2, row.NoteCount);
+        Assert.Null(row.LastError);
+    }
+
+    [Fact]
     public async Task OneCollectorsNewestNoteDoesNotBecomeAnothers()
     {
         var service = new LocalDataService(_duckDb);

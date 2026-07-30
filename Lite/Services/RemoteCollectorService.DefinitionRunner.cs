@@ -372,6 +372,22 @@ public partial class RemoteCollectorService
                 using (var reader = await command.ExecuteReaderAsync(cancellationToken))
                 {
                     rows = await definition.ReadAsync(reader, context, cancellationToken);
+
+                    /* #1851: a definition that declares it may hand back an OPTIONAL trailing
+                       (item_name, error_text) result set naming items its own server-side cursor
+                       reached but could not probe — database_size_stats' mid-restore / inaccessible
+                       databases, which used to vanish into an empty CATCH. Read through the SAME
+                       shared machinery as the enumeration path's failures (#1837), so the note wording
+                       and the log cap cannot drift between the two channels or between the two hosts.
+                       Read HERE, still inside the reader, and before the storage phase below: it
+                       touches only the note, never `rows`, so the payload and its delta ordering are
+                       exactly what they were. */
+                    if (definition.EmitsProbeFailures)
+                    {
+                        var probes = await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(reader, cancellationToken);
+                        telemetry.Note = probes.Note;
+                        LogEnumerationProbeFailures(definition, server, probes.ProbeFailures);
+                    }
                 }
 
                 /* Optional best-effort second query on the same connection (e.g. server_properties'
@@ -410,11 +426,16 @@ public partial class RemoteCollectorService
     }
 
     /// <summary>
-    /// Writes the per-item app-log lines for an enumeration's probe failures (#1837), capped at
+    /// Writes the per-item app-log lines for probe failures, capped at
     /// <see cref="EnumeratedCollectorDriver.MaxLoggedProbeFailures"/> with the suppressed remainder
     /// reported as a count. The collection_log row already carries the summary note; this is where the
     /// actual per-database error text lands, and it is why that note says "see the app log". Darling's
     /// twin is <c>DarlingCollectorRunner.LogEnumerationProbeFailures</c> — same shared templates.
+    ///
+    /// <para>Serves BOTH channels: an enumeration's second result set (#1837) and a payload collector's
+    /// trailing one (#1851). Named for the shared template it writes, which reports the failing step as
+    /// an enumeration probe — accurate for both, since a payload collector reaches this only by
+    /// enumerating and probing databases inside its own server-side cursor.</para>
     /// </summary>
     private void LogEnumerationProbeFailures<TRow>(
         ICollectorDefinition<TRow> definition,

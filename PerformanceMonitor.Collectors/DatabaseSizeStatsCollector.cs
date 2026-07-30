@@ -76,6 +76,14 @@ CREATE TABLE #file_space
     used_size_mb decimal(19,2) NULL
 );
 
+/* #1851: every failure below used to die in an empty CATCH, so a database that was mid-restore or
+   inaccessible to the login contributed no used_size_mb and the cycle reported SUCCESS with that
+   database's file space silently absent. These rows come back AFTER the payload as the payload path's
+   probe-failure contract (EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync) — they cannot ride the
+   payload result set, which is one row per FILE and is written to database_size_stats verbatim. */
+DECLARE
+    @probe_failures TABLE (name sysname, error_text nvarchar(4000));
+
 DECLARE
     @db_name sysname,
     @sql nvarchar(MAX);
@@ -108,6 +116,12 @@ FROM sys.database_files AS df;'';';
         EXECUTE sys.sp_executesql @sql;
     END TRY
     BEGIN CATCH
+        /* The failure modes this catches are ordinary and per-database (mid-restore, a database that
+           went offline between the cursor and the probe, a login the cross-database reference is
+           rejected for), so the cursor keeps going — but that database's files then join the payload
+           below with used_size_mb NULL, on a row that still reports SUCCESS. */
+        INSERT @probe_failures (name, error_text)
+        VALUES (@db_name, ERROR_MESSAGE());
     END CATCH;
 
     FETCH NEXT FROM db_cursor INTO @db_name;
@@ -171,7 +185,17 @@ WHERE d.state_desc = N'ONLINE'
 ORDER BY
     d.name,
     mf.file_id
-OPTION(RECOMPILE);";
+OPTION(RECOMPILE);
+
+/* Trailing result set = the payload path's probe-failure contract (#1851,
+   EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync). Always returned, normally empty; the host
+   reads zero rows and attaches no note. */
+SELECT
+    name,
+    error_text
+FROM @probe_failures
+ORDER BY
+    name;";
 
     private const string AzureSqlDbQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -244,6 +268,21 @@ OPTION(RECOMPILE);";
     /// (the per-database XE readers); this one simply stops asking.</para>
     /// </summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => false;
+
+    /// <summary>
+    /// This collector's on-prem batch returns its per-database probe failures after the payload (#1851).
+    /// Its cursor probes every ONLINE database it can enter with a cross-database
+    /// <c>[db].sys.sp_executesql</c>, and that probe is exactly what fails for a database that goes
+    /// mid-restore or offline between the cursor and the call: before this, the CATCH was empty, so that
+    /// database's files landed in the payload with <c>used_size_mb</c> NULL — indistinguishable from a
+    /// file whose space was genuinely unreadable — under a SUCCESS row that said nothing had happened.
+    ///
+    /// <para>Declared unconditionally, including for Azure SQL DB, whose query is a single cursor-less
+    /// statement that emits no such set. The contract treats an absent trailing set as zero failures, so
+    /// the flag needs no target branch and the Azure path is byte-for-byte unchanged — see
+    /// <see cref="ICollectorDefinition{TRow}.EmitsProbeFailures"/>.</para>
+    /// </summary>
+    public override bool EmitsProbeFailures => true;
 
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
