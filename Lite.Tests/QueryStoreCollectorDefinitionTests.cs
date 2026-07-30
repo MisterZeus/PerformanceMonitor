@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor Lite.
@@ -20,7 +20,7 @@ namespace Lite.Tests;
 /// Pins the parity contract of the extracted query_store definition: the actual_state enumeration
 /// (on-prem, AG-aware), the live PRODUCTVERSION probe deciding the 2017+/2022+ column gates (default
 /// 13 when the probe fails), the last_execution_time incremental watermark with its 60-minute
-/// fallback and 24h catch-up clamp, and the 54-column payload. Second Name≠TargetTable case
+/// fallback and 24h catch-up clamp, and the 56-column payload. Second Name≠TargetTable case
 /// (query_store → query_store_stats).
 ///
 /// <para>Also pins the TWO-SHAPE contract added in #1836: Azure SQL DB runs per database
@@ -168,7 +168,7 @@ public sealed class QueryStoreCollectorDefinitionTests
         Assert.DoesNotContain(".sys.query_store", plan.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("QUOTENAME", plan.Text, StringComparison.Ordinal);
 
-        /* Payload columns are present and unchanged in shape — the reader contract is the same 53
+        /* Payload columns are present and unchanged in shape — the reader contract is the same 55
            ordinals on both paths. */
         Assert.Contains("SELECT /* PerformanceMonitorLite */ TOP (50000)", plan.Text, StringComparison.Ordinal);
         Assert.Contains("query_id = qsq.query_id,", plan.Text, StringComparison.Ordinal);
@@ -189,7 +189,7 @@ public sealed class QueryStoreCollectorDefinitionTests
         /* The drift guard this rework is designed around (#1836). Both builders are handed the SAME
            context, so they must produce the SAME payload — the per-item form differing ONLY by the
            quote-doubling that nests it inside [db].sys.sp_executesql. Hand-edit either path's columns
-           and this fails, which is the point: a 54-column payload maintained in two copies is how the
+           and this fails, which is the point: a 56-column payload maintained in two copies is how the
            two paths silently stop agreeing about what the reader's ordinals mean. */
         var context = MakeContext(isAzureSqlDb: true, probeResult: 16, capturePlanXml: true);
 
@@ -227,7 +227,7 @@ public sealed class QueryStoreCollectorDefinitionTests
     public void BuildQuery_Azure_GatesReplicaAttributionOff_ButKeepsTheColumn()
     {
         /* Explicitly gated off, not dropped (#1836): Azure emits the same nvarchar(1) NULL placeholder
-           at the same ordinal a pre-2022 box does, so the 53-ordinal reader contract is identical.
+           at the same ordinal a pre-2022 box does, so the 55-ordinal reader contract is identical.
            replica_group_id's own doc page names SQL Server 2022+ and is silent on Azure SQL Database
            while its sibling columns name Azure explicitly, and Query Store for secondary replicas is
            documented as unavailable on Hyperscale — a column that does not bind fails the WHOLE
@@ -518,7 +518,7 @@ public sealed class QueryStoreCollectorDefinitionTests
         var context = MakeContext();
         context.PerItemTextBudgetExceeded = true;
 
-        var row = new object[53];
+        var row = new object[55];
         row[0] = 101L;
         row[1] = 202L;
         row[2] = "Regular";
@@ -538,6 +538,8 @@ public sealed class QueryStoreCollectorDefinitionTests
         row[50] = DBNull.Value;
         row[51] = "0xPH";
         row[52] = DBNull.Value;
+        row[53] = 9001L;
+        row[54] = new DateTime(2026, 7, 2, 10, 0, 0);
 
         using var reader = new FakeCollectorDataReader(row);
         var rows = new System.Collections.Generic.List<QueryStoreCollector.Row>();
@@ -557,7 +559,7 @@ public sealed class QueryStoreCollectorDefinitionTests
 
         object[] MakeRow(long queryId, string sqlText)
         {
-            var row = new object[53];
+            var row = new object[55];
             row[0] = queryId;
             row[1] = 202L;
             row[2] = "Regular";
@@ -577,6 +579,8 @@ public sealed class QueryStoreCollectorDefinitionTests
             row[50] = DBNull.Value;
             row[51] = "0xPH";
             row[52] = DBNull.Value;
+            row[53] = 9001L;
+            row[54] = new DateTime(2026, 7, 2, 10, 0, 0);
             return row;
         }
 
@@ -631,10 +635,10 @@ public sealed class QueryStoreCollectorDefinitionTests
             async () => await QueryStoreCollector.Instance.ReadAsync(reader, context, CancellationToken.None));
     }
 
-    /// <summary>One reader row shaped to the 53-ordinal payload contract both paths select.</summary>
+    /// <summary>One reader row shaped to the 55-ordinal payload contract both paths select.</summary>
     private static object[] MakeReaderRow(long queryId, string sqlText)
     {
-        var row = new object[53];
+        var row = new object[55];
         row[0] = queryId;
         row[1] = 202L;
         row[2] = "Regular";
@@ -654,6 +658,8 @@ public sealed class QueryStoreCollectorDefinitionTests
         row[50] = DBNull.Value;
         row[51] = "0xPH";
         row[52] = DBNull.Value;
+        row[53] = 9001L;                    /* runtime_stats_interval_id */
+        row[54] = new DateTime(2026, 7, 2, 10, 0, 0);  /* interval_start_time_utc (already datetime2) */
         return row;
     }
 
@@ -666,12 +672,47 @@ public sealed class QueryStoreCollectorDefinitionTests
         Assert.Equal(collectionTime.AddMinutes(-60), Assert.Single(plan.Parameters).Value);
     }
 
+    [Theory]
+    [InlineData(13, false)]   /* SQL Server 2016 — the AppliesTo floor */
+    [InlineData(16, false)]   /* SQL Server 2022 */
+    [InlineData(12, true)]    /* Azure SQL DB, which under-reports PRODUCTVERSION */
+    public void Payload_SelectsIntervalIdentity_OnEveryVersionAndTarget(int productVersion, bool isAzureSqlDb)
+    {
+        /* #1841 tier 2. Query Store rows are cumulative per-interval snapshots, so the interval is the
+           unit every aggregate has to collapse to — and until this shipped the schema carried no interval
+           key at all, only the first_execution_time proxy, and no interval CLOCK, which is why the slicer
+           bucketed an interval into the hour it was last COLLECTED.
+
+           Deliberately NOT version-gated, unlike plan_type_desc / the log-bytes family / replica_role
+           beside it: sys.query_store_runtime_stats.runtime_stats_interval_id and the
+           sys.query_store_runtime_stats_interval catalog view are original Query Store surface, verified
+           present on SQL Server 2016 SP3 (13.0.6300.2) — the same floor AppliesTo enforces. A gate here
+           would be dead weight AND would silently deny the identity to the oldest supported servers. */
+        var context = MakeContext(isAzureSqlDb: isAzureSqlDb, probeResult: productVersion);
+        var body = isAzureSqlDb
+            ? QueryStoreCollector.Instance.BuildQuery(context).Text
+            : QueryStoreCollector.Instance.BuildEnumerationQuery(context) is not null
+                ? QueryStoreCollector.Instance.BuildPerItemQuery("SO", context).Text
+                : throw new InvalidOperationException("on-prem must enumerate");
+
+        /* The on-prem form is quote-DOUBLED for [db].sys.sp_executesql nesting, so the timezone literal
+           reads ''UTC'' there and 'UTC' on Azure — the one place this pair could have broken the escaping. */
+        var quote = isAzureSqlDb ? "'" : "''";
+        Assert.Contains("runtime_stats_interval_id = qsrs.runtime_stats_interval_id,", body, StringComparison.Ordinal);
+        Assert.Contains($"interval_start_time_utc = CONVERT(datetime2, qsrsi.start_time AT TIME ZONE {quote}UTC{quote})", body, StringComparison.Ordinal);
+
+        /* LEFT JOIN, never INNER: an interval row that failed to resolve must cost this collector ONE
+           column, not every runtime-stats row for that database. Same lesson as the replica join. */
+        Assert.Contains("LEFT JOIN sys.query_store_runtime_stats_interval AS qsrsi", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("JOIN sys.query_store_runtime_stats_interval AS qsrsi\n  ON qsrsi", body.Replace("LEFT JOIN sys.query_store_runtime_stats_interval", "X", StringComparison.Ordinal), StringComparison.Ordinal);
+    }
+
     [Fact]
-    public void PayloadColumns_MatchSchemaOrder_54Columns()
+    public void PayloadColumns_MatchSchemaOrder_56Columns()
     {
         var names = QueryStoreCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray();
 
-        Assert.Equal(54, names.Length);
+        Assert.Equal(56, names.Length);
         Assert.Equal("database_name", names[0]);
         Assert.Equal("query_id", names[1]);
         Assert.Equal("execution_count", names[9]);
@@ -681,21 +722,24 @@ public sealed class QueryStoreCollectorDefinitionTests
         Assert.Equal("compatibility_level", names[50]);
         Assert.Equal("query_plan_hash", names[52]);
 
-        /* replica_role is pinned LAST deliberately: both hosts' bulk writers are positional, and an
-           upgraded store receives this column from an ALTER TABLE ADD COLUMN, which can only append.
-           Moving it earlier would desync a fresh store (DDL generated from this list) from an upgraded
-           one. See the CollectorColumn comment in QueryStoreCollector. */
+        /* The appended tail is pinned in ORDER deliberately: both hosts' bulk writers are positional, and
+           an upgraded store receives these columns from an ALTER TABLE ADD COLUMN, which can only append.
+           Moving any of them earlier would desync a fresh store (DDL generated from this list) from an
+           upgraded one. replica_role landed first (#1546), then #1841 tier 2's interval-identity pair;
+           anything added later must go AFTER these. See the CollectorColumn comment in QueryStoreCollector. */
         Assert.Equal("replica_role", names[53]);
+        Assert.Equal("runtime_stats_interval_id", names[54]);
+        Assert.Equal("interval_start_time_utc", names[55]);
     }
 
     [Fact]
-    public async Task ReadItemAsync_WritePayload_Pins54ColumnOrder_AndTypeCoercions()
+    public async Task ReadItemAsync_WritePayload_Pins56ColumnOrder_AndTypeCoercions()
     {
         var context = MakeContext();
         var firstExec = new DateTimeOffset(2026, 7, 2, 10, 0, 0, TimeSpan.FromHours(-4));
         var lastExec = new DateTimeOffset(2026, 7, 2, 11, 0, 0, TimeSpan.FromHours(-4));
 
-        var row = new object[53];
+        var row = new object[55];
         row[0] = 101L;                      /* query_id */
         row[1] = 202L;                      /* plan_id */
         row[2] = "Regular";                 /* execution_type_desc */
@@ -721,6 +765,10 @@ public sealed class QueryStoreCollectorDefinitionTests
         row[50] = DBNull.Value;             /* query_plan_text (always NULL literal) */
         row[51] = "0xPH";                   /* query_plan_hash */
         row[52] = "Secondary";              /* replica_role (2022+ attributed the row to a secondary) */
+        row[53] = 9001L;                    /* runtime_stats_interval_id (#1841 tier 2) */
+        row[54] = new DateTime(2026, 7, 2, 10, 0, 0);  /* interval_start_time_utc: datetime2, NOT datetimeoffset —
+                                                          the SELECT does the AT TIME ZONE conversion, so unlike
+                                                          first/last_execution_time this needs no client shift */
 
         using var reader = new FakeCollectorDataReader(row);
         var rows = new System.Collections.Generic.List<QueryStoreCollector.Row>();
@@ -729,7 +777,7 @@ public sealed class QueryStoreCollectorDefinitionTests
         var writer = new RecordingCollectorRowWriter();
         QueryStoreCollector.Instance.WritePayload(Assert.Single(rows), writer, context);
 
-        Assert.Equal(54, writer.Values.Count);
+        Assert.Equal(56, writer.Values.Count);
         Assert.Equal("SO", writer.Values[0]);                       /* enumerated item leads the payload */
         Assert.Equal(101L, writer.Values[1]);
         Assert.Equal(firstExec.UtcDateTime, writer.Values[4]);      /* datetimeoffset -> UTC DateTime */
@@ -744,7 +792,9 @@ public sealed class QueryStoreCollectorDefinitionTests
         Assert.Equal(160, writer.Values[50]);                       /* smallint compat -> int */
         Assert.Null(writer.Values[51]);
         Assert.Equal("0xPH", writer.Values[52]);
-        Assert.Equal("Secondary", writer.Values[53]);               /* replica_role rides last, after query_plan_hash */
+        Assert.Equal("Secondary", writer.Values[53]);               /* replica_role, after query_plan_hash */
+        Assert.Equal(9001L, writer.Values[54]);                     /* runtime_stats_interval_id (#1841 tier 2) */
+        Assert.Equal(new DateTime(2026, 7, 2, 10, 0, 0), writer.Values[55]); /* interval_start_time_utc, no shift applied */
         Assert.Empty(s_deltas.Calls);                               /* incremental snapshot — no deltas */
     }
 }

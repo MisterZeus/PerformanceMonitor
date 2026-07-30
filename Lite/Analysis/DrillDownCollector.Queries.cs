@@ -301,7 +301,7 @@ WITH deduped AS
         query_text,
         ROW_NUMBER() OVER
         (
-            PARTITION BY database_name, query_id, plan_id, first_execution_time
+            PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time
             ORDER BY collection_time DESC
         ) AS rn
     FROM v_query_store_stats

@@ -84,6 +84,7 @@ public static class PgMigrations
         new Migration(38, "query-payload-dimensions", PgSchemaGenerator.GenerateV38PayloadDimensions()),
         new Migration(39, "dim-feeding-fact-floor-indexes", V39Sql),
         new Migration(40, "blocking-wait-threshold", V40Sql),
+        new Migration(41, "query-store-interval-identity", V41Sql),
     };
 
     /// <summary>
@@ -652,6 +653,31 @@ CREATE INDEX IF NOT EXISTS ix_procedure_stats_digest_floor
     private const string V40Sql = @"
 ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS blocking_wait_seconds_threshold integer NOT NULL DEFAULT 0;";
+
+    /// <summary>
+    /// V41 — the REAL Query Store interval identity on <c>query_store_stats</c> (#1841 tier 2):
+    /// <c>runtime_stats_interval_id</c> (<c>sys.query_store_runtime_stats</c>' own interval key) and
+    /// <c>interval_start_time_utc</c> (<c>sys.query_store_runtime_stats_interval.start_time</c>, converted
+    /// to UTC at collection).
+    /// <para>Query Store rows are CUMULATIVE per-interval snapshots and the collector re-fetches the OPEN
+    /// interval every cycle, so every aggregate read must collapse an interval to its latest snapshot
+    /// before summing. Tier 1 (#1845) did that on the <c>first_execution_time</c> PROXY because the schema
+    /// exposed no interval key; this is the real one, and it is also the only honest x-axis for "when the
+    /// work ran" — <c>collection_time</c> dates an interval to the cycle that last FETCHED it, one bucket
+    /// late on Query Store's default 60-minute interval.</para>
+    /// <para>Both nullable and appended (identical physical column order for the binary COPY whether fresh —
+    /// V1 is generated from the current collector definition, which now includes them — or upgraded;
+    /// <c>ADD COLUMN IF NOT EXISTS</c> no-ops on fresh). Deliberately NOT backfilled: rows already stored
+    /// were collected without the identity and nothing can reconstruct it, so readers key on the real id
+    /// only when present and fall back to the tier-1 proxy otherwise. The trailing
+    /// <c>CREATE OR REPLACE VIEW</c> re-expands <c>v_query_store_stats</c>' pinned <c>SELECT *</c>
+    /// (Postgres freezes it at CREATE; append-only ADDs keep the refresh legal), mirroring V15/V27/V28.
+    /// Runs after V8, so the bare names resolve through <c>search_path = collect, config, public</c>.</para>
+    /// </summary>
+    private const string V41Sql = @"
+ALTER TABLE query_store_stats ADD COLUMN IF NOT EXISTS runtime_stats_interval_id bigint;
+ALTER TABLE query_store_stats ADD COLUMN IF NOT EXISTS interval_start_time_utc timestamp;
+CREATE OR REPLACE VIEW v_query_store_stats AS SELECT * FROM query_store_stats;";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:
