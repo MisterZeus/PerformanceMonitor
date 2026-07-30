@@ -3,25 +3,37 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Add SQL Server"
         SizeToContent="Height" Width="450"
+        MaxHeight="{Binding Source={x:Static SystemParameters.WorkArea}, Path=Height}"
+        MinWidth="450" MinHeight="360"
         WindowStartupLocation="CenterOwner"
-        ResizeMode="NoResize"
+        ResizeMode="CanResizeWithGrip"
+        SizeChanged="Dialog_SizeChanged"
         Icon="/EDD.ico"
         Background="{DynamicResource BackgroundBrush}">
+    <!-- #1828: the auth panels grow this dialog past a 1080p work area, and SizeToContent kept growing
+         the window off-screen with the buttons unreachable (NoResize left no recovery). The form scrolls
+         in a star row, the status + buttons are pinned OUTSIDE the scroll so they are always visible,
+         and MaxHeight clamps the window to the work area - the Dashboard twin's proven shape. -->
     <Grid Margin="16">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
+
+        <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
 
         <!-- Header -->
         <TextBlock Grid.Row="0" Text="Add SQL Server Connection" FontSize="18" FontWeight="Bold" Margin="0,0,0,15"
@@ -163,15 +175,18 @@
             </StackPanel>
         </StackPanel>
 
-        <!-- Status -->
-        <TextBlock Grid.Row="10" x:Name="StatusText" Foreground="{DynamicResource ForegroundMutedBrush}"
-                   TextWrapping="Wrap" VerticalAlignment="Bottom" Margin="0,0,0,8"/>
+            </Grid>
+        </ScrollViewer>
 
-        <!-- Buttons -->
-        <StackPanel Grid.Row="11" Orientation="Horizontal" HorizontalAlignment="Right">
-            <Button x:Name="TestButton" Content="Test Connection" Click="TestButton_Click" Margin="0,0,8,0"/>
-            <Button x:Name="SaveButton" Content="Save" Width="80" Height="30" Click="SaveButton_Click" Style="{StaticResource AccentButton}" Margin="0,0,8,0"/>
-            <Button Content="Cancel" Width="80" Height="30" Click="CancelButton_Click"/>
+        <!-- Status + buttons: pinned below the scroll so they stay visible at any window height. -->
+        <StackPanel Grid.Row="1" Margin="0,8,0,0">
+            <TextBlock x:Name="StatusText" Foreground="{DynamicResource ForegroundMutedBrush}"
+                       TextWrapping="Wrap" Margin="0,0,0,8"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button x:Name="TestButton" Content="_Test Connection" Click="TestButton_Click" Margin="0,0,8,0"/>
+                <Button x:Name="SaveButton" Content="_Save" Width="80" Height="30" Click="SaveButton_Click" Style="{StaticResource AccentButton}" Margin="0,0,8,0"/>
+                <Button Content="_Cancel" Width="80" Height="30" Click="CancelButton_Click" IsCancel="True"/>
+            </StackPanel>
         </StackPanel>
     </Grid>
 </Window>

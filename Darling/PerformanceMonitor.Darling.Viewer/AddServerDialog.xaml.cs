@@ -595,4 +595,20 @@ public partial class AddServerDialog : Window
         DialogResult = false;
         Close();
     }
+
+    /// <summary>
+    /// #1828: SizeToContent growth is top-anchored, so expanding a tall auth panel mid-session can
+    /// carry the pinned footer past the bottom of the work area without ever hitting the MaxHeight
+    /// clamp - MaxHeight limits total height, not position. When growth pushes the bottom edge
+    /// off-screen, pull the window up so the footer stays visible: the SizeToContent-friendly form
+    /// of the Dashboard twin's SizeToWorkArea() top-pinning. Mirrors Lite's AddServerDialog.
+    /// </summary>
+    private void Dialog_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        var workArea = SystemParameters.WorkArea;
+        if (Top + ActualHeight > workArea.Bottom)
+        {
+            Top = Math.Max(workArea.Top, workArea.Bottom - ActualHeight);
+        }
+    }
 }

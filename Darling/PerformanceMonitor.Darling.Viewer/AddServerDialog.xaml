@@ -3,25 +3,38 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Add SQL Server"
         SizeToContent="Height" Width="450"
+        MaxHeight="{Binding Source={x:Static SystemParameters.WorkArea}, Path=Height}"
+        MinWidth="450" MinHeight="360"
         WindowStartupLocation="CenterOwner"
-        ResizeMode="NoResize"
+        ResizeMode="CanResizeWithGrip"
+        SizeChanged="Dialog_SizeChanged"
         Icon="EDD.ico"
         Background="{DynamicResource BackgroundBrush}">
+    <!-- #1828: the auth panels grow this dialog past a 1080p work area, and SizeToContent kept growing
+         the window off-screen with the buttons unreachable (NoResize left no recovery). The form scrolls
+         in a star row, the status + buttons are pinned OUTSIDE the scroll so they are always visible,
+         and MaxHeight clamps the window to the work area - the Dashboard twin's proven shape. Mirrors
+         Lite's AddServerDialog. -->
     <Grid Margin="16">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
+
+        <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
 
         <!-- Header -->
         <TextBlock Grid.Row="0" x:Name="HeaderText" Text="Add SQL Server Connection" FontSize="18" FontWeight="Bold" Margin="0,0,0,15"
@@ -155,18 +168,22 @@
             </StackPanel>
         </StackPanel>
 
-        <!-- Status -->
-        <TextBlock Grid.Row="10" x:Name="StatusText" Foreground="{DynamicResource ForegroundMutedBrush}"
-                   TextWrapping="Wrap" VerticalAlignment="Bottom" Margin="0,0,0,8"/>
+            </Grid>
+        </ScrollViewer>
 
-        <!-- Buttons. Test Connection enqueues a test_connect command; the SERVICE opens the connection and
+        <!-- Status + buttons: pinned below the scroll so they stay visible at any window height.
+             Test Connection enqueues a test_connect command; the SERVICE opens the connection and
              writes the probe result back, which the dialog polls for and shows. -->
-        <DockPanel Grid.Row="11" LastChildFill="False">
-            <Button x:Name="TestConnectionButton" Content="Test Connection" Width="130" Height="30"
-                    Click="TestConnectionButton_Click" DockPanel.Dock="Left"
-                    ToolTip="Asks the Darling service to connect to this server and report the version/edition, before saving."/>
-            <Button Content="Cancel" Width="80" Height="30" Click="CancelButton_Click" DockPanel.Dock="Right"/>
-            <Button x:Name="SaveButton" Content="Save" Width="80" Height="30" Click="SaveButton_Click" Style="{StaticResource AccentButton}" DockPanel.Dock="Right" Margin="0,0,8,0"/>
-        </DockPanel>
+        <StackPanel Grid.Row="1" Margin="0,8,0,0">
+            <TextBlock x:Name="StatusText" Foreground="{DynamicResource ForegroundMutedBrush}"
+                       TextWrapping="Wrap" Margin="0,0,0,8"/>
+            <DockPanel LastChildFill="False">
+                <Button x:Name="TestConnectionButton" Content="_Test Connection" Width="130" Height="30"
+                        Click="TestConnectionButton_Click" DockPanel.Dock="Left"
+                        ToolTip="Asks the Darling service to connect to this server and report the version/edition, before saving."/>
+                <Button Content="_Cancel" Width="80" Height="30" Click="CancelButton_Click" DockPanel.Dock="Right" IsCancel="True"/>
+                <Button x:Name="SaveButton" Content="_Save" Width="80" Height="30" Click="SaveButton_Click" Style="{StaticResource AccentButton}" DockPanel.Dock="Right" Margin="0,0,8,0"/>
+            </DockPanel>
+        </StackPanel>
     </Grid>
 </Window>
