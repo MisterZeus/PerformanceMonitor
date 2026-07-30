@@ -871,7 +871,13 @@ internal static class DarlingDataReader
             AVG(duration_ms) AS avg_duration_ms,
             MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
             MAX(collection_time) AS last_run_time,
-            MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN error_message END) AS last_error,
+            -- #1855: the message from the NEWEST failing run, not MAX()'s lexicographically greatest
+            -- one. The status re-check is load-bearing rather than belt-and-braces: when no failing run
+            -- in the window carried text, error_rank = 1 falls through to the newest row of ANY class,
+            -- and without it a SUCCESS row's note could surface here as a fake last error.
+            MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS') THEN error_message END) AS last_error,
+            -- The newest failure OUTRIGHT, text or not — "when did this last fail" means the run, not
+            -- the message.
             MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN collection_time END) AS last_error_time,
             SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
             SUM(CASE WHEN status = 'YIELDED' THEN 1 ELSE 0 END) AS yield_count,
@@ -879,11 +885,41 @@ internal static class DarlingDataReader
             -- items whose enumeration probe failed) and how many runs carried one. Gated on SUCCESS
             -- specifically — the runners attach a note only to the SUCCESS write. Informational: it
             -- feeds no band, and a legitimately empty target stays HEALTHY.
-            MAX(CASE WHEN status = 'SUCCESS' THEN error_message END) AS last_note,
+            MAX(CASE WHEN note_rank = 1 AND status = 'SUCCESS' THEN error_message END) AS last_note,
             COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count
-        FROM v_collection_log
-        WHERE server_id = $1
-        AND   collection_time >= $2
+        FROM
+        (
+            -- #1855: rank each class of message newest-first so the two exemplar columns above can take
+            -- the LATEST one instead of the lexicographically greatest. Ordering on whether the class's
+            -- CASE came back empty puts every row that carries such a message ahead of every row that
+            -- does not, so rank 1 is the newest one that has text — and a later clean run no longer
+            -- blanks a note the window still holds. Text does not sort like the number #1837's probe
+            -- note carries: 12 item(s) sorts below 9 item(s). One byte-identical shape with Lite's
+            -- DuckDB read and the Viewer's, down to the error_message DESC tie-break.
+            SELECT
+                collector_name,
+                collection_time,
+                duration_ms,
+                status,
+                error_message,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY collector_name
+                    ORDER BY (CASE WHEN status = 'SUCCESS' THEN error_message END) IS NULL,
+                             collection_time DESC,
+                             error_message DESC
+                ) AS note_rank,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY collector_name
+                    ORDER BY (CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN error_message END) IS NULL,
+                             collection_time DESC,
+                             error_message DESC
+                ) AS error_rank
+            FROM v_collection_log
+            WHERE server_id = $1
+            AND   collection_time >= $2
+        ) runs
         GROUP BY collector_name
         ORDER BY collector_name
         """;

@@ -104,7 +104,13 @@ public sealed class DarlingEmptyEnumerationNoteTests
     {
         /* The read-side guard that keeps this note out of the Collection Health "last error" surface, in
            both readers. A broadening to error_message IS NOT NULL would turn every quiet enumeration
-           cycle into a fake last-error. */
+           cycle into a fake last-error.
+
+           #1855 replaced the value-MAX with a newest-first rank, so the gate now reads as the status
+           re-check on the rank-1 row. It is the SAME claim: the column can only ever be filled from a
+           failing run. Without the re-check the rank falls through to the newest row of any class when
+           no failure carried text, and a SUCCESS row's note would land here. Lite's twin pin asserts the
+           identical expression against its DuckDB read. */
         foreach (var relative in new[]
         {
             Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.CollectionHealth.cs"),
@@ -112,7 +118,7 @@ public sealed class DarlingEmptyEnumerationNoteTests
         })
         {
             var source = ReadRepoFile(relative);
-            Assert.Contains("MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN error_message END) AS last_error", source);
+            Assert.Contains("MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS') THEN error_message END) AS last_error", source);
             Assert.DoesNotContain("error_message IS NOT NULL", source);
         }
     }
@@ -125,8 +131,9 @@ public sealed class DarlingEmptyEnumerationNoteTests
         /* Both Darling readers, matching Lite. Gated on SUCCESS, not on "not a failure status": the
            runners attach a note only to the SUCCESS write, and the looser complement of last_error would
            drag Darling's SESSION_MISSING rows — a real capture fault with its own self-alert — into a
-           column whose tooltip promises it is NOT an error. Written as MAX/COUNT over a CASE rather than
-           a NULL test on purpose: no read on this surface may key on message PRESENCE (the pin above). */
+           column whose tooltip promises it is NOT an error. Every gate on this surface is still a STATUS
+           gate — #1855's rank orders on whether the status-gated CASE came back empty, never on message
+           presence alone (the pin above). */
         foreach (var relative in new[]
         {
             Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.CollectionHealth.cs"),
@@ -134,7 +141,7 @@ public sealed class DarlingEmptyEnumerationNoteTests
         })
         {
             var source = ReadRepoFile(relative);
-            Assert.Contains("MAX(CASE WHEN status = 'SUCCESS' THEN error_message END) AS last_note", source);
+            Assert.Contains("MAX(CASE WHEN note_rank = 1 AND status = 'SUCCESS' THEN error_message END) AS last_note", source);
             Assert.Contains("COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count", source);
         }
     }
@@ -157,6 +164,18 @@ public sealed class DarlingEmptyEnumerationNoteTests
 
         Assert.Contains("LastNote = reader.IsDBNull(11)", source);
         Assert.Contains("NoteCount = reader.IsDBNull(12)", source);
+
+        /* #1855: the fleet read holds the ORDINALS but deliberately not the exemplar TEXT. Its only
+           caller bands and counts; no surface renders a fleet row's message, and ranking them turns a
+           parallel hash aggregate into a serial sort of the whole window (measured 0.84s -> 13.9s over
+           200 servers / 4M rows on PG 18.4). NULL rather than the pre-#1855 lexicographic MAX, because a
+           blank is honestly nothing while that MAX was quietly the wrong run's text. Pinned so a future
+           edit that "completes the parity" has to meet the cost first — the note_count aggregate, which
+           is order-independent and cheap, deliberately stays real on both. */
+        Assert.Contains("CAST(NULL AS text) AS last_note", fleet);
+        Assert.Contains("CAST(NULL AS text) AS last_error", fleet);
+        Assert.Contains("COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count", fleet);
+        Assert.DoesNotContain("CAST(NULL AS text)", perServer);
     }
 
     [Fact]
