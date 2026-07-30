@@ -119,6 +119,15 @@ public static class EnumeratedCollectorDriver
     /// <summary>Stand-in for a probe failure whose error column came back NULL — the failure still counts.</summary>
     public const string NoErrorText = "(no error text)";
 
+    /// <summary>
+    /// Stand-in for a GENUINE probe failure whose item-name column came back NULL. Deliberately distinct
+    /// from <see cref="ContractViolationItem"/>: sharing one sentinel would render a real failure the
+    /// enumeration merely failed to name identically to a malformed-result-set diagnostic, and send an
+    /// operator hunting a SQL defect that is not there. No shipped enumeration can produce it (query_store
+    /// takes the name from sys.databases), so this is for the enumerations that adopt the contract next.
+    /// </summary>
+    public const string UnnamedItem = "(unnamed item)";
+
     /// <summary><see cref="ProbeFailureNoteFormat"/> parsed once (CA1863) — the const stays the greppable, pinnable text.</summary>
     private static readonly CompositeFormat s_probeFailureNote = CompositeFormat.Parse(ProbeFailureNoteFormat);
 
@@ -204,7 +213,7 @@ public static class EnumeratedCollectorDriver
                COUNT but a non-string column would throw InvalidCastException out of here and fail the
                whole collection cycle — the outcome the arity check above deliberately avoids. Read
                loosely and the malformed set still reports itself as a probe failure. */
-            var item = reader.IsDBNull(0) ? ContractViolationItem : reader.GetValue(0).ToString() ?? ContractViolationItem;
+            var item = reader.IsDBNull(0) ? UnnamedItem : reader.GetValue(0).ToString() ?? UnnamedItem;
             var error = reader.IsDBNull(1) ? NoErrorText : reader.GetValue(1).ToString() ?? NoErrorText;
             failures.Add(new EnumerationProbeFailure(item, error));
         }

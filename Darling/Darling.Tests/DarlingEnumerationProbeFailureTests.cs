@@ -182,6 +182,32 @@ public sealed class DarlingEnumerationProbeFailureTests
         var failure = Assert.Single(outcome.ProbeFailures);
         Assert.Equal(EnumeratedCollectorDriver.ContractViolationItem, failure.Item);
         Assert.Equal(EnumeratedCollectorDriver.ContractViolationError, failure.Error);
+        Assert.Contains("1 item(s) failed their enumeration probe", outcome.Note);
+    }
+
+    [Fact]
+    public async Task A_Failure_With_No_Item_Name_Is_Not_Mistaken_For_A_Malformed_Result_Set()
+    {
+        /* Two different things that both leave the item unnamed: a GENUINE failure whose name column came
+           back NULL, and a result set with the wrong SHAPE. Sharing one sentinel would send an operator
+           hunting a SQL defect that is not there, so they read differently. */
+        var dataSet = new DataSet();
+        var itemTable = new DataTable("items");
+        itemTable.Columns.Add("name", typeof(string));
+        var failureTable = new DataTable("probe_failures");
+        failureTable.Columns.Add("name", typeof(string));
+        failureTable.Columns.Add("error_text", typeof(string));
+        failureTable.Rows.Add(DBNull.Value, "denied");
+        dataSet.Tables.Add(itemTable);
+        dataSet.Tables.Add(failureTable);
+
+        using var reader = dataSet.CreateDataReader();
+        var outcome = await EnumeratedCollectorDriver.ReadEnumerationAsync(reader, CancellationToken.None);
+
+        var failure = Assert.Single(outcome.ProbeFailures);
+        Assert.Equal(EnumeratedCollectorDriver.UnnamedItem, failure.Item);
+        Assert.NotEqual(EnumeratedCollectorDriver.ContractViolationItem, failure.Item);
+        Assert.Equal("denied", failure.Error);
     }
 
     /* ── the collector that needed it ── */
