@@ -210,6 +210,29 @@ public sealed class DarlingEnumerationProbeFailureTests
         Assert.Equal("denied", failure.Error);
     }
 
+    [Fact]
+    public async Task Null_Error_Text_Does_Not_Drop_The_Failure()
+    {
+        /* ERROR_MESSAGE() should never be NULL, but a probe failure is the LAST thing that may vanish for
+           want of its own text — the count is the part the operator acts on. */
+        var dataSet = new DataSet();
+        var itemTable = new DataTable("items");
+        itemTable.Columns.Add("name", typeof(string));
+        var failureTable = new DataTable("probe_failures");
+        failureTable.Columns.Add("name", typeof(string));
+        failureTable.Columns.Add("error_text", typeof(string));
+        failureTable.Rows.Add("A", DBNull.Value);
+        dataSet.Tables.Add(itemTable);
+        dataSet.Tables.Add(failureTable);
+
+        using var reader = dataSet.CreateDataReader();
+        var outcome = await EnumeratedCollectorDriver.ReadEnumerationAsync(reader, CancellationToken.None);
+
+        var failure = Assert.Single(outcome.ProbeFailures);
+        Assert.Equal("A", failure.Item);
+        Assert.False(string.IsNullOrWhiteSpace(failure.Error));
+    }
+
     /* ── the collector that needed it ── */
 
     [Fact]
@@ -239,6 +262,25 @@ public sealed class DarlingEnumerationProbeFailureTests
         var failures = text.IndexOf("FROM @probe_failures", StringComparison.Ordinal);
         Assert.True(items >= 0 && failures >= 0, "both result sets must be selected");
         Assert.True(items < failures, "the item list must be the first result set");
+    }
+
+    [Fact]
+    public void QueryStore_OnPrem_Enumeration_Screens_Databases_The_Login_Cannot_Enter()
+    {
+        /* #1823's screen, which this collector never got — the sibling enumerations
+           (database_scoped_config, index_object_stats, database_size_stats) all carry it. Without it a
+           least-privilege login probes every database it cannot enter and takes a 916 per database; those
+           failures were harmless while the CATCH swallowed them, but recording them turns a permission
+           posture that is not changing into a probe-failure note and a warning burst EVERY cycle. */
+        var plan = QueryStoreCollector.Instance.BuildEnumerationQuery(new CollectorContext
+        {
+            ServerId = 42,
+            ServerName = "test-server",
+            CollectionTime = DateTime.UtcNow,
+            Deltas = null!,
+        });
+
+        Assert.Contains("HAS_DBACCESS(d.name) = 1", plan!.Text, StringComparison.Ordinal);
     }
 
     /* ── helpers ── */
