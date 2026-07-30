@@ -65,8 +65,10 @@ public partial class App : Application
 
     /// <summary>
     /// Gets the per-user config directory path. Holds settings.json, schedules, and
-    /// other per-user preferences. Stays in %LOCALAPPDATA% so Velopack updates can
-    /// replace the app directory without losing data.
+    /// other per-user preferences. Lives under the data root, which is deliberately a
+    /// SIBLING of the install directory rather than inside it — Velopack's in-place
+    /// update left data alone, but re-running Setup.exe deletes the install directory
+    /// outright (#1832). See <see cref="Services.DataRootMigration"/>.
     /// </summary>
     public static string ConfigDirectory { get; private set; } = string.Empty;
 
@@ -356,11 +358,29 @@ public partial class App : Application
         System.Windows.Media.RenderOptions.ProcessRenderMode =
             System.Windows.Interop.RenderMode.SoftwareOnly;
 
-        // Initialize paths — store data in %LOCALAPPDATA% so Velopack updates
-        // can replace the app directory without losing data
-        var appDataRoot = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "PerformanceMonitorLite");
+        /* Initialize paths. Data lives in %LOCALAPPDATA%\PerformanceMonitorLite-Data, NOT in
+           %LOCALAPPDATA%\PerformanceMonitorLite — that second path is Velopack's install root, and
+           re-running Setup.exe over an existing install renames it aside and deletes it, taking the
+           store, the archive and settings.json with it (#1832). Local rather than roaming: the DuckDB
+           store must not be dragged across a roaming profile. Migration runs first, before anything
+           reads settings or opens the store; AppLogger buffers until Initialize, so its log lines
+           land in the file a few statements later. */
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var appDataRoot = Path.Combine(localAppData, Services.DataRootMigration.DataRootName);
+
+        var migration = Services.DataRootMigration.Migrate(
+            Path.Combine(localAppData, Services.DataRootMigration.LegacyRootName),
+            appDataRoot,
+            message => AppLogger.Info("DataRoot", message));
+
+        if (migration.Failed.Count > 0)
+        {
+            AppLogger.Error("DataRoot",
+                $"{migration.Failed.Count} item(s) could not be moved out of the install directory and are " +
+                $"NOT in use: {string.Join(", ", migration.Failed)}. Close any other Lite instance and restart " +
+                "to retry.");
+        }
+
         DataDirectory = appDataRoot;
         ConfigDirectory = Path.Combine(appDataRoot, "config");
         DatabasePath = Path.Combine(appDataRoot, "monitor.duckdb");
@@ -533,11 +553,34 @@ public partial class App : Application
         catch { /* Use default */ }
     }
 
-    public static void LoadAlertSettings()
+    public static void LoadAlertSettings() => LoadAlertSettings(ConfigDirectory, GetWebhookUrl, SaveWebhookUrl);
+
+    /// <summary>
+    /// Path- and secret-store-injected form, so the "secrets load even without settings.json" contract is
+    /// testable without touching the process-wide config directory or the real Credential Manager.
+    /// <paramref name="writeSecret"/> is required rather than optional on purpose: this method WRITES to the
+    /// credential store on the #1506 legacy-plaintext-URL path, and a test that forgot to intercept that
+    /// would silently overwrite the operator's real webhook URL.
+    /// </summary>
+    internal static void LoadAlertSettings(
+        string configDirectory,
+        Func<string, string> readSecret,
+        Action<string, string> writeSecret)
     {
+        /* Webhook secrets live in Credential Manager, never in settings.json, so they load FIRST and
+           unconditionally — before the early return below. They used to load at the tail of the
+           settings.json parse, which meant a missing settings.json (exactly what the #1832 install-root
+           wipe produced) left the Settings window's webhook boxes blank while the credentials were still
+           there. Saving from that window then wrote the blank back, and SaveWebhookUrl DELETES on blank —
+           so opening Settings once after the data loss destroyed the surviving webhook URLs too. */
+        TeamsWebhookUrl = readSecret(TeamsWebhookCredentialKey);
+        SlackWebhookUrl = readSecret(SlackWebhookCredentialKey);
+        GenericWebhookUrl = readSecret(GenericWebhookCredentialKey);
+        GenericWebhookHeadersJson = readSecret(GenericWebhookHeadersCredentialKey);
+
         try
         {
-            var path = Path.Combine(ConfigDirectory, "settings.json");
+            var path = Path.Combine(configDirectory, "settings.json");
             if (!File.Exists(path)) return;
 
             using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
@@ -658,13 +701,16 @@ public partial class App : Application
             if (root.TryGetProperty("generic_proxy_address", out v)) GenericWebhookProxyAddress = v.GetString() ?? "";
             if (root.TryGetProperty("generic_body_template", out v)) GenericWebhookBodyTemplate = v.GetString() ?? "";
 
-            /* Migrate webhook URLs from plaintext settings.json to Credential Manager */
+            /* Migrate webhook URLs from plaintext settings.json to Credential Manager. A legacy plaintext
+               URL still wins over whatever the store held, matching the old order (save, then read back);
+               the live property is set here rather than re-reading, since we just wrote the value. */
             if (root.TryGetProperty("teams_webhook_url", out v))
             {
                 var legacyUrl = v.GetString() ?? "";
                 if (!string.IsNullOrWhiteSpace(legacyUrl))
                 {
-                    SaveWebhookUrl(TeamsWebhookCredentialKey, legacyUrl);
+                    writeSecret(TeamsWebhookCredentialKey, legacyUrl);
+                    TeamsWebhookUrl = legacyUrl;
                 }
             }
             if (root.TryGetProperty("slack_webhook_url", out v))
@@ -672,16 +718,10 @@ public partial class App : Application
                 var legacyUrl = v.GetString() ?? "";
                 if (!string.IsNullOrWhiteSpace(legacyUrl))
                 {
-                    SaveWebhookUrl(SlackWebhookCredentialKey, legacyUrl);
+                    writeSecret(SlackWebhookCredentialKey, legacyUrl);
+                    SlackWebhookUrl = legacyUrl;
                 }
             }
-
-            /* Load webhook URLs from Credential Manager. The generic channel's headers JSON rides the same
-               secure store as a URL — it carries the Authorization bearer token (#1506). */
-            TeamsWebhookUrl = GetWebhookUrl(TeamsWebhookCredentialKey);
-            SlackWebhookUrl = GetWebhookUrl(SlackWebhookCredentialKey);
-            GenericWebhookUrl = GetWebhookUrl(GenericWebhookCredentialKey);
-            GenericWebhookHeadersJson = GetWebhookUrl(GenericWebhookHeadersCredentialKey);
 
             /* SMTP settings */
             if (root.TryGetProperty("smtp_enabled", out v)) SmtpEnabled = v.GetBoolean();

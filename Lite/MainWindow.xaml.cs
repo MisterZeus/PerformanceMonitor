@@ -328,6 +328,7 @@ public partial class MainWindow : Window
                     Dispatcher.Invoke(() =>
                     {
                         Title = $"Performance Monitor Lite — Update v{newVersion.TargetFullRelease.Version} available (Help > About)";
+                        AnnounceUpdate($"v{newVersion.TargetFullRelease.Version}");
                     });
                     return;
                 }
@@ -344,6 +345,7 @@ public partial class MainWindow : Window
                 Dispatcher.Invoke(() =>
                 {
                     Title = $"Performance Monitor Lite — Update {result.LatestVersion} available (Help > About)";
+                    AnnounceUpdate(result.LatestVersion);
                 });
             }
         }
@@ -351,6 +353,21 @@ public partial class MainWindow : Window
         {
             // Never crash on update check failure
         }
+    }
+
+    /// <summary>
+    /// One tray balloon per session when an update is found. The title-bar suffix was the only signal,
+    /// and a title bar nobody reads is how installs stayed on old builds — or got upgraded by re-running
+    /// Setup.exe, which used to delete the data directory (#1832). Help &gt; About does it safely and in
+    /// place. The update check itself runs once per launch, so no extra suppression is needed.
+    /// </summary>
+    private void AnnounceUpdate(string? version)
+    {
+        _trayService?.ShowNotification(
+            "Update Available",
+            $"Performance Monitor Lite {version} is available. Open Help > About to install it — that updates in "
+                + "place and keeps your data.",
+            Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Info);
     }
 
     private bool _closingCleanupStarted;

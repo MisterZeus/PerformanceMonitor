@@ -12,7 +12,7 @@ using System.IO;
 namespace PerformanceMonitorLite.Services;
 
 /// <summary>
-/// Seeds the per-user config directory (%LOCALAPPDATA%\PerformanceMonitorLite\config) from the config
+/// Seeds the per-user config directory (%LOCALAPPDATA%\PerformanceMonitorLite-Data\config) from the config
 /// files bundled next to the exe, on first run. Without this a fresh install / nightly extract starts
 /// with an empty config dir, so the per-user ignored_wait_types.json never exists and wait-stat
 /// filtering silently becomes a no-op — every benign wait (SOS_WORK_DISPATCHER, DISPATCHER_QUEUE_SEMAPHORE,
