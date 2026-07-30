@@ -469,8 +469,14 @@ public class AlertHistoryRow
        Value and Threshold columns, so both carry the unit. */
     private static string FormatValue(string metricName, double value) => metricName switch
     {
-        /* Percent metrics — CPU/TempDB usage, free space, and the job's "% of average". */
-        "High CPU" or "tempdb Space" or "Volume Free Space" or "Long-Running Job" => $"{value:F1}%",
+        /* Percent metrics — CPU/tempdb usage, free space, and the job's "% of average".
+           "TempDB Space" is the PRE-RENAME spelling of "tempdb Space" (the tempdb token was
+           lowercased across both apps' UI in c0109f34, which changed the metric_name KEY). That
+           commit accepted "historical alert-history rows keep the old name", so archived rows
+           still carry it — and matching here is ordinal, so those rows were falling through to
+           the bare :F2 default and rendering a percentage with no unit. Nothing writes the old
+           name any more; it is kept solely so already-stored rows format like the new ones. */
+        "High CPU" or "tempdb Space" or "TempDB Space" or "Volume Free Space" or "Long-Running Job" => $"{value:F1}%",
 
         /* Poison wait carries an average ms/wait; long-running query carries elapsed minutes. */
         "Poison Wait" => $"{value:F0} ms",

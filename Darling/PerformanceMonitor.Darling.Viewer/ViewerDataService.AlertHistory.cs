@@ -87,7 +87,12 @@ public sealed class ViewerAlertRow
        "Analysis: <category> [<hash>]" finding severity — from rendering as a raw full-precision float. */
     private static string FormatValue(string metricName, double value) => metricName switch
     {
-        "High CPU" or "tempdb Space" or "Volume Free Space" or "Long-Running Job" => $"{value:F1}%",
+        /* "TempDB Space" is the PRE-RENAME spelling of "tempdb Space" (c0109f34 lowercased the tempdb
+           token across both apps' UI, which changed the metric_name KEY; that commit accepted that
+           historical alert-history rows keep the old name). Matching is ordinal, so stored rows with
+           the old name fell through to the bare :F2 default instead of the percent format. Nothing
+           writes it any more — it is kept solely so already-stored rows format like the new ones. */
+        "High CPU" or "tempdb Space" or "TempDB Space" or "Volume Free Space" or "Long-Running Job" => $"{value:F1}%",
         "Poison Wait" => $"{value:F0} ms",
         "Long-Running Query" => $"{value:F0} m",
         /* #1839 total blocked wait — seconds, whole (the numeric is already seconds, not ms). */

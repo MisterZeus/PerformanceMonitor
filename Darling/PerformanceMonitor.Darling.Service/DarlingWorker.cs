@@ -3149,8 +3149,12 @@ LIMIT 1";
             _logger.LogInformation("  [{Server}] {Collector} => {Rows} rows (sql:{SqlMs}ms, pg:{PgMs}ms)",
                 server.Config.DisplayName, collectorName, result.Rows, result.SqlMs, result.StorageMs);
 
+            /* result.Note is null for an ordinary run — the message column stays null as before. It is set
+               only for a successful-but-empty run worth explaining (today: an enumeration that listed zero
+               databases, #1837). The status stays SUCCESS, and every health/band read keys on status rather
+               than on error_message, so the note is inert outside the Collection Log detail grid. */
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "SUCCESS", result.Rows, result.SqlMs, result.StorageMs, null, _logger, cancellationToken);
+                _postgres!, runtime, collectorName, "SUCCESS", result.Rows, result.SqlMs, result.StorageMs, result.Note, _logger, cancellationToken);
             return result.Rows;
         }
         catch (OperationCanceledException)

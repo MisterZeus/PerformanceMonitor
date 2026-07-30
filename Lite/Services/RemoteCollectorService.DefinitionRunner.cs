@@ -39,6 +39,7 @@ public partial class RemoteCollectorService
         var collectionTime = DateTime.UtcNow;
         _lastSqlMs = 0;
         _lastDuckDbMs = 0;
+        _lastCollectionNote = null;
 
         var status = _serverManager.GetConnectionStatus(server.Id);
         var target = new CollectorTargetInfo
@@ -217,7 +218,11 @@ public partial class RemoteCollectorService
 
                 if (items.Count == 0)
                 {
-                    /* No items → no storage phase, matching the original's early return. */
+                    /* No items → no storage phase, matching the original's early return. The cycle still
+                       records SUCCESS/0 rows (nothing failed), but it leaves a note on the collection_log
+                       row so that row is distinguishable from a healthy collector whose databases were
+                       just quiet — the silent-empty shape this codebase keeps paying for (#1837). */
+                    _lastCollectionNote = EnumeratedCollectorDriver.EmptyEnumerationMessage;
                     return 0;
                 }
 

@@ -37,6 +37,18 @@ public readonly record struct EnumeratedRunResult(int Rows, long SqlMs, long Sto
 public static class EnumeratedCollectorDriver
 {
     /// <summary>
+    /// What both hosts put on the collection_log row when an enumerated collector's enumeration query
+    /// returned NO items — so the driver never even runs. That cycle records SUCCESS with 0 rows, which
+    /// on its own is indistinguishable from a healthy collector whose databases were simply quiet; it is
+    /// equally the shape of query_store enumerating zero Query-Store-enabled databases, or
+    /// index_object_stats being filtered down to nothing. The status deliberately stays SUCCESS (this is
+    /// not a failure, and #1837's health-banding design is the larger fix); this message is the
+    /// fixed, greppable breadcrumb that says WHY the row is empty. Shared so the two runners cannot
+    /// drift on the wording the operator greps for.
+    /// </summary>
+    public const string EmptyEnumerationMessage = "enumeration yielded 0 items - nothing to collect this cycle";
+
+    /// <summary>
     /// Runs the per-item loop: for each item, (optionally) refresh its per-database watermark, read its
     /// rows, surface the cap/byte-budget WARNING, then flush that batch before moving on.
     /// </summary>

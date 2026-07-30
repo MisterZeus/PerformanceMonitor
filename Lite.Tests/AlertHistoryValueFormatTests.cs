@@ -37,6 +37,17 @@ public class AlertHistoryValueFormatTests
     }
 
     [Fact]
+    public void LegacyTempDbSpaceName_StillRendersAsPercent()
+    {
+        /* The tempdb token was lowercased across both apps' UI (c0109f34), which changed this metric's
+           metric_name KEY from "TempDB Space" to "tempdb Space"; that commit accepted that stored
+           alert-history rows keep the old name. Matching here is ordinal, so those rows fell through to
+           the :F2 default and showed a percentage with no unit. Both spellings must format identically. */
+        Assert.Equal("87.3%", Row("TempDB Space", 87.3).CurrentValueDisplay);
+        Assert.Equal(Row("tempdb Space", 87.3).CurrentValueDisplay, Row("TempDB Space", 87.3).CurrentValueDisplay);
+    }
+
+    [Fact]
     public void PoisonWait_RendersWholeMilliseconds()
     {
         Assert.Equal("1235 ms", Row("Poison Wait", 1234.56).CurrentValueDisplay);
