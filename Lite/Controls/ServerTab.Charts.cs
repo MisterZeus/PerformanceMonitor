@@ -1267,12 +1267,14 @@ public partial class ServerTab : UserControl
         // Use manual tick labels for both axes instead.
         ReapplyAxisColors(QueryHeatmapChart);
 
-        // X-axis: time labels at column positions
+        // X-axis: time labels at column positions. #1831: NumericManual labels bypass the shared
+        // DateTime formatter, so this axis converts for display itself — matching this same
+        // chart's tooltip, which already goes through ConvertForDisplay.
         var xTicks = new ScottPlot.TickGenerators.NumericManual();
         int xStep = Math.Max(1, numCols / 12); // ~12 labels max
         for (int i = 0; i < numCols; i += xStep)
         {
-            var t = result.TimeBuckets[i].AddMinutes(UtcOffsetMinutes);
+            var t = UiTimeContext.ConvertForDisplay(result.TimeBuckets[i].AddMinutes(UtcOffsetMinutes));
             xTicks.AddMajor(i, t.ToString("M/d\nHH:mm"));
         }
         QueryHeatmapChart.Plot.Axes.Bottom.TickGenerator = xTicks;
