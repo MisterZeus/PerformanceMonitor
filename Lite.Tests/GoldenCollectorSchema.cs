@@ -23,8 +23,9 @@ namespace PerformanceMonitorLite.Tests;
 
 internal static class GoldenCollectorSchema
 {
-    /// <summary>Pre-change CREATE TABLE DDL, keyed by collector target table (36 entries — the original
-    /// 35 pre-generation tables plus long_query_completions, #1496, added at its post-collapse migration).</summary>
+    /// <summary>Pre-change CREATE TABLE DDL, keyed by collector target table (38 entries — the original
+    /// 35 pre-generation tables plus the three collectors added at their own post-collapse migrations:
+    /// long_query_completions (#1496) and the two Availability Group tables (#991)).</summary>
     public static readonly IReadOnlyDictionary<string, string> Tables = new Dictionary<string, string>
     {
         ["wait_stats"] = @"CREATE TABLE IF NOT EXISTS wait_stats (
