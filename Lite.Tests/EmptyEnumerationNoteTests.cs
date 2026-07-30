@@ -183,7 +183,11 @@ public class EmptyEnumerationNoteTests
         var source = File.ReadAllText(FindRepoFile(
             Path.Combine("Lite", "Services", "LocalDataService.CollectionHealth.cs")));
 
-        Assert.Contains("MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN error_message END) AS last_error", source);
+        /* #1855 replaced the value-MAX with a newest-first rank, so the gate now reads as the status
+           re-check on the rank-1 row. It is the SAME claim: the column can only ever be filled from a
+           failing run. Without the re-check the rank falls through to the newest row of any class when
+           no failure carried text, and a SUCCESS row's note would land here. */
+        Assert.Contains("MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS') THEN error_message END) AS last_error", source);
         Assert.DoesNotContain("error_message IS NOT NULL", source);
     }
 
@@ -194,13 +198,14 @@ public class EmptyEnumerationNoteTests
     {
         /* Gated on SUCCESS, not on "not a failure status": the runners attach a note only to the SUCCESS
            write, and the looser complement of last_error would drag SESSION_MISSING and CANCELLED
-           messages into a column whose tooltip promises it is NOT an error. Written as MAX/COUNT over a
-           CASE rather than a NULL test on purpose: no read on this surface may key on message PRESENCE
-           (the pin above), and MAX/COUNT skip NULLs anyway. */
+           messages into a column whose tooltip promises it is NOT an error. Every gate on this surface
+           is still a STATUS gate — #1855's rank orders on whether the status-gated CASE came back empty,
+           never on message presence alone (the pin above), so no read here can key on the fact that a
+           row has text without first asking what kind of row it is. */
         var source = File.ReadAllText(FindRepoFile(
             Path.Combine("Lite", "Services", "LocalDataService.CollectionHealth.cs")));
 
-        Assert.Contains("MAX(CASE WHEN status = 'SUCCESS' THEN error_message END) AS last_note", source);
+        Assert.Contains("MAX(CASE WHEN note_rank = 1 AND status = 'SUCCESS' THEN error_message END) AS last_note", source);
         Assert.Contains("COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count", source);
     }
 
