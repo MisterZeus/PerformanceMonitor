@@ -38,9 +38,9 @@ namespace PerformanceMonitor.Collectors;
 /// exactly that rejected three-part reference inside an empty CATCH, so every database failed
 /// silently, the item list came back empty, and the collector logged SUCCESS with zero rows forever.
 /// Both shapes are built from the SINGLE body <see cref="BuildPayloadBody"/> returns — the on-prem
-/// wrapper only quote-doubles it for nesting — because two hand-maintained copies of a 53-column
-/// SELECT is precisely the drift this collector cannot survive. (53 selected columns; the stored row
-/// is 54 — <c>database_name</c> is supplied client-side, from the enumerated item or the connected
+/// wrapper only quote-doubles it for nesting — because two hand-maintained copies of a 55-column
+/// SELECT is precisely the drift this collector cannot survive. (55 selected columns; the stored row
+/// is 56 — <c>database_name</c> is supplied client-side, from the enumerated item or the connected
 /// database.)</para>
 /// </summary>
 public sealed class QueryStoreCollector : CollectorDefinitionBase<QueryStoreCollector.Row>
@@ -115,6 +115,26 @@ public sealed class QueryStoreCollector : CollectorDefinitionBase<QueryStoreColl
         /// hasReplicaAttribution in <see cref="BuildPayloadBody"/>.
         /// </summary>
         public string? ReplicaRole { get; set; }
+
+        /// <summary>
+        /// The runtime-stats interval this row is a snapshot OF — <c>sys.query_store_runtime_stats.
+        /// runtime_stats_interval_id</c>, the real interval identity (#1841 tier 2). Query Store rows are
+        /// CUMULATIVE per-interval snapshots and the collector re-fetches the OPEN interval every cycle, so
+        /// every aggregate read must collapse an interval to its latest snapshot before summing; before this
+        /// column the only identity available was the <c>first_execution_time</c> proxy. Per DATABASE, not
+        /// per server — each database has its own Query Store and its own interval sequence — so a dedup key
+        /// carrying it must also carry <c>database_name</c>. NULL only on rows collected by a pre-tier-2
+        /// build.
+        /// </summary>
+        public long? RuntimeStatsIntervalId { get; set; }
+
+        /// <summary>
+        /// When the interval STARTED, in UTC — <c>sys.query_store_runtime_stats_interval.start_time</c>,
+        /// converted at collection (#1841 tier 2). This is the honest x-coordinate for "when the work ran":
+        /// bucketing on <c>collection_time</c> attributes an interval to the cycle that last FETCHED it,
+        /// which on Query Store's default 60-minute interval is reliably one bucket late.
+        /// </summary>
+        public DateTime? IntervalStartTimeUtc { get; set; }
     }
 
     private const string OnPremDatabaseListQueryText = @"
@@ -485,9 +505,11 @@ END;
             ? "query_plan_text = CASE WHEN ROW_NUMBER() OVER (PARTITION BY qsp.plan_id ORDER BY qsrs.last_execution_time DESC) = 1 THEN CONVERT(nvarchar(max), qsp.query_plan) ELSE CONVERT(nvarchar(max), NULL) END,"
             : "query_plan_text = CONVERT(nvarchar(1), NULL),";
 
-        /* The replica-attribution column + its join (see hasReplicaAttribution above). Selected LAST,
-           so pre-2022 targets read the nvarchar(1) NULL placeholder at the same ordinal — byte-identical
-           shape to the attributed form. No trailing comma: it is the final SELECT item. */
+        /* The replica-attribution column + its join (see hasReplicaAttribution above). Selected after every
+           version-gated column, so pre-2022 targets read the nvarchar(1) NULL placeholder at the same
+           ordinal — byte-identical shape to the attributed form. The interval-identity pair (#1841 tier 2)
+           follows it and is NOT version-gated, so this fragment stays comma-free and the template supplies
+           the separator. */
         string replicaRoleCol = hasReplicaAttribution
             ? "replica_role = qsr.replica_name"
             : "replica_role = CONVERT(nvarchar(1), NULL)";
@@ -506,6 +528,26 @@ END;
            zero SQL cost, identical semantics. Self rows cross the wire (~2% of a busy database's rows)
            and are dropped before they enter the batch (never stored, never counted against the byte
            budget). The query still CONTAINS the marker, in its own leading comment. */
+
+        /* Interval identity (#1841 tier 2), the last two SELECT items. Not version-gated: both
+           sys.query_store_runtime_stats.runtime_stats_interval_id and the
+           sys.query_store_runtime_stats_interval catalog view are original Query Store surface, verified
+           present on SQL Server 2016 SP3 (13.0.6300.2) — the collector's own AppliesTo floor — so there is
+           no target this collector runs on that lacks them.
+
+           LEFT JOIN, not JOIN, for the same reason the replica join above is one: an INNER JOIN here would
+           make every runtime-stats row's survival depend on its interval row resolving, and a Query Store
+           that trimmed an interval row out from under us would silently delete real collection rather than
+           lose one column. The id comes off qsrs directly and is unaffected either way; only
+           interval_start_time_utc goes NULL if the join misses.
+
+           start_time is datetimeoffset. AT TIME ZONE 'UTC' re-expresses it at +00:00 and the CONVERT drops
+           the offset, so the stored value is naive UTC — the same clock as collection_time and as
+           first_execution_time (which ReadRowsAsync already normalizes via DateTimeOffset.UtcDateTime).
+           That is what makes it safe to bucket on: it is NOT the monitored server's local wall clock.
+           AT TIME ZONE is SQL Server 2016+, matching the floor above, and the expression contains no
+           single quote... except the timezone literal, which quote-doubles cleanly for the sp_executesql
+           nesting exactly like the rest of the body. */
         return $@"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase})
@@ -562,7 +604,9 @@ SELECT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase})
     compatibility_level = qsp.compatibility_level,
     {planTextCol}
     query_plan_hash = CONVERT(varchar(64), qsp.query_plan_hash, 1),
-    {replicaRoleCol}
+    {replicaRoleCol},
+    runtime_stats_interval_id = qsrs.runtime_stats_interval_id,
+    interval_start_time_utc = CONVERT(datetime2, qsrsi.start_time AT TIME ZONE 'UTC')
 FROM sys.query_store_runtime_stats AS qsrs
 JOIN sys.query_store_plan AS qsp
   ON qsp.plan_id = qsrs.plan_id
@@ -570,6 +614,8 @@ JOIN sys.query_store_query AS qsq
   ON qsq.query_id = qsp.query_id
 JOIN sys.query_store_query_text AS qst
   ON qst.query_text_id = qsq.query_text_id
+LEFT JOIN sys.query_store_runtime_stats_interval AS qsrsi
+  ON qsrsi.runtime_stats_interval_id = qsrs.runtime_stats_interval_id
 {replicaJoin}
 WHERE qsrs.last_execution_time > @cutoff_time
 ORDER BY qsrs.last_execution_time DESC
@@ -738,6 +784,11 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
                 QueryPlanText = reader.IsDBNull(50) ? null : reader.GetString(50),
                 QueryPlanHash = reader.IsDBNull(51) ? null : reader.GetString(51),
                 ReplicaRole = reader.IsDBNull(52) ? null : reader.GetString(52),
+                RuntimeStatsIntervalId = reader.IsDBNull(53) ? null : reader.GetInt64(53),
+                /* Already datetime2 (the SELECT does the AT TIME ZONE conversion), so this reads a plain
+                   DateTime — unlike first_execution_time/last_execution_time above, which arrive as
+                   datetimeoffset and need the .UtcDateTime normalization. */
+                IntervalStartTimeUtc = reader.IsDBNull(54) ? null : reader.GetDateTime(54),
             };
 
             /* Client-side self-exclusion (#1565): our own collector queries carry the marker in their
@@ -851,6 +902,15 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
            UPGRADED one — the same COPY then writing shifted values on one of them. Same reasoning as
            deadlocks.database_name (Darling V27 / Lite v46). */
         new CollectorColumn("replica_role", CollectorColumnType.Varchar),
+        /* #1841 tier 2, appended for the same positional reason replica_role was: an upgraded store gets
+           these from an ALTER TABLE ADD COLUMN, which can only append, while a fresh store's DDL is
+           generated from this list — any other position would give the two stores different physical
+           column orders and the positional bulk writers would then write shifted values on one of them.
+           Both nullable: rows collected by a pre-tier-2 build have no interval identity, and every reader
+           that keys on it must tolerate NULL rather than assume the upgrade backfilled anything (it
+           cannot — the identity was never collected). */
+        new CollectorColumn("runtime_stats_interval_id", CollectorColumnType.BigInt),
+        new CollectorColumn("interval_start_time_utc", CollectorColumnType.Timestamp),
     };
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
@@ -909,6 +969,8 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
             .Value(row.CompatibilityLevel)
             .Value(row.QueryPlanText)
             .Value(row.QueryPlanHash)
-            .Value(row.ReplicaRole);
+            .Value(row.ReplicaRole)
+            .Value(row.RuntimeStatsIntervalId)
+            .Value(row.IntervalStartTimeUtc);
     }
 }

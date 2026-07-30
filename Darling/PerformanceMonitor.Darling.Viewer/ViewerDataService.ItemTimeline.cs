@@ -116,7 +116,7 @@ public sealed partial class ViewerDataService
                 avg_physical_io_reads,
                 ROW_NUMBER() OVER
                 (
-                    PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc, replica_role
+                    PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
                     ORDER BY collection_time DESC
                 ) AS rn
             FROM query_store_stats

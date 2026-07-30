@@ -75,16 +75,26 @@ public sealed class QueryStoreDedupReadTests : IClassFixture<SharedDuckDbFixture
         return _seedConn;
     }
 
+    /// <param name="intervalId">
+    /// #1841 tier 2's real interval identity. NULL seeds a LEGACY row — one collected before the collector
+    /// stored the identity — which is what the mixed-window arms have to keep handling.
+    /// </param>
+    /// <param name="intervalStart">
+    /// When the interval STARTED (UTC). NULL alongside a NULL id is the legacy shape; the reads fall back
+    /// to collection_time placement for exactly these rows.
+    /// </param>
     private async Task SeedAsync(
         DateTime collectionTime,
         long queryId,
         long planId,
-        DateTime firstExecutionTime,
+        DateTime? firstExecutionTime,
         long executionCount,
         long avgCpuUs,
         long avgDurationUs,
         long avgReads,
-        string queryHash)
+        string queryHash,
+        long? intervalId = null,
+        DateTime? intervalStart = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -95,8 +105,9 @@ INSERT INTO query_store_stats
      query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
      query_text, query_hash, execution_count, avg_cpu_time_us, avg_duration_us,
      avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads,
-     query_plan_hash, is_forced_plan, force_failure_count)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)";
+     query_plan_hash, is_forced_plan, force_failure_count,
+     runtime_stats_interval_id, interval_start_time_utc)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
         cmd.Parameters.Add(new DuckDBParameter { Value = collectionTime });
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
@@ -105,7 +116,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         cmd.Parameters.Add(new DuckDBParameter { Value = queryId });
         cmd.Parameters.Add(new DuckDBParameter { Value = planId });
         cmd.Parameters.Add(new DuckDBParameter { Value = "Regular" });
-        cmd.Parameters.Add(new DuckDBParameter { Value = firstExecutionTime });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)firstExecutionTime ?? DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = collectionTime });
         cmd.Parameters.Add(new DuckDBParameter { Value = $"SELECT {queryId}" });
         cmd.Parameters.Add(new DuckDBParameter { Value = queryHash });
@@ -118,6 +129,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         cmd.Parameters.Add(new DuckDBParameter { Value = $"0xPLAN{planId}" });
         cmd.Parameters.Add(new DuckDBParameter { Value = false });
         cmd.Parameters.Add(new DuckDBParameter { Value = 0L });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)intervalId ?? DBNull.Value });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)intervalStart ?? DBNull.Value });
         await cmd.ExecuteNonQueryAsync();
     }
 
@@ -128,12 +141,20 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     /// accumulates. True work is the LAST snapshot only: 40 x 300us CPU, 40 x 7,000us duration, 40 x 5 reads.
     /// An un-deduped SUM reports 10x100 + 25x200 + 40x300 = 18,000us of CPU against a true 12,000us.
     /// </summary>
+    /* Both intervals START in BucketStart's hour and are collected inside it, so the bucket assertions
+       below are about DEDUP and not about placement — the placement fix has its own test, where the two
+       hours deliberately disagree. Seeded WITH the tier-2 identity so the reads exercise the real key;
+       the legacy (identity-NULL) generation has its own coverage. */
+    private const long IntervalIdA = 9101;
+    private const long IntervalIdB = 9102;
+
     private async Task SeedBothIntervalShapesAsync()
     {
         foreach (var minute in new[] { 5, 10, 15, 20 })
         {
             await SeedAsync(BucketStart.AddMinutes(minute), queryId: 1, planId: 11, FirstExecA,
-                executionCount: 1, avgCpuUs: 1_000, avgDurationUs: 2_000, avgReads: 7, queryHash: "0xHASH_A");
+                executionCount: 1, avgCpuUs: 1_000, avgDurationUs: 2_000, avgReads: 7, queryHash: "0xHASH_A",
+                intervalId: IntervalIdA, intervalStart: BucketStart);
         }
 
         var growth = new (int Minute, long Execs, long Cpu, long Dur)[]
@@ -145,7 +166,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         foreach (var g in growth)
         {
             await SeedAsync(BucketStart.AddMinutes(g.Minute), queryId: 2, planId: 22, FirstExecB,
-                executionCount: g.Execs, avgCpuUs: g.Cpu, avgDurationUs: g.Dur, avgReads: 5, queryHash: "0xHASH_B");
+                executionCount: g.Execs, avgCpuUs: g.Cpu, avgDurationUs: g.Dur, avgReads: 5, queryHash: "0xHASH_B",
+                intervalId: IntervalIdB, intervalStart: BucketStart);
         }
     }
 
@@ -221,24 +243,142 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     }
 
     [Fact]
-    public async Task DurationTrend_IsTheOneQueryStoreAggregateLeftUndeduped()
+    public async Task DurationTrend_PlacesEachIntervalsWorkAtTheHourItRan_DedupedOnce()
     {
-        /* Pins the ONE deliberate exclusion (#1841 tier 2) so it stays a decision rather than looking
-           like a read that was missed. Deduping this one is right for totals and wrong for the chart: it
-           keeps a single row per interval, at the collection where the interval CLOSED, and Query Store's
-           default 60-minute interval against a 5-minute cadence collapses every query's twelve snapshots
-           onto one collection_time — a 1-hour window would render a SINGLE point, valued 0 because the
-           LAG has no predecessor. Placing the work when it ran needs first_execution_time, which is the
-           monitored server's LOCAL wall clock while this axis is UTC.
+        /* DELIBERATE FLIP of the #1845 pin that lived here (#1841 tier 2). That pin recorded the one
+           Query Store aggregate left un-deduped, and its reasoning was sound but rested on a premise that
+           was FALSE: that placing work at the interval's own clock would trade a magnitude bug for a
+           timezone bug, because the interval clock is the monitored server's LOCAL wall time. It is not.
+           sys.query_store_runtime_stats_interval.start_time and first_execution_time are both
+           datetimeoffset, verified on a live server reading +00:00 while the host sat at UTC-4, and the
+           collector normalizes through DateTimeOffset.UtcDateTime before storing either way. So the
+           interval clock shares an axis with collection_time and the honest fix was available all along
+           once the identity was collected.
 
-           So it still emits one point per COLLECTION (four here, one per cycle) and still overstates. */
-        await SeedBothIntervalShapesAsync();
+           Two intervals, one hour apart, EACH collected twice and straddling the hour boundary — the
+           shape that made the old query overstate. Interval 1 ran in hour 0 and was collected at 0:50 and
+           1:10; interval 2 ran in hour 1 and was collected at 1:50 and 2:10.
+
+           Un-deduped at collection_time (the pre-tier-2 read) that is FOUR points carrying every
+           cumulative restatement. Deduped and placed at the interval start it is TWO points, each holding
+           its interval's true final total, at the hour that work actually ran. */
+        var h0 = BucketStart;
+        var h1 = BucketStart.AddHours(1);
+
+        await SeedAsync(h0.AddMinutes(50), queryId: 1, planId: 11, FirstExecA,
+            executionCount: 10, avgCpuUs: 100, avgDurationUs: 1_000, avgReads: 0, queryHash: "0xT1",
+            intervalId: 7001, intervalStart: h0);
+        await SeedAsync(h1.AddMinutes(10), queryId: 1, planId: 11, FirstExecA,
+            executionCount: 40, avgCpuUs: 300, avgDurationUs: 7_000, avgReads: 0, queryHash: "0xT1",
+            intervalId: 7001, intervalStart: h0);
+
+        await SeedAsync(h1.AddMinutes(50), queryId: 2, planId: 22, FirstExecB,
+            executionCount: 3, avgCpuUs: 100, avgDurationUs: 1_000, avgReads: 0, queryHash: "0xT2",
+            intervalId: 7002, intervalStart: h1);
+        await SeedAsync(h1.AddHours(1).AddMinutes(10), queryId: 2, planId: 22, FirstExecB,
+            executionCount: 9, avgCpuUs: 200, avgDurationUs: 2_000, avgReads: 0, queryHash: "0xT2",
+            intervalId: 7002, intervalStart: h1);
 
         var points = await new LocalDataService(_duckDb).GetQueryStoreDurationTrendAsync(ServerId, hoursBack: 24);
 
-        Assert.Equal(4, points.Count);
-        Assert.Equal(BucketStart.AddMinutes(5), points[0].CollectionTime);
-        Assert.Equal(BucketStart.AddMinutes(20), points[3].CollectionTime);
+        Assert.Equal(2, points.Count);
+        Assert.Equal(h0, points[0].CollectionTime);
+        Assert.Equal(h1, points[1].CollectionTime);
+
+        /* The first point has no predecessor, so its rate is 0 — the same convention the query_stats and
+           procedure_stats trends have always used, not a Query Store quirk. */
+        Assert.Equal(0d, points[0].Value);
+
+        /* Interval 2's FINAL snapshot only: 9 executions x 2,000us = 18 ms of work, over the 3,600s
+           between interval starts. Un-deduped this point would also carry interval 2's earlier 3x1,000us
+           restatement AND interval 1's rows that were collected in this hour. */
+        Assert.Equal(18.0 / 3600.0, points[1].Value, precision: 9);
+    }
+
+    [Fact]
+    public async Task DurationTrend_LegacyRowsKeepThePreTier2Treatment_AndTheArmsDoNotOverlap()
+    {
+        /* The mixed-window boundary (#1841 tier 2), pinned so it can neither lie nor crash. Rows with no
+           interval identity cannot be placed at an interval start — nothing can reconstruct one — so they
+           keep the pre-tier-2 behavior exactly: un-deduped, one point per collection_time. The arms split
+           on interval_start_time_utc IS NULL, which partitions the rows with NO overlap and NO gap, so a
+           window spanning the upgrade counts every row exactly once.
+
+           Two legacy collections of one interval (the cumulative shape) plus one identified interval an
+           hour later. Legacy contributes its TWO restatement points; the identified interval contributes
+           ONE, at its start. If the arms overlapped, a legacy row would appear twice; if they had a gap,
+           one would vanish. */
+        var h0 = BucketStart;
+        var h1 = BucketStart.AddHours(1);
+
+        await SeedAsync(h0.AddMinutes(10), queryId: 1, planId: 11, FirstExecA,
+            executionCount: 10, avgCpuUs: 100, avgDurationUs: 1_000, avgReads: 0, queryHash: "0xL1");
+        await SeedAsync(h0.AddMinutes(20), queryId: 1, planId: 11, FirstExecA,
+            executionCount: 25, avgCpuUs: 200, avgDurationUs: 2_000, avgReads: 0, queryHash: "0xL1");
+
+        await SeedAsync(h1.AddMinutes(10), queryId: 2, planId: 22, FirstExecB,
+            executionCount: 4, avgCpuUs: 100, avgDurationUs: 1_000, avgReads: 0, queryHash: "0xN1",
+            intervalId: 7101, intervalStart: h1);
+
+        var points = await new LocalDataService(_duckDb).GetQueryStoreDurationTrendAsync(ServerId, hoursBack: 24);
+
+        Assert.Equal(3, points.Count);
+        Assert.Equal(h0.AddMinutes(10), points[0].CollectionTime);   /* legacy, at collection_time */
+        Assert.Equal(h0.AddMinutes(20), points[1].CollectionTime);   /* legacy, still restated */
+        Assert.Equal(h1, points[2].CollectionTime);                  /* identified, at its interval START */
+    }
+
+    [Fact]
+    public async Task SlicerBucket_PlacesAnIntervalInTheHourItRan_NotTheHourItWasCollected()
+    {
+        /* The one-bucket placement lag (#1841 tier 2). Query Store's default interval is 60 minutes and
+           the closing fetch lands in the cycle AFTER the interval ends, so an interval that ran in hour 0
+           was reliably drawn in hour 1. Here the disagreement is explicit: the interval STARTED at hour 0
+           and every one of its collections landed in hour 1.
+
+           Pre-tier-2 this produced a single bucket at h1. Now it produces a single bucket at h0, because
+           interval_start_time_utc is the interval's own start converted to UTC at collection — the same
+           clock as collection_time, so this is a placement fix and not a timezone trade. */
+        var h0 = BucketStart;
+        var h1 = BucketStart.AddHours(1);
+
+        await SeedAsync(h1.AddMinutes(5), queryId: 1, planId: 11, FirstExecA,
+            executionCount: 3, avgCpuUs: 1_000, avgDurationUs: 2_000, avgReads: 6, queryHash: "0xP1",
+            intervalId: 7201, intervalStart: h0);
+        await SeedAsync(h1.AddMinutes(10), queryId: 1, planId: 11, FirstExecA,
+            executionCount: 5, avgCpuUs: 1_000, avgDurationUs: 2_000, avgReads: 6, queryHash: "0xP1",
+            intervalId: 7201, intervalStart: h0);
+
+        var buckets = await new LocalDataService(_duckDb).GetQueryStoreSlicerDataAsync(ServerId, hoursBack: 24);
+
+        var bucket = Assert.Single(buckets);
+        Assert.Equal(h0, bucket.BucketTime);
+        /* And still deduped: the LATEST snapshot only, 5 executions x 1,000us = 5 ms, not 8 x. */
+        Assert.Equal(5.0, bucket.TotalCpu, precision: 6);
+    }
+
+    [Fact]
+    public async Task DedupKeysOnTheRealIntervalId_WhenFirstExecutionTimeCannotTellIntervalsApart()
+    {
+        /* What the real identity buys over the tier-1 proxy. first_execution_time is NULL here — Query
+           Store leaves it unset on rows the engine never attributed a first execution to — so under
+           tier 1's key these two DISTINCT intervals collapsed into one and the read UNDER-counted, which
+           is the failure mode dedup is supposed to prevent, not cause. Keyed on runtime_stats_interval_id
+           they stay two intervals: 6 + 5 = 11 executions. */
+        await SeedAsync(BucketStart.AddMinutes(5), queryId: 3, planId: 33, firstExecutionTime: null,
+            executionCount: 4, avgCpuUs: 1_000, avgDurationUs: 1_000, avgReads: 0, queryHash: "0xNULLFE",
+            intervalId: 7301, intervalStart: BucketStart);
+        await SeedAsync(BucketStart.AddMinutes(10), queryId: 3, planId: 33, firstExecutionTime: null,
+            executionCount: 6, avgCpuUs: 1_000, avgDurationUs: 1_000, avgReads: 0, queryHash: "0xNULLFE",
+            intervalId: 7301, intervalStart: BucketStart);
+        await SeedAsync(BucketStart.AddMinutes(15), queryId: 3, planId: 33, firstExecutionTime: null,
+            executionCount: 5, avgCpuUs: 1_000, avgDurationUs: 1_000, avgReads: 0, queryHash: "0xNULLFE",
+            intervalId: 7302, intervalStart: BucketStart);
+
+        var rows = await new LocalDataService(_duckDb).GetQueryStoreTopQueriesAsync(ServerId, hoursBack: 24);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(11L, row.TotalExecutions);
     }
 
     [Fact]
@@ -274,26 +414,45 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     {
         var source = File.ReadAllText(SourcePath("Lite", "Services", "LocalDataService.QueryStore.cs"));
 
-        /* The four aggregate reads: slicer, top queries, and the comparison's two windows. Counting
-           occurrences rather than matching order keeps this from breaking on a harmless reshuffle. */
+        /* The five aggregate reads: slicer, top queries, the comparison's two windows, and — since
+           #1841 tier 2 — the duration trend's identified arm. Counting occurrences rather than matching
+           order keeps this from breaking on a harmless reshuffle. */
         var partitions = Regex.Matches(
             source,
-            @"PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc, replica_role").Count;
+            @"PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role").Count;
         var rankFilters = Regex.Matches(source, @"(?:WHERE|AND)\s+(?:qs\.)?rn = 1").Count;
 
-        Assert.Equal(4, partitions);
-        /* Six, not four: the comparison's two deduped CTEs are each consumed TWICE — once to pick the
+        Assert.Equal(5, partitions);
+        /* Seven, not five: the comparison's two deduped CTEs are each consumed TWICE — once to pick the
            top 100 hashes and once by the value aggregate — and an rn filter missing from either consumer
            would let the un-deduped rows straight back into the numbers. */
-        Assert.Equal(6, rankFilters);
+        Assert.Equal(7, rankFilters);
 
         /* Every dedup orders by collection_time — "latest" is never decided by execution_count, which can
            sit still across a hundred re-collections of the same interval. */
         Assert.Equal(partitions, Regex.Matches(source, @"ORDER BY collection_time DESC\s*\n\s*\) AS rn").Count);
 
-        /* The two deliberate exclusions must keep explaining themselves, so neither reads as an oversight. */
+        /* No dedup may key on the tier-1 proxy ALONE any more: the real interval id has to be in every
+           partition, or a row whose first_execution_time is NULL collapses with every other such interval
+           of the same plan and the read silently UNDER-counts. */
+        Assert.DoesNotContain("PARTITION BY database_name, query_id, plan_id, first_execution_time", source, StringComparison.Ordinal);
+
+        /* The history drilldown's exclusion must keep explaining itself, so it never reads as an oversight. */
         Assert.Contains("Deliberately NOT deduped per interval (#1841)", source, StringComparison.Ordinal);
-        Assert.Contains("KNOWN OVERSTATEMENT, deliberately still here (#1841 tier 2)", source, StringComparison.Ordinal);
+
+        /* The duration trend is no longer an exclusion — it is the two-armed fix. Both arms must be
+           present and the split must stay total: identified rows placed at the interval start, legacy
+           rows at collection_time, partitioned on IS NULL / IS NOT NULL so nothing is counted twice and
+           nothing is dropped. */
+        Assert.DoesNotContain("KNOWN OVERSTATEMENT", source, StringComparison.Ordinal);
+        Assert.Contains("AND   interval_start_time_utc IS NOT NULL", source, StringComparison.Ordinal);
+        Assert.Contains("AND   interval_start_time_utc IS NULL", source, StringComparison.Ordinal);
+        Assert.Contains("interval_start_time_utc AS point_time", source, StringComparison.Ordinal);
+        Assert.Contains("collection_time AS point_time", source, StringComparison.Ordinal);
+
+        /* Both bucketed reads place work at the interval start when there is one — the slicer's
+           one-bucket lag fix. COALESCE, not a bare column, so legacy rows keep collection_time. */
+        Assert.Equal(2, Regex.Matches(source, @"date_trunc\('hour', COALESCE\(interval_start_time_utc, collection_time\)\)").Count);
     }
 
     /// <summary>Walks up from the test binary to the repo root so the pin works from any run directory.</summary>

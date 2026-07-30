@@ -130,7 +130,7 @@ public sealed partial class ViewerDataService
                 *,
                 ROW_NUMBER() OVER
                 (
-                    PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc, replica_role
+                    PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
                     ORDER BY collection_time DESC
                 ) AS rn
             FROM query_store_stats
@@ -382,7 +382,7 @@ public sealed partial class ViewerDataService
                 avg_logical_io_reads,
                 ROW_NUMBER() OVER
                 (
-                    PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc, replica_role
+                    PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
                     ORDER BY collection_time DESC
                 ) AS rn
             FROM query_store_stats
@@ -401,7 +401,7 @@ public sealed partial class ViewerDataService
                 avg_logical_io_reads,
                 ROW_NUMBER() OVER
                 (
-                    PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc, replica_role
+                    PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
                     ORDER BY collection_time DESC
                 ) AS rn
             FROM query_store_stats
@@ -530,14 +530,14 @@ public sealed partial class ViewerDataService
                showed 496 collections of a single interval inside one hour bucket. Keep the LATEST
                snapshot per interval, then bucket, so the bars sum to the true total across the window.
 
-               Bucketing still happens on collection_time, so an interval is attributed to the hour it was
-               last COLLECTED in, not the hour it ran: on Query Store's default 60-minute interval that is
-               reliably one bucket late, because the closing fetch lands in the cycle after the interval
-               ends. The window totals are right and only the placement lags. Fixing the placement needs
-               first_execution_time, which is the monitored server's LOCAL wall clock while these bounds
-               are UTC — a timezone bug traded for a placement bug. Tier 2 (#1841) owns it. */
+               runtime_stats_interval_id is the REAL interval identity (tier 2), with first_execution_time
+               kept beside it as the tier-1 proxy for rows collected before it existed — both in the key
+               rather than a COALESCE, because the id is NULL on exactly the pre-tier-2 generation and
+               non-NULL on exactly the post-tier-2 one, so the two can never collide and a legacy-only
+               window degrades to precisely tier 1's key. Twins Lite's GetQueryStoreSlicerDataAsync. */
             SELECT
                 collection_time,
+                interval_start_time_utc,
                 query_id,
                 execution_count,
                 avg_cpu_time_us,
@@ -547,7 +547,7 @@ public sealed partial class ViewerDataService
                 avg_physical_io_reads,
                 ROW_NUMBER() OVER
                 (
-                    PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc, replica_role
+                    PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
                     ORDER BY collection_time DESC
                 ) AS rn
             FROM query_store_stats
@@ -557,7 +557,14 @@ public sealed partial class ViewerDataService
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
         )
         SELECT
-            date_trunc('hour', collection_time) AS bucket,
+            /* The bar sits in the hour the work RAN, not the hour it was last COLLECTED (#1841 tier 2).
+               Query Store's default interval is 60 minutes and the closing fetch lands in the cycle AFTER
+               the interval ends, so a collection_time bucket was reliably one bar late.
+               interval_start_time_utc is the interval's own start boundary, converted to UTC at collection
+               (the same clock as collection_time), so this is a placement fix and not a timezone trade.
+               Legacy rows have no interval start and keep collection_time placement, so a window spanning
+               the upgrade renders correctly on both sides and the lag disappears as those rows age out. */
+            date_trunc('hour', COALESCE(interval_start_time_utc, collection_time)) AS bucket,
             COUNT(DISTINCT query_id) AS query_count,
             COALESCE(SUM(CAST(avg_cpu_time_us AS double precision) * execution_count), 0) / 1000.0 AS total_cpu_ms,
             COALESCE(SUM(CAST(avg_duration_us AS double precision) * execution_count), 0) / 1000.0 AS total_duration_ms,
@@ -566,7 +573,7 @@ public sealed partial class ViewerDataService
             COALESCE(SUM(CAST(avg_physical_io_reads AS double precision) * execution_count), 0) AS total_physical_reads
         FROM deduped
         WHERE rn = 1
-        GROUP BY date_trunc('hour', collection_time)
+        GROUP BY date_trunc('hour', COALESCE(interval_start_time_utc, collection_time))
         ORDER BY bucket
         """;
 

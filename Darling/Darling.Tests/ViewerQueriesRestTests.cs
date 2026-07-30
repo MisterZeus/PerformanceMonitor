@@ -8,6 +8,7 @@
 
 using System;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
@@ -27,10 +28,15 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class ViewerQueryTrendsSqlTests
 {
+    /// <summary>
+    /// The three DELTA-based trends. Query Store is deliberately not here: its x-axis stopped being
+    /// collection_time in #1841 tier 2 (see <see cref="QueryStoreDurationTrend_PlacesWorkAtTheIntervalStart_WithALegacyArm"/>),
+    /// so folding it into this theory would force the shared pins to be loosened for all four and the
+    /// delta trends would stop being pinned to the axis they genuinely use.
+    /// </summary>
     [Theory]
     [InlineData(nameof(ViewerDataService.QueryDurationTrendSql), "query_stats")]
     [InlineData(nameof(ViewerDataService.ProcedureDurationTrendSql), "procedure_stats")]
-    [InlineData(nameof(ViewerDataService.QueryStoreDurationTrendSql), "query_store_stats")]
     [InlineData(nameof(ViewerDataService.ExecutionCountTrendSql), "query_stats")]
     public void TrendSql_ComputesPerSecondRate_ViaLagInterval_BaseTable(string sqlName, string table)
     {
@@ -60,20 +66,44 @@ public sealed class ViewerQueryTrendsSqlTests
     }
 
     [Fact]
-    public void QueryStoreDurationTrendSql_IsTheOneQueryStoreAggregateLeftUndeduped()
+    public void QueryStoreDurationTrend_PlacesWorkAtTheIntervalStart_WithALegacyArm()
     {
-        /* #1841 tier 2, pinned so the exclusion stays DELIBERATE rather than looking like an oversight
-           next to the four Query Store reads that DO dedup. Deduping to the latest snapshot per interval
-           is right for totals but destroys this series: it keeps one row per interval, at the collection
-           where the interval closed, and Query Store's default 60-minute interval against a 5-minute
-           cadence collapses twelve snapshots onto one collection_time — a 1-hour window would render a
-           single point, valued 0 because the LAG has no predecessor. Fixing it needs the work placed at
-           first_execution_time, which is server-LOCAL while this axis is UTC. */
-        var sql = ViewerDataService.QueryStoreDurationTrendSql;
-        Assert.DoesNotContain("rn = 1", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY collection_time", sql, StringComparison.Ordinal);
+        /* DELIBERATE FLIP of the #1845 pin that stood here (#1841 tier 2). That pin recorded the one
+           Query Store aggregate left un-deduped, and its reasoning held right up to a premise that was
+           FALSE: that placing the work at the interval's own clock trades a magnitude bug for a timezone
+           bug, because that clock is the monitored server's LOCAL wall time. It is not. Query Store's
+           interval start_time and first_execution_time are both datetimeoffset — verified on a live
+           server reading +00:00 while the host sat at UTC-4 — and the collector normalizes through
+           DateTimeOffset.UtcDateTime before storing. So the interval clock shares an axis with
+           collection_time, and dedup + interval-start placement together give a series that neither
+           overstates nor collapses.
 
-        /* The delta-based trends never needed one either: their columns are already per-cycle increments. */
+           Both arms must stay, and the split must stay TOTAL. */
+        var sql = ViewerDataService.QueryStoreDurationTrendSql;
+
+        /* Arm 1: deduped per interval, keyed on the real identity, placed at the interval start. */
+        Assert.Contains("WHERE rn = 1", sql, StringComparison.Ordinal);
+        Assert.Contains("PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role", sql, StringComparison.Ordinal);
+        Assert.Contains("interval_start_time_utc AS point_time", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   interval_start_time_utc IS NOT NULL", sql, StringComparison.Ordinal);
+
+        /* Arm 2: pre-tier-2 rows, un-deduped at collection_time — the behavior they always had, because
+           nothing can reconstruct an interval start for them. */
+        Assert.Contains("collection_time AS point_time", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   interval_start_time_utc IS NULL", sql, StringComparison.Ordinal);
+
+        /* IS NULL / IS NOT NULL partitions the rows with no overlap and no gap: a mixed window counts
+           every row exactly once. A predicate pair that could ever both match, or both miss, would make
+           this chart double-count or silently drop the transition window. */
+        Assert.Single(Regex.Matches(sql, @"AND   interval_start_time_utc IS NOT NULL"));
+        Assert.Single(Regex.Matches(sql, @"AND   interval_start_time_utc IS NULL"));
+        Assert.Contains("UNION ALL", sql, StringComparison.Ordinal);
+
+        /* The rate denominator now measures interval-start to interval-start, not cycle to cycle. */
+        Assert.Contains("LAG(point_time) OVER (ORDER BY point_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY point_time", sql, StringComparison.Ordinal);
+
+        /* The delta-based trends never needed any of this: their columns are already per-cycle increments. */
         Assert.DoesNotContain("first_execution_time", ViewerDataService.QueryDurationTrendSql, StringComparison.Ordinal);
         Assert.DoesNotContain("first_execution_time", ViewerDataService.ExecutionCountTrendSql, StringComparison.Ordinal);
     }

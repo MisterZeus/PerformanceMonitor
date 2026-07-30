@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -283,7 +283,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
            key because the aggregate GROUPs BY it — the dedup must never drop a row the read must return. */
         var sql = DarlingDataReader.QueryStoreTopSql;
         Assert.Contains(
-            "PARTITION BY database_name, query_id, plan_id, first_execution_time, execution_type_desc, replica_role",
+            "PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role",
             sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY collection_time DESC", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE rn = 1", sql, StringComparison.Ordinal);
