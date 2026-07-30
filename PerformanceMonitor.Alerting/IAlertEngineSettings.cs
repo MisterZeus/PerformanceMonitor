@@ -81,6 +81,17 @@ public interface IAlertEngineSettings
     /// <summary>Fire when the rolling-window blocked-process-report count reaches this value (count-based; see class remarks).</summary>
     int BlockingCountThreshold { get; }
 
+    /// <summary>
+    /// Fire when the TOTAL blocked wait time in the latest blocking snapshot reaches this many seconds
+    /// (#1839). 0 = OFF, and off is the shipped default — this is a second, independent gate alongside
+    /// <see cref="BlockingCountThreshold"/>: a count gate cannot tell one session blocked for an hour
+    /// from one blocked for a second. Level-triggered (fires while above, re-fires on cooldown, resolves
+    /// when it drops below), unlike the count gate's rolling-window edge trigger, and it reports under
+    /// its own "Blocking Wait Time" metric so mutes, history and cooldowns never tangle with the count
+    /// gate's. Both gates still respect <see cref="BlockingEnabled"/>.
+    /// </summary>
+    int BlockingWaitSecondsThreshold { get; }
+
     /// <summary>Fire when the rolling-window deadlock count reaches this value (count-based; see class remarks).</summary>
     int DeadlockCountThreshold { get; }
 

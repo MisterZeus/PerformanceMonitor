@@ -123,6 +123,13 @@ public partial class App : Application
     public static CpuAlertMode AlertCpuMode { get; set; } = CpuAlertMode.Total;
     public static bool AlertBlockingEnabled { get; set; } = true;
     public static int AlertBlockingThreshold { get; set; } = 1;
+    /// <summary>
+    /// #1839: fire when the latest blocking snapshot's TOTAL blocked wait reaches this many seconds.
+    /// 0 = off, and off ships by default — a count threshold can't tell one session blocked for an hour
+    /// from one blocked for a second, but turning this on for everyone would change what existing
+    /// installs alert about.
+    /// </summary>
+    public static int AlertBlockingWaitSecondsThreshold { get; set; }
     public static bool AlertDeadlockEnabled { get; set; } = true;
     public static int AlertDeadlockThreshold { get; set; } = 1;
     public static bool AlertPoisonWaitEnabled { get; set; } = true;
@@ -551,6 +558,7 @@ public partial class App : Application
                 AlertCpuMode = mode;
             if (root.TryGetProperty("alert_blocking_enabled", out v)) AlertBlockingEnabled = v.GetBoolean();
             if (root.TryGetProperty("alert_blocking_threshold", out v)) AlertBlockingThreshold = v.GetInt32();
+            if (root.TryGetProperty("alert_blocking_wait_seconds_threshold", out v)) AlertBlockingWaitSecondsThreshold = v.GetInt32();
             if (root.TryGetProperty("alert_deadlock_enabled", out v)) AlertDeadlockEnabled = v.GetBoolean();
             if (root.TryGetProperty("alert_deadlock_threshold", out v)) AlertDeadlockThreshold = v.GetInt32();
             if (root.TryGetProperty("alert_poison_wait_enabled", out v)) AlertPoisonWaitEnabled = v.GetBoolean();

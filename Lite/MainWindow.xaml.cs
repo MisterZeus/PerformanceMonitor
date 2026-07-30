@@ -217,14 +217,11 @@ public partial class MainWindow : Window
             /* #1812: the adapter's snapshot-freshness bound needs the server's EFFECTIVE running_jobs
                cadence. The adapter keys servers by the deterministic int hash; ScheduleManager keys by
                the connection GUID — the same hash-match FetchFailedJobsForAlertAsync already does. */
-            _alertReadAdapter = new LiteAlertReadAdapter(_dataService, serverId =>
-            {
-                var server = _serverManager.GetAllServers().FirstOrDefault(s =>
-                    RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s)) == serverId);
-                return server is null
-                    ? 0
-                    : _scheduleManager.GetScheduleForServer(server.Id, "running_jobs")?.FrequencyMinutes ?? 0;
-            });
+            _alertReadAdapter = new LiteAlertReadAdapter(
+                _dataService,
+                serverId => ResolveCollectorCadenceForAlerts(serverId, "running_jobs"),
+                /* #1839: the same resolution for the blocking snapshot the total-wait gate reads. */
+                serverId => ResolveCollectorCadenceForAlerts(serverId, "dmv_blocking_snapshot"));
 
             /* Phase-5 forwarding: construct the shared alert engine once, over Lite's five seam
                implementations — live App.* thresholds, the DuckDB read adapter, the DuckDB

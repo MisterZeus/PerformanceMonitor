@@ -55,6 +55,7 @@ public sealed class DarlingSelfAlertTests
         public bool FailedJobEnabled { get; set; }
         public int CpuThresholdPercent { get; set; } = 80;
         public int BlockingCountThreshold { get; set; } = 1;
+        public int BlockingWaitSecondsThreshold { get; set; }
         public int DeadlockCountThreshold { get; set; } = 1;
         public int PoisonWaitThresholdMs { get; set; } = 500;
         public int LongRunningQueryThresholdMinutes { get; set; } = 30;
@@ -1938,6 +1939,8 @@ public sealed class DarlingSelfAlertTests
     {
         public Task<List<BlockedProcessAlertRow>> GetRecentBlockedProcessReportsAsync(string serverKey, int hoursBack, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<BlockedProcessAlertRow>());
+        public Task<CurrentBlockingWaitResult?> GetCurrentBlockingWaitAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult<CurrentBlockingWaitResult?>(null);
         public Task<List<DeadlockAlertRow>> GetRecentDeadlocksAsync(string serverKey, int hoursBack, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<DeadlockAlertRow>());
         public Task<List<PoisonWaitDelta>> GetPoisonWaitDeltasAsync(string serverKey, double thresholdMs, CancellationToken cancellationToken = default) =>

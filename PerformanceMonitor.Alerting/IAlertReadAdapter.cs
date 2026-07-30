@@ -46,6 +46,26 @@ public interface IAlertReadAdapter
         string serverKey, int hoursBack, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// The CURRENT total blocked wait time (#1839): the sum of <c>wait_time_ms</c> across the rows of
+    /// the LATEST <c>dmv_blocking_snapshots</c> snapshot for this server, with the distinct blocked-SPID
+    /// count. Returns null when the store holds NO snapshot for the server at all.
+    /// <para>
+    /// A snapshot sum, deliberately — see <see cref="CurrentBlockingWaitResult"/> for why the alert is
+    /// level-triggered on one snapshot rather than a rolling window. Implementations select rows by
+    /// <c>collection_time = MAX(collection_time)</c> (the snapshot identity the running-jobs and
+    /// long-running-query reads already key on), NOT by a time window.
+    /// </para>
+    /// <para>
+    /// FRESHNESS: implementations set <see cref="CurrentBlockingWaitResult.SnapshotIsFresh"/> false when
+    /// the snapshot is older than <see cref="CurrentBlockingWaitResult.MaxSnapshotAge"/> at the server's
+    /// effective <c>dmv_blocking_snapshot</c> cadence — the #1812 rule, so a collector outage cannot hold
+    /// a level-triggered alert active on frozen rows.
+    /// </para>
+    /// </summary>
+    Task<CurrentBlockingWaitResult?> GetCurrentBlockingWaitAsync(
+        string serverKey, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Recent deadlock events for the deadlock alert, newest (by deadlock time) first, capped
     /// at 50. Excluded-database filtering happens in the builder
     /// (<see cref="AlertContextBuilders.IsDeadlockExcluded"/> parses the graph XML), not here.

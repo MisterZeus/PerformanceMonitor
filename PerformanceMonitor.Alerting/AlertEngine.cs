@@ -88,6 +88,7 @@ public sealed class AlertEngine
        the deliverer's own email/webhook cooldown seeds, not these). */
     private readonly ConcurrentDictionary<string, DateTime> _lastCpuAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastBlockingAlert = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastBlockingWaitAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastDeadlockAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastPoisonWaitAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastLongRunningQueryAlert = new();
@@ -103,6 +104,7 @@ public sealed class AlertEngine
        Lite's MainWindow.xaml.cs:78-89. */
     private readonly ConcurrentDictionary<string, bool> _activeCpuAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activeBlockingAlert = new();
+    private readonly ConcurrentDictionary<string, bool> _activeBlockingWaitAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activeDeadlockAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activePoisonWaitAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activeLongRunningQueryAlert = new();
@@ -424,6 +426,106 @@ public sealed class AlertEngine
                     key, serverName, "Blocking Detected",
                     "Blocking Cleared",                                             /* :190 */
                     $"{serverName}: No active blocking"), ct);                      /* :191 */
+            }
+        }
+
+        /* #1839 — the second, independent blocking gate, evaluated here so it can reuse THIS sweep's
+           blocked-process rows for its content instead of refetching them. Deliberately downstream of
+           the count gate's fetch-failure `return` above: when the store can't answer for blocked
+           processes it can't answer for blocking snapshots either, and firing a wait alert with no
+           incident content is worse than skipping the sweep (state untouched, same as every other
+           check's failure shape). */
+        await CheckBlockingWaitAsync(key, serverName, now, alertCooldown, suppressed, blockingRows, ct);
+    }
+
+    /* ---------------- blocking wait time (#1839) ---------------- */
+
+    /// <summary>
+    /// The total-blocked-wait gate: LEVEL-triggered on the sum of <c>wait_time_ms</c> in the latest
+    /// blocking snapshot, mirroring the High CPU mechanism above (active flag → cooldown re-fire while
+    /// still above → resolve on the way down) rather than the count gate's rolling-window edge trigger.
+    /// The two answer different questions — a count cannot distinguish one session blocked for an hour
+    /// from one blocked for a second — so this reports under its OWN metric name, keeping mute rules,
+    /// history rows and cooldown state from tangling with "Blocking Detected".
+    /// <para>
+    /// Both gates sit under <see cref="IAlertEngineSettings.BlockingEnabled"/>: turning blocking alerts
+    /// off must silence both, exactly as a user reading one toggle would expect. With the threshold at
+    /// its shipped 0 the adapter read never happens at all.
+    /// </para>
+    /// </summary>
+    private async Task CheckBlockingWaitAsync(
+        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed,
+        List<BlockedProcessAlertRow>? blockingRows, CancellationToken ct)
+    {
+        int thresholdSeconds = _settings.BlockingWaitSecondsThreshold;
+        bool enabled = _settings.BlockingEnabled && thresholdSeconds > 0;
+
+        CurrentBlockingWaitResult? current = null;
+        if (enabled)
+        {
+            try
+            {
+                current = await _readAdapter.GetCurrentBlockingWaitAsync(key, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                /* Log and skip for the sweep — state untouched, so a transient store error neither
+                   fires nor resolves (the same adaptation (2) shape as the count gate). */
+                _logger?.LogError("Failed to check blocking wait time for {Server}: {Message}", serverName, ex.Message);
+                return;
+            }
+        }
+
+        /* A stale snapshot is NOT evidence (#1812's rule): it neither fires nor holds the alert
+           active — see CurrentBlockingWaitResult for why staleness resolves here but not for jobs. */
+        long thresholdMs = (long)thresholdSeconds * 1000L;
+        bool exceeded = enabled
+            && current is { SnapshotIsFresh: true }
+            && current.TotalWaitMs >= thresholdMs;
+
+        if (exceeded)
+        {
+            _activeBlockingWaitAlert[key] = true;
+            if (!suppressed && CooldownElapsed(_lastBlockingWaitAlert, key, now, alertCooldown))
+            {
+                var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Blocking Wait Time" };
+                bool isMuted = _isAlertMuted(muteCtx);
+                _lastBlockingWaitAlert[key] = now;                                  /* stamped even when muted */
+
+                /* Same incident content the count gate ships, built from the rows this sweep already
+                   fetched — an operator who gets this alert gets today's Blocking Detected detail. */
+                var blockingContext = AlertContextBuilders.BuildBlockingContext(serverName, blockingRows, _settings.ExcludedDatabases);
+                var detailText = AlertContextBuilders.ContextToDetailText(blockingContext);
+
+                /* REAL numerics (#1830): the display text is prose ("745s across 3 blocked session(s)"),
+                   which no history-store parser could turn back into a number — the value has to travel
+                   as a number or every history row lands at 0, which is the defect #1830 just fixed. */
+                double totalWaitSeconds = current!.TotalWaitSeconds;
+                await FireAsync(new AlertOutcome(
+                    key, serverName, "Blocking Wait Time",
+                    $"{totalWaitSeconds:F0}s across {current.BlockedSessionCount} blocked session(s)",
+                    $"{thresholdSeconds}s",
+                    blockingContext, detailText,
+                    NumericCurrentValue: totalWaitSeconds, NumericThresholdValue: thresholdSeconds,
+                    Muted: isMuted, Severity: blockingContext?.SeverityOverride,
+                    ShortMessage: $"{totalWaitSeconds:F0}s total blocked wait across {current.BlockedSessionCount} session(s) (threshold: {thresholdSeconds}s)"), ct);
+            }
+        }
+        else if (_activeBlockingWaitAlert.TryGetValue(key, out var wasActive) && wasActive)
+        {
+            _activeBlockingWaitAlert[key] = false;
+            /* Announced only while the gate is still on — disabling it, or zeroing the threshold, flips
+               `exceeded` false without blocking having actually cleared (the CPU check's rule). */
+            if (!suppressed && enabled)
+            {
+                await NotifyResolutionAsync(new AlertResolution(
+                    key, serverName, "Blocking Wait Time",
+                    "Blocking Wait Cleared",
+                    $"{serverName}: Total blocked wait back under {thresholdSeconds}s"), ct);
             }
         }
     }

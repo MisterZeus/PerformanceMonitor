@@ -149,7 +149,9 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
 
             /* Only blocking/deadlocks ever routed through SendDetectedAlertAsync's #1141 split in
                the old loop; every other metric was a direct single send with its numerics. */
-            if (outcome.MetricName is "Blocking Detected" or "Deadlocks Detected")
+            /* #1839's "Blocking Wait Time" joins them: it carries the same blocked-process incident
+               context, so it splits per-event the same way. */
+            if (outcome.MetricName is "Blocking Detected" or "Blocking Wait Time" or "Deadlocks Detected")
             {
                 await SendDetectedAlertAsync(
                     outcome.MetricName, outcome.ServerName, outcome.CurrentValue, outcome.ThresholdValue,

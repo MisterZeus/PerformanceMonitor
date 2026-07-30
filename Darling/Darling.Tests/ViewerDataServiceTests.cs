@@ -457,6 +457,14 @@ public sealed class ViewerSchemaVersionGateTests
     public void MapProbedSchemaVersion_PayloadDimensionsAbsent_CapsAt37() =>
         Assert.Equal(37, ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
 
+    /// <summary>The #1839 rung: every sentinel through V39 present but blocking_wait_seconds_threshold absent —
+    /// the probe must report 39, so the gate blocks a V40 viewer until the service migrates. Gating matters
+    /// here because the viewer's Settings window names that column in both its alert-settings SELECT and its
+    /// upsert: against a V39 store the read would fail outright with 42703 rather than degrade.</summary>
+    [Fact]
+    public void MapProbedSchemaVersion_BlockingWaitThresholdAbsent_CapsAt39() =>
+        Assert.Equal(39, ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+
     [Fact]
     public void MapProbedSchemaVersion_V23CompositeIsGatedBehindV22_NotAStandaloneTopArm()
     {
@@ -479,7 +487,7 @@ public sealed class ViewerSchemaVersionGateTests
            the connect-time gate refuse to open the viewer against a perfectly healthy store. */
         Assert.Equal(
             ViewerDataService.RequiredStoreSchemaVersion,
-            ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+            ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
     }
 }
 

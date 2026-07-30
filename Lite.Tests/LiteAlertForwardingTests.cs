@@ -96,6 +96,12 @@ public class LiteAlertForwardingTests
         public Task<List<BlockedProcessAlertRow>> GetRecentBlockedProcessReportsAsync(string serverKey, int hoursBack, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<BlockedProcessAlertRow>(Blocking));
 
+        /* #1839: null = no blocking snapshot in the store; tests that exercise the gate assign one. */
+        public CurrentBlockingWaitResult? BlockingWait { get; set; }
+
+        public Task<CurrentBlockingWaitResult?> GetCurrentBlockingWaitAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult(BlockingWait);
+
         public Task<List<DeadlockAlertRow>> GetRecentDeadlocksAsync(string serverKey, int hoursBack, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<DeadlockAlertRow>(Deadlocks));
 
@@ -840,6 +846,7 @@ public class LiteAlertForwardingTests
 
         App.AlertCpuThreshold = 91; Assert.Equal(91, settings.CpuThresholdPercent);
         App.AlertBlockingThreshold = 7; Assert.Equal(7, settings.BlockingCountThreshold);
+        App.AlertBlockingWaitSecondsThreshold = 745; Assert.Equal(745, settings.BlockingWaitSecondsThreshold);
         App.AlertDeadlockThreshold = 4; Assert.Equal(4, settings.DeadlockCountThreshold);
         App.AlertPoisonWaitThresholdMs = 999; Assert.Equal(999, settings.PoisonWaitThresholdMs);
         App.AlertLongRunningQueryThresholdMinutes = 15; Assert.Equal(15, settings.LongRunningQueryThresholdMinutes);

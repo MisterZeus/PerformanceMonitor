@@ -363,6 +363,15 @@ public sealed class AlertsConfig
     [JsonPropertyName("blockingCountThreshold")]
     public int BlockingCountThreshold { get; set; } = 1;
 
+    /// <summary>
+    /// #1839: fire when the latest blocking snapshot's TOTAL blocked wait reaches this many seconds.
+    /// 0 = off, and off is the shipped default — a count threshold cannot tell one session blocked for
+    /// an hour from one blocked for a second, but enabling it for everyone would change what existing
+    /// deployments alert about.
+    /// </summary>
+    [JsonPropertyName("blockingWaitSecondsThreshold")]
+    public int BlockingWaitSecondsThreshold { get; set; }
+
     [JsonPropertyName("deadlockEnabled")]
     public bool DeadlockEnabled { get; set; } = true;
 

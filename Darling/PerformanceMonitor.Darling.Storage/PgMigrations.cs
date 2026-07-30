@@ -83,6 +83,7 @@ public static class PgMigrations
         new Migration(37, "ag-local-replica-and-disconnect-refire", V37Sql),
         new Migration(38, "query-payload-dimensions", PgSchemaGenerator.GenerateV38PayloadDimensions()),
         new Migration(39, "dim-feeding-fact-floor-indexes", V39Sql),
+        new Migration(40, "blocking-wait-threshold", V40Sql),
     };
 
     /// <summary>
@@ -637,6 +638,20 @@ CREATE INDEX IF NOT EXISTS ix_query_stats_digest_floor
 CREATE INDEX IF NOT EXISTS ix_procedure_stats_digest_floor
     ON procedure_stats (collection_time)
     WHERE query_plan_digest IS NOT NULL;";
+
+    /// <summary>
+    /// V40 — <c>config_alert_settings.blocking_wait_seconds_threshold</c>, the #1839 total-blocked-wait
+    /// gate. A second, independent blocking threshold beside the existing count one, because a count
+    /// cannot distinguish one session blocked for an hour from one blocked for a second.
+    /// <para>NOT NULL DEFAULT 0 = OFF, so an upgraded store alerts byte-for-byte as before and nobody
+    /// starts getting a new alert because they took an update — the same shipped-behavior-preserving
+    /// choice V37's re-fire column made. <c>ADD COLUMN IF NOT EXISTS</c> per the file's additive idiom;
+    /// config.-qualified because the migrate session runs under
+    /// <c>search_path = collect, config, public</c>.</para>
+    /// </summary>
+    private const string V40Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS blocking_wait_seconds_threshold integer NOT NULL DEFAULT 0;";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

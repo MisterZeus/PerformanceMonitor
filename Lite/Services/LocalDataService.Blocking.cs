@@ -22,6 +22,55 @@ namespace PerformanceMonitorLite.Services;
 public partial class LocalDataService
 {
     /// <summary>
+    /// The CURRENT total blocked wait time (#1839): the newest <c>dmv_blocking_snapshots</c> snapshot's
+    /// summed <c>wait_time_ms</c> and distinct blocked-SPID count, or null when the store holds no
+    /// snapshot for the server. Freshness is judged by the caller (the alert adapter, which knows the
+    /// server's effective cadence) — this read reports the snapshot's time, not a verdict on it.
+    /// <para>
+    /// Scoped to ONE snapshot by <c>collection_time = MAX(collection_time)</c>, never a time window:
+    /// summing a window would add up blocking that has already ended, and the alert could then never
+    /// clear while the window still held it. Reads the archive-aware view for the same reason
+    /// <see cref="GetLatestRunningJobsSnapshotTimeAsync"/> does — after a 512 MB reset the newest
+    /// snapshot can live only in parquet, and it must read as its true (possibly stale) age rather than
+    /// as absent.
+    /// </para>
+    /// </summary>
+    public async Task<(DateTime SnapshotTime, long TotalWaitMs, int BlockedSessionCount)?> GetCurrentBlockingWaitAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        /* The two CASTs are load-bearing, not decoration: DuckDB widens SUM(BIGINT) to HUGEINT, which
+           DuckDB.NET materializes as System.Numerics.BigInteger — a type Convert.ToInt64 cannot convert
+           (BigInteger does not implement IConvertible), so the read threw at alert-check time without
+           them. COUNT is cast for the same reason its result is read as an int. */
+        command.CommandText = @"
+SELECT
+    collection_time,
+    CAST(COALESCE(SUM(wait_time_ms), 0) AS BIGINT) AS total_wait_ms,
+    CAST(COUNT(DISTINCT blocked_spid) AS INTEGER) AS blocked_sessions
+FROM v_dmv_blocking_snapshots
+WHERE server_id = $1
+AND   collection_time = (
+    SELECT MAX(collection_time)
+    FROM v_dmv_blocking_snapshots
+    WHERE server_id = $1
+)
+GROUP BY collection_time";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+
+        using var reader = await command.ExecuteReaderAsync();
+        if (!await reader.ReadAsync())
+        {
+            return null;
+        }
+
+        return (
+            reader.GetDateTime(0),
+            reader.IsDBNull(1) ? 0L : reader.GetInt64(1),
+            reader.IsDBNull(2) ? 0 : reader.GetInt32(2));
+    }
+
+    /// <summary>
     /// Gets recent deadlock events for a server.
     /// </summary>
     public async Task<List<DeadlockRow>> GetRecentDeadlocksAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)

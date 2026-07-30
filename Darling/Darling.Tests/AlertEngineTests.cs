@@ -46,6 +46,8 @@ public sealed class AlertEngineTests
         public bool FailedJobEnabled { get; set; }
         public int CpuThresholdPercent { get; set; } = 80;
         public int BlockingCountThreshold { get; set; } = 1;
+        /* #1839: 0 = off, the shipped default — a test must opt in for the wait gate to run at all. */
+        public int BlockingWaitSecondsThreshold { get; set; }
         public int DeadlockCountThreshold { get; set; } = 1;
         public int PoisonWaitThresholdMs { get; set; } = 500;
         public int LongRunningQueryThresholdMinutes { get; set; } = 30;
@@ -78,12 +80,23 @@ public sealed class AlertEngineTests
 
         public int BlockingFetches { get; private set; }
         public int DeadlockFetches { get; private set; }
+        public int BlockingWaitFetches { get; private set; }
+
+        /* #1839: null = the store holds no blocking snapshot at all (the shipped state of a server that
+           has never blocked); tests that exercise the gate assign a result. */
+        public CurrentBlockingWaitResult? BlockingWait { get; set; }
         public (int ThresholdMinutes, int MaxResults, bool Diag, bool WaitFor, bool Backups, bool Misc, bool Cdc, IReadOnlyList<string> Excluded)? LastLrqArgs { get; private set; }
 
         public Task<List<BlockedProcessAlertRow>> GetRecentBlockedProcessReportsAsync(string serverKey, int hoursBack, CancellationToken cancellationToken = default)
         {
             BlockingFetches++;
             return Task.FromResult(new List<BlockedProcessAlertRow>(Blocking));
+        }
+
+        public Task<CurrentBlockingWaitResult?> GetCurrentBlockingWaitAsync(string serverKey, CancellationToken cancellationToken = default)
+        {
+            BlockingWaitFetches++;
+            return Task.FromResult(BlockingWait);
         }
 
         public Task<List<DeadlockAlertRow>> GetRecentDeadlocksAsync(string serverKey, int hoursBack, CancellationToken cancellationToken = default)
@@ -466,6 +479,202 @@ public sealed class AlertEngineTests
         Assert.Equal("1", Assert.Single(h.Deliverer.Outcomes).CurrentValue);
     }
 
+    /* ---------------- blocking wait time (#1839) ---------------- */
+
+    /// <summary>A fresh snapshot totalling <paramref name="totalWaitMs"/> across <paramref name="sessions"/> SPIDs.</summary>
+    private static CurrentBlockingWaitResult WaitSnapshot(long totalWaitMs, int sessions = 3, bool fresh = true) =>
+        new(new DateTime(2026, 7, 1, 11, 59, 0), totalWaitMs, sessions, fresh);
+
+    [Fact]
+    public async Task BlockingWait_OffByDefault_NeverReadsOrFires()
+    {
+        /* The shipped state: threshold 0 with blocking alerts ON. The gate must not even ask the store —
+           an off feature that still costs a query per sweep per server is not off. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Adapter.BlockingWait = WaitSnapshot(600_000);
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(0, h.Adapter.BlockingWaitFetches);
+        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
+    }
+
+    [Fact]
+    public async Task BlockingWait_FiresAtThresholdInclusive_WithRealNumericsAndContent()
+    {
+        /* At/above, not strictly above — the same inclusive comparison every other threshold uses. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 600;
+        h.Adapter.BlockingWait = WaitSnapshot(600_000, sessions: 3);
+        h.Adapter.Blocking.Add(BlockingRow(55));
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
+        Assert.Equal("600s across 3 blocked session(s)", fired.CurrentValue);
+        Assert.Equal("600s", fired.ThresholdValue);
+        /* #1830: the numerics must carry the real values — the display text is prose no parser recovers. */
+        Assert.Equal(600d, fired.NumericCurrentValue);
+        Assert.Equal(600d, fired.NumericThresholdValue);
+        /* The reporter asked for today's Blocking Detected content, built from this sweep's rows. */
+        Assert.NotNull(fired.Context);
+        Assert.False(string.IsNullOrWhiteSpace(fired.DetailText));
+    }
+
+    [Fact]
+    public async Task BlockingWait_BelowThreshold_DoesNotFire()
+    {
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 600;
+        h.Adapter.BlockingWait = WaitSnapshot(599_999);
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(1, h.Adapter.BlockingWaitFetches);
+        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
+    }
+
+    [Fact]
+    public async Task BlockingWait_IsLevelTriggered_CooldownSuppressesThenRefiresWhileStillAbove()
+    {
+        /* The distinguishing behavior vs the count gate's edge trigger: blocking that STAYS above the
+           threshold keeps announcing itself every cooldown instead of going quiet after one alert. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        h.Settings.CooldownMinutes = 5;
+        h.Adapter.BlockingWait = WaitSnapshot(120_000);
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
+
+        /* Inside the cooldown, still above: no second alert. */
+        h.Now = h.Now.AddMinutes(4);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
+
+        /* Cooldown elapsed, still above: it re-fires — no edge required. */
+        h.Now = h.Now.AddMinutes(2);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count(o => o.MetricName == "Blocking Wait Time"));
+        Assert.Empty(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task BlockingWait_ResolvesWhenItDropsBelow()
+    {
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        h.Adapter.BlockingWait = WaitSnapshot(120_000);
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
+
+        h.Adapter.BlockingWait = WaitSnapshot(1_000);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var resolution = Assert.Single(h.Resolutions);
+        Assert.Equal("Blocking Wait Cleared", resolution.Title);
+        Assert.Equal("Blocking Wait Time", resolution.MetricName);
+        /* A resolution is not a history row — nothing new was delivered. */
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
+    }
+
+    [Fact]
+    public async Task BlockingWait_StaleSnapshot_NeitherFiresNorHoldsTheAlertActive()
+    {
+        /* #1812's rule: a stopped collector leaves a "latest" snapshot that reads as NOW. A level-
+           triggered gate on frozen rows would re-fire every cooldown forever, so staleness is no
+           evidence — and it RESOLVES rather than latching (see CurrentBlockingWaitResult). */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        h.Adapter.BlockingWait = WaitSnapshot(120_000);
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
+
+        /* Same over-threshold numbers, now stale: no re-fire even once the cooldown has elapsed. */
+        h.Adapter.BlockingWait = WaitSnapshot(120_000, fresh: false);
+        h.Now = h.Now.AddMinutes(30);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
+        Assert.Equal("Blocking Wait Cleared", Assert.Single(h.Resolutions).Title);
+    }
+
+    [Fact]
+    public async Task BlockingWait_NoSnapshotAtAll_DoesNotFire()
+    {
+        /* A server that has never blocked has no snapshot row; null must read as "not above". */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        h.Adapter.BlockingWait = null;
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(1, h.Adapter.BlockingWaitFetches);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task BlockingWait_FollowsTheBlockingEnabledToggle()
+    {
+        /* Turning blocking alerts off silences BOTH gates — one toggle, as a user reading it expects. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = false;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        h.Adapter.BlockingWait = WaitSnapshot(120_000);
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(0, h.Adapter.BlockingWaitFetches);
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task BlockingWait_IsADistinctMetricFromTheCountGate()
+    {
+        /* Both gates can be over threshold in the same sweep and must produce two separate alerts, so
+           muting or acknowledging one never silences the other. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingCountThreshold = 1;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        h.Adapter.Blocking.Add(BlockingRow(55));
+        h.Adapter.BlockingWait = WaitSnapshot(120_000);
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(
+            new[] { "Blocking Detected", "Blocking Wait Time" },
+            h.Deliverer.Outcomes.Select(o => o.MetricName).OrderBy(n => n, StringComparer.Ordinal).ToArray());
+    }
+
+    [Fact]
+    public async Task BlockingWait_Muted_IsStillDeliveredFlagged()
+    {
+        /* Lite's flow: a muted alert is recorded, not sent — the deliverer decides, the engine flags. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        h.Adapter.BlockingWait = WaitSnapshot(120_000);
+        h.Muted = true;
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.True(Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time").Muted);
+    }
+
     /* ---------------- deadlocks ---------------- */
 
     [Fact]
@@ -812,6 +1021,8 @@ public sealed class AlertEngineTests
     private sealed class ThrowingAdapter : IAlertReadAdapter
     {
         public Task<List<BlockedProcessAlertRow>> GetRecentBlockedProcessReportsAsync(string serverKey, int hoursBack, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("store down");
+        public Task<CurrentBlockingWaitResult?> GetCurrentBlockingWaitAsync(string serverKey, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
         public Task<List<DeadlockAlertRow>> GetRecentDeadlocksAsync(string serverKey, int hoursBack, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");

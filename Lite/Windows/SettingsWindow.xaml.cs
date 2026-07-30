@@ -484,6 +484,7 @@ public partial class SettingsWindow : Window
         AlertCpuModeBox.SelectedIndex = App.AlertCpuMode == CpuAlertMode.SqlOnly ? 1 : 0;
         AlertBlockingCheckBox.IsChecked = App.AlertBlockingEnabled;
         AlertBlockingThresholdBox.Text = App.AlertBlockingThreshold.ToString();
+        AlertBlockingWaitSecondsBox.Text = App.AlertBlockingWaitSecondsThreshold.ToString();
         AlertDeadlockCheckBox.IsChecked = App.AlertDeadlockEnabled;
         AlertDeadlockThresholdBox.Text = App.AlertDeadlockThreshold.ToString();
         AlertPoisonWaitCheckBox.IsChecked = App.AlertPoisonWaitEnabled;
@@ -548,6 +549,10 @@ public partial class SettingsWindow : Window
         App.AlertBlockingEnabled = AlertBlockingCheckBox.IsChecked == true;
         if (int.TryParse(AlertBlockingThresholdBox.Text, out var blocking) && blocking > 0)
             App.AlertBlockingThreshold = blocking;
+        /* #1839: >= 0, not > 0 like its siblings — 0 is this setting's OFF value, so rejecting it would
+           make the gate impossible to turn back off once enabled. */
+        if (int.TryParse(AlertBlockingWaitSecondsBox.Text, out var blockingWait) && blockingWait >= 0)
+            App.AlertBlockingWaitSecondsThreshold = blockingWait;
         App.AlertDeadlockEnabled = AlertDeadlockCheckBox.IsChecked == true;
         if (int.TryParse(AlertDeadlockThresholdBox.Text, out var deadlock) && deadlock > 0)
             App.AlertDeadlockThreshold = deadlock;
@@ -638,6 +643,7 @@ public partial class SettingsWindow : Window
             root["alert_cpu_mode"] = App.AlertCpuMode.ToString();
             root["alert_blocking_enabled"] = App.AlertBlockingEnabled;
             root["alert_blocking_threshold"] = App.AlertBlockingThreshold;
+            root["alert_blocking_wait_seconds_threshold"] = App.AlertBlockingWaitSecondsThreshold;
             root["alert_deadlock_enabled"] = App.AlertDeadlockEnabled;
             root["alert_deadlock_threshold"] = App.AlertDeadlockThreshold;
             root["alert_poison_wait_enabled"] = App.AlertPoisonWaitEnabled;

@@ -40,6 +40,7 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
 {
     private readonly NpgsqlDataSource _postgres;
     private readonly Func<int, int>? _runningJobsCadenceMinutes;
+    private readonly Func<int, int>? _blockingSnapshotCadenceMinutes;
 
     /// <param name="runningJobsCadenceMinutes">
     /// Resolves a server's EFFECTIVE running_jobs collection cadence (minutes) for the #1812
@@ -47,10 +48,17 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
     /// <c>StoreConfigProvider.ResolveSchedule</c> the sweep runs on). Null (test call sites) or a
     /// non-positive answer falls back to the shared <see cref="CollectorScheduleDefaults"/> cadence.
     /// </param>
-    public DarlingAlertReadAdapter(NpgsqlDataSource postgres, Func<int, int>? runningJobsCadenceMinutes = null)
+    /// <param name="blockingSnapshotCadenceMinutes">
+    /// The same resolver for the dmv_blocking_snapshot cadence, behind #1839's freshness bound.
+    /// </param>
+    public DarlingAlertReadAdapter(
+        NpgsqlDataSource postgres,
+        Func<int, int>? runningJobsCadenceMinutes = null,
+        Func<int, int>? blockingSnapshotCadenceMinutes = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _runningJobsCadenceMinutes = runningJobsCadenceMinutes;
+        _blockingSnapshotCadenceMinutes = blockingSnapshotCadenceMinutes;
     }
 
     /* ---------------- blocking (XE-preferred + DMV fallback) ---------------- */
@@ -170,6 +178,62 @@ LIMIT 200";
         BlockedProcessReportMerge.AppendDmvFallbackRows(items, dmvItems);
 
         return items;
+    }
+
+    /* ---------------- current blocking wait (#1839) ---------------- */
+
+    /// <summary>
+    /// Lite's latest-blocking-snapshot sum, ported dialect-for-dialect: ONE snapshot selected by
+    /// <c>collection_time = MAX(collection_time)</c> (never a window — see
+    /// <see cref="CurrentBlockingWaitResult"/>), its <c>wait_time_ms</c> summed and its distinct
+    /// blocked SPIDs counted. $1 server_id, used twice.
+    /// <para>
+    /// ONE statement, deliberately: Npgsql fails SILENTLY on multi-statement commands with positional
+    /// parameters, so the freshness probe cannot be batched onto this — the snapshot time comes back as
+    /// a column of this same aggregate instead, which is one round trip rather than two anyway.
+    /// </para>
+    /// </summary>
+    public const string CurrentBlockingWaitSql = @"
+SELECT
+    collection_time,
+    CAST(COALESCE(SUM(wait_time_ms), 0) AS bigint) AS total_wait_ms,
+    CAST(COUNT(DISTINCT blocked_spid) AS integer) AS blocked_sessions
+FROM dmv_blocking_snapshots
+WHERE server_id = $1
+AND   collection_time = (
+    SELECT MAX(collection_time)
+    FROM dmv_blocking_snapshots
+    WHERE server_id = $1
+)
+GROUP BY collection_time";
+
+    public async Task<CurrentBlockingWaitResult?> GetCurrentBlockingWaitAsync(
+        string serverKey, CancellationToken cancellationToken = default)
+    {
+        var serverId = ParseServerKey(serverKey);
+
+        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        using var command = new NpgsqlCommand(CurrentBlockingWaitSql, connection);
+        command.Parameters.AddWithValue(serverId);
+
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        /* The SQL casts pin both aggregates to bigint/integer, so these read directly — PG's SUM(bigint)
+           is numeric and COUNT is bigint, neither of which Npgsql would hand back as long/int untyped. */
+        var snapshotTime = reader.GetDateTime(0);
+        var totalWaitMs = reader.IsDBNull(1) ? 0L : reader.GetInt64(1);
+        var blockedSessions = reader.IsDBNull(2) ? 0 : reader.GetInt32(2);
+
+        /* #1812 freshness, same rule as Lite's adapter — parity is the point. The stored times are
+           naive UTC, so they compare directly against DateTime.UtcNow. */
+        var cadence = ResolveCadence(_blockingSnapshotCadenceMinutes, serverId, "dmv_blocking_snapshot");
+        bool isFresh = DateTime.UtcNow - snapshotTime <= CurrentBlockingWaitResult.MaxSnapshotAge(cadence);
+
+        return new CurrentBlockingWaitResult(snapshotTime, totalWaitMs, blockedSessions, isFresh);
     }
 
     /* ---------------- deadlocks ---------------- */
@@ -538,15 +602,22 @@ LIMIT 5";
         return new AnomalousJobsResult(SnapshotIsFresh: true, items);
     }
 
-    private int ResolveRunningJobsCadence(int serverId)
+    private int ResolveRunningJobsCadence(int serverId) =>
+        ResolveCadence(_runningJobsCadenceMinutes, serverId, "running_jobs");
+
+    /// <summary>
+    /// A server's effective cadence for one collector: the worker's resolver when it answers usefully,
+    /// otherwise the shipped default, otherwise 2 minutes (an unregistered collector name).
+    /// </summary>
+    private static int ResolveCadence(Func<int, int>? resolver, int serverId, string collectorName)
     {
-        var resolved = _runningJobsCadenceMinutes?.Invoke(serverId) ?? 0;
+        var resolved = resolver?.Invoke(serverId) ?? 0;
         if (resolved > 0)
         {
             return resolved;
         }
 
-        return PerformanceMonitor.Collectors.CollectorScheduleDefaults.All.TryGetValue("running_jobs", out var schedule)
+        return PerformanceMonitor.Collectors.CollectorScheduleDefaults.All.TryGetValue(collectorName, out var schedule)
             ? schedule.FrequencyMinutes
             : 2;
     }

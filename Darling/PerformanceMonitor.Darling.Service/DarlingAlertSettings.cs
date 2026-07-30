@@ -49,6 +49,10 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
 
     public int CpuThresholdPercent => _config.Alerts.CpuThresholdPercent;
     public int BlockingCountThreshold => _config.Alerts.BlockingCountThreshold;
+
+    /* #1839: floored at 0 (= off) so a negative in darling.json or the store can't make the
+       "is it above threshold" test true for every snapshot. */
+    public int BlockingWaitSecondsThreshold => Math.Max(0, _config.Alerts.BlockingWaitSecondsThreshold);
     public int DeadlockCountThreshold => _config.Alerts.DeadlockCountThreshold;
     public int PoisonWaitThresholdMs => _config.Alerts.PoisonWaitThresholdMs;
     public int LongRunningQueryThresholdMinutes => _config.Alerts.LongRunningQueryThresholdMinutes;
