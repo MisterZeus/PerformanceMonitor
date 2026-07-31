@@ -112,9 +112,22 @@ public static class ComposeCompiler
     /// alternative is hardcoding a column list a new measure would silently outgrow. Composed SQL still names
     /// only catalog identifiers, and every value is one of the two already-bound window parameters.</para>
     ///
-    /// <para>NOT a fix for the CAGG route: <c>query_store_stats_hourly</c> materialized its sums from
-    /// un-deduped raw rows, so a panel whose window reaches past the raw tier still reads inflated numbers
-    /// and cannot be repaired at read time. That is #1841 tier 2.</para>
+    /// <para><b>The CAGG route is repaired since #1849, but only where the corrected rollups reach.</b> The
+    /// original <c>query_store_stats_hourly</c>/<c>_daily</c> materialized their sums from UN-DEDUPED raw
+    /// rows, and no read-side edit can undo that — the duplicates are gone once materialized and the CAGG
+    /// output carries no interval identity to key on. #1849 therefore added a corrected family
+    /// (<c>query_store_stats_interval_hourly</c> dedups at interval grain;
+    /// <c>query_store_stats_corrected_hourly</c>/<c>_daily</c> collapse it to these composer dims) and
+    /// <see cref="ComposeSourceRouter"/> prefers it. The old pair is KEPT — a CAGG cannot be reshaped in
+    /// place, and rebuilding would destroy 21 days of hourly and all daily history (#1759/#1793) — so a
+    /// window older than the corrected rollups have materialized still reads INFLATED numbers, with a
+    /// visible step at that boundary. <c>--backfill-rollups</c> is what moves the boundary; retention aging
+    /// out the old rows is what eventually removes it.</para>
+    ///
+    /// <para>The dedup partition below is the SAME key the corrected L1 groups on, and it has to stay that
+    /// way — raw and rollup answering one panel with different notions of "an interval" is the class of
+    /// defect #1784 records. L1 additionally groups <c>module_name</c>/<c>query_hash</c> because it projects
+    /// them; both are functionally dependent on <c>query_id</c>, so they add no groups.</para>
     /// </summary>
     private static string BuildFactRelation(
         string sourceTable, ComposeRoute route, string timeColumn, string startParam, string endParam)

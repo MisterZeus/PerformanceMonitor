@@ -45,16 +45,32 @@ public sealed record ComposeRoute(ComposeSourceTier Tier, string? CaggRelation)
 /// <summary>One raw table's continuous-aggregate coverage: its hourly (and optional daily) rollup view names and
 /// the dimensions those rollups are grouped by — the set a panel's group-by/filter dimensions must be a subset of
 /// to route (the universal <c>server</c> dimension always qualifies, since server_id/server_name lead every CAGG's
-/// GROUP BY).</summary>
+/// GROUP BY).
+///
+/// <para><b><c>LegacyHourlyView</c>/<c>LegacyDailyView</c> are the SUPERSEDED pair, and only query_store_stats has
+/// one (#1849).</b> Its original rollups materialized <c>sum(execution_count)</c> from un-deduped raw rows, so they
+/// bake in the cumulative-snapshot double-count — measured at up to 496x for a single Query Store interval. The
+/// corrected rollups above replace them, but the old pair CANNOT be dropped and rebuilt: a continuous aggregate's
+/// columns cannot be ALTERed, and with retention active a rebuild would re-materialize from 4 days of raw and
+/// permanently destroy the 21-day hourly and indefinite daily history (#1759/#1793). So the corrected pair starts
+/// empty and deepens from deploy, the old pair keeps everything it already holds, and reads prefer the corrected
+/// one wherever it reaches. <b>Past that boundary a window is still served INFLATED numbers</b> — a visible step
+/// where the two meet, unavoidable while the old history is the only history, and shrinking every day as the
+/// corrected rollups deepen and the old rows age out.</para></summary>
 public sealed record ComposeCaggInfo(
     string RawTable,
     string HourlyView,
     string? DailyView,
-    IReadOnlySet<string> Dimensions)
+    IReadOnlySet<string> Dimensions,
+    string? LegacyHourlyView = null,
+    string? LegacyDailyView = null)
 {
     public bool Covers(string dimensionName) =>
         string.Equals(dimensionName, MeasureCatalog.ServerDimensionName, StringComparison.Ordinal)
         || Dimensions.Contains(dimensionName);
+
+    /// <summary>Is there a superseded pair to fall back to for windows the primary pair has not materialized?</summary>
+    public bool HasLegacyPair => LegacyHourlyView is not null;
 }
 
 /// <summary>
@@ -82,9 +98,15 @@ public static class ComposeCaggCatalog
             "procedure_stats", "procedure_stats_hourly", "procedure_stats_daily",
             new HashSet<string>(StringComparer.Ordinal) { "database_name", "schema_name", "object_name" }),
 
+        /* The CORRECTED pair is primary (#1849); the original inflated pair is the documented fallback for
+           windows the corrected rollups have not materialized. Same dimensions and the same column NAMES on
+           both, so ComposeCaggValueMapper and the compiled SQL are identical either way — only which relation
+           is named changes. */
         ["query_store_stats"] = new(
-            "query_store_stats", "query_store_stats_hourly", "query_store_stats_daily",
-            new HashSet<string>(StringComparer.Ordinal) { "database_name", "module_name", "query_hash" }),
+            "query_store_stats", "query_store_stats_corrected_hourly", "query_store_stats_corrected_daily",
+            new HashSet<string>(StringComparer.Ordinal) { "database_name", "module_name", "query_hash" },
+            LegacyHourlyView: "query_store_stats_hourly",
+            LegacyDailyView: "query_store_stats_daily"),
     };
 
     /// <summary>The CAGG coverage for <paramref name="rawTable"/>, or null if it has no continuous aggregate.</summary>
@@ -175,22 +197,84 @@ public static class ComposeSourceRouter
            composer-specific; the flags are per-TABLE (#1665), because a failure-isolated ensure sweep can
            build one table's pair and not another's. A catalog entry with no daily view feeds
            dailyAvailable=false through the same ladder — identical to the old null-DailyView fallback. */
+        var primary = ResolveFamily(cagg.HourlyView, cagg.DailyView, nowUtc, windowStartUtc, rollups, coverage);
+
+        if (!cagg.HasLegacyPair)
+        {
+            return primary.Route;
+        }
+
+        /* ── the corrected/legacy boundary (#1849) ────────────────────────────────────────────────────────
+           The corrected Query Store rollups are NEW objects that start empty and deepen from deploy, beside
+           an old pair that already holds up to 21 days (hourly) and unbounded (daily) of INFLATED history.
+           The rule is: use the corrected pair wherever it has actually materialized the window, and only
+           reach for the superseded pair where it measurably reaches further back.
+
+           WHAT THIS MEANS FOR A READER, stated because it is a real product behaviour and not a detail: a
+           window inside the corrected coverage reads deduped numbers; a window past it reads the old
+           inflated ones, and there is a VISIBLE STEP where the two meet. That step is not new — it exists
+           today between raw (deduped since #1853) and the CAGGs, and this change moves it strictly outward
+           and shrinks it every day. It disappears once the corrected rollups are backfilled past the old
+           pair's floor, which --backfill-rollups does.
+
+           The comparison is the same COMPARATIVE primitive the coverage ladder uses, never an absolute one:
+           the legacy pair wins only when its floor is measurably deeper, so on a healthy store — where the
+           corrected pair covers everything asked for — this never fires and never silently prefers the
+           inflated numbers. */
+        /* AVAILABILITY IS NOT COVERAGE, and deciding them in one step is wrong. A store whose service predates
+           #1849 has NO corrected rollups, so there is nothing to compare floors against — every floor is null
+           and the comparative rule below (correctly) refuses to move on no evidence, which would strand every
+           Query Store window on raw and throw away the legacy pair that was serving them yesterday. Existence
+           is therefore settled FIRST, and settling it restores exactly the pre-#1849 routing. */
+        var correctedExists = rollups.Has(cagg.HourlyView)
+            || (cagg.DailyView is not null && rollups.Has(cagg.DailyView));
+
+        if (!correctedExists)
+        {
+            return ResolveFamily(cagg.LegacyHourlyView!, cagg.LegacyDailyView, nowUtc, windowStartUtc, rollups, coverage).Route;
+        }
+
+        if (primary.Route.IsCagg && TierCoverage.Covers(primary.FloorUtc, windowStartUtc))
+        {
+            return primary.Route;
+        }
+
+        var legacy = ResolveFamily(cagg.LegacyHourlyView!, cagg.LegacyDailyView, nowUtc, windowStartUtc, rollups, coverage);
+
+        return legacy.Route.IsCagg && TierCoverage.ReachesFurtherBack(legacy.FloorUtc, primary.FloorUtc)
+            ? legacy.Route
+            : primary.Route;
+    }
+
+    /// <summary>
+    /// One rollup family's route AND the materialized floor the chosen tier actually reaches — the pair the
+    /// corrected/legacy comparison above needs. A raw outcome carries a null floor, which
+    /// <see cref="TierCoverage.ReachesFurtherBack"/> reads as "no evidence", so an absent or empty family can
+    /// never beat one holding something.
+    /// </summary>
+    private static (ComposeRoute Route, DateTime? FloorUtc) ResolveFamily(
+        string hourlyView, string? dailyView, DateTime nowUtc, DateTime windowStartUtc,
+        RollupAvailability rollups, RollupCoverage coverage)
+    {
+        /* coverage.For(...) is called INLINE in the Resolve argument list, and again below for the floors,
+           rather than hoisted into a local used twice. That is deliberate: RollupCoverageRoutingTests scans
+           the source for RetentionTierRouter.Resolve call sites and requires each to look coverage up in its
+           own argument list — a guard against the #1759 shape where a caller routes on no evidence. A local
+           satisfies the compiler and defeats the scan, so the duplicate lookup (two dictionary probes) buys
+           a guard that stays honest. Do not "simplify" it back. */
         var tier = RetentionTierRouter.Resolve(
             nowUtc, windowStartUtc,
-            hourlyAvailable: rollups.Has(cagg.HourlyView),
-            dailyAvailable: cagg.DailyView is not null && rollups.Has(cagg.DailyView),
-            coverage: coverage.For(cagg.HourlyView, cagg.DailyView));
+            hourlyAvailable: rollups.Has(hourlyView),
+            dailyAvailable: dailyView is not null && rollups.Has(dailyView),
+            coverage: coverage.For(hourlyView, dailyView));
 
-        if (tier == RetentionTier.Raw)
+        var tierCoverage = coverage.For(hourlyView, dailyView);
+
+        return tier switch
         {
-            return ComposeRoute.Raw;
-        }
-
-        if (tier == RetentionTier.Hourly)
-        {
-            return new ComposeRoute(ComposeSourceTier.Hourly, cagg.HourlyView);
-        }
-
-        return new ComposeRoute(ComposeSourceTier.Daily, cagg.DailyView!);
+            RetentionTier.Raw => (ComposeRoute.Raw, null),
+            RetentionTier.Hourly => (new ComposeRoute(ComposeSourceTier.Hourly, hourlyView), tierCoverage.HourlyFloorUtc),
+            _ => (new ComposeRoute(ComposeSourceTier.Daily, dailyView!), tierCoverage.DailyFloorUtc),
+        };
     }
 }

@@ -1147,6 +1147,11 @@ AND   ((SELECT min(bucket) FROM collect.query_stats_hourly) IS NULL
     {
         "query_stats", "procedure_stats", "query_store_stats",
         "query_stats_hourly", "procedure_stats_hourly", "query_store_stats_hourly", "query_stats_db_hourly",
+        /* The corrected Query Store tier (#1849): the interval-grain dedup layer on its own short horizon,
+           and the corrected hourly on the standard 21-day one. The corrected DAILY is kept indefinitely like
+           every other daily, so it carries no policy and must not appear here. */
+        TimescaleSupport.QueryStoreStatsIntervalHourlyView,
+        TimescaleSupport.QueryStoreStatsCorrectedHourlyView,
     }
     .Concat(TimescaleSupport.BaselineAggregates.Select(a => a.View))
     .ToArray();

@@ -226,14 +226,15 @@ public sealed class RollupCoverageRoutingTests
 
         /* Plain PostgreSQL: no rollup named at all, but the raw floors still read. */
         var none = TimescaleSupport.RollupCoverageProbeSql(RollupAvailability.None);
-        foreach (var (view, _, _, _) in TimescaleSupport.RollupViews)
+        foreach (var (view, _, _, _, _) in TimescaleSupport.RollupViews)
         {
             Assert.DoesNotContain($"collect.{view}", none, StringComparison.Ordinal);
         }
 
         Assert.Contains("min(collection_time) FROM collect.query_stats)", none, StringComparison.Ordinal);
 
-        /* Fixed column count across every shape (8 rollups + 3 raw tables). */
+        /* Fixed column count across every shape (every rollup + the 3 raw tables), derived from the source
+           lists so adding a rollup cannot silently leave the reader indexing past the end. */
         foreach (var shape in new[] { RollupAvailability.All, partial, RollupAvailability.None })
         {
             var columns = TimescaleSupport.RollupCoverageProbeSql(shape)["SELECT ".Length..].Split(", ");
