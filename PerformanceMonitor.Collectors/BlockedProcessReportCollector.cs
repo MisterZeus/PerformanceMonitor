@@ -673,7 +673,7 @@ SET
             N'database: ' + COALESCE(DB_NAME(b.resource_database_id), DB_NAME(b.database_id), N'unknown') +
             /* #1865: the reason, where one is known. This is the fix the issue actually asked for --
                the operator reading the grid gets the answer on the row instead of a bare
-               bare Unresolved whose two causes -- grant the login access, versus the page moved
+               Unresolved whose two causes -- grant the login access, versus the page moved
                and there is nothing to fix -- could not be told apart. ISNULL over the fragment, so a row nobody
                attempted to resolve (an OBJECT lock, or a resource type with no lookup path) is
                labeled exactly as it always was. */

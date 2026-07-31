@@ -354,6 +354,42 @@ public sealed class ComposeSourceRouterTests
     }
 
     /// <summary>
+    /// WATCHED (mutation): drop the <c>ReachesFurtherBack</c> arm of the day-grain preference — return the
+    /// corrected daily whenever the day-grain one does not COVER the window — and this goes red.
+    ///
+    /// <para>The third outcome of that preference, and the only one the #1885 review found untested: neither
+    /// daily holds the window, but the day-grain one is measurably DEEPER, so it wins on the same
+    /// comparative rule the corrected/legacy step below it uses. Serving from the shallower relation when a
+    /// deeper one exists returns fewer rows AND the over-counted ones, which is the worst of both.</para>
+    ///
+    /// <para>The ladder is built inline rather than from <see cref="QueryStoreLadder"/> because the shape
+    /// this branch needs is the inverse of that one's: the day-grain daily has to out-reach the corrected
+    /// daily, and the legacy pair must NOT out-reach the day-grain daily — otherwise the legacy comparison
+    /// in <c>Resolve</c> takes the window back off it and the assertion would pass for the wrong reason.</para>
+    /// </summary>
+    [Fact]
+    public void QueryStore_NeitherDailyCoversTheWindow_DeeperDayGrainStillWins()
+    {
+        var coverage = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal)
+            {
+                [TimescaleSupport.QueryStoreStatsCorrectedHourlyView] = Now.AddDays(-30),
+                [TimescaleSupport.QueryStoreStatsCorrectedDailyView] = Now.AddDays(-30),
+                [TimescaleSupport.QueryStoreStatsDayGrainDailyView] = Now.AddDays(-40),
+                [TimescaleSupport.QueryStoreStatsHourlyView] = Now.AddDays(-35),
+                [TimescaleSupport.QueryStoreStatsDailyView] = Now.AddDays(-35),
+            },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal) { ["query_store_stats"] = Now.AddDays(-4) });
+
+        /* -50 days: past every floor on the ladder, so nothing COVERS it and only depth can decide. */
+        var route = ComposeSourceRouter.Resolve(
+            Plan("qs_executions"), Now, Now.AddDays(-50), RollupAvailability.All, coverage);
+
+        Assert.Equal(ComposeSourceTier.Daily, route.Tier);
+        Assert.Equal(TimescaleSupport.QueryStoreStatsDayGrainDailyView, route.CaggRelation);
+    }
+
+    /// <summary>
     /// The residual is IRREDUCIBLE at the hourly grain — an interval genuinely collected across two hours has
     /// to appear in both — so #1869 buys nothing there and must change nothing there. An hourly-age window
     /// routes exactly where #1849 left it, whatever the day-grain daily has materialized.

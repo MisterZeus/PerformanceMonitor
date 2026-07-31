@@ -46,9 +46,9 @@ public sealed class DuckDbAlertHistoryStore : IAlertHistoryStore
            with Darling's PgAlertHistoryStore rather than written out twice — see
            AlertValueParser.ResolveStoredValue for why that duplication was the drift risk #1881
            turned on. */
-        var currentValue = PerformanceMonitor.Notifications.AlertValueParser.ResolveStoredValue(
+        var currentValue = AlertValueParser.ResolveStoredValue(
             record.NumericCurrentValue, record.CurrentValueText);
-        var thresholdValue = PerformanceMonitor.Notifications.AlertValueParser.ResolveStoredValue(
+        var thresholdValue = AlertValueParser.ResolveStoredValue(
             record.NumericThresholdValue, record.ThresholdValueText);
         var serverId = int.TryParse(record.ServerId, out var sid) ? sid : 0;
 

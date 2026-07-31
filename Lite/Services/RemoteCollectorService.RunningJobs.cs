@@ -35,10 +35,10 @@ public partial class RemoteCollectorService
     /// <see cref="FailedJobsQuery"/> (Phase-5 slice E; see its doc for the query semantics and the
     /// server-local RunDateTime note). Runs at alert-check time — failure outcomes are not part of
     /// the collected running_jobs snapshot. Reuses the collector's connection path (MFA
-    /// serialization, throttle, retry) and degrades gracefully: any error (a login without msdb /
-    /// SQLAgentReaderRole access, a transient failure, etc.) returns an empty list rather than
-    /// failing the alert cycle. The caller skips Azure SQL DB (no Agent) and no-msdb logins before
-    /// calling.
+    /// serialization, throttle, retry) and degrades gracefully: any error (a login without SELECT on
+    /// msdb.dbo.sysjobs and sysjobhistory, a transient failure, etc.) returns an empty list rather
+    /// than failing the alert cycle. The caller skips Azure SQL DB (no Agent) and no-msdb logins
+    /// before calling.
     /// </summary>
     public async Task<List<FailedJobInfo>> GetRecentlyFailedJobsAsync(
         ServerConnection server,
@@ -63,9 +63,11 @@ public partial class RemoteCollectorService
         }
         catch (Microsoft.Data.SqlClient.SqlException ex) when (ex.Number is 229 or 297 or 300 or 916)
         {
-            /* Login lacks msdb / SQLAgentReaderRole access — expected for read-only monitoring
-               accounts; skip quietly so a permission gap doesn't fail the whole alert cycle. */
-            _logger?.LogDebug("Skipping failed-job check for '{Server}': {Message}", server.DisplayName, ex.Message);
+            /* Login cannot read the msdb job tables — expected for read-only monitoring accounts;
+               skip quietly so a permission gap doesn't fail the whole alert cycle. The remedy is
+               direct table SELECTs, NOT SQLAgentReaderRole (#1823): that role gates the sp_help_job*
+               procedures, which this product never calls, and grants no SELECT on the base tables. */
+            _logger?.LogDebug("Skipping failed-job check for '{Server}' (needs SELECT on msdb.dbo.sysjobs and sysjobhistory — SQLAgentReaderRole alone is not enough; see the monitoring-login grants in the README): {Message}", server.DisplayName, ex.Message);
             return new List<FailedJobInfo>();
         }
         catch (Exception ex)

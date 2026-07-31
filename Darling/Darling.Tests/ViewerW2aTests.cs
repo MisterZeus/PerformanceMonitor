@@ -636,10 +636,11 @@ public sealed class ViewerW2aLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteSummaryRowsAsync(connection, SummaryServerId);
+        await DeleteSummaryRowsAsync(connection, SummaryServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var now = TruncateToSeconds(DateTime.UtcNow);
@@ -673,10 +674,13 @@ public sealed class ViewerW2aLivePostgresTests
             Assert.NotNull(summary.LastCollectionTime);
             Assert.True(summary.IsOnline);                   // fresh collection
             Assert.Equal("Online", summary.StatusDisplay);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteSummaryRowsAsync(connection, SummaryServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteSummaryRowsAsync(cleanup, SummaryServerId, cleanupCt));
         }
     }
 
@@ -690,10 +694,11 @@ public sealed class ViewerW2aLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteSummaryRowsAsync(connection, FallbackServerId);
+        await DeleteSummaryRowsAsync(connection, FallbackServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var now = TruncateToSeconds(DateTime.UtcNow);
@@ -707,10 +712,13 @@ public sealed class ViewerW2aLivePostgresTests
 
             Assert.Equal(2, summary.BlockingCount);
             Assert.Equal(0, summary.DeadlockCount);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteSummaryRowsAsync(connection, FallbackServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteSummaryRowsAsync(cleanup, FallbackServerId, cleanupCt));
         }
     }
 
@@ -724,10 +732,11 @@ public sealed class ViewerW2aLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteEnrichmentRowsAsync(connection, EnrichServerId);
+        await DeleteEnrichmentRowsAsync(connection, EnrichServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var now = TruncateToSeconds(DateTime.UtcNow);
@@ -783,10 +792,13 @@ public sealed class ViewerW2aLivePostgresTests
             Assert.Equal(1, summary.HealthyCollectorCount);
             Assert.Equal(1, summary.FailedCollectorCount);
             Assert.Equal(HealthSeverity.Warning, summary.CollectorSeverity);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteEnrichmentRowsAsync(connection, EnrichServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteEnrichmentRowsAsync(cleanup, EnrichServerId, cleanupCt));
         }
     }
 
@@ -800,10 +812,11 @@ public sealed class ViewerW2aLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteAlertRowsAsync(connection);
+        await DeleteAlertRowsAsync(connection, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var now = TruncateToSeconds(DateTime.UtcNow);
@@ -842,10 +855,13 @@ public sealed class ViewerW2aLivePostgresTests
             Assert.Equal(2, dismissedAll);
             Assert.Empty(await viewer.GetAlertHistoryAsync(since, DismissServerA));
             Assert.Single(await viewer.GetAlertHistoryAsync(since, DismissServerB));
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteAlertRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteAlertRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -1044,7 +1060,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)", connection);
     private static DateTime TruncateToSeconds(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
 
-    private static async Task DeleteSummaryRowsAsync(NpgsqlConnection connection, int serverId)
+    private static async Task DeleteSummaryRowsAsync(NpgsqlConnection connection, int serverId, System.Threading.CancellationToken ct)
     {
         foreach (var table in new[]
         {
@@ -1053,11 +1069,11 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)", connection);
         })
         {
             using var cleanup = new NpgsqlCommand($"DELETE FROM {table} WHERE server_id = {serverId};", connection);
-            await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            await cleanup.ExecuteNonQueryAsync(ct);
         }
     }
 
-    private static async Task DeleteEnrichmentRowsAsync(NpgsqlConnection connection, int serverId)
+    private static async Task DeleteEnrichmentRowsAsync(NpgsqlConnection connection, int serverId, System.Threading.CancellationToken ct)
     {
         foreach (var table in new[]
         {
@@ -1066,14 +1082,14 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)", connection);
         })
         {
             using var cleanup = new NpgsqlCommand($"DELETE FROM {table} WHERE server_id = {serverId};", connection);
-            await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            await cleanup.ExecuteNonQueryAsync(ct);
         }
     }
 
-    private static async Task DeleteAlertRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteAlertRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM config_alert_log WHERE server_id IN ({DismissServerA}, {DismissServerB});", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

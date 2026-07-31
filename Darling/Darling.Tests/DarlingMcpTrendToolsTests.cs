@@ -273,6 +273,7 @@ public sealed class DarlingMcpTrendToolsLivePostgresTests
         await DeleteRowsAsync(connection, ct);
         await using var postgres = NpgsqlDataSource.Create(cs!);
 
+        var bodySucceeded = false;
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
@@ -322,10 +323,13 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)"
             Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(await DarlingMcpTrendTools.GetMemoryTrend(postgres, ServerName)));
             Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(await DarlingMcpTrendTools.GetQueryDurationTrend(postgres, ServerName)));
             Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpTrendTools.GetQueryTrend(postgres, "0xTRENDHASH", Db, ServerName)));
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, ct);
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
         }
     }
 

@@ -272,10 +272,11 @@ public sealed class DarlingRetentionTests
         await PgMigrations.MigrateAsync(connection, ct);
 
         /* Clear leftovers from an earlier aborted run so the assertions below are deterministic. */
-        await DeleteTestRowsAsync(connection);
+        await DeleteTestRowsAsync(connection, ct);
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             /* All timestamps Kind-Unspecified — naive-UTC storage, see PgCollectorRowWriter. */
@@ -454,10 +455,13 @@ public sealed class DarlingRetentionTests
                 var status = await read.ExecuteScalarAsync(ct) as string;
                 Assert.True(status == "SUCCESS", $"expected a SUCCESS run-record, got '{status}'; {purgeLog.Joined}");
             }
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteTestRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteTestRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -487,9 +491,10 @@ public sealed class DarlingRetentionTests
            exercised on every run. */
         Assert.True(await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct) > 0);
         await ExecAsync(connection, "ALTER TABLE wait_stats SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')", ct);
-        await DeleteTestRowsAsync(connection);
+        await DeleteTestRowsAsync(connection, ct);
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
         try
         {
             var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
@@ -544,10 +549,13 @@ WHERE hypertable_name = 'wait_stats'
                 Assert.True(survivor > utcNow.AddDays(-1), $"the surviving row should be the 1-hour one, got {survivor:O}; {purgeLog.Joined}");
                 Assert.False(await reader.ReadAsync(ct), $"the 40-day row inside the compressed chunk survived the purge; {purgeLog.Joined}");
             }
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteTestRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteTestRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -569,9 +577,10 @@ WHERE hypertable_name = 'wait_stats'
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
-        await DeleteTestRowsAsync(connection);
+        await DeleteTestRowsAsync(connection, ct);
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
         try
         {
             /* A resolver that throws drives PurgeAsync into its outer catch, which writes an ERROR run-record
@@ -585,14 +594,17 @@ WHERE hypertable_name = 'wait_stats'
                 "SELECT status FROM collection_log WHERE server_id = $1 AND collector_name = 'data_retention' ORDER BY collection_time DESC LIMIT 1", connection);
             read.Parameters.AddWithValue(DarlingObservability.FleetServerId);
             Assert.Equal("ERROR", await read.ExecuteScalarAsync(ct));
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteTestRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteTestRowsAsync(cleanup, cleanupCt));
         }
     }
 
-    private static async Task DeleteTestRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteTestRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         /* Also clears the fleet-sentinel data_retention run-record the purge writes, so the shared dev store
            doesn't accumulate them and the run-record assertion always reads THIS run's row. */
@@ -603,6 +615,6 @@ WHERE hypertable_name = 'wait_stats'
             $"DELETE FROM config.config_command WHERE target_server_id = {TestServerId}; " +
             $"DELETE FROM collection_log WHERE server_id = {DarlingObservability.FleetServerId} AND collector_name = 'data_retention';",
             connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

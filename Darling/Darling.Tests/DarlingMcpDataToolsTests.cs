@@ -532,6 +532,7 @@ public sealed class DarlingMcpDataToolsLivePostgresTests
 
         await using var postgres = NpgsqlDataSource.Create(cs!);
 
+        var bodySucceeded = false;
         try
         {
             await RegisterServerAsync(connection, ct);
@@ -590,10 +591,13 @@ public sealed class DarlingMcpDataToolsLivePostgresTests
             /* ---- an EMPTY store for a tool returns the #1224 miss, not a throw. */
             await DeleteRowsAsync(connection, ct, keepServer: true);
             Assert.Equal("unavailable", StatusOf(await DarlingMcpDataTools.GetCpuUtilization(postgres, ServerName)));
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, ct);
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
         }
     }
 

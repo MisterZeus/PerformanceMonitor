@@ -29,8 +29,8 @@ namespace PerformanceMonitor.Alerting;
 /// Hosts execute <see cref="Sql"/> on their own connections with their own gating:
 /// Lite pre-gates the call (online + non-Azure-SQL-DB + <c>HasMsdbAccess</c>) and rides the
 /// collector's connection path (MFA serialization, throttle, retry); the Dashboard skips Azure
-/// SQL DB (engineEdition == 5) at the call site and degrades a login without msdb /
-/// SQLAgentReaderRole access (SqlException 229/297/300/916) to an empty list; the future Darling
+/// SQL DB (engineEdition == 5) at the call site and degrades a login that cannot SELECT the msdb
+/// job tables (SqlException 229/297/300/916) to an empty list; the future Darling
 /// engine gates on !IsAzureSqlDb + the same exception degrade — per the Phase-5 review finding
 /// (F11), Darling must NOT invent an msdb access probe (no <c>HasMsdbAccess</c> exists there).
 /// Every host returns an empty list on failure so a permission gap or transient error never
