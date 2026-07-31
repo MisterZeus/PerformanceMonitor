@@ -135,16 +135,45 @@ else {
 # hardening below must grant the account the service really runs as: rebuilding the DACL around the
 # virtual account on a re-homed install would strip the operator's grant and lock the service out of
 # its own config on the next start. Fresh installs resolve to the virtual account just created.
+#
+# Resolution failure is NOT a silent fallback. On the FRESH path the default is provably right - sc create
+# above set that very account - so a WMI hiccup there costs nothing and only warns. On the UPGRADE path we
+# do not know what the service was re-homed to, and guessing the virtual account is exactly the lockout
+# this resolution exists to prevent, so it stops the install instead of quietly ACLing the wrong principal.
+# sc.exe qc is tried first as a non-WMI second opinion, so a broken WMI repository alone cannot brick an
+# upgrade; its field labels are localized, so a non-match there just falls through to the loud failure.
 $serviceAccount = "NT SERVICE\$serviceName"
+$startName = $null
 try {
     $startName = (Get-CimInstance -ClassName Win32_Service -Filter "Name='$serviceName'" -ErrorAction Stop).StartName
-    if ($startName) {
-        if ($startName -eq 'LocalSystem') { $serviceAccount = 'NT AUTHORITY\SYSTEM' }
-        else { $serviceAccount = $startName -replace '^\.\\', "$env:COMPUTERNAME\" }
-    }
 }
 catch {
-    # Fall back to the virtual account the create path just used.
+    Write-Host "Get-CimInstance could not read the service's logon account ($($_.Exception.Message)) - falling back to sc.exe qc." -ForegroundColor Yellow
+    $qc = & sc.exe qc $serviceName 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        $match = $qc | Select-String -Pattern '^\s*SERVICE_START_NAME\s*:\s*(\S.*?)\s*$'
+        if ($match) { $startName = $match.Matches[0].Groups[1].Value }
+    }
+}
+
+if ($startName) {
+    if ($startName -eq 'LocalSystem') { $serviceAccount = 'NT AUTHORITY\SYSTEM' }
+    else { $serviceAccount = $startName -replace '^\.\\', "$env:COMPUTERNAME\" }
+}
+elseif ($existing) {
+    Fail @"
+Could not determine which account service '$serviceName' logs on as, and it already existed before this run.
+Assuming the default virtual account would re-ACL darling.json around 'NT SERVICE\$serviceName' and strip the
+grant of whatever domain account or gMSA the service was re-homed to (#1802, #1823), locking it out of its own
+config on the next start - so this install stops here instead. Nothing was ACLed; the service is stopped with
+its binPath already updated.
+
+Check the account, then re-run this script:
+  sc.exe qc $serviceName
+"@
+}
+else {
+    Write-Host "Could not determine the service's logon account; using the virtual account 'NT SERVICE\$serviceName' that sc create just set." -ForegroundColor Yellow
 }
 
 # -- 4b. Lock down darling.json (#1647) -----------------------------------------------------------

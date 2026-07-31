@@ -172,11 +172,12 @@ public class DataRootMigrationTests
     }
 
     /// <summary>
-    /// Both roots complete: the new root is the live one and the old copy is stale. Nothing moves, nothing
-    /// is overwritten, and no signpost is planted over a folder we did not touch.
+    /// Both roots complete: the new root is the live one and the old copy is stale. Nothing in the new root
+    /// is touched — but the stale copy does not get to stay in the install directory either, because that
+    /// is the folder Setup.exe deletes (#1842 review). It is quarantined under the new root instead.
     /// </summary>
     [Fact]
-    public void Migrate_LeavesBothAlone_WhenTheNewRootAlreadyHasAStore()
+    public void Migrate_QuarantinesTheStaleCopy_WhenTheNewRootAlreadyHasAStore()
     {
         var parent = NewTempDir("both");
         try
@@ -192,19 +193,72 @@ public class DataRootMigrationTests
 
             Assert.Equal(DataRootMigrationStatus.AlreadyMigrated, result.Status);
             Assert.Empty(result.Moved);
+            Assert.Empty(result.Kept);
 
             /* The new root's copies win, untouched. */
             Assert.Equal("current-duckdb", File.ReadAllText(Path.Combine(target, "monitor.duckdb")));
             Assert.Equal("{\"alerts_enabled\":false}", File.ReadAllText(Path.Combine(target, "config", "settings.json")));
 
-            /* And the old root is left exactly as it was, including the artifacts the new root lacks. */
-            Assert.Equal("duckdb-bytes", File.ReadAllText(Path.Combine(legacy, "monitor.duckdb")));
-            Assert.True(Directory.Exists(Path.Combine(legacy, "archive")));
-            Assert.True(File.Exists(Path.Combine(legacy, "alert_state.json")));
-            Assert.False(File.Exists(Path.Combine(legacy, DataRootMigration.MarkerFileName)));
+            /* Every one of ours is out of the deletable folder and readable in the quarantine. */
+            var rescueDir = Path.Combine(target, DataRootMigration.RescuedDirName);
+            Assert.Equal("duckdb-bytes", File.ReadAllText(Path.Combine(rescueDir, "monitor.duckdb")));
+            Assert.Equal("archive-bytes", File.ReadAllText(Path.Combine(rescueDir, "archive", "2026-07.parquet")));
+            Assert.Equal("{\"alerts_enabled\":true}", File.ReadAllText(Path.Combine(rescueDir, "config", "settings.json")));
+            Assert.True(File.Exists(Path.Combine(rescueDir, "alert_state.json")));
+            Assert.False(File.Exists(Path.Combine(legacy, "monitor.duckdb")));
+            Assert.False(Directory.Exists(Path.Combine(legacy, "archive")));
 
-            /* Silence here would strand data with no way to find out - the skip has to say so. */
+            /* A stale archive\ must NOT quietly become the live install's archive just because the new root
+               happened not to have one - that is why this path quarantines rather than merges. */
+            Assert.False(Directory.Exists(Path.Combine(target, "archive")));
+            Assert.False(File.Exists(Path.Combine(target, "alert_state.json")));
+
+            AssertUpdaterFilesIntact(legacy);
+
+            /* Silence here would strand data with no way to find out - the move has to say so, and the
+               signpost points at where it went. */
             Assert.Single(log);
+            Assert.Contains(rescueDir, File.ReadAllText(Path.Combine(legacy, DataRootMigration.MarkerFileName)), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(parent, true);
+        }
+    }
+
+    /// <summary>
+    /// The failure the #1842 review found: <c>monitor.duckdb</c>'s move fails once, the app opens DuckDB at
+    /// the new root and a fresh EMPTY database appears there, and from then on bare existence reads as
+    /// "already migrated" — with the real multi-gigabyte store still in the folder Setup.exe deletes.
+    /// An empty target has nothing to lose, so the real store takes its place.
+    /// </summary>
+    [Fact]
+    public void Migrate_ReplacesAnEmptyPlaceholder_RatherThanStrandingTheRealArtifact()
+    {
+        var parent = NewTempDir("placeholder");
+        try
+        {
+            var legacy = Path.Combine(parent, "PerformanceMonitorLite");
+            var target = Path.Combine(parent, "PerformanceMonitorLite-Data");
+            PopulateLegacyRoot(legacy);
+
+            /* What last session left behind: a zero-byte store file and an empty config directory. */
+            WriteFile(target, "monitor.duckdb", "");
+            Directory.CreateDirectory(Path.Combine(target, "config"));
+            var log = new List<string>();
+
+            var result = DataRootMigration.Migrate(legacy, target, log.Add);
+
+            Assert.Equal(DataRootMigrationStatus.Migrated, result.Status);
+            Assert.Contains("monitor.duckdb", result.Moved);
+            Assert.Contains("config", result.Moved);
+            Assert.Empty(result.Kept);
+            Assert.Empty(result.Rescued);
+
+            Assert.Equal("duckdb-bytes", File.ReadAllText(Path.Combine(target, "monitor.duckdb")));
+            Assert.Equal("{\"alerts_enabled\":true}", File.ReadAllText(Path.Combine(target, "config", "settings.json")));
+            Assert.False(File.Exists(Path.Combine(legacy, "monitor.duckdb")));
+            AssertUpdaterFilesIntact(legacy);
         }
         finally
         {
@@ -265,11 +319,62 @@ public class DataRootMigrationTests
             Assert.Equal("duckdb-bytes", File.ReadAllText(Path.Combine(target, "monitor.duckdb")));
             Assert.False(File.Exists(Path.Combine(legacy, "monitor.duckdb")));
 
-            /* The already-landed config is NOT clobbered by the old one, and the old one is left behind. */
+            /* The already-landed config is NOT clobbered by the old one - but the old one does not stay in
+               the install directory either; it is quarantined where Setup.exe cannot reach it. */
             Assert.Equal("{\"already\":\"moved\"}", File.ReadAllText(Path.Combine(target, "config", "settings.json")));
-            Assert.Contains("config", result.Kept);
-            Assert.True(File.Exists(Path.Combine(legacy, "config", "settings.json")));
+            Assert.Contains("config", result.Rescued);
+            Assert.Empty(result.Kept);
+            Assert.False(Directory.Exists(Path.Combine(legacy, "config")));
+            Assert.Equal(
+                "{\"alerts_enabled\":true}",
+                File.ReadAllText(Path.Combine(target, DataRootMigration.RescuedDirName, "config", "settings.json")));
 
+            AssertUpdaterFilesIntact(legacy);
+        }
+        finally
+        {
+            Directory.Delete(parent, true);
+        }
+    }
+
+    /// <summary>
+    /// The likelier half of the #1842 review's finding: <c>config\</c>'s move fails, and <c>App.xaml.cs</c>
+    /// runs <c>ConfigSeeder.SeedMissing</c> straight afterwards regardless, filling a NEW config directory
+    /// at the new root with defaults that do not include <c>settings.json</c>. That directory is not empty,
+    /// so it is not a placeholder — but the user's real settings must still leave the deletable folder.
+    /// </summary>
+    [Fact]
+    public void Migrate_RescuesTheRealConfig_WhenASeededStandInTookItsPlace()
+    {
+        var parent = NewTempDir("seeded");
+        try
+        {
+            var legacy = Path.Combine(parent, "PerformanceMonitorLite");
+            var target = Path.Combine(parent, "PerformanceMonitorLite-Data");
+            PopulateLegacyRoot(legacy);
+
+            /* What ConfigSeeder leaves: the defaults it knows about, and no settings.json. */
+            WriteFile(target, Path.Combine("config", "ignored_waits.json"), "[]");
+            var log = new List<string>();
+
+            var result = DataRootMigration.Migrate(legacy, target, log.Add);
+
+            Assert.Equal(DataRootMigrationStatus.Migrated, result.Status);
+            Assert.Equal(new[] { "config" }, result.Rescued);
+            Assert.Empty(result.Kept);
+
+            /* The stand-in stays live, untouched... */
+            Assert.Equal("[]", File.ReadAllText(Path.Combine(target, "config", "ignored_waits.json")));
+            Assert.False(File.Exists(Path.Combine(target, "config", "settings.json")));
+
+            /* ...and the real settings are out of the install directory and still readable. */
+            Assert.Equal(
+                "{\"alerts_enabled\":true}",
+                File.ReadAllText(Path.Combine(target, DataRootMigration.RescuedDirName, "config", "settings.json")));
+            Assert.False(Directory.Exists(Path.Combine(legacy, "config")));
+
+            /* Everything that did not collide migrated normally. */
+            Assert.Contains("monitor.duckdb", result.Moved);
             AssertUpdaterFilesIntact(legacy);
         }
         finally

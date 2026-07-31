@@ -2428,7 +2428,7 @@ LIMIT 1", connection);
     /// The engine's live-msdb failed-jobs feed: runs the shared <see cref="FailedJobsQuery"/> on
     /// the monitored server's own connection. Gated !IsAzureSqlDb (the engine also gates on the
     /// snapshot; there is deliberately NO msdb-access probe — Phase-5 review F11) and degrades
-    /// exactly like the Dashboard's caller: a login without msdb / SQLAgentReaderRole access
+    /// exactly like the Dashboard's caller: a login that cannot SELECT the msdb job tables
     /// raises SqlException 229/297/300/916 → Info + empty list; any other failure → Warning +
     /// empty list — a permission gap or transient error never fails the alert cycle.
     /// </summary>

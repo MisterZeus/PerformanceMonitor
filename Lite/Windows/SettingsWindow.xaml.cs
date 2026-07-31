@@ -709,9 +709,11 @@ public partial class SettingsWindow : Window
         AlertCpuThresholdBox.Text = "80";
         AlertCpuModeBox.SelectedIndex = 0; // Total
         AlertBlockingThresholdBox.Text = "1";
+        AlertBlockingWaitSecondsBox.Text = "0";
         AlertDeadlockThresholdBox.Text = "1";
         AlertPoisonWaitThresholdBox.Text = "500";
         AlertLongRunningQueryThresholdBox.Text = "30";
+        AlertLongRunningQueryMaxResultsBox.Text = "5";
         AlertTempDbSpaceThresholdBox.Text = "80";
         AlertLowDiskThresholdPercentBox.Text = "10";
         AlertLowDiskThresholdGbBox.Text = "5";
@@ -745,7 +747,12 @@ public partial class SettingsWindow : Window
             parts.Add($"{cpuLabel} > {AlertCpuThresholdBox.Text}%");
         }
         if (AlertBlockingCheckBox.IsChecked == true)
+        {
             parts.Add($"blocking >= {AlertBlockingThresholdBox.Text}");
+            /* #1839: only summarize the wait gate when it is actually on (0 = off). */
+            if (int.TryParse(AlertBlockingWaitSecondsBox.Text, out var blockingWaitPreview) && blockingWaitPreview > 0)
+                parts.Add($"blocked wait >= {blockingWaitPreview}s");
+        }
         if (AlertDeadlockCheckBox.IsChecked == true)
             parts.Add($"deadlocks >= {AlertDeadlockThresholdBox.Text}");
         if (AlertPoisonWaitCheckBox.IsChecked == true)
@@ -775,12 +782,14 @@ public partial class SettingsWindow : Window
         AlertCpuModeBox.IsEnabled = enabled;
         AlertBlockingCheckBox.IsEnabled = enabled;
         AlertBlockingThresholdBox.IsEnabled = enabled;
+        AlertBlockingWaitSecondsBox.IsEnabled = enabled;
         AlertDeadlockCheckBox.IsEnabled = enabled;
         AlertDeadlockThresholdBox.IsEnabled = enabled;
         AlertPoisonWaitCheckBox.IsEnabled = enabled;
         AlertPoisonWaitThresholdBox.IsEnabled = enabled;
         AlertLongRunningQueryCheckBox.IsEnabled = enabled;
         AlertLongRunningQueryThresholdBox.IsEnabled = enabled;
+        AlertLongRunningQueryMaxResultsBox.IsEnabled = enabled;
         AlertTempDbSpaceCheckBox.IsEnabled = enabled;
         AlertTempDbSpaceThresholdBox.IsEnabled = enabled;
         AlertLowDiskCheckBox.IsEnabled = enabled;

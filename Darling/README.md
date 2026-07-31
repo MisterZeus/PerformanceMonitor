@@ -265,7 +265,7 @@ Notes:
 
 - **Azure SQL DB** is the most restricted target: the six `!IsAzureSqlDb` collectors read server-scoped DMVs or on-disk artifacts that do not exist there, and the SQL Agent collectors have no Agent to read. Nothing about that is a permission problem, so it is not reported as one.
 - **AWS RDS** blocks direct `msdb` job reads specifically; the rest of the SQL Agent surface is unaffected.
-- **`HasMsdbAccess`** is probed per server at connect (`HAS_DBACCESS('msdb')`), so losing the `SQLAgentReaderRole` grant later moves those collectors from running to skipped without an error storm.
+- **`HasMsdbAccess`** is probed per server at connect and is exactly `HAS_DBACCESS('msdb')` — *any* access to msdb, not a specific role or table grant. Losing msdb access later moves those collectors from running to skipped without an error storm. A login that can enter msdb but lacks `SELECT` on the job tables passes this probe and is caught one layer down as a `PERMISSIONS` skip instead.
 - An unknown version (`SqlMajorVersion == 0`, i.e. detection has not completed yet) is treated as capable rather than skipped, so a collector is never silently dropped because a probe was slow.
 
 If a tab or column is empty and you expect data, check **Collection Health**: a collector skipped for platform reasons shows no runs at all, whereas one denied by permissions logs `PERMISSIONS` and is classified `NO_PERMISSIONS`. Those are different problems with different fixes — the first is expected on that platform, the second is a grant to add from the table above.
@@ -600,7 +600,7 @@ A monitored server that is down is retried every 60 seconds forever; a collector
 
 **`PERMISSIONS` rows in `collection_log`** — that collector's reads were denied (SQL errors 229/297/300). Check the [permissions](#permissions-on-monitored-servers); the collector retries every cycle and recovers as soon as the grant lands.
 
-**"Skipping recently-failed-job check"** (info) — the login has no msdb / `SQLAgentReaderRole` access, so failed-job alerts are skipped. Expected for minimal-privilege monitoring logins; grant the role if you want job alerts.
+**"Skipping recently-failed-job check"** (info) — the login cannot read `msdb.dbo.sysjobs` / `sysjobhistory`, so failed-job alerts are skipped. Expected for minimal-privilege monitoring logins. If you want job alerts, add the direct msdb table `SELECT`s from the [permissions](#permissions-on-monitored-servers) section — **not** `SQLAgentReaderRole`, which gates the `sp_help_job*` procedures this product never calls and leaves the reads failing with error 229.
 
 **"TimescaleDB setup failed — continuing in plain-PostgreSQL mode"** (warning) — the extension exists but conversion hit a problem. Everything still works (DELETE-based retention, plain tables); conversion is retried on the next service start.
 
