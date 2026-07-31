@@ -53,32 +53,65 @@ public sealed class MainWindowAccessKeyTests
     private const string KeyedControls =
         "Button|CheckBox|RadioButton|Label|ToggleButton|GroupBox|Expander|TabItem|MenuItem|DataGridColumnHeader";
 
-    /// <summary>Lite's main window plus every tab content it hosts.</summary>
-    private static readonly string[] s_liteScope =
-    [
-        @"Lite\MainWindow.xaml",
-        @"Lite\Controls\ServerTab.xaml",
-        @"Lite\Controls\FinOpsTab.xaml",
-        @"Lite\Controls\AlertsHistoryTab.xaml",
-        @"Lite\Controls\JobHistoryTab.xaml",
-        @"Lite\Controls\RecommendationsTab.xaml",
-    ];
+    private const string LiteWindow = "Lite/MainWindow.xaml";
+    private const string LiteControls = "Lite/Controls";
+    private const string DarlingWindow = "Darling/PerformanceMonitor.Darling.Viewer/MainWindow.xaml";
+    private const string DarlingControls = "Darling/PerformanceMonitor.Darling.Viewer";
 
-    private static readonly string[] s_darlingScope =
-    [
-        @"Darling\PerformanceMonitor.Darling.Viewer\MainWindow.xaml",
-        @"Darling\PerformanceMonitor.Darling.Viewer\ViewerServerTab.xaml",
-    ];
+    /// <summary>
+    /// The tab bodies hosted from CODE rather than declared in the window's markup, so the derivation below
+    /// cannot see them: both apps build their per-server tabs at runtime (Lite's <c>MainWindow.xaml.cs</c>
+    /// news up a <c>ServerTab</c> per connected server and adds it to <c>ServerTabControl</c>). Named
+    /// explicitly because they are the whole reason this issue exists.
+    /// </summary>
+    private static readonly Dictionary<string, string> s_dynamicallyHostedTab = new(StringComparer.Ordinal)
+    {
+        ["Lite"] = "Lite/Controls/ServerTab.xaml",
+        ["Darling"] = "Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.xaml",
+    };
+
+    /// <summary>
+    /// Every XAML file in one app's main-window access-key scope: the window itself, plus each
+    /// <c>UserControl</c> it hosts.
+    ///
+    /// <para><b>Derived from the markup, not hand-listed</b>, because the hand-list was wrong when this test
+    /// was first written — it missed all four of Darling's hosted tabs AND Lite's own
+    /// <c>AvailabilityGroupsTab</c>. A list of file names maintained by hand is a list that silently stops
+    /// matching what the window hosts, and an audit that quietly stops looking is worse than no audit: it
+    /// reports success over the gap. Converters and template selectors share the same XML namespace prefix
+    /// and fall out for free, having no <c>.xaml</c> of their own.</para>
+    /// </summary>
+    private static List<string> ScopeFiles(string app)
+    {
+        var windowPath = app == "Lite" ? LiteWindow : DarlingWindow;
+        var controlsDir = app == "Lite" ? LiteControls : DarlingControls;
+        var prefix = app == "Lite" ? "controls" : "local";
+
+        var files = new List<string> { windowPath };
+
+        foreach (Match hosted in Regex.Matches(ParitySource.ReadFile(windowPath), $@"<{prefix}:(\w+)\b"))
+        {
+            var candidate = $"{controlsDir}/{hosted.Groups[1].Value}.xaml";
+            if (File.Exists(Path.Combine(ParitySource.RepoRoot(), candidate.Replace('/', Path.DirectorySeparatorChar)))
+                && !files.Contains(candidate, StringComparer.Ordinal))
+            {
+                files.Add(candidate);
+            }
+        }
+
+        files.Add(s_dynamicallyHostedTab[app]);
+        return files;
+    }
 
     [Fact]
     public void TheThreeInTabCheckboxes_CarryTheirAgreedMnemonics()
     {
-        Assert.Contains("Content=\"_Auto-refresh\"", ReadRepoFile(@"Lite\Controls\ServerTab.xaml"), StringComparison.Ordinal);
-        Assert.Contains("Content=\"_Auto-refresh\"", ReadRepoFile(@"Darling\PerformanceMonitor.Darling.Viewer\ViewerServerTab.xaml"), StringComparison.Ordinal);
+        Assert.Contains("Content=\"_Auto-refresh\"", ParitySource.ReadFile("Lite/Controls/ServerTab.xaml"), StringComparison.Ordinal);
+        Assert.Contains("Content=\"_Auto-refresh\"", ParitySource.ReadFile("Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.xaml"), StringComparison.Ordinal);
 
         /* D, not A: see the class remarks — the FinOps and server tabs cannot be on screen together, but the
            letters must not DEPEND on that. */
-        Assert.Contains("Content=\"All _Databases\"", ReadRepoFile(@"Lite\Controls\FinOpsTab.xaml"), StringComparison.Ordinal);
+        Assert.Contains("Content=\"All _Databases\"", ParitySource.ReadFile("Lite/Controls/FinOpsTab.xaml"), StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -88,8 +121,8 @@ public sealed class MainWindowAccessKeyTests
     [Fact]
     public void BothApps_UseTheSameKeyForAutoRefresh()
     {
-        var lite = AutoRefreshContent(ReadRepoFile(@"Lite\Controls\ServerTab.xaml"));
-        var darling = AutoRefreshContent(ReadRepoFile(@"Darling\PerformanceMonitor.Darling.Viewer\ViewerServerTab.xaml"));
+        var lite = AutoRefreshContent(ParitySource.ReadFile("Lite/Controls/ServerTab.xaml"));
+        var darling = AutoRefreshContent(ParitySource.ReadFile("Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.xaml"));
 
         Assert.Equal(lite, darling);
         Assert.Equal('A', AccessKeyOf(lite));
@@ -100,15 +133,21 @@ public sealed class MainWindowAccessKeyTests
     [InlineData("Darling")]
     public void NothingInTheMainWindowScope_CollidesWithTheTabContentKeys(string app)
     {
-        var files = app == "Lite" ? s_liteScope : s_darlingScope;
-        var chrome = MainWindowScopeKeys(ReadRepoFile(files[0]));
+        var files = ScopeFiles(app);
+
+        /* Self-validating: a namespace-prefix rename would otherwise empty the derivation and turn this
+           audit green by looking at nothing. Both apps host at least the per-server tab plus FinOps. */
+        Assert.True(files.Count >= 3, $"{app}: the scope derivation found only {files.Count} file(s) — it has stopped seeing the hosted tabs.");
+        Assert.Contains(s_dynamicallyHostedTab[app], files, StringComparer.Ordinal);
+
+        var chrome = MainWindowScopeKeys(ParitySource.ReadFile(files[0]));
 
         /* Within the always-visible shell: no duplicates. */
         AssertNoDuplicates($"{app} main-window chrome", chrome);
 
         foreach (var tabFile in files.Skip(1))
         {
-            var tab = MainWindowScopeKeys(ReadRepoFile(tabFile));
+            var tab = MainWindowScopeKeys(ParitySource.ReadFile(tabFile));
             var name = Path.GetFileName(tabFile);
 
             /* Within one tab's content: no duplicates. */
@@ -264,19 +303,4 @@ public sealed class MainWindowAccessKeyTests
         return result;
     }
 
-    private static string ReadRepoFile(string relativePath)
-    {
-        var dir = AppContext.BaseDirectory;
-        for (var i = 0; i < 8 && dir is not null; i++)
-        {
-            var candidate = Path.Combine(dir, relativePath);
-            if (File.Exists(candidate))
-            {
-                return File.ReadAllText(candidate);
-            }
-            dir = Path.GetDirectoryName(dir);
-        }
-
-        throw new FileNotFoundException($"Could not locate {relativePath} walking up from {AppContext.BaseDirectory}");
-    }
 }
