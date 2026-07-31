@@ -261,6 +261,57 @@ public class DataRootMigrationTests
     }
 
     /// <summary>
+    /// The per-item loop's twin of <see cref="Migrate_EveryRescueFails_SaysSoInsteadOfClaimingAMove"/>, which
+    /// only covered the already-populated branch. Every artifact collides with real content AND every rescue
+    /// then fails, so moved/rescued/failed are all empty and only <c>kept</c> is not - a shape that used to
+    /// hit an early return before the summary log ran.
+    ///
+    /// <para>Not TOTAL silence, as the review had it: <c>TryRescue</c> logs its own per-item failure either
+    /// way. What the early return skipped is the line that says what to DO about it - that these are still in
+    /// the folder Setup.exe deletes and want copying somewhere safe - which is the only actionable part and
+    /// the only one that names the whole set. So the assertion is on that summary specifically; asserting
+    /// merely that something was logged passes with the bug still in place, which is how this test was
+    /// written the first time.</para>
+    /// </summary>
+    [Fact]
+    public void Migrate_EveryItemCollidesAndEveryRescueFails_StillSaysWhatIsStillHere()
+    {
+        var parent = NewTempDir("silentstrand");
+        try
+        {
+            var legacy = Path.Combine(parent, "PerformanceMonitorLite");
+            var target = Path.Combine(parent, "PerformanceMonitorLite-Data");
+
+            /* One pending artifact, colliding with real content, and its quarantine name already taken. */
+            WriteFile(legacy, Path.Combine("config", "settings.json"), "{\"alerts_enabled\":true}");
+            WriteFile(legacy, "Update.exe", "velopack");
+            WriteFile(target, Path.Combine("config", "ignored_waits.json"), "[]");
+            WriteFile(target, Path.Combine(DataRootMigration.RescuedDirName, "config", "taken.json"), "x");
+
+            var log = new List<string>();
+            var result = DataRootMigration.Migrate(legacy, target, log.Add);
+
+            Assert.Equal(DataRootMigrationStatus.AlreadyMigrated, result.Status);
+            Assert.Equal(new[] { "config" }, result.Kept);
+            Assert.Empty(result.Moved);
+            Assert.Empty(result.Rescued);
+
+            /* The actionable summary must run even though nothing moved, rescued, or failed. */
+            Assert.Contains(log, line => line.Contains("Left in", StringComparison.Ordinal)
+                                      && line.Contains(legacy, StringComparison.Ordinal)
+                                      && line.Contains("config", StringComparison.Ordinal)
+                                      && line.Contains("Setup.exe deletes that folder", StringComparison.Ordinal));
+
+            /* And the data really is still sitting there, which is why the log matters. */
+            Assert.True(File.Exists(Path.Combine(legacy, "config", "settings.json")));
+        }
+        finally
+        {
+            Directory.Delete(parent, true);
+        }
+    }
+
+    /// <summary>
     /// The multi-LAUNCH hole (#1842 review, second pass). Launch 1 relocates some artifacts and fails on one,
     /// so it writes a marker naming what is still here. Launch 2 sees only the leftover pending, finishes it,
     /// and rewrites the marker - which must still name what launch 1 relocated, even though launch 2's own

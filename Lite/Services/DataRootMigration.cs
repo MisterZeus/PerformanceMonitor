@@ -236,15 +236,10 @@ internal static class DataRootMigration
                 }
             }
 
-            if (moved.Count == 0 && rescued.Count == 0 && failed.Count == 0)
-            {
-                return new DataRootMigrationResult
-                {
-                    Status = DataRootMigrationStatus.AlreadyMigrated,
-                    Kept = kept
-                };
-            }
-
+            /* Every arm logs BEFORE any early return. A run where each artifact collided and each rescue
+               then failed leaves moved/rescued/failed all empty and kept full — and returning on that
+               emptiness without saying so would strand real data in the deletable folder in total silence,
+               which is the failure this whole class exists to prevent. */
             if (moved.Count > 0)
             {
                 log($"Moved Lite's data out of the install directory '{legacyRoot}' and into '{newRoot}' (#1832): " +
@@ -264,6 +259,15 @@ internal static class DataRootMigration
                 log($"Left in '{legacyRoot}' because '{newRoot}' already had a copy and the old one could not be " +
                     $"moved aside: {string.Join(", ", kept)}. Copy them somewhere safe by hand - re-running " +
                     "Setup.exe deletes that folder.");
+            }
+
+            if (moved.Count == 0 && rescued.Count == 0 && failed.Count == 0)
+            {
+                return new DataRootMigrationResult
+                {
+                    Status = DataRootMigrationStatus.AlreadyMigrated,
+                    Kept = kept
+                };
             }
 
             /* Written as soon as anything leaves this folder, whether it went live or into the quarantine.
@@ -290,11 +294,15 @@ internal static class DataRootMigration
                 $"anything left in '{legacyRoot}' is untouched.");
             return new DataRootMigrationResult
             {
-                Status = failed.Count > 0 || moved.Count > 0
+                /* Rescued counts as progress here exactly like Moved: an artifact already relocated before
+                   the throw really did leave the legacy root, and reporting it empty would understate what
+                   happened on the one path where the caller has least information. */
+                Status = failed.Count > 0 || moved.Count > 0 || rescued.Count > 0
                     ? DataRootMigrationStatus.PartiallyMigrated
                     : DataRootMigrationStatus.NothingToMigrate,
                 Moved = moved,
                 Kept = kept,
+                Rescued = rescued,
                 Failed = failed
             };
         }
