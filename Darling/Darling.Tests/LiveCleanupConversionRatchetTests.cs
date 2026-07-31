@@ -42,10 +42,12 @@ public sealed class LiveCleanupConversionRatchetTests
     ///
     /// <para>126 when #1902 was filed; 87 after batch one (the config-writing and server-registering classes,
     /// which were the highest blast radius — a leaked <c>config_mute_rules</c> row mutes another test's alerts
-    /// and a leaked <c>collect.servers</c> row is a phantom server in every fleet read). Batches two and three
-    /// take the rest.</para>
+    /// and a leaked <c>collect.servers</c> row is a phantom server in every fleet read); 19 after batch two,
+    /// which took the whole <c>Viewer*</c> read-path family. What is left is the Darling engine classes,
+    /// including the one teardown that cleans up through an <c>NpgsqlDataSource</c> rather than a connection —
+    /// deliberately isolated into batch three rather than buried in a sixty-eight-site diff.</para>
     /// </summary>
-    private const int Ceiling = 87;
+    private const int Ceiling = 19;
 
     [Fact]
     public void UnconvertedLiveTeardowns_NeverExceedTheRatchet()

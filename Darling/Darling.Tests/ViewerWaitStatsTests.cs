@@ -233,10 +233,11 @@ public sealed class ViewerWaitStatsLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteWaitRowsAsync(connection);
+        await DeleteWaitRowsAsync(connection, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
@@ -250,10 +251,13 @@ public sealed class ViewerWaitStatsLivePostgresTests
             var types = await viewer.GetDistinctWaitTypesAsync(WaitServerId, t1.AddMinutes(-1), t2.AddMinutes(1));
 
             Assert.Equal(new[] { "CXPACKET", "WRITELOG" }, types);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteWaitRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteWaitRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -267,10 +271,11 @@ public sealed class ViewerWaitStatsLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteWaitRowsAsync(connection);
+        await DeleteWaitRowsAsync(connection, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
@@ -301,10 +306,13 @@ public sealed class ViewerWaitStatsLivePostgresTests
             Assert.Equal(2.0, cx[1].WaitTimeMsPerSecond, precision: 3);
             Assert.Equal(0.2, cx[1].SignalWaitTimeMsPerSecond, precision: 3);
             Assert.Equal(200.0, cx[1].AvgMsPerWait, precision: 3);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteWaitRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteWaitRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -332,10 +340,10 @@ VALUES ($1, $2, $3, $4, $5, 0, 0, 0, $6, $7, $8)", connection);
     private static DateTime TruncateToSeconds(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
 
-    private static async Task DeleteWaitRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteWaitRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM wait_stats WHERE server_id = {WaitServerId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

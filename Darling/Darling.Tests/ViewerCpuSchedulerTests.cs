@@ -310,10 +310,11 @@ public sealed class ViewerCpuSchedulerLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteAsync(connection, ServerId);
+        await DeleteAsync(connection, ServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
@@ -334,10 +335,13 @@ public sealed class ViewerCpuSchedulerLivePostgresTests
             Assert.Equal(t2.Ticks, snapshot!.CollectionTime.Ticks);
             Assert.Equal(9, snapshot.TotalRunnableTasksCount);
             Assert.True(snapshot.WorkerThreadExhaustionWarning);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteAsync(connection, ServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteAsync(cleanup, ServerId, cleanupCt));
         }
     }
 
@@ -373,9 +377,9 @@ VALUES ($1, $2, $3, $4, 512, 8, 8, $5, 0, 128, 0.5, 2, $6, $7, 0, 3, 20, 12.5,
     private static DateTime TruncateToSeconds(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
 
-    private static async Task DeleteAsync(NpgsqlConnection connection, int serverId)
+    private static async Task DeleteAsync(NpgsqlConnection connection, int serverId, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand($"DELETE FROM cpu_scheduler_stats WHERE server_id = {serverId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

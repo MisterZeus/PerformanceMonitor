@@ -449,10 +449,11 @@ public sealed class ViewerFleetRollupLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteFleetRowsAsync(connection);
+        await DeleteFleetRowsAsync(connection, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var at = WindowAnchor;
@@ -478,10 +479,13 @@ public sealed class ViewerFleetRollupLivePostgresTests
             Assert.Equal(5, totals.TotalBlockingEvents);
             /* Fleet deadlocks = 1 + 2 = 3. */
             Assert.Equal(3, totals.TotalDeadlocks);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteFleetRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteFleetRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -526,13 +530,13 @@ public sealed class ViewerFleetRollupLivePostgresTests
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 
-    private static async Task DeleteFleetRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteFleetRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         foreach (var table in new[] { "blocked_process_reports", "dmv_blocking_snapshots", "deadlocks" })
         {
             using var cleanup = new NpgsqlCommand(
                 $"DELETE FROM {table} WHERE server_id IN ({XeServerId}, {DmvServerId});", connection);
-            await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            await cleanup.ExecuteNonQueryAsync(ct);
         }
     }
 }
