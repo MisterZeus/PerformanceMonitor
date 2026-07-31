@@ -863,7 +863,7 @@ $do$";
 
     /// <summary>The Query Store DAILY continuous aggregate — hierarchical from <see cref="QueryStoreStatsHourlyView"/>,
     /// same composer dims (module_name / query_hash) + weighted sums. Kept indefinitely; a QS window past the
-    /// hourly's 21d horizon routes here.</summary>
+    /// hourly's horizon routes here.</summary>
     public const string QueryStoreStatsDailyView = "query_store_stats_daily";
 
     /// <summary>
@@ -1022,7 +1022,7 @@ WITH NO DATA";
     /// The per-DATABASE query_stats rollup (#1661). Added rather than folded into
     /// <see cref="CreateQueryStatsHourlySql"/> deliberately: TimescaleDB cannot ALTER columns into a continuous
     /// aggregate, so widening that one would mean DROP + recreate, and now that retention is active the rebuild
-    /// would re-materialize from 4 days of raw and permanently destroy the 21-day hourly and indefinite daily
+    /// would re-materialize from 4 days of raw and permanently destroy the retained hourly and indefinite daily
     /// history the tiers exist to preserve. A NEW aggregate costs nothing existing; its history simply starts
     /// accumulating from deploy.
     ///
@@ -1156,7 +1156,7 @@ WITH NO DATA";
 
        WHY THREE NEW OBJECTS INSTEAD OF FIXING THE TWO ABOVE. A continuous aggregate's columns cannot be
        ALTERed, so reshaping means DROP + recreate — and with retention active the rebuild re-materializes
-       from 4 days of raw and PERMANENTLY DESTROYS the 21-day hourly and indefinite daily history (the same
+       from 4 days of raw and PERMANENTLY DESTROYS the retained hourly and indefinite daily history (the same
        reason CreateQueryStatsDbHourlySql was added rather than folded in). Per #1759/#1793 materialized
        history is never destroyed, so the corrected rollups are NEW objects alongside; the old pair keeps its
        identity, data, retention and jobs, and still answers windows the corrected tier has not reached.
@@ -1614,10 +1614,24 @@ WITH NO DATA";
     /// refresh window, so the raw drop never outruns the aggregate that preserves it.</summary>
     public const string RawRetentionInterval = "4 days";
 
-    /// <summary>Hourly-CAGG-tier retention horizon: keep the hourly rollups 21 days — well past the daily CAGG's
+    /// <summary>Hourly-CAGG-tier retention horizon: keep the hourly rollups 90 days — well past the daily CAGG's
     /// 3-day refresh window, so the hourly drop never outruns the daily aggregate. The daily CAGGs themselves get
-    /// NO retention policy: they are the coarsened, kept-indefinitely tier.</summary>
-    public const string HourlyRetentionInterval = "21 days";
+    /// NO retention policy: they are the coarsened, kept-indefinitely tier.
+    ///
+    /// <para><b>90, not 21 (#1937).</b> The viewer offers month-plus windows and the reason for the number is
+    /// entirely about what those windows can RENDER: at 21 days a 30-day view finds three weeks of hourly data
+    /// and nothing before it, so the rest of the range either empties out or drops to daily grain partway
+    /// through. That is structural rather than a lag — no amount of waiting fixes it — and 90 covers
+    /// quarter-scale windows with room rather than exactly. Deliberately NOT a Lite-parity argument: Lite's
+    /// query family defaults to 30 days of raw and its long tier is the parquet archive at full grain, so
+    /// "match Lite" would be the wrong reason written down.</para>
+    ///
+    /// <para><b>Changing this number is not enough on its own</b>, in two ways that have both drawn blood.
+    /// Reads route on <see cref="RetentionTierRouter.HourlyMaxAge"/>, which is derived from the twin below
+    /// precisely so this cannot be raised without the router following. And stores that already have a policy
+    /// keep their old horizon unless the sweep converges it — see
+    /// <see cref="ConvergeRetentionHorizonSql"/>.</para></summary>
+    public const string HourlyRetentionInterval = "90 days";
 
     /// <summary>
     /// Retention horizon for the INTERVAL-grain dedup layer (#1849): keep
@@ -1688,8 +1702,10 @@ WITH NO DATA";
     public static readonly TimeSpan IntervalDailyRetentionSpan = TimeSpan.FromDays(10);
 
     /// <summary><see cref="TimeSpan"/> twin of <see cref="HourlyRetentionInterval"/>; pinned equal by
-    /// RetentionTierRouterTests and by the all-five sweep in TimescaleContinuousAggregateTests (#1905).</summary>
-    public static readonly TimeSpan HourlyRetentionSpan = TimeSpan.FromDays(21);
+    /// RetentionTierRouterTests and by the all-five sweep in TimescaleContinuousAggregateTests (#1905).
+    /// <see cref="RetentionTierRouter.HourlyMaxAge"/> is derived from this, so the read side cannot be left
+    /// behind when the horizon moves (#1937).</summary>
+    public static readonly TimeSpan HourlyRetentionSpan = TimeSpan.FromDays(90);
 
     /// <summary>
     /// A TimescaleDB retention policy: schedule a background job that DROPs chunks older than
@@ -1727,6 +1743,38 @@ WITH NO DATA";
     /// </summary>
     public static string ArmRetentionPolicySql(string relation)
         => SetRetentionScheduleSql(relation, scheduled: true);
+
+    /// <summary>
+    /// Moves an EXISTING retention policy onto the horizon the constants now name (#1937), and touches nothing
+    /// else about it.
+    ///
+    /// <para><b>Why this has to exist.</b> <c>add_retention_policy(if_not_exists =&gt; true)</c> returns -1 for a
+    /// policy the store already has and changes NOTHING about it — verified against 2.28.1, which additionally
+    /// emits <c>WARNING: retention policy already exists</c> and leaves the old <c>drop_after</c> in place. So
+    /// changing a horizon constant gives fresh installs the new number and leaves every store that already ran
+    /// on the old one, forever. That is the fresh-versus-upgraded drift this project treats as a defect, and
+    /// with the hourly tier it is the difference between a month-scale view rendering and not.</para>
+    ///
+    /// <para><b>Why it is safe to run on every start.</b> The <c>IS DISTINCT FROM</c> guard compares as
+    /// INTERVAL, not text, so a policy already on the right horizon matches nothing and no job is touched —
+    /// this is a no-op on the second and every later start, and on a fresh store the policy was just created
+    /// with the right value. Only <c>config</c> is named, so the job's SCHEDULED state is preserved exactly:
+    /// measured on 2.28.1 against both an armed and a held policy, each kept its state across the update while
+    /// the horizon moved. That is what lets this run BEFORE the coverage gate without disturbing it — a policy
+    /// #1877 is holding paused stays paused, and the #1680 discipline of never exposing an armed window is not
+    /// weakened, because this statement cannot arm anything.</para>
+    ///
+    /// <para><c>next_start</c> is left alone too, and measurably does not jump to now: the armed policy's next
+    /// run stayed one schedule interval out across the update, so converging a horizon never triggers an
+    /// immediate purge.</para>
+    /// </summary>
+    public static string ConvergeRetentionHorizonSql(string relation)
+        => $@"SELECT alter_job(j.job_id, config => jsonb_set(j.config, '{{drop_after}}', to_jsonb($1::text)))
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '{relation}'
+AND   (j.config->>'drop_after')::interval IS DISTINCT FROM $1::interval";
 
     /// <summary>
     /// Re-holds a retention policy that is ALREADY ARMED (#1877). The mirror of
@@ -2017,7 +2065,7 @@ AND   j.hypertable_name = '{relation}'";
     /// Attaches the tiered retention policies: the three raw tables drop at <see cref="RawRetentionInterval"/>, the
     /// three hourly CAGGs at <see cref="HourlyRetentionInterval"/>; the daily CAGGs are kept indefinitely (no
     /// policy). Ordering safety is by HORIZON, not run order — each tier's drop stays comfortably past the next
-    /// tier's 3-day refresh start_offset (4d raw vs 3d hourly refresh; 21d hourly vs 3d daily refresh), so a drop
+    /// tier's 3-day refresh start_offset (4d raw vs 3d hourly refresh; 90d hourly vs 3d daily refresh), so a drop
     /// never removes history the next tier has not yet materialized. Idempotent (<c>if_not_exists</c>) and
     /// failure-isolated per policy. MUST run AFTER <see cref="EnsureContinuousAggregatesAsync"/> so the hourly
     /// CAGGs the hourly policies target already exist. Returns the number of policies in place.
@@ -2049,6 +2097,7 @@ AND   j.hypertable_name = '{relation}'";
         var armed = 0;
         var held = 0;
         var indeterminate = 0;
+        var converged = 0;
 
         foreach (var (relation, dropAfter, timeColumn, coverage) in RetentionPolicies)
         {
@@ -2085,6 +2134,24 @@ AND   j.hypertable_name = '{relation}'";
                 }
 
                 applied++;
+
+                /* #1937: converge an EXISTING policy onto the current horizon. if_not_exists returned -1 above
+                   for a policy this store already had, leaving whatever drop_after it was created with — so
+                   without this, a horizon change reaches fresh installs only and every upgraded store keeps the
+                   old number permanently. Named config only, so the job's armed/paused state is untouched and
+                   this cannot arm anything the gate below is about to judge. A no-op once converged. */
+                using (var converge = new NpgsqlCommand(ConvergeRetentionHorizonSql(relation), connection) { CommandTimeout = SetupTimeoutSeconds })
+                {
+                    converge.Parameters.AddWithValue(dropAfter);
+                    using var reader = await converge.ExecuteReaderAsync(cancellationToken);
+                    if (await reader.ReadAsync(cancellationToken))
+                    {
+                        converged++;
+                        logger?.LogInformation(
+                            "Retention policy for {Relation} moved to a {DropAfter} horizon - this store was created under an earlier default and kept it, because add_retention_policy does not update a policy that already exists.",
+                            relation, dropAfter);
+                    }
+                }
 
                 var (verdict, shortConsumer) = await MeasureRetentionCoverageAsync(connection, relation, timeColumn, coverage, cancellationToken);
                 if (verdict == RetentionCoverage.Covered)
@@ -2136,8 +2203,8 @@ AND   j.hypertable_name = '{relation}'";
         }
 
         logger?.LogInformation(
-            "TimescaleDB: {Applied}/{Total} retention policies in place, {Armed} armed, {Held} held paused pending backfill, {Indeterminate} left as-is (coverage unreadable) (raw {Raw}, hourly CAGGs {Hourly}; daily CAGGs kept indefinitely)",
-            applied, RetentionPolicies.Count, armed, held, indeterminate, RawRetentionInterval, HourlyRetentionInterval);
+            "TimescaleDB: {Applied}/{Total} retention policies in place, {Armed} armed, {Held} held paused pending backfill, {Indeterminate} left as-is (coverage unreadable), {Converged} moved onto a new horizon (raw {Raw}, hourly CAGGs {Hourly}; daily CAGGs kept indefinitely)",
+            applied, RetentionPolicies.Count, armed, held, indeterminate, converged, RawRetentionInterval, HourlyRetentionInterval);
         return applied;
     }
 

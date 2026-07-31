@@ -2108,7 +2108,7 @@ public static class DarlingCliCommands
     /// than an optimization.</b> A refresh whose range lies entirely within DROPPED raw chunks DESTROYS the
     /// materialization there — with force and without, measured on PG 18.4 + TimescaleDB 2.28.1 and pinned by
     /// <c>QueryStoreSliceRepairLiveTests</c>. Aiming at a nominal "pre-fix period" instead of at the collapsed
-    /// rows' own span would therefore blank the 21-day hourly and the indefinitely-kept daily below raw's
+    /// rows' own span would therefore blank the retained hourly tier and the indefinitely-kept daily below raw's
     /// floor, which is precisely the history #1759/#1793 forbid destroying. Collapsed rows are inside raw's
     /// extent by definition, so deriving the window from them cannot reach under it.</para>
     ///
@@ -2667,7 +2667,7 @@ public static class DarlingCliCommands
         output.WriteLine("  'N/N retention policies in place, N armed, 0 held paused pending backfill'");
         output.WriteLine("is the confirmation; the first purge then reclaims the raw tables in one pass.");
         output.WriteLine();
-        output.WriteLine("Do not delay the restart. The hourly rollups carry their OWN 21-day retention policy, already");
+        output.WriteLine($"Do not delay the restart. The hourly rollups carry their OWN retention policy ({TimescaleSupport.HourlyRetentionInterval}), already");
         output.WriteLine("armed on these stores, which will trim the coverage this run just built when it next fires");
         output.WriteLine("(roughly daily). Restarting now is what lets the raw policies arm off that coverage first. If");
         output.WriteLine("the trim wins the race nothing is lost — raw is still held — and re-running this verb rebuilds it.");

@@ -29,11 +29,14 @@ public sealed class RetentionTierRouterTests
     [InlineData(0, RetentionTier.Raw)]
     [InlineData(1, RetentionTier.Raw)]
     [InlineData(3, RetentionTier.Raw)]
-    /* Past raw's route margin, inside hourly retention. */
+    /* Past raw's route margin, inside hourly retention. 30 is the case #1937 is about: a month-scale window
+       used to land on Daily here, which is what made a 30-day view unrenderable at hourly grain. */
     [InlineData(4, RetentionTier.Hourly)]
     [InlineData(20, RetentionTier.Hourly)]
+    [InlineData(30, RetentionTier.Hourly)]
+    [InlineData(89, RetentionTier.Hourly)]
     /* Past hourly's route margin — only the indefinitely-kept daily CAGG still has it. */
-    [InlineData(21, RetentionTier.Daily)]
+    [InlineData(90, RetentionTier.Daily)]
     [InlineData(400, RetentionTier.Daily)]
     public void Resolve_PicksTierByAgeOfOldestPoint(int ageDays, RetentionTier expected) =>
         Assert.Equal(expected, RetentionTierRouter.Resolve(Now, Now.AddDays(-ageDays)));
@@ -104,18 +107,21 @@ public sealed class RetentionTierRouterTests
     /// (capped); a missing hourly view falls to raw.
     /// </summary>
     [Theory]
-    /* A TimescaleDB store with every rollup — the age decision is unchanged. */
+    /* A TimescaleDB store with every rollup — the age decision is unchanged. 120 days is past the hourly
+       route margin since #1937 (it was 30 before the horizon moved to 90); 30 is kept as its own case because
+       a month-scale window reaching HOURLY is the entire point of that change. */
     [InlineData(1, true, true, RetentionTier.Raw)]
     [InlineData(10, true, true, RetentionTier.Hourly)]
-    [InlineData(30, true, true, RetentionTier.Daily)]
+    [InlineData(30, true, true, RetentionTier.Hourly)]
+    [InlineData(120, true, true, RetentionTier.Daily)]
     /* Plain PostgreSQL — no rollups, raw holds full history: every window is raw. */
     [InlineData(10, false, false, RetentionTier.Raw)]
-    [InlineData(30, false, false, RetentionTier.Raw)]
+    [InlineData(120, false, false, RetentionTier.Raw)]
     /* Partial builds (failure-isolated setup): daily missing → hourly, mirroring
        ComposeSourceRouter's DailyView-is-null rule; hourly missing → raw, the safe floor. */
-    [InlineData(30, true, false, RetentionTier.Hourly)]
+    [InlineData(120, true, false, RetentionTier.Hourly)]
     [InlineData(10, false, true, RetentionTier.Raw)]
-    [InlineData(30, false, true, RetentionTier.Daily)]
+    [InlineData(120, false, true, RetentionTier.Daily)]
     public void Resolve_WithAvailability_DegradesToWhatTheStoreActuallyHas(
         int ageDays, bool hourlyAvailable, bool dailyAvailable, RetentionTier expected) =>
         Assert.Equal(expected, RetentionTierRouter.Resolve(Now, Now.AddDays(-ageDays), hourlyAvailable, dailyAvailable));

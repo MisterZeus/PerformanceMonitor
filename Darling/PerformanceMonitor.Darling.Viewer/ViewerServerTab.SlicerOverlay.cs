@@ -128,7 +128,7 @@ public partial class ViewerServerTab
         {
             var value = selector(p);
             if (value > 0)
-                points.Add((p.CollectionTime, value));
+                points.Add((p.PointTime, value));
         }
         return points;
     }

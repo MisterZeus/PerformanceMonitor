@@ -566,6 +566,114 @@ FULL OUTER JOIN baseline_period b
     }
 
     /// <summary>
+    /// One point on the Query Store slicer overlay: the interval's per-interval totals, placed at the hour
+    /// the work RAN.
+    /// </summary>
+    public sealed record QueryStoreItemTimelinePoint(DateTime PointTime, double CpuMs, double ElapsedMs, double Reads);
+
+    /// <summary>
+    /// The selected Query Store row's execution timeline, for the grid→slicer overlay (#683).
+    ///
+    /// <para><b>Why this exists rather than the overlay reusing <see cref="GetQueryStoreHistoryAsync"/>, which
+    /// is what it did before #1921.</b> That read feeds the history GRID, a deliberately raw per-collection
+    /// projection (#1845) whose window is keyed on <c>collection_time</c> — which is correct for it, because a
+    /// list of collection events is exactly what it shows. The overlay needs the opposite: points placed and
+    /// windowed on the interval start, matching the bars it is drawn over. Moving the shared read would have
+    /// silently changed the history grid's window as well, so the two surfaces get the two reads their
+    /// different questions need. Darling has had this split since #683 (<c>ItemTimeline</c>); this converges
+    /// Lite onto the same structure rather than inventing a third shape.</para>
+    ///
+    /// <para>It also picks up the DEDUP the overlay never had. Darling's equivalent dedups per interval
+    /// because the rows are cumulative snapshots and an un-deduped overlay draws one interval as a rising
+    /// staircase of restatements; Lite's overlay was plotting every history row. Both halves of the invariant
+    /// — dedup and placement — are what make the overlay agree with the bars, which is the whole point of the
+    /// series.</para>
+    /// </summary>
+    public async Task<List<QueryStoreItemTimelinePoint>> GetQueryStoreItemTimelineAsync(
+        int serverId, string databaseName, long queryId, long planId,
+        int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+
+        command.CommandText = @"
+WITH deduped AS
+(
+    -- LOAD-BEARING (correctness, not just perf) — #1841. query_store_stats rows are CUMULATIVE per-interval
+    -- snapshots and the collector re-fetches the OPEN interval every cycle, so an un-deduped projection draws
+    -- one interval as a rising staircase of restatements rather than new work. The overlay is drawn OVER the
+    -- deduped slicer bars, so leaving it raw makes it disagree with the bars it annotates.
+    --
+    -- The execution_count tie-break is the #1907 residual, same as every other dedup site: rows collected
+    -- before that fix can share this whole partition AND collection_time, and it resolves them to the flushed
+    -- slice deterministically instead of flapping.
+    SELECT
+        -- Placed where the work RAN (#1921). #1841 moved the bars to the interval start and left this series
+        -- on collection_time, so a point sat up to one Query Store interval — 60 minutes by default, 1440 at
+        -- most — to the RIGHT of the bar describing the very same work. COALESCE, not a bare column: rows
+        -- collected before tier 2 have no interval start and keep collection_time placement.
+        COALESCE(interval_start_time_utc, collection_time) AS point_time,
+        execution_count,
+        avg_cpu_time_us,
+        avg_duration_us,
+        avg_logical_io_reads,
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
+            ORDER BY collection_time DESC, execution_count DESC
+        ) AS rn
+    FROM v_query_store_stats
+    WHERE server_id = $1
+    AND   database_name = $2
+    AND   query_id = $3
+    AND   plan_id = $4
+    -- Windowed on the SAME expression the points are placed on, and the same one the bars use. Filtering on
+    -- collection_time while placing on the interval start disagrees at both edges, and disagrees with the
+    -- bars about whether an interval is in the window at all.
+    AND   COALESCE(interval_start_time_utc, collection_time) >= $5
+    AND   COALESCE(interval_start_time_utc, collection_time) <= $6
+    -- Pruning bounds, NOT filters: v_query_store_stats unions the live table with the parquet archive, and
+    -- bounds on collection_time are what let the reader skip archive row groups instead of scanning the whole
+    -- glob. Same shipped shape and reasoning as the slicer's (#1892/#1923) — the floor is free because an
+    -- interval is always collected after it starts, and the ceiling is deliberately enormous because a row's
+    -- collection_time exceeds its interval start by the interval's length (at most 1 day) plus however far
+    -- behind the collector was, which nothing bounds.
+    AND   collection_time >= $5 - INTERVAL '1 day'
+    AND   collection_time <= $6 + INTERVAL '30 days'
+)
+SELECT
+    point_time,
+    COALESCE(CAST(avg_cpu_time_us AS DOUBLE PRECISION) * execution_count, 0) / 1000.0 AS cpu_ms,
+    COALESCE(CAST(avg_duration_us AS DOUBLE PRECISION) * execution_count, 0) / 1000.0 AS elapsed_ms,
+    COALESCE(CAST(avg_logical_io_reads AS DOUBLE PRECISION) * execution_count, 0) AS reads
+FROM deduped
+WHERE rn = 1
+-- Ordered on the axis the points are PLOTTED on: a series whose x-values are not monotonic draws as a
+-- zig-zag rather than a curve.
+ORDER BY point_time";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = databaseName });
+        command.Parameters.Add(new DuckDBParameter { Value = queryId });
+        command.Parameters.Add(new DuckDBParameter { Value = planId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+
+        var points = new List<QueryStoreItemTimelinePoint>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            points.Add(new QueryStoreItemTimelinePoint(
+                reader.GetDateTime(0),
+                reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
+                reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
+                reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3))));
+        }
+        return points;
+    }
+
+    /// <summary>
     /// Gets collection-level history for ALL plans of a Query Store query (query-scoped, matching
     /// the Dashboard drilldown) so plan switches and regressions are visible over time.
     ///

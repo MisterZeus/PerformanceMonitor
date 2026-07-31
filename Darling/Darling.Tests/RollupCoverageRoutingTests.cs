@@ -46,26 +46,40 @@ public sealed class RollupCoverageRoutingTests
     /* ── The #1759 store: rollups created over a year of pre-existing history, purges HELD, so raw is deep and
           the rollups only reach back to creation-minus-3-days. Every window past that must reach raw. ── */
     [InlineData(10, 3, 3, 365, RetentionTier.Raw)]      /* hourly-age window, hourly floor too shallow */
-    [InlineData(30, 3, 3, 365, RetentionTier.Raw)]      /* daily-age window, daily floor too shallow */
+    [InlineData(120, 3, 3, 365, RetentionTier.Raw)]     /* daily-age window, daily floor too shallow */
     [InlineData(400, 3, 3, 365, RetentionTier.Raw)]     /* far past everything */
     [InlineData(2, 3, 3, 365, RetentionTier.Raw)]       /* recent — raw by AGE, unchanged */
     /* ── The same store AFTER --backfill-rollups: coverage reaches raw, so routing returns to the rollups.
           This is the pin that says Phase 2 actually restores acceleration rather than stranding reads on raw. ── */
     [InlineData(10, 365, 365, 365, RetentionTier.Hourly)]
-    [InlineData(30, 365, 365, 365, RetentionTier.Daily)]
+    [InlineData(120, 365, 365, 365, RetentionTier.Daily)]
     /* ── A HEALTHY store with armed purges: raw keeps ~4 days, the rollups keep weeks. A window older than every
           floor is routine here, and dropping to raw would return LESS. The fallback must stay silent. ── */
-    [InlineData(30, 10, 10, 4, RetentionTier.Daily)]    /* 10-day-old store: raw is shallower — stay put */
+    [InlineData(120, 10, 10, 4, RetentionTier.Daily)]   /* 10-day-old store: raw is shallower — stay put */
     [InlineData(10, 21, 60, 4, RetentionTier.Hourly)]   /* mature store, window inside hourly coverage */
-    [InlineData(30, 21, 60, 4, RetentionTier.Daily)]    /* mature store, window inside daily coverage */
+    [InlineData(120, 60, 200, 4, RetentionTier.Daily)]  /* mature store, window inside daily coverage */
     [InlineData(400, 21, 60, 4, RetentionTier.Daily)]   /* past even the daily floor, but raw is shallower */
+    /* ── #1937's REGROW PERIOD, decided by #1939: complete beats partial. A store upgraded onto the 90-day
+          hourly horizon still holds only ~21 days of hourly MATERIALIZED, because the rest was purged under the
+          old horizon and raw (4 days) cannot rebuild it. A 30-day window is hourly by AGE now and its floor does
+          not reach — but the DAILY floor covers the whole window, so the router serves it COMPLETELY at daily
+          grain rather than partially at hourly with the older weeks silently blank. A month view missing its
+          older weeks is the #1937 complaint wearing routing clothes; for ~10 weeks after upgrade these stores
+          render month-plus windows at daily grain, exactly as they did before the horizon moved, and gain
+          hourly grain as the tier regrows. ── */
+    [InlineData(30, 21, 60, 4, RetentionTier.Daily)]
+    /* ...and the arm's SELF-LIMIT: when the daily floor cannot cover the window either (25d floor, 30d window),
+          nothing complete exists, so the pre-#1939 behavior stands — partial at the finest tier that reaches. */
+    [InlineData(30, 21, 25, 4, RetentionTier.Hourly)]
     /* ── The TRANSIENT tier-2 shape (#1759's withdrawn-overclaim comment): a daily rollup still empty while its
-          hourly has materialized. A 30-day window must land on the 21-day hourly, NOT skip it to a 4-day raw. ── */
+          hourly has materialized. A 30-day window must land on the hourly, NOT skip it to a 4-day raw. ── */
     [InlineData(30, 21, -1, 4, RetentionTier.Hourly)]
     /* ...and the same shape on a HELD store, where raw IS deeper than the hourly: raw wins. */
     [InlineData(30, 3, -1, 365, RetentionTier.Raw)]
-    /* ── Everything empty (a fresh store): no evidence anywhere, so the age ladder decides, unchanged. ── */
-    [InlineData(30, -1, -1, -1, RetentionTier.Daily)]
+    /* ── Everything empty (a fresh store): no evidence anywhere, so the age ladder decides. 30 days reaching
+          HOURLY rather than daily is the #1937 change itself. ── */
+    [InlineData(120, -1, -1, -1, RetentionTier.Daily)]
+    [InlineData(30, -1, -1, -1, RetentionTier.Hourly)]
     [InlineData(10, -1, -1, -1, RetentionTier.Hourly)]
     public void Resolve_WithCoverage_PrefersTheTierThatMeasurablyReachesFurthestBack(
         double windowDays, double hourlyFloorDays, double dailyFloorDays, double rawOldestDays, RetentionTier expected)
@@ -91,7 +105,9 @@ public sealed class RollupCoverageRoutingTests
         var held = new TierCoverage(DaysAgo(3), DaysAgo(3), DaysAgo(365));
         var window = DaysAgo(30);
 
-        Assert.Equal(RetentionTier.Daily, RetentionTierRouter.Resolve(Now, window, true, true));
+        /* 30 days is HOURLY by age since #1937 (it was Daily under the 21-day horizon). The point of this
+           test is unchanged: the two overloads must DISAGREE on a held store, whatever the age answer is. */
+        Assert.Equal(RetentionTier.Hourly, RetentionTierRouter.Resolve(Now, window, true, true));
         Assert.Equal(RetentionTier.Raw, RetentionTierRouter.Resolve(Now, window, true, true, held));
     }
 

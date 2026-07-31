@@ -226,13 +226,18 @@ public sealed class TimescaleContinuousAggregateTests
     }
 
     [Fact]
-    public void RetentionTiers_RawFourDays_HourlyTwentyOneDays_StayPastTheNextRefreshWindow()
+    public void RetentionTiers_RawFourDays_HourlyNinetyDays_StayPastTheNextRefreshWindow()
     {
         /* The buffers the whole tiering rests on: raw's 4d stays past the hourly CAGG's 3d refresh start; the
-           hourly CAGGs' 21d stays past the daily CAGG's 3d refresh start. Either dropping below 3 days would let a
-           drop outrun the aggregate meant to preserve that history. */
+           hourly CAGGs' 90d stays past the daily CAGG's 3d refresh start. Either dropping below 3 days would let a
+           drop outrun the aggregate meant to preserve that history.
+
+           The hourly number is 90 rather than 21 since #1937, and the reason is a READ one rather than a refresh
+           one: the viewer offers month-plus windows, and at 21 days a 30-day view could not render at hourly
+           grain at all. The refresh-window buffer this test is about is satisfied either way — widening never
+           threatened it — so the pin is here to catch a future NARROWING, which would. */
         Assert.Equal("4 days", TimescaleSupport.RawRetentionInterval);
-        Assert.Equal("21 days", TimescaleSupport.HourlyRetentionInterval);
+        Assert.Equal("90 days", TimescaleSupport.HourlyRetentionInterval);
     }
 
     /* ── #1661: the per-database rollup carrying the I/O sums no other aggregate has ── */

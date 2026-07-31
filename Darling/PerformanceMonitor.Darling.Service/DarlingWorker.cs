@@ -778,7 +778,7 @@ public sealed class DarlingWorker : BackgroundService
                 // in the composer-dimension shape (no-op once reshaped, and on a fresh store nothing matches).
                 await TimescaleSupport.DropStaleContinuousAggregatesAsync(timescaleConnection, _logger, stoppingToken);
                 await TimescaleSupport.EnsureContinuousAggregatesAsync(timescaleConnection, _logger, stoppingToken);
-                // AFTER the CAGGs exist: the tiered retention (raw 4d, hourly CAGGs 21d; daily kept indefinitely).
+                // AFTER the CAGGs exist: the tiered retention (raw 4d, hourly CAGGs 90d per #1937; daily kept indefinitely).
                 await TimescaleSupport.EnsureRetentionPoliciesAsync(timescaleConnection, _logger, stoppingToken);
 
                 /* #1757: the baseline aggregates ship WITH NO DATA and their refresh policy only ever covers
