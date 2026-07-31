@@ -448,18 +448,26 @@ WHERE c.hypertable_schema = 'collect'", connection);
     private static async Task SetChunkIntervalAsync(
         NpgsqlConnection connection, string relation, TimeSpan interval, CancellationToken ct)
     {
-        string materialized;
+        /* BOTH arms quote server-side through format('%I.%I'), and the fallback is a COALESCE rather than a C#
+           string built beside it — so there is one quoting rule here instead of two that agree only by luck of
+           the catalog being lowercase today. */
+        string partitioned;
         await using (var find = new NpgsqlCommand(@"
-SELECT format('%I.%I', c.materialization_hypertable_schema, c.materialization_hypertable_name)
-FROM timescaledb_information.continuous_aggregates AS c
-WHERE c.view_schema = 'collect' AND c.view_name = $1", connection))
+SELECT COALESCE(
+    (
+        SELECT format('%I.%I', c.materialization_hypertable_schema, c.materialization_hypertable_name)
+        FROM timescaledb_information.continuous_aggregates AS c
+        WHERE c.view_schema = 'collect' AND c.view_name = $1
+    ),
+    format('%I.%I', 'collect', $1))", connection))
         {
             find.Parameters.AddWithValue(relation);
-            materialized = (string?)(await find.ExecuteScalarAsync(ct)) ?? $"collect.{relation}";
+            partitioned = (string)(await find.ExecuteScalarAsync(ct))!;
         }
 
-        await using var set = new NpgsqlCommand(
-            $"SELECT set_chunk_time_interval('{materialized}', $1)", connection);
+        /* Bound as a parameter rather than interpolated, so the identifier never reaches the SQL text at all. */
+        await using var set = new NpgsqlCommand("SELECT set_chunk_time_interval($1::regclass, $2)", connection);
+        set.Parameters.AddWithValue(partitioned);
         set.Parameters.AddWithValue(interval);
         await set.ExecuteNonQueryAsync(ct);
     }
