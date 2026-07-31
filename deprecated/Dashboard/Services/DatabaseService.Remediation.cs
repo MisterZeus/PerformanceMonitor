@@ -180,6 +180,25 @@ SET NUMERIC_ROUNDABORT OFF;";
             }
 
             // Gate passed — issue the mutation on the SAME open connection.
+            //
+            // @replica_group_id is deliberately NOT passed (#1882). On force, omitting it targets the
+            // PRIMARY replica, which is the scope this Apply path intends and the only one it could
+            // honestly claim: ForcePlanTarget carries the replica ROLE the regression was measured on
+            // (sys.query_store_replicas.replica_name), never the group id, so there is no correct value
+            // to supply. See FactRemediation.ExtractPlanRegressionTargets for the citations.
+            //
+            // Nothing secondary-derived can reach here today: this executor is Dashboard-only, and the
+            // Dashboard's own drill-down (SqlServerDrillDownCollector.Queries.cs) has no replica column
+            // at all, so its targets always carry a null role. Lite and Darling produce the replica-aware
+            // targets but have no Apply path — they are copy-paste only, and their rendered text carries
+            // the disclosure. If an Apply path ever consumes a replica-attributed target, the scope
+            // mismatch becomes reachable and needs a gate, not just a comment.
+            //
+            // On unforce the omission is NOT symmetric, which is why the rendered advice says so: the
+            // docs give unforce's @replica_group_id a default of "the local replica where the command is
+            // being executed" rather than the primary. This executor connects to the monitored server,
+            // which the Query Store collector only ever reads from as a primary, so local IS the primary
+            // here — the asymmetry bites an operator running the copy-paste elsewhere, not this path.
             var proc = isUnforce ? "sys.sp_query_store_unforce_plan" : "sys.sp_query_store_force_plan";
             int? execSpid;
             try

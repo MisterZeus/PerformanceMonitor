@@ -267,4 +267,13 @@ public sealed record ForcePlanTarget(
     string? LatestPlanHash = null,             // display / freshness only
     double LatestCpuPerExecUs = 0,             // display only (renders the preview comment)
     double BestCpuPerExecUs = 0,               // display only (renders the preview comment)
-    double RegressionFactor = 0);              // display only (surfaced in the confirm modal)
+    double RegressionFactor = 0,               // display only (surfaced in the confirm modal)
+
+    /* #1882: WHICH REPLICA'S workload this regression was measured on — sys.query_store_replicas'
+       replica_name, verbatim from the collector: "Primary", "Secondary", "Geo Secondary",
+       "Geo HA Secondary", or empty/null when the server did not attribute the row (anything below
+       SQL Server 2022, a non-AG standalone, or Managed Instance). Display + disclosure only, never
+       an execution input — see FactRemediation.ExtractPlanRegressionTargets for why naming a replica
+       is not the same as being able to TARGET one. Appended last with a default so the positional
+       construction sites and the persisted-action JSON round-trip stay source- and wire-compatible. */
+    string? ReplicaRole = null);

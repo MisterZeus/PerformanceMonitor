@@ -185,11 +185,17 @@ public class LiteRecommendationsReaderTests
     {
         /* #1850 made the plan-regression drill-down per-REPLICA: on an AG primary with Query Store for
            secondary replicas enabled, one query can regress on the primary AND on a secondary and arrive
-           as two rows with their own best_plan_id. Forcing a plan is per QUERY, so both rows reaching
-           the renderer would emit two sp_query_store_force_plan calls naming the same query with
-           different plan ids — mutually exclusive instructions where whichever the operator runs last
-           silently wins. The worst regression (rows arrive ordered regression_factor DESC) is the one
-           kept. #1882 tracks which replica SHOULD win; this pins only that they cannot both. */
+           as two rows with their own best_plan_id. Both reaching the renderer would emit two
+           sp_query_store_force_plan calls naming the same query with different plan ids — mutually
+           exclusive instructions where whichever the operator runs last silently wins. This pins that
+           they cannot both.
+
+           WHICH one survives is settled by #1882 and pinned in ForcePlanReplicaScopeTests: the PRIMARY's
+           row wins, because the rendered statement omits @replica_group_id and therefore forces on the
+           primary by that argument's documented default. This fixture cannot tell the two rules apart —
+           it seeds the primary with the WORSE regression, so #1850's "keep the first" and #1882's "prefer
+           the primary" agree on it. That is why it kept passing through the #1882 change, and why the
+           discriminating seed (a secondary that regressed HARDER) lives in the other suite. */
         var finding = Finding("PLAN_REGRESSION", 1.6, database: "MyDb");
         finding.DrillDown = new Dictionary<string, object>
         {
@@ -220,10 +226,14 @@ public class LiteRecommendationsReaderTests
         Assert.Equal(7L, target.PlanId);
         Assert.Equal(12.0, target.RegressionFactor);
 
-        /* And the rendered command names that plan once, not two plans for one query. */
+        /* And the rendered command names that plan once, not two plans for one query. Asserted on the
+           whole EXEC statement rather than on the bare digits "7" and "9": a substring search for a
+           single digit matches any cpu figure, regression factor or URL the renderer happens to emit,
+           so it passes or fails for reasons that have nothing to do with plan ids. */
         var sql = FactRemediation.GenerateForFinding(finding);
-        Assert.Contains("7", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("9", sql, StringComparison.Ordinal);
+        Assert.Contains(
+            "EXEC sys.sp_query_store_force_plan @query_id = 123, @plan_id = 7;", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("@plan_id = 9;", sql, StringComparison.Ordinal);
     }
 
     [Fact]
