@@ -181,6 +181,17 @@ public partial class MainWindow : Window
             var archiveService = new ArchiveService(_databaseInitializer, App.ArchiveDirectory, new AppLoggerAdapter<ArchiveService>());
             var retentionService = new RetentionService(App.ArchiveDirectory, new AppLoggerAdapter<RetentionService>());
 
+            /* #1912 one-time Query Store repair: collapse the split slices stored by pre-#1907 builds, in the
+               hot table and in the parquet archive. Runs ONCE per store, records a marker, and never throws —
+               a store that cannot be repaired must still start, and the next launch retries. Fired here rather
+               than awaited inline so a large archive rewrite cannot hold the window closed; it takes the same
+               read lock every other store operation does, so it serializes with collection rather than racing
+               it. Automatic by design: gating it behind a button would leave the users least equipped to find
+               it holding wrong numbers permanently (v39 / #1832 precedent). */
+            var sliceRepair = new QueryStoreSliceRepairService(
+                _databaseInitializer, App.ArchiveDirectory, new AppLoggerAdapter<QueryStoreSliceRepairService>());
+            _ = Task.Run(() => sliceRepair.RepairOnStartupAsync());
+
             // Routes high-severity analysis findings to email/Slack/Teams; the background
             // service runs scheduled analysis and hands findings to it.
             /* serverId resolver: Lite uses the finding's stable int id as a string (Plan E E3c). */

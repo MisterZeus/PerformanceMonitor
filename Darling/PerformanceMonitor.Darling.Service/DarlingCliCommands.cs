@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -105,6 +105,11 @@ public static class DarlingCliCommands
     public static bool IsBackfillRollupsVerb(string arg) =>
         string.Equals(arg, "--backfill-rollups", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The verb <see cref="CollapseLegacySlicesAsync"/> handles — repair the pre-#1907 Query Store
+    /// split slices still sitting in stored rows, then re-materialize what they fed (#1912).</summary>
+    public static bool IsCollapseLegacySlicesVerb(string arg) =>
+        string.Equals(arg, "--collapse-legacy-slices", StringComparison.OrdinalIgnoreCase);
+
     /// <summary><c>--version</c>/<c>-v</c> — print the product version and exit.</summary>
     public static bool IsVersionVerb(string arg) =>
         string.Equals(arg, "--version", StringComparison.OrdinalIgnoreCase)
@@ -202,6 +207,7 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --enable-web        Enable the web dashboard in the store and open its firewall (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-web       Disable the web dashboard in the store and remove its firewall rule (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups  Materialize the retention rollups back over existing history, after a disk preflight." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --collapse-legacy-slices  Repair Query Store rows collected before the split-slice fix, then re-materialize the rollups they fed." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run   Show the plan, the disk estimate and the time budget, and change nothing.";
 
     /// <summary>
@@ -2081,6 +2087,205 @@ public static class DarlingCliCommands
        a rollup genuinely covers raw. Arming here would duplicate that decision in a second place, and
        the whole reason nothing has been lost on these stores is that exactly one thing decides it.
        ================================================================================================ */
+
+    /// <summary>
+    /// <c>--collapse-legacy-slices</c> (#1912): repair the Query Store rows collected before #1907, then
+    /// re-materialize the rollups they fed.
+    ///
+    /// <para>Before #1907 the collector stored Query Store's FLUSHED and still-IN-MEMORY slice of one interval
+    /// as two rows. They are ADDITIVE, so the read-side dedup — which keeps one row per key — reports a
+    /// fraction of the interval's work, and the rollups materialized that fraction. #1907 made the choice
+    /// deterministic; this makes it correct, for the rows it can still reach.</para>
+    ///
+    /// <para><b>Bounded on purpose, and the bound is raw retention.</b> Only rows still in the raw tier can be
+    /// collapsed, so on a Darling store the repair reaches the last few days — which at upgrade time is the
+    /// operator's most-looked-at recent history, and is why running it PROMPTLY after upgrading is what makes
+    /// it worth anything. Everything older keeps its understated counts permanently: the daily tiers are kept
+    /// indefinitely and cannot be rebuilt from raw that no longer exists. That residue is disclosed in the
+    /// release notes rather than papered over, the same shape #1849 used for the inflated-rollup boundary.</para>
+    ///
+    /// <para><b>The refresh is CLAMPED to the rows actually collapsed, and that is a safety property rather
+    /// than an optimization.</b> A refresh whose range lies entirely within DROPPED raw chunks DESTROYS the
+    /// materialization there — with force and without, measured on PG 18.4 + TimescaleDB 2.28.1 and pinned by
+    /// <c>QueryStoreSliceRepairLiveTests</c>. Aiming at a nominal "pre-fix period" instead of at the collapsed
+    /// rows' own span would therefore blank the 21-day hourly and the indefinitely-kept daily below raw's
+    /// floor, which is precisely the history #1759/#1793 forbid destroying. Collapsed rows are inside raw's
+    /// extent by definition, so deriving the window from them cannot reach under it.</para>
+    ///
+    /// <para><b>Safe to re-run.</b> The pre-fix signature — two or more rows sharing the whole dedup key AND
+    /// <c>collection_time</c> — cannot match a row collected since #1907, which emits at most one row per
+    /// interval per cycle. A second run finds nothing and says so.</para>
+    ///
+    /// <para>Returns 0 when the repair completed or had nothing to do, 1 on a load/mode/credential error.</para>
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public static async Task<int> CollapseLegacySlicesAsync(
+        string? configPath, bool dryRun, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(output);
+        ArgumentNullException.ThrowIfNull(error);
+
+        DarlingConfig config;
+        try
+        {
+            config = DarlingConfig.Load(configPath);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not load configuration: {ex.Message}");
+            return 1;
+        }
+
+        var postgres = config.Postgres;
+        if (postgres is null)
+        {
+            error.WriteLine("postgres section is required.");
+            return 1;
+        }
+
+        var connectionString = postgres.Managed
+            ? DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres)
+            : postgres.ConnectionString;
+
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            error.WriteLine(postgres.Managed
+                ? "The managed store credential does not exist yet — start the PerformanceMonitor Darling service once so its first run initializes the store, then re-run this command."
+                : "postgres.connectionString is empty, so there is no store to repair.");
+            return 1;
+        }
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        try
+        {
+            await connection.OpenAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"Could not connect to the store: {ex.Message}");
+            return 1;
+        }
+
+        output.WriteLine();
+        output.WriteLine("PerformanceMonitor Darling — Query Store slice repair (--collapse-legacy-slices)");
+        output.WriteLine();
+
+        QueryStoreSliceRepair.Survey survey;
+        try
+        {
+            survey = await QueryStoreSliceRepair.SurveyAsync(connection, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"Could not survey query_store_stats: {ex.Message}");
+            return 1;
+        }
+
+        if (!survey.HasWork)
+        {
+            output.WriteLine("  Nothing to repair — no Query Store rows carry the pre-fix split-slice signature.");
+            output.WriteLine();
+            output.WriteLine("  That is the expected result on a store that has only ever run builds carrying the");
+            output.WriteLine("  collection-side fix, and on any store where a previous run already repaired them.");
+            return 0;
+        }
+
+        output.WriteLine($"  Split intervals found : {survey.SplitGroups:N0}");
+        output.WriteLine($"  Rows involved         : {survey.SplitRows:N0}  (collapsing to {survey.SplitGroups:N0}, removing {survey.RowsRemoved:N0})");
+        output.WriteLine($"  Collection-time span  : {survey.OldestUtc:yyyy-MM-dd HH:mm} .. {survey.NewestUtc:yyyy-MM-dd HH:mm} UTC");
+        output.WriteLine();
+        output.WriteLine("  Only rows still held in the raw tier can be repaired. Query Store history older than");
+        output.WriteLine("  raw retention keeps its understated counts permanently — see the release notes.");
+        output.WriteLine();
+
+        if (dryRun)
+        {
+            output.WriteLine("  DRY RUN — nothing was changed.");
+            return 0;
+        }
+
+        /* SLICED PER DAY, not one call over the whole span. CollapseSliceAsync runs each slice in ONE
+           transaction, and that transaction takes locks on the raw chunks it touches — which the compression
+           policy also wants. Handing it the entire survey span would make one long transaction sitting across
+           however much history the store keeps, which is exactly the lock-duration family that has bitten this
+           repo before (#1564/#1567). On a default 4-day raw tier this is a handful of slices; on a store with
+           a widened retention it is the protection the method's own doc promises.
+
+           The half-open upper bound includes the newest collapsed row — the survey reports that instant
+           itself, not a bound past it — hence the final slice's one-second nudge. */
+        long removed = 0;
+        var sliceStart = survey.OldestUtc!.Value.Date;
+        var collapseEnd = survey.NewestUtc!.Value.AddSeconds(1);
+
+        try
+        {
+            while (sliceStart < collapseEnd)
+            {
+                var sliceEnd = sliceStart.AddDays(1);
+                if (sliceEnd > collapseEnd)
+                {
+                    sliceEnd = collapseEnd;
+                }
+
+                removed += await QueryStoreSliceRepair.CollapseSliceAsync(
+                    connection, sliceStart, sliceEnd, cancellationToken);
+
+                sliceStart = sliceEnd;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* Each slice is its own transaction, so earlier slices are already committed and are not lost —
+               and the collapse is idempotent, so re-running picks up where this stopped. */
+            error.WriteLine($"  The collapse failed after {removed:N0} row(s); the failing slice was rolled back: {ex.Message}");
+            error.WriteLine("  Slices already committed are safe. Re-run to continue — the repair is idempotent.");
+            return 1;
+        }
+
+        output.WriteLine($"  Collapsed. Rows removed: {removed:N0}");
+        output.WriteLine();
+
+        /* Re-materialize every rollup fed by query_store_stats, in the dependency order RollupBackfill.Targets
+           already carries — a rollup refreshed before its source materializes nothing, reports success, and
+           consumes the invalidations that covered the range. The window is the collapsed rows' own span,
+           widened to whole buckets so a partially-covered bucket is recomputed rather than left half-old. */
+        var affected = RollupBackfill.Targets
+            .Where(t => string.Equals(t.RawTable, QueryStoreSliceRepair.Table, StringComparison.Ordinal))
+            .ToList();
+
+        /* ONE disclosure for the whole run, so a pre-2.21 store's missing `options` parameter is reported once
+           rather than per rollup — and reported at all, which is the point of it being required (#1797). */
+        var disclosure = new RefreshDisclosure(message => output.WriteLine($"  [NOTE] {message}"));
+
+        var refreshed = 0;
+        foreach (var target in affected)
+        {
+            var from = Floor(survey.OldestUtc!.Value, target.BucketWidth);
+            var to = Floor(survey.NewestUtc!.Value, target.BucketWidth) + target.BucketWidth;
+
+            try
+            {
+                await RollupBackfill.RepairAsync(connection, target.View, from, to, disclosure, cancellationToken);
+                refreshed++;
+                output.WriteLine($"  [OK]   {target.View}: re-materialized {from:yyyy-MM-dd HH:mm} .. {to:yyyy-MM-dd HH:mm} UTC");
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                error.WriteLine($"  [FAIL] {target.View}: {ex.Message}");
+            }
+        }
+
+        output.WriteLine();
+        output.WriteLine(refreshed == affected.Count
+            ? $"  DONE — {removed:N0} row(s) collapsed, {refreshed} rollup(s) re-materialized."
+            : $"  PARTIAL — {removed:N0} row(s) collapsed, {refreshed} of {affected.Count} rollup(s) re-materialized. The collapse itself is committed; re-run to retry the rollups.");
+
+        return 0;
+    }
+
+    /// <summary>Floors an instant to its bucket, so a refresh window covers whole buckets on both edges.</summary>
+    private static DateTime Floor(DateTime value, TimeSpan bucket)
+        => bucket <= TimeSpan.Zero ? value : new DateTime(value.Ticks - (value.Ticks % bucket.Ticks), value.Kind);
 
     /// <summary>
     /// Materializes the query-acceleration rollups back over pre-existing history so the held raw retention
