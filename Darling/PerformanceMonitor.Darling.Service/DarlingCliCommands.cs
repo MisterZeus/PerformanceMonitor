@@ -17,6 +17,7 @@ using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.Versioning;
 using System.Security.Principal;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -73,6 +74,11 @@ public static class DarlingCliCommands
     /// <summary>The verb <see cref="PrintViewerConnectionAsync"/> handles (darling-network-endpoints D8).</summary>
     public static bool IsPrintViewerConnectionVerb(string arg) =>
         string.Equals(arg, "--print-viewer-connection", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The verb <see cref="ExportViewerConfigAsync"/> handles — write a COMPLETE viewer darling.json +
+    /// server.crt + README.txt an operator copies to the viewer machine as-is (#1953).</summary>
+    public static bool IsExportViewerConfigVerb(string arg) =>
+        string.Equals(arg, "--export-viewer-config", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The verb <see cref="ConfigureNetworkAsync"/> handles — the interactive exposure wizard (#1561).</summary>
     public static bool IsConfigureNetworkVerb(string arg) =>
@@ -131,6 +137,7 @@ public static class DarlingCliCommands
         IsEncryptPasswordVerb(arg)
         || IsValidateConfigVerb(arg)
         || IsPrintViewerConnectionVerb(arg)
+        || IsExportViewerConfigVerb(arg)
         || IsConfigureNetworkVerb(arg)
         || IsConfigureFirewallVerb(arg)
         || IsEnableMcpVerb(arg)
@@ -201,6 +208,7 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --test-connection   Validate darling.json and probe every configured server." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --encrypt-password  Encrypt a SQL-auth password for darling.json (reads stdin)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --print-viewer-connection   Print a remote-viewer connection string (managed store)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --export-viewer-config [dir]  Write a ready-to-copy viewer folder (darling.json + server.crt + README.txt)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --configure-network Interactive LAN-exposure wizard." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --configure-firewall  Create/remove the scoped firewall rules to match darling.json (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-mcp        Enable the MCP endpoint in the store and open its firewall (run elevated)." + Environment.NewLine +
@@ -306,35 +314,131 @@ public static class DarlingCliCommands
             return 1;
         }
 
+        var handoff = await ResolveViewerHandoffAsync(
+            config, "--print-viewer-connection", "print", error, cancellationToken);
+        if (handoff is null)
+        {
+            return 1;
+        }
+
+        /* The client-side Root Certificate placeholder: the operator saves the PEM below at this path on the
+           VIEWER machine (a bare filename resolves against the viewer's working directory; an absolute path
+           also works). Kept as a literal so the printed string is paste-ready. */
+        const string clientCertificatePath = ViewerClientCertificateFileName;
+        var connectionString = BuildViewerConnectionString(
+            handoff.Host, handoff.Port, handoff.Role, handoff.Password, clientCertificatePath);
+
+        /* Read the cert BEFORE anything reaches STDOUT: every STDERR line — including the missing-cert NOTE —
+           must be emitted ahead of the payload (#1953 item 3). The field report watched the live password scroll
+           past and only THEN saw the redirect advice, which is exactly backwards for a warning. */
+        var certificate = File.Exists(handoff.CertificatePath)
+            ? (await File.ReadAllTextAsync(handoff.CertificatePath, cancellationToken)).Trim()
+            : null;
+
+        /* Guidance + the live-secret warning go to STDERR, so redirecting STDOUT to a file or the clipboard
+           captures the connection string + cert WITHOUT swallowing the warning (D8). */
+        error.WriteLine();
+        error.WriteLine(
+            $"WARNING: the connection string below contains a LIVE database password (the '{handoff.Role}' role), written " +
+            "to STDOUT. Redirect it to an ACL'd file or pipe it to the clipboard; do not leave it in shell " +
+            "scrollback, CI logs, or a screenshare.");
+        error.WriteLine("  Example (file):      PerformanceMonitor.Darling.Service.exe --print-viewer-connection > viewer-connection.txt");
+        error.WriteLine("  Example (clipboard): PerformanceMonitor.Darling.Service.exe --print-viewer-connection | clip");
+        error.WriteLine("  Example (no paste):  PerformanceMonitor.Darling.Service.exe --export-viewer-config   (writes the whole viewer folder for you)");
+        if (string.Equals(handoff.Role, "admin", StringComparison.Ordinal))
+        {
+            error.WriteLine(
+                "  NOTE: 'admin' is a WRITE credential holding the config-table pivot surface. Prefer the default " +
+                "'viewer' (read-only) for a remote seat; if you must use 'admin', NTFS-ACL the laptop file too.");
+        }
+
+        if (certificate is not null)
+        {
+            error.WriteLine(
+                $"Save the certificate block below as '{clientCertificatePath}' on the viewer machine (beside its " +
+                "darling.json) and point \"Root Certificate\" at it — the store uses SSL Mode=VerifyFull, so the cert must match.");
+        }
+        else
+        {
+            error.WriteLine(
+                $"NOTE: the server TLS certificate ({handoff.CertificatePath}) does not exist yet — the service generates it " +
+                "on its first managed start with postgres.network exposed. Enable postgres.network, restart the " +
+                "service, then re-run this command to emit the cert for verify-full.");
+        }
+
+        error.WriteLine();
+
+        output.WriteLine(
+            "# Paste into the viewer machine's darling.json -> postgres.connectionString (with postgres.managed = false):");
+        output.WriteLine(connectionString);
+        output.WriteLine();
+
+        /* Emit the server cert PEM so the operator can copy it to the viewer machine. */
+        if (certificate is not null)
+        {
+            output.WriteLine($"# Server TLS certificate ({DarlingManagedPostgres.ServerCertFileName}) — save as '{clientCertificatePath}' on the viewer machine:");
+            output.WriteLine(certificate);
+        }
+
+        return 0;
+    }
+
+    /// <summary>
+    /// The name the exported/pasted client-side certificate takes on the VIEWER machine, and therefore the
+    /// <c>Root Certificate=</c> value both viewer verbs emit. Deliberately the same file name the store
+    /// generates, so an operator who copies the folder never has to re-point anything.
+    /// </summary>
+    public const string ViewerClientCertificateFileName = "server.crt";
+
+    /// <summary>Everything a remote viewer seat needs, resolved from darling.json + the managed store's
+    /// on-disk material: where to dial, as whom, with which password, and the server cert to pin. Shared by
+    /// <see cref="PrintViewerConnectionAsync"/> and <see cref="ExportViewerConfigAsync"/> so the two verbs
+    /// cannot disagree about any of it.</summary>
+    /// <param name="CertificatePath">The store-side <c>server.crt</c>; may not exist yet (each verb decides
+    /// whether that is fatal — the print verb still has a useful string, the export does not).</param>
+    private sealed record ViewerHandoff(
+        string Host, int Port, string Role, string Password, string CertificatePath);
+
+    /// <summary>
+    /// Resolves the remote-viewer handoff material (D8), writing every refusal + warning to
+    /// <paramref name="error"/> and returning null when the caller must exit 1. Managed-mode only: the DPAPI
+    /// credential files and the generated TLS cert it reads exist only there — in BYO the operator's own
+    /// PostgreSQL governs exposure + credentials (D-BYO). Windows-only (DPAPI-LocalMachine). The two string
+    /// parameters shape message WORDING only — never the logic, so both verbs resolve identically.
+    /// </summary>
+    /// <param name="verb">The CLI verb to name in refusals, e.g. <c>--export-viewer-config</c>.</param>
+    /// <param name="action">What the verb would have produced, e.g. "print" / "export", for the no-remote-connection refusal.</param>
+    [SupportedOSPlatform("windows")]
+    private static async Task<ViewerHandoff?> ResolveViewerHandoffAsync(
+        DarlingConfig config, string verb, string action, TextWriter error, CancellationToken cancellationToken)
+    {
         var postgres = config.Postgres;
         if (postgres is null)
         {
             error.WriteLine("postgres section is required.");
-            return 1;
+            return null;
         }
 
-        /* Managed-mode only: the DPAPI credential files + the generated TLS cert this verb reads exist only in
-           managed mode. In BYO the operator's own PostgreSQL governs exposure + credentials (D-BYO). */
         if (!postgres.Managed)
         {
             error.WriteLine(
-                "--print-viewer-connection is for the managed store only. In bring-your-own mode " +
+                $"{verb} is for the managed store only. In bring-your-own mode " +
                 "(postgres.connectionString), your own PostgreSQL governs network exposure and credentials — " +
                 "build the remote viewer's connection string from your own role + TLS setup.");
-            return 1;
+            return null;
         }
 
         /* The pg_hba login role the network exposure names — default viewer (read-only, the secure default).
            An explicitly-invalid value is a hard error: the store degrades to loopback for it, so no remote
-           connection exists to print. */
+           connection exists at all. */
         var network = postgres.Network;
         var role = DarlingNetwork.NormalizeNetworkRole(network?.Role);
         if (role is null)
         {
             error.WriteLine(
                 $"postgres.network.role '{network?.Role}' is invalid — it must be \"viewer\" (default, read-only) " +
-                "or \"admin\". The store degrades to loopback for an unknown role, so there is no remote connection to print.");
-            return 1;
+                $"or \"admin\". The store degrades to loopback for an unknown role, so there is no remote connection to {action}.");
+            return null;
         }
 
         /* Warn (not fail) when the store is not actually network-exposed: the operator still gets a template,
@@ -362,7 +466,7 @@ public static class DarlingCliCommands
                 $"The '{role}' role credential ({credentialPath}) does not exist yet. Start the PerformanceMonitor " +
                 "Darling service once so its first run provisions the least-privilege roles and their credentials, " +
                 "then re-run this command.");
-            return 1;
+            return null;
         }
 
         string password;
@@ -375,58 +479,306 @@ public static class DarlingCliCommands
             error.WriteLine(
                 $"Could not decrypt the '{role}' credential at {credentialPath}: {ex.Message} (DPAPI-LocalMachine — " +
                 "run this on the same machine as the service, under an account that can read the credential).");
+            return null;
+        }
+
+        return new ViewerHandoff(
+            host,
+            postgres.Port,
+            role,
+            password,
+            Path.Combine(Path.GetDirectoryName(credentialPath)!, DarlingManagedPostgres.ServerCertFileName));
+    }
+
+    /// <summary>
+    /// #1953 — writes the viewer machine's COMPLETE handoff folder: a ready-to-use <c>darling.json</c> (the
+    /// resolved connection string, <c>"managed": false</c> already set, every field commented in place), the
+    /// store's <c>server.crt</c> beside it, and a <c>README.txt</c> that documents the fields — including the
+    /// valid <c>Root Certificate=</c> values — for an operator who never opens the JSON. The field report that
+    /// motivated this had to hand-merge <c>--print-viewer-connection</c>'s output into JSON copied out of the
+    /// docs and discover the <c>managed</c> flip by trial; nobody writes that file by hand anymore.
+    /// <para>Managed-mode + Windows only (same DPAPI/TLS material as <see cref="PrintViewerConnectionAsync"/>,
+    /// resolved by the same helper). The cert is REQUIRED here, unlike the print verb: a folder whose
+    /// verify-full connection cannot be completed is exactly the half-finished handoff this verb exists to
+    /// kill, so a missing cert fails with the reason instead of exporting something broken.</para>
+    /// <para><b>The written darling.json holds a LIVE credential</b> — the verb says so on STDERR, naming the
+    /// file, before writing it, and ACLs it to SYSTEM + Administrators + this account + INTERACTIVE. The
+    /// password value itself is never echoed.</para>
+    /// </summary>
+    /// <param name="outputDirectory">Where to write; null = a <c>viewer-config</c> folder beside darling.json.</param>
+    [SupportedOSPlatform("windows")]
+    public static async Task<int> ExportViewerConfigAsync(
+        string? configPath, string? outputDirectory, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        var targetDirectory = ResolveViewerExportDirectory(DarlingConfig.ResolveConfigPath(configPath), outputDirectory);
+
+        /* Argument shape first, before any config load or credential decrypt: this verb's positional argument
+           is the DESTINATION, while every sibling verb's is a config path, so an operator with sibling muscle
+           memory types darling.json here. Say that plainly rather than failing later on a directory-create
+           against an existing file — and say it without having touched DPAPI. */
+        if (File.Exists(targetDirectory)
+            || targetDirectory.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+        {
+            error.WriteLine(
+                $"'{targetDirectory}' is a file, not a directory. This verb's argument is the DESTINATION folder " +
+                "for the exported viewer files; to point it at a different darling.json, use --config <path> " +
+                "(e.g. --export-viewer-config D:\\handoff --config C:\\Darling\\darling.json).");
             return 1;
         }
 
-        /* The client-side Root Certificate placeholder: the operator saves the PEM below at this path on the
-           VIEWER machine (a bare filename resolves beside the viewer's working directory; an absolute path
-           also works). Kept as a literal so the printed string is paste-ready. */
-        const string clientCertificatePath = "server.crt";
-        var connectionString = BuildViewerConnectionString(host, postgres.Port, role, password, clientCertificatePath);
+        DarlingConfig config;
+        try
+        {
+            config = DarlingConfig.Load(configPath);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not load configuration: {ex.Message}");
+            return 1;
+        }
 
-        /* Guidance + the live-secret warning go to STDERR, so redirecting STDOUT to a file or the clipboard
-           captures the connection string + cert WITHOUT swallowing the warning (D8). */
-        error.WriteLine();
-        error.WriteLine(
-            $"WARNING: the connection string below contains a LIVE database password (the '{role}' role), written " +
-            "to STDOUT. Redirect it to an ACL'd file or pipe it to the clipboard; do not leave it in shell " +
-            "scrollback, CI logs, or a screenshare.");
-        error.WriteLine("  Example (file):      PerformanceMonitor.Darling.Service.exe --print-viewer-connection > viewer-connection.txt");
-        error.WriteLine("  Example (clipboard): PerformanceMonitor.Darling.Service.exe --print-viewer-connection | clip");
-        if (string.Equals(role, "admin", StringComparison.Ordinal))
+        var handoff = await ResolveViewerHandoffAsync(
+            config, "--export-viewer-config", "export", error, cancellationToken);
+        if (handoff is null)
+        {
+            return 1;
+        }
+
+        string certificate;
+        if (!File.Exists(handoff.CertificatePath))
         {
             error.WriteLine(
-                "  NOTE: 'admin' is a WRITE credential holding the config-table pivot surface. Prefer the default " +
-                "'viewer' (read-only) for a remote seat; if you must use 'admin', NTFS-ACL the laptop file too.");
+                $"Cannot export: the server TLS certificate ({handoff.CertificatePath}) does not exist yet, and the " +
+                "exported connection uses SSL Mode=VerifyFull — without the cert the viewer could not connect. The " +
+                "service generates it on its first managed start with postgres.network exposed: set postgres.network " +
+                "(listen + allowFrom), restart the service, then re-run this command.");
+            return 1;
         }
 
-        error.WriteLine(
-            $"Save the certificate block below as '{clientCertificatePath}' on the viewer machine (beside its " +
-            "darling.json) and point \"Root Certificate\" at it — the store uses SSL Mode=VerifyFull, so the cert must match.");
-        error.WriteLine();
-
-        output.WriteLine(
-            "# Paste into the viewer machine's darling.json -> postgres.connectionString (with postgres.managed = false):");
-        output.WriteLine(connectionString);
-        output.WriteLine();
-
-        /* Emit the server cert PEM so the operator can copy it to the viewer machine. */
-        var certificatePath = Path.Combine(
-            Path.GetDirectoryName(credentialPath)!, DarlingManagedPostgres.ServerCertFileName);
-        if (File.Exists(certificatePath))
+        try
         {
-            output.WriteLine($"# Server TLS certificate ({DarlingManagedPostgres.ServerCertFileName}) — save as '{clientCertificatePath}' on the viewer machine:");
-            output.WriteLine((await File.ReadAllTextAsync(certificatePath, cancellationToken)).Trim());
+            certificate = (await File.ReadAllTextAsync(handoff.CertificatePath, cancellationToken)).Trim();
         }
-        else
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not read the server TLS certificate ({handoff.CertificatePath}): {ex.Message}");
+            return 1;
+        }
+
+        var configFile = Path.Combine(targetDirectory, ViewerConfigFileName);
+        var certificateFile = Path.Combine(targetDirectory, ViewerClientCertificateFileName);
+        var readmeFile = Path.Combine(targetDirectory, ViewerReadmeFileName);
+
+        /* The live-secret warning goes out BEFORE the write, naming the file — so an operator who walks away
+           mid-run has still been told a credential-bearing file is landing there (#1953 item 3's ordering rule,
+           applied to the verb that writes the secret rather than printing it). */
+        error.WriteLine();
+        error.WriteLine(
+            $"WARNING: {configFile} will contain a LIVE database password (the '{handoff.Role}' role) in cleartext, " +
+            "because that is what the viewer connects with. Copy the folder over a channel you trust, and keep the " +
+            "file ACL'd to the operator account on the viewer machine.");
+
+        try
+        {
+            Directory.CreateDirectory(targetDirectory);
+            await File.WriteAllTextAsync(
+                configFile,
+                BuildViewerConfigJson(
+                    BuildViewerConnectionString(
+                        handoff.Host, handoff.Port, handoff.Role, handoff.Password, ViewerClientCertificateFileName),
+                    DateTimeOffset.UtcNow),
+                cancellationToken);
+            TryHardenExportedSecret(configFile, error);
+
+            await File.WriteAllTextAsync(certificateFile, certificate + Environment.NewLine, cancellationToken);
+            await File.WriteAllTextAsync(
+                readmeFile,
+                BuildViewerConfigReadme(handoff.Host, handoff.Port, handoff.Role, DateTimeOffset.UtcNow),
+                cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not write the viewer config to {targetDirectory}: {ex.Message}");
+            return 1;
+        }
+
+        if (string.Equals(handoff.Role, "admin", StringComparison.Ordinal))
         {
             error.WriteLine(
-                $"NOTE: the server TLS certificate ({certificatePath}) does not exist yet — the service generates it " +
-                "on its first managed start with postgres.network exposed. Enable postgres.network, restart the " +
-                "service, then re-run this command to emit the cert for verify-full.");
+                "NOTE: 'admin' is a WRITE credential holding the config-table pivot surface. Prefer the default " +
+                "'viewer' (read-only) for a remote seat; if you must use 'admin', NTFS-ACL the exported file on the " +
+                "viewer machine too.");
         }
 
+        error.WriteLine();
+        error.WriteLine($"Copy the whole folder to the viewer machine, then point DARLING_CONFIG at its {ViewerConfigFileName}");
+        error.WriteLine($"(or drop the files beside the Viewer executable). {ViewerReadmeFileName} documents every field.");
+        error.WriteLine("Re-run this command after the store's certificate is regenerated (a changed bind IP rotates it).");
+        error.WriteLine();
+
+        output.WriteLine(targetDirectory);
+        output.WriteLine(configFile);
+        output.WriteLine(certificateFile);
+        output.WriteLine(readmeFile);
         return 0;
+    }
+
+    /// <summary>The exported viewer folder's file names — the JSON the Viewer resolves by name, the cert its
+    /// <c>Root Certificate=</c> points at, and the operator-facing field reference (#1953 item 4).</summary>
+    public const string ViewerConfigFileName = "darling.json";
+    public const string ViewerReadmeFileName = "README.txt";
+
+    /// <summary>
+    /// Where <see cref="ExportViewerConfigAsync"/> writes: the operator's directory when they named one,
+    /// else a <c>viewer-config</c> folder beside the service's darling.json — next to the file the operator
+    /// already knows, not buried under ProgramData. Pure (no I/O), so it pins directly.
+    /// </summary>
+    public static string ResolveViewerExportDirectory(string configPath, string? outputDirectory)
+    {
+        if (!string.IsNullOrWhiteSpace(outputDirectory))
+        {
+            return Path.GetFullPath(outputDirectory.Trim());
+        }
+
+        var configDirectory = Path.GetDirectoryName(Path.GetFullPath(configPath));
+        return Path.Combine(
+            string.IsNullOrEmpty(configDirectory) ? AppContext.BaseDirectory : configDirectory,
+            "viewer-config");
+    }
+
+    /// <summary>
+    /// The exported viewer <c>darling.json</c> (#1953 items 1 + 4): the two fields the Viewer actually reads —
+    /// <c>managed: false</c> and the verbatim connection string — with every field, and the valid
+    /// <c>Root Certificate=</c> values, documented in <c>//</c> comments IN the file. The Viewer parses with
+    /// <c>JsonCommentHandling.Skip</c> + <c>AllowTrailingCommas</c> (the same tolerance darling.sample.json
+    /// relies on), so the commented file is consumed as-is — <see cref="!:ViewerSettings"/> is pinned against
+    /// this text by <c>DarlingExportViewerConfigTests</c>. Hand-composed rather than serialized precisely
+    /// because <c>System.Text.Json</c> cannot WRITE comments, and the comments are the point.
+    /// Pure — unit-testable.
+    /// </summary>
+    public static string BuildViewerConfigJson(string connectionString, DateTimeOffset generatedUtc) =>
+        "{" + Environment.NewLine +
+        "  // PerformanceMonitor Darling - VIEWER configuration." + Environment.NewLine +
+        $"  // Generated by --export-viewer-config at {generatedUtc.ToUniversalTime():yyyy-MM-dd HH:mm:ss}Z. Nothing here needs hand-editing." + Environment.NewLine +
+        "  //" + Environment.NewLine +
+        "  // THIS FILE CONTAINS A LIVE DATABASE PASSWORD. Keep it ACL'd to the operator account." + Environment.NewLine +
+        "  //" + Environment.NewLine +
+        "  // Where it goes on the viewer machine (first match wins):" + Environment.NewLine +
+        "  //   1. the path in the DARLING_CONFIG environment variable" + Environment.NewLine +
+        "  //   2. darling.json beside the Viewer executable" + Environment.NewLine +
+        "  //   3. darling.json one folder up (the release zip puts the Viewer in a viewer\\ subfolder)" + Environment.NewLine +
+        "  // Keep server.crt in the SAME folder you launch the Viewer from (see Root Certificate below)." + Environment.NewLine +
+        "  \"postgres\": {" + Environment.NewLine +
+        "    // false = this machine does not RUN a store, it connects to one. The service host's own" + Environment.NewLine +
+        "    // darling.json says true; that flag is about who OWNS the PostgreSQL, not who is connecting." + Environment.NewLine +
+        "    // A viewer left on true would hunt for a bundled local PostgreSQL that is not there." + Environment.NewLine +
+        "    \"managed\": false," + Environment.NewLine +
+        Environment.NewLine +
+        "    // Consumed VERBATIM by the Viewer (Npgsql keywords):" + Environment.NewLine +
+        "    //   Host / Port      the service host's exposed store endpoint (its postgres.network.listen + postgres.port)" + Environment.NewLine +
+        "    //   Username         the least-privilege store role: viewer = read-only, admin = read + config writes" + Environment.NewLine +
+        "    //   Password         that role's live password (rotate by re-running the export after a rotation)" + Environment.NewLine +
+        "    //   Database         always darling" + Environment.NewLine +
+        "    //   Search Path      collect,config,public - resolves the bare table names the Viewer queries" + Environment.NewLine +
+        "    //   SSL Mode         VerifyFull - encrypted AND the server certificate must match Host. Do not" + Environment.NewLine +
+        "    //                    downgrade it to Require: that keeps the encryption but stops verifying the" + Environment.NewLine +
+        "    //                    certificate, so Root Certificate below would be ignored entirely." + Environment.NewLine +
+        "    //   Root Certificate the server.crt exported beside this file. Valid values:" + Environment.NewLine +
+        "    //                      server.crt            a bare name, resolved against the Viewer's" + Environment.NewLine +
+        "    //                                            WORKING DIRECTORY - correct when the Viewer is" + Environment.NewLine +
+        "    //                                            launched from this folder, which a desktop" + Environment.NewLine +
+        "    //                                            shortcut may not do" + Environment.NewLine +
+        "    //                      C:\\Darling\\server.crt  an absolute path - always correct, and the fix if a" + Environment.NewLine +
+        "    //                                            connection fails on the certificate" + Environment.NewLine +
+        "    //                    It must be the PEM the SERVICE generated (exported beside this file);" + Environment.NewLine +
+        "    //                    VerifyFull rejects any other certificate, including a re-issued one." + Environment.NewLine +
+        $"    \"connectionString\": {JsonSerializer.Serialize(connectionString)}" + Environment.NewLine +
+        "  }" + Environment.NewLine +
+        "}" + Environment.NewLine;
+
+    /// <summary>
+    /// The exported <c>README.txt</c> (#1953 item 4): the same field reference as the JSON's comments, for an
+    /// operator who never opens the JSON, plus the one-line "copy this folder" instruction. Takes no password
+    /// — the credential lives in exactly one exported file and is never echoed anywhere else. Pure —
+    /// unit-testable.
+    /// </summary>
+    public static string BuildViewerConfigReadme(string host, int port, string role, DateTimeOffset generatedUtc) =>
+        "PerformanceMonitor Darling - remote Viewer setup" + Environment.NewLine +
+        "================================================" + Environment.NewLine +
+        Environment.NewLine +
+        $"Generated by --export-viewer-config at {generatedUtc.ToUniversalTime():yyyy-MM-dd HH:mm:ss}Z on the service host." + Environment.NewLine +
+        Environment.NewLine +
+        "TO USE IT" + Environment.NewLine +
+        "  Copy this folder to the viewer machine and set DARLING_CONFIG to the darling.json inside it" + Environment.NewLine +
+        $"  (or copy the files next to the Viewer executable). Then start the Viewer - nothing to edit." + Environment.NewLine +
+        Environment.NewLine +
+        "WHAT IS IN HERE" + Environment.NewLine +
+        $"  {ViewerConfigFileName}      the Viewer's configuration. CONTAINS A LIVE DATABASE PASSWORD - treat it as a secret," + Environment.NewLine +
+        "                    ACL it to your account, and do not commit it or mail it around." + Environment.NewLine +
+        $"  {ViewerClientCertificateFileName}        the store's TLS certificate. The connection pins THIS file; the Viewer will" + Environment.NewLine +
+        "                    refuse any other certificate." + Environment.NewLine +
+        $"  {ViewerReadmeFileName}        this file." + Environment.NewLine +
+        Environment.NewLine +
+        "THE FIELDS" + Environment.NewLine +
+        "  managed = false   This machine does not RUN a store, it connects to one over the network. The" + Environment.NewLine +
+        "                    SERVICE host's own darling.json says managed = true, which is about who OWNS" + Environment.NewLine +
+        "                    the PostgreSQL, not who connects. A viewer left on true looks for a bundled" + Environment.NewLine +
+        "                    local PostgreSQL that does not exist there and fails." + Environment.NewLine +
+        "  connectionString  Handed to Npgsql verbatim. This export's values:" + Environment.NewLine +
+        Environment.NewLine +
+        $"      Host={host} / Port={port}" + Environment.NewLine +
+        "          the exposed store endpoint on the service host." + Environment.NewLine +
+        $"      Username={role}" + Environment.NewLine +
+        "          the least-privilege store role: viewer = read-only, admin = read plus the" + Environment.NewLine +
+        "          Viewer's config writes." + Environment.NewLine +
+        "      Password=<that role's live password>" + Environment.NewLine +
+        "          filled in for you; it is in darling.json and nowhere else, this file included." + Environment.NewLine +
+        "      Database=darling" + Environment.NewLine +
+        "          always." + Environment.NewLine +
+        "      Search Path=collect,config,public" + Environment.NewLine +
+        "          resolves the bare table names the Viewer queries." + Environment.NewLine +
+        "      SSL Mode=VerifyFull" + Environment.NewLine +
+        "          encrypted AND the server certificate must match Host. Do NOT downgrade this to" + Environment.NewLine +
+        "          Require: the encryption stays, the verification stops, and Root Certificate is" + Environment.NewLine +
+        "          then ignored entirely." + Environment.NewLine +
+        $"      Root Certificate={ViewerClientCertificateFileName}" + Environment.NewLine +
+        "          the certificate exported beside darling.json. Valid values:" + Environment.NewLine +
+        "            server.crt              a bare name, resolved against the Viewer's" + Environment.NewLine +
+        "                                    WORKING DIRECTORY. Correct when the Viewer is" + Environment.NewLine +
+        "                                    launched from this folder; a desktop shortcut can" + Environment.NewLine +
+        "                                    set a different working directory." + Environment.NewLine +
+        "            C:\\Darling\\server.crt   an absolute path - always correct. Switch to this if" + Environment.NewLine +
+        "                                    a connection fails on the certificate." + Environment.NewLine +
+        "          It must be the PEM the SERVICE generated; VerifyFull rejects any other" + Environment.NewLine +
+        "          certificate, including a re-issued one." + Environment.NewLine +
+        Environment.NewLine +
+        "IF IT DOES NOT CONNECT" + Environment.NewLine +
+        "  - Certificate errors: make Root Certificate an absolute path to the server.crt in this folder." + Environment.NewLine +
+        "  - The store's certificate is regenerated when its bind IP changes. Re-run --export-viewer-config" + Environment.NewLine +
+        "    on the service host and replace this folder." + Environment.NewLine +
+        $"  - The service host must be reachable on port {port} (its firewall rule is scoped to the allowed CIDR)," + Environment.NewLine +
+        "    and its postgres.network block must still name this network." + Environment.NewLine;
+
+    /// <summary>
+    /// ACLs the exported darling.json down to SYSTEM + Administrators + this account + INTERACTIVE (the
+    /// admin/viewer-credential posture — the Viewer reads it interactively), so it does not sit in a folder
+    /// that inherited BUILTIN\Users read. Never fatal: the export's value is the file, and an ACL failure is
+    /// reported with the icacls that fixes it rather than throwing the folder away — mirroring
+    /// <c>DarlingManagedPostgres.TryHardenCredentialFile</c>.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private static void TryHardenExportedSecret(string path, TextWriter error)
+    {
+        try
+        {
+            DarlingFileSecurity.HardenFile(path, allowInteractiveRead: true);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine(
+                $"NOTE: could not restrict the ACL on {path} ({ex.Message}){DarlingFileSecurity.DescribeOwnerAndExposure(path)}. " +
+                $"It holds a live password, so ACL it yourself: icacls \"{path}\" /inheritance:r /grant \"{DarlingFileSecurity.ServiceAccountDisplayName}\":F");
+        }
     }
 
     /// <summary>
@@ -1265,7 +1617,7 @@ public static class DarlingCliCommands
         output.WriteLine($"  (or:  sc.exe stop \"{ServiceName}\"   then   sc.exe start \"{ServiceName}\")");
     }
 
-    /// <summary>Prints the handoff reminders: the scoped firewall command(s), the store's --print-viewer-connection step, and the web dashboard's browser login hint.</summary>
+    /// <summary>Prints the handoff reminders: the scoped firewall command(s), the store's --export-viewer-config step, and the web dashboard's browser login hint.</summary>
     [SupportedOSPlatform("windows")]
     private static void PrintNextSteps(
         TextWriter output,
@@ -1280,9 +1632,10 @@ public static class DarlingCliCommands
             output.WriteLine("  Store firewall rule (run ELEVATED; scoped to the port + CIDR):");
             output.WriteLine("    " + DarlingManagedPostgres.BuildFirewallEnableCommand(
                 $"PerformanceMonitor Darling store (port {storePort})", storePort, storeCidr!));
-            output.WriteLine("  After the service restarts (which generates the TLS cert), get the remote viewer's");
-            output.WriteLine("  paste-ready connection string + certificate with:");
-            output.WriteLine("    PerformanceMonitor.Darling.Service.exe --print-viewer-connection");
+            output.WriteLine("  After the service restarts (which generates the TLS cert), write the remote viewer's");
+            output.WriteLine("  whole config folder — darling.json + server.crt + README — with:");
+            output.WriteLine("    PerformanceMonitor.Darling.Service.exe --export-viewer-config");
+            output.WriteLine("  (or --print-viewer-connection for just the paste-ready string + certificate).");
         }
 
         if (mcpConfigured)

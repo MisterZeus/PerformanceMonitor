@@ -745,7 +745,7 @@ The fastest path is the interactive wizard — run it on the **service host**:
 PerformanceMonitor.Darling.Service.exe --configure-network
 ```
 
-It shows the current exposure (read from the service's own resolvers), then walks you through the **store**, **MCP**, the **web dashboard**, any comma combination (e.g. `1,3`), or all three at once (or a **disable** that removes all exposure). Every answer is validated **by delegation to the exact checks the running service fail-closes on**, so the wizard can never write a config the service would refuse — it re-prompts with the resolver's own reason. It generates the MCP bearer / web access tokens for you (DPAPI-protected; each plaintext is printed once, so save it then), edits `darling.json` **in place preserving every comment** behind a timestamped `darling.json.bak-<timestamp>` backup, prints the scoped firewall command(s), the `--print-viewer-connection` handoff, and the web dashboard's browser login URL (`http://<listen>:<port>/?token=...`), and offers to restart the service to apply. `install-darling.ps1 -Network` runs it automatically right after the install reaches Running. The manual field reference below documents exactly what it writes.
+It shows the current exposure (read from the service's own resolvers), then walks you through the **store**, **MCP**, the **web dashboard**, any comma combination (e.g. `1,3`), or all three at once (or a **disable** that removes all exposure). Every answer is validated **by delegation to the exact checks the running service fail-closes on**, so the wizard can never write a config the service would refuse — it re-prompts with the resolver's own reason. It generates the MCP bearer / web access tokens for you (DPAPI-protected; each plaintext is printed once, so save it then), edits `darling.json` **in place preserving every comment** behind a timestamped `darling.json.bak-<timestamp>` backup, prints the scoped firewall command(s), the `--export-viewer-config` handoff, and the web dashboard's browser login URL (`http://<listen>:<port>/?token=...`), and offers to restart the service to apply. `install-darling.ps1 -Network` runs it automatically right after the install reaches Running. The manual field reference below documents exactly what it writes.
 
 ### Firewall rules (`--configure-firewall`)
 
@@ -816,10 +816,30 @@ On every start the service reconciles this against the live cluster: it adds the
 **Remote-viewer handoff.** On the **service host**, run:
 
 ```
+PerformanceMonitor.Darling.Service.exe --export-viewer-config
+```
+
+It writes the viewer machine's **whole configuration folder** — nothing to hand-merge, nothing to look up:
+
+```
+viewer-config\darling.json    the complete viewer config: the resolved connection string, "managed": false
+                              already set, and every field documented in comments IN the file
+viewer-config\server.crt      the store's TLS certificate, the file the connection pins
+viewer-config\README.txt      the same field reference in plain text, including the valid
+                              "Root Certificate=" values and the one-line install instruction
+```
+
+Copy that folder to the viewer machine and point `DARLING_CONFIG` at its `darling.json` (or drop the files beside the Viewer executable) — then start the Viewer. By default the folder lands beside the service's own `darling.json`; pass a directory to put it somewhere else (`--export-viewer-config D:\handoff`), and `--config <path>` if darling.json is not where the service would resolve it.
+
+The exported `darling.json` **contains a live database password** (that is what the viewer authenticates with), so the verb says so before it writes, and ACLs the file to SYSTEM + Administrators + you. Copy the folder over a channel you trust, and keep it ACL'd on the viewer machine. Re-run the export after a credential or certificate rotation.
+
+`--print-viewer-connection` remains for the case where you want the string itself — to paste into an existing config, or to check what the viewer will dial:
+
+```
 PerformanceMonitor.Darling.Service.exe --print-viewer-connection
 ```
 
-It decrypts the `network.role` credential and prints a paste-ready connection string plus the server certificate PEM. It prints a **live database password to STDOUT** — redirect it to an ACL'd file or pipe it to the clipboard (`... --print-viewer-connection | clip`); do not leave it in shell scrollback, CI logs, or a screenshare. On the **viewer machine**, set a minimal `darling.json` to bring-your-own mode and paste the string in verbatim (no viewer code path changes — the string is consumed as-is), then save the emitted PEM where `Root Certificate` points:
+It decrypts the `network.role` credential and prints a paste-ready connection string plus the server certificate PEM. Every warning is printed **before** the payload, but the payload is still a **live database password on STDOUT** — redirect it to an ACL'd file or pipe it to the clipboard (`... --print-viewer-connection | clip`); do not leave it in shell scrollback, CI logs, or a screenshare. The minimal viewer `darling.json` it targets is bring-your-own mode with the string pasted in verbatim (no viewer code path changes — the string is consumed as-is), and the emitted PEM saved where `Root Certificate` points:
 
 ```json
 {
@@ -830,7 +850,9 @@ It decrypts the `network.role` credential and prints a paste-ready connection st
 }
 ```
 
-- **Certificate placement + rotation.** Save the emitted PEM at the `Root Certificate` path on the viewer machine (a bare `server.crt` resolves beside the viewer's working directory; an absolute path also works). The cert **auto-regenerates if the bind IP changes** (so verify-full keeps working after a `listen` change) — when that happens, clients must re-run `--print-viewer-connection` and replace their saved cert. To rotate on demand, **delete `server.crt` and `server.key`** beside the data directory; the service regenerates the pair on its next start.
+`"managed": false` is not a typo next to the service's `"managed": true`: the flag says who **owns** the PostgreSQL, not who is connecting. A viewer left on `true` goes looking for a bundled local PostgreSQL that is not there. (The export sets it for you, which is the point.)
+
+- **Certificate placement + rotation.** Save the emitted PEM at the `Root Certificate` path on the viewer machine. A bare `server.crt` resolves against the viewer's **working directory** — correct when the Viewer is launched from that folder, which a desktop shortcut may not do; an **absolute path** always works and is the fix when a connection fails on the certificate. The cert **auto-regenerates if the bind IP changes** (so verify-full keeps working after a `listen` change) — when that happens, clients must re-run the export (or `--print-viewer-connection`) and replace their saved cert. To rotate on demand, **delete `server.crt` and `server.key`** beside the data directory; the service regenerates the pair on its next start.
 - **Plaintext at rest on the viewer machine.** The pasted connection string holds the role password in cleartext in the laptop's `darling.json` (there is no client-side secret store yet). That is acceptable for the read-only `viewer` credential on a single-operator, ACL'd profile; if you use `role: "admin"`, treat that file as a secret and NTFS-ACL it to your account. DPAPI-encrypting the viewer's BYO connection string is future hardening, out of scope today.
 
 ### MCP endpoint (assistant over the LAN)

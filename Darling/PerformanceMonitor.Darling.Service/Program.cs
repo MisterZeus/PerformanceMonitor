@@ -90,6 +90,39 @@ if (args.Length > 0 && DarlingCliCommands.IsPrintViewerConnectionVerb(args[0]))
     return await DarlingCliCommands.PrintViewerConnectionAsync(configPath, Console.Out, Console.Error, CancellationToken.None);
 }
 
+/* CLI verb: --export-viewer-config (#1953) — write the viewer machine's whole handoff folder (a complete
+   darling.json with "managed": false and the resolved connection string, the store's server.crt beside it, and
+   a README.txt documenting every field) instead of making the operator hand-merge --print-viewer-connection's
+   output into JSON copied out of the docs. Same DPAPI/TLS material as that verb, so the same Windows-only
+   guard. First non-flag arg = the output DIRECTORY (default: viewer-config beside darling.json); an explicit
+   config path is passed as --config <path> (this verb's positional is the destination, unlike its siblings). */
+if (args.Length > 0 && DarlingCliCommands.IsExportViewerConfigVerb(args[0]))
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        Console.Error.WriteLine("--export-viewer-config requires Windows (DPAPI).");
+        return 1;
+    }
+
+    var rest = args.AsSpan(1);
+    string? exportConfigPath = null;
+    string? exportDirectory = null;
+    for (var i = 0; i < rest.Length; i++)
+    {
+        if (string.Equals(rest[i], "--config", StringComparison.OrdinalIgnoreCase) && i + 1 < rest.Length)
+        {
+            exportConfigPath = rest[++i];
+        }
+        else
+        {
+            exportDirectory = rest[i];
+        }
+    }
+
+    return await DarlingCliCommands.ExportViewerConfigAsync(
+        exportConfigPath, exportDirectory, Console.Out, Console.Error, CancellationToken.None);
+}
+
 /* CLI verb: the interactive --configure-network wizard (#1561; web surface #1617) — guides the operator
    through the opt-in store / MCP / web-dashboard LAN exposure, validating every input by delegation to the
    SAME resolvers the running service fail-closes on, then splicing a comment-preserving edit into
