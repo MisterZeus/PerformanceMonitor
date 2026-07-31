@@ -125,13 +125,29 @@ public sealed partial class ViewerDataService
 
                replica_role and execution_type_desc are in the partition because the aggregate below is
                grouped (or MAXed) on them: the dedup key must be at least as fine as the read's own row
-               identity, or dedup would silently drop a row the grid must show rather than de-duplicate one. */
+               identity, or dedup would silently drop a row the grid must show rather than de-duplicate one.
+
+               The execution_count tie-break is the #1907 residual, and it is NOT decoration. collection_time
+               alone was not a total order on rows collected before that fix: Query Store hands back the
+               flushed and the still-in-memory slice of ONE interval as two ADDITIVE rows, the collector
+               stored both, and they then shared every partition column above AND collection_time. ROW_NUMBER
+               kept whichever the engine emitted first, so a grid could show an in-memory sliver of 8 where
+               the interval's total was 94, and show a different one on the next run. The collector now
+               combines the slices before storing, so rows collected after #1907 cannot tie at all and this
+               clause never fires on them. It is here for the rows already in the store, which cannot be
+               rewritten: it deterministically picks the FLUSHED slice, the one holding the bulk of the
+               interval's work, instead of flapping. Closest-available, not correct — the correct value is the
+               SUM of the slices, which no read-side rule can express (#1912). This applies to EVERY dedup
+               site in both apps: Darling.Tests/QueryStoreSliceTieBreakSourceTests pins all 12 of Darling's
+               across the 8 files that hold them, and Lite.Tests/QueryStoreSliceTieBreakSourceTests pins its
+               7, so dropping one fails loudly and names the file. Both enumerate their files rather than
+               globbing, so MOVING a read has to be re-declared instead of silently shrinking the guard. */
             SELECT
                 *,
                 ROW_NUMBER() OVER
                 (
                     PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
-                    ORDER BY collection_time DESC
+                    ORDER BY collection_time DESC, execution_count DESC
                 ) AS rn
             FROM query_store_stats
             WHERE server_id = $1
@@ -383,7 +399,7 @@ public sealed partial class ViewerDataService
                 ROW_NUMBER() OVER
                 (
                     PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
-                    ORDER BY collection_time DESC
+                    ORDER BY collection_time DESC, execution_count DESC
                 ) AS rn
             FROM query_store_stats
             WHERE server_id = $1
@@ -402,7 +418,7 @@ public sealed partial class ViewerDataService
                 ROW_NUMBER() OVER
                 (
                     PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
-                    ORDER BY collection_time DESC
+                    ORDER BY collection_time DESC, execution_count DESC
                 ) AS rn
             FROM query_store_stats
             WHERE server_id = $1
@@ -548,7 +564,7 @@ public sealed partial class ViewerDataService
                 ROW_NUMBER() OVER
                 (
                     PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
-                    ORDER BY collection_time DESC
+                    ORDER BY collection_time DESC, execution_count DESC
                 ) AS rn
             FROM query_store_stats
             WHERE server_id = $1

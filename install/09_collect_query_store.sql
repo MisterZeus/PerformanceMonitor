@@ -51,6 +51,7 @@ BEGIN
         @error_message nvarchar(4000),
         @new bit = 0,
         @plan_type_available bit = 0, /*plan_type_desc requires SQL Server 2022+*/
+        @replica_group_available bit = 0, /*replica_group_id requires SQL Server 2022+ (#1907)*/
         @engine integer =
             CONVERT
             (
@@ -95,6 +96,28 @@ BEGIN
         BEGIN
             SELECT
                 @plan_type_available = 1;
+        END;
+
+        /*
+        @replica_group_available = 1 where sys.query_store_runtime_stats.replica_group_id exists:
+        SQL Server 2022+ (version 16+), and Azure SQL Database (engine 5), which under-reports
+        PRODUCTVERSION as 12 while running an evergreen engine. Managed Instance (engine 8) keeps the
+        pure version gate. Same gate, same reasoning, as QueryStoreCollector.hasReplicaAttribution.
+
+        Controls only the slice-aggregation grouping key below (#1907) — this proc does not collect the
+        replica attribution itself. The column must be in that key where it exists: two replicas' rows
+        for one interval are DIFFERENT work under "Query Store for secondary replicas", and grouping
+        without it would SUM a secondary's executions into the primary's. Naming a column that does not
+        exist in a GROUP BY fails the whole batch, hence the gate.
+        */
+        IF
+        (
+           @product_version >= 16
+        OR @engine = 5
+        )
+        BEGIN
+            SELECT
+                @replica_group_available = 1;
         END;
 
     BEGIN TRY
@@ -622,8 +645,129 @@ BEGIN
                             PATH(''compilation_metrics''),
                             TYPE
                     ),
-                query_plan_hash = p.query_plan_hash
-            FROM ' + QUOTENAME(@database_name) + N'.sys.query_store_runtime_stats AS rs
+                query_plan_hash = p.query_plan_hash';
+
+            /*
+            #1907: combine the slices of one runtime-stats interval BEFORE anything reads them.
+
+            sys.query_store_runtime_stats returns the FLUSHED slice and the still-IN-MEMORY slice of one
+            runtime_stats_interval_id as SEPARATE rows, and they are ADDITIVE members of one interval, not
+            competing snapshots of it. Verified on SQL Server 2022 (16.0.4255.1): 100 executions flushed
+            plus 25 in memory came back as two rows, while sys.dm_exec_procedure_stats — a separate source
+            read at the same instant — reported 125. With a 900s default flush against a 3600s default
+            interval one interval can hold several flushed slices, so the count is not bounded at two.
+
+            Selecting them straight through stored both, so the Dashboard grids showed a fraction of an
+            interval's work wherever the reads picked one slice. Grouping on the natural key of the view
+            makes one interval yield at most one row per collection. The emitted column list is unchanged.
+
+            avg_* columns take the count-WEIGHTED mean: Query Store stores an average and a count but never
+            a total, so avg * count recovers each slice's total and the quotient of the sums is the
+            interval's true average. A plain AVG() of slice averages would weight a 25-execution sliver
+            equally with a 100-execution flush. min_* / max_* take the extreme, and first/last execution
+            time the interval's own span.
+
+            The cutoff moves from WHERE to HAVING deliberately. A per-slice WHERE cannot survive the
+            aggregation: the flushed slice is STATIC, so once the growing in-memory slice pushes the
+            watermark past it the flushed slice stops qualifying and the sum degrades to the sliver alone.
+            The IN (...) pre-filter is a prune only — its interval list is a superset of what the HAVING
+            keeps, so it cannot subtract a row — and it is what stops the aggregate running over the whole
+            retained Query Store every cycle.
+
+            Mirrors QueryStoreCollector.BuildPayloadBody, which is where this defect was fixed for Lite and
+            Darling. Kept in step with it deliberately: this is the deprecated Dashboard proc, but it reads
+            the same view and had the same bug.
+            */
+            SET @sql += N'
+            FROM
+            (
+                SELECT
+                    rs.plan_id,
+                    rs.runtime_stats_interval_id,
+                    rs.execution_type_desc,';
+
+            IF @replica_group_available = 1
+            BEGIN
+                SET @sql += N'
+                    rs.replica_group_id,';
+            END;
+
+            SET @sql += N'
+                    first_execution_time = MIN(rs.first_execution_time),
+                    last_execution_time = MAX(rs.last_execution_time),
+                    count_executions = SUM(rs.count_executions),
+                    avg_duration = SUM(rs.avg_duration * rs.count_executions) / NULLIF(SUM(rs.count_executions), 0),
+                    min_duration = MIN(rs.min_duration),
+                    max_duration = MAX(rs.max_duration),
+                    avg_cpu_time = SUM(rs.avg_cpu_time * rs.count_executions) / NULLIF(SUM(rs.count_executions), 0),
+                    min_cpu_time = MIN(rs.min_cpu_time),
+                    max_cpu_time = MAX(rs.max_cpu_time),
+                    avg_logical_io_reads = SUM(rs.avg_logical_io_reads * rs.count_executions) / NULLIF(SUM(rs.count_executions), 0),
+                    min_logical_io_reads = MIN(rs.min_logical_io_reads),
+                    max_logical_io_reads = MAX(rs.max_logical_io_reads),
+                    avg_logical_io_writes = SUM(rs.avg_logical_io_writes * rs.count_executions) / NULLIF(SUM(rs.count_executions), 0),
+                    min_logical_io_writes = MIN(rs.min_logical_io_writes),
+                    max_logical_io_writes = MAX(rs.max_logical_io_writes),
+                    avg_physical_io_reads = SUM(rs.avg_physical_io_reads * rs.count_executions) / NULLIF(SUM(rs.count_executions), 0),
+                    min_physical_io_reads = MIN(rs.min_physical_io_reads),
+                    max_physical_io_reads = MAX(rs.max_physical_io_reads),
+                    avg_clr_time = SUM(rs.avg_clr_time * rs.count_executions) / NULLIF(SUM(rs.count_executions), 0),
+                    min_clr_time = MIN(rs.min_clr_time),
+                    max_clr_time = MAX(rs.max_clr_time),
+                    avg_query_max_used_memory = SUM(rs.avg_query_max_used_memory * rs.count_executions) / NULLIF(SUM(rs.count_executions), 0),
+                    min_query_max_used_memory = MIN(rs.min_query_max_used_memory),
+                    max_query_max_used_memory = MAX(rs.max_query_max_used_memory),
+                    avg_rowcount = SUM(rs.avg_rowcount * rs.count_executions) / NULLIF(SUM(rs.count_executions), 0),
+                    min_rowcount = MIN(rs.min_rowcount),
+                    max_rowcount = MAX(rs.max_rowcount),';
+
+            /*
+            The 2017+ families, aggregated. These must VANISH rather than emit a NULL placeholder when the
+            columns do not exist: an unbound column inside an aggregate fails the batch exactly as it would
+            outside one. The outer projection above still emits its NULL placeholders, so the collected
+            column list does not move. min_dop / max_dop follow them, ungated, so this fragment can keep the
+            file''s trailing-comma style and still be omitted whole.
+            */
+            IF @new = 1
+            BEGIN
+                SET @sql += N'
+                    avg_num_physical_io_reads = SUM(rs.avg_num_physical_io_reads * rs.count_executions) / NULLIF(SUM(rs.count_executions), 0),
+                    min_num_physical_io_reads = MIN(rs.min_num_physical_io_reads),
+                    max_num_physical_io_reads = MAX(rs.max_num_physical_io_reads),
+                    avg_log_bytes_used = SUM(rs.avg_log_bytes_used * rs.count_executions) / NULLIF(SUM(rs.count_executions), 0),
+                    min_log_bytes_used = MIN(rs.min_log_bytes_used),
+                    max_log_bytes_used = MAX(rs.max_log_bytes_used),
+                    avg_tempdb_space_used = SUM(rs.avg_tempdb_space_used * rs.count_executions) / NULLIF(SUM(rs.count_executions), 0),
+                    min_tempdb_space_used = MIN(rs.min_tempdb_space_used),
+                    max_tempdb_space_used = MAX(rs.max_tempdb_space_used),';
+            END;
+
+            SET @sql += N'
+                    min_dop = MIN(rs.min_dop),
+                    max_dop = MAX(rs.max_dop)
+                FROM ' + QUOTENAME(@database_name) + N'.sys.query_store_runtime_stats AS rs
+                WHERE rs.runtime_stats_interval_id IN
+                (
+                    SELECT
+                        f.runtime_stats_interval_id
+                    FROM ' + QUOTENAME(@database_name) + N'.sys.query_store_runtime_stats AS f
+                    WHERE f.last_execution_time >= @cutoff_time
+                )
+                GROUP BY
+                    rs.plan_id,
+                    rs.runtime_stats_interval_id,
+                    rs.execution_type_desc';
+
+            IF @replica_group_available = 1
+            BEGIN
+                SET @sql += N',
+                    rs.replica_group_id';
+            END;
+
+            SET @sql += N'
+                HAVING
+                    MAX(rs.last_execution_time) >= @cutoff_time
+            ) AS rs
             JOIN ' + QUOTENAME(@database_name) + N'.sys.query_store_plan AS p
               ON p.plan_id = rs.plan_id
             JOIN ' + QUOTENAME(@database_name) + N'.sys.query_store_query AS q
@@ -632,7 +776,6 @@ BEGIN
               ON qt.query_text_id = q.query_text_id
             LEFT JOIN #objects AS o
               ON q.object_id = o.object_id
-            WHERE rs.last_execution_time >= @cutoff_time
             ORDER BY rs.last_execution_time DESC;';
 
             IF @debug = 1

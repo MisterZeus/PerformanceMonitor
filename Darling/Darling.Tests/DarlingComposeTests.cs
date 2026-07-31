@@ -1172,9 +1172,14 @@ public sealed class DarlingComposeTests
             ValidPlan("{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}"),
             servers: ["srv-a", "srv-b"]);
 
+        /* The execution_count tie-break is the #1907 residual and is pinned as part of the ORDER BY rather
+           than left to a looser Contains: collection_time alone was not a total order on rows collected
+           before that fix, where Query Store's flushed and in-memory slices of one interval were stored as
+           two rows sharing this whole partition AND collection_time. It cannot fire on rows collected since
+           — the collector combines the slices — so it exists for what is already stored (#1912). */
         Assert.Contains(
             "PARTITION BY server_id, server_name, database_name, query_id, plan_id, runtime_stats_interval_id, "
-            + "first_execution_time, execution_type_desc, replica_role ORDER BY collection_time DESC",
+            + "first_execution_time, execution_type_desc, replica_role ORDER BY collection_time DESC, execution_count DESC",
             sql, StringComparison.Ordinal);
         Assert.Contains("AS qs_rn", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE qs_rn = 1", sql, StringComparison.Ordinal);
