@@ -577,6 +577,41 @@ public sealed class RollupBackfillTests
     }
 
     /// <summary>
+    /// The Query Store dedup chain is THREE levels deep since #1869 — raw → interval_hourly → interval_daily →
+    /// daygrain_daily — and the ordering must hold across both hops, not just the first. Every other rollup
+    /// here is one hop from raw, so "hierarchical" was enough to sort them; two hierarchical rollups where one
+    /// reads the other are indistinguishable to that boolean, and got their order from the DECLARATION ORDER of
+    /// RollupViews. This pins the edges the backfill actually traverses, so re-declaring or re-pointing a level
+    /// fails here rather than silently materializing nothing while reporting success.
+    /// </summary>
+    [Fact]
+    public void Targets_OrderTheThreeLevelQueryStoreChain_ByItsRealEdges()
+    {
+        int IndexOf(string view) => Array.FindIndex(RollupBackfill.Targets,
+            t => string.Equals(t.View, view, StringComparison.Ordinal));
+
+        var l1 = IndexOf(TimescaleSupport.QueryStoreStatsIntervalHourlyView);
+        var l2 = IndexOf(TimescaleSupport.QueryStoreStatsIntervalDailyView);
+        var l3 = IndexOf(TimescaleSupport.QueryStoreStatsDayGrainDailyView);
+
+        Assert.True(l1 >= 0 && l2 >= 0 && l3 >= 0, "all three levels of the corrected chain must be backfill targets.");
+        Assert.True(l1 < l2, "the interval-grain DAILY reads the interval-grain HOURLY, so it must run after it.");
+        Assert.True(l2 < l3, "the day-grain daily reads the interval-grain daily, so it must run after it.");
+
+        /* And the edges themselves, so the ordering above is checking the real graph rather than a coincidence
+           of names: the day-grain daily's source is L2, NOT L1 (which is what its corrected sibling reads). */
+        var dayGrain = RollupBackfill.Targets[l3];
+        Assert.Equal(TimescaleSupport.QueryStoreStatsIntervalDailyView, dayGrain.Source);
+        Assert.Equal(TimescaleSupport.QueryStoreStatsIntervalHourlyView, RollupBackfill.Targets[l2].Source);
+        Assert.Equal("query_store_stats", dayGrain.RawTable);
+
+        /* Both new levels are DAY-bucketed. The explicit width matters most here: L2 is a hierarchical rollup
+           whose source is itself hierarchical, so nothing about its position in the list implies its grain. */
+        Assert.Equal(TimeSpan.FromDays(1), RollupBackfill.Targets[l2].BucketWidth);
+        Assert.Equal(TimeSpan.FromDays(1), dayGrain.BucketWidth);
+    }
+
+    /// <summary>
     /// The backfill covers exactly the rollups the ROUTER can route to. A rollup the router uses but the
     /// backfill skips would stay permanently un-materialized — its windows served from raw forever, and its raw
     /// purge held forever, which is #1759 unfixed for that table.
