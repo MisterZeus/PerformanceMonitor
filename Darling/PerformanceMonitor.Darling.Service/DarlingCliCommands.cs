@@ -2667,7 +2667,7 @@ public static class DarlingCliCommands
         output.WriteLine("  'N/N retention policies in place, N armed, 0 held paused pending backfill'");
         output.WriteLine("is the confirmation; the first purge then reclaims the raw tables in one pass.");
         output.WriteLine();
-        output.WriteLine($"Do not delay the restart. The hourly rollups carry their OWN {TimescaleSupport.HourlyRetentionInterval} retention policy, already");
+        output.WriteLine($"Do not delay the restart. The hourly rollups carry their OWN retention policy ({TimescaleSupport.HourlyRetentionInterval}), already");
         output.WriteLine("armed on these stores, which will trim the coverage this run just built when it next fires");
         output.WriteLine("(roughly daily). Restarting now is what lets the raw policies arm off that coverage first. If");
         output.WriteLine("the trim wins the race nothing is lost — raw is still held — and re-running this verb rebuilds it.");
