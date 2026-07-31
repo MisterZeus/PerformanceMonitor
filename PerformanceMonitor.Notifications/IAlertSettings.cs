@@ -77,6 +77,11 @@ public interface IAlertSettings
     string PagerDutyRoutingKey { get; }
     bool   PagerDutyUseEuRegion { get; }
 
+    /// <summary>Optional proxy for the PagerDuty channel (#1945) - PagerDuty's endpoints are fixed public
+    /// URLs, so a locked-down network that proxies webhook egress needs this like the sibling channels.
+    /// Empty means direct, matching Teams/Slack/Generic.</summary>
+    string PagerDutyProxyAddress { get; }
+
     /* Scheduled-analysis notifications */
     double AnalysisNotifySeverity { get; }
     int    AnalysisNotifyCooldownMinutes { get; }

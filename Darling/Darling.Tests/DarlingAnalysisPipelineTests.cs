@@ -543,6 +543,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)", connection);
         public bool PagerDutyEnabled => false;
         public string PagerDutyRoutingKey => "";
         public bool PagerDutyUseEuRegion => false;
+        public string PagerDutyProxyAddress => "";
         public double AnalysisNotifySeverity { get; init; } = 1.5;
         public int AnalysisNotifyCooldownMinutes { get; init; } = 360;
     }

@@ -274,6 +274,7 @@ public class PagerDutyWebhookTests
         public bool PagerDutyEnabled { get; set; }
         public string PagerDutyRoutingKey { get; set; } = "";
         public bool PagerDutyUseEuRegion { get; set; }
+        public string PagerDutyProxyAddress => "";
         public double AnalysisNotifySeverity => 1.5;
         public int AnalysisNotifyCooldownMinutes => 360;
     }

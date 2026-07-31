@@ -229,6 +229,7 @@ public partial class App : Application
     public static bool PagerDutyWebhookEnabled { get; set; } = false;
     public static string PagerDutyRoutingKey { get; set; } = "";
     public static bool PagerDutyUseEuRegion { get; set; } = false;
+    public static string PagerDutyProxyAddress { get; set; } = "";
 
     private const string TeamsWebhookCredentialKey = "TeamsWebhook";
     private const string SlackWebhookCredentialKey = "SlackWebhook";
@@ -714,6 +715,7 @@ public partial class App : Application
                only the enable flag and EU-region toggle are plain prefs. */
             if (root.TryGetProperty("pagerduty_webhook_enabled", out v)) PagerDutyWebhookEnabled = v.GetBoolean();
             if (root.TryGetProperty("pagerduty_use_eu_region", out v)) PagerDutyUseEuRegion = v.GetBoolean();
+            if (root.TryGetProperty("pagerduty_proxy_address", out v)) PagerDutyProxyAddress = v.GetString() ?? "";
 
             /* Migrate webhook URLs from plaintext settings.json to Credential Manager. A legacy plaintext
                URL still wins over whatever the store held, matching the old order (save, then read back);

@@ -995,6 +995,7 @@ public partial class SettingsWindow : Window
         PagerDutyWebhookEnabledCheckBox.IsChecked = App.PagerDutyWebhookEnabled;
         PagerDutyRoutingKeyBox.Text = App.PagerDutyRoutingKey;
         PagerDutyEuRegionCheckBox.IsChecked = App.PagerDutyUseEuRegion;
+        PagerDutyProxyAddressBox.Text = App.PagerDutyProxyAddress;
         UpdateTeamsControlStates();
         UpdateSlackControlStates();
         UpdateGenericControlStates();
@@ -1038,6 +1039,7 @@ public partial class SettingsWindow : Window
         App.PagerDutyWebhookEnabled = PagerDutyWebhookEnabledCheckBox.IsChecked == true;
         App.PagerDutyRoutingKey = PagerDutyRoutingKeyBox.Text?.Trim() ?? "";
         App.PagerDutyUseEuRegion = PagerDutyEuRegionCheckBox.IsChecked == true;
+        App.PagerDutyProxyAddress = PagerDutyProxyAddressBox.Text?.Trim() ?? "";
 
         /* Save webhook URLs to Credential Manager instead of settings.json. The generic channel's headers
            JSON goes there too — it carries the Authorization bearer token (#1506). The PagerDuty routing
@@ -1076,6 +1078,7 @@ public partial class SettingsWindow : Window
 
             root["pagerduty_webhook_enabled"] = App.PagerDutyWebhookEnabled;
             root["pagerduty_use_eu_region"] = App.PagerDutyUseEuRegion;
+            root["pagerduty_proxy_address"] = App.PagerDutyProxyAddress;
 
             /* Remove legacy plaintext webhook URLs from settings.json */
             if (root is JsonObject obj)
@@ -1172,7 +1175,7 @@ public partial class SettingsWindow : Window
         {
             var routingKey = PagerDutyRoutingKeyBox.Text?.Trim() ?? "";
             var useEuRegion = PagerDutyEuRegionCheckBox.IsChecked == true;
-            var error = await WebhookAlertService.SendTestPagerDutyAsync(routingKey, useEuRegion, EmailAlertService.Branding);
+            var error = await WebhookAlertService.SendTestPagerDutyAsync(routingKey, useEuRegion, EmailAlertService.Branding, PagerDutyProxyAddressBox.Text?.Trim());
 
             if (error == null)
             {
