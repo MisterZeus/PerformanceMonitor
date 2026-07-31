@@ -525,12 +525,44 @@ public sealed class DarlingComposeTests
     [Fact]
     public void Compile_VeryOldWindow_QueryStore_RoutesToDailyCagg()
     {
-        /* A 40-day QS window routes to the corrected daily (same weighted-sum columns as the hourly). */
+        /* A 40-day QS window routes to the corrected daily (same weighted-sum columns as the hourly). This
+           helper measures no coverage, and #1869's day-grain daily wins only on positive evidence that it
+           holds the window — so with none, the corrected daily keeps it. */
         var (compiled, error) = CompileAged(
             "{\"source\":\"query_store_stats\",\"ratio\":\"qs_avg_duration_us\",\"timeBucket\":\"day\",\"viz\":\"line\"}", daysOld: 40);
         Assert.True(error is null, error);
         Assert.Contains("FROM collect.query_store_stats_corrected_daily AS f", compiled!.Sql, StringComparison.Ordinal);
         Assert.Contains("SUM(f.duration_us_weighted_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0)", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #1869 end to end through the COMPILER, not just the router: once the day-grain daily has measurably
+    /// materialized the window, the compiled SQL names it — and names nothing else differently. The projection
+    /// is asserted byte-for-byte against the corrected daily's, because the whole design rests on the two
+    /// carrying identical column names so ComposeCaggValueMapper and every composed panel are untouched.
+    /// </summary>
+    [Fact]
+    public void Compile_VeryOldWindow_QueryStore_DayGrainDailyCovered_RoutesThereWithTheSameProjection()
+    {
+        var plan = ValidPlan("{\"source\":\"query_store_stats\",\"ratio\":\"qs_avg_duration_us\",\"timeBucket\":\"day\",\"viz\":\"line\"}");
+        var end = WindowEnd;
+        var start = end.AddDays(-40);
+
+        var coverage = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal)
+            {
+                [TimescaleSupport.QueryStoreStatsCorrectedDailyView] = end.AddDays(-60),
+                [TimescaleSupport.QueryStoreStatsDayGrainDailyView] = end.AddDays(-60),
+            },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal));
+
+        var (compiled, error) = ComposeCompiler.Compile(
+            plan, new ComposeRunContext(null, start, end, ComposeRunContext.NoVariables, RollupAvailability.All, end, coverage));
+
+        Assert.True(error is null, error);
+        Assert.Contains("FROM collect.query_store_stats_daygrain_daily AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(f.duration_us_weighted_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0)", compiled.Sql, StringComparison.Ordinal);
+        Assert.Contains("date_trunc('day', f.bucket)", compiled.Sql, StringComparison.Ordinal);
     }
 
     [Fact]

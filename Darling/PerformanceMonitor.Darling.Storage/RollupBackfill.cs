@@ -96,7 +96,16 @@ public static class RollupBackfill
     /// test — a rollup whose source is keyed on <c>bucket</c> reads another rollup, and every such rollup was
     /// a daily — so one boolean served as both the ordering key and the bucket width.
     /// <c>query_store_stats_corrected_hourly</c> is the counter-example: hierarchical, but bucketed in HOURS.
-    /// Ordering still comes from the source column; the width is now read from the source list.</para>
+    /// The width is read from the source list.</para>
+    ///
+    /// <para><b>Ordering is by DEPTH from raw, not by the hierarchical flag (#1869).</b> The flag sorts a chain
+    /// only two levels tall. <c>query_store_stats_daygrain_daily</c> reads
+    /// <c>query_store_stats_interval_daily</c>, which itself reads a rollup — the first three-level chain here
+    /// — and both are "hierarchical", so the boolean cannot separate them. It happened to work while
+    /// <see cref="TimescaleSupport.RollupViews"/> declared them in the right order and LINQ's sort is stable,
+    /// which is a silent dependency on the ORDER OF A LIST for a property the type comments call a correctness
+    /// invariant. Depth reads the edge itself, so a future rollup declared anywhere still lands after its
+    /// source.</para>
     /// </summary>
     public static readonly RollupBackfillTarget[] Targets =
         TimescaleSupport.RollupViews
@@ -107,8 +116,36 @@ public static class RollupBackfill
                 r.SourceTimeColumn,
                 IsHierarchical: string.Equals(r.SourceTimeColumn, "bucket", StringComparison.Ordinal),
                 BucketWidth: r.BucketWidth))
-            .OrderBy(t => t.IsHierarchical)
+            .OrderBy(SourceDepth)
             .ToArray();
+
+    /// <summary>How many rollups sit between <paramref name="target"/> and the raw table underneath it: 0 for a
+    /// raw-sourced rollup, 1 for one reading a raw-sourced rollup, and so on. The backfill's ordering key —
+    /// refreshing a rollup before its source materializes nothing while REPORTING success (see
+    /// <see cref="Targets"/>). Walking stops at the first source that is not itself a rollup, and the hop count
+    /// is bounded by the list length so a malformed list cannot spin here.</summary>
+    private static int SourceDepth(RollupBackfillTarget target)
+    {
+        var depth = 0;
+        var source = target.Source;
+
+        for (var hop = 0; hop < TimescaleSupport.RollupViews.Length; hop++)
+        {
+            var current = source;
+            var parent = Array.FindIndex(TimescaleSupport.RollupViews,
+                r => string.Equals(r.View, current, StringComparison.Ordinal));
+
+            if (parent < 0)
+            {
+                break;
+            }
+
+            depth++;
+            source = TimescaleSupport.RollupViews[parent].Source;
+        }
+
+        return depth;
+    }
 
     /* ─────────────────────────── the probe ─────────────────────────── */
 

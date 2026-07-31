@@ -56,14 +56,23 @@ public sealed record ComposeRoute(ComposeSourceTier Tier, string? CaggRelation)
 /// empty and deepens from deploy, the old pair keeps everything it already holds, and reads prefer the corrected
 /// one wherever it reaches. <b>Past that boundary a window is still served INFLATED numbers</b> — a visible step
 /// where the two meet, unavoidable while the old history is the only history, and shrinking every day as the
-/// corrected rollups deepen and the old rows age out.</para></summary>
+/// corrected rollups deepen and the old rows age out.</para>
+///
+/// <para><b><c>DayGrainDailyView</c> is a BETTER daily, not a deeper one (#1869), and only query_store_stats
+/// has one.</b> <c>DailyView</c> dedups each Query Store interval within a collection HOUR, so an interval
+/// straddling an hour boundary is counted once per hour it was collected in — measured at 1.97x. The
+/// day-grain daily dedups across the whole DAY and counts it once. It is a NEW aggregate that starts empty,
+/// so it wins only where it has actually materialized the window; older windows keep falling to
+/// <c>DailyView</c>, and older ones still to <c>LegacyDailyView</c>. Three dailies, best-first, each step the
+/// same comparative rule.</para></summary>
 public sealed record ComposeCaggInfo(
     string RawTable,
     string HourlyView,
     string? DailyView,
     IReadOnlySet<string> Dimensions,
     string? LegacyHourlyView = null,
-    string? LegacyDailyView = null)
+    string? LegacyDailyView = null,
+    string? DayGrainDailyView = null)
 {
     public bool Covers(string dimensionName) =>
         string.Equals(dimensionName, MeasureCatalog.ServerDimensionName, StringComparison.Ordinal)
@@ -106,7 +115,8 @@ public static class ComposeCaggCatalog
             "query_store_stats", "query_store_stats_corrected_hourly", "query_store_stats_corrected_daily",
             new HashSet<string>(StringComparer.Ordinal) { "database_name", "module_name", "query_hash" },
             LegacyHourlyView: "query_store_stats_hourly",
-            LegacyDailyView: "query_store_stats_daily"),
+            LegacyDailyView: "query_store_stats_daily",
+            DayGrainDailyView: "query_store_stats_daygrain_daily"),
     };
 
     /// <summary>The CAGG coverage for <paramref name="rawTable"/>, or null if it has no continuous aggregate.</summary>
@@ -197,7 +207,10 @@ public static class ComposeSourceRouter
            composer-specific; the flags are per-TABLE (#1665), because a failure-isolated ensure sweep can
            build one table's pair and not another's. A catalog entry with no daily view feeds
            dailyAvailable=false through the same ladder — identical to the old null-DailyView fallback. */
-        var primary = ResolveFamily(cagg.HourlyView, cagg.DailyView, nowUtc, windowStartUtc, rollups, coverage);
+        var primary = PreferDayGrainDaily(
+            cagg,
+            ResolveFamily(cagg.HourlyView, cagg.DailyView, nowUtc, windowStartUtc, rollups, coverage),
+            windowStartUtc, rollups, coverage);
 
         if (!cagg.HasLegacyPair)
         {
@@ -244,6 +257,47 @@ public static class ComposeSourceRouter
         return legacy.Route.IsCagg && TierCoverage.ReachesFurtherBack(legacy.FloorUtc, primary.FloorUtc)
             ? legacy.Route
             : primary.Route;
+    }
+
+    /// <summary>
+    /// #1869: at the DAILY tier only, swap in the day-grain daily where it can answer the window.
+    ///
+    /// <para><b>Why the daily tier only.</b> The hour-straddle residual this removes is IRREDUCIBLE at the
+    /// hourly grain — an interval genuinely collected across two hours has to appear in both — so there is no
+    /// better hourly to prefer, and an hourly-age window is left exactly as #1849 routed it. What made the
+    /// daily worth a fourth near-raw-cardinality aggregate is that the daily tier is kept INDEFINITELY: its
+    /// numbers are the ones that persist and get compared year over year.</para>
+    ///
+    /// <para><b>The candidate has to prove itself, which is the reverse of the corrected/legacy step in
+    /// <see cref="Resolve"/> and deliberately so.</b> There the incumbent was the inflated pair and the
+    /// newcomer was simply better;
+    /// here both relations are corrected and the newcomer is merely MORE correct, while being younger and
+    /// therefore shallower. So it wins where it covers the window, or where it measurably reaches further
+    /// back, and otherwise the corrected daily keeps the window — trading a bounded ~2x over-count for
+    /// coverage the newer view does not have, the same trade the legacy step makes one notch further down.
+    /// With no coverage measured at all (a failed probe) nothing moves: <see cref="TierCoverage"/>'s rule is
+    /// that null is no evidence, and no evidence never wins.</para>
+    /// </summary>
+    private static (ComposeRoute Route, DateTime? FloorUtc) PreferDayGrainDaily(
+        ComposeCaggInfo cagg, (ComposeRoute Route, DateTime? FloorUtc) resolved,
+        DateTime windowStartUtc, RollupAvailability rollups, RollupCoverage coverage)
+    {
+        if (cagg.DayGrainDailyView is null
+            || resolved.Route.Tier != ComposeSourceTier.Daily
+            || !rollups.Has(cagg.DayGrainDailyView))
+        {
+            return resolved;
+        }
+
+        var dayGrain = (Route: new ComposeRoute(ComposeSourceTier.Daily, cagg.DayGrainDailyView),
+                        FloorUtc: coverage.FloorOf(cagg.DayGrainDailyView));
+
+        if (TierCoverage.Covers(dayGrain.FloorUtc, windowStartUtc))
+        {
+            return dayGrain;
+        }
+
+        return TierCoverage.ReachesFurtherBack(dayGrain.FloorUtc, resolved.FloorUtc) ? dayGrain : resolved;
     }
 
     /// <summary>
