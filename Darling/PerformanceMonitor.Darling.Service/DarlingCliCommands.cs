@@ -2202,7 +2202,7 @@ public static class DarlingCliCommands
             plans.Add((target, RollupBackfill.Plan(
                 target.View, RollupBackfill.EventualSourceFloor(probe.SourceOldestUtc, rootRawOldest), probe.CoverageOldestUtc,
                 probe.MaterializedBuckets, probe.MaterializedBytes, rawBytes,
-                target.IsDaily ? TimeSpan.FromDays(1) : TimeSpan.FromHours(1))));
+                target.BucketWidth)));
         }
 
         var work = plans.Where(p => !p.Plan.IsComplete).ToList();
@@ -2336,7 +2336,7 @@ public static class DarlingCliCommands
                     target.View, live.SourceOldestUtc, live.CoverageOldestUtc,
                     live.MaterializedBuckets, live.MaterializedBytes,
                     rawBytesCache.TryGetValue(target.RawTable, out var cachedRawBytes) ? cachedRawBytes : 0,
-                    target.IsDaily ? TimeSpan.FromDays(1) : TimeSpan.FromHours(1));
+                    target.BucketWidth);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {

@@ -88,10 +88,15 @@ public static class RollupBackfill
     /// merely reorder work; it can leave permanent under-coverage that looks like completion.</para>
     ///
     /// <para>DERIVED from <see cref="TimescaleSupport.RollupViews"/> rather than restated. That list already
-    /// carries every rollup's raw table, source relation and source time column; a second hand-kept copy here
-    /// is a drift surface, and #1798 is what drift between two notions of "covered" costs. A rollup is
-    /// hierarchical exactly when its source is keyed on <c>bucket</c> — i.e. it reads another rollup — which is
-    /// also what makes its own grain a day, so the ordering and the bucket width both fall out of one fact.</para>
+    /// carries every rollup's raw table, source relation, source time column and bucket width; a second
+    /// hand-kept copy here is a drift surface, and #1798 is what drift between two notions of "covered"
+    /// costs.</para>
+    ///
+    /// <para><b>Hierarchy and grain are two facts, not one (#1849).</b> They used to be derived from the same
+    /// test — a rollup whose source is keyed on <c>bucket</c> reads another rollup, and every such rollup was
+    /// a daily — so one boolean served as both the ordering key and the bucket width.
+    /// <c>query_store_stats_corrected_hourly</c> is the counter-example: hierarchical, but bucketed in HOURS.
+    /// Ordering still comes from the source column; the width is now read from the source list.</para>
     /// </summary>
     public static readonly RollupBackfillTarget[] Targets =
         TimescaleSupport.RollupViews
@@ -100,8 +105,9 @@ public static class RollupBackfill
                 r.RawTable,
                 r.Source,
                 r.SourceTimeColumn,
-                IsDaily: string.Equals(r.SourceTimeColumn, "bucket", StringComparison.Ordinal)))
-            .OrderBy(t => t.IsDaily)
+                IsHierarchical: string.Equals(r.SourceTimeColumn, "bucket", StringComparison.Ordinal),
+                BucketWidth: r.BucketWidth))
+            .OrderBy(t => t.IsHierarchical)
             .ToArray();
 
     /* ─────────────────────────── the probe ─────────────────────────── */
@@ -659,9 +665,12 @@ public sealed class RefreshDisclosure
     }
 }
 
-/// <summary>One rollup to backfill: the view, the RAW table whose oldest row is the coverage target, and whether
-/// it is a hierarchical daily (sourced from its hourly, so it must be refreshed after one).</summary>
-public sealed record RollupBackfillTarget(string View, string RawTable, string Source, string SourceTimeColumn, bool IsDaily);
+/// <summary>One rollup to backfill: the view, the RAW table whose oldest row is the coverage target, the source
+/// it converges to, whether it reads another rollup rather than raw (which orders the run), and its own bucket
+/// width — a SEPARATE fact since #1849, when <c>query_store_stats_corrected_hourly</c> became the first
+/// hierarchical rollup that is not a daily. See <see cref="RollupBackfill.Targets"/>.</summary>
+public sealed record RollupBackfillTarget(
+    string View, string RawTable, string Source, string SourceTimeColumn, bool IsHierarchical, TimeSpan BucketWidth);
 
 /// <summary>One rollup's measured state (<see cref="RollupBackfill.ProbeSql"/>).</summary>
 public sealed record RollupBackfillProbe(

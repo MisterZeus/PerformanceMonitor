@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -87,7 +88,7 @@ public sealed class TimescaleContinuousAggregateTests
            "covered" would mean two different things to the router and to the purge. */
         var probe = TimescaleSupport.RollupCoverageProbeSql(RollupAvailability.All);
         var arming = TimescaleSupport.RetentionArmSafetySql(
-            "query_stats", "collection_time", TimescaleSupport.QueryStatsHourlyView);
+            "query_stats", "collection_time", new[] { TimescaleSupport.QueryStatsHourlyView });
 
         Assert.Contains($"min(bucket) FROM collect.{TimescaleSupport.QueryStatsHourlyView}", probe, StringComparison.Ordinal);
         Assert.Contains($"min(bucket) FROM collect.{TimescaleSupport.QueryStatsHourlyView}", arming, StringComparison.Ordinal);
@@ -374,11 +375,62 @@ public sealed class TimescaleContinuousAggregateTests
     [InlineData("query_stats_hourly", "bucket", "query_stats_daily")]
     public void RetentionArmSafetySql_ComparesSourceOldestToCoverageOldest(string relation, string timeColumn, string coverage)
     {
-        var sql = TimescaleSupport.RetentionArmSafetySql(relation, timeColumn, coverage);
+        var sql = TimescaleSupport.RetentionArmSafetySql(relation, timeColumn, new[] { coverage });
 
         Assert.Contains($"min({timeColumn}) FROM collect.{relation}", sql, StringComparison.Ordinal);
         Assert.Contains($"min(bucket) FROM collect.{coverage}", sql, StringComparison.Ordinal);
         Assert.Contains("AS source_oldest", sql, StringComparison.Ordinal);
         Assert.Contains("AS coverage_oldest", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// WATCHED (mutation): make the arming gate emit only the FIRST coverage relation and this goes red.
+    /// A raw table can have more than one rollup family reading it (#1849 — query_store_stats feeds both the
+    /// original inflated pair and the corrected one), and a purge that satisfied only one of them would drop
+    /// raw history the other has never materialized. Every named consumer must appear in the statement, each
+    /// as its own column, because the verdict is an AND the READER evaluates — folding them into one
+    /// <c>GREATEST</c> would skip NULLs and let an EMPTY rollup vanish from the comparison entirely.
+    /// </summary>
+    [Fact]
+    public void RetentionArmSafetySql_NamesEveryCoverageRelation()
+    {
+        var coverage = new[]
+        {
+            TimescaleSupport.QueryStoreStatsHourlyView,
+            TimescaleSupport.QueryStoreStatsIntervalHourlyView,
+        };
+
+        var sql = TimescaleSupport.RetentionArmSafetySql("query_store_stats", "collection_time", coverage);
+
+        foreach (var view in coverage)
+        {
+            Assert.Contains($"min(bucket) FROM collect.{view}", sql, StringComparison.Ordinal);
+        }
+
+        /* One column per consumer, indexed — the reader walks them positionally. */
+        Assert.Contains("AS coverage_oldest_0", sql, StringComparison.Ordinal);
+        Assert.Contains("AS coverage_oldest_1", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("GREATEST", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The map both purge paths read (#1784) must name BOTH Query Store rollup families as raw's coverage.
+    /// query_store_stats is the only raw table with two consumers; naming just one would let raw purge over
+    /// history the other never materialized, which is the #1790-class race the corrected rollups introduce.
+    /// </summary>
+    [Fact]
+    public void RawTierCoverage_QueryStoreStats_RequiresBothRollupFamilies()
+    {
+        var entry = TimescaleSupport.RawTierCoverage.Single(t =>
+            string.Equals(t.Relation, "query_store_stats", StringComparison.Ordinal));
+
+        Assert.Contains(TimescaleSupport.QueryStoreStatsHourlyView, entry.Coverage);
+        Assert.Contains(TimescaleSupport.QueryStoreStatsIntervalHourlyView, entry.Coverage);
+
+        /* The interval tier must outlive raw or the gate can never be satisfied in steady state: raw's
+           newest-dropped chunk and L1's oldest-kept bucket would sit at the same age. */
+        Assert.True(TimescaleSupport.IntervalRetentionSpan > TimescaleSupport.RawRetentionSpan,
+            "the interval-grain dedup layer must be retained strictly longer than raw, or arming raw's purge " +
+            "races its own coverage gate.");
     }
 }

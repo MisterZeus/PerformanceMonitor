@@ -519,21 +519,60 @@ public sealed class RollupBackfillTests
     /// no-ops over the hole and reports success too. The order is a correctness invariant, not a preference.
     /// </summary>
     [Fact]
-    public void Targets_RunEveryHourlyBeforeAnyDaily()
+    public void Targets_RunEveryRawSourcedRollupBeforeAnyThatReadsOne()
     {
-        var firstDaily = Array.FindIndex(RollupBackfill.Targets, t => t.IsDaily);
-        var lastHourly = Array.FindLastIndex(RollupBackfill.Targets, t => !t.IsDaily);
+        var firstHierarchical = Array.FindIndex(RollupBackfill.Targets, t => t.IsHierarchical);
+        var lastRawSourced = Array.FindLastIndex(RollupBackfill.Targets, t => !t.IsHierarchical);
 
-        Assert.True(firstDaily > lastHourly,
-            "every hourly rollup must be refreshed before any daily one — a daily reads its hourly, so the " +
-            "reverse order materializes nothing while reporting success AND burns the invalidations that " +
-            "would have let a later pass repair it.");
+        Assert.True(firstHierarchical > lastRawSourced,
+            "every raw-sourced rollup must be refreshed before any rollup that reads one — the reverse order " +
+            "materializes nothing while reporting success AND burns the invalidations that would have let a " +
+            "later pass repair it.");
 
-        /* Each daily's hourly sibling is genuinely present in the list, or "hourlies first" would be vacuous. */
-        foreach (var daily in RollupBackfill.Targets.Where(t => t.IsDaily))
+        /* Each hierarchical rollup's ACTUAL SOURCE appears earlier in the list. Asserted against Source
+           rather than by rewriting "_daily" to "_hourly" in the view name, which is what this used to do:
+           that guess silently held only while every hierarchical rollup was a daily named after its parent.
+           query_store_stats_corrected_daily breaks both halves — it is a daily whose source is
+           query_store_stats_INTERVAL_hourly (its sibling's parent, not its sibling), so the name rewrite
+           would have looked for a view that does not exist and Assert.Contains would have failed for the
+           wrong reason. Reading the edge the backfill actually traverses cannot drift from it. */
+        foreach (var hierarchical in RollupBackfill.Targets.Where(t => t.IsHierarchical))
         {
-            var hourly = daily.View.Replace("_daily", "_hourly", StringComparison.Ordinal);
-            Assert.Contains(RollupBackfill.Targets, t => !t.IsDaily && string.Equals(t.View, hourly, StringComparison.Ordinal));
+            var sourceIndex = Array.FindIndex(RollupBackfill.Targets,
+                t => string.Equals(t.View, hierarchical.Source, StringComparison.Ordinal));
+
+            Assert.True(sourceIndex >= 0,
+                $"{hierarchical.View} reads {hierarchical.Source}, which is not itself a backfill target — it " +
+                "would never be materialized, so this rollup could never converge.");
+
+            Assert.True(sourceIndex < Array.FindIndex(RollupBackfill.Targets,
+                    t => string.Equals(t.View, hierarchical.View, StringComparison.Ordinal)),
+                $"{hierarchical.View} must be refreshed after its source {hierarchical.Source}.");
+        }
+    }
+
+    /// <summary>
+    /// A rollup's BUCKET WIDTH is its own fact, not a synonym for "is hierarchical" (#1849). It is divided
+    /// into the backfill window to get a bucket count, which drives the slice count AND the disk estimate, so
+    /// a width that is 24x too wide under-counts buckets by 24x — and under-estimating is the one direction
+    /// the preflight exists to prevent. <c>query_store_stats_corrected_hourly</c> is the case that separates
+    /// the two: it reads another rollup (hierarchical) but its buckets are HOURS.
+    /// </summary>
+    [Fact]
+    public void Targets_CarryTheirOwnBucketWidth_NotOneInferredFromHierarchy()
+    {
+        var correctedHourly = RollupBackfill.Targets.Single(t =>
+            string.Equals(t.View, TimescaleSupport.QueryStoreStatsCorrectedHourlyView, StringComparison.Ordinal));
+
+        Assert.True(correctedHourly.IsHierarchical);
+        Assert.Equal(TimeSpan.FromHours(1), correctedHourly.BucketWidth);
+
+        /* Every target's width matches the one declared beside its view in the single source list. */
+        foreach (var target in RollupBackfill.Targets)
+        {
+            var declared = TimescaleSupport.RollupViews.Single(r =>
+                string.Equals(r.View, target.View, StringComparison.Ordinal));
+            Assert.Equal(declared.BucketWidth, target.BucketWidth);
         }
     }
 
@@ -658,7 +697,7 @@ public sealed class RollupBackfillTests
 
         Assert.Contains(
             $"min(bucket) FROM collect.{TimescaleSupport.QueryStatsHourlyView}",
-            TimescaleSupport.RetentionArmSafetySql("query_stats", "collection_time", TimescaleSupport.QueryStatsHourlyView),
+            TimescaleSupport.RetentionArmSafetySql("query_stats", "collection_time", new[] { TimescaleSupport.QueryStatsHourlyView }),
             StringComparison.Ordinal);
     }
 

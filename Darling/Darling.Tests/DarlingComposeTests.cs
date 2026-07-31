@@ -512,22 +512,24 @@ public sealed class DarlingComposeTests
     public void Compile_OldWindow_QueryStore_WeightedRatio_RoutesToCagg_RemapsWeightedMean()
     {
         /* A 10-day window routes QS to the hourly CAGG; the weighted mean remaps to the reshaped weighted-sum over
-           execution_count_sum (exact, not an avg-of-avgs). A >21d window would route to query_store_stats_daily. */
+           execution_count_sum (exact, not an avg-of-avgs). Since #1849 that is the CORRECTED hourly — same
+           column names, so the compiled expression is byte-identical and only the relation changed. A >21d
+           window would route to the corrected daily. */
         var (compiled, error) = CompileAged(
             "{\"source\":\"query_store_stats\",\"ratio\":\"qs_avg_duration_us\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 10);
         Assert.True(error is null, error);
-        Assert.Contains("FROM collect.query_store_stats_hourly AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.query_store_stats_corrected_hourly AS f", compiled!.Sql, StringComparison.Ordinal);
         Assert.Contains("SUM(f.duration_us_weighted_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0)", compiled.Sql, StringComparison.Ordinal);
     }
 
     [Fact]
     public void Compile_VeryOldWindow_QueryStore_RoutesToDailyCagg()
     {
-        /* A 40-day QS window now routes to query_store_stats_daily (same weighted-sum columns as the hourly). */
+        /* A 40-day QS window routes to the corrected daily (same weighted-sum columns as the hourly). */
         var (compiled, error) = CompileAged(
             "{\"source\":\"query_store_stats\",\"ratio\":\"qs_avg_duration_us\",\"timeBucket\":\"day\",\"viz\":\"line\"}", daysOld: 40);
         Assert.True(error is null, error);
-        Assert.Contains("FROM collect.query_store_stats_daily AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.query_store_stats_corrected_daily AS f", compiled!.Sql, StringComparison.Ordinal);
         Assert.Contains("SUM(f.duration_us_weighted_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0)", compiled.Sql, StringComparison.Ordinal);
     }
 
@@ -1166,14 +1168,15 @@ public sealed class DarlingComposeTests
     [Fact]
     public void Compile_QueryStoreCaggRoute_IsNotWrappedInTheRawDedup()
     {
-        /* The dedup belongs to the RAW route only: the rollup has no first_execution_time to partition on
-           (a CAGG cannot contain a window function at all), and its sums were materialized from
-           un-deduped rows — #1841 tier 2, deliberately not repaired here. */
+        /* The read-time dedup belongs to the RAW route only: a CAGG cannot contain a window function at all.
+           Since #1849 the rollup is not un-deduped either — the dedup moved INTO the rollup chain, where
+           query_store_stats_interval_hourly collapses each interval with last(x, collection_time) before the
+           composer-grain view sums it. So this route is correct without the wrapper, not merely un-wrapped. */
         var (compiled, error) = CompileAged(
             "{\"source\":\"query_store_stats\",\"ratio\":\"qs_avg_duration_us\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 10);
         Assert.True(error is null, error);
 
-        Assert.Contains("FROM collect.query_store_stats_hourly AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.query_store_stats_corrected_hourly AS f", compiled!.Sql, StringComparison.Ordinal);
         Assert.DoesNotContain("qs_rn", compiled.Sql, StringComparison.Ordinal);
     }
 

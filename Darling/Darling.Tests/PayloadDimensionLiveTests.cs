@@ -1327,7 +1327,7 @@ public sealed class PayloadDimensionLiveTests
     {
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
-        foreach (var (view, _, _, _) in TimescaleSupport.RollupViews)
+        foreach (var (view, _, _, _, _) in TimescaleSupport.RollupViews)
         {
             await TryExecAsync(connection,
                 $"SELECT remove_continuous_aggregate_policy('collect.{view}', if_exists => true)", ct);
@@ -1352,7 +1352,11 @@ public sealed class PayloadDimensionLiveTests
     {
         await EnsureAggregatesWithoutPoliciesAsync(connection, ct);
 
-        foreach (var (relation, _, coverage) in TimescaleSupport.RawTierCoverage)
+        /* Every coverage relation, not just the first: a raw table can have more than one rollup family
+           gating its purge (#1849), and the #1784 gate is an AND over all of them — refreshing one would
+           leave the gate correctly refusing and the test looking at the wrong cause. */
+        foreach (var (relation, _, coverageRelations) in TimescaleSupport.RawTierCoverage)
+        foreach (var coverage in coverageRelations)
         {
             _ = relation;
             for (var attempt = 1; ; attempt++)
