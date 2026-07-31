@@ -438,7 +438,7 @@ END;
         /* Detect server version for version-gated columns.
            isNew = true for SQL Server 2017+ (product version > 13) or Azure SQL DB/MI.
            Controls: avg_num_physical_io_reads, avg_log_bytes_used, avg_tempdb_space_used, plan_forcing_type_desc.
-           hasPlanType = true for SQL Server 2022+ (product version >= 16), and on Azure SQL DB.
+           hasPlanType = true for SQL Server 2022+ (product version >= 16), and on Azure SQL DB/MI.
            Controls: plan_type_desc. */
         var productVersion = context.EnumerationProbeResult is null
             ? DefaultProductVersion
@@ -450,11 +450,13 @@ END;
            overrides above), while the engine underneath is evergreen and never older than 2022. The
            column's own catalog-view page lists Azure SQL Database in its Applies-to banner and names
            exactly one platform where referencing it errors — Azure Synapse Analytics, engine edition 6,
-           which is never IsAzureSqlDb (edition 5). Managed Instance deliberately keeps the pure version
-           gate: it also under-reports PRODUCTVERSION, but its feature set follows a per-instance update
-           policy rather than being evergreen, so "Azure means 2022+" is not sound there and MI has no
-           per-database path to verify it on. */
-        bool hasPlanType = productVersion >= 16 || context.Target.IsAzureSqlDb;
+           which is never IsAzureSqlDb (edition 5).
+
+           Managed Instance is ON as of #1886, on the same live-evidence basis Azure SQL DB was flipped on
+           and NOT by pattern-matching the Azure change — see the replica-attribution comment below for
+           the full probe, which answered both gates in one session. The short form: plan_type_desc binds
+           on MI (COL_LENGTH = 120), measured on an instance following the CONSERVATIVE update policy. */
+        bool hasPlanType = productVersion >= 16 || context.Target.IsAzureSqlDb || context.Target.IsAzureManagedInstance;
 
         /* Replica attribution — SQL Server 2022+ (product version >= 16). Controls: replica_role.
 
@@ -512,12 +514,41 @@ END;
            General Purpose, so the collector cannot tell the tiers apart at query-build time. It does
            not need to — both bind identically.
 
-           Managed Instance deliberately keeps the pure version gate, for the same reason plan_type_desc
-           gives above: MI under-reports PRODUCTVERSION too, but its feature set follows a per-instance
-           update policy rather than being evergreen, so "Azure means 2022+" is not sound there and MI
-           has no per-database path to verify it on. IsAzureSqlDb is false for MI, so MI falls through
-           to productVersion >= 16 and stays off until a probe on MI says otherwise. */
-        bool hasReplicaAttribution = productVersion >= 16 || context.Target.IsAzureSqlDb;
+           Managed Instance is ON as of #1886 — the probe the previous version of this comment demanded
+           was run, so nobody needs to provision an MI to re-answer this. MI was held back through #1844
+           and #1872 for a reason that does NOT apply to Azure SQL DB and had to be retired on its own
+           terms: MI is not evergreen. Its feature set follows a per-instance UPDATE POLICY, so "Azure
+           means 2022+" is a claim about the fleet that does not transfer to a specific instance, and an
+           MI on an older policy genuinely might not have the catalog. The bar #1886 set for the simple
+           edition gate was therefore stricter than Azure's: the catalog must be present on the OLDEST
+           update policy still in support, not merely on whatever instance was to hand.
+
+           Measured 2026-07-31 on a GPv2 Gen5 4-vCore Managed Instance, westus3, provisioned for the run
+           and torn down after — reporting ProductVersion 12.0.2000.8, EngineEdition 8, and crucially
+           SERVERPROPERTY('ProductUpdateType') = 'CU', i.e. the CONSERVATIVE (SQL Server 2022) update
+           policy rather than Always-up-to-date. That is exactly the "oldest policy still in support"
+           case, so the bar is met without an AlwaysUpToDate instance: catalog presence is a 2022-surface
+           fact, not an evergreen one.
+
+             - OBJECT_ID('sys.query_store_replicas') = -660 and
+               COL_LENGTH('sys.query_store_runtime_stats', 'replica_group_id') = 8 — the same two-value
+               probe #1848/#1872 ran on Azure SQL DB, non-NULL on both counts.
+             - Answered THROUGH THE COLLECTOR'S OWN MECHANISM, not just in master: the same two values
+               came back from a user-database context via [db].sys.sp_executesql (msdb standing in, since
+               these catalog views are per-database). MI takes the on-prem enumeration path, so binding in
+               master would not have settled it — that path is what the issue said MI lacked.
+             - COL_LENGTH('sys.query_store_plan', 'plan_type_desc') = 120, which is what flips the
+               hasPlanType carve-out above in the same session rather than provisioning MI twice.
+
+           A standalone MI's sys.query_store_replicas is an EMPTY enumeration — zero rows — unlike Azure
+           SQL DB's, which is a static 4-row roles table even with no replicas present. That difference
+           is worth stating because it looks alarming and is not: BINDING is the collection-safety
+           question and the answer is yes, while an empty enumeration only means a GP instance with no
+           read replicas has nothing to attribute. The LEFT JOIN below is what makes that harmless — it
+           is the same shape that keeps a 2022 standalone (whose view is also empty) collecting, and
+           tightening it would break both. replica_role simply reads NULL there, which is the honest
+           state rather than an invented one. */
+        bool hasReplicaAttribution = productVersion >= 16 || context.Target.IsAzureSqlDb || context.Target.IsAzureManagedInstance;
 
         /* Build version-conditional column fragments for the Query Store query.
            None of these contain a single quote, so they splice into the body identically whether the

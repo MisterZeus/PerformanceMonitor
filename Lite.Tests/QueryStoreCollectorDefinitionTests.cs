@@ -631,11 +631,9 @@ public sealed class QueryStoreCollectorDefinitionTests
         Assert.Contains("plan_type = qsp.plan_type_desc,", plan.Text, StringComparison.Ordinal);
         Assert.Contains("replica_role = qsr.replica_name", plan.Text, StringComparison.Ordinal);
 
-        /* Managed Instance keeps the PURE VERSION GATE on both, and #1872 deliberately did not change
-           that: MI under-reports PRODUCTVERSION too, but its feature set follows a per-instance update
-           policy rather than being evergreen, so "Azure means 2022+" is not sound there — and unlike
-           Azure SQL DB, MI has no per-database path this could have been verified on. Its probe here
-           defaults to 13, so both columns emit their NULL placeholder. */
+        /* Managed Instance joined both gates with #1886, on its OWN live evidence rather than by
+           pattern-matching this Azure SQL DB change — see BuildPerItemQuery_ManagedInstance_CarriesBothVersionGatedColumns below for
+           what was measured and why MI needed a stricter bar than Azure did. */
         var managedInstance = QueryStoreCollector.Instance.BuildPerItemQuery("SO", new CollectorContext
         {
             ServerId = 42,
@@ -645,9 +643,104 @@ public sealed class QueryStoreCollectorDefinitionTests
             Target = new CollectorTargetInfo { IsAzureManagedInstance = true },
         }).Text;
 
-        Assert.Contains("plan_type = NULL,", managedInstance, StringComparison.Ordinal);
-        Assert.Contains("replica_role = CONVERT(nvarchar(1), NULL)", managedInstance, StringComparison.Ordinal);
-        Assert.DoesNotContain("sys.query_store_replicas", managedInstance, StringComparison.Ordinal);
+        Assert.Contains("plan_type = qsp.plan_type_desc,", managedInstance, StringComparison.Ordinal);
+        Assert.Contains("replica_role = qsr.replica_name", managedInstance, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildPerItemQuery_ManagedInstance_CarriesBothVersionGatedColumns()
+    {
+        /* #1886. MI reports PRODUCTVERSION major 12 and EngineEdition 8, so the pure version gate can
+           NEVER fire on it — before this, every MI row stored the nvarchar(1) NULL placeholder for
+           replica_role and NULL for plan_type on every instance, regardless of what its engine
+           supported.
+
+           MI was deliberately held back through #1844 and #1872 while Azure SQL DB was flipped, and the
+           reason does not transfer: MI is not evergreen. Its feature set follows a per-instance UPDATE
+           POLICY, so an instance on an older policy genuinely might not have the catalog, and the bar
+           #1886 set for this simple edition gate was correspondingly stricter than Azure's — the catalog
+           had to be present on the OLDEST update policy still in support.
+
+           Measured 2026-07-31 on a GPv2 Gen5 4-vCore MI (westus3, torn down after) reporting
+           ProductUpdateType = 'CU', i.e. the conservative SQL Server 2022 policy rather than
+           Always-up-to-date, which is exactly that oldest-supported case:
+
+             OBJECT_ID('sys.query_store_replicas')                                 = -660
+             COL_LENGTH('sys.query_store_runtime_stats', 'replica_group_id')       = 8
+             COL_LENGTH('sys.query_store_plan', 'plan_type_desc')                  = 120
+
+           and the same two replica values re-answered from a user-database context through
+           [db].sys.sp_executesql — the collector's actual MI mechanism, which is the path the issue
+           noted MI has instead of Azure SQL DB's per-database connection.
+
+           This pins the SOURCE the gate emits, not live MI state: the instance is gone, and the
+           evidence lives on #1886. */
+        var mi = QueryStoreCollector.Instance.BuildPerItemQuery("SO", new CollectorContext
+        {
+            ServerId = 42,
+            ServerName = "test-server",
+            CollectionTime = new DateTime(2026, 7, 2, 12, 0, 0, DateTimeKind.Utc),
+            Deltas = s_deltas,
+            /* No probe result, so productVersion falls to the default — the gate must ride the EDITION,
+               which is the whole point on a platform whose version probe under-reports. */
+            Target = new CollectorTargetInfo { IsAzureManagedInstance = true },
+        }).Text;
+
+        Assert.Contains("plan_type = qsp.plan_type_desc,", mi, StringComparison.Ordinal);
+        Assert.Contains("replica_role = qsr.replica_name", mi, StringComparison.Ordinal);
+
+        /* MUST be a LEFT JOIN, and for MI the reason is sharper than it is anywhere else: a standalone
+           MI's sys.query_store_replicas is an EMPTY enumeration (zero rows), where Azure SQL DB's is a
+           static 4-row roles table even with no replicas. An INNER JOIN would match nothing and silently
+           delete ALL Query Store collection on every standalone MI. */
+        Assert.Contains("LEFT JOIN sys.query_store_replicas AS qsr", mi, StringComparison.Ordinal);
+        Assert.Contains("ON qsr.replica_group_id = qsrs.replica_group_id", mi, StringComparison.Ordinal);
+
+        /* Neither placeholder survives. */
+        Assert.DoesNotContain("plan_type = NULL,", mi, StringComparison.Ordinal);
+        Assert.DoesNotContain("replica_role = CONVERT(nvarchar(1), NULL)", mi, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildPerItemQuery_ManagedInstance_GatesRideTheEditionNotTheProbe()
+    {
+        /* The discriminating pin (#1886). MI's version probe reports major 12, so if either gate were
+           still reading the probe rather than the edition, a LOW probe value would put the NULL
+           placeholders back. Passing the real under-reported major explicitly proves the edition term is
+           what carries both columns — which is exactly the condition that made MI never attribute. */
+        var mi = QueryStoreCollector.Instance.BuildPerItemQuery("SO", new CollectorContext
+        {
+            ServerId = 42,
+            ServerName = "test-server",
+            CollectionTime = new DateTime(2026, 7, 2, 12, 0, 0, DateTimeKind.Utc),
+            Deltas = s_deltas,
+            EnumerationProbeResult = 12,
+            Target = new CollectorTargetInfo { IsAzureManagedInstance = true },
+        }).Text;
+
+        Assert.Contains("plan_type = qsp.plan_type_desc,", mi, StringComparison.Ordinal);
+        Assert.Contains("replica_role = qsr.replica_name", mi, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildPerItemQuery_OnPremBelow2022_StillGetsNeitherColumn()
+    {
+        /* The counterfactual that keeps #1886 honest: widening the two gates must not have widened them
+           for box SQL Server. A 2019 target still emits both NULL placeholders and never references the
+           replicas catalog, which does not exist there. */
+        var onPrem = QueryStoreCollector.Instance.BuildPerItemQuery("SO", new CollectorContext
+        {
+            ServerId = 42,
+            ServerName = "test-server",
+            CollectionTime = new DateTime(2026, 7, 2, 12, 0, 0, DateTimeKind.Utc),
+            Deltas = s_deltas,
+            EnumerationProbeResult = 15,
+            Target = new CollectorTargetInfo(),
+        }).Text;
+
+        Assert.Contains("plan_type = NULL,", onPrem, StringComparison.Ordinal);
+        Assert.Contains("replica_role = CONVERT(nvarchar(1), NULL)", onPrem, StringComparison.Ordinal);
+        Assert.DoesNotContain("sys.query_store_replicas", onPrem, StringComparison.Ordinal);
     }
 
     [Fact]
