@@ -59,25 +59,26 @@ public sealed class TimescaleEnableConnectionSafetyTests
                 continue;
             }
 
+            var text = File.ReadAllText(file);
             var lines = File.ReadAllLines(file);
-            for (var i = 0; i < lines.Length; i++)
+
+            /* Whitespace-tolerant, and matched against the whole FILE rather than line by line: a call split
+               as `TimescaleSupport\n    .TryEnableAsync(...)` is the same call, and a guard that a line break
+               can slip past is not a guard. Same reason the window below is flattened before it is read. */
+            foreach (Match call in Regex.Matches(text, @"TimescaleSupport\s*\.\s*TryEnableAsync\s*\("))
             {
-                var line = lines[i];
-                if (!line.Contains("TimescaleSupport.TryEnableAsync(", StringComparison.Ordinal))
-                {
-                    continue;
-                }
+                var lineIndex = text.Take(call.Index).Count(c => c == '\n');
 
                 /* A doc comment mentioning it is not a call. */
-                var trimmed = line.TrimStart();
+                var trimmed = lines[lineIndex].TrimStart();
                 if (trimmed.StartsWith("///", StringComparison.Ordinal) || trimmed.StartsWith("*", StringComparison.Ordinal))
                 {
                     continue;
                 }
 
-                if (!IsCheckedOnTheSpot(lines, i))
+                if (!IsCheckedOnTheSpot(lines, lineIndex))
                 {
-                    offenders.Add($"{name}:{i + 1}");
+                    offenders.Add($"{name}:{lineIndex + 1}");
                 }
             }
         }
@@ -148,28 +149,26 @@ public sealed class TimescaleEnableConnectionSafetyTests
     /// </summary>
     private static bool IsCheckedOnTheSpot(string[] lines, int index)
     {
-        var line = lines[index];
-        if (line.Contains("Assert.True(", StringComparison.Ordinal))
+        /* The statement plus the next few, flattened to one string. Flattening is what lets a call or an
+           assertion wrapped across lines read the same as the one-line form — the blind spot a purely
+           line-by-line scan leaves. The window starts at the call's line, so an assertion ABOVE it is not
+           mistaken for a check of it. */
+        var window = string.Join(' ', lines.Skip(index).Take(4));
+
+        if (Regex.IsMatch(window, @"Assert\s*\.\s*True\s*\(\s*await\s+TimescaleSupport\s*\.\s*TryEnableAsync"))
         {
             return true;
         }
 
-        var captured = Regex.Match(line, @"var\s+(\w+)\s*=\s*await\s+TimescaleSupport\.TryEnableAsync\(");
+        var captured = Regex.Match(window, @"var\s+(\w+)\s*=\s*await\s+TimescaleSupport\s*\.\s*TryEnableAsync\s*\(");
         if (!captured.Success)
         {
             return false;
         }
 
+        /* Tied to the CAPTURED variable, so an unrelated assertion nearby cannot launder an unchecked call. */
         var variable = captured.Groups[1].Value;
-        for (var i = index + 1; i < Math.Min(index + 4, lines.Length); i++)
-        {
-            if (Regex.IsMatch(lines[i], $@"Assert\.True\(\s*{Regex.Escape(variable)}\b"))
-            {
-                return true;
-            }
-        }
-
-        return false;
+        return Regex.IsMatch(window, $@"Assert\s*\.\s*True\s*\(\s*{Regex.Escape(variable)}\b");
     }
 
     private static string? FindTestProjectDirectory()
