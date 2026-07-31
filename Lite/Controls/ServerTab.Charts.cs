@@ -875,7 +875,7 @@ public partial class ServerTab : UserControl
         expandedTimes.Add(rangeEnd.ToOADate());
         expandedCounts.Add(0);
 
-        var plot = BlockingTrendChart.Plot.Add.TimeSeries(expandedTimes.ToArray(), expandedCounts.ToArray());
+        var plot = BlockingTrendChart.Plot.Add.Scatter(expandedTimes.ToArray(), expandedCounts.ToArray()); /* synthetic spike baseline (±0.0001d offsets), NOT a cadence series - gap-breaking would lock onto the artificial deltas (#1944 review) */
         plot.LegendText = "Blocking Incidents";
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Blocking"));
         plot.MarkerSize = 0; /* No markers, just lines */
@@ -954,7 +954,7 @@ public partial class ServerTab : UserControl
         expandedTimes.Add(rangeEnd.ToOADate());
         expandedCounts.Add(0);
 
-        var plot = DeadlockTrendChart.Plot.Add.TimeSeries(expandedTimes.ToArray(), expandedCounts.ToArray());
+        var plot = DeadlockTrendChart.Plot.Add.Scatter(expandedTimes.ToArray(), expandedCounts.ToArray()); /* synthetic spike baseline (±0.0001d offsets), NOT a cadence series - gap-breaking would lock onto the artificial deltas (#1944 review) */
         plot.LegendText = "Deadlocks";
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Deadlocks"));
         plot.MarkerSize = 0; /* No markers, just lines */

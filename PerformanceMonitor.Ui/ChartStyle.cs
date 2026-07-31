@@ -237,8 +237,12 @@ namespace PerformanceMonitor.Ui
             // must match the number of color positions" on EVERY render frame — an unhandled-exception
             // flood that crashes the app. So only fill when the data genuinely varies; otherwise leave
             // the line unfilled.
-            double minY = pointCount > 0 ? pts.Min(p => p.Y) : 0.0;
-            double maxY = pointCount > 0 ? pts.Max(p => p.Y) : 0.0;
+            /* NaN Ys are #1944's injected gap markers, and Enumerable.Min/Max PROPAGATE NaN - one gap
+               would read as minY=maxY=NaN and silently kill the gradient fill for the entire series.
+               The fill must survive a gap (ScottPlot splits it at the break); only real values rank. */
+            var realYs = pts.Where(p => !double.IsNaN(p.Y)).Select(p => p.Y).ToList();
+            double minY = realYs.Count > 0 ? realYs.Min() : 0.0;
+            double maxY = realYs.Count > 0 ? realYs.Max() : 0.0;
             bool canFill = pointCount >= 2
                 && maxY > minY
                 && !double.IsNaN(minY) && !double.IsNaN(maxY)
