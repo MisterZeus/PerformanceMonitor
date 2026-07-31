@@ -35,7 +35,7 @@ Nothing is installed on the monitored SQL Servers by either edition beyond two l
 ### Prerequisites
 
 - **Windows** for the service host (Windows-service lifetime, DPAPI password protection) and for the viewer (WPF). Monitored servers can be SQL Server 2016–2025, Azure SQL Managed Instance, AWS RDS for SQL Server, or Azure SQL Database.
-- **A PostgreSQL store — bundled or your own.** In managed mode (the shipped default, see [Managed Bundled PostgreSQL](#managed-bundled-postgresql)) the service runs its own bundled PostgreSQL 18 + TimescaleDB and no database provisioning is needed. To bring your own instead, PostgreSQL 16 or newer is recommended (developed and validated against PostgreSQL 18) with a database and a login the service can create tables in.
+- **A PostgreSQL store — bundled or your own.** In managed mode (the shipped default, see [Managed Bundled PostgreSQL](#managed-bundled-postgresql)) the service runs its own bundled PostgreSQL 18 + TimescaleDB and no database provisioning is needed. To bring your own instead, PostgreSQL 16 or newer is recommended (developed and validated against PostgreSQL 18) with a database and a login the service can create tables in — and if that store has TimescaleDB, size its background workers before you rely on compression, because the stock PostgreSQL defaults cannot run the policies (see [Background workers](#background-workers-sizing-an-unmanaged-store-and-what-happens-if-you-dont)).
 - **TimescaleDB is optional and auto-adopted.** If the extension is installed (or pre-created by an administrator) in the store database, the service detects it at startup and automatically converts the collector tables to hypertables with compression; without it, the service runs in plain-PostgreSQL mode, which is fully supported. No configuration flag either way.
 - **.NET 10** to build and run.
 
@@ -286,7 +286,7 @@ Two mutually exclusive modes — setting both `managed: true` and `connectionStr
 | `port` | `5641` | Managed mode only: the loopback port the bundled server listens on. Deliberately uncommon so it coexists with any PostgreSQL (5432) already on the machine. |
 | `dataDirectory` | *(null)* | Managed mode only: the cluster's data directory. `null` means `%ProgramData%\PerformanceMonitorDarling\pg`. |
 | `connectAs` | `"admin"` | Managed mode only: which least-privilege role the Viewer connects as — `"admin"` (reads everything + manages mute rules and dismisses alerts) or `"viewer"` (read-only; those write actions are hidden/disabled). See [Security & Least-Privilege Roles](#security--least-privilege-roles). Ignored in bring-your-own mode (the connection string picks the role). |
-| `connectionString` | *(required unless managed)* | Npgsql connection string for a store you provision yourself, e.g. `Host=localhost;Port=5432;Username=darling;Password=...;Database=darling` |
+| `connectionString` | *(required unless managed)* | Npgsql connection string for a store you provision yourself, e.g. `Host=localhost;Port=5432;Username=darling;Password=...;Database=darling`. You own that cluster's settings: if it has TimescaleDB, size its [background workers](#background-workers-sizing-an-unmanaged-store-and-what-happens-if-you-dont) — managed mode does this for you, this mode does not. |
 
 ### servers (array, at least one entry)
 
@@ -512,6 +512,42 @@ At startup, right after migration, the service attempts `CREATE EXTENSION IF NOT
 
 `IF NOT EXISTS` short-circuits before privilege checks, so a store whose administrator pre-created the extension works for a service login that could never create it.
 
+### Background workers: sizing an unmanaged store, and what happens if you don't
+
+**This section is for bring-your-own PostgreSQL only.** In managed mode the service sizes these itself on every start and there is nothing to do.
+
+Every TimescaleDB policy — compression, retention, continuous-aggregate refresh — runs in a **background worker**, and a policy that cannot get a worker does not run. PostgreSQL's stock `max_worker_processes = 8` is far below what this store needs, so an unmanaged store left at the defaults silently does very little compressing.
+
+Managed mode derives the two settings from the live hypertable count, and an unmanaged store wants the same numbers:
+
+```
+timescaledb.max_background_workers = <hypertables> + 2
+max_worker_processes               = 3 + timescaledb.max_background_workers + 8
+```
+
+Today that is **41** and **52** for 39 hypertables (the 38 collector tables plus `collection_log`). The `+ 2` is not slack — it is exactly TimescaleDB's own two built-in jobs, `policy_telemetry` and `policy_job_stat_history_retention`, so a fully migrated store holds precisely one job per worker:
+
+```sql
+SELECT proc_name, count(*) FROM timescaledb_information.jobs GROUP BY proc_name;
+```
+
+Both settings need a **server restart** (`max_worker_processes` is restart-only — a reload leaves the old value serving), and the hypertable count grows as collectors are added, so re-check it after a major upgrade rather than pinning 41/52 forever.
+
+**One store per cluster is the assumption.** `timescaledb.max_background_workers` is a **cluster-wide** pool shared by every database, while the derivation above is **per-store**. Managed mode puts one store on one cluster so the two coincide, but if you run **N Darling stores on one PostgreSQL cluster** — or share the cluster with any other TimescaleDB database — multiply both numbers by N. Each database with the extension loaded also permanently holds a scheduler slot out of that same pool, so the sharing starts before any policy fires.
+
+**What under-provisioning looks like.** The postmaster log (`pg.log`, or wherever your cluster logs) is where it shows up, in one of two shapes:
+
+```
+WARNING:  failed to launch job 1042 "Columnstore Policy [1042]": out of background workers
+WARNING:  ... failed to start a background worker
+```
+
+The first means TimescaleDB's own pool is full; the second means PostgreSQL's is. Neither is fatal and neither corrupts anything — the job is skipped and retried on its next schedule, so **light contention is benign** and you may see a couple of these without any consequence. It matters at scale: when the shortfall is persistent rather than momentary, compression falls behind the 1-day policy and the store grows at its uncompressed rate (measured compression is ~16.7x on perfmon and ~6.4x on the plan-XML-heavy `query_stats`, so the gap is large), retention stops reclaiming chunks, and the jobs that keep losing the race are the ones whose backlog is worst. `timescaledb_information.job_stats` is the check that settles it — a healthy store shows successes with no failures:
+
+```sql
+SELECT sum(total_runs), sum(total_successes), sum(total_failures) FROM timescaledb_information.job_stats;
+```
+
 ### Retention
 
 A purge runs on the first sweep after startup and then daily, driven by the same shared per-collector horizons Lite uses:
@@ -604,6 +640,8 @@ A monitored server that is down is retried every 60 seconds forever; a collector
 
 **"TimescaleDB setup failed — continuing in plain-PostgreSQL mode"** (warning) — the extension exists but conversion hit a problem. Everything still works (DELETE-based retention, plain tables); conversion is retried on the next service start.
 
+**"out of background workers" / "failed to start a background worker" in the postmaster log, or the store keeps growing despite compression** — bring-your-own stores only: the cluster has fewer worker slots than the store has policies, so compression and retention jobs are being skipped. An occasional one is benign (the job retries on its next schedule); persistent ones mean the store is effectively uncompressed. Size the two settings and restart the server — see [Background workers](#background-workers-sizing-an-unmanaged-store-and-what-happens-if-you-dont), and multiply them if the cluster hosts more than one store. `timescaledb_information.job_stats` tells you whether jobs are actually succeeding.
+
 **"Why are there 40+ postgres.exe processes?"** — the count is three populations, and only one is client connections: (1) PostgreSQL's own system processes (postmaster, checkpointer, WAL/background writers, autovacuum, stats); (2) **TimescaleDB background workers** — the managed conf sizes `timescaledb.max_background_workers` to the hypertable count + 2 (≈38), and every RUNNING compression/retention policy job is its own process, so the count legitimately surges during checkpoint/compression waves and falls back when they finish; (3) client backends — the service's pools are capped at 24, the co-located viewer's at 10. Decompose it live with: `SELECT backend_type, count(*) FROM pg_stat_activity GROUP BY backend_type ORDER BY 2 DESC;` — and remember Windows charges the shared buffer segment to every attached process's working set, so per-process memory numbers cannot be summed.
 
 **query_store bursts every ~15 minutes** — two or three near-empty cycles, then one large one, is Query Store's own behavior, not a collector bug: the engine buffers in memory and flushes to its persisted tables on `DATA_FLUSH_INTERVAL_SECONDS` (default 900s), so the collector genuinely sees nothing new between flushes. Narrowing the collection interval will not smooth it. The per-database log lines show which database drove a burst.
@@ -656,7 +694,7 @@ With `postgres.managed = true` (the sample's default), the service runs its own 
 
 The store is split into two schemas so that no consumer connects with more privilege than it needs:
 
-- **`collect`** — the 32 collector hypertables plus the service-written, user-read metadata (`servers`, `collection_log`, `analysis_findings`, the `v_*` views). Read-only to everyone but the service.
+- **`collect`** — the collector hypertables (one per collector) plus the service-written, user-read metadata (`servers`, `collection_log`, `analysis_findings`, the `v_*` views). Read-only to everyone but the service.
 - **`config`** — exactly the tables a human operator changes through the Viewer or MCP: `config_mute_rules`, `config_alert_log` (alert dismissals), `config_edge_trigger_watermarks`, and `analysis_muted`.
 
 Table names are unchanged — only their schema moved — and the shared SQL keeps using the bare, unqualified names, resolved through `search_path = collect, config, public` (set as the database default and carried on the managed connection strings). This is deliberate: Darling's SQL is byte-identical to Lite's DuckDB SQL, and re-qualifying it would fork that twin.

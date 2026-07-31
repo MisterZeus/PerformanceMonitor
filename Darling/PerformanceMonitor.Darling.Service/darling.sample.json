@@ -42,6 +42,17 @@
   //    still applies (it is a migration); provision the least-privilege roles yourself with
   //    Darling/tools/provision-roles.sql and point a read-only Viewer's connectionString at the
   //    "viewer" role.
+  //
+  //    SIZE THE BACKGROUND WORKERS YOURSELF. Managed mode writes these on every start; in this
+  //    mode nothing does, and PostgreSQL's stock max_worker_processes = 8 cannot run TimescaleDB's
+  //    compression/retention policies at all — the store just quietly stays uncompressed. In
+  //    postgresql.conf (both need a server RESTART, not a reload):
+  //      timescaledb.max_background_workers = <hypertables> + 2        -- 41 today (39 hypertables)
+  //      max_worker_processes = 3 + that + 8                           -- 52 today
+  //    The pool is CLUSTER-wide but that derivation is PER-STORE: running N Darling stores (or
+  //    other TimescaleDB databases) on one cluster means multiplying both by N. Under-provisioned
+  //    clusters log "out of background workers" and skip the job until its next schedule; check
+  //    timescaledb_information.job_stats for failures. See Darling/README.md, "Background workers".
   "postgres": {
     "managed": true,
     "port": 5641,

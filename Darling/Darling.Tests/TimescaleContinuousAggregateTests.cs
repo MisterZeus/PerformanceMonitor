@@ -366,6 +366,39 @@ public sealed class TimescaleContinuousAggregateTests
     }
 
     /// <summary>
+    /// #1877: holding is the exact mirror of arming — same targeting, opposite flag — because a policy whose
+    /// coverage list GREW under it has to be stopped, and <c>add_retention_policy(if_not_exists)</c> never
+    /// pauses a policy the store already has.
+    ///
+    /// <para>The two statements are asserted to disagree on the flag and agree on everything else. A hold that
+    /// missed the hypertable filter would stop every retention policy in the store on one shallow consumer;
+    /// one that said <c>true</c> would arm the very policy the gate just judged unsafe, which is the data-loss
+    /// direction and would look identical in a test that only checked the targeting.</para>
+    /// </summary>
+    [Fact]
+    public void HoldRetentionPolicy_IsTheMirrorOfArming_SameTargetOppositeFlag()
+    {
+        var hold = TimescaleSupport.HoldRetentionPolicySql("query_stats");
+        var arm = TimescaleSupport.ArmRetentionPolicySql("query_stats");
+
+        Assert.Contains("scheduled => false", hold, StringComparison.Ordinal);
+        Assert.DoesNotContain("scheduled => true", hold, StringComparison.Ordinal);
+
+        foreach (var filter in new[]
+        {
+            "proc_name = 'policy_retention'",
+            "hypertable_schema = 'collect'",
+            "hypertable_name = 'query_stats'",
+        })
+        {
+            Assert.Contains(filter, hold, StringComparison.Ordinal);
+        }
+
+        /* Identical apart from the flag - the pair is one statement with a boolean, so they cannot drift. */
+        Assert.Equal(arm, hold.Replace("scheduled => false", "scheduled => true", StringComparison.Ordinal));
+    }
+
+    /// <summary>
     /// The safety probe compares the source's oldest row against the coverage tier's oldest bucket. Raw tables
     /// key on collection_time, rollups on bucket - reading the wrong column would compare against nothing and
     /// silently decide it was safe to arm.
@@ -512,11 +545,21 @@ public sealed class TimescaleContinuousAggregateTests
     /// raw (4d) &lt; L1 (7d) &lt; the interval-grain daily (10d), and the two composer-grain dailies are kept
     /// indefinitely. Written as one chain because that is the invariant — the individual numbers are tunable,
     /// their order is not.
+    ///
+    /// <para><b>#1877 raised the stakes on this ordering.</b> Under the old arm-only gate, inverting a pair cost
+    /// an arming failure: the source's policy simply never armed and that tier grew. Now that a positively
+    /// measured shortfall RE-HOLDS a running policy, an inverted pair would stop a purge that is already armed
+    /// on a perfectly healthy store, and it would not self-release. Steady state is safe by construction —
+    /// every consumer here outlives its source AND materialization chunks are never finer than their source's
+    /// (measured at 10 days against the raw tables' 1, on TimescaleDB 2.28.1), so a consumer always retains at
+    /// least as far back as its source. Both halves of that are what this ordering has to keep true.</para>
     /// </summary>
     [Fact]
     public void RetentionHorizons_RiseDownTheQueryStoreDedupChain_SoNoGateWaitsOnSomethingAlreadyDropped()
     {
         Assert.True(TimescaleSupport.IntervalRetentionSpan > TimescaleSupport.RawRetentionSpan);
+        Assert.True(TimescaleSupport.HourlyRetentionSpan > TimescaleSupport.RawRetentionSpan,
+            "the hourly rollups gate raw's purge too, so they must outlive raw for the same reason L1 does.");
         Assert.True(TimescaleSupport.IntervalDailyRetentionSpan > TimescaleSupport.IntervalRetentionSpan,
             "the interval-grain DAILY layer must outlive the hourly one whose purge is gated on it, or L1's " +
             "policy can never arm and L1 grows without bound.");
