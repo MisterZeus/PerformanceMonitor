@@ -58,7 +58,7 @@ internal sealed class CpuSchedulerChartRenderer
             foreach (var s in series)
             {
                 var values = ordered.Select(s.Selector).ToArray();
-                var plot = chart.Plot.Add.Scatter(times, values);
+                var plot = chart.Plot.Add.TimeSeries(times, values);
                 plot.LegendText = s.Name;
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
                 ChartStyle.StyleScatter(plot);

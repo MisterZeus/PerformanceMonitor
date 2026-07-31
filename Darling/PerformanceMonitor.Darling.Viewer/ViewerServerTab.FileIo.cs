@@ -143,7 +143,7 @@ public partial class ViewerServerTab
 
             if (readLatency.Length > 0)
             {
-                var readPlot = FileIoReadChart.Plot.Add.Scatter(times, readLatency);
+                var readPlot = FileIoReadChart.Plot.Add.TimeSeries(times, readLatency);
                 readPlot.LegendText = dbGroup.Key;
                 readPlot.Color = color;
                 ChartStyle.StyleScatter(readPlot);
@@ -153,7 +153,7 @@ public partial class ViewerServerTab
 
             if (writeLatency.Length > 0)
             {
-                var writePlot = FileIoWriteChart.Plot.Add.Scatter(times, writeLatency);
+                var writePlot = FileIoWriteChart.Plot.Add.TimeSeries(times, writeLatency);
                 writePlot.LegendText = dbGroup.Key;
                 writePlot.Color = color;
                 ChartStyle.StyleScatter(writePlot);
@@ -169,7 +169,7 @@ public partial class ViewerServerTab
 
                 if (queuedReadLatency.Any(v => v > 0))
                 {
-                    var qReadPlot = FileIoReadChart.Plot.Add.Scatter(times, queuedReadLatency);
+                    var qReadPlot = FileIoReadChart.Plot.Add.TimeSeries(times, queuedReadLatency);
                     qReadPlot.LegendText = $"{dbGroup.Key} (queued)";
                     qReadPlot.Color = color;
                     ChartStyle.StyleScatter(qReadPlot);
@@ -179,7 +179,7 @@ public partial class ViewerServerTab
 
                 if (queuedWriteLatency.Any(v => v > 0))
                 {
-                    var qWritePlot = FileIoWriteChart.Plot.Add.Scatter(times, queuedWriteLatency);
+                    var qWritePlot = FileIoWriteChart.Plot.Add.TimeSeries(times, queuedWriteLatency);
                     qWritePlot.LegendText = $"{dbGroup.Key} (queued)";
                     qWritePlot.Color = color;
                     ChartStyle.StyleScatter(qWritePlot);
@@ -251,7 +251,7 @@ public partial class ViewerServerTab
 
             if (readThroughput.Length > 0)
             {
-                var readPlot = FileIoReadThroughputChart.Plot.Add.Scatter(times, readThroughput);
+                var readPlot = FileIoReadThroughputChart.Plot.Add.TimeSeries(times, readThroughput);
                 readPlot.LegendText = fileGroup.Key;
                 readPlot.Color = color;
                 ChartStyle.StyleScatter(readPlot);
@@ -261,7 +261,7 @@ public partial class ViewerServerTab
 
             if (writeThroughput.Length > 0)
             {
-                var writePlot = FileIoWriteThroughputChart.Plot.Add.Scatter(times, writeThroughput);
+                var writePlot = FileIoWriteThroughputChart.Plot.Add.TimeSeries(times, writeThroughput);
                 writePlot.LegendText = fileGroup.Key;
                 writePlot.Color = color;
                 ChartStyle.StyleScatter(writePlot);

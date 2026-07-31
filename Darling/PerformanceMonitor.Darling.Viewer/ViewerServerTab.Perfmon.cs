@@ -212,7 +212,7 @@ public partial class ViewerServerTab
                 var times = trend.Select(t => ViewerTimeHelper.ForDisplay(t.CollectionTime).ToOADate()).ToArray();
                 var values = trend.Select(t => (double)t.DeltaValue).ToArray();
 
-                var plot = PerfmonChart.Plot.Add.Scatter(times, values);
+                var plot = PerfmonChart.Plot.Add.TimeSeries(times, values);
                 plot.LegendText = selected[i].DisplayName;
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
                 ChartStyle.StyleScatter(plot);

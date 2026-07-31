@@ -402,7 +402,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             {
                 var anomalyTimes = anomalyIndices.Select(i => sqlTimes[i]).ToArray();
                 var anomalyVals = anomalyIndices.Select(i => sqlValues[i]).ToArray();
-                var anomalyScatter = CpuChart.Plot.Add.Scatter(anomalyTimes, anomalyVals);
+                var anomalyScatter = CpuChart.Plot.Add.TimeSeries(anomalyTimes, anomalyVals);
                 anomalyScatter.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Anomaly"));
                 anomalyScatter.MarkerSize = 6;
                 anomalyScatter.MarkerShape = ScottPlot.MarkerShape.FilledCircle;
@@ -412,7 +412,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
         if (totalValues.Length > 0)
         {
-            var totalScatter = CpuChart.Plot.Add.Scatter(totalTimes, totalValues);
+            var totalScatter = CpuChart.Plot.Add.TimeSeries(totalTimes, totalValues);
             totalScatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("TotalCpu"));
             totalScatter.MarkerSize = 0;
             totalScatter.LineWidth = 1.5f;
@@ -422,7 +422,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
         if (sqlValues.Length > 0)
         {
-            var sqlScatter = CpuChart.Plot.Add.Scatter(sqlTimes, sqlValues);
+            var sqlScatter = CpuChart.Plot.Add.TimeSeries(sqlTimes, sqlValues);
             sqlScatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("SqlCpu"));
             sqlScatter.MarkerSize = 0;
             sqlScatter.LineWidth = 1.5f;
@@ -491,7 +491,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             {
                 var anomalyTimes = anomalyIndices.Select(i => times[i]).ToArray();
                 var anomalyValues = anomalyIndices.Select(i => values[i]).ToArray();
-                var anomalyScatter = chart.Plot.Add.Scatter(anomalyTimes, anomalyValues);
+                var anomalyScatter = chart.Plot.Add.TimeSeries(anomalyTimes, anomalyValues);
                 anomalyScatter.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Anomaly"));
                 anomalyScatter.MarkerSize = 6;
                 anomalyScatter.MarkerShape = ScottPlot.MarkerShape.FilledCircle;
@@ -499,7 +499,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             }
         }
 
-        var scatter = chart.Plot.Add.Scatter(times, values);
+        var scatter = chart.Plot.Add.TimeSeries(times, values);
         scatter.Color = ScottPlot.Color.FromHex(colorHex);
         scatter.MarkerSize = 0;
         scatter.LineWidth = 1.5f;

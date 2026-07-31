@@ -73,14 +73,14 @@ public partial class ViewerServerTab
             var times = data.Select(d => ViewerTimeHelper.ForDisplay(d.CollectionTime).ToOADate()).ToArray();
 
             var singleUse = data.Select(d => d.SingleUseSizeMb).ToArray();
-            var singlePlot = PlanCacheChart.Plot.Add.Scatter(times, singleUse);
+            var singlePlot = PlanCacheChart.Plot.Add.TimeSeries(times, singleUse);
             singlePlot.LegendText = "Single-Use";
             singlePlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("SinglePagePlans"));
             ChartStyle.StyleScatter(singlePlot);
             _planCacheHover?.Add(singlePlot, "Single-Use");
 
             var multiUse = data.Select(d => d.MultiUseSizeMb).ToArray();
-            var multiPlot = PlanCacheChart.Plot.Add.Scatter(times, multiUse);
+            var multiPlot = PlanCacheChart.Plot.Add.TimeSeries(times, multiUse);
             multiPlot.LegendText = "Multi-Use";
             multiPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("MultiPagePlans"));
             ChartStyle.StyleScatter(multiPlot);

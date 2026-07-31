@@ -92,7 +92,7 @@ public partial class ViewerServerTab
         var values = data.Select(d => d.Value).ToArray();
 
         _queryDurationTrendHover?.Clear();
-        var plot = QueryDurationTrendChart.Plot.Add.Scatter(times, values);
+        var plot = QueryDurationTrendChart.Plot.Add.TimeSeries(times, values);
         plot.LegendText = "Query Duration";
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("QueryDuration"));
         ChartStyle.StyleScatter(plot);
@@ -120,7 +120,7 @@ public partial class ViewerServerTab
         var values = data.Select(d => d.Value).ToArray();
 
         _procDurationTrendHover?.Clear();
-        var plot = ProcDurationTrendChart.Plot.Add.Scatter(times, values);
+        var plot = ProcDurationTrendChart.Plot.Add.TimeSeries(times, values);
         plot.LegendText = "Procedure Duration";
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("ProcedureDuration"));
         ChartStyle.StyleScatter(plot);
@@ -148,7 +148,7 @@ public partial class ViewerServerTab
         var values = data.Select(d => d.Value).ToArray();
 
         _queryStoreDurationTrendHover?.Clear();
-        var plot = QueryStoreDurationTrendChart.Plot.Add.Scatter(times, values);
+        var plot = QueryStoreDurationTrendChart.Plot.Add.TimeSeries(times, values);
         plot.LegendText = "Query Store Duration";
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("QueryStoreDuration"));
         ChartStyle.StyleScatter(plot);
@@ -176,7 +176,7 @@ public partial class ViewerServerTab
         var values = data.Select(d => d.Value).ToArray();
 
         _executionCountTrendHover?.Clear();
-        var plot = ExecutionCountTrendChart.Plot.Add.Scatter(times, values);
+        var plot = ExecutionCountTrendChart.Plot.Add.TimeSeries(times, values);
         plot.LegendText = "Executions";
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Executions"));
         ChartStyle.StyleScatter(plot);

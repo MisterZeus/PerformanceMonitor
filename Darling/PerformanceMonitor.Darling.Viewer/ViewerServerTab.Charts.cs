@@ -163,13 +163,13 @@ public partial class ViewerServerTab : IDisposable
         var sqlCpu = data.Select(d => (double)d.SqlServerCpu).ToArray();
         var otherCpu = data.Select(d => (double)d.OtherProcessCpu).ToArray();
 
-        var sqlPlot = CpuChart.Plot.Add.Scatter(times, sqlCpu);
+        var sqlPlot = CpuChart.Plot.Add.TimeSeries(times, sqlCpu);
         sqlPlot.LegendText = "SQL Server";
         sqlPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("SqlCpu"));
         ChartStyle.StyleScatter(sqlPlot);
         _cpuHover?.Add(sqlPlot, "SQL Server");
 
-        var otherPlot = CpuChart.Plot.Add.Scatter(times, otherCpu);
+        var otherPlot = CpuChart.Plot.Add.TimeSeries(times, otherCpu);
         otherPlot.LegendText = "Other";
         otherPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("OtherCpu"));
         ChartStyle.StyleScatter(otherPlot);
@@ -208,19 +208,19 @@ public partial class ViewerServerTab : IDisposable
         var internalObj = data.Select(d => d.InternalObjectReservedMb).ToArray();
         var versionStore = data.Select(d => d.VersionStoreReservedMb).ToArray();
 
-        var userPlot = TempDbChart.Plot.Add.Scatter(times, userObj);
+        var userPlot = TempDbChart.Plot.Add.TimeSeries(times, userObj);
         userPlot.LegendText = "User Objects";
         userPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("UserObjects"));
         ChartStyle.StyleScatter(userPlot);
         _tempDbHover?.Add(userPlot, "User Objects");
 
-        var internalPlot = TempDbChart.Plot.Add.Scatter(times, internalObj);
+        var internalPlot = TempDbChart.Plot.Add.TimeSeries(times, internalObj);
         internalPlot.LegendText = "Internal Objects";
         internalPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("InternalObjects"));
         ChartStyle.StyleScatter(internalPlot);
         _tempDbHover?.Add(internalPlot, "Internal Objects");
 
-        var vsPlot = TempDbChart.Plot.Add.Scatter(times, versionStore);
+        var vsPlot = TempDbChart.Plot.Add.TimeSeries(times, versionStore);
         vsPlot.LegendText = "Version Store";
         vsPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("VersionStore"));
         ChartStyle.StyleScatter(vsPlot);
@@ -263,7 +263,7 @@ public partial class ViewerServerTab : IDisposable
         var times = sorted.Select(d => ViewerTimeHelper.ForDisplay(d.CollectionTime).ToOADate()).ToArray();
         var totals = sorted.Select(d => d.TotalReservedMb + d.UnallocatedMb).ToArray();
 
-        var sizePlot = TempDbSizeChart.Plot.Add.Scatter(times, totals);
+        var sizePlot = TempDbSizeChart.Plot.Add.TimeSeries(times, totals);
         sizePlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("UnallocatedTempdb"));
         ChartStyle.StyleScatter(sizePlot);
         _tempDbSizeHover?.Add(sizePlot, "Allocated MB");
@@ -314,7 +314,7 @@ public partial class ViewerServerTab : IDisposable
 
             if (latency.Length > 0)
             {
-                var plot = TempDbFileIoChart.Plot.Add.Scatter(times, latency);
+                var plot = TempDbFileIoChart.Plot.Add.TimeSeries(times, latency);
                 plot.LegendText = fileGroup.Key;
                 plot.Color = color;
                 ChartStyle.StyleScatter(plot);

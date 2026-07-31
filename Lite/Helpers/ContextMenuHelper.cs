@@ -292,6 +292,13 @@ public static class ContextMenuHelper
 
                             foreach (var point in points)
                             {
+                                /* #1944's gap markers are fabricated mid-gap timestamps with NaN values -
+                                   rendering artifacts, never collected data. Exports carry only real rows. */
+                                if (double.IsNaN(point.Y))
+                                {
+                                    continue;
+                                }
+
                                 var dateTime = DateTime.FromOADate(point.X);
                                 sb.AppendLine(string.Join(sep, new[]
                                 {
