@@ -346,10 +346,11 @@ public sealed class DarlingAnomalyBaselineTests
         await PgMigrations.MigrateAsync(connection, ct);
 
         /* Clear leftovers from an earlier aborted run so the assertions below are deterministic. */
-        await DeleteTestRowsAsync(connection);
+        await DeleteTestRowsAsync(connection, ct);
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             /* ---- plant the hour×dow history: one bucket (Monday 10:00 UTC), 12 collections
@@ -482,11 +483,16 @@ public sealed class DarlingAnomalyBaselineTests
             Assert.Equal((double)BaselineTier.Full, fact.Metadata["baseline_tier"]);
             Assert.Equal(10.0, fact.Metadata["baseline_hour"]);
             Assert.Equal((double)DayOfWeek.Monday, fact.Metadata["baseline_dow"]);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteTestRowsAsync(connection);
-            await DropBaselineFallbackViewsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteTestRowsAsync(cleanup, cleanupCt);
+                await DropBaselineFallbackViewsAsync(cleanup, cleanupCt);
+            });
         }
     }
 
@@ -500,11 +506,11 @@ public sealed class DarlingAnomalyBaselineTests
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 
-    private static async Task DeleteTestRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteTestRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM wait_stats WHERE server_id = {TestServerId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 
     /// <summary>
@@ -512,12 +518,12 @@ public sealed class DarlingAnomalyBaselineTests
     /// continuous-aggregate guard the product does, so it can never drop a real aggregate another live test
     /// planted — a bare DROP VIEW would, because a continuous aggregate is also a relkind='v' view.
     /// </summary>
-    private static async Task DropBaselineFallbackViewsAsync(NpgsqlConnection connection)
+    private static async Task DropBaselineFallbackViewsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         foreach (var (_, view) in TimescaleSupport.BaselineAggregates)
         {
             using var drop = new NpgsqlCommand(TimescaleSupport.DropBaselineFallbackViewSql(view), connection);
-            await drop.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            await drop.ExecuteNonQueryAsync(ct);
         }
     }
 }

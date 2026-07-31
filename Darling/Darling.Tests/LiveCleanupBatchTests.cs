@@ -88,6 +88,7 @@ public sealed class LiveCleanupBatchTests
             await create.ExecuteNonQueryAsync(ct);
         }
 
+        var bodySucceeded = false;
         try
         {
             var batch = new LiveCleanupBatch(connection, publishResidue: false, maxAttempts: 2);
@@ -108,11 +109,18 @@ public sealed class LiveCleanupBatchTests
                could not remove it. */
             Assert.Contains(nameof(AStatementThatDoesNotRemoveTheObject_IsRecordedAsResidue_AgainstDevPostgres),
                 entry, StringComparison.Ordinal);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await using var cleanup = await OpenAsync(connectionString!, CancellationToken.None);
-            await new LiveCleanupBatch(cleanup).DropTableAsync(Probe, CancellationToken.None);
+            /* Through LiveStoreCleanup like every other live teardown (#1902). This one already opened its own
+               connection with CancellationToken.None, so both halves were right by hand — but "right by hand"
+               is exactly what the ratchet cannot tell apart from wrong, and an exemption carved for a correct
+               site is an exemption a later incorrect site inherits. Going through the helper costs nothing and
+               lets the count reach zero honestly. */
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await new LiveCleanupBatch(cleanup).DropTableAsync(Probe, cleanupCt));
         }
     }
 
@@ -217,6 +225,7 @@ public sealed class LiveCleanupBatchTests
 
         await using var connection = await OpenAsync(connectionString!, ct);
 
+        var bodySucceeded = false;
         try
         {
             await ExecAsync(connection,
@@ -256,13 +265,17 @@ WITH NO DATA", ct);
             Assert.False(await AggregateExistsAsync(connection, Hourly, ct), $"collect.{Hourly} should be gone.");
             Assert.False(await AggregateExistsAsync(connection, Daily, ct), $"collect.{Daily} should be gone.");
             Assert.False(await AggregateExistsAsync(connection, DayGrain, ct), $"collect.{DayGrain} should be gone.");
+
+            bodySucceeded = true;
         }
         finally
         {
-            await using var cleanup = await OpenAsync(connectionString!, CancellationToken.None);
-            var batch = new LiveCleanupBatch(cleanup);
-            await batch.DropContinuousAggregatesAsync([DayGrain, Daily, Hourly], CancellationToken.None);
-            await batch.DropTableAsync(Raw, CancellationToken.None);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                var batch = new LiveCleanupBatch(cleanup);
+                await batch.DropContinuousAggregatesAsync([DayGrain, Daily, Hourly], cleanupCt);
+                await batch.DropTableAsync(Raw, cleanupCt);
+            });
         }
     }
 

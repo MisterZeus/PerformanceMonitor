@@ -230,11 +230,12 @@ public sealed class PgFactCollectorTests
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
 
         /* Clear leftovers from an earlier aborted run so the assertions below are deterministic. */
-        await DeleteTestRowsAsync(connection);
+        await DeleteTestRowsAsync(connection, TestContext.Current.CancellationToken);
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
         var collector = new PgFactCollector(postgres);
 
+        var bodySucceeded = false;
         try
         {
             /* Whole-second window bounds so the PG microsecond timestamp comparisons are exact.
@@ -330,21 +331,24 @@ VALUES ($1, $2, $3, $4, $5, $6)", connection);
                 ServerUtcOffset = TimeSpan.Zero
             };
             Assert.Empty(await collector.CollectFactsAsync(emptyContext));
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteTestRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteTestRowsAsync(cleanup, cleanupCt));
         }
     }
 
     private static DateTime TruncateToSeconds(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
 
-    private static async Task DeleteTestRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteTestRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM wait_stats WHERE server_id IN ({TestServerId}, {EmptyServerId}); " +
             $"DELETE FROM cpu_utilization_stats WHERE server_id IN ({TestServerId}, {EmptyServerId});", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 }
