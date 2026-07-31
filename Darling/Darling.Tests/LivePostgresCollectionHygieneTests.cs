@@ -63,10 +63,49 @@ public sealed class LivePostgresCollectionHygieneTests
     /// </summary>
     private const string ScratchStoreFactory = "ScratchPostgres.CreateAsync(";
 
-    private const string LiveCollectionAttribute = "[Collection(\"live-postgres\")]";
+    private const string LiveCollectionName = "live-postgres";
+
+    private const string LiveCollectionAttribute = "[Collection(\"" + LiveCollectionName + "\")]";
 
     /// <summary>The recorded-exemption marker. Prose, deliberately: the point is that a human wrote down why.</summary>
     private const string OwnStoreMarker = "#1776 own-store";
+
+    /// <summary>
+    /// The collection's own fixture (<see cref="LivePostgresStoreFixture"/>) reaches the shared store and
+    /// cannot carry <c>[Collection]</c> — a fixture is not a test class. It needs no exemption comment either,
+    /// because it is not merely serialized against the live classes: xUnit initializes it BEFORE any of them
+    /// runs, which is a stronger guarantee than the attribute buys and is the entire reason it exists (#1862).
+    ///
+    /// <para>Resolved by REFLECTION off the <c>[CollectionDefinition]</c> rather than accepted as a third
+    /// prose marker, so the exemption cannot be claimed by pasting a comment: it belongs to exactly the type
+    /// the collection is actually wired to. That also makes this rule guard the wiring — unhook the fixture
+    /// from the definition and the exemption evaporates, so the fixture file itself turns up as an offender.
+    /// Null when nothing is wired, which exempts nobody.</para>
+    /// </summary>
+    private static string? LiveCollectionFixtureTypeName()
+    {
+        foreach (var type in typeof(LivePostgresCollectionHygieneTests).Assembly.GetTypes())
+        {
+            var definition = (CollectionDefinitionAttribute?)Attribute.GetCustomAttribute(
+                type, typeof(CollectionDefinitionAttribute));
+
+            if (definition is null || !string.Equals(definition.Name, LiveCollectionName, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            foreach (var contract in type.GetInterfaces())
+            {
+                if (contract.IsGenericType
+                    && contract.GetGenericTypeDefinition() == typeof(ICollectionFixture<>))
+                {
+                    return contract.GetGenericArguments()[0].Name;
+                }
+            }
+        }
+
+        return null;
+    }
 
     /// <summary>Top-level class declarations. Nested types are indented and correctly not matched.</summary>
     private static readonly Regex ClassDeclaration =
@@ -92,6 +131,7 @@ public sealed class LivePostgresCollectionHygieneTests
             + "rather than skipping, or the rule stops being enforced without anyone noticing.");
 
         var offenders = new List<string>();
+        var fixtureTypeName = LiveCollectionFixtureTypeName();
 
         /* Recurse, and skip build output. The project is flat today, so TopDirectoryOnly would be equivalent —
            but it would also mean the first test file someone puts in a subfolder escapes the rule silently, which
@@ -124,8 +164,13 @@ public sealed class LivePostgresCollectionHygieneTests
                     continue;
                 }
 
+                if (string.Equals(declaration.Groups[1].Value, fixtureTypeName, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
                 var header = HeaderAbove(text, declaration.Index);
-                if (header.Contains(LiveCollectionAttribute, StringComparison.Ordinal)
+                if (CarriesLiveCollectionAttribute(header)
                     || header.Contains(OwnStoreMarker, StringComparison.Ordinal))
                 {
                     continue;
@@ -158,6 +203,41 @@ public sealed class LivePostgresCollectionHygieneTests
     private static bool TouchesSharedStore(string source) =>
         source.Contains(SharedStoreVariable, StringComparison.Ordinal)
         || source.Contains(ScratchStoreFactory, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Is the attribute APPLIED here, as opposed to merely talked about? It counts only when it OPENS a line,
+    /// which every one of the seventy-odd real ones does — alone above the class, or ahead of it on one line.
+    ///
+    /// <para>A plain "does the header contain it" was not enough, and the hole was not hypothetical: every
+    /// prose mention in this project sits behind <c>///</c> or inside the <c>/* #1776 own-store */</c> blocks,
+    /// so ANY class whose doc comment quoted the attribute while explaining the rule exempted itself from it.
+    /// <see cref="LivePostgresStoreFixture"/>'s summary mentions it nineteen lines above its declaration —
+    /// comfortably inside the lookback — and that alone made the fixture read as compliant when nothing had
+    /// been decided about it at all (#1862). Matching on position rather than on comment prefixes is what
+    /// makes it robust: it covers the <c>///</c> case, the block-comment case whose continuation lines carry
+    /// no marker of their own, and prose that merely names the attribute mid-sentence, with no comment-state
+    /// tracking that a SQL string containing a comment delimiter could throw off.</para>
+    ///
+    /// <para>Deliberately NOT applied to <see cref="OwnStoreMarker"/>, which is prose in a comment BY DESIGN:
+    /// the exemption's whole value is that a human wrote down why, so the check for it must read comments.
+    /// The two live in the same header and are read by different rules on purpose.</para>
+    ///
+    /// <para>The narrowing can only DISCARD a match, so its failure mode is a compliant class wrongly
+    /// REPORTED, which is loud and gets looked at. That is the right direction for a guard whose silent
+    /// misses are what let the #1776 family of moving flakes survive in the first place.</para>
+    /// </summary>
+    private static bool CarriesLiveCollectionAttribute(string header)
+    {
+        foreach (var line in header.Split('\n'))
+        {
+            if (line.TrimStart().StartsWith(LiveCollectionAttribute, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     /// <summary>
     /// The class's own attribute/comment region: the <see cref="HeaderLookbackLines"/> lines immediately above the
