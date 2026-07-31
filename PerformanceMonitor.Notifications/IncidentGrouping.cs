@@ -15,6 +15,184 @@ using System.Text.RegularExpressions;
 namespace PerformanceMonitor.Notifications;
 
 /// <summary>
+/// Brings a stored <c>contentious_object</c> label to the <c>blocked_process_report</c> collector's
+/// conventions before it becomes an incident identity (#1876).
+///
+/// <para>
+/// Two collectors write that column and they never agreed. <c>blocked_process_report</c> writes a plain
+/// <c>schema.object</c>, or an <c>Unresolved: key lock, database: Foo</c> sentinel when the lookup failed.
+/// <c>dmv_blocking_snapshots</c> writes a <c>QUOTENAME</c>'d <c>[schema].[object]</c>, and for a KEY, PAGE
+/// or RID lock — which it does not resolve at all — the RAW wait resource. Both feed one list into
+/// <see cref="BlockingIncidentGrouper"/>, which hashes the label into the incident's dedup key, so the
+/// same contended table blocking the same way alerted twice depending on which collector saw it.
+/// </para>
+///
+/// <para>
+/// The raw wait resource is the worse half. <c>KEY: 5:72057594041991168 (8194443284a0)</c> carries a hobt
+/// id and a per-VALUE lock hash, so it is not merely a second identity for the object — it is a NEW
+/// identity for almost every row, which turns one recurring unresolvable lock into an unbounded stream of
+/// one-occurrence incidents. Collapsing it to the sentinel gives those rows the same
+/// (lock type, database) grouping the report side has always had.
+/// </para>
+///
+/// <para>
+/// Deliberately a total, idempotent function on the column rather than a DMV-only transform, because one
+/// read surface — the <c>top_blocking_chains</c> drill-down — <c>UNION</c>s the two sources and cannot
+/// tell them apart by then. A label already in report form has no bracket to strip and cannot match the
+/// wait-resource shape (that pattern requires an ALL-CAPS leading token, which <c>Unresolved: </c> is
+/// not, and a plain <c>schema.object</c> has no <c>": "</c> at all), so it is returned untouched. Only
+/// DMV-shaped values change, which is what keeps the fingerprint churn on the fallback path.
+/// </para>
+/// </summary>
+public static class ContentiousObjectLabel
+{
+    /// <summary>The report collector's sentinel prefix, spelled once for both the producer's format and this.</summary>
+    public const string UnresolvedPrefix = "Unresolved: ";
+
+    /// <summary>What the report collector's <c>ISNULL(DB_NAME(...), N'unknown')</c> writes for a database it cannot name.</summary>
+    public const string UnknownDatabase = "unknown";
+
+    /// <summary>
+    /// A wait resource's leading type token: ALL CAPS, then <c>": "</c>. Matches <c>KEY: </c>,
+    /// <c>PAGE: </c>, <c>ALLOCATION_UNIT: </c>; deliberately does NOT match <c>Unresolved: </c>, whose
+    /// token is mixed case, nor a plain <c>schema.object</c>, which has no colon.
+    /// </summary>
+    private static readonly Regex s_waitResource =
+        new(@"^[A-Z][A-Z0-9_]*: ", RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    /// <summary>
+    /// The lock-type order the collector's own classifier uses — an embedded type in a compound resource
+    /// wins over the leading token, and the four are tested in this exact sequence.
+    /// </summary>
+    private static readonly string[] s_lockTypes = { "KEY", "OBJECT", "RID", "PAGE" };
+
+    /// <summary>
+    /// Returns <paramref name="value"/> in report-collector form. <paramref name="databaseName"/> names the
+    /// database in a sentinel this has to synthesize; it is unused for a value that needs no rewrite.
+    /// </summary>
+    public static string Normalize(string? value, string? databaseName)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return value ?? string.Empty;
+        }
+
+        var trimmed = value.Trim();
+
+        if (trimmed[0] == '[')
+        {
+            /* A QUOTENAME'd path is the DMV side's RESOLVED form and the report side's is unquoted, so
+               the only difference between them is the brackets. Unquoting rather than string-replacing
+               keeps an identifier that legitimately contains ']' (doubled by QUOTENAME) intact; anything
+               that does not parse cleanly is left alone rather than mangled. */
+            return TryUnquotePath(trimmed, out var plain) ? plain : value;
+        }
+
+        if (!s_waitResource.IsMatch(trimmed))
+        {
+            return value;
+        }
+
+        var lockType = LockTypeOf(trimmed);
+        var database = string.IsNullOrWhiteSpace(databaseName) ? UnknownDatabase : databaseName.Trim();
+
+        return lockType.Length == 0
+            ? UnresolvedPrefix + "database: " + database
+            : UnresolvedPrefix + lockType.ToLowerInvariant() + " lock, database: " + database;
+    }
+
+    /// <summary>
+    /// The collector's classifier, in C#: a type embedded anywhere in a compound resource wins, otherwise
+    /// the leading token up to the first colon, upper-cased and capped at the same 32 characters.
+    /// </summary>
+    private static string LockTypeOf(string waitResource)
+    {
+        foreach (var candidate in s_lockTypes)
+        {
+            if (waitResource.Contains(candidate + ": ", StringComparison.Ordinal))
+            {
+                return candidate;
+            }
+        }
+
+        var colon = waitResource.IndexOf(':', StringComparison.Ordinal);
+        var token = colon >= 0 ? waitResource[..colon] : waitResource;
+        token = token.ToUpperInvariant();
+        return token.Length <= 32 ? token : token[..32];
+    }
+
+    /// <summary>Reverses <c>QUOTENAME(a) + '.' + QUOTENAME(b)</c>, including its doubled <c>]]</c> escape.</summary>
+    private static bool TryUnquotePath(string value, out string plain)
+    {
+        plain = string.Empty;
+        var parts = new List<string>(2);
+        var i = 0;
+
+        while (i < value.Length)
+        {
+            if (value[i] != '[')
+            {
+                return false;
+            }
+
+            i++;
+            var part = new System.Text.StringBuilder();
+            var closed = false;
+            while (i < value.Length)
+            {
+                if (value[i] == ']')
+                {
+                    if (i + 1 < value.Length && value[i + 1] == ']')
+                    {
+                        part.Append(']');
+                        i += 2;
+                        continue;
+                    }
+
+                    i++;
+                    closed = true;
+                    break;
+                }
+
+                part.Append(value[i]);
+                i++;
+            }
+
+            if (!closed)
+            {
+                return false;
+            }
+
+            parts.Add(part.ToString());
+
+            if (i == value.Length)
+            {
+                break;
+            }
+
+            if (value[i] != '.')
+            {
+                return false;
+            }
+
+            i++;
+            if (i == value.Length)
+            {
+                return false;
+            }
+        }
+
+        if (parts.Count == 0)
+        {
+            return false;
+        }
+
+        plain = string.Join('.', parts);
+        return true;
+    }
+}
+
+/// <summary>
 /// Groups raw blocked-process rows into distinct incidents (#1140 / #1141). Today's alert lists the
 /// same blocking chain several times (one row per sample, differing only by wait time) and caps the
 /// list at a few rows while the count says more — gotqn's report. This collapses rows that share an
@@ -63,8 +241,24 @@ public static class BlockingIncidentGrouper
         var order = new List<string>();
         var buckets = new Dictionary<string, List<BlockedEvent>>(StringComparer.Ordinal);
 
-        foreach (var e in events ?? Enumerable.Empty<BlockedEvent>())
+        foreach (var raw in events ?? Enumerable.Empty<BlockedEvent>())
         {
+            /* #1876: normalize the label HERE, at the one point every blocking fingerprint passes
+               through, rather than where the two collectors' rows are merged. Both matter:
+               - Coverage. Two independent producers group blocking (the live alert builders and the
+                 analysis drill-down, whose SQL UNIONs the two collectors), and only one of them goes
+                 through the merge. Normalizing at the identity is the only placement a third producer
+                 cannot arrive without.
+               - Not destroying evidence. dmv_blocking_snapshots stores NO wait_resource column, so for
+                 a lock it could not resolve, contentious_object IS the raw resource — the hobt id and
+                 lock hash included. Rewriting it at the merge would erase that from every grid and MCP
+                 payload the merge also feeds. Storage and display keep what the collector wrote; only
+                 the INCIDENT IDENTITY is normalized. */
+            var e = raw with
+            {
+                ContentiousObject = ContentiousObjectLabel.Normalize(raw.ContentiousObject, raw.Database),
+            };
+
             var identity = IdentityKey(e);
             if (!buckets.TryGetValue(identity, out var list))
             {

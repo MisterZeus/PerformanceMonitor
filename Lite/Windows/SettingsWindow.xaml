@@ -11,11 +11,11 @@
     <Window.Resources>
         <ResourceDictionary>
             <ContextMenu x:Key="DataGridContextMenu">
-                <MenuItem Header="Copy Cell" Click="CopyCell_Click"/>
-                <MenuItem Header="Copy Row" Click="CopyRow_Click"/>
-                <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click"/>
+                <MenuItem Header="Copy _Cell" Click="CopyCell_Click"/>
+                <MenuItem Header="Copy _Row" Click="CopyRow_Click"/>
+                <MenuItem Header="Copy _All Rows" Click="CopyAllRows_Click"/>
                 <Separator/>
-                <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click"/>
+                <MenuItem Header="_Export to CSV..." Click="ExportToCsv_Click"/>
             </ContextMenu>
         </ResourceDictionary>
     </Window.Resources>
@@ -52,7 +52,10 @@
                     <TextBlock x:Name="CollectionStatusText" Text="Status: Active" FontSize="12"
                                Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,4,0,0"/>
                 </StackPanel>
-                <Button Grid.Column="1" x:Name="PauseResumeButton" Content="Pause Collection"
+                <!-- The mnemonic sits on "Co_llection" rather than the verb so Alt+L works in both
+                     states: the Click handler swaps this Content to "Resume Co_llection", and a key
+                     that moved with the state would be a worse affordance than no key. -->
+                <Button Grid.Column="1" x:Name="PauseResumeButton" Content="Pause Co_llection"
                         Click="PauseResumeButton_Click" VerticalAlignment="Center"/>
             </Grid>
         </Border>
@@ -69,14 +72,14 @@
                     <TextBlock Text="Port:" VerticalAlignment="Center" Margin="20,0,6,0"
                                Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="McpPortTextBox" Width="70" Text="5151" VerticalAlignment="Center"/>
-                    <Button Content="Auto" ToolTip="Find an available port"
+                    <Button Content="_Auto" ToolTip="Find an available port"
                             Margin="6,0,0,0" Padding="8,2"
                             VerticalAlignment="Center"
                             Click="AutoPortButton_Click"/>
                 </StackPanel>
                 <TextBlock x:Name="McpStatusText" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,6,0,0"/>
                 <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
-                    <Button x:Name="CopyMcpCommandButton" Content="Copy Setup Command" Click="CopyMcpCommandButton_Click"/>
+                    <Button x:Name="CopyMcpCommandButton" Content="Cop_y Setup Command" Click="CopyMcpCommandButton_Click"/>
                     <TextBlock Text="Works with Claude Code. Other LLMs may apply, but why would you?"
                                FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                VerticalAlignment="Center" Margin="8,0,0,0"/>
@@ -146,7 +149,7 @@
             <StackPanel>
                 <StackPanel Orientation="Horizontal">
                     <TextBlock Text="Notifications" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
-                    <Button x:Name="RestoreAlertDefaultsButton" Content="Restore Defaults" Margin="12,0,0,0"
+                    <Button x:Name="RestoreAlertDefaultsButton" Content="_Restore Defaults" Margin="12,0,0,0"
                             FontSize="11" VerticalAlignment="Center" Click="RestoreAlertDefaultsButton_Click"/>
                 </StackPanel>
                 <CheckBox x:Name="MinimizeToTrayCheckBox" Content="Minimize to system tray" Margin="0,8,0,0"
@@ -338,7 +341,7 @@
                         <ComboBoxItem Content="Never"/>
                     </ComboBox>
                 </StackPanel>
-                <Button x:Name="ManageMuteRulesButton" Content="Manage Mute Rules..."
+                <Button x:Name="ManageMuteRulesButton" Content="_Manage Mute Rules..."
                         Click="ManageMuteRulesButton_Click" HorizontalAlignment="Left"
                         Padding="12,4" Margin="20,4,0,4"/>
                 <TextBlock Text="Create rules to suppress specific recurring alerts while still logging them."
@@ -429,8 +432,8 @@
                              ToolTip="Comma-separated email addresses"/>
 
                     <StackPanel Grid.Row="6" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
-                        <Button x:Name="TestEmailButton" Content="Send Test Email" Click="TestEmailButton_Click"/>
-                        <Button x:Name="ValidateSmtpButton" Content="Validate Settings" Margin="8,0,0,0"
+                        <Button x:Name="TestEmailButton" Content="Send Test _Email" Click="TestEmailButton_Click"/>
+                        <Button x:Name="ValidateSmtpButton" Content="_Validate Settings" Margin="8,0,0,0"
                                 Click="ValidateSmtpButton_Click"/>
                         <TextBlock x:Name="SmtpStatusText" FontSize="11" FontStyle="Italic"
                                    Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
@@ -469,7 +472,10 @@
                              ToolTip="Optional HTTP proxy (e.g. http://proxy.corp:8080). Leave blank for direct connection."/>
 
                     <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
-                        <Button x:Name="TestTeamsButton" Content="Send Test Notification" Click="TestTeamsButton_Click"/>
+                        <!-- Named per channel: the Teams, Slack and generic-webhook buttons all read
+                             "Send Test Notification" before, which are three identical labels visible at
+                             once on one scrolling page and so could not carry distinct access keys. -->
+                        <Button x:Name="TestTeamsButton" Content="Send Test to _Teams" Click="TestTeamsButton_Click"/>
                         <TextBlock x:Name="TeamsStatusText" FontSize="11" FontStyle="Italic"
                                    Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
                     </StackPanel>
@@ -510,7 +516,7 @@
                              ToolTip="Optional HTTP proxy (e.g. http://proxy.corp:8080). Leave blank for direct connection."/>
 
                     <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
-                        <Button x:Name="TestSlackButton" Content="Send Test Notification" Click="TestSlackButton_Click"/>
+                        <Button x:Name="TestSlackButton" Content="Send Test to Slac_k" Click="TestSlackButton_Click"/>
                         <TextBlock x:Name="SlackStatusText" FontSize="11" FontStyle="Italic"
                                    Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
                     </StackPanel>
@@ -566,7 +572,7 @@
                              ToolTip="Optional HTTP proxy (e.g. http://proxy.corp:8080). Leave blank for direct connection."/>
 
                     <StackPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
-                        <Button x:Name="TestGenericButton" Content="Send Test Notification" Click="TestGenericButton_Click"/>
+                        <Button x:Name="TestGenericButton" Content="Send Test to _Webhook" Click="TestGenericButton_Click"/>
                         <TextBlock x:Name="GenericStatusText" FontSize="11" FontStyle="Italic"
                                    Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
                     </StackPanel>
@@ -642,13 +648,13 @@
                 </DataGrid>
 
                 <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,8,0,0">
-                    <Button Content="Edit Selected..." x:Name="EditServerScheduleButton" Click="EditServerSchedule_Click" Margin="0,0,8,0"/>
-                    <Button Content="Edit Default..." x:Name="EditDefaultScheduleButton" Click="EditDefaultSchedule_Click" Margin="0,0,16,0"/>
+                    <Button Content="E_dit Selected..." x:Name="EditServerScheduleButton" Click="EditServerSchedule_Click" Margin="0,0,8,0"/>
+                    <Button Content="Edit De_fault..." x:Name="EditDefaultScheduleButton" Click="EditDefaultSchedule_Click" Margin="0,0,16,0"/>
                     <TextBlock Text="Default preset:" Foreground="{DynamicResource ForegroundBrush}" FontSize="12"
                                VerticalAlignment="Center" Margin="0,0,8,0"/>
                     <TextBlock x:Name="DefaultPresetText" FontSize="12" FontWeight="SemiBold"
                                Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,16,0"/>
-                    <Button Content="Apply Default to All" Click="ApplyDefaultToAll_Click"/>
+                    <Button Content="A_pply Default to All" Click="ApplyDefaultToAll_Click"/>
                 </StackPanel>
             </Grid>
         </Border>

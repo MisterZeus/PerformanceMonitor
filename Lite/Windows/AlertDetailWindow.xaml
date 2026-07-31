@@ -16,6 +16,7 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <!-- Header -->
@@ -159,5 +160,14 @@
                          VerticalScrollBarVisibility="Auto"/>
             </StackPanel>
         </Border>
+
+        <!-- Footer. This window had no close button of any kind, which made it the one dialog in
+             either app a keyboard user could not dismiss (its only other button is the per-section
+             Copy inside the ItemsControl template, and hanging IsCancel on that would make Esc copy
+             something). A real Close matches every sibling dialog and gives Esc something correct to
+             press. -->
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+            <Button Content="_Close" Width="80" Height="28" IsCancel="True" Click="Close_Click"/>
+        </StackPanel>
     </Grid>
 </Window>

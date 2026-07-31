@@ -83,7 +83,7 @@ public partial class ViewerServerTab
     private void WireHeatmapDrillDownMenu()
     {
         var menu = BuildChartContextMenu(QueryHeatmapChart, "Query_Heatmap");
-        var drillItem = new MenuItem { Header = "Show Active Queries at This Time" };
+        var drillItem = new MenuItem { Header = "Show _Active Queries at This Time" };
         menu.Items.Insert(0, drillItem);
         menu.Items.Insert(1, new Separator());
 

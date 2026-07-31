@@ -103,6 +103,16 @@
                 <Expander Header="{Binding Header}" IsExpanded="{Binding IsExpanded, Mode=OneTime}"
                           Foreground="{DynamicResource ForegroundBrush}" FontWeight="SemiBold"
                           FontSize="14" Margin="0,0,0,10">
+                    <!-- The header is data-derived (finding headline, or the raw fact key such as
+                         SOS_SCHEDULER_YIELD when no advice prose exists), and an Expander's header
+                         presenter parses a single "_" as an access-key marker. Rendering it through a
+                         TextBlock keeps the underscores and claims no Alt key. Foreground is restated
+                         because the themes' implicit TextBlock style would otherwise win. -->
+                    <Expander.HeaderTemplate>
+                        <DataTemplate>
+                            <TextBlock Text="{Binding}" Foreground="{DynamicResource ForegroundBrush}"/>
+                        </DataTemplate>
+                    </Expander.HeaderTemplate>
                     <ItemsControl ItemsSource="{Binding Cards}"
                                   ItemTemplate="{StaticResource RecommendationCardTemplate}"
                                   Margin="0,8,0,0"/>

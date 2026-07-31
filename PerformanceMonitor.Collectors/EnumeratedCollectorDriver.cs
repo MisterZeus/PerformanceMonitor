@@ -50,6 +50,54 @@ public sealed record ProbeFailureOutcome(
     string? Note);
 
 /// <summary>
+/// Accumulates payload probe failures across the databases of ONE per-database cycle (#1875), so that
+/// cycle reports them the way every other path does: one note on one collection_log row, and one capped
+/// burst of app-log lines.
+///
+/// <para>
+/// The plain path reads a collector's trailing failure set once, so it can assign
+/// <see cref="ProbeFailureOutcome.Note"/> straight onto the run's telemetry. The per-database path reads
+/// it N times — once per monitored database — and neither half of that generalizes: N single-shot note
+/// assignments leave only the LAST database's, and N calls to the host's capped logger give a
+/// 200-database Azure server 200 five-line bursts instead of one. Both failures are of the same kind, a
+/// per-READ decision applied to a per-CYCLE fact, which is why the accumulation lives here beside the
+/// read rather than being re-derived in each runner's loop body — the reason #1556 moved that loop into
+/// this class to begin with.
+/// </para>
+///
+/// <para>
+/// <see cref="Add"/> deliberately takes the whole <see cref="ProbeFailureOutcome"/> rather than its
+/// failure list: the per-read <see cref="ProbeFailureOutcome.Note"/> is wrong on this path by
+/// construction, and taking the outcome is what makes discarding it a documented step at the one place
+/// it happens instead of an omission at each call site.
+/// </para>
+/// </summary>
+public sealed class CycleProbeFailures
+{
+    private readonly List<EnumerationProbeFailure> _failures = new();
+
+    /// <summary>Every failure this cycle's databases reported, in the order they were read.</summary>
+    public IReadOnlyList<EnumerationProbeFailure> Failures => _failures;
+
+    /// <summary>
+    /// The ONE note for the whole cycle, composed through the same <see cref="EnumeratedCollectorDriver.BuildNote"/>
+    /// both other channels use, so its wording cannot drift from theirs. Null when nothing failed —
+    /// identical to the pre-#1875 behavior, where this path never set a note at all.
+    /// </summary>
+    public string? Note => EnumeratedCollectorDriver.BuildNote(enumerationWasEmpty: false, _failures.Count);
+
+    /// <summary>
+    /// Folds one database's read into the cycle. The outcome's own note is discarded on purpose (see the
+    /// type remarks); its failures are what carry forward.
+    /// </summary>
+    public void Add(ProbeFailureOutcome outcome)
+    {
+        ArgumentNullException.ThrowIfNull(outcome);
+        _failures.AddRange(outcome.ProbeFailures);
+    }
+}
+
+/// <summary>
 /// The shared control-flow driver for the enumeration collectors' per-item loop (#1556). Both hosts
 /// (Lite → DuckDB, Darling → Postgres) ran a byte-identical per-item loop that accumulated EVERY
 /// database's rows into one list before a single write — the shape that let one 24-server query_store
