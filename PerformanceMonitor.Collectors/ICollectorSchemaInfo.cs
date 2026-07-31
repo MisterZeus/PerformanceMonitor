@@ -74,4 +74,23 @@ public interface ICollectorSchemaInfo
     /// other collector had to come from somewhere unexpected and stays an ERROR.
     /// </summary>
     bool YieldsOnLockTimeout { get; }
+
+    /// <summary>
+    /// Named pieces of per-server collector state the host loads from its own store before the query is
+    /// built (exposed as <see cref="CollectorContext.State"/>) and persists back after the cycle (from
+    /// <see cref="CollectorContext.PendingState"/>) — the sibling of
+    /// <see cref="ICollectorDefinition{TRow}.WatermarkColumn"/> for state that is NOT derivable from the
+    /// collected rows, and so cannot be a MAX() over the target table.
+    ///
+    /// <para>default_trace_events is the one declaring collector: its last-seen trace FILE path decides
+    /// whether the cycle can read only the current rollover file or must re-read the whole set, and a
+    /// cycle that collects zero rows must still record the path it saw — exactly the case a row-derived
+    /// watermark cannot cover (#1962).</para>
+    ///
+    /// <para>Empty (the common case) means the host runs no state query at all, so this costs the other
+    /// collectors nothing. Keys are declared rather than discovered so the load is a fixed, pinnable set,
+    /// and declared HERE — on the non-generic surface <see cref="CollectorCatalog.All"/> exposes — so a
+    /// host or a test can enumerate the collectors that carry state without the row type.</para>
+    /// </summary>
+    IReadOnlyList<string> StateKeys { get; }
 }

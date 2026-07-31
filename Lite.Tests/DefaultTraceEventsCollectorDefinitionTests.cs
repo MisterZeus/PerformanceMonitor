@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -37,9 +38,16 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
         DateTime? collectionTime = null,
         string[]? excludedDatabases = null,
         bool hasCollectedBefore = false,
-        bool collectSchemaChanges = true)
+        bool collectSchemaChanges = true,
+        string? lastTraceFilePath = null)
         => new()
         {
+            State = lastTraceFilePath is null
+                ? CollectorContext.NoState
+                : new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    [DefaultTraceEventsCollector.LastTraceFilePathStateKey] = lastTraceFilePath,
+                },
             ServerId = 42,
             ServerName = "test-server",
             CollectionTime = collectionTime ?? new DateTime(2026, 7, 9, 12, 0, 0, DateTimeKind.Utc),
@@ -68,9 +76,11 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
         Assert.Contains("sys.traces", text, StringComparison.Ordinal);
         Assert.Contains("sys.fn_trace_gettable", text, StringComparison.Ordinal);
         Assert.Contains("sys.trace_events", text, StringComparison.Ordinal);
-        /* Base-path normalization so ALL rollover files are read (strip _NN, re-append the extension). */
-        Assert.Contains("REVERSE(t.path)", text, StringComparison.Ordinal);
-        Assert.Contains("t.max_files", text, StringComparison.Ordinal);
+        /* Base-path normalization so ALL rollover files are read on the FALLBACK arm (strip _NN,
+           re-append the extension) — over the captured @current_trace_path, not a second read of
+           t.path, so the path stored for the next cycle is the file this read used (#1962). */
+        Assert.Contains("REVERSE(@current_trace_path)", text, StringComparison.Ordinal);
+        Assert.Contains("ELSE t.max_files", text, StringComparison.Ordinal);
         Assert.Contains("t.is_default = 1", text, StringComparison.Ordinal);
         Assert.Contains("t.status = 1", text, StringComparison.Ordinal);
         Assert.Contains("ft.StartTime > @cutoff_time", text, StringComparison.Ordinal);
@@ -87,8 +97,8 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
            nonexistent file. The CASE must fall back to the base t.path when CHARINDEX finds no underscore. */
         var text = DefaultTraceEventsCollector.Instance.BuildQuery(MakeContext()).Text;
 
-        Assert.Contains("WHEN CHARINDEX(N'_', REVERSE(t.path)) > 0", text, StringComparison.Ordinal);
-        Assert.Contains("ELSE t.path", text, StringComparison.Ordinal);
+        Assert.Contains("WHEN CHARINDEX(N'_', REVERSE(@current_trace_path)) > 0", text, StringComparison.Ordinal);
+        Assert.Contains("ELSE @current_trace_path", text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -102,10 +112,10 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
         var text = DefaultTraceEventsCollector.Instance.BuildQuery(MakeContext()).Text;
 
         Assert.Contains(
-            @"AND (CHARINDEX(N'\', REVERSE(t.path)) = 0 OR CHARINDEX(N'_', REVERSE(t.path)) < CHARINDEX(N'\', REVERSE(t.path)))",
+            @"AND (CHARINDEX(N'\', REVERSE(@current_trace_path)) = 0 OR CHARINDEX(N'_', REVERSE(@current_trace_path)) < CHARINDEX(N'\', REVERSE(@current_trace_path)))",
             text, StringComparison.Ordinal);
         Assert.Contains(
-            "AND (CHARINDEX(N'/', REVERSE(t.path)) = 0 OR CHARINDEX(N'_', REVERSE(t.path)) < CHARINDEX(N'/', REVERSE(t.path)))",
+            "AND (CHARINDEX(N'/', REVERSE(@current_trace_path)) = 0 OR CHARINDEX(N'_', REVERSE(@current_trace_path)) < CHARINDEX(N'/', REVERSE(@current_trace_path)))",
             text, StringComparison.Ordinal);
     }
 
@@ -182,7 +192,7 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
     {
         var noExclusion = DefaultTraceEventsCollector.Instance.BuildQuery(MakeContext());
         Assert.DoesNotContain("@excl_db_0", noExclusion.Text, StringComparison.Ordinal);
-        Assert.Equal(2, noExclusion.Parameters.Count); /* @cutoff_time + @include_object_ddl */
+        Assert.Equal(3, noExclusion.Parameters.Count); /* @cutoff_time + @last_trace_path + @include_object_ddl */
 
         var withExclusion = DefaultTraceEventsCollector.Instance.BuildQuery(
             MakeContext(excludedDatabases: new[] { "ReportingDB", "ScratchDB" }));
@@ -194,7 +204,7 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
             "AND (ft.DatabaseName IS NULL OR ft.DatabaseName NOT IN (@excl_db_0, @excl_db_1))",
             withExclusion.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("AND ft.DatabaseName NOT IN", withExclusion.Text, StringComparison.Ordinal); /* never the bare form */
-        Assert.Equal(4, withExclusion.Parameters.Count); /* @cutoff_time + @include_object_ddl + two excluded names */
+        Assert.Equal(5, withExclusion.Parameters.Count); /* @cutoff_time + @last_trace_path + @include_object_ddl + two excluded names */
         Assert.Contains(withExclusion.Parameters, p => p.Name == "@excl_db_0" && (string?)p.Value == "ReportingDB");
         Assert.Contains(withExclusion.Parameters, p => p.Name == "@excl_db_1" && (string?)p.Value == "ScratchDB");
     }
@@ -289,5 +299,161 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
         Assert.Equal(21, nullWriter.Values.Count);
         Assert.All(nullWriter.Values, Assert.Null);
         Assert.Empty(s_deltas.Calls);
+
+        /* A reader carrying only the payload (no trailing path set) records nothing rather than throwing. */
+        Assert.Empty(context.PendingState);
+    }
+
+    /* ---- #1962: read the CURRENT rollover file in steady state, fall back when the trace moved ---- */
+
+    /* Multi-line SQL fragments are asserted against LF text: the template is a verbatim string literal, so
+       its line endings are whatever the source file carries (CRLF here) and a raw \n assertion would pass
+       or fail on checkout settings rather than on the SQL. */
+    private static string Lf(string text) => text.Replace("\r\n", "\n", StringComparison.Ordinal);
+
+    [Fact]
+    public void StateKeys_DeclaresTheLastSeenTracePath_AndIsTheOnlyCollectorWithState()
+    {
+        Assert.Equal(
+            new[] { "last_trace_file_path" },
+            DefaultTraceEventsCollector.Instance.StateKeys.ToArray());
+        Assert.Equal("last_trace_file_path", DefaultTraceEventsCollector.LastTraceFilePathStateKey);
+
+        /* Every other collector's dedup IS derivable from its rows (a MAX() over the target table), so it
+           declares no state and its host runs no state query. A second collector appearing here is a real
+           design decision — both hosts must load and persist its keys — not a silent addition. */
+        var declaring = CollectorCatalog.All
+            .Where(c => c.StateKeys.Count > 0)
+            .Select(c => c.Name)
+            .ToArray();
+        Assert.Equal(new[] { "default_trace_events" }, declaring);
+    }
+
+    [Fact]
+    public void BuildQuery_SteadyState_ReadsOnlyTheCurrentFile_WhenTheStoredPathStillMatches()
+    {
+        /* The whole point of #1962: fn_trace_gettable has no predicate pushdown, so handing it the base
+           path + max_files materializes all 5 x 20 MB every cycle and the StartTime watermark filters
+           AFTERWARDS. Measured 897 ms whole-set vs 178 ms current-file on the reporting fleet's apex box. */
+        var text = Lf(DefaultTraceEventsCollector.Instance.BuildQuery(
+            MakeContext(lastTraceFilePath: @"S:\MSSQL\Log\log_766.trc")).Text);
+
+        /* The live path is captured ONCE and everything downstream reads that value — the arm decision,
+           the file(s) read, and the path handed back for the next cycle. */
+        Assert.Contains("@current_trace_path nvarchar(260)", text, StringComparison.Ordinal);
+        Assert.Contains("@current_trace_path = t.path", text, StringComparison.Ordinal);
+
+        /* Steady-state arm: the captured path itself, and ONE file. */
+        Assert.Contains("WHEN @current_trace_path = @last_trace_path\n        THEN @current_trace_path", text, StringComparison.Ordinal);
+        Assert.Contains("WHEN @current_trace_path = @last_trace_path\n        THEN 1", text, StringComparison.Ordinal);
+
+        /* Fallback arm still reads the whole set, via the unchanged base-path normalization. */
+        Assert.Contains("ELSE t.max_files", text, StringComparison.Ordinal);
+
+        /* sys.traces stays in the FROM: its is_default/status predicate is what keeps fn_trace_gettable
+           from being invoked at all when the default trace is off (a read-only collector must not error
+           on a server that simply has it disabled), and max_files still comes from it. */
+        Assert.Contains("FROM sys.traces AS t", text, StringComparison.Ordinal);
+        Assert.Contains("t.is_default = 1", text, StringComparison.Ordinal);
+        Assert.Contains("t.status = 1", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildQuery_BindsTheStoredPath_AndBindsNullWhenThereIsNone()
+    {
+        /* Steady state: the path stored by the previous cycle is what the query compares against. */
+        var stored = DefaultTraceEventsCollector.Instance.BuildQuery(
+            MakeContext(lastTraceFilePath: @"S:\MSSQL\Log\log_766.trc"));
+        var storedParameter = stored.Parameters.Single(p => p.Name == "@last_trace_path");
+        Assert.Equal(@"S:\MSSQL\Log\log_766.trc", storedParameter.Value);
+
+        /* THE FALLBACK TRIGGER. No stored path — a first run, a host that restarted before it could store
+           one, a store upgraded onto this build, a previous cycle that failed — binds NULL, and NULL is
+           never equal to anything in SQL, so the CASE cannot take the current-file arm and the whole
+           rollover set is read. Not knowing what you missed is not the same as knowing you missed nothing:
+           proven live on SQL2022, where a cutoff spanning a rollover returned 1,161 events from the
+           current file against 4,497 from the whole set. */
+        var firstRun = DefaultTraceEventsCollector.Instance.BuildQuery(MakeContext());
+        Assert.Null(firstRun.Parameters.Single(p => p.Name == "@last_trace_path").Value);
+
+        /* The arms are ONE text with a bound parameter, never a text fork — so the plan cache sees one
+           statement and the two arms cannot drift apart. */
+        Assert.Equal(stored.Text, firstRun.Text);
+
+        /* nvarchar(260) matches sys.traces.path exactly. Binding at 128 would TRUNCATE a deep install
+           path, and a truncated path never equals the live one — every cycle on precisely the servers
+           with long paths would silently take the expensive fallback forever. */
+        Assert.Equal(CollectorParameterType.NVarChar260, storedParameter.Type);
+    }
+
+    [Fact]
+    public void BuildQuery_ReturnsTheReadPathAsATrailingResultSet_NotAPayloadColumn()
+    {
+        var text = Lf(DefaultTraceEventsCollector.Instance.BuildQuery(MakeContext()).Text);
+
+        /* A SECOND result set, after the payload's OPTION(RECOMPILE). It cannot be a payload column: the
+           cycles that most need the path recorded are the ones that collect ZERO rows (a server whose
+           trace churns through 20 MB files without producing curated events), and a row-derived path
+           would never notice those rollovers — leaving the collector in the expensive fallback forever. */
+        Assert.Contains("OPTION(RECOMPILE);\n\nSELECT\n    current_trace_path = @current_trace_path;", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("current_trace_path = ft.", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("trace_path", string.Join(",", DefaultTraceEventsCollector.Instance.PayloadColumns.Select(c => c.Name)), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ReadAsync_RecordsThePathItRead_EvenWhenTheCycleCollectedNothing()
+    {
+        /* The zero-row cycle is the case this state exists for. */
+        var context = MakeContext();
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            Array.Empty<object[]>(),
+            new[] { new object[] { @"S:\MSSQL\Log\log_766.trc" } });
+
+        var rows = await DefaultTraceEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Empty(rows);
+        Assert.Equal(
+            @"S:\MSSQL\Log\log_766.trc",
+            context.PendingState[DefaultTraceEventsCollector.LastTraceFilePathStateKey]);
+    }
+
+    [Fact]
+    public async Task ReadAsync_RecordsNothing_WhenThereIsNoRunningDefaultTrace()
+    {
+        /* Trace off / absent: the capture SELECT assigns nothing, so the trailing set carries NULL.
+           Recording nothing leaves the next cycle on the fallback, which is what a collector that
+           cannot see the trace should do. */
+        var context = MakeContext();
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            Array.Empty<object[]>(),
+            new[] { new object[] { DBNull.Value } });
+
+        await DefaultTraceEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Empty(context.PendingState);
+    }
+
+    [Fact]
+    public async Task ReadAsync_RecordsThePath_AlongsideCollectedRows()
+    {
+        var context = MakeContext();
+        var payloadRow = new object[]
+        {
+            new DateTime(2026, 7, 31, 14, 55, 0, DateTimeKind.Utc), "ErrorLog", 22, 55, "SalesDB", 7,
+            "app_login", "APPHOST", "SqlClient", (object)DBNull.Value, (object)DBNull.Value, 0L, 0L,
+            "something went wrong", "app_login", 823, 24, 2, 900002L, 0L, (object)DBNull.Value,
+        };
+
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            new[] { payloadRow },
+            new[] { new object[] { @"S:\MSSQL\Log\log_767.trc" } });
+
+        var rows = await DefaultTraceEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Single(rows);
+        Assert.Equal("ErrorLog", rows[0].EventName);
+        Assert.Equal(
+            @"S:\MSSQL\Log\log_767.trc",
+            context.PendingState[DefaultTraceEventsCollector.LastTraceFilePathStateKey]);
     }
 }

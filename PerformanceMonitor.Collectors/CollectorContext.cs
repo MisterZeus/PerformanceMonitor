@@ -19,6 +19,13 @@ public sealed class CollectorContext
 {
     private static readonly IReadOnlySet<string> s_emptySet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// The empty <see cref="State"/> — what a host passes for a definition that declares no state keys
+    /// (so it ran no state query), and what a definition sees when nothing has been stored yet.
+    /// </summary>
+    public static readonly IReadOnlyDictionary<string, string> NoState =
+        new Dictionary<string, string>(StringComparer.Ordinal);
+
     public required int ServerId { get; init; }
 
     public required string ServerName { get; init; }
@@ -77,6 +84,26 @@ public sealed class CollectorContext
     /// the watermark is null, and only default_trace_events and job_history consult it.
     /// </summary>
     public bool HasCollectedBefore { get; init; }
+
+    /// <summary>
+    /// The per-server collector state the host loaded from ITS store (Lite: DuckDB; Darling: Postgres)
+    /// for the keys this definition declared in <c>StateKeys</c> — the sibling of <see cref="Watermark"/>
+    /// for state no MAX() over the collected rows can produce. Empty when the definition declares no
+    /// keys (every collector but default_trace_events), when nothing has been stored yet, or when the
+    /// state read failed: a definition MUST treat "absent" as its documented conservative path, because
+    /// absent is what a first run, a restarted host, and a broken store all look like.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> State { get; init; } = NoState;
+
+    /// <summary>
+    /// State the definition wants persisted for the NEXT cycle, written during this cycle (typically in
+    /// <c>ReadAsync</c>, from a value the query itself returned) and upserted by the host once the cycle
+    /// completes — so a cycle that collected zero rows still records what it observed. Nothing is written
+    /// for a cycle that threw: the next run then re-reads the older state and takes its conservative
+    /// path, which is the safe direction. One of the context members the definition writes back to the
+    /// host (the others are <see cref="PerItemTextBudgetExceeded"/> and <see cref="CatchupClampApplied"/>).
+    /// </summary>
+    public Dictionary<string, string> PendingState { get; } = new(StringComparer.Ordinal);
 
     /// <summary>Wait types excluded from collection (Lite: ignored_wait_types.json — #1240).</summary>
     public IReadOnlySet<string> IgnoredWaitTypes { get; init; } = s_emptySet;

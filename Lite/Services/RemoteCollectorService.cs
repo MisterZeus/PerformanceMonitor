@@ -1283,6 +1283,81 @@ WHERE server_id = $3";
     }
 
     /// <summary>
+    /// The stored per-server state for one collector's declared keys (#1962) — the sibling of
+    /// <see cref="GetLastCollectedTimeAsync"/> for state no MAX() over the collected rows can produce.
+    /// Read only for the collectors that declare keys, so it costs the rest nothing. An empty result on
+    /// failure is the SAFE direction: every definition treats absent state as its conservative path
+    /// (default_trace_events re-reads the whole rollover set), so a broken read costs time, never events.
+    /// Darling's twin is <c>DarlingCollectorRunner.GetCollectorStateAsync</c>.
+    /// </summary>
+    protected async Task<Dictionary<string, string>> GetCollectorStateAsync(
+        int serverId, string collectorName, CancellationToken cancellationToken)
+    {
+        var state = new Dictionary<string, string>(StringComparer.Ordinal);
+        try
+        {
+            using var conn = _duckDb.CreateConnection();
+            await conn.OpenAsync(cancellationToken);
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT state_key, state_value FROM collector_state WHERE server_id = $1 AND collector_name = $2";
+            cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+            cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = collectorName });
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (!reader.IsDBNull(1))
+                {
+                    state[reader.GetString(0)] = reader.GetString(1);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            /* Fail toward "no state" — the definition's conservative path, never a wrong-but-plausible one. */
+            _logger?.LogDebug(ex, "Reading collector state for {Collector} failed; using the no-state path", collectorName);
+        }
+        return state;
+    }
+
+    /// <summary>
+    /// Upserts what the definition observed this cycle (<see cref="PerformanceMonitor.Collectors.CollectorContext.PendingState"/>),
+    /// after the cycle completed — so a cycle that collected zero rows still records what it saw, which is
+    /// the whole point of keeping this state off the payload. Best-effort: a failed write leaves the older
+    /// value, and the next cycle re-derives from it or falls back.
+    /// </summary>
+    protected async Task SaveCollectorStateAsync(
+        int serverId, string collectorName, IReadOnlyDictionary<string, string> state, CancellationToken cancellationToken)
+    {
+        if (state.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            using var conn = _duckDb.CreateConnection();
+            await conn.OpenAsync(cancellationToken);
+            foreach (var entry in state)
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = @"
+INSERT OR REPLACE INTO collector_state (server_id, collector_name, state_key, state_value, updated_at)
+VALUES ($1, $2, $3, $4, $5)";
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = collectorName });
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = entry.Key });
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = entry.Value });
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DateTime.UtcNow });
+                await cmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Storing collector state for {Collector} failed; next cycle uses the older value", collectorName);
+        }
+    }
+
+    /// <summary>
     /// Deterministic hash code for a string. Forwards to the shared
     /// <see cref="PerformanceMonitor.Common.ServerIdHelper.GetDeterministicHashCode"/> so Lite,
     /// Dashboard, and the MCP paths all derive the same server id from a server name. Kept as a

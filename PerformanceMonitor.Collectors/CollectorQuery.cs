@@ -18,6 +18,13 @@ public enum CollectorParameterType
 {
     DateTime2,
     NVarChar128,
+
+    /// <summary>
+    /// Matches <c>sys.traces.path</c> exactly (#1962). Binding a trace file path as NVarChar128 would
+    /// TRUNCATE a deep install path, and a truncated path never equals the live one — the collector
+    /// would take its expensive fallback every cycle on precisely the servers with long paths, silently.
+    /// </summary>
+    NVarChar260,
     Int32,
     BigInt,
 }

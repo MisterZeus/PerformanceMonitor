@@ -74,7 +74,11 @@ public sealed class ViewerDataServiceTests
 /// DPAPI entropy) is pinned against the SERVICE's DarlingSecrets/DarlingManagedPostgres here,
 /// because the viewer deliberately duplicates those constants instead of referencing the
 /// service project.
+/// <para>In the <c>darling-config-env</c> collection because the resolution test sets the process-wide
+/// <c>DARLING_CONFIG</c> variable — see <see cref="DarlingConfigEnvironmentCollection"/> for why saving
+/// and restoring it in a <c>finally</c> is not enough on its own.</para>
 /// </summary>
+[Collection("darling-config-env")]
 public sealed class ViewerSettingsTests
 {
     [Fact]
@@ -103,6 +107,9 @@ public sealed class ViewerSettingsTests
                 """;
 
             var settings = ViewerSettings.Parse(json);
+            /* The flag the startup diagnostics report (#1954): the string was DERIVED, so
+               postgres.connectionString in the file is not consulted at all. */
+            Assert.True(settings.Managed);
             var parsed = new NpgsqlConnectionStringBuilder(settings.ConnectionString);
             /* 127.0.0.1, not "localhost" — the viewer half of the managed-Host parity pair with the
                service's DarlingManagedPostgres.BuildConnectionString (darling-network-endpoints). */
@@ -215,6 +222,9 @@ public sealed class ViewerSettingsTests
         var settings = ViewerSettings.Parse(json);
 
         Assert.Equal("Host=localhost;Database=darling", settings.ConnectionString);
+        /* Bring-your-own: the string came out of the file verbatim, which is what the startup
+           diagnostics report as postgres.managed = false (#1954). */
+        Assert.False(settings.Managed);
     }
 
     [Fact]
@@ -475,6 +485,15 @@ public sealed class ViewerSchemaVersionGateTests
         Assert.Equal(21, ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, false, true, false, false, false, false, false, false, false, false, false));
     }
 
+    /// <summary>The #1962 rung: every sentinel through V43 present but collector_state absent — the probe
+    /// must report 43, so a V43 store is correctly seen as one migration behind. This rung is unusual in
+    /// that the viewer never reads collector_state (service-only state, no view, no viewer query), so
+    /// nothing here is about a failing read: it exists so a FULLY-migrated store maps to 44 instead of
+    /// capping at 43, which is what would make the connect-time gate refuse every healthy store.</summary>
+    [Fact]
+    public void MapProbedSchemaVersion_CollectorStateAbsent_CapsAt43() =>
+        Assert.Equal(43, ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+
     [Fact]
     public void RequiredStoreSchemaVersion_TracksTheBuildSchemaVersion_AndTheProbeCoversIt()
     {
@@ -487,7 +506,7 @@ public sealed class ViewerSchemaVersionGateTests
            the connect-time gate refuse to open the viewer against a perfectly healthy store. */
          Assert.Equal(
              ViewerDataService.RequiredStoreSchemaVersion,
-             ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+             ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
     }
 }
 

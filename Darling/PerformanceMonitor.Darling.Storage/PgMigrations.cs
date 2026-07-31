@@ -87,6 +87,7 @@ public static class PgMigrations
         new Migration(41, "query-store-interval-identity", V41Sql),
         new Migration(42, "pagerduty-webhook", V42Sql),
         new Migration(43, "pagerduty-proxy", V43Sql),
+        new Migration(44, "collector-state", V44Sql),
     };
 
     /// <summary>
@@ -705,6 +706,37 @@ ALTER TABLE config.config_notification
     private const string V43Sql = @"
 ALTER TABLE config.config_notification
     ADD COLUMN IF NOT EXISTS pagerduty_proxy text NOT NULL DEFAULT '';";
+
+    /// <summary>
+    /// V44 — per-server collector state that is NOT derivable from the collected rows, so it cannot be a
+    /// MAX() over the collector's own table the way the <c>event_time</c> / <c>instance_id</c> watermarks
+    /// are (#1962). One collector declares state today: <c>default_trace_events</c> records the trace FILE
+    /// it read, and compares it next cycle to decide whether it can read only the current rollover file
+    /// (the measured 5.0x steady-state saving) or must re-read the whole set because the trace rolled.
+    /// The state cannot ride on the payload precisely because the cycles that need it most collect zero
+    /// rows — a server whose default trace churns through 20 MB files without producing any CURATED event
+    /// would never record a rollover, and so would never leave the expensive fallback.
+    ///
+    /// <para><b>Schema — <c>collect</c>, qualified.</b> Service-written state the operator never mutates,
+    /// so it belongs in <c>collect</c> beside <c>analysis_state</c> (V19) rather than the <c>config</c>
+    /// control plane; qualifying is belt-and-suspenders over the migrate session's
+    /// <c>search_path = collect, config, public</c>, exactly like V19. NOT a hypertable: it is a keyed
+    /// registry with one short row per (server, collector, key), and
+    /// <see cref="!:TimescaleSupport.HypertableTables"/> is catalog-driven, so a non-collector table is
+    /// excluded automatically. No <c>v_*</c> passthrough view — nothing outside the collector runner reads
+    /// it. <c>CREATE TABLE IF NOT EXISTS</c>, so a re-run is a no-op; a fresh store reaches it in
+    /// migration order like every other post-V8 addition. Lite's twin is <c>Schema.CreateCollectorStateTable</c>
+    /// — same columns, same key.</para>
+    /// </summary>
+    private const string V44Sql = @"
+CREATE TABLE IF NOT EXISTS collect.collector_state (
+    server_id integer NOT NULL,
+    collector_name text NOT NULL,
+    state_key text NOT NULL,
+    state_value text NOT NULL,
+    updated_at timestamp NOT NULL,
+    PRIMARY KEY (server_id, collector_name, state_key)
+);";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:
