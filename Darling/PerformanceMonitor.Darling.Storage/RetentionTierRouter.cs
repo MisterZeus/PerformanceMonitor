@@ -51,17 +51,35 @@ public enum RetentionTier
 public static class RetentionTierRouter
 {
     /// <summary>
-    /// Raw answers windows whose oldest point is within this age — a day inside the 4-day
-    /// <see cref="TimescaleSupport.RawRetentionInterval"/>, so raw never routes to an about-to-drop chunk.
+    /// How far inside a tier's retention horizon its route threshold sits. One day, applied identically to raw
+    /// and hourly, so a window is never routed at a tier whose oldest chunk is about to be dropped underneath
+    /// it. Small relative to every horizon it applies to, which is what lets one constant serve both.
+    ///
+    /// <para>Declared FIRST deliberately: static field initializers run in textual order, so a margin declared
+    /// below the fields that subtract it would silently read <c>TimeSpan.Zero</c> and every route threshold
+    /// would land exactly ON its horizon instead of inside it.</para>
     /// </summary>
-    public static readonly TimeSpan RawMaxAge = TimeSpan.FromDays(3);
+    private static readonly TimeSpan RouteMargin = TimeSpan.FromDays(1);
 
     /// <summary>
-    /// The hourly CAGG answers up to this age — a day inside the 21-day
-    /// <see cref="TimescaleSupport.HourlyRetentionInterval"/>; older windows fall to the daily CAGG, which has no
-    /// retention policy and is kept indefinitely.
+    /// Raw answers windows whose oldest point is within this age — a day inside
+    /// <see cref="TimescaleSupport.RawRetentionSpan"/>, so raw never routes to an about-to-drop chunk.
     /// </summary>
-    public static readonly TimeSpan HourlyMaxAge = TimeSpan.FromDays(20);
+    public static readonly TimeSpan RawMaxAge = TimescaleSupport.RawRetentionSpan - RouteMargin;
+
+    /// <summary>
+    /// The hourly CAGG answers up to this age — a day inside
+    /// <see cref="TimescaleSupport.HourlyRetentionSpan"/>, so a read never routes to an about-to-drop chunk;
+    /// older windows fall to the daily CAGG, which has no retention policy and is kept indefinitely.
+    ///
+    /// <para><b>DERIVED, since #1937, and that was the whole bug.</b> This was a hardcoded 20 days sitting a
+    /// day under a hardcoded 21-day horizon — two independent literals that agreed only because someone kept
+    /// them agreeing. Raising retention to 90 while this stayed at 20 would have changed nothing an operator
+    /// could see: a 30-day window would still have routed straight past the hourly tier to daily, which is
+    /// EXACTLY the complaint (#1937) that moved the horizon in the first place. The margin is now the only
+    /// number written down; the horizon it hangs off is read.</para>
+    /// </summary>
+    public static readonly TimeSpan HourlyMaxAge = TimescaleSupport.HourlyRetentionSpan - RouteMargin;
 
     /// <summary>
     /// How far back per-row text (<c>query_text</c>, <c>query_plan</c>) actually exists. Identical to
@@ -193,6 +211,20 @@ public static class RetentionTierRouter
             {
                 return tier;
             }
+        }
+
+        /* #1939: everything above escalates toward FINER grain, so a window past the hourly floor used to be
+           served PARTIALLY at hourly — silently missing its oldest part — even when the daily tier held the
+           COMPLETE window. Complete beats partial: a month view missing its older weeks is the #1937 complaint
+           wearing routing clothes, and the field case is every store upgraded across a horizon raise, whose
+           hourly tier spends weeks regrowing while HourlyMaxAge already points far past its floor. The arm
+           self-limits on the degraded path: when HOURLY was reached by falling from an age-picked DAILY, the
+           daily floor has already failed Covers above, so this cannot bounce back and forth. */
+        if (tier == RetentionTier.Hourly
+            && dailyAvailable
+            && TierCoverage.Covers(coverage.DailyFloorUtc, windowStartUtc))
+        {
+            return RetentionTier.Daily;
         }
 
         return TierCoverage.ReachesFurtherBack(coverage.RawOldestUtc, floor) ? RetentionTier.Raw : tier;
