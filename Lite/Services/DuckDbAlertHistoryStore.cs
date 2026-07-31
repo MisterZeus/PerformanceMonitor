@@ -45,9 +45,9 @@ public sealed class DuckDbAlertHistoryStore : IAlertHistoryStore
            old TrimEnd('%') parse failed on any decorated value ("87% (Total CPU)") and silently
            stored 0 for every High CPU row. */
         var currentValue = record.NumericCurrentValue
-            ?? PerformanceMonitor.Notifications.AlertValueParser.ParseOrDefault(record.CurrentValueText);
+            ?? AlertValueParser.ParseOrDefault(record.CurrentValueText);
         var thresholdValue = record.NumericThresholdValue
-            ?? PerformanceMonitor.Notifications.AlertValueParser.ParseOrDefault(record.ThresholdValueText);
+            ?? AlertValueParser.ParseOrDefault(record.ThresholdValueText);
         var serverId = int.TryParse(record.ServerId, out var sid) ? sid : 0;
 
         try

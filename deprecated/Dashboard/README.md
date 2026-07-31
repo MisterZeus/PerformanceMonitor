@@ -101,16 +101,33 @@ USE [PerformanceMonitor];
 CREATE USER [SQLServerPerfMon] FOR LOGIN [SQLServerPerfMon];
 ALTER ROLE [db_owner] ADD MEMBER [SQLServerPerfMon];
 
+/* Direct table grants, deliberately NOT SQLAgentReaderRole: that role gates the sp_help_job*
+   procedures, which this product never calls, and grants NO SELECT on the tables the running
+   jobs collector actually reads - with only the role, those reads fail with error 229 (#1823).
+   These four are exactly what 51_collect_running_jobs.sql and 44_hung_job_monitor.sql read.
+   Lite and Darling need a wider set (syscategories, sysjobschedules, and EXECUTE on
+   agent_datetime) for collectors this edition does not have - see the main README. */
 USE [msdb];
 CREATE USER [SQLServerPerfMon] FOR LOGIN [SQLServerPerfMon];
-ALTER ROLE [SQLAgentReaderRole] ADD MEMBER [SQLServerPerfMon];
+GRANT SELECT ON dbo.sysjobs        TO [SQLServerPerfMon];
+GRANT SELECT ON dbo.sysjobactivity TO [SQLServerPerfMon];
+GRANT SELECT ON dbo.sysjobhistory  TO [SQLServerPerfMon];
+GRANT SELECT ON dbo.syssessions    TO [SQLServerPerfMon];
+
+/* Only if you leave the hung-job monitor's @stop_hung_job at its default of 1: stopping a job
+   is an EXECUTE, which no amount of SELECT covers. Without it the auto-stop fails its
+   permission check every time it fires - logged to collection_log, not a crash, but the jobs
+   it was meant to stop keep running. Withhold it and set @stop_hung_job = 0 so the monitor
+   reports rather than acts. */
+GRANT EXECUTE ON dbo.sp_stop_job   TO [SQLServerPerfMon];
 ```
 
 | Grant | Why |
 |---|---|
 | `VIEW SERVER STATE` | All DMV access (wait stats, query stats, memory, CPU, file I/O, etc.) |
 | `db_owner` on PerformanceMonitor | Collectors insert data, create/alter tables, execute procedures. Scoped to just this database — not sysadmin. |
-| `SQLAgentReaderRole` on msdb | Read `sysjobs`, `sysjobactivity`, `sysjobhistory` for the running jobs collector |
+| `SELECT` on the four msdb job tables | Read `sysjobs`, `sysjobactivity`, `sysjobhistory`, `syssessions` for the running jobs collector and the hung-job monitor. These are direct table reads — `SQLAgentReaderRole` alone leaves every one failing with error 229 |
+| `EXECUTE` on `msdb.dbo.sp_stop_job` | The hung-job monitor's auto-stop, on by default (`@stop_hung_job = 1`). Withhold it and set `@stop_hung_job = 0`, or the auto-stop fails on permissions every time it fires |
 
 **Optional** (gracefully skipped if missing):
 - `ALTER SETTINGS` — installer sets `blocked process threshold` via `sp_configure`. Skipped with a warning if unavailable.

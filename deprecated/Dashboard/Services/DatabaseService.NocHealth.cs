@@ -248,7 +248,7 @@ namespace PerformanceMonitorDashboard.Services
         /// Two checks: (1) are the PerformanceMonitor SQL Agent jobs disabled (immediate, definitive),
         /// and (2) has nothing logged a collection within the expected window (catches Agent-stopped /
         /// erroring collectors). The msdb job check is skipped on Azure SQL DB (no Agent) and degrades
-        /// gracefully if msdb is unreadable (RDS / missing SQLAgentReaderRole) — it never reports
+        /// gracefully if msdb is unreadable (RDS / no SELECT on the job tables) — it never reports
         /// "disabled" when it simply couldn't look.
         /// </summary>
         private async Task<CollectionStoppedResult> GetCollectionStoppedAsync(SqlConnection connection, int engineEdition)
@@ -283,7 +283,7 @@ namespace PerformanceMonitorDashboard.Services
                 }
                 catch (Exception ex)
                 {
-                    // Restricted msdb (e.g. AWS RDS) or no SQLAgentReaderRole — leave counts at 0 so we
+                    // Restricted msdb (e.g. AWS RDS) or no SELECT on the job tables — leave counts at 0 so we
                     // fall through to the freshness check rather than falsely claiming jobs are disabled.
                     Logger.Warning($"Could not read collector job state: {ex.Message}");
                 }

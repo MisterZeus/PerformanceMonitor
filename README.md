@@ -469,7 +469,7 @@ Darling uses the same target-server grants; its bundled PostgreSQL store and ser
 
 ### FinOps Index Analysis (per-database grants)
 
-Applies to **all editions**. The FinOps Index Analysis tab runs `sp_IndexCleanup` against each user database you ask it to inspect, executing as your app login. The grants above (`VIEW SERVER STATE`, plus optional `SQLAgentReaderRole` on `msdb`) are *not* sufficient on their own — the login also needs a user mapping in every user database it will analyze, plus `VIEW DATABASE STATE`, `VIEW DEFINITION`, and `SELECT` on `sys.sql_expression_dependencies` in each.
+Applies to **all editions**. The FinOps Index Analysis tab runs `sp_IndexCleanup` against each user database you ask it to inspect, executing as your app login. The server-level grants above (`VIEW SERVER STATE` and friends) are *not* sufficient on their own — the login also needs a user mapping in every user database it will analyze, plus `VIEW DATABASE STATE`, `VIEW DEFINITION`, and `SELECT` on `sys.sql_expression_dependencies` in each.
 
 The third grant is the easy one to miss: by default only members of `db_owner` have `SELECT` on `sys.sql_expression_dependencies`, and `VIEW DEFINITION` does not include it. `sp_IndexCleanup` queries that catalog view (via three-part name to the target database) when checking for computed columns and check constraints that reference UDFs, so the failure only surfaces on databases that actually have those — which is why a smoke-test database may pass and a real workload database fails with `Msg 229`.
 
