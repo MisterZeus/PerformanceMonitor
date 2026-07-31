@@ -502,10 +502,20 @@ public static class DarlingCliCommands
     /// verify-full connection cannot be completed is exactly the half-finished handoff this verb exists to
     /// kill, so a missing cert fails with the reason instead of exporting something broken.</para>
     /// <para><b>The written darling.json holds a LIVE credential</b> — the verb says so on STDERR, naming the
-    /// file, before writing it, and ACLs it to SYSTEM + Administrators + this account + INTERACTIVE. The
-    /// password value itself is never echoed.</para>
+    /// file, before writing it, then ACLs it to SYSTEM + Administrators + this account + INTERACTIVE and
+    /// CONFIRMS that (returning 2, not 0, when the secret is still readable — "exported" must not read as
+    /// "protected" to a script). The password value itself is never echoed.</para>
+    /// <para>It also refuses destinations rather than clobbering them, all decided BEFORE any config load or
+    /// credential decrypt because they are pure path questions whose failure cannot be undone: the service's
+    /// OWN config directory (exporting there replaced darling.json with the viewer's, destroying its servers,
+    /// encrypted passwords and tokens — reproduced, and one keystroke from a legitimate command); a
+    /// darling.json this verb did not write (an operator's file, or one pre-created by a local user who would
+    /// keep OWNERSHIP through the harden — a Windows owner keeps WRITE_DAC); and a junction/symlink
+    /// destination (creating one needs no privilege, and it redirects the cleartext credential). Re-exporting
+    /// over its OWN output is silent — that is the documented step after a rotation.</para>
     /// </summary>
     /// <param name="outputDirectory">Where to write; null = a <c>viewer-config</c> folder beside darling.json.</param>
+    /// <returns>0 exported and protected; 1 refused or failed; 2 exported but the secret is NOT protected.</returns>
     [SupportedOSPlatform("windows")]
     public static async Task<int> ExportViewerConfigAsync(
         string? configPath, string? outputDirectory, TextWriter output, TextWriter error, CancellationToken cancellationToken)
