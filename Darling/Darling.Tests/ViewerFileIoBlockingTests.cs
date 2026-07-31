@@ -231,10 +231,11 @@ public sealed class ViewerFileIoBlockingLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "file_io_stats", FileIoServerId);
+        await DeleteRowsAsync(connection, "file_io_stats", FileIoServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
@@ -269,10 +270,13 @@ public sealed class ViewerFileIoBlockingLivePostgresTests
             /* 50 stall / 5 reads = 10 ms read; 0 writes → CASE ELSE 0 write latency. */
             Assert.Equal(10.0, so.AvgReadLatencyMs, precision: 3);
             Assert.Equal(0.0, so.AvgWriteLatencyMs, precision: 3);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "file_io_stats", FileIoServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "file_io_stats", FileIoServerId, cleanupCt));
         }
     }
 
@@ -286,10 +290,11 @@ public sealed class ViewerFileIoBlockingLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "file_io_stats", ThroughputServerId);
+        await DeleteRowsAsync(connection, "file_io_stats", ThroughputServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
@@ -316,10 +321,13 @@ public sealed class ViewerFileIoBlockingLivePostgresTests
             Assert.All(rows, r => Assert.Equal(1.0, r.ReadMbPerSec, precision: 3));
             /* Write bytes are double the read bytes → 2.0 MB/s. */
             Assert.All(rows, r => Assert.Equal(2.0, r.WriteMbPerSec, precision: 3));
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "file_io_stats", ThroughputServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "file_io_stats", ThroughputServerId, cleanupCt));
         }
     }
 
@@ -333,11 +341,12 @@ public sealed class ViewerFileIoBlockingLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "blocked_process_reports", BlockingServerId);
-        await DeleteRowsAsync(connection, "dmv_blocking_snapshots", BlockingServerId);
+        await DeleteRowsAsync(connection, "blocked_process_reports", BlockingServerId, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "dmv_blocking_snapshots", BlockingServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var baseTime = TruncateToMinute(DateTime.UtcNow.AddMinutes(-10));
@@ -360,15 +369,20 @@ public sealed class ViewerFileIoBlockingLivePostgresTests
             Assert.True(withXe[0].Time < withXe[1].Time);
 
             /* Remove the XE rows: now the DMV fallback contributes its two minute-A rows. */
-            await DeleteRowsAsync(connection, "blocked_process_reports", BlockingServerId);
+            await DeleteRowsAsync(connection, "blocked_process_reports", BlockingServerId, TestContext.Current.CancellationToken);
             var dmvOnly = await viewer.GetBlockingTrendAsync(BlockingServerId, baseTime.AddMinutes(-1), baseTime.AddMinutes(10));
             Assert.Single(dmvOnly);
             Assert.Equal(2, dmvOnly[0].Count);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "blocked_process_reports", BlockingServerId);
-            await DeleteRowsAsync(connection, "dmv_blocking_snapshots", BlockingServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteRowsAsync(cleanup, "blocked_process_reports", BlockingServerId, cleanupCt);
+                await DeleteRowsAsync(cleanup, "dmv_blocking_snapshots", BlockingServerId, cleanupCt);
+            });
         }
     }
 
@@ -382,10 +396,11 @@ public sealed class ViewerFileIoBlockingLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "deadlocks", DeadlockServerId);
+        await DeleteRowsAsync(connection, "deadlocks", DeadlockServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var collectionTime = TruncateToMinute(DateTime.UtcNow.AddMinutes(-10));
@@ -403,10 +418,13 @@ public sealed class ViewerFileIoBlockingLivePostgresTests
             Assert.Equal(2, rows[0].Count);
             Assert.Equal(1, rows[1].Count);
             Assert.True(rows[0].Time < rows[1].Time);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "deadlocks", DeadlockServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "deadlocks", DeadlockServerId, cleanupCt));
         }
     }
 
@@ -420,10 +438,11 @@ public sealed class ViewerFileIoBlockingLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "wait_stats", LockWaitServerId);
+        await DeleteRowsAsync(connection, "wait_stats", LockWaitServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
@@ -443,10 +462,13 @@ public sealed class ViewerFileIoBlockingLivePostgresTests
             Assert.Equal(0.0, rows[0].WaitTimeMsPerSecond, precision: 3);
             /* Second: 6000 ms / 60 s = 100 ms/sec. */
             Assert.Equal(100.0, rows[1].WaitTimeMsPerSecond, precision: 3);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "wait_stats", LockWaitServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "wait_stats", LockWaitServerId, cleanupCt));
         }
     }
 
@@ -460,10 +482,11 @@ public sealed class ViewerFileIoBlockingLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "waiting_tasks", WaitingTaskServerId);
+        await DeleteRowsAsync(connection, "waiting_tasks", WaitingTaskServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var collectionTime = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
@@ -483,10 +506,13 @@ public sealed class ViewerFileIoBlockingLivePostgresTests
             Assert.Single(rows);
             Assert.Equal("LCK_M_X", rows[0].WaitType);
             Assert.Equal(6_000_000_000L, rows[0].TotalWaitMs);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "waiting_tasks", WaitingTaskServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "waiting_tasks", WaitingTaskServerId, cleanupCt));
         }
     }
 
@@ -500,10 +526,11 @@ public sealed class ViewerFileIoBlockingLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "waiting_tasks", BlockedSessionServerId);
+        await DeleteRowsAsync(connection, "waiting_tasks", BlockedSessionServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var collectionTime = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
@@ -529,10 +556,13 @@ public sealed class ViewerFileIoBlockingLivePostgresTests
             Assert.Equal(2, rows[0].BlockedCount);
             Assert.Equal("ReportDb", rows[1].DatabaseName);
             Assert.Equal(1, rows[1].BlockedCount);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "waiting_tasks", BlockedSessionServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "waiting_tasks", BlockedSessionServerId, cleanupCt));
         }
     }
 
@@ -680,9 +710,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)", connection);
     private static DateTime TruncateToMinute(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerMinute)), DateTimeKind.Unspecified);
 
-    private static async Task DeleteRowsAsync(NpgsqlConnection connection, string table, int serverId)
+    private static async Task DeleteRowsAsync(NpgsqlConnection connection, string table, int serverId, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand($"DELETE FROM {table} WHERE server_id = {serverId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

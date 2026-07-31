@@ -432,10 +432,11 @@ public sealed class ViewerMemoryLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "memory_stats", StatsServerId);
+        await DeleteRowsAsync(connection, "memory_stats", StatsServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var older = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-20));
@@ -463,10 +464,13 @@ public sealed class ViewerMemoryLivePostgresTests
             Assert.Equal(250.50, stats.PlanCacheMb, precision: 2);
             Assert.Equal("Available physical memory is high", stats.SystemMemoryState);
             Assert.Equal("LOCK_PAGES", stats.SqlMemoryModel);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "memory_stats", StatsServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "memory_stats", StatsServerId, cleanupCt));
         }
     }
 
@@ -480,10 +484,11 @@ public sealed class ViewerMemoryLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "memory_grant_stats", GrantTrendServerId);
+        await DeleteRowsAsync(connection, "memory_grant_stats", GrantTrendServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
@@ -504,10 +509,13 @@ public sealed class ViewerMemoryLivePostgresTests
             Assert.Equal(125.0, trend[0].TotalGrantedMb, precision: 2);
             Assert.Equal(t2.Ticks, trend[1].CollectionTime.Ticks);
             Assert.Equal(300.0, trend[1].TotalGrantedMb, precision: 2);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "memory_grant_stats", GrantTrendServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "memory_grant_stats", GrantTrendServerId, cleanupCt));
         }
     }
 
@@ -521,10 +529,11 @@ public sealed class ViewerMemoryLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "memory_clerks", ClerkServerId);
+        await DeleteRowsAsync(connection, "memory_clerks", ClerkServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
@@ -559,10 +568,13 @@ public sealed class ViewerMemoryLivePostgresTests
             Assert.Equal(t1.Ticks, bp[0].CollectionTime.Ticks);
             Assert.Equal(500.00, bp[0].MemoryMb, precision: 2);
             Assert.Equal(520.00, bp[1].MemoryMb, precision: 2);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "memory_clerks", ClerkServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "memory_clerks", ClerkServerId, cleanupCt));
         }
     }
 
@@ -591,10 +603,11 @@ public sealed class ViewerMemoryLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "memory_grant_stats", GrantChartServerId);
+        await DeleteRowsAsync(connection, "memory_grant_stats", GrantChartServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
@@ -630,10 +643,13 @@ public sealed class ViewerMemoryLivePostgresTests
             Assert.Equal(20.00, pool2.GrantedMemoryMb, precision: 2);
             Assert.Equal(3, pool2.GranteeCount);
             Assert.Equal(2, pool2.WaiterCount);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "memory_grant_stats", GrantChartServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "memory_grant_stats", GrantChartServerId, cleanupCt));
         }
     }
 
@@ -647,10 +663,11 @@ public sealed class ViewerMemoryLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "memory_pressure_events", PressureServerId);
+        await DeleteRowsAsync(connection, "memory_pressure_events", PressureServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var collUtc = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-30));
@@ -674,10 +691,13 @@ public sealed class ViewerMemoryLivePostgresTests
             Assert.Equal(3, events[1].MemoryIndicatorsProcess);
             Assert.Equal(2, events[1].MemoryIndicatorsSystem);
             Assert.Equal("RESOURCE_MEMPHYSICAL_LOW", events[1].MemoryNotification);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "memory_pressure_events", PressureServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "memory_pressure_events", PressureServerId, cleanupCt));
         }
     }
 
@@ -774,9 +794,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", connection);
     private static DateTime TruncateToSeconds(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
 
-    private static async Task DeleteRowsAsync(NpgsqlConnection connection, string table, int serverId)
+    private static async Task DeleteRowsAsync(NpgsqlConnection connection, string table, int serverId, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand($"DELETE FROM {table} WHERE server_id = {serverId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

@@ -211,10 +211,11 @@ public sealed class ViewerConfigurationLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "server_config", ServerConfigServerId);
+        await DeleteRowsAsync(connection, "server_config", ServerConfigServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var older = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
@@ -239,10 +240,13 @@ public sealed class ViewerConfigurationLivePostgresTests
             Assert.False(maxdop.ValuesMatch);
             Assert.Equal("No", maxdop.AdvancedDisplay);
             Assert.Equal("Yes", maxdop.DynamicDisplay);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "server_config", ServerConfigServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "server_config", ServerConfigServerId, cleanupCt));
         }
     }
 
@@ -256,10 +260,11 @@ public sealed class ViewerConfigurationLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "database_config", DatabaseConfigServerId);
+        await DeleteRowsAsync(connection, "database_config", DatabaseConfigServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var older = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
@@ -299,10 +304,13 @@ public sealed class ViewerConfigurationLivePostgresTests
             Assert.Equal("Yes", r.AutoCloseDisplay);
             Assert.Equal("No", r.AutoShrinkDisplay);
             Assert.Equal("Yes", r.OptimizedLockingDisplay);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "database_config", DatabaseConfigServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "database_config", DatabaseConfigServerId, cleanupCt));
         }
     }
 
@@ -316,10 +324,11 @@ public sealed class ViewerConfigurationLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "database_scoped_config", ScopedConfigServerId);
+        await DeleteRowsAsync(connection, "database_scoped_config", ScopedConfigServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var older = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
@@ -341,10 +350,13 @@ public sealed class ViewerConfigurationLivePostgresTests
             var db1Maxdop = rows.Single(r => r.DatabaseName == "db1" && r.ConfigurationName == "MAXDOP");
             Assert.Equal("4", db1Maxdop.Value);
             Assert.Equal("2", db1Maxdop.ValueForSecondary);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "database_scoped_config", ScopedConfigServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "database_scoped_config", ScopedConfigServerId, cleanupCt));
         }
     }
 
@@ -358,10 +370,11 @@ public sealed class ViewerConfigurationLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "trace_flags", TraceFlagsServerId);
+        await DeleteRowsAsync(connection, "trace_flags", TraceFlagsServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var older = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
@@ -381,10 +394,13 @@ public sealed class ViewerConfigurationLivePostgresTests
             Assert.Equal("Enabled", rows[1].StatusDisplay);    // 3226, status true
             Assert.Equal("Yes", rows[1].GlobalDisplay);
             Assert.Equal("No", rows[1].SessionDisplay);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "trace_flags", TraceFlagsServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "trace_flags", TraceFlagsServerId, cleanupCt));
         }
     }
 
@@ -519,9 +535,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", connection);
     private static DateTime TruncateToSeconds(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
 
-    private static async Task DeleteRowsAsync(NpgsqlConnection connection, string table, int serverId)
+    private static async Task DeleteRowsAsync(NpgsqlConnection connection, string table, int serverId, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand($"DELETE FROM {table} WHERE server_id = {serverId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

@@ -743,12 +743,13 @@ public sealed class ViewerRecommendationsLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteFindingRowsAsync(connection);
+        await DeleteFindingRowsAsync(connection, TestContext.Current.CancellationToken);
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
         var store = new PgFindingStore(postgres);
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var windowEnd = TruncateToSeconds(DateTime.UtcNow);
@@ -796,20 +797,23 @@ public sealed class ViewerRecommendationsLivePostgresTests
             Assert.True(card.ShowCopyFix);
             Assert.Equal("CREATE INDEX IX_Posts_1 ON dbo.Posts (OwnerUserId);", card.CopyPasteSql);
             Assert.True(card.ShowAskAi);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteFindingRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteFindingRowsAsync(cleanup, cleanupCt));
         }
     }
 
     private static DateTime TruncateToSeconds(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
 
-    private static async Task DeleteFindingRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteFindingRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM analysis_findings WHERE server_id = {ServerId}; DELETE FROM analysis_muted WHERE server_id = {ServerId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 }
