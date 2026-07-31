@@ -188,10 +188,11 @@ public sealed class ViewerPlanCacheLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteAsync(connection, ServerId);
+        await DeleteAsync(connection, ServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
@@ -219,10 +220,13 @@ public sealed class ViewerPlanCacheLivePostgresTests
             var summary = await viewer.GetPlanCacheSummaryAsync(ServerId, t1.AddMinutes(-1), t1.AddMinutes(1));
             Assert.Equal(35L, summary.TotalPlans);
             Assert.Equal(oldest.Ticks, summary.OldestPlanCreateTime!.Value.Ticks);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteAsync(connection, ServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteAsync(cleanup, ServerId, cleanupCt));
         }
     }
 
@@ -255,9 +259,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 1.5, 64, $13)", conne
     private static DateTime TruncateToSeconds(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
 
-    private static async Task DeleteAsync(NpgsqlConnection connection, int serverId)
+    private static async Task DeleteAsync(NpgsqlConnection connection, int serverId, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand($"DELETE FROM plan_cache_stats WHERE server_id = {serverId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

@@ -158,6 +158,20 @@ public static class TimescaleSupport
     /// never create it; a server without the loadable library (or without the privilege to
     /// create it) throws, which degrades gracefully to "not available" — logged once at
     /// Information (plain-PostgreSQL mode is a fully supported configuration, not a problem).
+    ///
+    /// <para><b>A <c>false</c> return may mean <paramref name="connection"/> IS NO LONGER USABLE, and callers
+    /// must not keep using it (#1922).</b> One of the ways this fails is not an ordinary ERROR: when the
+    /// library is present on disk but missing from <c>shared_preload_libraries</c>, <c>CREATE EXTENSION</c>
+    /// TERMINATES THE BACKEND. The catch below turns that into <c>false</c> like any other failure, so the
+    /// contract reads as "carry on in plain-PostgreSQL mode" while the connection is in fact dead, and the
+    /// next statement on it throws <c>InvalidOperationException: Connection is not open</c> from wherever
+    /// that happens to be — naming the cause nowhere.</para>
+    ///
+    /// <para><c>DarlingWorker</c> is safe from this by construction and deliberately so: it opens a DEDICATED
+    /// connection for the TimescaleDB block and gates every subsequent call on the returned flag, so a
+    /// <c>false</c> return means nothing touches that connection again before it is disposed. <b>Keep it that
+    /// way</b> — moving a call out from under the flag, or reusing the connection afterwards, reintroduces
+    /// the same masking in the service.</para>
     /// </summary>
     public static async Task<bool> TryEnableAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
     {
@@ -742,7 +756,7 @@ WITH NO DATA";
     /// it is unconditionally true — so the gate skips exactly the tiered stores it exists for, and fires only
     /// on stores that do not need it. BaselineSupplyTests pins this direction.</para>
     ///
-    /// <para>This is the same predicate shape the retention arming uses (<c>IsSafeToArmRetentionAsync</c>) over
+    /// <para>This is the same predicate shape the retention arming uses (<c>MeasureRetentionCoverageAsync</c>) over
     /// the same pair of relations, deliberately: what we backfill and what unblocks arming cannot be allowed
     /// to drift apart.</para>
     /// </summary>
@@ -851,6 +865,51 @@ $do$";
     /// same composer dims (module_name / query_hash) + weighted sums. Kept indefinitely; a QS window past the
     /// hourly's 21d horizon routes here.</summary>
     public const string QueryStoreStatsDailyView = "query_store_stats_daily";
+
+    /// <summary>
+    /// L1 of the CORRECTED Query Store rollups (#1849): the INTERVAL-grain dedup layer. Query Store rows are
+    /// cumulative per-interval snapshots that the collector re-fetches every cycle, so
+    /// <see cref="QueryStoreStatsHourlyView"/>'s <c>sum(execution_count)</c> counts one interval's work once per
+    /// COLLECTION — measured at up to 496x on a live store, and 243x on this repo's own seeded proof.
+    ///
+    /// <para>This is not a read target. It exists so <see cref="QueryStoreStatsCorrectedHourlyView"/> and
+    /// <see cref="QueryStoreStatsCorrectedDailyView"/> have a source in which each interval appears ONCE.</para>
+    /// </summary>
+    public const string QueryStoreStatsIntervalHourlyView = "query_store_stats_interval_hourly";
+
+    /// <summary>The CORRECTED composer-grain HOURLY rollup (#1849) — <see cref="QueryStoreStatsHourlyView"/>'s
+    /// replacement for windows the corrected tier covers, carrying the IDENTICAL column names so
+    /// <c>ComposeCaggValueMapper</c> reads it unchanged.</summary>
+    public const string QueryStoreStatsCorrectedHourlyView = "query_store_stats_corrected_hourly";
+
+    /// <summary>The CORRECTED composer-grain DAILY rollup (#1849). A SIBLING of
+    /// <see cref="QueryStoreStatsCorrectedHourlyView"/>, not its child — see that view's remarks for the
+    /// identity-width leaf constraint that forces the fan-out.
+    ///
+    /// <para>Superseded at the daily grain by <see cref="QueryStoreStatsDayGrainDailyView"/> (#1869), and kept
+    /// for the same reason the original pair is kept: it holds history the newer level starts empty of.</para>
+    /// </summary>
+    public const string QueryStoreStatsCorrectedDailyView = "query_store_stats_corrected_daily";
+
+    /// <summary>
+    /// L2 of the corrected Query Store rollups (#1869): the interval-grain DAILY dedup layer — one row per
+    /// INTERVAL IDENTITY per DAY, holding that interval's last snapshot of the day.
+    ///
+    /// <para>Like <see cref="QueryStoreStatsIntervalHourlyView"/> this is not a read target. It exists so
+    /// <see cref="QueryStoreStatsDayGrainDailyView"/> has a source in which each interval appears once PER DAY
+    /// rather than once per collection HOUR, which is the whole of the hour-straddle residual #1849 left
+    /// behind.</para>
+    /// </summary>
+    public const string QueryStoreStatsIntervalDailyView = "query_store_stats_interval_daily";
+
+    /// <summary>The composer-grain DAILY rollup deduped at the DAY grain (#1869) —
+    /// <see cref="QueryStoreStatsCorrectedDailyView"/>'s replacement for windows it covers, carrying the
+    /// IDENTICAL column names so <c>ComposeCaggValueMapper</c> reads it unchanged.
+    ///
+    /// <para>Named for its dedup GRAIN and deliberately not for exactness: it removes the HOUR-straddle
+    /// residual, and an interval whose snapshots straddle MIDNIGHT is still counted once per collection DAY.
+    /// See <see cref="CreateQueryStoreStatsDayGrainDailySql"/> for the measured size of what remains.</para></summary>
+    public const string QueryStoreStatsDayGrainDailyView = "query_store_stats_daygrain_daily";
 
     /// <summary>
     /// The query_stats hourly continuous aggregate. 1-hour buckets grouped by the SAME dimensions the composer's
@@ -1093,6 +1152,268 @@ FROM collect.query_store_stats_hourly
 GROUP BY server_id, server_name, database_name, module_name, query_hash, time_bucket('1 day', bucket)
 WITH NO DATA";
 
+    /* ═══════════ the CORRECTED Query Store rollups (#1849) ═══════════
+
+       WHY THREE NEW OBJECTS INSTEAD OF FIXING THE TWO ABOVE. A continuous aggregate's columns cannot be
+       ALTERed, so reshaping means DROP + recreate — and with retention active the rebuild re-materializes
+       from 4 days of raw and PERMANENTLY DESTROYS the 21-day hourly and indefinite daily history (the same
+       reason CreateQueryStatsDbHourlySql was added rather than folded in). Per #1759/#1793 materialized
+       history is never destroyed, so the corrected rollups are NEW objects alongside; the old pair keeps its
+       identity, data, retention and jobs, and still answers windows the corrected tier has not reached.
+
+       THE SHAPE IS FORCED BY WHAT TIMESCALEDB ACCEPTS, all five results live-probed on PG 18.4 /
+       TimescaleDB 2.28.1 (#1849 carries the tier-2 probes; the ones below were re-probed here):
+
+         - A CAGG on query_store_stats CANNOT bucket on interval_start_time_utc:
+           "time bucket function must reference the primary hypertable dimension column". So dedup cannot
+           happen at the interval's own clock — it must bucket on collection_time and dedup at the interval
+           GRAIN, which is what makes L1 a separate level rather than a WHERE clause.
+         - Window functions inside a CAGG are rejected and the hint names an EXPERIMENTAL GUC
+           (timescaledb.enable_cagg_window_functions). Shipping correctness on a server-side experimental
+           toggle an operator's own PostgreSQL may not have set is not a trade worth making; last() needs no
+           flag.
+         - AN IDENTITY-WIDTH HIERARCHICAL CAGG IS A LEAF. This is the constraint that shapes the daily, and
+           it is not in #1849 because it was found here: a child whose bucket equals its parent's width
+           (CorrectedHourly is time_bucket('1 hour', bucket) over L1's 1-hour bucket) CREATES fine and
+           refreshes fine, but nothing can be built ON it — a further CAGG fails with the same
+           primary-dimension error. Verified it is the identity width and NOT the depth: a plain
+           1h -> 1d -> 7d three-level chain is ACCEPTED. So CorrectedDaily is a SIBLING of CorrectedHourly
+           sourced from L1 at a 1-day bucket, never its child. That is also the better shape: each corrected
+           rollup is one hop from the deduped L1, so the daily does not compound the hourly's straddle
+           residual.
+
+       THE RESIDUAL, STATED PLAINLY. An interval whose snapshots straddle an hour boundary produces two L1
+       rows, each holding a CUMULATIVE value, so the composer-grain sum counts it once per collection HOUR
+       (~2) instead of once per COLLECTION (up to 496). That is a ~250x correction, not exactness. At the
+       hourly grain the residual is irreducible — an interval genuinely collected in two hours has to appear
+       in both, and CreateQueryStoreStatsCorrectedHourlySql still carries it.
+
+       AT THE DAILY GRAIN IT IS REMOVED, by #1869: an interval-grain re-dedup level (L2,
+       CreateQueryStoreStatsIntervalDailySql) sits between L1 and a second composer-grain collapse
+       (CreateQueryStoreStatsDayGrainDailySql), so the interval is deduped across the WHOLE DAY before it is
+       summed. That makes the stack three levels deep, which is legal only because L2 WIDENS 1h -> 1d: the
+       leaf rule above forbids building on an identity-width child, not on a depth. The old corrected daily
+       stays exactly where it is, for the same reason the original pair does — it holds history the day-grain
+       level starts empty of, and reads prefer whichever actually covers the window. */
+
+    /// <summary>
+    /// L1 of the corrected Query Store rollups (#1849): one row per INTERVAL IDENTITY per collection hour,
+    /// projecting each interval's LAST snapshot. This is the level that removes the double-count.
+    ///
+    /// <para><b>Why <c>last(x, collection_time)</c>.</b> Query Store's runtime-stats columns are cumulative
+    /// WITHIN an interval, so an interval's true contribution is its final snapshot, not the sum of the
+    /// snapshots. <c>last()</c> is an ordered aggregate TimescaleDB accepts inside a continuous aggregate with
+    /// no flag; the <c>row_number()</c> formulation a reader might reach for first is rejected outright.</para>
+    ///
+    /// <para><b>Both interval keys are in the GROUP BY, deliberately not COALESCEd (#1853's argument, applied
+    /// here).</b> <c>runtime_stats_interval_id</c> is the real identity but is NULL on exactly the pre-V41
+    /// generation of rows, which nothing can backfill; <c>first_execution_time</c> is tier 1's proxy and is
+    /// present on both. Grouping by BOTH means a post-V41 row is keyed by its real id (the proxy rides along,
+    /// functionally dependent on it — Query Store fixes first_execution_time when the interval's row is
+    /// created and never moves it, so it adds no groups), while a legacy row keys on the proxy alone. The two
+    /// generations can never collide, so LEGACY ROWS ARE INCLUDED RATHER THAN EXCLUDED and degrade to
+    /// precisely tier 1's key. Excluding them would have been the easier claim to make true, and it would
+    /// silently drop every pre-upgrade hour out of the corrected rollup while the store still held the rows.
+    /// A COALESCE into one key is expressible in a CAGG GROUP BY (probed: accepted) and is still the wrong
+    /// choice — it fuses two identity domains into one text column and loses the ability to tell which
+    /// generation a group came from.</para>
+    ///
+    /// <para><b>Capacity.</b> This keys on query_id/plan_id/interval, so its cardinality is near-raw — the
+    /// reduction is the collection multiplicity, NOT the dimensional collapse the composer-grain rollups get.
+    /// It is therefore the one rollup here whose retention is deliberately SHORT
+    /// (<see cref="IntervalRetentionInterval"/>): nothing reads it, so it only has to outlive raw for the
+    /// arming gate and outlive its consumers' 3-day refresh window.</para>
+    /// </summary>
+    public const string CreateQueryStoreStatsIntervalHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_interval_hourly
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    module_name,
+    query_hash,
+    query_id,
+    plan_id,
+    execution_type_desc,
+    replica_role,
+    runtime_stats_interval_id,
+    first_execution_time,
+    time_bucket('1 hour', collection_time) AS bucket,
+    last(execution_count, collection_time) AS execution_count,
+    last(avg_duration_us, collection_time) AS avg_duration_us,
+    last(avg_cpu_time_us, collection_time) AS avg_cpu_time_us,
+    last(interval_start_time_utc, collection_time) AS interval_start_time_utc,
+    max(max_duration_us) AS max_duration_us,
+    max(max_cpu_time_us) AS max_cpu_time_us,
+    count(*) AS sample_count
+FROM collect.query_store_stats
+GROUP BY server_id, server_name, database_name, module_name, query_hash, query_id, plan_id,
+         execution_type_desc, replica_role, runtime_stats_interval_id, first_execution_time,
+         time_bucket('1 hour', collection_time)
+WITH NO DATA";
+
+    /// <summary>
+    /// The corrected composer-grain HOURLY rollup (#1849): <see cref="CreateQueryStoreStatsHourlySql"/>'s
+    /// column set to the byte, computed from the DEDUPED L1 instead of from raw. Same names so
+    /// <c>ComposeCaggValueMapper</c> and every composed panel read it with no change — the correction is
+    /// invisible to the read layer, which is the point.
+    ///
+    /// <para>The weighted sums are rebuilt from L1's per-interval <c>last()</c> values
+    /// (<c>avg_* * execution_count</c> = that interval's total), so the composer's weighted mean still composes
+    /// EXACTLY as <c>duration_us_weighted_sum / execution_count_sum</c> and is never an avg-of-avgs.
+    /// <c>sample_count</c> deliberately carries L1's <c>sum(sample_count)</c> — the number of RAW SNAPSHOTS
+    /// behind the bucket, matching what the old view's <c>count(*)</c> meant — so the two are comparable
+    /// while both exist.</para>
+    ///
+    /// <para><b>This is an identity-width hierarchical CAGG and therefore a LEAF</b> (see the block comment
+    /// above): its bucket equals L1's, so nothing can be built on top of it. That is why
+    /// <see cref="CreateQueryStoreStatsCorrectedDailySql"/> reads L1 rather than this view.</para>
+    /// </summary>
+    public const string CreateQueryStoreStatsCorrectedHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_corrected_hourly
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    module_name,
+    query_hash,
+    time_bucket('1 hour', bucket) AS bucket,
+    sum(execution_count) AS execution_count_sum,
+    sum(avg_duration_us::double precision * execution_count) AS duration_us_weighted_sum,
+    sum(avg_cpu_time_us::double precision * execution_count) AS cpu_us_weighted_sum,
+    max(max_duration_us) AS max_duration_us_max,
+    max(max_cpu_time_us) AS max_cpu_time_us_max,
+    sum(sample_count) AS sample_count
+FROM collect.query_store_stats_interval_hourly
+GROUP BY server_id, server_name, database_name, module_name, query_hash, time_bucket('1 hour', bucket)
+WITH NO DATA";
+
+    /// <summary>
+    /// The corrected composer-grain DAILY rollup (#1849) — the same columns as
+    /// <see cref="CreateQueryStoreStatsCorrectedHourlySql"/> at a 1-day bucket, sourced from L1 DIRECTLY.
+    ///
+    /// <para><b>A sibling of the corrected hourly, not its child</b>, because an identity-width hierarchical
+    /// CAGG is a leaf (see the block comment above) — a daily built on the corrected hourly is rejected. Every
+    /// other daily in this file IS built on its hourly, so this asymmetry is deliberate and load-bearing, not
+    /// an oversight to be "made consistent" later. Reading L1 also keeps the daily one hop from the dedup, so
+    /// it does not inherit the hourly's straddle residual on top of its own.</para>
+    ///
+    /// <para>Kept indefinitely (no retention policy), like the other daily rollups.</para>
+    /// </summary>
+    public const string CreateQueryStoreStatsCorrectedDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_corrected_daily
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    module_name,
+    query_hash,
+    time_bucket('1 day', bucket) AS bucket,
+    sum(execution_count) AS execution_count_sum,
+    sum(avg_duration_us::double precision * execution_count) AS duration_us_weighted_sum,
+    sum(avg_cpu_time_us::double precision * execution_count) AS cpu_us_weighted_sum,
+    max(max_duration_us) AS max_duration_us_max,
+    max(max_cpu_time_us) AS max_cpu_time_us_max,
+    sum(sample_count) AS sample_count
+FROM collect.query_store_stats_interval_hourly
+GROUP BY server_id, server_name, database_name, module_name, query_hash, time_bucket('1 day', bucket)
+WITH NO DATA";
+
+    /// <summary>
+    /// L2 of the corrected Query Store rollups (#1869): L1 re-deduped at the DAY grain — one row per interval
+    /// identity per DAY, projecting that interval's LAST snapshot of the day.
+    ///
+    /// <para><b>What this removes.</b> L1 keys on the collection HOUR, so an interval collected across an hour
+    /// boundary leaves TWO rows, each holding a cumulative value, and
+    /// <see cref="CreateQueryStoreStatsCorrectedDailySql"/>'s <c>sum</c> counts it once per hour it was
+    /// collected in rather than once. Bounded by 2x and measured at <b>1.97x</b> on this repo's own seeded
+    /// proof (1,013 against an exact 515). Taking <c>last(execution_count, bucket)</c> over the day collapses
+    /// those rows back to one before the collapse to composer dims.</para>
+    ///
+    /// <para><b>Legal only because it WIDENS.</b> A hierarchical CAGG whose bucket equals its parent's is a
+    /// leaf (see the block comment above), so this level could not exist at 1 hour — it is 1 DAY over L1's
+    /// 1 hour, and the <c>1h -> 1d -> 1d</c> chain it creates was live-probed ACCEPTED on PostgreSQL 18.4 /
+    /// TimescaleDB 2.28.1 together with its refresh and retention policies.</para>
+    ///
+    /// <para><b>What it does NOT remove, stated because the whole point of #1869 is that a permanent
+    /// mis-count is a permanent lie.</b> An interval whose snapshots straddle MIDNIGHT still produces two
+    /// rows here, one per day, and is still counted twice across them — the identical argument one grain up,
+    /// and equally irreducible at the daily grain. It is a far smaller residual than the hourly one and the
+    /// difference is structural, not a guess: <c>QueryStoreCollector</c> fetches an interval while its
+    /// <c>last_execution_time</c> keeps advancing, so a 60-minute interval is collected over roughly one hour
+    /// of wall clock and crosses an hour boundary almost ALWAYS but a day boundary about once per 24
+    /// intervals — a ~4% over-count against the 97% removed. Measured, pinned by a live test, and filed with
+    /// the cost of a fifth near-raw-cardinality level as #1879 rather than left as a comment.</para>
+    ///
+    /// <para><b>Capacity.</b> Keyed on interval identity, so near-raw cardinality like L1 — but at a day
+    /// bucket rather than an hour bucket, which makes it the SMALLER of the two: an interval spans ~2 hourly
+    /// buckets and 1 daily one. It therefore takes a short horizon too
+    /// (<see cref="IntervalDailyRetentionInterval"/>).</para>
+    /// </summary>
+    public const string CreateQueryStoreStatsIntervalDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_interval_daily
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    module_name,
+    query_hash,
+    query_id,
+    plan_id,
+    execution_type_desc,
+    replica_role,
+    runtime_stats_interval_id,
+    first_execution_time,
+    time_bucket('1 day', bucket) AS bucket,
+    last(execution_count, bucket) AS execution_count,
+    last(avg_duration_us, bucket) AS avg_duration_us,
+    last(avg_cpu_time_us, bucket) AS avg_cpu_time_us,
+    last(interval_start_time_utc, bucket) AS interval_start_time_utc,
+    max(max_duration_us) AS max_duration_us,
+    max(max_cpu_time_us) AS max_cpu_time_us,
+    sum(sample_count) AS sample_count
+FROM collect.query_store_stats_interval_hourly
+GROUP BY server_id, server_name, database_name, module_name, query_hash, query_id, plan_id,
+         execution_type_desc, replica_role, runtime_stats_interval_id, first_execution_time,
+         time_bucket('1 day', bucket)
+WITH NO DATA";
+
+    /// <summary>
+    /// The composer-grain DAILY rollup computed from the DAY-grain dedup (#1869) —
+    /// <see cref="CreateQueryStoreStatsCorrectedDailySql"/>'s column set to the byte, sourced from L2 instead
+    /// of L1 so an hour-straddling interval is counted ONCE.
+    ///
+    /// <para>Same column names again, so <c>ComposeCaggValueMapper</c> and every composed panel read it with
+    /// no change — only which relation the router names differs. <c>sample_count</c> still carries the number
+    /// of RAW SNAPSHOTS behind the bucket (L2 sums L1's, this sums L2's), so it stays comparable with both
+    /// dailies it sits beside.</para>
+    ///
+    /// <para>This is an identity-width hierarchical CAGG (1 day over L2's 1 day) and therefore a LEAF —
+    /// nothing can be built on it. Nothing needs to be: it is the end of the chain, which is exactly why the
+    /// identity width is spendable HERE and was not at L2.</para>
+    ///
+    /// <para>Kept indefinitely (no retention policy), like every other daily. That is also why #1869 was
+    /// worth its cost: the daily tier is the one whose numbers persist and get compared year over year.</para>
+    /// </summary>
+    public const string CreateQueryStoreStatsDayGrainDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_daygrain_daily
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    module_name,
+    query_hash,
+    time_bucket('1 day', bucket) AS bucket,
+    sum(execution_count) AS execution_count_sum,
+    sum(avg_duration_us::double precision * execution_count) AS duration_us_weighted_sum,
+    sum(avg_cpu_time_us::double precision * execution_count) AS cpu_us_weighted_sum,
+    max(max_duration_us) AS max_duration_us_max,
+    max(max_cpu_time_us) AS max_cpu_time_us_max,
+    sum(sample_count) AS sample_count
+FROM collect.query_store_stats_interval_daily
+GROUP BY server_id, server_name, database_name, module_name, query_hash, time_bucket('1 day', bucket)
+WITH NO DATA";
+
     /// <summary>
     /// The refresh policy for a continuous aggregate: materialize <c>[now - 3 days, now - endOffset]</c> every
     /// <c>scheduleInterval</c>. <c>start_offset 3 days</c> gives margin past the ~2-day compression/hot window
@@ -1210,10 +1531,22 @@ WITH NO DATA";
             (CreateSql: CreateProcedureStatsHourlySql,  View: ProcedureStatsHourlyView,  PolicySql: AddContinuousAggregatePolicySql(ProcedureStatsHourlyView)),
             (CreateSql: CreateQueryStoreStatsHourlySql, View: QueryStoreStatsHourlyView, PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsHourlyView)),
             (CreateSql: CreateQueryStatsDbHourlySql,    View: QueryStatsDbHourlyView,    PolicySql: AddContinuousAggregatePolicySql(QueryStatsDbHourlyView)),
+            /* The corrected Query Store rollups (#1849). L1 is raw-sourced and MUST precede both corrected
+               views, which are hierarchical from it — the same ordering requirement the daily tier has. Both
+               corrected views read L1 (the daily is its SIBLING, not the hourly's child: an identity-width
+               hierarchical CAGG is a leaf — see CreateQueryStoreStatsCorrectedDailySql). */
+            (CreateSql: CreateQueryStoreStatsIntervalHourlySql,  View: QueryStoreStatsIntervalHourlyView,  PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsIntervalHourlyView)),
+            (CreateSql: CreateQueryStoreStatsCorrectedHourlySql, View: QueryStoreStatsCorrectedHourlyView, PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsCorrectedHourlyView)),
             (CreateSql: CreateQueryStatsDailySql,       View: QueryStatsDailyView,       PolicySql: AddContinuousAggregatePolicySql(QueryStatsDailyView, "1 day", "1 day")),
             (CreateSql: CreateProcedureStatsDailySql,   View: ProcedureStatsDailyView,   PolicySql: AddContinuousAggregatePolicySql(ProcedureStatsDailyView, "1 day", "1 day")),
             (CreateSql: CreateQueryStoreStatsDailySql,  View: QueryStoreStatsDailyView,  PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsDailyView, "1 day", "1 day")),
+            (CreateSql: CreateQueryStoreStatsCorrectedDailySql, View: QueryStoreStatsCorrectedDailyView, PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsCorrectedDailyView, "1 day", "1 day")),
             (CreateSql: CreateQueryStatsDbDailySql,     View: QueryStatsDbDailyView,     PolicySql: AddContinuousAggregatePolicySql(QueryStatsDbDailyView, "1 day", "1 day")),
+            /* The DAY-grain corrected daily (#1869), THREE levels deep: L1 (above) -> L2 interval_daily ->
+               daygrain_daily. Both must follow L1 and L2 must precede its own child, which this ordered sweep
+               gives — the same requirement the daily tier has, one level longer. */
+            (CreateSql: CreateQueryStoreStatsIntervalDailySql, View: QueryStoreStatsIntervalDailyView, PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsIntervalDailyView, "1 day", "1 day")),
+            (CreateSql: CreateQueryStoreStatsDayGrainDailySql, View: QueryStoreStatsDayGrainDailyView, PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsDayGrainDailyView, "1 day", "1 day")),
         }
         /* The nine baseline-tier aggregates (#1757) take the helper's hourly defaults: they are sourced from
            raw like the hourly tier, not hierarchically from another CAGG, so they carry no ordering
@@ -1286,12 +1619,76 @@ WITH NO DATA";
     /// NO retention policy: they are the coarsened, kept-indefinitely tier.</summary>
     public const string HourlyRetentionInterval = "21 days";
 
+    /// <summary>
+    /// Retention horizon for the INTERVAL-grain dedup layer (#1849): keep
+    /// <see cref="QueryStoreStatsIntervalHourlyView"/> 7 days.
+    ///
+    /// <para>Shorter than every other CAGG tier ON PURPOSE, and the number is picked by two constraints, not
+    /// by taste. It must EXCEED <see cref="RawRetentionInterval"/> (4 days) with margin, because the raw purge
+    /// is gated on this view covering raw's oldest row — equal horizons would race, with raw's newest-dropped
+    /// chunk and L1's oldest-kept bucket at the same age. And it only has to exceed it: nothing READS this
+    /// view, and its consumers (the two corrected rollups) refresh over a 3-day window.</para>
+    ///
+    /// <para><b>MEASURED, because #1849 raises capacity as a real input and #1581 says settle it before
+    /// shipping.</b> On a seeded 600-query store at the default 5-minute <c>query_store</c> cadence
+    /// (CollectorSchedulePresets), 24 hours of collection produced: raw 40 MB / 187,200 rows; this view
+    /// 11 MB / 28,800 rows (28% of raw — it keys on query_id/plan_id/interval, so the reduction is the
+    /// collection multiplicity, NOT the dimensional collapse); the composer-grain rollups 4.4 MB / 15,000 rows
+    /// each. Projected to the horizons: raw at 4 days is 160 MB, this view at 7 days is 79 MB — against
+    /// <b>238 MB</b> had it simply inherited the 21-day hourly horizon, which would have made the store's
+    /// intermediate dedup layer larger than its entire raw tier.</para>
+    /// </summary>
+    public const string IntervalRetentionInterval = "7 days";
+
+    /// <summary>
+    /// Retention horizon for the interval-grain DAILY dedup layer (#1869): keep
+    /// <see cref="QueryStoreStatsIntervalDailyView"/> 10 days.
+    ///
+    /// <para>Picked by the same rule that picked <see cref="IntervalRetentionInterval"/>, one tier up, and it
+    /// is the OPPOSITE direction from the one instinct suggests. This layer is downstream of L1, so it is L1's
+    /// purge that is gated on THIS view covering it — meaning it must OUTLIVE ITS OWN SOURCE with margin, or
+    /// L1's gate can never release and L1 grows without bound. 10 against L1's 7 is the same 3-day margin L1
+    /// takes over raw's 4, and the ordering is pinned as a test invariant so a future tuning pass cannot
+    /// invert it silently.</para>
+    ///
+    /// <para><b>Capacity (#1581), MEASURED at the same scale #1849 used</b> — a seeded 600-query store at the
+    /// default 5-minute <c>query_store</c> cadence, 24 hours of collection (187,200 raw rows). The rig
+    /// reproduces #1849's own L1 figures to the row (28,800 rows / 11 MB), which is what makes the rest
+    /// comparable rather than merely plausible:
+    ///
+    /// <list type="bullet">
+    /// <item>this view: <b>15,000 rows / 4.7 MB per day</b> — near-raw cardinality like L1, but keyed on
+    /// interval identity x DAY where L1 keys on interval identity x HOUR, and an interval spans ~2 hourly
+    /// buckets against 1 daily one. So the fourth near-raw-cardinality object is the SMALLEST of them:
+    /// <b>~47 MB at 10 days</b> against L1's 79 MB at 7.</item>
+    /// <item><see cref="QueryStoreStatsDayGrainDailyView"/> above it: ~600 rows/day at composer grain, and
+    /// measured byte-for-byte identical to the corrected daily it sits beside (448 kB each over the same
+    /// span) — which is why it is kept indefinitely like every other daily rather than needing a horizon of
+    /// its own.</item>
+    /// </list></para>
+    /// </summary>
+    public const string IntervalDailyRetentionInterval = "10 days";
+
     /// <summary><see cref="TimeSpan"/> twin of <see cref="RawRetentionInterval"/> for callers doing arithmetic
-    /// (the #1665 partial-window notice); RetentionTierRouterTests pins the two equal so they can't drift.</summary>
+    /// (the #1665 partial-window notice). RetentionTierRouterTests pins the two equal, as does the all-five
+    /// sweep in TimescaleContinuousAggregateTests (#1905), so they can't drift.</summary>
     public static readonly TimeSpan RawRetentionSpan = TimeSpan.FromDays(4);
 
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="IntervalRetentionInterval"/>, pinned equal by
+    /// TimescaleContinuousAggregateTests. The ORDERING that keeps the raw arming gate satisfiable — this
+    /// strictly greater than <see cref="RawRetentionSpan"/> — is no longer pinned here by hand: it is one pair
+    /// in the walk over <see cref="RetentionPolicies"/> (#1905).</summary>
+    public static readonly TimeSpan IntervalRetentionSpan = TimeSpan.FromDays(7);
+
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="IntervalDailyRetentionInterval"/>, pinned equal by
+    /// TimescaleContinuousAggregateTests. Its ordering against <see cref="IntervalRetentionSpan"/> is checked
+    /// by the walk over <see cref="RetentionPolicies"/> (#1905), like every other pair: a consumer that expired
+    /// before its source would hold its source's purge forever, and since #1877 would also STOP one that is
+    /// already running, on a healthy store, without self-releasing.</summary>
+    public static readonly TimeSpan IntervalDailyRetentionSpan = TimeSpan.FromDays(10);
+
     /// <summary><see cref="TimeSpan"/> twin of <see cref="HourlyRetentionInterval"/>; pinned equal by
-    /// RetentionTierRouterTests.</summary>
+    /// RetentionTierRouterTests and by the all-five sweep in TimescaleContinuousAggregateTests (#1905).</summary>
     public static readonly TimeSpan HourlyRetentionSpan = TimeSpan.FromDays(21);
 
     /// <summary>
@@ -1329,38 +1726,154 @@ WITH NO DATA";
     /// policy's first check IMMEDIATELY at creation, not on its next interval (#1680).
     /// </summary>
     public static string ArmRetentionPolicySql(string relation)
-        => $@"SELECT alter_job(j.job_id, scheduled => true)
+        => SetRetentionScheduleSql(relation, scheduled: true);
+
+    /// <summary>
+    /// Re-holds a retention policy that is ALREADY ARMED (#1877). The mirror of
+    /// <see cref="ArmRetentionPolicySql"/>, and the statement that closes the arm-only gap: a policy created
+    /// paused stays paused by itself, but <c>add_retention_policy(if_not_exists =&gt; true)</c> returns -1 for a
+    /// policy this store already has, so nothing ever paused one whose COVERAGE LIST GREW under it.
+    ///
+    /// <para>Reached ONLY from a positive coverage measurement — never from an indeterminate one. See
+    /// <c>RetentionCoverage</c> for why that distinction is the whole of #1877.</para>
+    /// </summary>
+    public static string HoldRetentionPolicySql(string relation)
+        => SetRetentionScheduleSql(relation, scheduled: false);
+
+    /// <summary>
+    /// The shared body of <see cref="ArmRetentionPolicySql"/> and <see cref="HoldRetentionPolicySql"/>: flip one
+    /// relation's retention job. Filtering by proc_name AND the hypertable is what keeps it from arming — or
+    /// stopping — some other policy, or every policy, by accident. Idempotent in both directions: setting a job
+    /// to the state it is already in is a no-op, which is what lets the sweep re-assert the verdict every start.
+    /// </summary>
+    private static string SetRetentionScheduleSql(string relation, bool scheduled)
+        => $@"SELECT alter_job(j.job_id, scheduled => {(scheduled ? "true" : "false")})
 FROM timescaledb_information.jobs AS j
 WHERE j.proc_name = 'policy_retention'
 AND   j.hypertable_schema = 'collect'
 AND   j.hypertable_name = '{relation}'";
 
     /// <summary>
-    /// Is it safe to arm <paramref name="relation"/>'s retention policy — i.e. does the tier below it already
-    /// cover everything this relation holds? Returns true when the source is empty (nothing to lose), or when the
-    /// coverage relation's oldest bucket is at or before the source's oldest row.
+    /// Is it safe to arm <paramref name="relation"/>'s retention policy — i.e. does EVERY tier below it already
+    /// cover everything this relation holds? Emits the source's oldest row followed by one
+    /// <c>min(bucket)</c> column per coverage relation, in <paramref name="coverageRelations"/> order.
     ///
     /// <para>This is the check that makes arming provably non-destructive rather than a race the operator has to
     /// win. It also self-heals: a store that is not yet covered stays paused and arms on the first start AFTER a
     /// backfill, with no manual step.</para>
+    ///
+    /// <para><b>Plural since #1849, and the plurality is the point.</b> <c>query_store_stats</c> now feeds TWO
+    /// rollup families — the original inflated pair and the corrected one — and a purge that satisfied only one
+    /// of them would destroy raw history the other has never materialized. The verdict is therefore an AND over
+    /// all of them, evaluated in <see cref="MeasureRetentionCoverageAsync"/> rather than folded into SQL:
+    /// <c>GREATEST</c> would have expressed it in one column and is exactly wrong here, because it SKIPS NULLs.
+    /// An empty new rollup would vanish from the comparison and the gate would pass on the old rollup alone —
+    /// which is the whole failure this exists to prevent.</para>
     /// </summary>
-    public static string RetentionArmSafetySql(string relation, string sourceTimeColumn, string coverageRelation)
-        => $@"SELECT
-    (SELECT min({sourceTimeColumn}) FROM collect.{relation}) AS source_oldest,
-    (SELECT min(bucket) FROM collect.{coverageRelation}) AS coverage_oldest";
+    public static string RetentionArmSafetySql(string relation, string sourceTimeColumn, IReadOnlyList<string> coverageRelations)
+    {
+        if (coverageRelations is null)
+        {
+            throw new ArgumentNullException(nameof(coverageRelations));
+        }
+
+        var columns = coverageRelations.Select((c, i) => $"    (SELECT min(bucket) FROM collect.{c}) AS coverage_oldest_{i}");
+        return $"SELECT{Environment.NewLine}    (SELECT min({sourceTimeColumn}) FROM collect.{relation}) AS source_oldest,{Environment.NewLine}"
+            + string.Join("," + Environment.NewLine, columns);
+    }
 
     /// <summary>
-    /// The raw tier and the aggregate that must already cover it — the single source of truth for which tables
+    /// The raw tier and EVERY aggregate that must already cover it — the single source of truth for which tables
     /// are coverage-gated, shared by the policy setup (<see cref="EnsureRetentionPoliciesAsync"/>) and by the
     /// catalog sweep's own drop (#1784). They MUST agree: two purge paths judging the same table by different
     /// rules is precisely the defect #1784 records.
+    ///
+    /// <para><b>Coverage is a LIST, because a raw table can have more than one consumer (#1849).</b>
+    /// <c>query_store_stats</c> is rolled up twice: by the original
+    /// <see cref="QueryStoreStatsHourlyView"/> (kept for the history it already holds) and by
+    /// <see cref="QueryStoreStatsIntervalHourlyView"/>, the corrected rollups' dedup layer. Both are named here
+    /// so raw cannot purge over history EITHER of them is missing. Extending this map rather than adding a
+    /// second one is deliberate: both purge paths read this list, so a consumer added here is automatically
+    /// honored by both, which is the #1784 invariant.</para>
     /// </summary>
-    public static readonly IReadOnlyList<(string Relation, string TimeColumn, string Coverage)> RawTierCoverage = new[]
+    public static readonly IReadOnlyList<(string Relation, string TimeColumn, IReadOnlyList<string> Coverage)> RawTierCoverage =
+        new (string, string, IReadOnlyList<string>)[]
     {
-        ("query_stats", "collection_time", QueryStatsHourlyView),
-        ("procedure_stats", "collection_time", ProcedureStatsHourlyView),
-        ("query_store_stats", "collection_time", QueryStoreStatsHourlyView),
+        ("query_stats", "collection_time", new[] { QueryStatsHourlyView }),
+        ("procedure_stats", "collection_time", new[] { ProcedureStatsHourlyView }),
+        ("query_store_stats", "collection_time", new[] { QueryStoreStatsHourlyView, QueryStoreStatsIntervalHourlyView }),
     };
+
+    /// <summary>
+    /// EVERY retention policy this store attaches, each naming the tier(s) that must already cover it before
+    /// arming is safe (#1680). The rule this list enforces is: NEVER DROP WHAT YOUR CONSUMER HAS NOT CAPTURED
+    /// YET. Iterated by <see cref="EnsureRetentionPoliciesAsync"/>, which used to build it as a local.
+    ///
+    /// <para><b>Declared rather than built inline (#1905), because the ORDERING it encodes became testable
+    /// only once something outside the sweep could enumerate it.</b> Every entry's consumers must outlive the
+    /// entry itself — a consumer that expired first would hold its own source's purge forever, and since #1877
+    /// would also STOP a purge already running on a healthy store, without self-releasing. That invariant used
+    /// to be asserted by hand against the pairs that happened to exist; it is now walked over this list, so a
+    /// policy added to a tier that has none today is covered the day it is added rather than the day someone
+    /// remembers to extend a test.</para>
+    ///
+    /// <para>MUST stay declared AFTER <see cref="RawTierCoverage"/> and <see cref="BaselineAggregates"/>:
+    /// static field initializers run in textual order, so moving it above either one reads a null and throws
+    /// <c>TypeInitializationException</c> on first touch.</para>
+    ///
+    /// <para>For the raw and hourly tiers the consumer is the next aggregate down the ladder — raw tables are
+    /// covered by their hourly CAGG, hourly CAGGs by their daily one — so "coverage" names that tier.</para>
+    ///
+    /// <para>THE LEAF RULE (#1757): a tier with nothing below it is not exempt, it just has a different
+    /// consumer. The baseline aggregates are leaves; their consumer is the baseline COMPUTATION, whose capture
+    /// requirement is <c>BaselineMath.BaselineWindowDays</c> (30). Their arming condition is therefore "the
+    /// tier holds at least the baseline window of buckets" — the same rule with the consumer named honestly,
+    /// still runtime-evaluable like the other seven rather than a degenerate always-open gate. It is
+    /// belt-and-braces by construction: <see cref="BaselineRetentionSpan"/> (35d) already exceeds the window,
+    /// so even an immediately-armed policy could not eat it. A policy with no identifiable consumer at all
+    /// still does not belong in this list.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<(string Relation, string DropAfter, string TimeColumn, IReadOnlyList<string> Coverage)> RetentionPolicies =
+        RawTierCoverage
+            .Select(t => (Relation: t.Relation, DropAfter: RawRetentionInterval, TimeColumn: t.TimeColumn, Coverage: t.Coverage))
+            .Concat(new (string Relation, string DropAfter, string TimeColumn, IReadOnlyList<string> Coverage)[]
+        {
+            (Relation: QueryStatsHourlyView,      DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: new[] { QueryStatsDailyView }),
+            (Relation: ProcedureStatsHourlyView,  DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: new[] { ProcedureStatsDailyView }),
+            (Relation: QueryStoreStatsHourlyView, DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: new[] { QueryStoreStatsDailyView }),
+            (Relation: QueryStatsDbHourlyView,    DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: new[] { QueryStatsDbDailyView }),
+
+            /* The corrected Query Store tier (#1849, extended by #1869).
+
+               L1 has THREE consumers. Two because the corrected daily is its SIBLING rather than the corrected
+               hourly's child (identity-width hierarchical CAGGs are leaves — see
+               CreateQueryStoreStatsCorrectedDailySql), and a third because #1869 hung the interval-grain DAILY
+               layer off it as well. All three are named, so L1 cannot purge over history ANY of them is still
+               missing — and the third is the load-bearing one on a store taking this build, because that store
+               has a fully-caught-up L1 and an empty interval_daily, which is precisely the state where a gate
+               reading only the older two would drop the only copy of history the day-grain daily has never
+               seen. That store's L1 policy was ALREADY ARMED under #1849, and until #1877 the gate could only
+               arm — so it kept purging while the new consumer held nothing, capping how deep the day-grain
+               daily could ever be backfilled. The sweep now RE-HOLDS it on the measured shortfall.
+
+               The corrected HOURLY is a leaf, so the leaf rule applies (#1757): its consumer is the composed
+               READ, which routes past HourlyRouteMaxAge to the corrected DAILY — exactly the relationship the
+               original hourly has to the original daily, so it takes the same horizon and the same coverage
+               tier.
+
+               The interval-grain DAILY (#1869) mirrors L1 one level down: one consumer (the day-grain daily it
+               feeds), and a short horizon that must still EXCEED L1's, since it is what L1's own gate waits on.
+               Both composer-grain dailies are kept indefinitely and get no policy. */
+            (Relation: QueryStoreStatsIntervalHourlyView,  DropAfter: IntervalRetentionInterval,      TimeColumn: "bucket", Coverage: new[] { QueryStoreStatsCorrectedHourlyView, QueryStoreStatsCorrectedDailyView, QueryStoreStatsIntervalDailyView }),
+            (Relation: QueryStoreStatsCorrectedHourlyView, DropAfter: HourlyRetentionInterval,        TimeColumn: "bucket", Coverage: new[] { QueryStoreStatsCorrectedDailyView }),
+            (Relation: QueryStoreStatsIntervalDailyView,   DropAfter: IntervalDailyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { QueryStoreStatsDayGrainDailyView }),
+        })
+        /* The nine baseline-tier policies (#1757). Coverage is the tier ITSELF: see the leaf rule in the
+           summary above -- their consumer is the baseline computation, whose capture requirement is the
+           30-day window, and BaselineRetentionSpan (35d) exceeds it by construction. */
+        .Concat(BaselineAggregates.Select(a =>
+            (Relation: a.View, DropAfter: BaselineRetentionInterval, TimeColumn: "bucket", Coverage: (IReadOnlyList<string>)new[] { a.View })))
+        .ToArray();
 
     /// <summary>
     /// Is <paramref name="relation"/> one of the coverage-gated raw tiers? Lets a caller skip the cost of a
@@ -1403,7 +1916,13 @@ AND   j.hypertable_name = '{relation}'";
         {
             if (string.Equals(tierRelation, relation, StringComparison.Ordinal))
             {
-                return await IsSafeToArmRetentionAsync(connection, tierRelation, timeColumn, coverage, cancellationToken);
+                var (verdict, _) = await MeasureRetentionCoverageAsync(connection, tierRelation, timeColumn, coverage, cancellationToken);
+
+                /* Only a POSITIVE all-clear permits a drop. Short and Unknown both answer "no", exactly as they
+                   did when this probe was a bool — the tristate exists for the ARMING side, which alone needs
+                   to tell a measured regression apart from a failed measurement (#1877). Collapsing it here
+                   keeps the #1793 property intact: both purge paths still judge the same drop identically. */
+                return verdict == RetentionCoverage.Covered;
             }
         }
 
@@ -1411,41 +1930,86 @@ AND   j.hypertable_name = '{relation}'";
     }
 
     /// <summary>
-    /// True when arming <paramref name="relation"/>'s retention policy cannot drop anything the tier below has
-    /// not already captured (#1680): the source is empty, or <paramref name="coverageRelation"/> reaches at least
-    /// as far back as the source does. Any failure to determine this returns FALSE - an unknown coverage state
-    /// must leave the policy paused, never armed on an assumption.
+    /// What a coverage probe was able to CONCLUDE — the distinction #1877 turns on.
+    ///
+    /// <para>Arming needs only "safe or not", and this was a bool for that reason. Re-holding needs more: an
+    /// already-armed policy may be stopped on evidence that its coverage genuinely fell short, and must NEVER be
+    /// stopped because the evidence could not be gathered. Folding a failed probe in with a measured shortfall
+    /// is what made "unsafe implies disarm" unshippable — one bad probe on a busy store would have stopped
+    /// purging across every tier and grown disk until someone noticed, trading #1877's bounded depth cap for an
+    /// unbounded disk risk.</para>
     /// </summary>
-    private static async Task<bool> IsSafeToArmRetentionAsync(
-        NpgsqlConnection connection, string relation, string sourceTimeColumn, string coverageRelation, CancellationToken cancellationToken)
+    private enum RetentionCoverage
+    {
+        /// <summary>Every named consumer positively reaches at least as far back as the source — or the source
+        /// is empty, so there is no history to lose. The only verdict that permits arming or dropping.</summary>
+        Covered,
+
+        /// <summary>MEASURED short: the probe ran, the source holds rows, and a named consumer either holds none
+        /// or starts later than the source's oldest row. A fact about the store, not a failure to read it — and
+        /// the only verdict that may stop a policy this store already armed.</summary>
+        Short,
+
+        /// <summary>Nothing could be concluded: the probe threw, timed out, or came back empty. Refuses arming
+        /// exactly as before, and refuses to re-hold, because a probe error is not a coverage regression.</summary>
+        Unknown,
+    }
+
+    /// <summary>
+    /// How far <paramref name="relation"/>'s consumers reach relative to what it holds (#1680): <c>Covered</c>
+    /// when the source is empty or EVERY relation in <paramref name="coverageRelations"/> reaches at least as far
+    /// back as the source does, <c>Short</c> when one of them is measurably behind, <c>Unknown</c> when the
+    /// probe could not answer at all. Also returns the first consumer found short, so the operator warning can
+    /// name the tier to backfill rather than the whole list.
+    ///
+    /// <para>The verdict is an AND across consumers (#1849), and the loop below is short-circuiting in the SAFE
+    /// direction only: one empty or shallow consumer holds the policy even if every other consumer is complete.
+    /// A raw table with two rollup families is covered when the LEAST-covering of them covers it.</para>
+    /// </summary>
+    private static async Task<(RetentionCoverage Verdict, string? ShortConsumer)> MeasureRetentionCoverageAsync(
+        NpgsqlConnection connection, string relation, string sourceTimeColumn, IReadOnlyList<string> coverageRelations, CancellationToken cancellationToken)
     {
         try
         {
-            using var command = new NpgsqlCommand(RetentionArmSafetySql(relation, sourceTimeColumn, coverageRelation), connection) { CommandTimeout = SetupTimeoutSeconds };
+            using var command = new NpgsqlCommand(RetentionArmSafetySql(relation, sourceTimeColumn, coverageRelations), connection) { CommandTimeout = SetupTimeoutSeconds };
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (!await reader.ReadAsync(cancellationToken))
             {
-                return false;
+                return (RetentionCoverage.Unknown, null);
             }
 
             /* Nothing in the source - a fresh store. No history to lose, so arm. */
             if (await reader.IsDBNullAsync(0, cancellationToken))
             {
-                return true;
+                return (RetentionCoverage.Covered, null);
             }
 
-            /* Source has data but the coverage tier is empty - arming would drop history nothing else holds. */
-            if (await reader.IsDBNullAsync(1, cancellationToken))
+            var sourceOldest = reader.GetDateTime(0);
+            for (var i = 0; i < coverageRelations.Count; i++)
             {
-                return false;
+                /* Source has data but THIS coverage tier is empty - arming would drop history it never
+                   materialized, whatever the other tiers hold. An empty consumer is a MEASUREMENT and not an
+                   unknown: the relation exists and answered with no rows, which is precisely the state a
+                   newly-added consumer is born in on an upgrading store (#1877). */
+                if (await reader.IsDBNullAsync(i + 1, cancellationToken))
+                {
+                    return (RetentionCoverage.Short, coverageRelations[i]);
+                }
+
+                if (reader.GetDateTime(i + 1) > sourceOldest)
+                {
+                    return (RetentionCoverage.Short, coverageRelations[i]);
+                }
             }
 
-            return reader.GetDateTime(1) <= reader.GetDateTime(0);
+            return (RetentionCoverage.Covered, null);
         }
         catch (Exception)
         {
-            /* Fail closed: if coverage cannot be established, the policy stays paused. */
-            return false;
+            /* Fail closed: if coverage cannot be established the policy is not armed — and, since #1877, not
+               re-held either. Both directions read the same way here: an unmeasurable store is left exactly as
+               it was, because nothing was learned about it. */
+            return (RetentionCoverage.Unknown, null);
         }
     }
 
@@ -1459,12 +2023,20 @@ AND   j.hypertable_name = '{relation}'";
     /// CAGGs the hourly policies target already exist. Returns the number of policies in place.
     ///
     /// COLD START ON AN EXISTING STORE (#1759): a store that already holds raw history older than its hourly
-    /// CAGG has materialized does NOT lose it. <see cref="IsSafeToArmRetentionAsync"/> is fail-closed, so that
-    /// store's raw policies are created and left PAUSED, and the per-policy WARN says which rollup is short and
-    /// by how much. This used to be documented as a caveat prescribing a manual backfill "BEFORE this policy's
+    /// CAGG has materialized does NOT lose it. <see cref="MeasureRetentionCoverageAsync"/> is fail-closed, so
+    /// that store's raw policies are created and left PAUSED, and the per-policy WARN says which rollup is
+    /// short. This used to be documented as a caveat prescribing a manual backfill "BEFORE this policy's
     /// first run" — a step no store ever received, and a defect rather than a caveat. The backfill is now a real
     /// operator verb (<c>--backfill-rollups</c>) with a disk preflight, and once it carries a rollup past the raw
     /// horizon this gate arms the held policy by itself on the next start, with no manual step.
+    ///
+    /// <para>A COVERAGE LIST THAT GROWS (#1877). Holding is not only for policies this sweep just created.
+    /// <c>add_retention_policy(if_not_exists =&gt; true)</c> returns -1 for a policy the store already has, so
+    /// nothing pauses it — which is right for a restart (it must not undo an operator's backfill) and was wrong
+    /// for a build that ADDS a consumer to a gate stores have already armed, as #1869 did. Such a policy kept
+    /// purging its source while the new consumer held nothing, capping how deep that consumer could ever be
+    /// backfilled. It is now re-held, but ONLY on a positive measurement: see the three-valued
+    /// <c>RetentionCoverage</c>, which is what keeps a probe failure from stopping retention fleet-wide.</para>
     /// </summary>
     public static async Task<int> EnsureRetentionPoliciesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
     {
@@ -1473,41 +2045,12 @@ AND   j.hypertable_name = '{relation}'";
             throw new ArgumentNullException(nameof(connection));
         }
 
-        /* Each policy names the tier that must already cover it before arming is safe (#1680). The rule this
-           list enforces is: NEVER DROP WHAT YOUR CONSUMER HAS NOT CAPTURED YET.
-
-           For the raw and hourly tiers the consumer is the next aggregate down the ladder -- raw tables are
-           covered by their hourly CAGG, hourly CAGGs by their daily one -- so "coverage" names that tier.
-
-           THE LEAF RULE (#1757): a tier with nothing below it is not exempt, it just has a different consumer.
-           The baseline aggregates are leaves; their consumer is the baseline COMPUTATION, whose capture
-           requirement is BaselineMath.BaselineWindowDays (30). Their arming condition is therefore "the tier
-           holds at least the baseline window of buckets" -- the same rule with the consumer named honestly,
-           still runtime-evaluable like the other seven rather than a degenerate always-open gate. It is
-           belt-and-braces by construction: BaselineRetentionSpan (35d) already exceeds the window, so even an
-           immediately-armed policy could not eat it, and Darling.Tests pins that static relation. A policy
-           with no identifiable consumer at all still does not belong in this list. */
-        var policies = RawTierCoverage
-            .Select(t => (Relation: t.Relation, DropAfter: RawRetentionInterval, TimeColumn: t.TimeColumn, Coverage: t.Coverage))
-            .Concat(new[]
-        {
-            (Relation: QueryStatsHourlyView,      DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: QueryStatsDailyView),
-            (Relation: ProcedureStatsHourlyView,  DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: ProcedureStatsDailyView),
-            (Relation: QueryStoreStatsHourlyView, DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: QueryStoreStatsDailyView),
-            (Relation: QueryStatsDbHourlyView,    DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: QueryStatsDbDailyView),
-        })
-        /* The nine baseline-tier policies (#1757). Coverage is the tier ITSELF: see the leaf rule in the
-           comment above -- their consumer is the baseline computation, whose capture requirement is the
-           30-day window, and BaselineRetentionSpan (35d) exceeds it by construction. */
-        .Concat(BaselineAggregates.Select(a =>
-            (Relation: a.View, DropAfter: BaselineRetentionInterval, TimeColumn: "bucket", Coverage: a.View)))
-        .ToArray();
-
         var applied = 0;
         var armed = 0;
         var held = 0;
+        var indeterminate = 0;
 
-        foreach (var (relation, dropAfter, timeColumn, coverage) in policies)
+        foreach (var (relation, dropAfter, timeColumn, coverage) in RetentionPolicies)
         {
             try
             {
@@ -1543,18 +2086,45 @@ AND   j.hypertable_name = '{relation}'";
 
                 applied++;
 
-                if (await IsSafeToArmRetentionAsync(connection, relation, timeColumn, coverage, cancellationToken))
+                var (verdict, shortConsumer) = await MeasureRetentionCoverageAsync(connection, relation, timeColumn, coverage, cancellationToken);
+                if (verdict == RetentionCoverage.Covered)
                 {
                     using var arm = new NpgsqlCommand(ArmRetentionPolicySql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
                     await arm.ExecuteNonQueryAsync(cancellationToken);
                     armed++;
                 }
-                else
+                else if (verdict == RetentionCoverage.Short)
                 {
+                    /* HELD — and since #1877 that is an ACTION, not just the absence of arming. A policy this
+                       store created moments ago is already paused and this re-asserts it; a policy the store
+                       armed under an EARLIER build, whose coverage list has since GROWN a consumer, is stopped
+                       here. That second case is the whole issue: if_not_exists returned -1 for the existing
+                       policy so nothing paused it, and it kept purging its source while the new consumer held
+                       nothing — capping how deep that consumer could ever be backfilled.
+
+                       Safe to do unconditionally because the verdict is a MEASUREMENT. An indeterminate probe
+                       lands in the branch below and touches nothing, so no store can have its purge stopped by
+                       a timeout, a permission blip, or a relation that is mid-rebuild. And the release is the
+                       existing arming path, unchanged: the next sweep measures Covered and arms it, with no
+                       manual step, exactly as a first-time hold releases. */
+                    using var hold = new NpgsqlCommand(HoldRetentionPolicySql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
+                    await hold.ExecuteNonQueryAsync(cancellationToken);
                     held++;
                     logger?.LogWarning(
-                        "Retention policy for {Relation} created but HELD PAUSED - {Coverage} does not yet cover everything it holds, so arming could drop history no rollup has. Backfill that rollup past the {DropAfter} horizon and the policy arms itself on the next start.",
-                        relation, coverage, dropAfter);
+                        "Retention policy for {Relation} HELD PAUSED - {ShortConsumer} does not yet cover everything it holds, so arming could drop history that rollup has never materialized. Backfill past the {DropAfter} horizon and the policy arms itself on the next start.",
+                        relation, shortConsumer, dropAfter);
+                }
+                else
+                {
+                    /* Coverage could not be MEASURED, which is not the same as measuring a shortfall. Leave the
+                       policy in whatever state it is already in: a new one is paused (fail-closed, as always),
+                       and one this store already armed keeps running. Disarming here instead would let a single
+                       bad probe stop purging across every tier at once and grow disk without bound — the
+                       failure mode that kept #1877 unfixed rather than fixed badly. */
+                    indeterminate++;
+                    logger?.LogWarning(
+                        "Retention policy for {Relation} left as-is - its coverage ({Coverage}) could not be established this start, and an unreadable store is not evidence of anything. Re-judged on the next start.",
+                        relation, string.Join(" + ", coverage));
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1566,8 +2136,8 @@ AND   j.hypertable_name = '{relation}'";
         }
 
         logger?.LogInformation(
-            "TimescaleDB: {Applied}/{Total} retention policies in place, {Armed} armed, {Held} held paused pending backfill (raw {Raw}, hourly CAGGs {Hourly}; daily CAGGs kept indefinitely)",
-            applied, policies.Length, armed, held, RawRetentionInterval, HourlyRetentionInterval);
+            "TimescaleDB: {Applied}/{Total} retention policies in place, {Armed} armed, {Held} held paused pending backfill, {Indeterminate} left as-is (coverage unreadable) (raw {Raw}, hourly CAGGs {Hourly}; daily CAGGs kept indefinitely)",
+            applied, RetentionPolicies.Count, armed, held, indeterminate, RawRetentionInterval, HourlyRetentionInterval);
         return applied;
     }
 
@@ -1589,7 +2159,17 @@ AND   j.hypertable_name = '{relation}'";
         $"to_regclass('collect.{ProcedureStatsHourlyView}') IS NOT NULL, " +
         $"to_regclass('collect.{ProcedureStatsDailyView}') IS NOT NULL, " +
         $"to_regclass('collect.{QueryStoreStatsHourlyView}') IS NOT NULL, " +
-        $"to_regclass('collect.{QueryStoreStatsDailyView}') IS NOT NULL";
+        $"to_regclass('collect.{QueryStoreStatsDailyView}') IS NOT NULL, " +
+        /* The corrected Query Store rollups (#1849). A store on an older service has none of them and reads
+           fall back to the pair above — the same per-tier degrade #1664/#1665 built, which is why these need
+           no schema migration or version gate: existence IS the probe. */
+        $"to_regclass('collect.{QueryStoreStatsIntervalHourlyView}') IS NOT NULL, " +
+        $"to_regclass('collect.{QueryStoreStatsCorrectedHourlyView}') IS NOT NULL, " +
+        $"to_regclass('collect.{QueryStoreStatsCorrectedDailyView}') IS NOT NULL, " +
+        /* The day-grain daily and its dedup layer (#1869) — the same existence-is-the-probe degrade, so a
+           store on a #1849-era service keeps reading the corrected daily and needs no version gate either. */
+        $"to_regclass('collect.{QueryStoreStatsIntervalDailyView}') IS NOT NULL, " +
+        $"to_regclass('collect.{QueryStoreStatsDayGrainDailyView}') IS NOT NULL";
 
     /// <summary>
     /// Detects which continuous-aggregate rollups exist in the store (<see cref="RollupProbeSql"/>). On a
@@ -1612,10 +2192,22 @@ AND   j.hypertable_name = '{relation}'";
         await reader.ReadAsync(cancellationToken);
         return new RollupAvailability(
             reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3),
-            reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7));
+            reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7),
+            reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10),
+            reader.GetBoolean(11), reader.GetBoolean(12));
     }
 
     /* ─────────────── rollup COVERAGE (the un-materialized-history guard, #1759) ─────────────── */
+
+    /// <summary>The hourly rollups' bucket width — named so <see cref="RollupViews"/> reads as data.
+    /// <para>Declared BEFORE <see cref="RollupViews"/> and that is not cosmetic: C# runs static field
+    /// initializers in DECLARATION order, so a list declared above these would capture
+    /// <c>default(TimeSpan)</c> — zero — for every width, and every backfill bucket count would divide by
+    /// zero-width buckets. Caught by RollupBackfillTests going red on exactly that.</para></summary>
+    public static readonly TimeSpan HourlyBucket = TimeSpan.FromHours(1);
+
+    /// <summary>The daily rollups' bucket width. See <see cref="HourlyBucket"/> on declaration order.</summary>
+    public static readonly TimeSpan DailyBucket = TimeSpan.FromDays(1);
 
     /// <summary>
     /// Every rollup view in probe order, with the two DIFFERENT relations it is measured against. One list, so
@@ -1639,17 +2231,38 @@ AND   j.hypertable_name = '{relation}'";
     ///
     /// <para><c>SourceTimeColumn</c> follows from that: raw tables are keyed on <c>collection_time</c>,
     /// rollup views on <c>bucket</c>.</para>
+    ///
+    /// <para><b><c>BucketWidth</c> is carried EXPLICITLY, not inferred (#1849).</b> Until the corrected Query
+    /// Store rollups existed, "hierarchical" and "daily" were the same fact, so the backfill derived a rollup's
+    /// bucket width from whether its source time column was <c>bucket</c>. <see cref="QueryStoreStatsCorrectedHourlyView"/>
+    /// breaks that: it is hierarchical (sourced from L1) but its buckets are HOURS. Inferring would have given
+    /// its backfill a 24x-too-wide bucket, so every bucket count, slice count and disk estimate for it would
+    /// have been silently wrong — an under-estimate, which is the one direction the preflight exists to
+    /// prevent. Ordering still keys on the source column (raw-sourced rollups must be backfilled before the
+    /// rollups that read them); only the width became its own column.</para>
     /// </summary>
-    public static readonly (string View, string RawTable, string Source, string SourceTimeColumn)[] RollupViews =
+    public static readonly (string View, string RawTable, string Source, string SourceTimeColumn, TimeSpan BucketWidth)[] RollupViews =
     {
-        (QueryStatsHourlyView, "query_stats", "query_stats", "collection_time"),
-        (QueryStatsDailyView, "query_stats", QueryStatsHourlyView, "bucket"),
-        (QueryStatsDbHourlyView, "query_stats", "query_stats", "collection_time"),
-        (QueryStatsDbDailyView, "query_stats", QueryStatsDbHourlyView, "bucket"),
-        (ProcedureStatsHourlyView, "procedure_stats", "procedure_stats", "collection_time"),
-        (ProcedureStatsDailyView, "procedure_stats", ProcedureStatsHourlyView, "bucket"),
-        (QueryStoreStatsHourlyView, "query_store_stats", "query_store_stats", "collection_time"),
-        (QueryStoreStatsDailyView, "query_store_stats", QueryStoreStatsHourlyView, "bucket"),
+        (QueryStatsHourlyView, "query_stats", "query_stats", "collection_time", HourlyBucket),
+        (QueryStatsDailyView, "query_stats", QueryStatsHourlyView, "bucket", DailyBucket),
+        (QueryStatsDbHourlyView, "query_stats", "query_stats", "collection_time", HourlyBucket),
+        (QueryStatsDbDailyView, "query_stats", QueryStatsDbHourlyView, "bucket", DailyBucket),
+        (ProcedureStatsHourlyView, "procedure_stats", "procedure_stats", "collection_time", HourlyBucket),
+        (ProcedureStatsDailyView, "procedure_stats", ProcedureStatsHourlyView, "bucket", DailyBucket),
+        (QueryStoreStatsHourlyView, "query_store_stats", "query_store_stats", "collection_time", HourlyBucket),
+        (QueryStoreStatsDailyView, "query_store_stats", QueryStoreStatsHourlyView, "bucket", DailyBucket),
+
+        /* The corrected Query Store rollups (#1849). L1 is raw-sourced; BOTH corrected views read L1 — the
+           daily is L1's second child, not the corrected hourly's, so it converges to L1 like its sibling. */
+        (QueryStoreStatsIntervalHourlyView, "query_store_stats", "query_store_stats", "collection_time", HourlyBucket),
+        (QueryStoreStatsCorrectedHourlyView, "query_store_stats", QueryStoreStatsIntervalHourlyView, "bucket", HourlyBucket),
+        (QueryStoreStatsCorrectedDailyView, "query_store_stats", QueryStoreStatsIntervalHourlyView, "bucket", DailyBucket),
+
+        /* The day-grain daily and its dedup layer (#1869) — L1's THIRD child, and the first rollup in this
+           list whose own source is itself hierarchical. Both are DAY-bucketed, which is why the explicit
+           BucketWidth above is what keeps the backfill honest here as well. */
+        (QueryStoreStatsIntervalDailyView, "query_store_stats", QueryStoreStatsIntervalHourlyView, "bucket", DailyBucket),
+        (QueryStoreStatsDayGrainDailyView, "query_store_stats", QueryStoreStatsIntervalDailyView, "bucket", DailyBucket),
     };
 
     /// <summary>The three raw tables the rollups roll up, in coverage-probe order (deduplicated
@@ -2399,19 +3012,32 @@ public sealed record CompressionActivity(
 /// </summary>
 public readonly record struct RollupAvailability(
     bool QueryGrainHourly, bool QueryGrainDaily, bool DbGrainHourly, bool DbGrainDaily,
-    bool ProcedureGrainHourly, bool ProcedureGrainDaily, bool QueryStoreGrainHourly, bool QueryStoreGrainDaily)
+    bool ProcedureGrainHourly, bool ProcedureGrainDaily, bool QueryStoreGrainHourly, bool QueryStoreGrainDaily,
+    bool QueryStoreIntervalHourly = false, bool QueryStoreCorrectedHourly = false, bool QueryStoreCorrectedDaily = false,
+    bool QueryStoreIntervalDaily = false, bool QueryStoreDayGrainDaily = false)
 {
     /// <summary>True when every rollup exists — the steady state on a TimescaleDB store, safe to cache
     /// permanently (a created continuous aggregate is never dropped outside the reshape sweep).</summary>
     public bool AllPresent =>
         QueryGrainHourly && QueryGrainDaily && DbGrainHourly && DbGrainDaily
-        && ProcedureGrainHourly && ProcedureGrainDaily && QueryStoreGrainHourly && QueryStoreGrainDaily;
+        && ProcedureGrainHourly && ProcedureGrainDaily && QueryStoreGrainHourly && QueryStoreGrainDaily
+        && QueryStoreIntervalHourly && QueryStoreCorrectedHourly && QueryStoreCorrectedDaily
+        && QueryStoreIntervalDaily && QueryStoreDayGrainDaily;
 
     /// <summary>No rollups at all — the plain-PostgreSQL shape, and the safe fallback when a probe fails.</summary>
     public static RollupAvailability None => default;
 
     /// <summary>Every flag true — the fully-built TimescaleDB shape (and the test shorthand for it).</summary>
-    public static RollupAvailability All => new(true, true, true, true, true, true, true, true);
+    public static RollupAvailability All => new(true, true, true, true, true, true, true, true, true, true, true, true, true);
+
+    /// <summary>The pre-#1849 shape: every ORIGINAL rollup present, none of the corrected Query Store ones —
+    /// i.e. a store whose service has not yet created them. The routing fallback's test shorthand.</summary>
+    public static RollupAvailability WithoutCorrectedQueryStore => new(true, true, true, true, true, true, true, true);
+
+    /// <summary>The #1849-era shape: the corrected rollups present, but not the #1869 day-grain daily pair —
+    /// a store whose service predates this build. Its Query Store dailies must keep routing to the corrected
+    /// daily, which is the degrade that lets #1869 ship with no migration either.</summary>
+    public static RollupAvailability WithoutDayGrainQueryStore => new(true, true, true, true, true, true, true, true, true, true, true);
 
     /// <summary>
     /// Whether <paramref name="caggView"/> (an unqualified <c>collect.*</c> rollup view name — the strings the
@@ -2429,6 +3055,11 @@ public readonly record struct RollupAvailability(
         TimescaleSupport.ProcedureStatsDailyView => ProcedureGrainDaily,
         TimescaleSupport.QueryStoreStatsHourlyView => QueryStoreGrainHourly,
         TimescaleSupport.QueryStoreStatsDailyView => QueryStoreGrainDaily,
+        TimescaleSupport.QueryStoreStatsIntervalHourlyView => QueryStoreIntervalHourly,
+        TimescaleSupport.QueryStoreStatsCorrectedHourlyView => QueryStoreCorrectedHourly,
+        TimescaleSupport.QueryStoreStatsCorrectedDailyView => QueryStoreCorrectedDaily,
+        TimescaleSupport.QueryStoreStatsIntervalDailyView => QueryStoreIntervalDaily,
+        TimescaleSupport.QueryStoreStatsDayGrainDailyView => QueryStoreDayGrainDaily,
         _ => false,
     };
 }
@@ -2539,7 +3170,7 @@ public sealed class RollupCoverage
     /// target became source-relative.</para></summary>
     public static string? RawTableFor(string caggView)
     {
-        foreach (var (view, rawTable, _, _) in TimescaleSupport.RollupViews)
+        foreach (var (view, rawTable, _, _, _) in TimescaleSupport.RollupViews)
         {
             if (string.Equals(view, caggView, StringComparison.Ordinal))
             {

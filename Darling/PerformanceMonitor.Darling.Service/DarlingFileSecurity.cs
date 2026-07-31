@@ -66,6 +66,29 @@ public static class DarlingFileSecurity
             ?? throw new InvalidOperationException("Cannot resolve the current Windows identity for ACL hardening.");
 
     /// <summary>
+    /// The current identity as a display name for remediation log lines: <c>NT SERVICE\PerformanceMonitor
+    /// Darling</c> on a default install, <c>DOMAIN\svc-account</c> when an operator re-homed the service to a
+    /// domain account or gMSA for integrated auth (#1802, #1823). The <c>icacls /grant</c> a harden failure
+    /// prints must name the account the service RUNS AS — granting the virtual account on a re-homed install
+    /// is a fix that cannot work, handed to the one operator who needs it. Falls back to the default virtual
+    /// account name rather than throwing: a remediation string must never itself take the log line down.
+    /// </summary>
+    public static string ServiceAccountDisplayName
+    {
+        get
+        {
+            try
+            {
+                return WindowsIdentity.GetCurrent().Name;
+            }
+            catch (Exception)
+            {
+                return @"NT SERVICE\PerformanceMonitor Darling";
+            }
+        }
+    }
+
+    /// <summary>
     /// Locks a directory to SYSTEM + Administrators + the service account (full control, inherited by
     /// children), removing ALL inherited access so no Users / Authenticated Users read survives. When
     /// <paramref name="allowInteractiveTraverse"/> is set, INTERACTIVE gets traverse (not list) on THIS

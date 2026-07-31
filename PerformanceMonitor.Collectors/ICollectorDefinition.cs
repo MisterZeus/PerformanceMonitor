@@ -76,18 +76,21 @@ public interface ICollectorDefinition<TRow> : ICollectorSchemaInfo
     string? PerDatabaseWatermarkColumn { get; }
 
     /// <summary>
-    /// Per-enumerated-item row count at or above which the host logs a WARNING naming the server and
-    /// item (#1556): a per-database read that returns this many rows in a single cycle is producing far
+    /// Per-database row count at or above which the host logs a WARNING naming the server and database
+    /// (#1556): a per-database read that returns this many rows in a single cycle is producing far
     /// more than a healthy volume and its oldest rows were trimmed by the definition's own server-side
     /// backstop (query_store's <c>TOP</c>). Null (the common case) = no cap, no warning. One const with
-    /// the SQL <c>TOP</c>: the runner warns exactly when the definition's own backstop engaged.
+    /// the SQL <c>TOP</c>: the runner warns exactly when the definition's own backstop engaged. Applied
+    /// on BOTH per-database shapes — the enumerated item loop, and the Azure per-database connection
+    /// loop, which has no enumerated item but the same one-command-per-database structure (#1836).
     /// </summary>
     int? PerItemRowCountWarnThreshold { get; }
 
     /// <summary>
-    /// Cumulative per-enumerated-item TEXT byte budget (#1556): a definition carrying large nvarchar(max)
-    /// payloads (query_store's query text + plan XML) enforces this budget CLIENT-SIDE inside its
-    /// <see cref="ReadItemAsync"/> — accumulating the materialized text bytes and stopping the read once
+    /// Cumulative per-database TEXT byte budget (#1556): a definition carrying large nvarchar(max)
+    /// payloads (query_store's query text + plan XML) enforces this budget CLIENT-SIDE inside its own
+    /// read — <see cref="ReadItemAsync"/> on the enumerated path, <see cref="ReadAsync"/> on the Azure
+    /// per-database path (#1836) — accumulating the materialized text bytes and stopping the read once
     /// the budget is reached, signalling truncation via <see cref="CollectorContext.PerItemTextBudgetExceeded"/>
     /// so the host surfaces the same WARNING. This is the PRIMARY memory bound: a row COUNT cap does not
     /// bound BYTES (50k rows each carrying a 40KB plan is 2GB), so the byte budget is what keeps peak
@@ -114,6 +117,32 @@ public interface ICollectorDefinition<TRow> : ICollectorSchemaInfo
 
     /// <summary>Merges the supplemental reader's data into the already-read rows.</summary>
     ValueTask ApplySupplementalAsync(List<TRow> rows, DbDataReader reader, CollectorContext context, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// True when this definition's batch may return an OPTIONAL trailing (item_name, error_text) result
+    /// set AFTER its payload rows, naming items it reached but could not probe (#1851) — the payload
+    /// path's half of the probe-failure contract #1837 gave the enumerating collectors. The host reads it
+    /// through <see cref="EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync"/> once
+    /// <see cref="ReadAsync"/> returns, summarizing it onto the run's collection_log row and logging the
+    /// per-item errors capped. Set by a definition whose own server-side cursor would otherwise discard
+    /// per-database failures in a CATCH, leaving a database silently absent from a SUCCESS row.
+    ///
+    /// <para>False (the common case) means the host never advances the reader past the payload — the
+    /// pre-#1851 behavior exactly. The declaration is required rather than inferred because a payload
+    /// reader can legitimately carry several result sets that belong to the definition itself
+    /// (<c>tempdb_stats</c> reads two), and a trailing-set read must never mistake one of those for
+    /// failures. An enumeration needs no such flag: its first result set is a bare item list, so anything
+    /// after it can only be the failure set.</para>
+    ///
+    /// <para>Declaring it does NOT oblige every run to produce the set. A declaring collector that
+    /// returns only its payload reads as zero failures and no note, which is what lets one definition
+    /// cover a shape that only some targets take — <c>database_size_stats</c> emits the set from its
+    /// on-prem cursor and runs a single cursor-less query on Azure SQL DB.</para>
+    ///
+    /// <para>Not consulted on the per-database or enumeration paths: those read through their own
+    /// contracts.</para>
+    /// </summary>
+    bool EmitsProbeFailures { get; }
 
     /// <summary>
     /// Optional enumeration shape (the "[db].sys.sp_executesql" idiom): when non-null, the host

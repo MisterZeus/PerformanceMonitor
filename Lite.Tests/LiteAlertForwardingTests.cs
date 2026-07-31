@@ -96,6 +96,12 @@ public class LiteAlertForwardingTests
         public Task<List<BlockedProcessAlertRow>> GetRecentBlockedProcessReportsAsync(string serverKey, int hoursBack, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<BlockedProcessAlertRow>(Blocking));
 
+        /* #1839: null = no blocking snapshot in the store; tests that exercise the gate assign one. */
+        public CurrentBlockingWaitResult? BlockingWait { get; set; }
+
+        public Task<CurrentBlockingWaitResult?> GetCurrentBlockingWaitAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult(BlockingWait);
+
         public Task<List<DeadlockAlertRow>> GetRecentDeadlocksAsync(string serverKey, int hoursBack, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<DeadlockAlertRow>(Deadlocks));
 
@@ -249,9 +255,12 @@ public class LiteAlertForwardingTests
         Assert.Equal("  Total CPU: 92%\n  Threshold: 80%", fired.DetailText);
         /* :84 — the toast body minus the "{server}: " prefix. */
         Assert.Equal("Total CPU at 92% (threshold: 80%)", fired.ShortMessage);
-        /* :93-100 — CPU passes no context and no numerics. */
+        /* :93-100 — CPU passes no context. #1830: the numerics are REQUIRED — without them the
+           history stores text-parsed "92% (Total CPU)", failed on the parenthesized label, and
+           stored 0 for every High CPU row. */
         Assert.Null(fired.Context);
-        Assert.Null(fired.NumericCurrentValue);
+        Assert.Equal(92d, fired.NumericCurrentValue);
+        Assert.Equal(80d, fired.NumericThresholdValue);
         Assert.False(fired.Muted);
 
         /* Resolve: :110-113 — exact title + message strings, Success-severity tray-only toast. */
@@ -735,23 +744,24 @@ public class LiteAlertForwardingTests
     }
 
     [Fact]
-    public async Task Deliverer_Blocking_SummaryMode_OneCombinedSend_NoNumerics()
+    public async Task Deliverer_Blocking_SummaryMode_OneCombinedSend_ForwardsOutcomeNumerics()
     {
-        /* :760-762 — the summary fallback carries the batched current value + detail text and,
-           like the old blocking/deadlock sends (:177-185), no numeric values. */
+        /* :760-762 — the summary fallback carries the batched current value + detail text. #1830:
+           the engine now supplies numerics on blocking/deadlock outcomes, and the deliverer must
+           forward them — the old path dropped them to null on this route. */
         var context = new AlertContext
         {
             Incidents = new List<AlertIncident> { new("a", new[] { "dbo.Users" }), new("b", new[] { "dbo.Posts" }) }
         };
         var (deliverer, _, sends) = BuildDeliverer();
 
-        await deliverer.DeliverAsync(Outcome("Blocking Detected", current: "2", threshold: "1", context: context));
+        await deliverer.DeliverAsync(Outcome("Blocking Detected", current: "2", threshold: "1", context: context, numCur: 2, numThr: 1));
 
         var send = Assert.Single(sends);
         Assert.Equal("2", send.CurrentValue);
         Assert.Equal("detail", send.DetailText);
-        Assert.Null(send.NumericCurrentValue);
-        Assert.Null(send.NumericThresholdValue);
+        Assert.Equal(2d, send.NumericCurrentValue);
+        Assert.Equal(1d, send.NumericThresholdValue);
         Assert.Equal(101, send.ServerId);
     }
 
@@ -774,7 +784,7 @@ public class LiteAlertForwardingTests
         };
         var (deliverer, toasts, sends) = BuildDeliverer();
 
-        await deliverer.DeliverAsync(Outcome("Blocking Detected", current: "6", threshold: "1", context: context));
+        await deliverer.DeliverAsync(Outcome("Blocking Detected", current: "6", threshold: "1", context: context, numCur: 6, numThr: 1));
 
         /* One toast (delivery-mode split shapes the SENDS only — the old loop toasted once). */
         Assert.Single(toasts);
@@ -782,7 +792,11 @@ public class LiteAlertForwardingTests
         Assert.Equal("3", sends[0].CurrentValue);   /* DescribeIncident = occurrence count */
         Assert.Equal("1", sends[1].CurrentValue);
         Assert.Equal("+1 more incident(s) this cycle", sends[2].CurrentValue);
-        Assert.All(sends, s => Assert.Null(s.NumericCurrentValue));
+        /* #1830: per-event sends carry per-incident numerics — occurrence counts, then the overflow
+           COUNT for the "+N more" trailer whose text is unparseable (it stored 0 before). The
+           threshold stays the outcome's on every send. */
+        Assert.Equal(new double?[] { 3, 1, 1 }, sends.Select(s => s.NumericCurrentValue).ToArray());
+        Assert.All(sends, s => Assert.Equal(1d, s.NumericThresholdValue));
         var overflowIncident = Assert.Single(sends[2].Context!.Incidents!);
         Assert.Equal("c", overflowIncident.DedupKey);
     }
@@ -832,6 +846,7 @@ public class LiteAlertForwardingTests
 
         App.AlertCpuThreshold = 91; Assert.Equal(91, settings.CpuThresholdPercent);
         App.AlertBlockingThreshold = 7; Assert.Equal(7, settings.BlockingCountThreshold);
+        App.AlertBlockingWaitSecondsThreshold = 745; Assert.Equal(745, settings.BlockingWaitSecondsThreshold);
         App.AlertDeadlockThreshold = 4; Assert.Equal(4, settings.DeadlockCountThreshold);
         App.AlertPoisonWaitThresholdMs = 999; Assert.Equal(999, settings.PoisonWaitThresholdMs);
         App.AlertLongRunningQueryThresholdMinutes = 15; Assert.Equal(15, settings.LongRunningQueryThresholdMinutes);

@@ -290,14 +290,16 @@ public partial class SettingsWindow : Window
         {
             CollectionStatusText.Text = "Status: not connected to the Darling store";
             PauseResumeButton.IsEnabled = false;
-            PauseResumeButton.Content = "Pause Collection";
+            PauseResumeButton.Content = "Pause Co_llection";
             return;
         }
 
         CollectionStatusText.Text = _paused
             ? "Status: Paused — the Darling service is not collecting"
             : "Status: Collecting — managed by the Darling service";
-        PauseResumeButton.Content = _paused ? "Resume Collection" : "Pause Collection";
+        /* The "_" keeps Alt+L alive across the state swap — see the XAML for why the key is on
+           "Collection" (the word both states share) rather than on the verb. */
+        PauseResumeButton.Content = _paused ? "Resume Co_llection" : "Pause Co_llection";
         PauseResumeButton.IsEnabled = !_dataService.IsReadOnly;
     }
 
@@ -670,6 +672,7 @@ public partial class SettingsWindow : Window
         AlertCpuModeBox.SelectedIndex = ViewerDataService.MapCpuModeFromStore(r.CpuMode) == "SqlOnly" ? 1 : 0;
         AlertBlockingCheckBox.IsChecked = r.BlockingEnabled;
         AlertBlockingThresholdBox.Text = r.BlockingCountThreshold.ToString(CultureInfo.InvariantCulture);
+        AlertBlockingWaitSecondsBox.Text = r.BlockingWaitSecondsThreshold.ToString(CultureInfo.InvariantCulture);
         AlertDeadlockCheckBox.IsChecked = r.DeadlockEnabled;
         AlertDeadlockThresholdBox.Text = r.DeadlockCountThreshold.ToString(CultureInfo.InvariantCulture);
         AlertPoisonWaitCheckBox.IsChecked = r.PoisonWaitEnabled;
@@ -755,6 +758,10 @@ public partial class SettingsWindow : Window
             row.CpuThresholdPercent = cpu;
         if (int.TryParse(AlertBlockingThresholdBox.Text, out var blocking) && blocking > 0)
             row.BlockingCountThreshold = blocking;
+        /* #1839: >= 0, not > 0 like its siblings — 0 is this setting's OFF value, so rejecting it would
+           make the gate impossible to turn back off once enabled. */
+        if (int.TryParse(AlertBlockingWaitSecondsBox.Text, out var blockingWait) && blockingWait >= 0)
+            row.BlockingWaitSecondsThreshold = blockingWait;
         if (int.TryParse(AlertDeadlockThresholdBox.Text, out var deadlock) && deadlock > 0)
             row.DeadlockCountThreshold = deadlock;
         if (int.TryParse(AlertPoisonWaitThresholdBox.Text, out var poisonWait) && poisonWait > 0)
@@ -818,6 +825,7 @@ public partial class SettingsWindow : Window
         AlertCpuThresholdBox.Text = "80";
         AlertCpuModeBox.SelectedIndex = 0; // Total
         AlertBlockingThresholdBox.Text = "1";
+        AlertBlockingWaitSecondsBox.Text = "0";
         AlertDeadlockThresholdBox.Text = "1";
         AlertPoisonWaitThresholdBox.Text = "500";
         AlertLongRunningQueryThresholdBox.Text = "30";
@@ -865,7 +873,12 @@ public partial class SettingsWindow : Window
             parts.Add($"{cpuLabel} > {AlertCpuThresholdBox.Text}%");
         }
         if (AlertBlockingCheckBox.IsChecked == true)
+        {
             parts.Add($"blocking >= {AlertBlockingThresholdBox.Text}");
+            /* #1839: only summarize the wait gate when it is actually on (0 = off). */
+            if (int.TryParse(AlertBlockingWaitSecondsBox.Text, out var blockingWaitPreview) && blockingWaitPreview > 0)
+                parts.Add($"blocked wait >= {blockingWaitPreview}s");
+        }
         if (AlertDeadlockCheckBox.IsChecked == true)
             parts.Add($"deadlocks >= {AlertDeadlockThresholdBox.Text}");
         if (AlertPoisonWaitCheckBox.IsChecked == true)
@@ -901,6 +914,7 @@ public partial class SettingsWindow : Window
         AlertCpuModeBox.IsEnabled = enabled;
         AlertBlockingCheckBox.IsEnabled = enabled;
         AlertBlockingThresholdBox.IsEnabled = enabled;
+        AlertBlockingWaitSecondsBox.IsEnabled = enabled;
         AlertDeadlockCheckBox.IsEnabled = enabled;
         AlertDeadlockThresholdBox.IsEnabled = enabled;
         AlertPoisonWaitCheckBox.IsEnabled = enabled;
@@ -1112,7 +1126,7 @@ public partial class SettingsWindow : Window
         }
         finally
         {
-            TestEmailButton.Content = "Send Test Email";
+            TestEmailButton.Content = "Send Test _Email";
             TestEmailButton.IsEnabled = true;
         }
     }
@@ -1216,7 +1230,7 @@ public partial class SettingsWindow : Window
         }
         finally
         {
-            TestTeamsButton.Content = "Send Test Notification";
+            TestTeamsButton.Content = "Send Test to _Teams";
             TestTeamsButton.IsEnabled = true;
         }
     }
@@ -1247,7 +1261,7 @@ public partial class SettingsWindow : Window
         }
         finally
         {
-            TestSlackButton.Content = "Send Test Notification";
+            TestSlackButton.Content = "Send Test to Slac_k";
             TestSlackButton.IsEnabled = true;
         }
     }
@@ -1308,7 +1322,7 @@ public partial class SettingsWindow : Window
         }
         finally
         {
-            TestGenericButton.Content = "Send Test Notification";
+            TestGenericButton.Content = "Send Test to _Webhook";
             TestGenericButton.IsEnabled = true;
         }
     }

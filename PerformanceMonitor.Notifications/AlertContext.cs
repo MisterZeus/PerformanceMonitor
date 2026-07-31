@@ -192,6 +192,13 @@ public record RcsiInactionFiguresDto(
     int BlockingEvents,
     int Deadlocks,
     int? ReaderWriterPct);
+/// <summary>
+/// JSON mirror of <c>ForcePlanTarget</c>. <see cref="ReplicaRole"/> is appended LAST and defaulted so
+/// the round-trip stays backward-compatible in both directions: legacy <c>remediation_action_json</c>
+/// written before #1882 has no such property and deserializes to null, which is the same thing the
+/// extractor produces for a server that does not attribute replicas — so an old row and a
+/// non-AG row are indistinguishable, as they should be.
+/// </summary>
 public record ForcePlanTargetDto(
     string Database,
     long QueryId,
@@ -200,7 +207,8 @@ public record ForcePlanTargetDto(
     string? LatestPlanHash,
     double LatestCpuPerExecUs,
     double BestCpuPerExecUs,
-    double RegressionFactor);
+    double RegressionFactor,
+    string? ReplicaRole = null);
 
 /// <summary>
 /// JSON mirror of <see cref="DbConfigTarget"/>. <see cref="Setting"/> is persisted
@@ -397,7 +405,8 @@ public static class AlertContextSerializer
                 t.LatestPlanHash,
                 t.LatestCpuPerExecUs,
                 t.BestCpuPerExecUs,
-                t.RegressionFactor));
+                t.RegressionFactor,
+                t.ReplicaRole));
         }
 
         List<DbConfigTargetDto>? dbConfigTargets = null;
@@ -500,7 +509,8 @@ public static class AlertContextSerializer
                     t.LatestPlanHash,
                     t.LatestCpuPerExecUs,
                     t.BestCpuPerExecUs,
-                    t.RegressionFactor));
+                    t.RegressionFactor,
+                    t.ReplicaRole));
             }
         }
 

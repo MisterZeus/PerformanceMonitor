@@ -44,8 +44,8 @@ namespace PerformanceMonitorDashboard.Models
 
         /// <summary>
         /// SQL Agent job runs that failed within the failed-job lookback window. Live
-        /// msdb query — empty on Azure SQL DB (no Agent) or when the login lacks msdb /
-        /// SQLAgentReaderRole access.
+        /// msdb query — empty on Azure SQL DB (no Agent) or when the login cannot SELECT the
+        /// msdb job tables.
         /// </summary>
         public List<FailedJobInfo> RecentlyFailedJobs { get; set; } = new();
         public bool IsOnline { get; set; } = true;
@@ -71,6 +71,14 @@ namespace PerformanceMonitorDashboard.Models
         /// (e.g. "3 of 6 collector jobs are disabled"). Null when collection is healthy.
         /// </summary>
         public string? CollectionStoppedReason { get; set; }
+
+        /// <summary>
+        /// The same cause as <see cref="CollectionStoppedReason"/>, compressed to fit the Alert History
+        /// grid's Value column (e.g. "3 of 6 job(s) disabled", "no collection in 47m"). Null when
+        /// collection is healthy. Computed alongside the reason rather than at the fire site, so the two
+        /// cannot describe different branches of the same incident (#1913).
+        /// </summary>
+        public string? CollectionStoppedShortValue { get; set; }
 
         /// <summary>
         /// Count of PerformanceMonitor Agent jobs with enabled = 0. 0 when none are disabled,

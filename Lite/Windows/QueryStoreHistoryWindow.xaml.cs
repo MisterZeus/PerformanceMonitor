@@ -151,7 +151,9 @@ public partial class QueryStoreHistoryWindow : Window
             colorIndex++;
         }
 
-        HistoryChart.Plot.Axes.DateTimeTicksBottom();
+        /* #1831: the DateChange variant routes labels through the shared formatter, which converts
+           for the display mode — plain DateTimeTicksBottom() rendered raw server time. */
+        HistoryChart.Plot.Axes.DateTimeTicksBottomDateChange();
         if (planGroups.Count > 1)
         {
             _legendPanel = HistoryChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);

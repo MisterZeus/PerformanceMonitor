@@ -564,10 +564,13 @@ public sealed class DarlingWorker : BackgroundService
                who can resolve this, so give them the three lines. */
             /* Built as ONE argument rather than repeating {Path}: a structured-logging template binds
                placeholders POSITIONALLY, so a repeated name silently consumes the next argument and the
-               tail of the message renders empty — in the one log line whose entire job is to be actionable. */
+               tail of the message renders empty — in the one log line whose entire job is to be actionable.
+               The /grant names the identity the service RUNS AS, not the default virtual account — on an
+               install re-homed to a domain account for integrated auth (#1823), granting the virtual
+               account would be a fix that cannot work. */
             var remediation =
                 $"icacls \"{path}\" /inheritance:d   then   icacls \"{path}\" /remove:g \"BUILTIN\\Users\"   " +
-                $"then   icacls \"{path}\" /grant \"NT SERVICE\\PerformanceMonitor Darling:(F)\"";
+                $"then   icacls \"{path}\" /grant \"{DarlingFileSecurity.ServiceAccountDisplayName}:(F)\"";
 
             _logger.LogError(
                 "Could not restrict the ACL on {Path}{Detail} ({Message}). If the owner is not this service, the " +
@@ -631,10 +634,11 @@ public sealed class DarlingWorker : BackgroundService
             catch (Exception ex)
             {
                 /* Same contract as the live file: best-effort, but the remediation is spelled out as
-                   runnable commands so an elevated human can finish the job the service cannot. */
+                   runnable commands so an elevated human can finish the job the service cannot — naming
+                   the identity the service runs as, which is not the virtual account on a re-homed install. */
                 var remediation =
                     $"icacls \"{backup}\" /inheritance:d   then   icacls \"{backup}\" /remove:g \"BUILTIN\\Users\"   " +
-                    $"then   icacls \"{backup}\" /grant \"NT SERVICE\\PerformanceMonitor Darling:(F)\"";
+                    $"then   icacls \"{backup}\" /grant \"{DarlingFileSecurity.ServiceAccountDisplayName}:(F)\"";
 
                 logger.LogError(
                     "Could not restrict the ACL on config backup {Path}{Detail} ({Message}). It carries the same " +
@@ -1953,8 +1957,11 @@ public sealed class DarlingWorker : BackgroundService
             /* #1812: the adapter's snapshot-freshness bound needs the server's EFFECTIVE running_jobs
                cadence — the same resolution the sweep schedules by, reading the live overrides field so
                a control-plane reload reaches the very next check. */
-            new DarlingAlertReadAdapter(postgres, serverId =>
-                StoreConfigProvider.ResolveSchedule("running_jobs", serverId, _scheduleOverrides).FrequencyMinutes),
+            new DarlingAlertReadAdapter(
+                postgres,
+                serverId => StoreConfigProvider.ResolveSchedule("running_jobs", serverId, _scheduleOverrides).FrequencyMinutes,
+                /* #1839: the same resolution for the blocking snapshot the total-wait gate reads. */
+                serverId => StoreConfigProvider.ResolveSchedule("dmv_blocking_snapshot", serverId, _scheduleOverrides).FrequencyMinutes),
             stateStore,
             deliverer,
             muteRuleService.IsAlertMuted,
@@ -2421,7 +2428,7 @@ LIMIT 1", connection);
     /// The engine's live-msdb failed-jobs feed: runs the shared <see cref="FailedJobsQuery"/> on
     /// the monitored server's own connection. Gated !IsAzureSqlDb (the engine also gates on the
     /// snapshot; there is deliberately NO msdb-access probe — Phase-5 review F11) and degrades
-    /// exactly like the Dashboard's caller: a login without msdb / SQLAgentReaderRole access
+    /// exactly like the Dashboard's caller: a login that cannot SELECT the msdb job tables
     /// raises SqlException 229/297/300/916 → Info + empty list; any other failure → Warning +
     /// empty list — a permission gap or transient error never fails the alert cycle.
     /// </summary>
@@ -2461,8 +2468,11 @@ LIMIT 1", connection);
         }
         catch (SqlException ex) when (ex.Number is 229 or 297 or 300 or 916)
         {
-            /* Expected for read-only monitoring accounts; hit every alert cycle, so Info. */
-            _logger.LogInformation("[{Server}] Skipping recently-failed-job check (msdb/SQLAgentReaderRole access needed): {Message}",
+            /* Expected for read-only monitoring accounts; hit every alert cycle, so Info. The named
+               remedy is direct table SELECTs, NOT SQLAgentReaderRole: that role gates the sp_help_job*
+               interface only and confers nothing on the base tables this query reads — a #1823 field
+               box had the role and still landed here every cycle. */
+            _logger.LogInformation("[{Server}] Skipping recently-failed-job check (needs SELECT on msdb.dbo.sysjobs and sysjobhistory — SQLAgentReaderRole alone is not enough; see the monitoring-login grants in the README): {Message}",
                 runtime.Config.DisplayName, ex.Message);
             return new List<FailedJobInfo>();
         }
@@ -3139,8 +3149,12 @@ LIMIT 1";
             _logger.LogInformation("  [{Server}] {Collector} => {Rows} rows (sql:{SqlMs}ms, pg:{PgMs}ms)",
                 server.Config.DisplayName, collectorName, result.Rows, result.SqlMs, result.StorageMs);
 
+            /* result.Note is null for an ordinary run — the message column stays null as before. It is set
+               only for a successful-but-empty run worth explaining (today: an enumeration that listed zero
+               databases, #1837). The status stays SUCCESS, and every health/band read keys on status rather
+               than on error_message, so the note is inert outside the Collection Log detail grid. */
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "SUCCESS", result.Rows, result.SqlMs, result.StorageMs, null, _logger, cancellationToken);
+                _postgres!, runtime, collectorName, "SUCCESS", result.Rows, result.SqlMs, result.StorageMs, result.Note, _logger, cancellationToken);
             return result.Rows;
         }
         catch (OperationCanceledException)
@@ -3185,12 +3199,15 @@ LIMIT 1";
                 _logger, cancellationToken);
             return 0;
         }
-        catch (SqlException ex) when (ex.Number is 229 or 297 or 300)
+        catch (SqlException ex) when (ex.Number is 229 or 297 or 300 or 8189)
         {
             /* Same Azure explanation Lite appends (#1631): error 300 on Azure SQL Database is a service
                objective limit phrased as a permission denied on 'master', which reads as a missing GRANT
                and sends people looking for one that cannot be issued. Appended, so the raw error stays
-               searchable. Parity is the point — a Darling operator gets the identical sentence Lite gives. */
+               searchable. Parity is the point — a Darling operator gets the identical sentence Lite gives.
+               8189 is sys.traces' own denial ("You do not have permission to run 'SYS.TRACES'", ALTER
+               TRACE missing): a legitimate least-privilege choice (#1823) — ALTER TRACE is not read-only —
+               so default_trace_events must degrade as PERMISSIONS, not scream ERROR every cycle. */
             var message = ex.Message + AzureDmvPermissionHint.For(ex.Number, server.Runtime?.Target.IsAzureSqlDb == true);
 
             _logger.LogWarning("  [{Server}] {Collector} => insufficient permissions ({Number}): {Message}",

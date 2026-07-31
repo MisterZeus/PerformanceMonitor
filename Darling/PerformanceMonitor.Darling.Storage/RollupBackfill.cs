@@ -88,10 +88,24 @@ public static class RollupBackfill
     /// merely reorder work; it can leave permanent under-coverage that looks like completion.</para>
     ///
     /// <para>DERIVED from <see cref="TimescaleSupport.RollupViews"/> rather than restated. That list already
-    /// carries every rollup's raw table, source relation and source time column; a second hand-kept copy here
-    /// is a drift surface, and #1798 is what drift between two notions of "covered" costs. A rollup is
-    /// hierarchical exactly when its source is keyed on <c>bucket</c> — i.e. it reads another rollup — which is
-    /// also what makes its own grain a day, so the ordering and the bucket width both fall out of one fact.</para>
+    /// carries every rollup's raw table, source relation, source time column and bucket width; a second
+    /// hand-kept copy here is a drift surface, and #1798 is what drift between two notions of "covered"
+    /// costs.</para>
+    ///
+    /// <para><b>Hierarchy and grain are two facts, not one (#1849).</b> They used to be derived from the same
+    /// test — a rollup whose source is keyed on <c>bucket</c> reads another rollup, and every such rollup was
+    /// a daily — so one boolean served as both the ordering key and the bucket width.
+    /// <c>query_store_stats_corrected_hourly</c> is the counter-example: hierarchical, but bucketed in HOURS.
+    /// The width is read from the source list.</para>
+    ///
+    /// <para><b>Ordering is by DEPTH from raw, not by the hierarchical flag (#1869).</b> The flag sorts a chain
+    /// only two levels tall. <c>query_store_stats_daygrain_daily</c> reads
+    /// <c>query_store_stats_interval_daily</c>, which itself reads a rollup — the first three-level chain here
+    /// — and both are "hierarchical", so the boolean cannot separate them. It happened to work while
+    /// <see cref="TimescaleSupport.RollupViews"/> declared them in the right order and LINQ's sort is stable,
+    /// which is a silent dependency on the ORDER OF A LIST for a property the type comments call a correctness
+    /// invariant. Depth reads the edge itself, so a future rollup declared anywhere still lands after its
+    /// source.</para>
     /// </summary>
     public static readonly RollupBackfillTarget[] Targets =
         TimescaleSupport.RollupViews
@@ -100,9 +114,38 @@ public static class RollupBackfill
                 r.RawTable,
                 r.Source,
                 r.SourceTimeColumn,
-                IsDaily: string.Equals(r.SourceTimeColumn, "bucket", StringComparison.Ordinal)))
-            .OrderBy(t => t.IsDaily)
+                IsHierarchical: string.Equals(r.SourceTimeColumn, "bucket", StringComparison.Ordinal),
+                BucketWidth: r.BucketWidth))
+            .OrderBy(SourceDepth)
             .ToArray();
+
+    /// <summary>How many rollups sit between <paramref name="target"/> and the raw table underneath it: 0 for a
+    /// raw-sourced rollup, 1 for one reading a raw-sourced rollup, and so on. The backfill's ordering key —
+    /// refreshing a rollup before its source materializes nothing while REPORTING success (see
+    /// <see cref="Targets"/>). Walking stops at the first source that is not itself a rollup, and the hop count
+    /// is bounded by the list length so a malformed list cannot spin here.</summary>
+    private static int SourceDepth(RollupBackfillTarget target)
+    {
+        var depth = 0;
+        var source = target.Source;
+
+        for (var hop = 0; hop < TimescaleSupport.RollupViews.Length; hop++)
+        {
+            var current = source;
+            var parent = Array.FindIndex(TimescaleSupport.RollupViews,
+                r => string.Equals(r.View, current, StringComparison.Ordinal));
+
+            if (parent < 0)
+            {
+                break;
+            }
+
+            depth++;
+            source = TimescaleSupport.RollupViews[parent].Source;
+        }
+
+        return depth;
+    }
 
     /* ─────────────────────────── the probe ─────────────────────────── */
 
@@ -659,9 +702,12 @@ public sealed class RefreshDisclosure
     }
 }
 
-/// <summary>One rollup to backfill: the view, the RAW table whose oldest row is the coverage target, and whether
-/// it is a hierarchical daily (sourced from its hourly, so it must be refreshed after one).</summary>
-public sealed record RollupBackfillTarget(string View, string RawTable, string Source, string SourceTimeColumn, bool IsDaily);
+/// <summary>One rollup to backfill: the view, the RAW table whose oldest row is the coverage target, the source
+/// it converges to, whether it reads another rollup rather than raw (which orders the run), and its own bucket
+/// width — a SEPARATE fact since #1849, when <c>query_store_stats_corrected_hourly</c> became the first
+/// hierarchical rollup that is not a daily. See <see cref="RollupBackfill.Targets"/>.</summary>
+public sealed record RollupBackfillTarget(
+    string View, string RawTable, string Source, string SourceTimeColumn, bool IsHierarchical, TimeSpan BucketWidth);
 
 /// <summary>One rollup's measured state (<see cref="RollupBackfill.ProbeSql"/>).</summary>
 public sealed record RollupBackfillProbe(

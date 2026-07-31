@@ -166,10 +166,11 @@ public sealed class DarlingDeltaSeederTests
         /* Migrations are idempotent — a fresh store comes up, a current store no-ops. */
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
 
+        var bodySucceeded = false;
         try
         {
             /* Clear leftovers from an earlier aborted run so the assertions below are deterministic. */
-            await DeleteTestRowsAsync(connection);
+            await DeleteTestRowsAsync(connection, TestContext.Current.CancellationToken);
 
             /* Two rows for the same wait type: an older baseline and the latest one, both recent
                enough to stay inside the wait-stats 300-second gap policy. */
@@ -193,10 +194,13 @@ public sealed class DarlingDeltaSeederTests
             /* The same latest row seeded the other two wait-stats delta groups. */
             Assert.Equal(5, deltas.CalculateDelta(TestServerId, "wait_stats_tasks", TestWaitType, 45, now, 300));
             Assert.Equal(200, deltas.CalculateDelta(TestServerId, "wait_stats_signal", TestWaitType, 1000, now, 300));
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteTestRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteTestRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -232,12 +236,23 @@ public sealed class DarlingDeltaSeederTests
            step the service runs on every start. Run the product's own, idempotent, so the pin measures
            the store shape a field install actually has (its real chunk interval included) rather than
            one hand-built here. */
-        await TimescaleSupport.TryEnableAsync(connection, null, TestContext.Current.CancellationToken);
+        /* #1922: on its OWN connection. This site discarded the result entirely and then kept using the same
+           connection for the whole test, so an unpreloaded TimescaleDB left every statement below failing
+           with "Connection is not open" instead of the real cause.
+
+           The result is CAPTURED and skipped on rather than discarded, which is the same point one layer up:
+           without TimescaleDB the conversion below fails per table into a swallowed warning, the table stays
+           plain, and the test lands on its own "no per-day chunks to exclude" skip several asserts later —
+           true, but arrived at by inference. Saying it here names the actual condition. */
+        var timescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(connectionString!, TestContext.Current.CancellationToken);
+        Assert.SkipWhen(!timescaleEnabled, "TimescaleDB is not enabled on DARLING_TEST_PG — there are no chunks to exclude.");
+
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, TestContext.Current.CancellationToken);
 
+        var bodySucceeded = false;
         try
         {
-            await DeleteTestRowsAsync(connection);
+            await DeleteTestRowsAsync(connection, TestContext.Current.CancellationToken);
 
             var insideWindow = DateTime.SpecifyKind(DateTime.UtcNow.AddMinutes(-1), DateTimeKind.Unspecified);
             var twoDaysBack = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-2), DateTimeKind.Unspecified);
@@ -255,10 +270,13 @@ public sealed class DarlingDeltaSeederTests
 
             Assert.DoesNotContain(oldChunk!, plan, StringComparison.Ordinal);
             Assert.Contains(recentChunk!, plan, StringComparison.Ordinal);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteTestRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteTestRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -353,10 +371,10 @@ public sealed class DarlingDeltaSeederTests
         await insert.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 
-    private static async Task DeleteTestRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteTestRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM wait_stats WHERE server_id = {TestServerId}", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

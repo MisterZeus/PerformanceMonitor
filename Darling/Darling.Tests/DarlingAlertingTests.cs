@@ -66,6 +66,8 @@ public sealed class DarlingAlertingTests
         Assert.Equal(80, settings.CpuThresholdPercent);
         Assert.Equal(CpuAlertMode.TotalServer, settings.CpuAlertMode); /* Lite default CpuAlertMode.Total */
         Assert.Equal(1, settings.BlockingCountThreshold);
+        /* #1839 ships OFF (0) in both SKUs — a new alert must not start firing on upgrade. */
+        Assert.Equal(0, settings.BlockingWaitSecondsThreshold);
         Assert.Equal(1, settings.DeadlockCountThreshold);
         Assert.Equal(500, settings.PoisonWaitThresholdMs);
         Assert.Equal(30, settings.LongRunningQueryThresholdMinutes);
@@ -213,10 +215,11 @@ public sealed class DarlingAlertingTests
         await PgMigrations.MigrateAsync(connection, ct);
 
         /* Clear leftovers from an earlier aborted run so the assertions below are deterministic. */
-        await DeleteTestRowsAsync(connection);
+        await DeleteTestRowsAsync(connection, ct);
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             /* All timestamps Kind-Unspecified — naive-UTC storage, see PgCollectorRowWriter. */
@@ -323,10 +326,13 @@ WHERE server_id = $1 AND metric_name = $2", connection))
             var (restartDeliverer, restartEngine) = await BuildStackAsync();
             await restartEngine.EvaluateServerAsync(snapshot, ct);
             Assert.DoesNotContain(restartDeliverer.Outcomes, o => o.MetricName == "Deadlocks Detected");
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteTestRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteTestRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -355,6 +361,7 @@ WHERE server_id = $1 AND metric_name = $2", connection))
             ExpiresAtUtc = DateTime.UtcNow.AddHours(1)
         };
 
+        var bodySucceeded = false;
         try
         {
             await store.InsertAsync(rule);
@@ -373,10 +380,16 @@ WHERE server_id = $1 AND metric_name = $2", connection))
             rule.Reason = "updated";
             await store.UpdateAsync(rule);
             Assert.Equal("updated", (await store.LoadAllAsync()).Single(r => r.Id == rule.Id).Reason);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await store.DeleteAsync(rule.Id);
+            /* RunOwnedAsync rather than RunAsync (#1902): the removal has to go through the STORE, which is
+               the API under test and owns its own NpgsqlDataSource — so it already opens a fresh connection
+               per call and was never exposed to the closed-body-connection half of this defect. Only the
+               masking half applies, and that is what this borrows. */
+            await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, async () => await store.DeleteAsync(rule.Id));
         }
 
         Assert.DoesNotContain(await store.LoadAllAsync(), r => r.Id == rule.Id);
@@ -392,13 +405,13 @@ WHERE server_id = $1 AND metric_name = $2", connection))
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 
-    private static async Task DeleteTestRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteTestRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM deadlocks WHERE server_id = {TestServerId};" +
             $"DELETE FROM wait_stats WHERE server_id = {TestServerId};" +
             $"DELETE FROM config_alert_log WHERE server_id = {TestServerId};" +
             $"DELETE FROM config_edge_trigger_watermarks WHERE server_id = {TestServerId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

@@ -93,6 +93,40 @@ public sealed partial class ViewerDataService
     }
 
     public const string QueryStoreItemTimelineSql = """
+        WITH deduped AS (
+            /* LOAD-BEARING (correctness, not just perf) — #1841. The rows are CUMULATIVE per-interval
+               snapshots and the collector re-fetches the OPEN interval every cycle, so an un-deduped
+               projection draws one interval as a rising staircase of avg_* x execution_count products
+               that are restatements of the same work, not new work.
+
+               Two reasons this read needs it even though it has no SUM. (1) This series is drawn OVER the
+               Query Store slicer bars, which ARE deduped (QueryStoreSlicerSql) — leaving the overlay raw
+               would make the overlay disagree with the bars it annotates. (2) The WHERE narrows to
+               query_id + plan_id but NOT to an interval, so one collection cycle can return several
+               intervals for the same plan; the reader appends those as separate points at the SAME
+               x-coordinate. Deduping per interval collapses the restatements while keeping genuinely
+               distinct intervals as their own points. */
+            SELECT
+                collection_time,
+                execution_count,
+                avg_cpu_time_us,
+                avg_duration_us,
+                avg_logical_io_reads,
+                avg_logical_io_writes,
+                avg_physical_io_reads,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
+                    ORDER BY collection_time DESC, execution_count DESC
+                ) AS rn
+            FROM query_store_stats
+            WHERE server_id = $1
+            AND   database_name = $2
+            AND   query_id = $3
+            AND   plan_id = $4
+            AND   collection_time >= $5
+            AND   collection_time <= $6
+        )
         SELECT
             collection_time,
             COALESCE(CAST(avg_cpu_time_us AS double precision) * execution_count, 0) / 1000.0 AS cpu_ms,
@@ -100,13 +134,8 @@ public sealed partial class ViewerDataService
             COALESCE(CAST(avg_logical_io_reads AS double precision) * execution_count, 0) AS reads,
             COALESCE(CAST(avg_logical_io_writes AS double precision) * execution_count, 0) AS writes,
             COALESCE(CAST(avg_physical_io_reads AS double precision) * execution_count, 0) AS physical_reads
-        FROM query_store_stats
-        WHERE server_id = $1
-        AND   database_name = $2
-        AND   query_id = $3
-        AND   plan_id = $4
-        AND   collection_time >= $5
-        AND   collection_time <= $6
+        FROM deduped
+        WHERE rn = 1
         ORDER BY collection_time
         """;
 

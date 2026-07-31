@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 
 namespace PerformanceMonitor.Common
 {
@@ -426,6 +427,55 @@ namespace PerformanceMonitor.Common
         public static bool IsOnLoadCollector(string? collectorName) =>
             collectorName is not null && OnLoadCollectorNames.Contains(collectorName);
 
+        /// <summary>
+        /// The collectors whose enumeration draws its item list from the target's USER DATABASES — exactly
+        /// the collectors that override <c>BuildEnumerationQuery</c> today. For these, and only these,
+        /// "the enumeration yielded 0 items" is worth qualifying against whether the target has any user
+        /// databases at all (#1852): zero items on a server that has none is the ordinary, legitimate case
+        /// and must stay quiet, while zero items on a server that HAS them is the interesting one — a login
+        /// that cannot enter any of them, an exclusion filter that swallowed everything, or a feature no
+        /// database has turned on.
+        ///
+        /// <para>Kept as an explicit name set for the same reason <see cref="OnLoadCollectorNames"/> is: so
+        /// this classifier stays free of a dependency on the collector catalog. Both apps' suites pin the
+        /// set against the catalog's actual enumerators, so a collector cannot start enumerating without a
+        /// decision landing here.</para>
+        /// </summary>
+        private static readonly HashSet<string> UserDatabaseEnumeratorNames = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "query_store",
+            "database_scoped_config",
+            "index_object_stats",
+        };
+
+        /// <summary>
+        /// True when this collector enumerates the target's user databases, so a persistently empty
+        /// enumeration can be qualified against whether the target actually has any (#1852). False for every
+        /// other collector, which is what keeps an unmapped collector's note unqualified.
+        /// </summary>
+        public static bool ExpectsUserDatabases(string? collectorName) =>
+            collectorName is not null && UserDatabaseEnumeratorNames.Contains(collectorName);
+
+        /// <summary>
+        /// The leading text of the shared empty-enumeration note
+        /// (<c>EnumeratedCollectorDriver.EmptyEnumerationMessage</c>), matched to tell that note apart from
+        /// the probe-failure summary — which names its own cause and needs no inventory qualifier.
+        ///
+        /// <para>Duplicated here rather than referenced because PerformanceMonitor.Common deliberately does
+        /// not depend on PerformanceMonitor.Collectors — the same boundary <see cref="OnLoadCollectorNames"/>
+        /// keeps, and inverting it would drag the collector layer into every consumer of Common. Both apps'
+        /// suites pin the two strings against each other, so editing one alone fails a build.</para>
+        /// </summary>
+        public const string EmptyEnumerationMarker = "enumeration yielded 0 items";
+
+        /// <summary>
+        /// What the qualifier adds inside the "(all N runs)" parentheses when the inventory says a
+        /// persistently empty enumeration is surprising (#1852). Deliberately a statement about the TARGET
+        /// rather than a verdict: the row stays HEALTHY and the operator gets the one fact that separates
+        /// "nothing to collect" from "collecting nothing".
+        /// </summary>
+        public const string HasUserDatabasesQualifier = "target has user databases";
+
         /// <summary>The FAILING cutoff (hours since last success) for a collector of the given cadence.</summary>
         public static double FailingThresholdHours(int frequencyMinutes) =>
             Math.Max(FailingFloorHours, FailingCadenceMultiplier * (frequencyMinutes / 60.0));
@@ -486,6 +536,86 @@ namespace PerformanceMonitor.Common
             }
 
             return Healthy;
+        }
+
+        /// <summary>
+        /// Renders the informational note a collector's NON-failing runs left behind (#1837) — an
+        /// enumeration that yielded 0 items, items whose enumeration probe failed — qualified by how much
+        /// of the window carried it. Empty string when there is nothing to say, which is the overwhelmingly
+        /// common case and keeps the column blank for a plainly healthy collector.
+        ///
+        /// <para>
+        /// Deliberately NOT a band and deliberately not an input to <see cref="Classify"/>. A target with
+        /// no user databases, no AGs, or nothing matching a collector's filter is legitimately empty and
+        /// must keep reading HEALTHY; making "empty" a band would cry wolf on exactly those installs. What
+        /// an operator actually needs is the DISTINCTION — "this collector has been coming back with
+        /// nothing" as a fact next to the green band, so a zero-row week is a thing you can see instead of
+        /// something you have to already suspect. The qualifier carries that: <c>all N runs</c> means every
+        /// run in the window came back empty, which is the persistently-empty signal; a fraction means it
+        /// happens sometimes, which is normal for a collector whose databases go quiet.
+        /// </para>
+        ///
+        /// <para>
+        /// Both counts come from the collection_log aggregate the health grid already reads, so the
+        /// qualifier itself adds no signal and no query. #1852 adds ONE more input —
+        /// <paramref name="targetHasUserDatabases"/> — and only to the per-server reads, which is what
+        /// turns "this collector has been coming back with nothing" into "…on a target that HAS user
+        /// databases". Still not a band: <see cref="Classify"/> reads none of this.
+        /// </para>
+        /// </summary>
+        /// <param name="lastNote">
+        /// The note text (health SQL's <c>last_note</c>); null/blank = nothing to render. Since #1855 it
+        /// is the message from the NEWEST run in the window that left one, so a probe note whose count
+        /// moves cycle to cycle shows the latest number rather than the greatest string.
+        /// </param>
+        /// <param name="noteCount">Runs in the window that carried a note (<c>note_count</c>).</param>
+        /// <param name="totalRuns">Runs in the window (<c>total_runs</c>).</param>
+        /// <param name="collectorName">
+        /// The collector the row describes, used only to decide whether an empty enumeration is worth
+        /// qualifying (<see cref="ExpectsUserDatabases"/>). Omitted = unmapped = never qualified.
+        /// </param>
+        /// <param name="targetHasUserDatabases">
+        /// Whether the store observed user databases on this target inside the health read's own window
+        /// (health SQL's <c>has_user_databases</c>). Defaults to FALSE, and false means silence: an
+        /// inventory that is absent, stale past the window, or simply not collected says nothing about
+        /// whether the emptiness is surprising, and a false alarm on a legitimately empty install is
+        /// worse than a missing hint. The fleet rollup passes nothing at all, by design.
+        /// </param>
+        public static string FormatCollectionNote(
+            string? lastNote,
+            long noteCount,
+            long totalRuns,
+            string? collectorName = null,
+            bool targetHasUserDatabases = false)
+        {
+            if (string.IsNullOrWhiteSpace(lastNote) || noteCount <= 0)
+            {
+                return string.Empty;
+            }
+
+            /* >= rather than ==: the counts come from one GROUP BY over the same window, so they cannot
+               disagree, but "all" must never be the branch that a future off-by-one turns into "97 of 96". */
+            if (noteCount < totalRuns || totalRuns <= 0)
+            {
+                return string.Format(CultureInfo.InvariantCulture, "{0} ({1} of {2} runs)", lastNote, noteCount, totalRuns);
+            }
+
+            /* #1852, all three conditions load-bearing:
+               - PERSISTENCE is the "all N runs" branch itself. A sometimes-empty collector is normal and
+                 gets no qualifier, however much inventory the target has.
+               - The note must be the EMPTY-ENUMERATION one. A probe-failure note already says why the
+                 enumeration came back short, and appending "target has user databases" to it would restate
+                 what the operator just read.
+               - The collector must actually enumerate user databases. Everything else — a note from a
+                 collector with no inventory to compare against — stays exactly as it read before. */
+            var qualified =
+                targetHasUserDatabases
+                && ExpectsUserDatabases(collectorName)
+                && lastNote.Contains(EmptyEnumerationMarker, StringComparison.Ordinal);
+
+            return qualified
+                ? string.Format(CultureInfo.InvariantCulture, "{0} (all {1} runs, {2})", lastNote, totalRuns, HasUserDatabasesQualifier)
+                : string.Format(CultureInfo.InvariantCulture, "{0} (all {1} runs)", lastNote, totalRuns);
         }
     }
 }

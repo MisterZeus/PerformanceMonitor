@@ -77,6 +77,18 @@ public sealed class ProcedureStatsCollectorDefinitionTests
     }
 
     [Fact]
+    public void RunsPerDatabase_OnAzureOnly()
+    {
+        /* #1833: without the per-database override, the Azure variant ran once on the server
+           entry's own connection (master when the Database field is blank), where its
+           database_id = DB_ID() filter matched nothing — zero user rows, logged SUCCESS. The
+           per-database connection is what makes that predicate mean each user database. */
+        Assert.True(ProcedureStatsCollector.Instance.RunsPerDatabase(new CollectorTargetInfo { IsAzureSqlDb = true }));
+        Assert.False(ProcedureStatsCollector.Instance.RunsPerDatabase(new CollectorTargetInfo()));
+        Assert.False(ProcedureStatsCollector.Instance.RunsPerDatabase(new CollectorTargetInfo { IsAzureManagedInstance = true }));
+    }
+
+    [Fact]
     public void BuildQuery_HandlesConvertToVarchar130_NeverTruncated()
     {
         /* plan_handle/sql_handle are varbinary(64); style-1 hex is '0x' + 128 = 130 chars. The old

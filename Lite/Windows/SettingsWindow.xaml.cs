@@ -162,14 +162,16 @@ public partial class SettingsWindow : Window
         if (_backgroundService.IsPaused)
         {
             CollectionStatusText.Text = "Status: Paused";
-            PauseResumeButton.Content = "Resume Collection";
+            /* The "_" keeps Alt+L alive across the state swap — see the XAML for why the key is on
+               "Collection" (the word both states share) rather than on the verb. */
+            PauseResumeButton.Content = "Resume Co_llection";
         }
         else
         {
             CollectionStatusText.Text = _backgroundService.IsCollecting
                 ? "Status: Collecting..."
                 : "Status: Active";
-            PauseResumeButton.Content = "Pause Collection";
+            PauseResumeButton.Content = "Pause Co_llection";
         }
     }
 
@@ -484,6 +486,7 @@ public partial class SettingsWindow : Window
         AlertCpuModeBox.SelectedIndex = App.AlertCpuMode == CpuAlertMode.SqlOnly ? 1 : 0;
         AlertBlockingCheckBox.IsChecked = App.AlertBlockingEnabled;
         AlertBlockingThresholdBox.Text = App.AlertBlockingThreshold.ToString();
+        AlertBlockingWaitSecondsBox.Text = App.AlertBlockingWaitSecondsThreshold.ToString();
         AlertDeadlockCheckBox.IsChecked = App.AlertDeadlockEnabled;
         AlertDeadlockThresholdBox.Text = App.AlertDeadlockThreshold.ToString();
         AlertPoisonWaitCheckBox.IsChecked = App.AlertPoisonWaitEnabled;
@@ -548,6 +551,10 @@ public partial class SettingsWindow : Window
         App.AlertBlockingEnabled = AlertBlockingCheckBox.IsChecked == true;
         if (int.TryParse(AlertBlockingThresholdBox.Text, out var blocking) && blocking > 0)
             App.AlertBlockingThreshold = blocking;
+        /* #1839: >= 0, not > 0 like its siblings — 0 is this setting's OFF value, so rejecting it would
+           make the gate impossible to turn back off once enabled. */
+        if (int.TryParse(AlertBlockingWaitSecondsBox.Text, out var blockingWait) && blockingWait >= 0)
+            App.AlertBlockingWaitSecondsThreshold = blockingWait;
         App.AlertDeadlockEnabled = AlertDeadlockCheckBox.IsChecked == true;
         if (int.TryParse(AlertDeadlockThresholdBox.Text, out var deadlock) && deadlock > 0)
             App.AlertDeadlockThreshold = deadlock;
@@ -638,6 +645,7 @@ public partial class SettingsWindow : Window
             root["alert_cpu_mode"] = App.AlertCpuMode.ToString();
             root["alert_blocking_enabled"] = App.AlertBlockingEnabled;
             root["alert_blocking_threshold"] = App.AlertBlockingThreshold;
+            root["alert_blocking_wait_seconds_threshold"] = App.AlertBlockingWaitSecondsThreshold;
             root["alert_deadlock_enabled"] = App.AlertDeadlockEnabled;
             root["alert_deadlock_threshold"] = App.AlertDeadlockThreshold;
             root["alert_poison_wait_enabled"] = App.AlertPoisonWaitEnabled;
@@ -703,9 +711,11 @@ public partial class SettingsWindow : Window
         AlertCpuThresholdBox.Text = "80";
         AlertCpuModeBox.SelectedIndex = 0; // Total
         AlertBlockingThresholdBox.Text = "1";
+        AlertBlockingWaitSecondsBox.Text = "0";
         AlertDeadlockThresholdBox.Text = "1";
         AlertPoisonWaitThresholdBox.Text = "500";
         AlertLongRunningQueryThresholdBox.Text = "30";
+        AlertLongRunningQueryMaxResultsBox.Text = "5";
         AlertTempDbSpaceThresholdBox.Text = "80";
         AlertLowDiskThresholdPercentBox.Text = "10";
         AlertLowDiskThresholdGbBox.Text = "5";
@@ -739,7 +749,12 @@ public partial class SettingsWindow : Window
             parts.Add($"{cpuLabel} > {AlertCpuThresholdBox.Text}%");
         }
         if (AlertBlockingCheckBox.IsChecked == true)
+        {
             parts.Add($"blocking >= {AlertBlockingThresholdBox.Text}");
+            /* #1839: only summarize the wait gate when it is actually on (0 = off). */
+            if (int.TryParse(AlertBlockingWaitSecondsBox.Text, out var blockingWaitPreview) && blockingWaitPreview > 0)
+                parts.Add($"blocked wait >= {blockingWaitPreview}s");
+        }
         if (AlertDeadlockCheckBox.IsChecked == true)
             parts.Add($"deadlocks >= {AlertDeadlockThresholdBox.Text}");
         if (AlertPoisonWaitCheckBox.IsChecked == true)
@@ -769,12 +784,14 @@ public partial class SettingsWindow : Window
         AlertCpuModeBox.IsEnabled = enabled;
         AlertBlockingCheckBox.IsEnabled = enabled;
         AlertBlockingThresholdBox.IsEnabled = enabled;
+        AlertBlockingWaitSecondsBox.IsEnabled = enabled;
         AlertDeadlockCheckBox.IsEnabled = enabled;
         AlertDeadlockThresholdBox.IsEnabled = enabled;
         AlertPoisonWaitCheckBox.IsEnabled = enabled;
         AlertPoisonWaitThresholdBox.IsEnabled = enabled;
         AlertLongRunningQueryCheckBox.IsEnabled = enabled;
         AlertLongRunningQueryThresholdBox.IsEnabled = enabled;
+        AlertLongRunningQueryMaxResultsBox.IsEnabled = enabled;
         AlertTempDbSpaceCheckBox.IsEnabled = enabled;
         AlertTempDbSpaceThresholdBox.IsEnabled = enabled;
         AlertLowDiskCheckBox.IsEnabled = enabled;
@@ -949,7 +966,7 @@ public partial class SettingsWindow : Window
             App.SmtpFromAddress = origFrom;
             App.SmtpRecipients = origRecipients;
 
-            TestEmailButton.Content = "Send Test Email";
+            TestEmailButton.Content = "Send Test _Email";
             TestEmailButton.IsEnabled = true;
         }
     }
@@ -1203,7 +1220,7 @@ public partial class SettingsWindow : Window
         }
         finally
         {
-            TestTeamsButton.Content = "Send Test Notification";
+            TestTeamsButton.Content = "Send Test to _Teams";
             TestTeamsButton.IsEnabled = true;
         }
     }
@@ -1234,7 +1251,7 @@ public partial class SettingsWindow : Window
         }
         finally
         {
-            TestSlackButton.Content = "Send Test Notification";
+            TestSlackButton.Content = "Send Test to Slac_k";
             TestSlackButton.IsEnabled = true;
         }
     }
@@ -1295,7 +1312,7 @@ public partial class SettingsWindow : Window
         }
         finally
         {
-            TestGenericButton.Content = "Send Test Notification";
+            TestGenericButton.Content = "Send Test to _Webhook";
             TestGenericButton.IsEnabled = true;
         }
     }

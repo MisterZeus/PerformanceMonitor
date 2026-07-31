@@ -82,9 +82,19 @@ SET LOCK_TIMEOUT 1000;
 DECLARE @cdc_capture_jobs TABLE (job_id uniqueidentifier PRIMARY KEY);
 DECLARE @cdc_readable bit = 0;
 BEGIN TRY
-    INSERT @cdc_capture_jobs (job_id)
-    EXEC sys.sp_executesql N'SELECT cj.job_id FROM msdb.dbo.cdc_jobs AS cj WHERE cj.job_type = N''capture'';';
-    SET @cdc_readable = 1;
+    /* Existence pre-guard, not just the TRY/CATCH: msdb.dbo.cdc_jobs is created lazily on first CDC
+       configuration, so on a never-CDC server the probe raised error 208 every cycle. The CATCH absorbed
+       the failure (collection proceeded on the text fallback), but TRY/CATCH suppresses the failure, not
+       the server-side error_reported EVENT - fleet error monitoring watching those events saw a
+       once-per-cycle "Invalid object name" from every no-CDC server. OBJECT_ID also returns NULL when the
+       table exists but the login lacks metadata visibility; that lands on the same text fallback the
+       CATCH would have. The TRY/CATCH stays as the belt for denied SELECTs and races. */
+    IF OBJECT_ID(N'msdb.dbo.cdc_jobs') IS NOT NULL
+    BEGIN
+        INSERT @cdc_capture_jobs (job_id)
+        EXEC sys.sp_executesql N'SELECT cj.job_id FROM msdb.dbo.cdc_jobs AS cj WHERE cj.job_type = N''capture'';';
+        SET @cdc_readable = 1;
+    END;
 END TRY
 BEGIN CATCH
     SET @cdc_readable = 0;

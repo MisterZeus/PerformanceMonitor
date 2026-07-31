@@ -194,6 +194,110 @@ public sealed class ViewerWave3DisplayTests
         Assert.Equal(expected, AlertRow(metric: metric, current: value).CurrentValueDisplay);
     }
 
+    [Fact]
+    public void LegacyTempDbSpaceName_StillRendersAsPercent()
+    {
+        /* Lite's twin pin (AlertHistoryValueFormatTests). The tempdb token was lowercased across both
+           apps' UI (c0109f34), changing this metric's metric_name KEY from "TempDB Space" to
+           "tempdb Space"; stored alert-history rows keep the old name, and ordinal matching sent them to
+           the :F2 default with no unit. Both spellings must format identically, in both apps. */
+        Assert.Equal("87.3%", AlertRow(metric: "TempDB Space", current: 87.3).CurrentValueDisplay);
+        Assert.Equal(
+            AlertRow(metric: "tempdb Space", current: 87.3).CurrentValueDisplay,
+            AlertRow(metric: "TempDB Space", current: 87.3).CurrentValueDisplay);
+    }
+
+    /* ── #1846 state-only metrics ──────────────────────────────────────────────────────────────────
+       Lite's twin pins live in AlertHistoryValueFormatTests; both grids run the SAME shared predicate
+       (AlertMetricClassifier.IsStateOnly), so this suite pins the Darling side of that contract. Darling
+       carries the bulk of these rows: every self-alert recovery and every shared-engine resolution
+       reaches alert history through Darling's deliverer, where Lite's resolution callback is toast-only
+       and writes no row at all. */
+
+    /// <summary>
+    /// The exact metric-name strings whose stored 0 is a sentinel rather than a measurement. Held
+    /// separately from Lite's copy on purpose: if the two lists ever diverge, that IS the bug.
+    /// </summary>
+    public static TheoryData<string> StateOnlyMetrics() => new()
+    {
+        /* The five actionable state metrics — a role_desc, a connected_state_desc, JudgeSync's prose
+           reason, the suspend_reason_desc, and the connection failure reason. */
+        "AG Failover",
+        "AG Replica Disconnected",
+        "AG Sync Fell Behind",
+        "AG Database Suspended",
+        "Server Unreachable",
+
+        /* The AG/connection resolutions. */
+        "AG Replica Reconnected",
+        "AG Sync Recovered",
+        "AG Data Movement Resumed",
+        "Server Restored",
+
+        /* Darling's own self-alert recoveries, all written by BuildResolutionRecord, which hardcodes
+           CurrentValueText: "resolved" and ThresholdValueText: "" with both numerics null. */
+        "Collection Resumed",
+        "Capture Restored",
+        "Agent Restarted",
+        "Store Disk Pressure Resolved",
+        "Compression Job Recovered",
+
+        /* The shared alert engine's resolution callback, which reaches history only in Darling. */
+        "CPU Resolved",
+        "Blocking Cleared",
+        "Blocking Wait Cleared",
+        "Deadlocks Cleared",
+        "Poison Waits Cleared",
+        "Long-Running Queries Cleared",
+        "tempdb Space Resolved",
+        "Volume Free Space Resolved",
+        "Long-Running Jobs Cleared",
+    };
+
+    [Theory]
+    [MemberData(nameof(StateOnlyMetrics))]
+    public void StateOnlyMetric_StoredZero_RendersDashNotZeroPointZeroZero(string metric)
+    {
+        Assert.Equal("—", AlertRow(metric: metric, current: 0).CurrentValueDisplay);
+        Assert.Equal("—", AlertRow(metric: metric, threshold: 0).ThresholdValueDisplay);
+    }
+
+    [Theory]
+    [MemberData(nameof(StateOnlyMetrics))]
+    public void StateOnlyMetric_NonZero_StillRendersTheNumber(string metric)
+    {
+        /* Defensive: the dash is gated on the 0 sentinel, not the metric name alone, so a future
+           producer that starts passing a real numeric is not hidden behind it. */
+        Assert.Equal("42.00", AlertRow(metric: metric, current: 42).CurrentValueDisplay);
+    }
+
+    [Theory]
+    [InlineData("High CPU", "0.0%")]
+    [InlineData("tempdb Space", "0.0%")]
+    [InlineData("Volume Free Space", "0.0%")]
+    [InlineData("Long-Running Job", "0.0%")]
+    [InlineData("Poison Wait", "0 ms")]
+    [InlineData("Long-Running Query", "0 m")]
+    [InlineData("Blocking Wait Time", "0 s")]
+    [InlineData("Blocking Detected", "0")]
+    [InlineData("Deadlocks Detected", "0")]
+    [InlineData("Failed Agent Job", "0")]
+    public void MeasuredMetric_AtZero_KeepsItsNumber(string metric, string expected)
+    {
+        /* The dash must never swallow a real measurement that happens to be zero — "no blocking right
+           now" and "no value was ever measured" are different statements. */
+        Assert.Equal(expected, AlertRow(metric: metric, current: 0).CurrentValueDisplay);
+    }
+
+    [Fact]
+    public void StoreDiskPressure_AtZero_RendersZero_BecauseZeroPercentFreeIsReal()
+    {
+        /* Deliberately NOT state-only even though its producer passes no numeric: its text
+           ("… has only 3% free (…)") carries a digit, so the parser stores percent-free, and a genuine 0
+           there means a FULL VOLUME. This is a Darling-only self-alert, so this pin only exists here. */
+        Assert.Equal("0.00", AlertRow(metric: "Store Disk Pressure", current: 0).CurrentValueDisplay);
+    }
+
     [Theory]
     [InlineData("email", true, null, "Sent")]
     [InlineData("email", false, "smtp exploded", "Failed")]
@@ -288,12 +392,13 @@ public sealed class ViewerWave3LivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteFindingRowsAsync(connection);
+        await DeleteFindingRowsAsync(connection, TestContext.Current.CancellationToken);
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
         var store = new PgFindingStore(postgres);
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             /* Seed one persisted finding for the server. */
@@ -338,10 +443,13 @@ public sealed class ViewerWave3LivePostgresTests
             /* Unmute via the viewer — the flag clears on the next read. */
             await viewer.UnmuteFindingAsync(afterMute.MuteId!.Value);
             Assert.False(Assert.Single(await viewer.GetLatestFindingsAsync(FindingServerId)).IsMuted);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteFindingRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteFindingRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -355,10 +463,11 @@ public sealed class ViewerWave3LivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteMuteRuleRowsAsync(connection);
+        await DeleteMuteRuleRowsAsync(connection, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var rule = new MuteRule
@@ -408,10 +517,13 @@ public sealed class ViewerWave3LivePostgresTests
             var removed = await viewer.PurgeExpiredMuteRulesAsync();
             Assert.True(removed >= 1);
             Assert.DoesNotContain(await viewer.GetMuteRulesAsync(), r => r.Id == MuteRuleId);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteMuteRuleRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteMuteRuleRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -425,10 +537,11 @@ public sealed class ViewerWave3LivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteAlertRowsAsync(connection);
+        await DeleteAlertRowsAsync(connection, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var now = TruncateToSeconds(DateTime.UtcNow);
@@ -450,10 +563,13 @@ public sealed class ViewerWave3LivePostgresTests
             /* The read carries the raw context_json (the #1140 dedup fingerprint) through unchanged. */
             Assert.NotNull(row.ContextJson);
             Assert.Contains("DedupKey", row.ContextJson, StringComparison.Ordinal);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteAlertRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteAlertRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -486,25 +602,25 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)", connection);
     private static DateTime TruncateToSeconds(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
 
-    private static async Task DeleteFindingRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteFindingRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM analysis_findings WHERE server_id = {FindingServerId}; DELETE FROM analysis_muted WHERE server_id = {FindingServerId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task DeleteMuteRuleRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteMuteRuleRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand("DELETE FROM config_mute_rules WHERE id = $1 OR server_name = $2", connection);
         cleanup.Parameters.AddWithValue(MuteRuleId);
         cleanup.Parameters.AddWithValue(MuteRuleServer);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task DeleteAlertRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteAlertRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM config_alert_log WHERE server_id = {AlertServerId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

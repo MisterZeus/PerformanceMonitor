@@ -116,11 +116,12 @@ public sealed class ViewerBlockingStatsLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "blocked_process_reports", StatsServerId);
-        await DeleteRowsAsync(connection, "dmv_blocking_snapshots", StatsServerId);
+        await DeleteRowsAsync(connection, "blocked_process_reports", StatsServerId, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "dmv_blocking_snapshots", StatsServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var baseTime = TruncateToMinute(DateTime.UtcNow.AddMinutes(-10));
@@ -154,7 +155,7 @@ public sealed class ViewerBlockingStatsLivePostgresTests
             Assert.Equal(500.0, withXe[1].AvgDurationMs, precision: 3);
 
             /* Remove the XE rows: now the DMV fallback contributes its two minute-A rows (9999 ms each). */
-            await DeleteRowsAsync(connection, "blocked_process_reports", StatsServerId);
+            await DeleteRowsAsync(connection, "blocked_process_reports", StatsServerId, TestContext.Current.CancellationToken);
             var dmvOnly = await viewer.GetBlockingDurationStatsAsync(StatsServerId, baseTime.AddMinutes(-1), baseTime.AddMinutes(10));
 
             Assert.Single(dmvOnly);
@@ -162,11 +163,16 @@ public sealed class ViewerBlockingStatsLivePostgresTests
             Assert.Equal(19998, dmvOnly[0].TotalDurationMs);
             Assert.Equal(9999, dmvOnly[0].MaxDurationMs);
             Assert.Equal(9999.0, dmvOnly[0].AvgDurationMs, precision: 3);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "blocked_process_reports", StatsServerId);
-            await DeleteRowsAsync(connection, "dmv_blocking_snapshots", StatsServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteRowsAsync(cleanup, "blocked_process_reports", StatsServerId, cleanupCt);
+                await DeleteRowsAsync(cleanup, "dmv_blocking_snapshots", StatsServerId, cleanupCt);
+            });
         }
     }
 
@@ -225,9 +231,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)", connection);
     private static DateTime TruncateToMinute(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerMinute)), DateTimeKind.Unspecified);
 
-    private static async Task DeleteRowsAsync(NpgsqlConnection connection, string table, int serverId)
+    private static async Task DeleteRowsAsync(NpgsqlConnection connection, string table, int serverId, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand($"DELETE FROM {table} WHERE server_id = {serverId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

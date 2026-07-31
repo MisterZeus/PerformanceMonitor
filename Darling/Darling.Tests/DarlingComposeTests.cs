@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -512,23 +512,57 @@ public sealed class DarlingComposeTests
     public void Compile_OldWindow_QueryStore_WeightedRatio_RoutesToCagg_RemapsWeightedMean()
     {
         /* A 10-day window routes QS to the hourly CAGG; the weighted mean remaps to the reshaped weighted-sum over
-           execution_count_sum (exact, not an avg-of-avgs). A >21d window would route to query_store_stats_daily. */
+           execution_count_sum (exact, not an avg-of-avgs). Since #1849 that is the CORRECTED hourly — same
+           column names, so the compiled expression is byte-identical and only the relation changed. A >21d
+           window would route to the corrected daily. */
         var (compiled, error) = CompileAged(
             "{\"source\":\"query_store_stats\",\"ratio\":\"qs_avg_duration_us\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 10);
         Assert.True(error is null, error);
-        Assert.Contains("FROM collect.query_store_stats_hourly AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.query_store_stats_corrected_hourly AS f", compiled!.Sql, StringComparison.Ordinal);
         Assert.Contains("SUM(f.duration_us_weighted_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0)", compiled.Sql, StringComparison.Ordinal);
     }
 
     [Fact]
     public void Compile_VeryOldWindow_QueryStore_RoutesToDailyCagg()
     {
-        /* A 40-day QS window now routes to query_store_stats_daily (same weighted-sum columns as the hourly). */
+        /* A 40-day QS window routes to the corrected daily (same weighted-sum columns as the hourly). This
+           helper measures no coverage, and #1869's day-grain daily wins only on positive evidence that it
+           holds the window — so with none, the corrected daily keeps it. */
         var (compiled, error) = CompileAged(
             "{\"source\":\"query_store_stats\",\"ratio\":\"qs_avg_duration_us\",\"timeBucket\":\"day\",\"viz\":\"line\"}", daysOld: 40);
         Assert.True(error is null, error);
-        Assert.Contains("FROM collect.query_store_stats_daily AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.query_store_stats_corrected_daily AS f", compiled!.Sql, StringComparison.Ordinal);
         Assert.Contains("SUM(f.duration_us_weighted_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0)", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #1869 end to end through the COMPILER, not just the router: once the day-grain daily has measurably
+    /// materialized the window, the compiled SQL names it — and names nothing else differently. The projection
+    /// is asserted byte-for-byte against the corrected daily's, because the whole design rests on the two
+    /// carrying identical column names so ComposeCaggValueMapper and every composed panel are untouched.
+    /// </summary>
+    [Fact]
+    public void Compile_VeryOldWindow_QueryStore_DayGrainDailyCovered_RoutesThereWithTheSameProjection()
+    {
+        var plan = ValidPlan("{\"source\":\"query_store_stats\",\"ratio\":\"qs_avg_duration_us\",\"timeBucket\":\"day\",\"viz\":\"line\"}");
+        var end = WindowEnd;
+        var start = end.AddDays(-40);
+
+        var coverage = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal)
+            {
+                [TimescaleSupport.QueryStoreStatsCorrectedDailyView] = end.AddDays(-60),
+                [TimescaleSupport.QueryStoreStatsDayGrainDailyView] = end.AddDays(-60),
+            },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal));
+
+        var (compiled, error) = ComposeCompiler.Compile(
+            plan, new ComposeRunContext(null, start, end, ComposeRunContext.NoVariables, RollupAvailability.All, end, coverage));
+
+        Assert.True(error is null, error);
+        Assert.Contains("FROM collect.query_store_stats_daygrain_daily AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(f.duration_us_weighted_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0)", compiled.Sql, StringComparison.Ordinal);
+        Assert.Contains("date_trunc('day', f.bucket)", compiled.Sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1122,6 +1156,78 @@ public sealed class DarlingComposeTests
         Assert.DoesNotContain("config.", sql, StringComparison.Ordinal);
         /* native µs displayed as the default ms — the same /1000 family conversion the other duration ratios use. */
         Assert.Contains("/ 1000.0", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_QueryStoreRawRoute_DedupsPerIntervalBeforeAggregating()
+    {
+        /* #1841. query_store_stats rows are CUMULATIVE per-interval snapshots re-collected every cycle,
+           so the raw route must aggregate the LATEST snapshot per interval, not every stored row. Tier 2
+           made runtime_stats_interval_id the real interval identity, with first_execution_time kept
+           beside it as the tier-1 proxy for rows collected before it existed; server_id is in the
+           partition because a composed panel spans the fleet. */
+        /* Scoped to specific servers on purpose — that is what puts server_name in the outer WHERE, which
+           is the whole reason it has to be in the partition too. */
+        var sql = Compile(
+            ValidPlan("{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}"),
+            servers: ["srv-a", "srv-b"]);
+
+        /* The execution_count tie-break is the #1907 residual and is pinned as part of the ORDER BY rather
+           than left to a looser Contains: collection_time alone was not a total order on rows collected
+           before that fix, where Query Store's flushed and in-memory slices of one interval were stored as
+           two rows sharing this whole partition AND collection_time. It cannot fire on rows collected since
+           — the collector combines the slices — so it exists for what is already stored (#1912). */
+        Assert.Contains(
+            "PARTITION BY server_id, server_name, database_name, query_id, plan_id, runtime_stats_interval_id, "
+            + "first_execution_time, execution_type_desc, replica_role ORDER BY collection_time DESC, execution_count DESC",
+            sql, StringComparison.Ordinal);
+        Assert.Contains("AS qs_rn", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE qs_rn = 1", sql, StringComparison.Ordinal);
+
+        /* server_name must be IN the partition, not only in the outer WHERE: Postgres pushes a qual through
+           a window-function subquery only when the qual's columns appear in every PARTITION BY, so without
+           it a fleet store would rank every server's rows before narrowing to the panel's scope. */
+        var partition = sql.IndexOf("PARTITION BY", StringComparison.Ordinal);
+        var scope = sql.IndexOf("f.server_name = ANY(", StringComparison.Ordinal);
+        Assert.True(scope > partition, "the server scope stays in the outer WHERE, so the partition must carry server_name");
+
+        /* The dedup window is pushed INSIDE the derived table, so "latest" means latest within the
+           panel's window rather than latest overall — and it prunes chunks before the window function. */
+        var relation = sql.IndexOf("collect.query_store_stats ", StringComparison.Ordinal);
+        var innerWindow = sql.IndexOf("WHERE collection_time >= $1 AND collection_time <= $2", StringComparison.Ordinal);
+        Assert.True(relation >= 0 && innerWindow > relation,
+            "the dedup subquery must carry the window predicate itself");
+
+        /* Still only catalog identifiers and the two already-bound window parameters. */
+        Assert.DoesNotContain("config.", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_QueryStoreCaggRoute_IsNotWrappedInTheRawDedup()
+    {
+        /* The read-time dedup belongs to the RAW route only: a CAGG cannot contain a window function at all.
+           Since #1849 the rollup is not un-deduped either — the dedup moved INTO the rollup chain, where
+           query_store_stats_interval_hourly collapses each interval with last(x, collection_time) before the
+           composer-grain view sums it. So this route is correct without the wrapper, not merely un-wrapped. */
+        var (compiled, error) = CompileAged(
+            "{\"source\":\"query_store_stats\",\"ratio\":\"qs_avg_duration_us\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 10);
+        Assert.True(error is null, error);
+
+        Assert.Contains("FROM collect.query_store_stats_corrected_hourly AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("qs_rn", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_NonQueryStoreRawRoute_ReadsTheTableDirectly()
+    {
+        /* The #1841 wrapper is scoped to query_store_stats — every other source keeps its bare
+           "FROM collect.<table> AS f", so this stays a one-table exception rather than a compiler-wide
+           behavior change. */
+        var sql = Compile(ValidPlan(
+            "{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}"));
+
+        Assert.Contains("FROM collect.wait_stats AS f", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("qs_rn", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1949,5 +2055,124 @@ public sealed class DarlingComposeLivePostgresTests
         Assert.DoesNotContain("_hourly", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("_daily", sql, StringComparison.Ordinal);
         Assert.Null(outcome.Payload["notice"]);
+    }
+}
+
+/// <summary>
+/// Gated (DARLING_TEST_PG) execution of the composed Query Store panel against real Postgres. The rest of
+/// the compose suite is string-only, so nothing else ever RUNS the compiler's output — and the #1841 raw
+/// route is a hand-assembled derived table, exactly the shape where a string pin passes while Postgres
+/// rejects the statement (or silently resolves a column the dedup forgot to project).
+/// </summary>
+[Collection("live-postgres")]
+public sealed class ComposeQueryStoreLivePostgresTests
+{
+    private const int ServerId = -970820;
+    private const string ServerName = "compose-qs-dedup";
+
+    private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    [Fact]
+    public async Task ComposedQueryStorePanel_RunsOnPostgres_AndCountsEachIntervalOnce()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live compose Query Store test.");
+
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteAsync(connection, TestContext.Current.CancellationToken);
+
+        var end = new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
+        var bucket = end.AddHours(-2);
+        var firstExecA = bucket.AddMinutes(1);
+        var firstExecB = bucket.AddMinutes(2);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* Interval A re-collected three times with a FLAT count of 1, interval B twice while it grew
+               10 -> 40. True total executions = 1 + 40 = 41; un-deduped = 3 + 50 = 53. */
+            foreach (var minute in new[] { 5, 10, 15 })
+            {
+                await InsertAsync(connection, bucket.AddMinutes(minute), queryId: 1, planId: 11, firstExecA, execCount: 1);
+            }
+
+            await InsertAsync(connection, bucket.AddMinutes(5), queryId: 2, planId: 22, firstExecB, execCount: 10);
+            await InsertAsync(connection, bucket.AddMinutes(10), queryId: 2, planId: 22, firstExecB, execCount: 40);
+
+            var (plan, parseError) = ComposeSpec.TryParsePanel(
+                (JsonObject)JsonNode.Parse("{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}")!,
+                []);
+            Assert.True(parseError is null, parseError);
+
+            var (compiled, compileError) = ComposeCompiler.Compile(
+                plan!,
+                new ComposeRunContext([ServerName], end.AddHours(-3), end, ComposeRunContext.NoVariables,
+                    RollupAvailability.All, end, RollupCoverage.Unknown));
+            Assert.True(compileError is null, compileError);
+
+            /* A 3-hour window ending now stays inside the raw tier, so this is the deduped raw route
+               under test and not the CAGG (whose sums #1841 tier 2 still owes a fix). */
+            Assert.False(compiled!.Route.IsCagg, "the window must stay on the raw route for this test to mean anything");
+
+            await using var command = new NpgsqlCommand(compiled.Sql, connection);
+            foreach (var parameter in compiled.Parameters)
+            {
+                command.Parameters.Add(parameter);
+            }
+
+            var total = 0.0;
+            await using (var reader = await command.ExecuteReaderAsync(TestContext.Current.CancellationToken))
+            {
+                while (await reader.ReadAsync(TestContext.Current.CancellationToken))
+                {
+                    /* Time-series shape: bucket, then value. */
+                    total += reader.GetDouble(reader.GetOrdinal("value"));
+                }
+            }
+
+            Assert.Equal(41.0, total, 3);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteAsync(cleanup, cleanupCt));
+        }
+    }
+
+    private static async Task DeleteAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand("DELETE FROM collect.query_store_stats WHERE server_id = $1", connection);
+        command.Parameters.AddWithValue(ServerId);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task InsertAsync(
+        NpgsqlConnection connection, DateTime collectionTimeUtc, long queryId, long planId, DateTime firstExecutionTimeUtc, long execCount)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO collect.query_store_stats
+    (collection_id, collection_time, server_id, server_name, database_name,
+     query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
+     query_hash, execution_count, avg_duration_us, avg_cpu_time_us)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)", connection);
+        command.Parameters.AddWithValue(1L);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(ServerId);
+        command.Parameters.AddWithValue(ServerName);
+        command.Parameters.AddWithValue("ComposeDb");
+        command.Parameters.AddWithValue(queryId);
+        command.Parameters.AddWithValue(planId);
+        command.Parameters.AddWithValue("Regular");
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(firstExecutionTimeUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue("0xCOMPOSEHASH");
+        command.Parameters.AddWithValue(execCount);
+        command.Parameters.AddWithValue(1000L);
+        command.Parameters.AddWithValue(500L);
+        await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 }

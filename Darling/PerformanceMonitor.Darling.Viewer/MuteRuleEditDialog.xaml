@@ -67,6 +67,7 @@
                   SelectionChanged="MetricCombo_SelectionChanged">
             <ComboBoxItem Content="(any)"/>
             <ComboBoxItem Content="Blocking Detected"/>
+            <ComboBoxItem Content="Blocking Wait Time"/>
             <ComboBoxItem Content="Deadlocks Detected"/>
             <ComboBoxItem Content="High CPU"/>
             <ComboBoxItem Content="Poison Wait"/>
@@ -105,8 +106,11 @@
         </Grid>
 
         <StackPanel Grid.Row="14" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
-            <Button Content="Save" Width="80" Height="30" Margin="0,0,8,0" Click="Save_Click" IsDefault="True"/>
-            <Button Content="Cancel" Width="80" Height="30" Click="Cancel_Click" IsCancel="True"/>
+            <!-- No IsDefault: reason, expiration, server, metric and four pattern boxes make this a
+                 multi-field entry form, where Enter-to-submit is a surprise (#1828/#1859). Matches the
+                 Lite twin, MuteRuleDialog. -->
+            <Button Content="_Save" Width="80" Height="30" Margin="0,0,8,0" Click="Save_Click"/>
+            <Button Content="_Cancel" Width="80" Height="30" Click="Cancel_Click" IsCancel="True"/>
         </StackPanel>
     </Grid>
 </Window>

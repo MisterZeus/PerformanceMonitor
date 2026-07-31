@@ -253,9 +253,16 @@ namespace PerformanceMonitorDashboard
             var startupPrefs = _preferencesService.GetPreferences();
             TabHelpers.CsvSeparator = startupPrefs.CsvSeparator;
             MuteRuleDialog.DefaultExpiration = startupPrefs.MuteRuleDefaultExpiration;
-            // Charts always render in server time; force the dropdown to match on startup
-            // so the display isn't misleading. The preference is still saved when changed.
-            Helpers.ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+            // #1831: the startup override that forced ServerTime here is gone — it existed because
+            // chart axes rendered raw server time regardless of the dropdown, and the least
+            // misleading option was pinning the dropdown to match. The shared axis formatter now
+            // converts through UiTimeContext at render, so the SAVED preference is restored
+            // instead — the force was the only startup assignment, so without this the setting
+            // was written on every change and read never.
+            if (Enum.TryParse<TimeDisplayMode>(startupPrefs.TimeDisplayMode, out var savedDisplayMode))
+            {
+                Helpers.ServerTimeHelper.CurrentDisplayMode = savedDisplayMode;
+            }
 
             // Wire the shared-UI time conversion hook before any chart/crosshair can
             // render (ahead of the tab-opening awaits below). The lambda reads

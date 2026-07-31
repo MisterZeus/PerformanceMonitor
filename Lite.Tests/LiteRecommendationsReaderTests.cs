@@ -180,6 +180,90 @@ public class LiteRecommendationsReaderTests
         Assert.Equal(expectedSql, item.CopyPasteSql);
     }
 
+    [Fact]
+    public void ExtractPlanRegressionTargets_TwoReplicasOfOneQuery_YieldsOneForcePlanTarget()
+    {
+        /* #1850 made the plan-regression drill-down per-REPLICA: on an AG primary with Query Store for
+           secondary replicas enabled, one query can regress on the primary AND on a secondary and arrive
+           as two rows with their own best_plan_id. Both reaching the renderer would emit two
+           sp_query_store_force_plan calls naming the same query with different plan ids — mutually
+           exclusive instructions where whichever the operator runs last silently wins. This pins that
+           they cannot both.
+
+           WHICH one survives is settled by #1882 and pinned in ForcePlanReplicaScopeTests: the PRIMARY's
+           row wins, because the rendered statement omits @replica_group_id and therefore forces on the
+           primary by that argument's documented default. This fixture cannot tell the two rules apart —
+           it seeds the primary with the WORSE regression, so #1850's "keep the first" and #1882's "prefer
+           the primary" agree on it. That is why it kept passing through the #1882 change, and why the
+           discriminating seed (a secondary that regressed HARDER) lives in the other suite. */
+        var finding = Finding("PLAN_REGRESSION", 1.6, database: "MyDb");
+        finding.DrillDown = new Dictionary<string, object>
+        {
+            ["regressed_queries"] = new[]
+            {
+                new Dictionary<string, object>
+                {
+                    ["database"] = "MyDb",
+                    ["query_id"] = 123L,
+                    ["best_plan_id"] = 7L,
+                    ["regression_factor"] = 12.0,
+                    ["replica_role"] = "PRIMARY"
+                },
+                new Dictionary<string, object>
+                {
+                    ["database"] = "MyDb",
+                    ["query_id"] = 123L,
+                    ["best_plan_id"] = 9L,
+                    ["regression_factor"] = 3.0,
+                    ["replica_role"] = "SECONDARY"
+                }
+            }
+        };
+
+        var targets = FactRemediation.ExtractPlanRegressionTargets(finding);
+
+        var target = Assert.Single(targets);
+        Assert.Equal(7L, target.PlanId);
+        Assert.Equal(12.0, target.RegressionFactor);
+
+        /* And the rendered command names that plan once, not two plans for one query. Asserted on the
+           whole EXEC statement rather than on the bare digits "7" and "9": a substring search for a
+           single digit matches any cpu figure, regression factor or URL the renderer happens to emit,
+           so it passes or fails for reasons that have nothing to do with plan ids. */
+        var sql = FactRemediation.GenerateForFinding(finding);
+        Assert.Contains(
+            "EXEC sys.sp_query_store_force_plan @query_id = 123, @plan_id = 7;", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("@plan_id = 9;", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ExtractPlanRegressionTargets_DistinctQueries_AreAllKept()
+    {
+        /* The dedup is per (database, query_id) — it must not collapse different queries, nor the same
+           query_id in a different database, which the cap of 5 would otherwise be doing silently. */
+        var finding = Finding("PLAN_REGRESSION", 1.6, database: "MyDb");
+        finding.DrillDown = new Dictionary<string, object>
+        {
+            ["regressed_queries"] = new[]
+            {
+                new Dictionary<string, object>
+                {
+                    ["database"] = "MyDb", ["query_id"] = 123L, ["best_plan_id"] = 7L, ["regression_factor"] = 12.0
+                },
+                new Dictionary<string, object>
+                {
+                    ["database"] = "MyDb", ["query_id"] = 124L, ["best_plan_id"] = 8L, ["regression_factor"] = 5.0
+                },
+                new Dictionary<string, object>
+                {
+                    ["database"] = "OtherDb", ["query_id"] = 123L, ["best_plan_id"] = 9L, ["regression_factor"] = 4.0
+                }
+            }
+        };
+
+        Assert.Equal(3, FactRemediation.ExtractPlanRegressionTargets(finding).Count);
+    }
+
     // ── BuildCopyPasteSql: the persisted-action renderer for all seven remediation shapes ──────────
     // Lite delegates to the SAME shared FactRemediation.RenderCopyPasteCommand the Darling viewer uses,
     // so these mirror Darling's ViewerRecommendationsTests and prove Lite produces byte-identical

@@ -135,19 +135,22 @@ public sealed class ComposeSourceRouterTests
     [Fact]
     public void QueryStore_RoutesByComposerDims()
     {
-        /* query_store_stats routes by module_name/query_hash (the reshaped composer dims). */
+        /* query_store_stats routes by module_name/query_hash (the reshaped composer dims), and since #1849
+           the primary pair is the CORRECTED one — same dims, same column names, deduped values. */
         var route = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-10), RollupAvailability.All, RollupCoverage.Unknown);
         Assert.Equal(ComposeSourceTier.Hourly, route.Tier);
-        Assert.Equal("query_store_stats_hourly", route.CaggRelation);
+        Assert.Equal("query_store_stats_corrected_hourly", route.CaggRelation);
     }
 
     [Fact]
     public void QueryStore_OldWindow_RoutesToDailyCagg()
     {
-        /* query_store_stats_daily now exists → a 40-day window routes to it, not the 21d-capped hourly. */
+        /* A 40-day window routes to the daily tier, not the 21d-capped hourly — and to the CORRECTED daily
+           since #1849. With no coverage evidence the corrected pair wins: the legacy fallback is comparative
+           and fires only where legacy is MEASURED to reach further back. */
         var route = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-40), RollupAvailability.All, RollupCoverage.Unknown);
         Assert.Equal(ComposeSourceTier.Daily, route.Tier);
-        Assert.Equal("query_store_stats_daily", route.CaggRelation);
+        Assert.Equal("query_store_stats_corrected_daily", route.CaggRelation);
     }
 
     [Fact]
@@ -194,9 +197,241 @@ public sealed class ComposeSourceRouterTests
         Assert.Equal(ComposeSourceTier.Hourly, procedureRoute.Tier);
         Assert.Equal("procedure_stats_hourly", procedureRoute.CaggRelation);
 
-        var qsPartial = RollupAvailability.All with { QueryStoreGrainHourly = false };
+        /* query_store_stats now has TWO rollup families (#1849), so losing ONE hourly view no longer strands
+           the table on raw — the corrected pair still answers. Clearing only the legacy hourly must therefore
+           still route, and route to the CORRECTED view. */
+        var qsLegacyGone = RollupAvailability.All with { QueryStoreGrainHourly = false };
+        var qsLegacyGoneRoute = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-10), qsLegacyGone, RollupCoverage.Unknown);
+        Assert.Equal(ComposeSourceTier.Hourly, qsLegacyGoneRoute.Tier);
+        Assert.Equal(TimescaleSupport.QueryStoreStatsCorrectedHourlyView, qsLegacyGoneRoute.CaggRelation);
+
+        /* Both families' hourly views gone IS the degrade-to-raw case. */
+        var qsPartial = RollupAvailability.All with { QueryStoreGrainHourly = false, QueryStoreCorrectedHourly = false };
         var qsRoute = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-10), qsPartial, RollupCoverage.Unknown);
         Assert.Equal(ComposeSourceTier.Raw, qsRoute.Tier);
+    }
+
+    /* ─────────────── the corrected / legacy Query Store boundary (#1849) ─────────────── */
+
+    /// <summary>
+    /// A store whose service predates the corrected rollups has none of them, and every Query Store window
+    /// must keep routing to the ORIGINAL pair rather than compiling SQL against relations that do not exist.
+    /// This is the #1664/#1665 per-tier degrade doing the job that lets #1849 ship without a schema migration
+    /// or a viewer version gate: existence IS the probe.
+    /// </summary>
+    [Fact]
+    public void QueryStore_CorrectedRollupsAbsent_RoutesToTheLegacyPair()
+    {
+        var old = RollupAvailability.WithoutCorrectedQueryStore;
+
+        var hourly = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-10), old, RollupCoverage.Unknown);
+        Assert.Equal(TimescaleSupport.QueryStoreStatsHourlyView, hourly.CaggRelation);
+
+        var daily = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-40), old, RollupCoverage.Unknown);
+        Assert.Equal(TimescaleSupport.QueryStoreStatsDailyView, daily.CaggRelation);
+    }
+
+    /// <summary>
+    /// WATCHED (mutation): drop the legacy fallback and this goes red. The corrected rollups start EMPTY and
+    /// deepen from deploy, while the original pair already holds up to 21 days of hourly and unbounded daily
+    /// history. A window inside the corrected coverage must read the corrected (deduped) numbers; a window
+    /// OLDER than the corrected rollups have materialized must fall back to the legacy pair, which is the only
+    /// relation holding that history at all — inflated, and documented as such, but present.
+    ///
+    /// <para>The fallback is COMPARATIVE, never absolute: legacy wins only where it measurably reaches
+    /// further back. A store where the corrected pair covers everything asked for must never silently prefer
+    /// the inflated numbers, which the first assertion pins.</para>
+    /// </summary>
+    [Fact]
+    public void QueryStore_BeyondCorrectedCoverage_FallsBackToTheLegacyPair()
+    {
+        /* Corrected materialized back 5 days; legacy back 30. */
+        var coverage = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal)
+            {
+                [TimescaleSupport.QueryStoreStatsCorrectedHourlyView] = Now.AddDays(-5),
+                [TimescaleSupport.QueryStoreStatsCorrectedDailyView] = Now.AddDays(-5),
+                [TimescaleSupport.QueryStoreStatsHourlyView] = Now.AddDays(-30),
+                [TimescaleSupport.QueryStoreStatsDailyView] = Now.AddDays(-30),
+            },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal) { ["query_store_stats"] = Now.AddDays(-4) });
+
+        /* Inside the corrected coverage → corrected, deduped. */
+        var inside = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-4), RollupAvailability.All, coverage);
+        Assert.Equal(TimescaleSupport.QueryStoreStatsCorrectedHourlyView, inside.CaggRelation);
+
+        /* Past it → the legacy pair, which is the only tier holding that history. */
+        var beyond = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-25), RollupAvailability.All, coverage);
+        Assert.Equal(TimescaleSupport.QueryStoreStatsDailyView, beyond.CaggRelation);
+    }
+
+    /// <summary>
+    /// The mirror case, and the one that keeps the fallback from becoming a regression: once the corrected
+    /// rollups have been backfilled at least as deep as the legacy pair, NOTHING routes to the inflated
+    /// relations any more. Without the comparative test — if the fallback fired merely because a window
+    /// started below the corrected floor — a fully-backfilled store would still be served inflated numbers
+    /// for its oldest windows, which is #1849 unfixed.
+    /// </summary>
+    [Fact]
+    public void QueryStore_CorrectedRollupsBackfilled_NeverRoutesToTheInflatedPair()
+    {
+        var coverage = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal)
+            {
+                [TimescaleSupport.QueryStoreStatsCorrectedHourlyView] = Now.AddDays(-30),
+                [TimescaleSupport.QueryStoreStatsCorrectedDailyView] = Now.AddDays(-30),
+                [TimescaleSupport.QueryStoreStatsHourlyView] = Now.AddDays(-30),
+                [TimescaleSupport.QueryStoreStatsDailyView] = Now.AddDays(-30),
+            },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal) { ["query_store_stats"] = Now.AddDays(-4) });
+
+        foreach (var age in new[] { 4, 10, 25, 29 })
+        {
+            var route = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-age), RollupAvailability.All, coverage);
+            Assert.True(
+                route.CaggRelation is TimescaleSupport.QueryStoreStatsCorrectedHourlyView
+                    or TimescaleSupport.QueryStoreStatsCorrectedDailyView,
+                $"a {age}-day window routed to {route.CaggRelation}, but the corrected rollups cover it — an " +
+                "equally-deep legacy pair must never win.");
+        }
+    }
+
+    /* ─────────────── the DAY-grain daily (#1869) ─────────────── */
+
+    /// <summary>Corrected back 30 days, day-grain back <paramref name="dayGrainDays"/>, legacy back 60 —
+    /// the three-deep Query Store daily ladder with each rung's floor stated explicitly.</summary>
+    private static RollupCoverage QueryStoreLadder(int dayGrainDays) => new(
+        new Dictionary<string, DateTime>(StringComparer.Ordinal)
+        {
+            [TimescaleSupport.QueryStoreStatsCorrectedHourlyView] = Now.AddDays(-30),
+            [TimescaleSupport.QueryStoreStatsCorrectedDailyView] = Now.AddDays(-30),
+            [TimescaleSupport.QueryStoreStatsDayGrainDailyView] = Now.AddDays(-dayGrainDays),
+            [TimescaleSupport.QueryStoreStatsHourlyView] = Now.AddDays(-60),
+            [TimescaleSupport.QueryStoreStatsDailyView] = Now.AddDays(-60),
+        },
+        new Dictionary<string, DateTime>(StringComparer.Ordinal) { ["query_store_stats"] = Now.AddDays(-4) });
+
+    /// <summary>
+    /// WATCHED (mutation): delete the day-grain preference and this goes red. The corrected daily sums each
+    /// interval once per collection HOUR, so an interval straddling an hour boundary lands in it about twice
+    /// (measured 1.97x on the live proof); the day-grain daily counts it once. Where the newer view has
+    /// materialized the window, it is simply the more correct answer and must win.
+    /// </summary>
+    [Fact]
+    public void QueryStore_DayGrainDailyCoversTheWindow_WinsOverTheCorrectedDaily()
+    {
+        var route = ComposeSourceRouter.Resolve(
+            Plan("qs_executions"), Now, Now.AddDays(-25), RollupAvailability.All, QueryStoreLadder(dayGrainDays: 30));
+
+        Assert.Equal(ComposeSourceTier.Daily, route.Tier);
+        Assert.Equal(TimescaleSupport.QueryStoreStatsDayGrainDailyView, route.CaggRelation);
+    }
+
+    /// <summary>
+    /// WATCHED (mutation): make the preference absolute — prefer the day-grain daily whenever it EXISTS — and
+    /// this goes red. It is a NEW aggregate that starts empty and deepens from deploy, so beyond its floor it
+    /// holds nothing, and serving a window off it would return empty rows where the corrected daily still has
+    /// the (slightly over-counted) history. Coverage beats correctness by exactly one rung, every time.
+    /// </summary>
+    [Fact]
+    public void QueryStore_BeyondDayGrainCoverage_FallsBackToTheCorrectedDaily()
+    {
+        /* Every age here is past HourlyRouteMaxAge (20 days): the preference lives at the DAILY tier, so a
+           younger window would be answered by the hourly rung and prove nothing about this ladder. */
+        var coverage = QueryStoreLadder(dayGrainDays: 25);
+
+        /* Inside the day-grain coverage → the exactly-counted view. */
+        var inside = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-22), RollupAvailability.All, coverage);
+        Assert.Equal(TimescaleSupport.QueryStoreStatsDayGrainDailyView, inside.CaggRelation);
+
+        /* Past it but inside the corrected daily → the corrected daily, NOT the legacy pair below it. */
+        var beyond = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-28), RollupAvailability.All, coverage);
+        Assert.Equal(TimescaleSupport.QueryStoreStatsCorrectedDailyView, beyond.CaggRelation);
+
+        /* Past BOTH → the superseded daily, the only relation holding it. The full three-rung ladder. */
+        var ancient = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-50), RollupAvailability.All, coverage);
+        Assert.Equal(TimescaleSupport.QueryStoreStatsDailyView, ancient.CaggRelation);
+    }
+
+    /// <summary>
+    /// WATCHED (mutation): drop the <c>ReachesFurtherBack</c> arm of the day-grain preference — return the
+    /// corrected daily whenever the day-grain one does not COVER the window — and this goes red.
+    ///
+    /// <para>The third outcome of that preference, and the only one the #1885 review found untested: neither
+    /// daily holds the window, but the day-grain one is measurably DEEPER, so it wins on the same
+    /// comparative rule the corrected/legacy step below it uses. Serving from the shallower relation when a
+    /// deeper one exists returns fewer rows AND the over-counted ones, which is the worst of both.</para>
+    ///
+    /// <para>The ladder is built inline rather than from <see cref="QueryStoreLadder"/> because the shape
+    /// this branch needs is the inverse of that one's: the day-grain daily has to out-reach the corrected
+    /// daily, and the legacy pair must NOT out-reach the day-grain daily — otherwise the legacy comparison
+    /// in <c>Resolve</c> takes the window back off it and the assertion would pass for the wrong reason.</para>
+    /// </summary>
+    [Fact]
+    public void QueryStore_NeitherDailyCoversTheWindow_DeeperDayGrainStillWins()
+    {
+        var coverage = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal)
+            {
+                [TimescaleSupport.QueryStoreStatsCorrectedHourlyView] = Now.AddDays(-30),
+                [TimescaleSupport.QueryStoreStatsCorrectedDailyView] = Now.AddDays(-30),
+                [TimescaleSupport.QueryStoreStatsDayGrainDailyView] = Now.AddDays(-40),
+                [TimescaleSupport.QueryStoreStatsHourlyView] = Now.AddDays(-35),
+                [TimescaleSupport.QueryStoreStatsDailyView] = Now.AddDays(-35),
+            },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal) { ["query_store_stats"] = Now.AddDays(-4) });
+
+        /* -50 days: past every floor on the ladder, so nothing COVERS it and only depth can decide. */
+        var route = ComposeSourceRouter.Resolve(
+            Plan("qs_executions"), Now, Now.AddDays(-50), RollupAvailability.All, coverage);
+
+        Assert.Equal(ComposeSourceTier.Daily, route.Tier);
+        Assert.Equal(TimescaleSupport.QueryStoreStatsDayGrainDailyView, route.CaggRelation);
+    }
+
+    /// <summary>
+    /// The residual is IRREDUCIBLE at the hourly grain — an interval genuinely collected across two hours has
+    /// to appear in both — so #1869 buys nothing there and must change nothing there. An hourly-age window
+    /// routes exactly where #1849 left it, whatever the day-grain daily has materialized.
+    /// </summary>
+    [Fact]
+    public void QueryStore_HourlyAgeWindow_IsUntouchedByTheDayGrainDaily()
+    {
+        var route = ComposeSourceRouter.Resolve(
+            Plan("qs_executions"), Now, Now.AddDays(-10), RollupAvailability.All, QueryStoreLadder(dayGrainDays: 30));
+
+        Assert.Equal(ComposeSourceTier.Hourly, route.Tier);
+        Assert.Equal(TimescaleSupport.QueryStoreStatsCorrectedHourlyView, route.CaggRelation);
+    }
+
+    /// <summary>
+    /// A store whose service predates #1869 has the corrected rollups but no day-grain pair, and every Query
+    /// Store daily window must keep routing to the corrected daily rather than compiling SQL against a
+    /// relation that does not exist. The same existence-is-the-probe degrade that let #1849 ship with no
+    /// schema migration, which is why #1869 needs none either.
+    /// </summary>
+    [Fact]
+    public void QueryStore_DayGrainDailyAbsent_KeepsRoutingToTheCorrectedDaily()
+    {
+        var route = ComposeSourceRouter.Resolve(
+            Plan("qs_executions"), Now, Now.AddDays(-25),
+            RollupAvailability.WithoutDayGrainQueryStore, QueryStoreLadder(dayGrainDays: 30));
+
+        Assert.Equal(TimescaleSupport.QueryStoreStatsCorrectedDailyView, route.CaggRelation);
+    }
+
+    /// <summary>
+    /// No coverage measured at all (a failed probe) moves nothing: null is "no evidence" everywhere else in
+    /// this router, and a rollup that might be empty must not displace one that was already answering. This is
+    /// also what keeps every pre-#1869 routing pin in this file honest rather than silently re-targeted.
+    /// </summary>
+    [Fact]
+    public void QueryStore_NoCoverageEvidence_LeavesTheCorrectedDailyInPlace()
+    {
+        var route = ComposeSourceRouter.Resolve(
+            Plan("qs_executions"), Now, Now.AddDays(-40), RollupAvailability.All, RollupCoverage.Unknown);
+
+        Assert.Equal(TimescaleSupport.QueryStoreStatsCorrectedDailyView, route.CaggRelation);
     }
 
     /// <summary>Daily-age window, daily view missing but hourly present: fall to the hourly view (capped at

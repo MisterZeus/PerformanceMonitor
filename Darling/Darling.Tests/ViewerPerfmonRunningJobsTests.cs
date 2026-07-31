@@ -311,10 +311,11 @@ public sealed class ViewerPerfmonRunningJobsLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeletePerfmonRowsAsync(connection);
+        await DeletePerfmonRowsAsync(connection, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
@@ -348,10 +349,13 @@ public sealed class ViewerPerfmonRunningJobsLivePostgresTests
             Assert.Equal(t2.Ticks, aaa[1].CollectionTime.Ticks);
             Assert.Equal(20, aaa[1].DeltaValue);
             Assert.Equal(200, aaa[1].Value);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeletePerfmonRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeletePerfmonRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -365,10 +369,11 @@ public sealed class ViewerPerfmonRunningJobsLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteJobRowsAsync(connection);
+        await DeleteJobRowsAsync(connection, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var older = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-20));
@@ -388,10 +393,13 @@ public sealed class ViewerPerfmonRunningJobsLivePostgresTests
             Assert.Equal("JobA", jobs[1].JobName);   // 300s second
             Assert.True(jobs[0].IsRunningLong);
             Assert.Equal(250m, jobs[0].PercentOfAverage);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteJobRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteJobRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -405,10 +413,11 @@ public sealed class ViewerPerfmonRunningJobsLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteJobLogRowsAsync(connection);
+        await DeleteJobLogRowsAsync(connection, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
@@ -424,10 +433,13 @@ public sealed class ViewerPerfmonRunningJobsLivePostgresTests
             var status = await viewer.GetLatestRunningJobsCollectorStatusAsync(JobsServerId);
 
             Assert.Equal("PERMISSIONS", status);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteJobLogRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteJobLogRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -491,21 +503,21 @@ VALUES ($1, $2, $3, $4, $5, $6)", connection);
     private static DateTime TruncateToSeconds(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
 
-    private static async Task DeletePerfmonRowsAsync(NpgsqlConnection connection)
+    private static async Task DeletePerfmonRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand($"DELETE FROM perfmon_stats WHERE server_id = {PerfmonServerId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task DeleteJobRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteJobRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand($"DELETE FROM running_jobs WHERE server_id = {JobsServerId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task DeleteJobLogRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteJobLogRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand($"DELETE FROM collection_log WHERE server_id = {JobsServerId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

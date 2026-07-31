@@ -9,23 +9,23 @@
     <Window.Resources>
         <ResourceDictionary>
             <ContextMenu x:Key="DataGridContextMenu">
-                <MenuItem Header="Edit" Click="EditMenuItem_Click"/>
-                <MenuItem Header="Enable / Disable Collection" Click="ToggleEnabledMenuItem_Click"/>
-                <MenuItem Header="Excluded Databases" Click="ExcludedDatabases_Click"/>
-                <MenuItem Header="Delete" Click="DeleteMenuItem_Click"
+                <MenuItem Header="_Edit" Click="EditMenuItem_Click"/>
+                <MenuItem Header="E_nable / Disable Collection" Click="ToggleEnabledMenuItem_Click"/>
+                <MenuItem Header="E_xcluded Databases" Click="ExcludedDatabases_Click"/>
+                <MenuItem Header="_Delete" Click="DeleteMenuItem_Click"
                           Foreground="{DynamicResource ErrorBrush}"/>
                 <Separator/>
-                <MenuItem Header="Copy Cell" Click="CopyCell_Click">
+                <MenuItem Header="Copy _Cell" Click="CopyCell_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>
                 </MenuItem>
-                <MenuItem Header="Copy Row" Click="CopyRow_Click">
+                <MenuItem Header="Copy _Row" Click="CopyRow_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon>
                 </MenuItem>
-                <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click">
+                <MenuItem Header="Copy _All Rows" Click="CopyAllRows_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon>
                 </MenuItem>
                 <Separator/>
-                <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click">
+                <MenuItem Header="Ex_port to CSV..." Click="ExportToCsv_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
                 </MenuItem>
             </ContextMenu>
@@ -76,13 +76,13 @@
 
         <!-- Buttons -->
         <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
-            <Button Content="Add Server" Click="AddButton_Click" Style="{StaticResource AccentButton}" Margin="0,0,8,0"/>
-            <Button Content="Edit" Click="EditButton_Click" Margin="0,0,8,0"/>
-            <Button Content="Excluded Databases" Click="ExcludedDatabases_Click" Margin="0,0,8,0"/>
-            <Button Content="Credential Profiles…" Click="CredentialProfiles_Click" Margin="0,0,8,0"
+            <Button Content="_Add Server" Click="AddButton_Click" Style="{StaticResource AccentButton}" Margin="0,0,8,0"/>
+            <Button Content="_Edit" Click="EditButton_Click" Margin="0,0,8,0"/>
+            <Button Content="E_xcluded Databases" Click="ExcludedDatabases_Click" Margin="0,0,8,0"/>
+            <Button Content="Credential _Profiles…" Click="CredentialProfiles_Click" Margin="0,0,8,0"
                     ToolTip="Manage named, reusable credentials that many servers can share."/>
-            <Button Content="Delete" Click="DeleteButton_Click" Margin="0,0,8,0"/>
-            <Button Content="Close" Click="CloseButton_Click"/>
+            <Button Content="_Delete" Click="DeleteButton_Click" Margin="0,0,8,0"/>
+            <Button Content="_Close" Click="CloseButton_Click" IsCancel="True"/>
         </StackPanel>
     </Grid>
 </Window>

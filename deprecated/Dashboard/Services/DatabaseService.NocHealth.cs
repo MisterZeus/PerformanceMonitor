@@ -193,6 +193,7 @@ namespace PerformanceMonitorDashboard.Services
                 var collectionStopped = await collectionStoppedTask;
                 result.CollectionStopped = collectionStopped.Stopped;
                 result.CollectionStoppedReason = collectionStopped.Reason;
+                result.CollectionStoppedShortValue = collectionStopped.ShortValue;
                 result.DisabledCollectorJobs = collectionStopped.DisabledJobs;
                 result.TotalCollectorJobs = collectionStopped.TotalJobs;
                 result.MinutesSinceLastCollection = collectionStopped.MinutesSince;
@@ -214,13 +215,29 @@ namespace PerformanceMonitorDashboard.Services
         /// </summary>
         private const int CollectionStaleThresholdMinutes = 30;
 
+        /// <param name="Reason">The full human-readable cause — what the toast, the email and the history
+        /// row's detail text all carry.</param>
+        /// <param name="ShortValue">The same cause compressed to a grid cell: what the Alert History
+        /// grid's Value column shows (#1913). Produced HERE, beside <paramref name="Reason"/>, rather than
+        /// re-derived at the fire site, because the two must agree on which branch fired and a second
+        /// derivation is a second chance to disagree — which is exactly what went wrong. Null when
+        /// collection is healthy, like <paramref name="Reason"/>.</param>
         internal readonly record struct CollectionStoppedResult(
-            bool Stopped, string? Reason, int DisabledJobs, int TotalJobs, int? MinutesSince);
+            bool Stopped, string? Reason, int DisabledJobs, int TotalJobs, int? MinutesSince, string? ShortValue);
 
         /// <summary>
         /// Pure decision: given the two probe results (disabled-job counts and minutes-since-last-collection),
         /// decide whether collection is stopped and why. Disabled jobs win — immediate and specific; the
         /// freshness gap is the catch-all for Agent-stopped / erroring collectors. Extracted for unit testing.
+        ///
+        /// <para><b>Two renderings of one cause, produced together (#1913).</b> The alert needs the cause at
+        /// two lengths: the full sentence for the toast, the email and the row's detail text, and a compact
+        /// form for the Alert History grid's 200px Value column — where the siblings all sit ("87% (Total
+        /// CPU)", "Session #12 running 45m"). The fire site used to build the compact one itself and got a
+        /// different answer: it reported <c>"{N} job(s) disabled"</c>, dropping the total that decides
+        /// whether collection stopped partially or completely, and on the staleness branch it reported the
+        /// constant <c>"no recent collection"</c> — which restates the metric name and throws away the one
+        /// figure an operator wants, the minutes. Both are computed here now, off the same branch.</para>
         /// </summary>
         internal static CollectionStoppedResult DecideCollectionStopped(
             int disabledJobs, int totalJobs, int? minutesSince, int thresholdMinutes)
@@ -230,16 +247,20 @@ namespace PerformanceMonitorDashboard.Services
                 string reason = disabledJobs == totalJobs
                     ? $"All {totalJobs} PerformanceMonitor collector Agent job(s) are disabled — data collection has stopped."
                     : $"{disabledJobs} of {totalJobs} PerformanceMonitor collector Agent job(s) are disabled — collection is partially or fully stopped.";
-                return new CollectionStoppedResult(true, reason, disabledJobs, totalJobs, minutesSince);
+                return new CollectionStoppedResult(
+                    true, reason, disabledJobs, totalJobs, minutesSince,
+                    $"{disabledJobs} of {totalJobs} job(s) disabled");
             }
 
             if (minutesSince.HasValue && minutesSince.Value >= thresholdMinutes)
             {
                 string reason = $"No collector has run in {minutesSince.Value} minutes — the SQL Agent service may be stopped or the collectors are failing.";
-                return new CollectionStoppedResult(true, reason, disabledJobs, totalJobs, minutesSince);
+                return new CollectionStoppedResult(
+                    true, reason, disabledJobs, totalJobs, minutesSince,
+                    $"no collection in {minutesSince.Value}m");
             }
 
-            return new CollectionStoppedResult(false, null, disabledJobs, totalJobs, minutesSince);
+            return new CollectionStoppedResult(false, null, disabledJobs, totalJobs, minutesSince, null);
         }
 
         /// <summary>
@@ -248,7 +269,7 @@ namespace PerformanceMonitorDashboard.Services
         /// Two checks: (1) are the PerformanceMonitor SQL Agent jobs disabled (immediate, definitive),
         /// and (2) has nothing logged a collection within the expected window (catches Agent-stopped /
         /// erroring collectors). The msdb job check is skipped on Azure SQL DB (no Agent) and degrades
-        /// gracefully if msdb is unreadable (RDS / missing SQLAgentReaderRole) — it never reports
+        /// gracefully if msdb is unreadable (RDS / no SELECT on the job tables) — it never reports
         /// "disabled" when it simply couldn't look.
         /// </summary>
         private async Task<CollectionStoppedResult> GetCollectionStoppedAsync(SqlConnection connection, int engineEdition)
@@ -283,7 +304,7 @@ namespace PerformanceMonitorDashboard.Services
                 }
                 catch (Exception ex)
                 {
-                    // Restricted msdb (e.g. AWS RDS) or no SQLAgentReaderRole — leave counts at 0 so we
+                    // Restricted msdb (e.g. AWS RDS) or no SELECT on the job tables — leave counts at 0 so we
                     // fall through to the freshness check rather than falsely claiming jobs are disabled.
                     Logger.Warning($"Could not read collector job state: {ex.Message}");
                 }
@@ -930,14 +951,20 @@ namespace PerformanceMonitorDashboard.Services
             // its SQL Agent program_name ('SQLAgent - TSQL JobStep (Job 0x<job_id> : Step N)'). This is CDC-specific
             // and never hides unrelated Agent jobs. The msdb reference is deferred through sp_executesql inside
             // TRY/CATCH so a login without msdb access gets a *catchable* error (not an uncatchable cross-db 916) and
-            // cleanly falls back to a text match on the whole batch/object text.
+            // cleanly falls back to a text match on the whole batch/object text. The OBJECT_ID pre-guard exists
+            // because cdc_jobs is created lazily on first CDC configuration and TRY/CATCH suppresses the failure,
+            // not the server-side error_reported EVENT - without it, every no-CDC server fed fleet error monitoring
+            // a once-per-cycle "Invalid object name" (mirrors the shared QuerySnapshotsCollector).
             string cdcSetup = excludeCdc ? @"
                 DECLARE @cdc_capture_jobs TABLE (job_id uniqueidentifier PRIMARY KEY);
                 DECLARE @cdc_readable bit = 0;
                 BEGIN TRY
-                    INSERT @cdc_capture_jobs (job_id)
-                    EXEC sys.sp_executesql N'SELECT cj.job_id FROM msdb.dbo.cdc_jobs AS cj WHERE cj.job_type = N''capture'';';
-                    SET @cdc_readable = 1;
+                    IF OBJECT_ID(N'msdb.dbo.cdc_jobs') IS NOT NULL
+                    BEGIN
+                        INSERT @cdc_capture_jobs (job_id)
+                        EXEC sys.sp_executesql N'SELECT cj.job_id FROM msdb.dbo.cdc_jobs AS cj WHERE cj.job_type = N''capture'';';
+                        SET @cdc_readable = 1;
+                    END;
                 END TRY
                 BEGIN CATCH
                     SET @cdc_readable = 0;
@@ -1107,9 +1134,11 @@ namespace PerformanceMonitorDashboard.Services
             }
             catch (Microsoft.Data.SqlClient.SqlException ex) when (ex.Number is 229 or 297 or 300 or 916)
             {
-                /* Login lacks msdb / SQLAgentReaderRole access — expected for read-only monitoring
-                   accounts; hit every alert cycle, so log at Info (not Warning) to avoid burying real warnings. */
-                Logger.Info($"Skipping recently-failed-job check (msdb/SQLAgentReaderRole access needed): {ex.Message}");
+                /* Login lacks direct msdb job-table SELECT — expected for read-only monitoring accounts;
+                   hit every alert cycle, so log at Info (not Warning) to avoid burying real warnings.
+                   SQLAgentReaderRole is deliberately NOT the named remedy: it gates the sp_help_job*
+                   interface only and confers nothing on the base tables this query reads (#1823). */
+                Logger.Info($"Skipping recently-failed-job check (needs SELECT on msdb.dbo.sysjobs and sysjobhistory — SQLAgentReaderRole alone is not enough; see the monitoring-login grants in the README): {ex.Message}");
             }
             catch (Exception ex)
             {

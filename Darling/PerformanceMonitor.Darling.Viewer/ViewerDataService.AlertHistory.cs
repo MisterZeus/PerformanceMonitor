@@ -57,9 +57,9 @@ public sealed class ViewerAlertRow
     /// <summary>Stored naive-UTC; shown in the viewer machine's local time (the viewer convention).</summary>
     public string TimeLocal => ViewerTimeHelper.ForDisplay(AlertTime).ToString("yyyy-MM-dd HH:mm:ss");
 
-    public string CurrentValueDisplay => FormatValue(MetricName, CurrentValue);
+    public string CurrentValueDisplay => AlertMetricClassifier.FormatHistoryValue(MetricName, CurrentValue);
 
-    public string ThresholdValueDisplay => FormatValue(MetricName, ThresholdValue);
+    public string ThresholdValueDisplay => AlertMetricClassifier.FormatHistoryValue(MetricName, ThresholdValue);
 
     /// <summary>Email rows show send outcome; tray/other rows show shown-vs-delivered (Lite's mapping).</summary>
     public string StatusDisplay
@@ -81,18 +81,6 @@ public sealed class ViewerAlertRow
 
     public bool IsWarning => AlertMetricClassifier.IsWarning(MetricName);
 
-    /* #1134 — render the stored value with the unit/precision matching each metric the alert engine
-       emits, keyed on the exact metric_name strings. Copied from Lite's AlertHistoryRow.FormatValue
-       so both grids read identically; the :F2 fallback (never :G) keeps an unmapped metric — e.g. an
-       "Analysis: <category> [<hash>]" finding severity — from rendering as a raw full-precision float. */
-    private static string FormatValue(string metricName, double value) => metricName switch
-    {
-        "High CPU" or "tempdb Space" or "Volume Free Space" or "Long-Running Job" => $"{value:F1}%",
-        "Poison Wait" => $"{value:F0} ms",
-        "Long-Running Query" => $"{value:F0} m",
-        "Blocking Detected" or "Deadlocks Detected" or "Failed Agent Job" => $"{value:F0}",
-        _ => $"{value:F2}",
-    };
 }
 
 public sealed partial class ViewerDataService

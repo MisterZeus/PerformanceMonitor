@@ -129,7 +129,9 @@ public partial class QueryStatsHistoryWindow : Window
         _chartHover.Clear();
         _chartHover.Add(scatter, label);
 
-        HistoryChart.Plot.Axes.DateTimeTicksBottom();
+        /* #1831: the DateChange variant routes labels through the shared formatter, which converts
+           for the display mode — plain DateTimeTicksBottom() rendered raw server time. */
+        HistoryChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ApplyTheme(HistoryChart);
 
         HistoryChart.Refresh();

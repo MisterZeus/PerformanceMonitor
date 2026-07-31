@@ -346,10 +346,11 @@ public sealed class DarlingAnomalyBaselineTests
         await PgMigrations.MigrateAsync(connection, ct);
 
         /* Clear leftovers from an earlier aborted run so the assertions below are deterministic. */
-        await DeleteTestRowsAsync(connection);
+        await DeleteTestRowsAsync(connection, ct);
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             /* ---- plant the hour×dow history: one bucket (Monday 10:00 UTC), 12 collections
@@ -393,8 +394,26 @@ public sealed class DarlingAnomalyBaselineTests
                compute the identical statistic, and an ordinary view is isolated — creating the aggregates here
                would create all seventeen and change compose's tier routing for the live test that asserts a
                10-day window lands on RAW. The continuous-aggregate half of this invariant is proven in
-               TimescaleSupportTests, which already owns the snapshot/restore machinery for that. */
-            Assert.Equal(9, await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct));
+               TimescaleSupportTests, which already owns the snapshot/restore machinery for that.
+
+               Asserted as EXISTENCE of all nine, not as a return count of nine (#1862). The return is how
+               many the call CREATED, and it skips any relation that is already there — so a store where a
+               sibling class's continuous aggregate is still standing, or where an earlier run's fallback view
+               survived, legitimately answers 8 and the old assertion failed on a store that was in every way
+               fit for this test. That is the same order-dependence as the fixture bug this shipped with, one
+               layer up: a count of a shared mutable store is not a property of this test. Existence is what
+               the paragraph above actually needs, and it holds however the nine came to be there. The list
+               being nine long is pinned purely in BaselineSupplyTests, where no store can move it. */
+            await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
+
+            foreach (var (_, view) in TimescaleSupport.BaselineAggregates)
+            {
+                using var exists = new NpgsqlCommand(TimescaleSupport.BaselineRelationExistsSql(view), connection);
+                Assert.True((bool)(await exists.ExecuteScalarAsync(ct))!,
+                    $"Baseline relation collect.{view} does not exist and could not be created as a fallback "
+                    + "view. Every assertion below would then read an empty baseline and compare against "
+                    + "zeroes rather than failing on the statistic it means to test.");
+            }
 
             /* The FOLLOWING Monday 10:00 UTC — same (hour, dow) bucket, 1-7 days back, still
                in the past. Both baseline reads and the detector window anchor here. */
@@ -464,11 +483,16 @@ public sealed class DarlingAnomalyBaselineTests
             Assert.Equal((double)BaselineTier.Full, fact.Metadata["baseline_tier"]);
             Assert.Equal(10.0, fact.Metadata["baseline_hour"]);
             Assert.Equal((double)DayOfWeek.Monday, fact.Metadata["baseline_dow"]);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteTestRowsAsync(connection);
-            await DropBaselineFallbackViewsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteTestRowsAsync(cleanup, cleanupCt);
+                await DropBaselineFallbackViewsAsync(cleanup, cleanupCt);
+            });
         }
     }
 
@@ -482,11 +506,11 @@ public sealed class DarlingAnomalyBaselineTests
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 
-    private static async Task DeleteTestRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteTestRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM wait_stats WHERE server_id = {TestServerId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 
     /// <summary>
@@ -494,12 +518,12 @@ public sealed class DarlingAnomalyBaselineTests
     /// continuous-aggregate guard the product does, so it can never drop a real aggregate another live test
     /// planted — a bare DROP VIEW would, because a continuous aggregate is also a relkind='v' view.
     /// </summary>
-    private static async Task DropBaselineFallbackViewsAsync(NpgsqlConnection connection)
+    private static async Task DropBaselineFallbackViewsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         foreach (var (_, view) in TimescaleSupport.BaselineAggregates)
         {
             using var drop = new NpgsqlCommand(TimescaleSupport.DropBaselineFallbackViewSql(view), connection);
-            await drop.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            await drop.ExecuteNonQueryAsync(ct);
         }
     }
 }

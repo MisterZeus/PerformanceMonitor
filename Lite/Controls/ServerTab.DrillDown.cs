@@ -21,7 +21,7 @@ public partial class ServerTab : UserControl
     private void AddWaitDrillDownMenuItem(ScottPlot.WPF.WpfPlot chart, ContextMenu contextMenu)
     {
         contextMenu.Items.Insert(0, new Separator());
-        var drillDownItem = new MenuItem { Header = "Show Queries With This Wait" };
+        var drillDownItem = new MenuItem { Header = "Show _Queries With This Wait" };
         drillDownItem.Click += ShowQueriesForWaitType_Click;
         contextMenu.Items.Insert(0, drillDownItem);
 
@@ -33,13 +33,13 @@ public partial class ServerTab : UserControl
             if (nearest.HasValue)
             {
                 drillDownItem.Tag = (nearest.Value.Label, nearest.Value.Time);
-                drillDownItem.Header = $"Show Queries With {nearest.Value.Label.Replace("_", "__")}";
+                drillDownItem.Header = $"Show _Queries With {nearest.Value.Label.Replace("_", "__")}";
                 drillDownItem.IsEnabled = true;
             }
             else
             {
                 drillDownItem.Tag = null;
-                drillDownItem.Header = "Show Queries With This Wait";
+                drillDownItem.Header = "Show _Queries With This Wait";
                 drillDownItem.IsEnabled = false;
             }
         };

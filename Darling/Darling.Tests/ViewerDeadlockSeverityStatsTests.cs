@@ -272,10 +272,11 @@ public sealed class ViewerDeadlockSeverityLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, SeverityServerId);
+        await DeleteRowsAsync(connection, SeverityServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var baseTime = TruncateToMinute(DateTime.UtcNow.AddMinutes(-10));
@@ -307,10 +308,13 @@ public sealed class ViewerDeadlockSeverityLivePostgresTests
             Assert.Equal(1200, points[1].TotalWaitMs);
             Assert.Equal(700, points[1].MaxWaitMs);
             Assert.Equal(600.0, points[1].AvgWaitMs, precision: 3);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, SeverityServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, SeverityServerId, cleanupCt));
         }
     }
 
@@ -349,9 +353,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", connection);
     private static DateTime TruncateToMinute(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerMinute)), DateTimeKind.Unspecified);
 
-    private static async Task DeleteRowsAsync(NpgsqlConnection connection, int serverId)
+    private static async Task DeleteRowsAsync(NpgsqlConnection connection, int serverId, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand($"DELETE FROM deadlocks WHERE server_id = {serverId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

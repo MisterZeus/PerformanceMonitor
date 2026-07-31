@@ -193,11 +193,11 @@
         <ui:HeatIntensityToBrushConverter x:Key="FinOpsHeatBrush"/>
 
         <ContextMenu x:Key="FinOpsGridContextMenu">
-            <MenuItem Header="Copy Cell" Click="CopyCell_Click"><MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon></MenuItem>
-            <MenuItem Header="Copy Row" Click="CopyRow_Click"><MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon></MenuItem>
-            <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click"><MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon></MenuItem>
+            <MenuItem Header="Copy _Cell" Click="CopyCell_Click"><MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon></MenuItem>
+            <MenuItem Header="Copy _Row" Click="CopyRow_Click"><MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon></MenuItem>
+            <MenuItem Header="Copy _All Rows" Click="CopyAllRows_Click"><MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon></MenuItem>
             <Separator/>
-            <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click"><MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon></MenuItem>
+            <MenuItem Header="_Export to CSV..." Click="ExportToCsv_Click"><MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon></MenuItem>
         </ContextMenu>
         <Style x:Key="FinOpsRowStyle" TargetType="DataGridRow" BasedOn="{StaticResource DarkGridRow}">
             <Setter Property="ContextMenu" Value="{StaticResource FinOpsGridContextMenu}"/>
@@ -205,13 +205,13 @@
 
         <!-- Storage Growth parent grid: base copy/export + the #1138 drill entry into the per-object heatmap. -->
         <ContextMenu x:Key="FinOpsStorageGrowthContextMenu">
-            <MenuItem Header="Copy Cell" Click="CopyCell_Click"><MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon></MenuItem>
-            <MenuItem Header="Copy Row" Click="CopyRow_Click"><MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon></MenuItem>
-            <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click"><MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon></MenuItem>
+            <MenuItem Header="Copy _Cell" Click="CopyCell_Click"><MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon></MenuItem>
+            <MenuItem Header="Copy _Row" Click="CopyRow_Click"><MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon></MenuItem>
+            <MenuItem Header="Copy _All Rows" Click="CopyAllRows_Click"><MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon></MenuItem>
             <Separator/>
-            <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click"><MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon></MenuItem>
+            <MenuItem Header="_Export to CSV..." Click="ExportToCsv_Click"><MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon></MenuItem>
             <Separator/>
-            <MenuItem Header="Show objects" Click="FinOpsStorageGrowthShowObjects_Click"><MenuItem.Icon><TextBlock Text="&#x1F50E;"/></MenuItem.Icon></MenuItem>
+            <MenuItem Header="Show _objects" Click="FinOpsStorageGrowthShowObjects_Click"><MenuItem.Icon><TextBlock Text="&#x1F50E;"/></MenuItem.Icon></MenuItem>
         </ContextMenu>
         <Style x:Key="FinOpsStorageGrowthRowStyle" TargetType="DataGridRow" BasedOn="{StaticResource DarkGridRow}">
             <Setter Property="ContextMenu" Value="{StaticResource FinOpsStorageGrowthContextMenu}"/>
@@ -224,14 +224,14 @@
              CanGetActualPlan — the Expensive Queries grid groups by text and carries no query_hash, so its rows
              fall back to disabled (no store key to resolve the re-executable text by). -->
         <ContextMenu x:Key="FinOpsQueryPlanContextMenu">
-            <MenuItem Header="Copy Cell" Click="CopyCell_Click"><MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon></MenuItem>
-            <MenuItem Header="Copy Row" Click="CopyRow_Click"><MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon></MenuItem>
-            <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click"><MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon></MenuItem>
+            <MenuItem Header="Copy _Cell" Click="CopyCell_Click"><MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon></MenuItem>
+            <MenuItem Header="Copy _Row" Click="CopyRow_Click"><MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon></MenuItem>
+            <MenuItem Header="Copy _All Rows" Click="CopyAllRows_Click"><MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon></MenuItem>
             <Separator/>
-            <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click"><MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon></MenuItem>
+            <MenuItem Header="_Export to CSV..." Click="ExportToCsv_Click"><MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon></MenuItem>
             <Separator/>
-            <MenuItem Header="View Stored Plan" Click="FinOpsViewPlan_Click"><MenuItem.Icon><TextBlock Text="&#x1F50D;"/></MenuItem.Icon></MenuItem>
-            <MenuItem Header="Get Actual Plan (re-run)" Click="FinOpsGetActualPlan_Click"
+            <MenuItem Header="_View Stored Plan" Click="FinOpsViewPlan_Click"><MenuItem.Icon><TextBlock Text="&#x1F50D;"/></MenuItem.Icon></MenuItem>
+            <MenuItem Header="_Get Actual Plan (re-run)" Click="FinOpsGetActualPlan_Click"
                       IsEnabled="{Binding PlacementTarget.DataContext.CanGetActualPlan, RelativeSource={RelativeSource AncestorType=ContextMenu}, FallbackValue=False}">
                 <MenuItem.Icon><TextBlock Text="&#x25B6;"/></MenuItem.Icon>
             </MenuItem>

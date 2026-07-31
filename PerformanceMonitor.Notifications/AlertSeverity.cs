@@ -45,6 +45,9 @@ internal static class AlertSeverity
         _ => metricName switch
         {
             "Blocking Detected" => ("#D97706", "ALERT", "\U0001F7E0"),
+            // #1839 total-blocked-wait gate — same tier as the count gate it sits beside; without an arm
+            // here it would render INFO-blue in email and webhooks (the #1136 fall-through).
+            "Blocking Wait Time" => ("#D97706", "ALERT", "\U0001F7E0"),
             "Deadlocks Detected" => ("#DC2626", "ALERT", "\U0001F534"),
             // Blocking/deadlock capture is broken — emailed/webhooked, and fired as an Error toast,
             // so it must not render INFO-blue like an unmapped metric (mirrors the #1136 gap fix).

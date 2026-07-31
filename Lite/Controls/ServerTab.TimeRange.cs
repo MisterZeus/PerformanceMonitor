@@ -169,7 +169,7 @@ public partial class ServerTab : UserControl
         }
     }
 
-    private void TimeDisplayMode_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private async void TimeDisplayMode_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (!IsLoaded) return;
         if (TimeDisplayModeBox.SelectedItem is not ComboBoxItem item) return;
@@ -239,6 +239,14 @@ public partial class ServerTab : UserControl
         QueryStoreSlicer.Redraw();
         BlockingSlicer.Redraw();
         DeadlockSlicer.Redraw();
+
+        /* #1831: the chart axes convert at render time through the shared formatter, but nothing
+           re-rendered them on a toggle flip — the new mode only showed after the next data cycle,
+           which read as "refresh doesn't help" in the field (refresh re-plotted server time under
+           the OLD un-converting formatter; now it re-plots and converts). Re-plot everything, the
+           same full refresh a range change does — the Viewer's toggle ends with
+           RefreshActiveInnerTabAsync for the same reason. */
+        await RefreshAllDataAsync();
     }
 
     private async void TimeRangeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)

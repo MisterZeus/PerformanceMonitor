@@ -166,10 +166,10 @@ INSERT INTO config_alert_settings (
     long_running_query_exclude_misc_waits, long_running_query_exclude_cdc, notify_connection_changes,
     notify_connection_down_at_startup, connection_refire_minutes,
     notify_ag_health, ag_lag_alert_seconds, ag_redo_queue_alert_kb,
-    ag_disconnect_refire_minutes, modified_at)
+    ag_disconnect_refire_minutes, blocking_wait_seconds_threshold, modified_at)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
         $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42,
-        $43)
+        $43, $44)
 ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(a.Enabled);
         command.Parameters.AddWithValue(a.CpuEnabled);
@@ -219,6 +219,8 @@ ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(a.AgRedoQueueAlertKb);
         /* V37 #1696: AG disconnect re-fire. */
         command.Parameters.AddWithValue(a.AgDisconnectRefireMinutes);
+        /* V40 #1839: total-blocked-wait gate (0 = off). */
+        command.Parameters.AddWithValue(a.BlockingWaitSecondsThreshold);
         command.Parameters.AddWithValue(now);
         await command.ExecuteNonQueryAsync(ct);
     }
@@ -364,7 +366,7 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        long_running_query_exclude_misc_waits, long_running_query_exclude_cdc, notify_connection_changes,
        notify_connection_down_at_startup, connection_refire_minutes,
        notify_ag_health, ag_lag_alert_seconds, ag_redo_queue_alert_kb,
-       ag_disconnect_refire_minutes
+       ag_disconnect_refire_minutes, blocking_wait_seconds_threshold
 FROM config_alert_settings WHERE id = 1", connection);
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -422,6 +424,11 @@ FROM config_alert_settings WHERE id = 1", connection);
             AgRedoQueueAlertKb = reader.GetInt64(40),
             /* #1696 AG disconnect re-fire appended (V37) at ordinal 41. */
             AgDisconnectRefireMinutes = reader.GetInt32(41),
+            /* #1839 total-blocked-wait gate appended (V40) at ordinal 42. This read is what makes the
+               setting REACHABLE at all: ApplyToConfig replaces config.Alerts wholesale with what the
+               store returned, so a column missing here would reset the knob to 0 on every worker start
+               and the alert could never fire, whatever darling.json said. */
+            BlockingWaitSecondsThreshold = reader.GetInt32(42),
         };
         var analysis = new AnalysisConfig
         {

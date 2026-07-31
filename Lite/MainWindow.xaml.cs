@@ -181,6 +181,17 @@ public partial class MainWindow : Window
             var archiveService = new ArchiveService(_databaseInitializer, App.ArchiveDirectory, new AppLoggerAdapter<ArchiveService>());
             var retentionService = new RetentionService(App.ArchiveDirectory, new AppLoggerAdapter<RetentionService>());
 
+            /* #1912 one-time Query Store repair: collapse the split slices stored by pre-#1907 builds, in the
+               hot table and in the parquet archive. Runs ONCE per store, records a marker, and never throws —
+               a store that cannot be repaired must still start, and the next launch retries. Fired here rather
+               than awaited inline so a large archive rewrite cannot hold the window closed; it takes the same
+               read lock every other store operation does, so it serializes with collection rather than racing
+               it. Automatic by design: gating it behind a button would leave the users least equipped to find
+               it holding wrong numbers permanently (v39 / #1832 precedent). */
+            var sliceRepair = new QueryStoreSliceRepairService(
+                _databaseInitializer, App.ArchiveDirectory, new AppLoggerAdapter<QueryStoreSliceRepairService>());
+            _ = Task.Run(() => sliceRepair.RepairOnStartupAsync());
+
             // Routes high-severity analysis findings to email/Slack/Teams; the background
             // service runs scheduled analysis and hands findings to it.
             /* serverId resolver: Lite uses the finding's stable int id as a string (Plan E E3c). */
@@ -217,14 +228,11 @@ public partial class MainWindow : Window
             /* #1812: the adapter's snapshot-freshness bound needs the server's EFFECTIVE running_jobs
                cadence. The adapter keys servers by the deterministic int hash; ScheduleManager keys by
                the connection GUID — the same hash-match FetchFailedJobsForAlertAsync already does. */
-            _alertReadAdapter = new LiteAlertReadAdapter(_dataService, serverId =>
-            {
-                var server = _serverManager.GetAllServers().FirstOrDefault(s =>
-                    RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s)) == serverId);
-                return server is null
-                    ? 0
-                    : _scheduleManager.GetScheduleForServer(server.Id, "running_jobs")?.FrequencyMinutes ?? 0;
-            });
+            _alertReadAdapter = new LiteAlertReadAdapter(
+                _dataService,
+                serverId => ResolveCollectorCadenceForAlerts(serverId, "running_jobs"),
+                /* #1839: the same resolution for the blocking snapshot the total-wait gate reads. */
+                serverId => ResolveCollectorCadenceForAlerts(serverId, "dmv_blocking_snapshot"));
 
             /* Phase-5 forwarding: construct the shared alert engine once, over Lite's five seam
                implementations — live App.* thresholds, the DuckDB read adapter, the DuckDB
@@ -331,6 +339,7 @@ public partial class MainWindow : Window
                     Dispatcher.Invoke(() =>
                     {
                         Title = $"Performance Monitor Lite — Update v{newVersion.TargetFullRelease.Version} available (Help > About)";
+                        AnnounceUpdate($"v{newVersion.TargetFullRelease.Version}");
                     });
                     return;
                 }
@@ -347,6 +356,7 @@ public partial class MainWindow : Window
                 Dispatcher.Invoke(() =>
                 {
                     Title = $"Performance Monitor Lite — Update {result.LatestVersion} available (Help > About)";
+                    AnnounceUpdate(result.LatestVersion);
                 });
             }
         }
@@ -354,6 +364,21 @@ public partial class MainWindow : Window
         {
             // Never crash on update check failure
         }
+    }
+
+    /// <summary>
+    /// One tray balloon per session when an update is found. The title-bar suffix was the only signal,
+    /// and a title bar nobody reads is how installs stayed on old builds — or got upgraded by re-running
+    /// Setup.exe, which used to delete the data directory (#1832). Help &gt; About does it safely and in
+    /// place. The update check itself runs once per launch, so no extra suppression is needed.
+    /// </summary>
+    private void AnnounceUpdate(string? version)
+    {
+        _trayService?.ShowNotification(
+            "Update Available",
+            $"Performance Monitor Lite {version} is available. Open Help > About to install it — that updates in "
+                + "place and keeps your data.",
+            Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Info);
     }
 
     private bool _closingCleanupStarted;
@@ -896,7 +921,7 @@ public partial class MainWindow : Window
 
         var acknowledgeItem = new MenuItem
         {
-            Header = "Acknowledge Alert",
+            Header = "_Acknowledge Alert",
             Tag = serverId,
             Icon = new TextBlock { Text = "✓", FontWeight = FontWeights.Bold }
         };
@@ -904,7 +929,7 @@ public partial class MainWindow : Window
 
         var silenceItem = new MenuItem
         {
-            Header = "Silence This Server",
+            Header = "_Silence This Server",
             Tag = serverId,
             Icon = new TextBlock { Text = "🔇" }
         };
@@ -912,7 +937,7 @@ public partial class MainWindow : Window
 
         var unsilenceItem = new MenuItem
         {
-            Header = "Unsilence",
+            Header = "_Unsilence",
             Tag = serverId,
             Icon = new TextBlock { Text = "🔔" }
         };

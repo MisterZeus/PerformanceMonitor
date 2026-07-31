@@ -35,7 +35,7 @@ Nothing is installed on the monitored SQL Servers by either edition beyond two l
 ### Prerequisites
 
 - **Windows** for the service host (Windows-service lifetime, DPAPI password protection) and for the viewer (WPF). Monitored servers can be SQL Server 2016–2025, Azure SQL Managed Instance, AWS RDS for SQL Server, or Azure SQL Database.
-- **A PostgreSQL store — bundled or your own.** In managed mode (the shipped default, see [Managed Bundled PostgreSQL](#managed-bundled-postgresql)) the service runs its own bundled PostgreSQL 18 + TimescaleDB and no database provisioning is needed. To bring your own instead, PostgreSQL 16 or newer is recommended (developed and validated against PostgreSQL 18) with a database and a login the service can create tables in.
+- **A PostgreSQL store — bundled or your own.** In managed mode (the shipped default, see [Managed Bundled PostgreSQL](#managed-bundled-postgresql)) the service runs its own bundled PostgreSQL 18 + TimescaleDB and no database provisioning is needed. To bring your own instead, PostgreSQL 16 or newer is recommended (developed and validated against PostgreSQL 18) with a database and a login the service can create tables in — and if that store has TimescaleDB, size its background workers before you rely on compression, because the stock PostgreSQL defaults cannot run the policies (see [Background workers](#background-workers-sizing-an-unmanaged-store-and-what-happens-if-you-dont)).
 - **TimescaleDB is optional and auto-adopted.** If the extension is installed (or pre-created by an administrator) in the store database, the service detects it at startup and automatically converts the collector tables to hypertables with compression; without it, the service runs in plain-PostgreSQL mode, which is fully supported. No configuration flag either way.
 - **.NET 10** to build and run.
 
@@ -77,7 +77,7 @@ Minimal working example — one server, integrated auth, bring-your-own PostgreS
 }
 ```
 
-**Integrated auth (recommended).** The service connects to monitored servers as the Windows account the service runs under. Grant that account the [permissions below](#permissions-on-monitored-servers).
+**Integrated auth (recommended).** The service connects to monitored servers as the Windows account the service runs under — there is no separate Windows credential to configure. Grant that account the [permissions below](#permissions-on-monitored-servers). The default install's virtual service account reaches *remote* servers as the collector machine's computer account (`DOMAIN\<machine>$`), so for integrated auth you will usually [run the service as a domain account or gMSA](#run-the-service-as-a-domain-account-or-gmsa) instead.
 
 **SQL auth.** Set `"auth": "sql"`, a `username`, and an `encryptedPassword` produced by the `--encrypt-password` verb:
 
@@ -98,6 +98,8 @@ PerformanceMonitor.Darling.Service.exe --test-connection
 ```
 
 (`--validate-config` is an alias.) It validates the file, then connects to and probes each server, printing a `[PASS]`/`[FAIL]` line per server (SQL major version, engine edition, and whether the account has msdb access for failed-job alerts). It exits `0` only when the file is valid **and** every server is reachable, so it doubles as a deployment gate. Add an explicit config path as a second argument if `darling.json` is not next to the exe and `DARLING_CONFIG` is not set. This is the same probe the Viewer's **Test Connection** button runs through the service.
+
+One identity caveat: the verb connects as **you**, the console user — not as the service account. For `"auth": "integrated"` servers a `[PASS]` proves the server is reachable and the config is well-formed, but the grants that matter at runtime are the *service account's*: the per-server connect lines in the service log are the real proof (see [Run the service as a domain account or gMSA](#run-the-service-as-a-domain-account-or-gmsa)).
 
 ### Run It — Console Mode
 
@@ -133,9 +135,50 @@ Also register the service's Windows event source once, from the same elevated sh
 powershell -NoProfile -Command "New-EventLog -LogName Application -Source 'PerformanceMonitor Darling' -ErrorAction SilentlyContinue"
 ```
 
-The `obj=` clause runs the service under a **virtual service account** (`NT SERVICE\<service name>` — password-less, per-service SID, unprivileged; the same convention SQL Server itself uses). That is the right account for SQL-auth monitoring, and with `postgres.managed = true` it is more than a preference: PostgreSQL refuses to execute with administrative privileges, so don't run the service as LocalSystem — a least-privilege account keeps the bundled store's initdb/start path on ground PostgreSQL supports. For integrated auth to monitored servers, set a domain account (or gMSA) holding the SQL-side grants below instead, via **Services.msc → Log On** or `sc config ... obj=`. Note the space after `binPath=`, `start=`, and `obj=` — `sc` requires it.
+The `obj=` clause runs the service under a **virtual service account** (`NT SERVICE\<service name>` — password-less, per-service SID, unprivileged; the same convention SQL Server itself uses). That is the right account for SQL-auth monitoring, and with `postgres.managed = true` it is more than a preference: PostgreSQL refuses to execute with administrative privileges, so don't run the service as LocalSystem — a least-privilege account keeps the bundled store's initdb/start path on ground PostgreSQL supports. For integrated auth to monitored servers, [run the service as a domain account or gMSA](#run-the-service-as-a-domain-account-or-gmsa) instead. Note the space after `binPath=`, `start=`, and `obj=` — `sc` requires it.
 
 One managed-mode handoff gotcha: if you test-drove the service from a console first, the bundled store's data directory belongs to *your* account, and the service account may not be able to write it. Point the service at a fresh `postgres.dataDirectory` (or delete the test directory) rather than fighting ACLs.
+
+#### Run the service as a domain account or gMSA
+
+With `"auth": "integrated"`, the monitoring identity **is** the service's Log On account — nothing in `darling.json` names a Windows account, and there is no separate credential to set. The default virtual account carries only the *machine* identity onto the network (remote servers see `DOMAIN\<collector-machine>$`), so for integrated auth against remote servers you almost always want a real AD service account or, better, a gMSA. Switching is a Windows-side change plus a SQL-side grant, with one file-permission step in the middle that bites everyone who skips it:
+
+1. **Change the Log On account.** Stop the service, then **Services.msc → PerformanceMonitor Darling → Log On → This account** — that route also grants the account the *Log on as a service* right automatically. Or from an elevated prompt (with `sc config` you grant *Log on as a service* yourself, via secpol.msc or GPO):
+
+   ```
+   sc config "PerformanceMonitor Darling" obj= "DOMAIN\svc-account" password= "ThePassword"
+   ```
+
+   A gMSA works the same way with an empty password: `obj= "DOMAIN\gmsa-name$" password= ""`. Keep the account **out of the local Administrators group**: with `postgres.managed = true` the bundled PostgreSQL refuses to run with administrative privileges, exactly as it refuses LocalSystem.
+
+2. **Grant the account on every monitored server** — a Windows login holding the same [permissions below](#permissions-on-monitored-servers) (the `GRANT`s there apply to a Windows login unchanged):
+
+   ```sql
+   USE [master];
+   CREATE LOGIN [DOMAIN\svc-account] FROM WINDOWS;
+   ```
+
+3. **Re-grant the service's own files — the step people miss.** The service deliberately locks its files down to SYSTEM, Administrators, and the account it was *running as*; the new account is on none of those ACLs, and the service will fail to read its config or write its store. One-time, from an elevated prompt, before starting the service:
+
+   ```
+   icacls "C:\ProgramData\PerformanceMonitorDarling" /grant "DOMAIN\svc-account:(OI)(CI)F"
+   icacls "C:\PerformanceMonitorDarling\darling.json" /grant "DOMAIN\svc-account:F"
+   ```
+
+   Adjust the second path to wherever `darling.json` sits beside the service exe; the first covers the logs and, in managed mode, the store's data directory. On its next start the service re-asserts the tight ACL itself — now including the new account — so this does not need repeating.
+
+   In managed-store mode there is one more, and it needs **ownership**, not a grant: the store's superuser credential `pg-credential.dpapi` (beside the data directory, under `C:\ProgramData\PerformanceMonitorDarling` by default) is trusted only when *owned* by SYSTEM, Administrators, or the service account — an anti-pre-plant check — and `icacls /grant` changes permissions, never ownership, so after the switch the file is still owned by the *previous* service account and the service refuses it. Hand ownership to Administrators (trusted across any future account change, which is why not the new account itself) and grant the new account on the file directly — its ACL is protected and does **not** inherit the folder grant above:
+
+   ```
+   takeown /f "C:\ProgramData\PerformanceMonitorDarling\pg-credential.dpapi" /a
+   icacls "C:\ProgramData\PerformanceMonitorDarling\pg-credential.dpapi" /grant "DOMAIN\svc-account:F"
+   ```
+
+   The sibling role credentials (the admin/viewer/mcp `.dpapi` files) hit the same ownership check but self-heal — a role password can be re-asserted, a superuser's cannot — so expect one-time `discarding and regenerating` warnings on the first start, not faults.
+
+4. **Start the service and verify from its log** (`%ProgramData%\PerformanceMonitorDarling\logs`): the per-server connect lines are the proof that the *service account's* grants work. `--test-connection` from your console runs as you, not the service account — see the [pre-flight note above](#validate-the-config-pre-flight).
+
+Nothing else moves: anything encrypted with `--encrypt-password` (SQL-auth server passwords, SMTP) survives the account change, because those blobs are DPAPI **machine**-scope, not account-scope — and collected data is untouched. Later `install-darling.ps1` upgrades preserve a custom Log On account and harden `darling.json` for the account the service actually runs as.
 
 ### What the Service Does on Monitored Servers
 
@@ -152,33 +195,59 @@ Every failure in steps 2–3 is tolerated and logged: the deadlock/blocked-proce
 
 ### Permissions on Monitored Servers
 
+The full least-privilege set, verified live against SQL Server 2025 with a scratch login carrying exactly these grants ([#1823](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1823)). For integrated auth, replace the first line with `CREATE LOGIN [DOMAIN\svc-account] FROM WINDOWS;` — the grants apply unchanged.
+
 ```sql
 USE [master];
 CREATE LOGIN [DarlingMonitor] WITH PASSWORD = N'YourStrongPassword';
+
+/* Required core: server-scoped DMVs (also implies VIEW DATABASE STATE in every database). */
 GRANT VIEW SERVER STATE TO [DarlingMonitor];
+
+/* The deadlock / blocked-process XE sessions. */
 GRANT ALTER ANY EVENT SESSION TO [DarlingMonitor];
 
--- Only if the instance hosts Availability Groups (see the table below)
+/* Enter every current and future database, with no per-database users to maintain. */
+GRANT CONNECT ANY DATABASE TO [DarlingMonitor];
+
+/* Catalog visibility everywhere - see the table for what goes silently missing without it. */
 GRANT VIEW ANY DEFINITION TO [DarlingMonitor];
 
--- Optional: SQL Agent job monitoring + failed-job alerts
+/* Optional: the default-trace collector (sys.traces requires ALTER TRACE; VIEW SERVER STATE
+   does not cover it). NOT read-only - it also permits creating/altering traces and implies
+   SHOWPLAN - so withholding it is a legitimate choice; the collector degrades cleanly. */
+GRANT ALTER TRACE TO [DarlingMonitor];
+
+/* Optional: SQL Agent job monitoring + failed-job alerts. Direct table grants, deliberately
+   NOT SQLAgentReaderRole - that role gates the sp_help_job* procedures, which this product
+   never calls, and grants NO SELECT on the tables the collectors read. */
 USE [msdb];
 CREATE USER [DarlingMonitor] FOR LOGIN [DarlingMonitor];
-ALTER ROLE [SQLAgentReaderRole] ADD MEMBER [DarlingMonitor];
+GRANT SELECT ON dbo.sysjobs         TO [DarlingMonitor];
+GRANT SELECT ON dbo.sysjobactivity  TO [DarlingMonitor];
+GRANT SELECT ON dbo.sysjobhistory   TO [DarlingMonitor];
+GRANT SELECT ON dbo.sysjobschedules TO [DarlingMonitor];
+GRANT SELECT ON dbo.syscategories   TO [DarlingMonitor];
+GRANT SELECT ON dbo.syssessions     TO [DarlingMonitor];
+GRANT EXECUTE ON dbo.agent_datetime TO [DarlingMonitor];
 ```
 
 | Grant | Why | If missing |
 |---|---|---|
 | `VIEW SERVER STATE` | All DMV collectors (wait stats, query stats, memory, CPU, file I/O, sessions, etc.) and the connect probe | Collection fails — this one is required |
 | `ALTER ANY EVENT SESSION` | Create/start the two XE sessions | Logged; deadlock and blocked-process collectors read zero rows (an admin can pre-create the sessions instead) |
+| `CONNECT ANY DATABASE` | The per-database collectors (`database_scoped_config`, `index_object_stats`, `database_size_stats`, `query_store_stats`) enter each database via `EXECUTE [db].sys.sp_executesql` | Databases the login cannot enter are skipped; without the grant that is every user database |
+| `VIEW ANY DEFINITION` | Catalog-view row visibility everywhere: `sys.tables` / `sys.indexes` / `sys.objects` for the index and object collectors, `sys.dm_db_partition_stats`, and the AG catalog views (`sys.availability_groups`, `sys.availability_replicas`) | **Silently zero rows** — catalog views hide rows rather than erroring, so missing objects look exactly like empty databases, and a real AG cluster looks identical to a server with no AGs |
 | `ALTER SETTINGS` | The `sp_configure` blocked-process-threshold bootstrap | Logged; set the threshold yourself (or via RDS Parameter Group) |
-| `SQLAgentReaderRole` on msdb | `running_jobs` collector and the failed/long-running-job alerts | Skipped gracefully — logged as a permissions skip, alerts return no jobs |
+| `ALTER TRACE` | The `default_trace_events` collector — `sys.traces` / `fn_trace_gettable` accept nothing less | `PERMISSIONS` skip in collection health; the default-trace tab stays empty |
+| msdb job-table `SELECT`s + `agent_datetime` `EXECUTE` | `running_jobs` / `job_history` / `agent_status` collectors and the failed/long-running-job alerts — all direct table reads; `SQLAgentReaderRole` alone leaves every one failing with error 229 | Skipped gracefully — logged as a permissions skip, alerts return no jobs |
 | `DBCC TRACESTATUS` permission | `trace_flags` snapshot | Degrades to zero rows with a warning |
-| `VIEW ANY DEFINITION` | The AG catalog views (`sys.availability_groups`, `sys.availability_replicas`) the `ag_replica_states` / `ag_database_replica_states` collectors join to the `sys.dm_hadr_*` DMVs | **Silently zero rows** — catalog views hide rows rather than erroring, so a real AG cluster looks identical to a server with no AGs. Not needed on an instance without Availability Groups |
 
-**Azure SQL Database:** connect to the one database you monitor (set the server entry's `"database"`), using a contained user with `VIEW DATABASE STATE`, matching the product's existing Azure guidance. The XE sessions are created database-scoped there (`ALTER ANY DATABASE EVENT SESSION`); SQL Agent collectors are skipped automatically.
+The msdb grants live inside a system database SQL Server setup can rewrite — re-check them after a CU or version upgrade.
 
-Collectors that hit a permission error (SQL errors 229/297/300) log a `PERMISSIONS` row in `collection_log` and retry on their next scheduled run — one denied collector never stops the rest.
+**Azure SQL Database:** connect to the one database you monitor (set the server entry's `"database"`), using a contained user with `VIEW DATABASE STATE` and `VIEW DEFINITION`, matching the product's existing Azure guidance. The XE sessions are created database-scoped there (`ALTER ANY DATABASE EVENT SESSION`); SQL Agent collectors are skipped automatically.
+
+Collectors that hit a permission error (SQL errors 229/297/300, plus 8189 from `sys.traces`) log a `PERMISSIONS` row in `collection_log` and retry on their next scheduled run — one denied collector never stops the rest.
 
 #### Which collectors run on which platform
 
@@ -196,7 +265,7 @@ Notes:
 
 - **Azure SQL DB** is the most restricted target: the six `!IsAzureSqlDb` collectors read server-scoped DMVs or on-disk artifacts that do not exist there, and the SQL Agent collectors have no Agent to read. Nothing about that is a permission problem, so it is not reported as one.
 - **AWS RDS** blocks direct `msdb` job reads specifically; the rest of the SQL Agent surface is unaffected.
-- **`HasMsdbAccess`** is probed per server at connect (`HAS_DBACCESS('msdb')`), so losing the `SQLAgentReaderRole` grant later moves those collectors from running to skipped without an error storm.
+- **`HasMsdbAccess`** is probed per server at connect and is exactly `HAS_DBACCESS('msdb')` — *any* access to msdb, not a specific role or table grant. Losing msdb access later moves those collectors from running to skipped without an error storm. A login that can enter msdb but lacks `SELECT` on the job tables passes this probe and is caught one layer down as a `PERMISSIONS` skip instead.
 - An unknown version (`SqlMajorVersion == 0`, i.e. detection has not completed yet) is treated as capable rather than skipped, so a collector is never silently dropped because a probe was slow.
 
 If a tab or column is empty and you expect data, check **Collection Health**: a collector skipped for platform reasons shows no runs at all, whereas one denied by permissions logs `PERMISSIONS` and is classified `NO_PERMISSIONS`. Those are different problems with different fixes — the first is expected on that platform, the second is a grant to add from the table above.
@@ -217,7 +286,7 @@ Two mutually exclusive modes — setting both `managed: true` and `connectionStr
 | `port` | `5641` | Managed mode only: the loopback port the bundled server listens on. Deliberately uncommon so it coexists with any PostgreSQL (5432) already on the machine. |
 | `dataDirectory` | *(null)* | Managed mode only: the cluster's data directory. `null` means `%ProgramData%\PerformanceMonitorDarling\pg`. |
 | `connectAs` | `"admin"` | Managed mode only: which least-privilege role the Viewer connects as — `"admin"` (reads everything + manages mute rules and dismisses alerts) or `"viewer"` (read-only; those write actions are hidden/disabled). See [Security & Least-Privilege Roles](#security--least-privilege-roles). Ignored in bring-your-own mode (the connection string picks the role). |
-| `connectionString` | *(required unless managed)* | Npgsql connection string for a store you provision yourself, e.g. `Host=localhost;Port=5432;Username=darling;Password=...;Database=darling` |
+| `connectionString` | *(required unless managed)* | Npgsql connection string for a store you provision yourself, e.g. `Host=localhost;Port=5432;Username=darling;Password=...;Database=darling`. You own that cluster's settings: if it has TimescaleDB, size its [background workers](#background-workers-sizing-an-unmanaged-store-and-what-happens-if-you-dont) — managed mode does this for you, this mode does not. |
 
 ### servers (array, at least one entry)
 
@@ -260,6 +329,7 @@ The shared alert engine's switches and thresholds. Every default mirrors Lite's 
 | `cpuMode` | `"total"` | `"total"` = SQL + other processes; `"sql"` = SQL process only |
 | `blockingEnabled` | `true` | |
 | `blockingCountThreshold` | `1` | Blocked-process count (rolling window) that trips the alert |
+| `blockingWaitSecondsThreshold` | `0` | Total blocked wait, in seconds, summed across the latest blocking snapshot; `0` = off. A second gate beside the count one, because a count cannot tell one session blocked for an hour from one blocked for a second. Reports as its own "Blocking Wait Time" alert, and unlike the count gate it is level-triggered: it re-fires every cooldown while the wait stays above the threshold and clears when it drops below |
 | `deadlockEnabled` | `true` | |
 | `deadlockCountThreshold` | `1` | Deadlock count (rolling window) that trips the alert |
 | `poisonWaitEnabled` | `true` | THREADPOOL / RESOURCE_SEMAPHORE / RESOURCE_SEMAPHORE_QUERY_COMPILE |
@@ -442,6 +512,42 @@ At startup, right after migration, the service attempts `CREATE EXTENSION IF NOT
 
 `IF NOT EXISTS` short-circuits before privilege checks, so a store whose administrator pre-created the extension works for a service login that could never create it.
 
+### Background workers: sizing an unmanaged store, and what happens if you don't
+
+**This section is for bring-your-own PostgreSQL only.** In managed mode the service sizes these itself on every start and there is nothing to do.
+
+Every TimescaleDB policy — compression, retention, continuous-aggregate refresh — runs in a **background worker**, and a policy that cannot get a worker does not run. PostgreSQL's stock `max_worker_processes = 8` is far below what this store needs, so an unmanaged store left at the defaults silently does very little compressing.
+
+Managed mode derives the two settings from the live hypertable count, and an unmanaged store wants the same numbers:
+
+```
+timescaledb.max_background_workers = <hypertables> + 2
+max_worker_processes               = 3 + timescaledb.max_background_workers + 8
+```
+
+Today that is **41** and **52** for 39 hypertables (the 38 collector tables plus `collection_log`). The `+ 2` is not slack — it is exactly TimescaleDB's own two built-in jobs, `policy_telemetry` and `policy_job_stat_history_retention`, so a fully migrated store holds precisely one job per worker:
+
+```sql
+SELECT proc_name, count(*) FROM timescaledb_information.jobs GROUP BY proc_name;
+```
+
+Both settings need a **server restart** (`max_worker_processes` is restart-only — a reload leaves the old value serving), and the hypertable count grows as collectors are added, so re-check it after a major upgrade rather than pinning 41/52 forever.
+
+**One store per cluster is the assumption.** `timescaledb.max_background_workers` is a **cluster-wide** pool shared by every database, while the derivation above is **per-store**. Managed mode puts one store on one cluster so the two coincide, but if you run **N Darling stores on one PostgreSQL cluster** — or share the cluster with any other TimescaleDB database — multiply both numbers by N. Each database with the extension loaded also permanently holds a scheduler slot out of that same pool, so the sharing starts before any policy fires.
+
+**What under-provisioning looks like.** The postmaster log (`pg.log`, or wherever your cluster logs) is where it shows up, in one of two shapes:
+
+```
+WARNING:  failed to launch job 1042 "Columnstore Policy [1042]": out of background workers
+WARNING:  ... failed to start a background worker
+```
+
+The first means TimescaleDB's own pool is full; the second means PostgreSQL's is. Neither is fatal and neither corrupts anything — the job is skipped and retried on its next schedule, so **light contention is benign** and you may see a couple of these without any consequence. It matters at scale: when the shortfall is persistent rather than momentary, compression falls behind the 1-day policy and the store grows at its uncompressed rate (measured compression is ~16.7x on perfmon and ~6.4x on the plan-XML-heavy `query_stats`, so the gap is large), retention stops reclaiming chunks, and the jobs that keep losing the race are the ones whose backlog is worst. `timescaledb_information.job_stats` is the check that settles it — a healthy store shows successes with no failures:
+
+```sql
+SELECT sum(total_runs), sum(total_successes), sum(total_failures) FROM timescaledb_information.job_stats;
+```
+
 ### Retention
 
 A purge runs on the first sweep after startup and then daily, driven by the same shared per-collector horizons Lite uses:
@@ -530,9 +636,11 @@ A monitored server that is down is retried every 60 seconds forever; a collector
 
 **`PERMISSIONS` rows in `collection_log`** — that collector's reads were denied (SQL errors 229/297/300). Check the [permissions](#permissions-on-monitored-servers); the collector retries every cycle and recovers as soon as the grant lands.
 
-**"Skipping recently-failed-job check"** (info) — the login has no msdb / `SQLAgentReaderRole` access, so failed-job alerts are skipped. Expected for minimal-privilege monitoring logins; grant the role if you want job alerts.
+**"Skipping recently-failed-job check"** (info) — the login cannot read `msdb.dbo.sysjobs` / `sysjobhistory`, so failed-job alerts are skipped. Expected for minimal-privilege monitoring logins. If you want job alerts, add the direct msdb table `SELECT`s from the [permissions](#permissions-on-monitored-servers) section — **not** `SQLAgentReaderRole`, which gates the `sp_help_job*` procedures this product never calls and leaves the reads failing with error 229.
 
 **"TimescaleDB setup failed — continuing in plain-PostgreSQL mode"** (warning) — the extension exists but conversion hit a problem. Everything still works (DELETE-based retention, plain tables); conversion is retried on the next service start.
+
+**"out of background workers" / "failed to start a background worker" in the postmaster log, or the store keeps growing despite compression** — bring-your-own stores only: the cluster has fewer worker slots than the store has policies, so compression and retention jobs are being skipped. An occasional one is benign (the job retries on its next schedule); persistent ones mean the store is effectively uncompressed. Size the two settings and restart the server — see [Background workers](#background-workers-sizing-an-unmanaged-store-and-what-happens-if-you-dont), and multiply them if the cluster hosts more than one store. `timescaledb_information.job_stats` tells you whether jobs are actually succeeding.
 
 **"Why are there 40+ postgres.exe processes?"** — the count is three populations, and only one is client connections: (1) PostgreSQL's own system processes (postmaster, checkpointer, WAL/background writers, autovacuum, stats); (2) **TimescaleDB background workers** — the managed conf sizes `timescaledb.max_background_workers` to the hypertable count + 2 (≈38), and every RUNNING compression/retention policy job is its own process, so the count legitimately surges during checkpoint/compression waves and falls back when they finish; (3) client backends — the service's pools are capped at 24, the co-located viewer's at 10. Decompose it live with: `SELECT backend_type, count(*) FROM pg_stat_activity GROUP BY backend_type ORDER BY 2 DESC;` — and remember Windows charges the shared buffer segment to every attached process's working set, so per-process memory numbers cannot be summed.
 
@@ -572,7 +680,7 @@ With `postgres.managed = true` (the sample's default), the service runs its own 
 }
 ```
 
-**What first run does.** The service looks for `pg-runtime\pgsql\` beside its binary, extracting it from `pg-runtime.zip` when only the zip is present (deleting the extracted directory is therefore always safe — it self-heals). If the data directory has no cluster, it generates a 32-character random password, protects it with DPAPI LocalMachine into `pg-credential.dpapi` beside the data directory (credential first, so a crash mid-initdb never strands a cluster nobody can log into), then runs `initdb` with `scram-sha-256` auth, data checksums, and UTF8/C locale. A marker-guarded block appended to `postgresql.conf` preloads TimescaleDB, sets the port, and restricts listening to `127.0.0.1`; a second versioned block sizes background workers up for the per-hypertable compression jobs (`timescaledb.max_background_workers = 28`, `max_worker_processes = 40` — PostgreSQL's default of 8 workers cannot launch them); a third versioned block sizes memory from the host's physical RAM for the up-to-500-servers case (`shared_buffers = min(25% RAM, 1GB)`, `effective_cache_size = 75% RAM`, `maintenance_work_mem = min(max(5% RAM, 1536MB), 25% RAM, 2048MB)`, and a deliberately-modest per-connection `work_mem = clamp(RAM/512, 16MB, 64MB)` — on an 8 GB box that is `shared_buffers 1024MB` / `work_mem 16MB`; the stock 128 MB / 4 MB defaults are fine at small scale but bottleneck at fleet scale). Later blocks re-state single settings that field measurement moved: a fifth caps `shared_buffers` for the co-located store, a sixth turns on the log-rotation ring, and a seventh carries the `maintenance_work_mem` floor that TimescaleDB's compression sort runs on (measured at ~+70% compression throughput on a 16 GB-class host, plateauing by 1536 MB). `postgresql.conf` takes the LAST assignment of a setting, so these override without rewriting anything. Every append is re-checked on every start, so a crash between initdb and the append heals itself instead of silently degrading — and clusters initialized before a given block existed gain it on their next start (effective at the next PostgreSQL restart). Then `pg_ctl start`, `CREATE DATABASE darling`, and the normal startup path (migrations, TimescaleDB adoption — you should see `32/32 collector table(s) are hypertables`) continues exactly as in bring-your-own mode. The connection string is derived from the stored credential; the Viewer and the MCP host on the same machine derive it the same way, so nothing needs configuring there either.
+**What first run does.** The service looks for `pg-runtime\pgsql\` beside its binary, extracting it from `pg-runtime.zip` when only the zip is present (deleting the extracted directory is therefore always safe — it self-heals). If the data directory has no cluster, it generates a 32-character random password, protects it with DPAPI LocalMachine into `pg-credential.dpapi` beside the data directory (credential first, so a crash mid-initdb never strands a cluster nobody can log into), then runs `initdb` with `scram-sha-256` auth, data checksums, and UTF8/C locale. A marker-guarded block appended to `postgresql.conf` preloads TimescaleDB, sets the port, and restricts listening to `127.0.0.1`; a second versioned block sizes background workers up for the per-hypertable compression jobs, DERIVED from the live hypertable count so it cannot go stale as collectors are added (`timescaledb.max_background_workers = hypertables + 2`, `max_worker_processes = 3 + that + 8` — today 41 and 52 for 39 hypertables; PostgreSQL's default of 8 workers cannot launch them); a third versioned block sizes memory from the host's physical RAM for the up-to-500-servers case (`shared_buffers = min(25% RAM, 1GB)`, `effective_cache_size = 75% RAM`, `maintenance_work_mem = min(max(5% RAM, 1536MB), 25% RAM, 2048MB)`, and a deliberately-modest per-connection `work_mem = clamp(RAM/512, 16MB, 64MB)` — on an 8 GB box that is `shared_buffers 1024MB` / `work_mem 16MB`; the stock 128 MB / 4 MB defaults are fine at small scale but bottleneck at fleet scale). Later blocks re-state single settings that field measurement moved: a fifth caps `shared_buffers` for the co-located store, a sixth turns on the log-rotation ring, and a seventh carries the `maintenance_work_mem` floor that TimescaleDB's compression sort runs on (measured at ~+70% compression throughput on a 16 GB-class host, plateauing by 1536 MB). `postgresql.conf` takes the LAST assignment of a setting, so these override without rewriting anything. Every append is re-checked on every start, so a crash between initdb and the append heals itself instead of silently degrading — and clusters initialized before a given block existed gain it on their next start (effective at the next PostgreSQL restart). Then `pg_ctl start`, `CREATE DATABASE darling`, and the normal startup path (migrations, TimescaleDB adoption — you should see `N/N collector table(s) are hypertables`, both numbers equal and equal to the collector count; a converted count BELOW the total means some table stayed plain and the line above it says which) continues exactly as in bring-your-own mode. The connection string is derived from the stored credential; the Viewer and the MCP host on the same machine derive it the same way, so nothing needs configuring there either.
 
 **Why scram and not trust, even loopback-only.** Trust auth would hand superuser to any local code that can open a loopback socket — every other local user, and network-capable-but-not-filesystem-capable attack primitives like SSRF from a co-hosted app. With scram the credential travels on the wire, failed attempts are auditable, and access is confined to what can read the DPAPI-protected credential file. `listen_addresses = '127.0.0.1'` keeps the server unreachable off the machine on top — unless you deliberately opt into a LAN endpoint (see [Opt-in Network Endpoints (LAN)](#opt-in-network-endpoints-lan)), which reconciles `listen_addresses`, a `hostssl` pg_hba rule, and TLS on every start and is otherwise off.
 
@@ -586,7 +694,7 @@ With `postgres.managed = true` (the sample's default), the service runs its own 
 
 The store is split into two schemas so that no consumer connects with more privilege than it needs:
 
-- **`collect`** — the 32 collector hypertables plus the service-written, user-read metadata (`servers`, `collection_log`, `analysis_findings`, the `v_*` views). Read-only to everyone but the service.
+- **`collect`** — the collector hypertables (one per collector) plus the service-written, user-read metadata (`servers`, `collection_log`, `analysis_findings`, the `v_*` views). Read-only to everyone but the service.
 - **`config`** — exactly the tables a human operator changes through the Viewer or MCP: `config_mute_rules`, `config_alert_log` (alert dismissals), `config_edge_trigger_watermarks`, and `analysis_muted`.
 
 Table names are unchanged — only their schema moved — and the shared SQL keeps using the bare, unqualified names, resolved through `search_path = collect, config, public` (set as the database default and carried on the managed connection strings). This is deliberate: Darling's SQL is byte-identical to Lite's DuckDB SQL, and re-qualifying it would fork that twin.

@@ -188,6 +188,7 @@ public sealed class DarlingMcpConfigToolsLivePostgresTests
         await DeleteRowsAsync(connection, ct);
         await using var postgres = NpgsqlDataSource.Create(cs!);
 
+        var bodySucceeded = false;
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
@@ -227,10 +228,13 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
             var traceFlags = await DarlingMcpConfigTools.GetTraceFlags(postgres, ServerName);
             DarlingMcpTestData.AssertEnvelope(traceFlags, ServerName, "trace_flags");
             Assert.Contains("3226", traceFlags, StringComparison.Ordinal);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, ct);
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
         }
     }
 

@@ -8,6 +8,7 @@
 
 using System;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
@@ -27,10 +28,15 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class ViewerQueryTrendsSqlTests
 {
+    /// <summary>
+    /// The three DELTA-based trends. Query Store is deliberately not here: its x-axis stopped being
+    /// collection_time in #1841 tier 2 (see <see cref="QueryStoreDurationTrend_PlacesWorkAtTheIntervalStart_WithALegacyArm"/>),
+    /// so folding it into this theory would force the shared pins to be loosened for all four and the
+    /// delta trends would stop being pinned to the axis they genuinely use.
+    /// </summary>
     [Theory]
     [InlineData(nameof(ViewerDataService.QueryDurationTrendSql), "query_stats")]
     [InlineData(nameof(ViewerDataService.ProcedureDurationTrendSql), "procedure_stats")]
-    [InlineData(nameof(ViewerDataService.QueryStoreDurationTrendSql), "query_store_stats")]
     [InlineData(nameof(ViewerDataService.ExecutionCountTrendSql), "query_stats")]
     public void TrendSql_ComputesPerSecondRate_ViaLagInterval_BaseTable(string sqlName, string table)
     {
@@ -57,6 +63,49 @@ public sealed class ViewerQueryTrendsSqlTests
         /* The execution-count trend projects only the executions/sec column (no elapsed). */
         Assert.DoesNotContain("elapsed", ViewerDataService.ExecutionCountTrendSql, StringComparison.Ordinal);
         Assert.Contains("SUM(delta_execution_count)", ViewerDataService.ExecutionCountTrendSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void QueryStoreDurationTrend_PlacesWorkAtTheIntervalStart_WithALegacyArm()
+    {
+        /* DELIBERATE FLIP of the #1845 pin that stood here (#1841 tier 2). That pin recorded the one
+           Query Store aggregate left un-deduped, and its reasoning held right up to a premise that was
+           FALSE: that placing the work at the interval's own clock trades a magnitude bug for a timezone
+           bug, because that clock is the monitored server's LOCAL wall time. It is not. Query Store's
+           interval start_time and first_execution_time are both datetimeoffset — verified on a live
+           server reading +00:00 while the host sat at UTC-4 — and the collector normalizes through
+           DateTimeOffset.UtcDateTime before storing. So the interval clock shares an axis with
+           collection_time, and dedup + interval-start placement together give a series that neither
+           overstates nor collapses.
+
+           Both arms must stay, and the split must stay TOTAL. */
+        var sql = ViewerDataService.QueryStoreDurationTrendSql;
+
+        /* Arm 1: deduped per interval, keyed on the real identity, placed at the interval start. */
+        Assert.Contains("WHERE rn = 1", sql, StringComparison.Ordinal);
+        Assert.Contains("PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role", sql, StringComparison.Ordinal);
+        Assert.Contains("interval_start_time_utc AS point_time", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   interval_start_time_utc IS NOT NULL", sql, StringComparison.Ordinal);
+
+        /* Arm 2: pre-tier-2 rows, un-deduped at collection_time — the behavior they always had, because
+           nothing can reconstruct an interval start for them. */
+        Assert.Contains("collection_time AS point_time", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   interval_start_time_utc IS NULL", sql, StringComparison.Ordinal);
+
+        /* IS NULL / IS NOT NULL partitions the rows with no overlap and no gap: a mixed window counts
+           every row exactly once. A predicate pair that could ever both match, or both miss, would make
+           this chart double-count or silently drop the transition window. */
+        Assert.Single(Regex.Matches(sql, @"AND   interval_start_time_utc IS NOT NULL"));
+        Assert.Single(Regex.Matches(sql, @"AND   interval_start_time_utc IS NULL"));
+        Assert.Contains("UNION ALL", sql, StringComparison.Ordinal);
+
+        /* The rate denominator now measures interval-start to interval-start, not cycle to cycle. */
+        Assert.Contains("LAG(point_time) OVER (ORDER BY point_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY point_time", sql, StringComparison.Ordinal);
+
+        /* The delta-based trends never needed any of this: their columns are already per-cycle increments. */
+        Assert.DoesNotContain("first_execution_time", ViewerDataService.QueryDurationTrendSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("first_execution_time", ViewerDataService.ExecutionCountTrendSql, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -303,7 +352,7 @@ public sealed class ViewerQueriesRestLivePostgresTests
         using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "query_stats", TrendServerId);
+        await DeleteRowsAsync(connection, "query_stats", TrendServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(cs!);
         var end = TruncateToSeconds(DateTime.UtcNow);
@@ -311,6 +360,7 @@ public sealed class ViewerQueriesRestLivePostgresTests
         var t1 = start.AddHours(1);
         var t2 = t1.AddSeconds(60); /* one 60-second interval later */
 
+        var bodySucceeded = false;
         try
         {
             await InsertQueryStatsAsync(connection, TrendServerId, t1, "0xA", deltaExec: 10, deltaWorker: 30_000, deltaElapsed: 60_000, deltaReads: 100, deltaWrites: 0, queryText: "SELECT a");
@@ -324,10 +374,13 @@ public sealed class ViewerQueriesRestLivePostgresTests
             Assert.Equal(t2, points[1].CollectionTime);
             Assert.Equal(2.0, points[1].Value, 3);          /* 120_000 us = 120 ms over 60 s -> 2 ms/sec */
             Assert.Equal(2, points[1].ExecutionCount);       /* 120 execs over 60 s -> 2/sec (truncated) */
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "query_stats", TrendServerId);
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "query_stats", TrendServerId, cleanupCt));
         }
     }
 
@@ -340,13 +393,14 @@ public sealed class ViewerQueriesRestLivePostgresTests
         using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "query_stats", HeatmapServerId);
+        await DeleteRowsAsync(connection, "query_stats", HeatmapServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(cs!);
         var end = TruncateToSeconds(DateTime.UtcNow);
         var start = end.AddHours(-24);
         var t1 = start.AddHours(1); /* all rows share one collection_time -> one 5-min bin */
 
+        var bodySucceeded = false;
         try
         {
             /* Duration metric = (delta_elapsed_time / 1000) / delta_exec (ms/exec).
@@ -368,10 +422,13 @@ public sealed class ViewerQueriesRestLivePostgresTests
             Assert.Equal("0xLOW", result.CellDetails[0, 0].TopQueryHash);
             /* 0xZERO (delta_exec = 0) contributed to no cell. */
             Assert.Equal(0.0, result.Intensities[6, 0]);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "query_stats", HeatmapServerId);
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "query_stats", HeatmapServerId, cleanupCt));
         }
     }
 
@@ -384,7 +441,7 @@ public sealed class ViewerQueriesRestLivePostgresTests
         using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "query_snapshots", SnapshotServerId);
+        await DeleteRowsAsync(connection, "query_snapshots", SnapshotServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(cs!);
         var end = TruncateToSeconds(DateTime.UtcNow);
@@ -392,6 +449,7 @@ public sealed class ViewerQueriesRestLivePostgresTests
         var older = start.AddHours(1);
         var newer = start.AddHours(2);
 
+        var bodySucceeded = false;
         try
         {
             await InsertQuerySnapshotAsync(connection, SnapshotServerId, older, spid: 51, cpu: 100, hash: "0xB1", queryText: "SELECT older");
@@ -413,10 +471,13 @@ public sealed class ViewerQueriesRestLivePostgresTests
             Assert.Equal(2, batch.Count);
             Assert.Equal(53, batch[0].SessionId);              /* cpu DESC within the batch */
             Assert.Equal(52, batch[1].SessionId);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "query_snapshots", SnapshotServerId);
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "query_snapshots", SnapshotServerId, cleanupCt));
         }
     }
 
@@ -429,7 +490,7 @@ public sealed class ViewerQueriesRestLivePostgresTests
         using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "query_snapshots", SlicerServerId);
+        await DeleteRowsAsync(connection, "query_snapshots", SlicerServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(cs!);
         var end = TruncateToSeconds(DateTime.UtcNow);
@@ -437,6 +498,7 @@ public sealed class ViewerQueriesRestLivePostgresTests
         var hour1 = TruncateToHour(start.AddHours(3));
         var hour2 = TruncateToHour(start.AddHours(5));
 
+        var bodySucceeded = false;
         try
         {
             await InsertQuerySnapshotAsync(connection, SlicerServerId, hour1.AddMinutes(5), spid: 60, cpu: 100, hash: "0xA", queryText: "a");
@@ -449,10 +511,13 @@ public sealed class ViewerQueriesRestLivePostgresTests
             Assert.Equal(hour1, buckets[0].BucketTime);
             Assert.Equal(2, buckets[0].SessionCount);      /* two snapshots in hour1 */
             Assert.Equal(300.0, buckets[0].TotalCpu, 3);   /* 100 + 200 */
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "query_snapshots", SlicerServerId);
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "query_snapshots", SlicerServerId, cleanupCt));
         }
     }
 
@@ -519,9 +584,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)", conn
     private static DateTime TruncateToHour(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Year, value.Month, value.Day, value.Hour, 0, 0), DateTimeKind.Unspecified);
 
-    private static async Task DeleteRowsAsync(NpgsqlConnection connection, string table, int serverId)
+    private static async Task DeleteRowsAsync(NpgsqlConnection connection, string table, int serverId, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand($"DELETE FROM {table} WHERE server_id = {serverId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

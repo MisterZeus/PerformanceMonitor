@@ -239,8 +239,14 @@ COPY (
     /// pre-reservation behavior that needs more headroom than the resting cap
     /// (#933). memory_limit is instance-level; concurrent operations briefly
     /// see the raised cap.
+    ///
+    /// <para><b>internal rather than private</b> so the #1912 archive repair reuses this exact raise/restore
+    /// instead of carrying its own copy of the number. The floor is a KNOWN-BROKEN-BELOW-2GB constraint, not a
+    /// tuning preference — DuckDB pre-reserves ~99% of memory_limit the moment a parquet COPY begins, so a
+    /// second literal drifting downward is precisely how it gets re-broken (#942 lowered it to 1GB on sound-
+    /// looking reasoning and broke compaction; #952 put it back).</para>
     /// </summary>
-    private static async Task WithRaisedCopyMemoryLimit(DuckDBConnection connection, Func<Task> action)
+    internal static async Task WithRaisedCopyMemoryLimit(DuckDBConnection connection, Func<Task> action)
     {
         using (var raiseCmd = connection.CreateCommand())
         {

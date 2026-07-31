@@ -129,11 +129,32 @@ public partial class RemoteCollectorService
     private static int ConnectionTimeoutSeconds => App.ConnectionTimeoutSeconds;
 
     /// <summary>
-    /// Per-call timing fields set by each collector method.
-    /// Read by RunCollectorAsync after the collector completes.
+    /// What one collector run has to hand its own collection_log row: the #1180 fetch/store split each
+    /// collector method sets, and the #1837 note a run that SUCCEEDED but collected nothing leaves behind
+    /// (an enumeration that yielded 0 items, items whose enumeration probe failed). Read by
+    /// <see cref="RunCollectorAsync"/> once the collector completes.
     /// </summary>
-    private long _lastSqlMs;
-    private long _lastDuckDbMs;
+    internal sealed class RunTelemetry
+    {
+        public long SqlMs { get; set; }
+        public long StorageMs { get; set; }
+        public string? Note { get; set; }
+    }
+
+    /// <summary>
+    /// Per-run telemetry keyed by SERVER, because a collection cycle runs the servers in PARALLEL (one
+    /// task each, see RunCollectionCycleAsync) while the collectors within one server run sequentially.
+    /// As plain instance fields these three were shared across those parallel tasks: server B's reset at
+    /// the top of its run could blank server A's timings between A's write and A's collection_log read,
+    /// and once #1837 gave every enumeration run a note, A's "enumeration yielded 0 items" could land on
+    /// B's row for a collector that does not even enumerate. Keying by server is sufficient precisely
+    /// because of the sequential-within-a-server rule — two collectors on one server never overlap.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, RunTelemetry> _runTelemetry = new();
+
+    /// <summary>This server's telemetry slot, created on first use.</summary>
+    internal RunTelemetry TelemetryFor(int serverId) =>
+        _runTelemetry.GetOrAdd(serverId, static _ => new RunTelemetry());
 
     /// <summary>
     /// Tracks health state per collector per server.
@@ -451,6 +472,16 @@ public partial class RemoteCollectorService
         int rowsCollected = 0;
         bool xeSessionUnavailable = false;
 
+        /* Clear the per-call fields HERE, not only inside the definition runner: everything below can
+           throw before the runner is ever entered — the XE session ensure for deadlocks /
+           blocked_process_report is the live example — and the catches all fall through to the
+           LogCollectionAsync at the end of this method. Reset only in the runner, such a row carried the
+           PREVIOUS collector's sql/storage milliseconds as if they were its own. */
+        var telemetry = TelemetryFor(GetServerId(server));
+        telemetry.SqlMs = 0;
+        telemetry.StorageMs = 0;
+        telemetry.Note = null;
+
         try
         {
             /* Target-gate collectors through the shared AppliesTo — the single authoritative gate surface
@@ -553,8 +584,16 @@ public partial class RemoteCollectorService
 
             _scheduleManager.MarkCollectorRunForServer(server.Id, collectorName, startTime);
 
+            /* Annotate a successful-but-empty run (#1837): errorMessage is provably null here — only the
+               catches below assign it — so this carries the runner's note (an enumeration that listed
+               zero databases, items whose enumeration probe failed) onto the collection_log row without
+               touching the SUCCESS status. Health tracking and every band/count read key on status, never
+               on error_message, so the note reaches the Collection Health Note column and the Collection
+               Log detail grid, and is inert everywhere else. */
+            errorMessage = telemetry.Note;
+
             var elapsed = (int)(DateTime.UtcNow - startTime).TotalMilliseconds;
-            AppLogger.Info("Collector", $"  [{server.DisplayName}] {collectorName} => {rowsCollected} rows in {elapsed}ms (sql:{_lastSqlMs}ms, duck:{_lastDuckDbMs}ms)");
+            AppLogger.Info("Collector", $"  [{server.DisplayName}] {collectorName} => {rowsCollected} rows in {elapsed}ms (sql:{telemetry.SqlMs}ms, duck:{telemetry.StorageMs}ms)");
         }
         catch (XeSessionEnsureException ex)
         {
@@ -597,8 +636,11 @@ public partial class RemoteCollectorService
             {
                 AppLogger.Warn("Collector", $"Collector '{collectorName}' column not found for server '{server.DisplayName}' (possible version incompatibility): {ex.Message}");
             }
-            else if (ex.Number == 229 || ex.Number == 297 || ex.Number == 300)
+            else if (ex.Number == 229 || ex.Number == 297 || ex.Number == 300 || ex.Number == 8189)
             {
+                /* 8189 is sys.traces' own denial (ALTER TRACE missing) — a legitimate least-privilege
+                   choice (#1823), so default_trace_events degrades as PERMISSIONS like every other
+                   denied collector instead of erroring every cycle. Mirrors Darling's classifier. */
                 status = "PERMISSIONS";
                 AppLogger.Warn("Collector", $"Collector '{collectorName}' permission denied for server '{server.DisplayName}': {ex.Message}");
             }
@@ -632,7 +674,7 @@ public partial class RemoteCollectorService
         RecordCollectorResult(GetServerId(server), collectorName, status, errorMessage, xeSessionUnavailable);
 
         // Log the collection attempt
-        await LogCollectionAsync(GetServerId(server), server.DisplayName, collectorName, startTime, status, errorMessage, rowsCollected, _lastSqlMs, _lastDuckDbMs);
+        await LogCollectionAsync(GetServerId(server), server.DisplayName, collectorName, startTime, status, errorMessage, rowsCollected, telemetry.SqlMs, telemetry.StorageMs);
     }
 
     /// <summary>

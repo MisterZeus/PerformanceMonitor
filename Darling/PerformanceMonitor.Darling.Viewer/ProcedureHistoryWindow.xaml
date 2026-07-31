@@ -25,27 +25,27 @@
             </Style>
 
             <ContextMenu x:Key="DataGridContextMenu">
-                <MenuItem Header="Copy Cell" Click="CopyCell_Click">
+                <MenuItem Header="Copy _Cell" Click="CopyCell_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>
                 </MenuItem>
-                <MenuItem Header="Copy Row" Click="CopyRow_Click">
+                <MenuItem Header="Copy _Row" Click="CopyRow_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon>
                 </MenuItem>
-                <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click">
+                <MenuItem Header="Copy _All Rows" Click="CopyAllRows_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon>
                 </MenuItem>
                 <Separator/>
-                <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click">
+                <MenuItem Header="_Export to CSV..." Click="ExportToCsv_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
                 </MenuItem>
                 <Separator/>
-                <MenuItem Header="View Stored Plan" Click="ViewPlan_Click">
+                <MenuItem Header="_View Stored Plan" Click="ViewPlan_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F50D;"/></MenuItem.Icon>
                 </MenuItem>
                 <!-- Live plan fetch for the RIGHT-CLICKED snapshot by its plan_handle (headless-safe cached read,
                      no re-exec) — distinct from the stored "View Plan". Gated on the current row's
                      HasLivePlanHandle so a snapshot without a plan_handle shows it disabled. -->
-                <MenuItem Header="View Cached Plan" Click="FetchLivePlan_Click"
+                <MenuItem Header="View Cac_hed Plan" Click="FetchLivePlan_Click"
                           IsEnabled="{Binding CurrentItem.HasLivePlanHandle, ElementName=HistoryDataGrid, FallbackValue=False}">
                     <MenuItem.Icon><TextBlock Text="&#x1F310;"/></MenuItem.Icon>
                 </MenuItem>
@@ -146,7 +146,7 @@
 
         <!-- Footer -->
         <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
-            <Button Content="Close" Padding="20,6" Click="Close_Click"/>
+            <Button Content="_Close" Padding="20,6" Click="Close_Click" IsCancel="True"/>
         </StackPanel>
     </Grid>
 </Window>

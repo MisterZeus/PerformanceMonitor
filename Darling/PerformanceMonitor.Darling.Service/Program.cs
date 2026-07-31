@@ -215,6 +215,35 @@ if (args.Length > 0 && DarlingCliCommands.IsBackfillRollupsVerb(args[0]))
         backfillConfigPath, dryRun, Console.Out, Console.Error, CancellationToken.None);
 }
 
+/* #1912 — repair the pre-#1907 Query Store split slices still in stored rows, then re-materialize what they
+   fed. Same Windows-only managed-credential guard and same --dry-run shape as --backfill-rollups above. */
+if (args.Length > 0 && DarlingCliCommands.IsCollapseLegacySlicesVerb(args[0]))
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        Console.Error.WriteLine("--collapse-legacy-slices requires Windows (DPAPI store credential).");
+        return 1;
+    }
+
+    var rest = args.AsSpan(1);
+    var dryRun = false;
+    string? collapseConfigPath = null;
+    foreach (var arg in rest)
+    {
+        if (string.Equals(arg, "--dry-run", StringComparison.OrdinalIgnoreCase))
+        {
+            dryRun = true;
+        }
+        else
+        {
+            collapseConfigPath = arg;
+        }
+    }
+
+    return await DarlingCliCommands.CollapseLegacySlicesAsync(
+        collapseConfigPath, dryRun, Console.Out, Console.Error, CancellationToken.None);
+}
+
 var builder = Host.CreateApplicationBuilder(args);
 
 /* Windows-service lifetime is a no-op when run from a console, so the same exe

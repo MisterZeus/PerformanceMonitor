@@ -23,8 +23,14 @@ using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
-/// <summary>Per-run outcome the worker logs (mirrors Lite's fetch/store phase split, #1180).</summary>
-public sealed record CollectorRunResult(int Rows, long SqlMs, long StorageMs);
+/// <summary>
+/// Per-run outcome the worker logs (mirrors Lite's fetch/store phase split, #1180). <paramref name="Note"/>
+/// annotates a run that SUCCEEDED but is worth explaining on its collection_log row — today only the
+/// empty-enumeration case (see <see cref="EnumeratedCollectorDriver.EmptyEnumerationMessage"/>). It is the
+/// Darling twin of Lite's <c>_lastCollectionNote</c>; null (the default) leaves the row's message column
+/// null exactly as before.
+/// </summary>
+public sealed record CollectorRunResult(int Rows, long SqlMs, long StorageMs, string? Note = null);
 
 /// <summary>
 /// Runs a shared collector definition against one monitored server and binary-COPYs the rows
@@ -147,6 +153,11 @@ public sealed class DarlingCollectorRunner
         long storageMs = 0;
         var rowsWritten = 0;
 
+        /* The collection_log note for this run (#1837) — null on every ordinary path. Only the enumeration
+           branch sets it, but it is declared here so the note reaches the single success return below when
+           items WERE found and merely some of their probes failed. Lite's twin is _lastCollectionNote. */
+        string? collectionNote = null;
+
         if (definition.RunsPerDatabase(context.Target))
         {
             /* Azure SQL DB scopes some DMVs to the connected database — run the query once per
@@ -173,6 +184,11 @@ public sealed class DarlingCollectorRunner
             var failed = 0;
             Exception? firstFailure = null;
 
+            /* #1875: this path reads the trailing probe-failure set once PER DATABASE, so the note and the
+               log cap are decided for the cycle after the loop rather than inside it — see
+               CycleProbeFailures for why neither generalizes from the single-read plain path. */
+            var cycleProbeFailures = new CycleProbeFailures();
+
             /* One pooled store connection for the whole body; one binary COPY per database on it
                (completing an importer commits that database — commit-1..N-1 semantics on abort). */
             await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
@@ -191,13 +207,28 @@ public sealed class DarlingCollectorRunner
                     if (dbPlan is null)
                     {
                         /* Null (no rows for this database yet) falls back to the definition's
-                           documented first-run window, per database. This is the XE ring-buffer path
-                           (deadlocks / BPR), NOT query_store — no 24h clamp here (those sources roll
-                           past 24h on their own; the clamp is scoped to query_store's enumeration path). */
+                           documented first-run window, per database. No clamp is applied HERE because
+                           this branch also serves the XE ring-buffer collectors (deadlocks / BPR),
+                           where flooring a stale watermark would WRONGLY truncate legitimate catch-up
+                           — those sources roll past 24h on their own. query_store also reaches this
+                           branch on Azure SQL DB (#1836) and does need the bound, so it applies
+                           WatermarkPolicy.ClampCatchup inside its own cutoff computation: the clamp
+                           travels with the collector that needs it instead of with the path. */
                         context.Watermark = await GetLastCollectedTimeForDatabaseAsync(
                             server.ServerId, definition.TargetTable, definition.WatermarkColumn!,
                             definition.PerDatabaseWatermarkColumn!, databaseName, cancellationToken);
                         dbPlan = definition.BuildQuery(context);
+
+                        /* The definition clamped its own cutoff — surface the same WARNING the
+                           enumeration path emits, so the bounded history hole stays LOGGED and does
+                           not become the one silent hole in a policy whose whole premise is that it
+                           is visible. Mirrors Lite. */
+                        if (context.CatchupClampApplied)
+                        {
+                            _logger?.LogWarning(
+                                "{Collector} on '{Server}' database [{Database}] catch-up clamped to {Hours}h (stored watermark {Raw:o} is older) — a bounded, logged history hole.",
+                                definition.Name, server.Config.DisplayName, databaseName, WatermarkPolicy.MaxCatchup.TotalHours, context.Watermark);
+                        }
                     }
 
                     var sqlSlice = Stopwatch.StartNew();
@@ -207,6 +238,18 @@ public sealed class DarlingCollectorRunner
                     using (var dbReader = await dbCommand.ExecuteReaderAsync(cancellationToken))
                     {
                         batch = await definition.ReadAsync(dbReader, context, cancellationToken);
+
+                        /* #1875: the payload path's probe-failure contract, on the path that used to
+                           ignore it. blocked_process_report is the declaring collector that also runs per
+                           database (Azure SQL DB, #1535), so before this its batch produced the trailing
+                           set and the loop simply never advanced the reader to it — the rows were built
+                           and dropped. Read HERE, still inside the reader and inside the per-database
+                           try, so a diagnostics fault stays a one-database skip like any other. */
+                        if (definition.EmitsProbeFailures)
+                        {
+                            cycleProbeFailures.Add(
+                                await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(dbReader, cancellationToken));
+                        }
                     }
                     sqlMs += sqlSlice.ElapsedMilliseconds;
 
@@ -216,6 +259,21 @@ public sealed class DarlingCollectorRunner
                         var storageSlice = Stopwatch.StartNew();
                         rowsWritten += await WriteBatchAsync(pgConnection, definition, batch, server, collectionTime, context, cancellationToken);
                         storageMs += storageSlice.ElapsedMilliseconds;
+                    }
+
+                    /* Same per-database truncation WARNING the enumeration path emits from
+                       onItemComplete, mirroring Lite. Reachable here since #1836 put query_store — the
+                       only collector that declares either bound — on this branch for Azure SQL DB;
+                       without it a database whose oldest rows were dropped this cycle would look like
+                       a clean collection. Read after the flush, as on the other path: the context
+                       signal stays this database's until the next read resets it. */
+                    var capHit = definition.PerItemRowCountWarnThreshold is int cap && batch.Count >= cap;
+                    if (capHit || context.PerItemTextBudgetExceeded)
+                    {
+                        _logger?.LogWarning(
+                            "{Collector} on '{Server}' database [{Database}] hit its per-database collection bound ({Reason}) — oldest rows dropped this cycle.",
+                            definition.Name, server.Config.DisplayName, databaseName,
+                            capHit ? $"row cap {definition.PerItemRowCountWarnThreshold}" : "256MB text budget");
                     }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)
@@ -229,6 +287,12 @@ public sealed class DarlingCollectorRunner
             }
 
             context.CurrentDatabaseName = null;
+
+            /* #1875: ONE note for the cycle and ONE capped log burst, composed from every database's
+               failures together. Assigned unconditionally — a cycle where nothing failed composes null,
+               which is exactly what this path carried before. */
+            collectionNote = cycleProbeFailures.Note;
+            LogEnumerationProbeFailures(definition, server, cycleProbeFailures.Failures);
 
             /* One database failing is routine (offline, mid-restore, a permissions oddity) and stays a
                debug-logged skip. EVERY database failing is a systemic fault — before this check the run
@@ -255,20 +319,28 @@ public sealed class DarlingCollectorRunner
                    run one query per item ON THE SAME CONNECTION; an item that fails is skipped
                    with a warning, matching Lite. */
                 var listSlice = Stopwatch.StartNew();
-                var items = new List<string>();
+                EnumerationOutcome enumeration;
                 using (var enumerationCommand = CreateCollectorCommand(enumerationPlan, sqlConnection, CommandTimeoutSeconds))
                 using (var enumerationReader = await enumerationCommand.ExecuteReaderAsync(cancellationToken))
                 {
-                    while (await enumerationReader.ReadAsync(cancellationToken))
-                    {
-                        items.Add(enumerationReader.GetString(0));
-                    }
+                    /* Shared read (#1837): the item list, then the OPTIONAL second result set of items the
+                       enumeration could not probe. Both hosts route through it so the item read, the
+                       failure read, and the note wording cannot drift. */
+                    enumeration = await EnumeratedCollectorDriver.ReadEnumerationAsync(enumerationReader, cancellationToken);
                 }
                 sqlMs += listSlice.ElapsedMilliseconds;
 
+                var items = enumeration.Items;
+                collectionNote = enumeration.Note;
+                LogEnumerationProbeFailures(definition, server, enumeration.ProbeFailures);
+
                 if (items.Count == 0)
                 {
-                    return new CollectorRunResult(0, sqlMs, 0);
+                    /* Nothing failed outright, so this stays SUCCESS/0 rows — but the note (the
+                       empty-enumeration breadcrumb, the probe-failure summary, or both) rides onto the
+                       collection_log row so it is distinguishable from a healthy collector whose databases
+                       were simply quiet (#1837). Mirrors Lite's _lastCollectionNote. */
+                    return new CollectorRunResult(0, sqlMs, 0, enumeration.Note);
                 }
 
                 /* Optional quick scalar probe (query_store's live PRODUCTVERSION check) —
@@ -373,6 +445,22 @@ public sealed class DarlingCollectorRunner
                 using (var reader = await command.ExecuteReaderAsync(cancellationToken))
                 {
                     rows = await definition.ReadAsync(reader, context, cancellationToken);
+
+                    /* #1851: a definition that declares it may hand back an OPTIONAL trailing
+                       (item_name, error_text) result set naming items its own server-side cursor
+                       reached but could not probe — database_size_stats' mid-restore / inaccessible
+                       databases, which used to vanish into an empty CATCH. Read through the SAME
+                       shared machinery as the enumeration path's failures (#1837), so the note wording
+                       and the log cap cannot drift between the two channels or between the two hosts.
+                       Read HERE, still inside the reader, and before the storage phase below: it
+                       touches only the note, never `rows`, so the payload and its delta ordering are
+                       exactly what they were. */
+                    if (definition.EmitsProbeFailures)
+                    {
+                        var probes = await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(reader, cancellationToken);
+                        collectionNote = probes.Note;
+                        LogEnumerationProbeFailures(definition, server, probes.ProbeFailures);
+                    }
                 }
 
                 /* Optional best-effort second query on the same connection (server_properties'
@@ -402,7 +490,43 @@ public sealed class DarlingCollectorRunner
 
         _logger?.LogDebug("Collected {RowCount} {Collector} rows for server '{Server}'",
             rowsWritten, definition.Name, server.Config.DisplayName);
-        return new CollectorRunResult(rowsWritten, sqlMs, storageMs);
+        return new CollectorRunResult(rowsWritten, sqlMs, storageMs, collectionNote);
+    }
+
+    /// <summary>
+    /// Writes the per-item app-log lines for probe failures, capped at
+    /// <see cref="EnumeratedCollectorDriver.MaxLoggedProbeFailures"/> with the suppressed remainder
+    /// reported as a count. The collection_log row already carries the summary note; this is where the
+    /// actual per-database error text lands, and it is why that note says "see the app log". Lite's twin
+    /// is <c>RemoteCollectorService.LogEnumerationProbeFailures</c> — same shared templates.
+    ///
+    /// <para>Serves BOTH channels: an enumeration's second result set (#1837) and a payload collector's
+    /// trailing one (#1851). Named for the shared template it writes, which reports the failing step as
+    /// an enumeration probe — accurate for both, since a payload collector reaches this only by
+    /// enumerating and probing databases inside its own server-side cursor.</para>
+    /// </summary>
+    private void LogEnumerationProbeFailures<TRow>(
+        ICollectorDefinition<TRow> definition,
+        ServerRuntime server,
+        IReadOnlyList<EnumerationProbeFailure> probeFailures)
+    {
+        if (probeFailures.Count == 0)
+        {
+            return;
+        }
+
+        var shown = Math.Min(probeFailures.Count, EnumeratedCollectorDriver.MaxLoggedProbeFailures);
+        for (var i = 0; i < shown; i++)
+        {
+            _logger?.LogWarning(EnumeratedCollectorDriver.ProbeFailureLogTemplate,
+                definition.Name, server.Config.DisplayName, probeFailures[i].Item, probeFailures[i].Error);
+        }
+
+        if (probeFailures.Count > shown)
+        {
+            _logger?.LogWarning(EnumeratedCollectorDriver.ProbeFailureOverflowLogTemplate,
+                definition.Name, server.Config.DisplayName, probeFailures.Count, probeFailures.Count - shown, shown);
+        }
     }
 
     /// <summary>

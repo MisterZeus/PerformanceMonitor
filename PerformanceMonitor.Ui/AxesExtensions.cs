@@ -21,7 +21,9 @@ internal static class AxesExtensions
     /// <summary>
     /// Like <c>DateTimeTicksBottom()</c>, but prints the date line on only the first tick
     /// and on ticks where the date component changes. All other ticks show time-only.
-    /// Date and time formats follow the current culture.
+    /// Date and time formats follow the current culture, and the label converts through
+    /// <see cref="UiTimeContext.ConvertForDisplay"/> so the axis honors the app's Local/Server/UTC
+    /// display mode (#1831).
     /// </summary>
     public static void DateTimeTicksBottomDateChange(this ScottPlot.AxisManager axes)
     {
@@ -33,6 +35,18 @@ internal static class AxesExtensions
             var culture = CultureInfo.CurrentCulture;
             gen.LabelFormatter = dt =>
             {
+                /* #1831: charts PLOT X in server time everywhere; the display-mode conversion
+                   happens at render, here — the same split the crosshair/tooltips already use
+                   (CorrelatedCrosshairManager → UiTimeContext.ConvertForDisplay). This was the one
+                   render surface that skipped the conversion, so the axis under every chart showed
+                   server time no matter what the toggle said. The lambda reads the hook at label
+                   time, so a mode flip takes effect on the next render with no re-plot needed.
+                   Apps that pre-convert plotted X (the Darling Viewer) leave UiTimeContext at its
+                   identity default, making this a no-op there — do NOT also wire the hook in such
+                   an app, that double-converts. Conversion is a fixed offset, so the pass-reset
+                   comparison below still sees monotonic values. */
+                dt = UiTimeContext.ConvertForDisplay(dt);
+
                 /* ScottPlot re-invokes this formatter from the leftmost tick on every render
                    pass, but lastDate persists across passes. Without resetting it, the first
                    tick stops printing its date after the first render — and a single-day window

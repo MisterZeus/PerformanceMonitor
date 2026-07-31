@@ -113,7 +113,49 @@ public sealed partial class ViewerDataService
     /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 top.
     /// </summary>
     public const string QueryStoreTopSql = """
-        WITH ranked AS (
+        WITH deduped AS (
+            /* LOAD-BEARING (correctness, not just perf) — #1841. query_store_stats rows are CUMULATIVE
+               per-Query-Store-interval snapshots, and the collector re-fetches the OPEN interval every
+               cycle as its last_execution_time advances, so the SAME interval (same first_execution_time)
+               is stored repeatedly with a growing execution_count. SUM(execution_count) over the raw rows
+               reports 10 + 25 + 40 for an interval that reached 40, and AVG(avg_*) becomes an avg-of-avgs
+               weighted by how many times each interval happened to be re-collected. Keep the LATEST
+               snapshot per interval. Matches the dedup convention in PgFactCollector.QueryPerf and
+               PgDrillDownCollector.Queries, and Lite's GetQueryStoreTopQueriesAsync.
+
+               replica_role and execution_type_desc are in the partition because the aggregate below is
+               grouped (or MAXed) on them: the dedup key must be at least as fine as the read's own row
+               identity, or dedup would silently drop a row the grid must show rather than de-duplicate one.
+
+               The execution_count tie-break is the #1907 residual, and it is NOT decoration. collection_time
+               alone was not a total order on rows collected before that fix: Query Store hands back the
+               flushed and the still-in-memory slice of ONE interval as two ADDITIVE rows, the collector
+               stored both, and they then shared every partition column above AND collection_time. ROW_NUMBER
+               kept whichever the engine emitted first, so a grid could show an in-memory sliver of 8 where
+               the interval's total was 94, and show a different one on the next run. The collector now
+               combines the slices before storing, so rows collected after #1907 cannot tie at all and this
+               clause never fires on them. It is here for the rows already in the store, which cannot be
+               rewritten: it deterministically picks the FLUSHED slice, the one holding the bulk of the
+               interval's work, instead of flapping. Closest-available, not correct — the correct value is the
+               SUM of the slices, which no read-side rule can express (#1912). This applies to EVERY dedup
+               site in both apps: Darling.Tests/QueryStoreSliceTieBreakSourceTests pins all 12 of Darling's
+               across the 8 files that hold them, and Lite.Tests/QueryStoreSliceTieBreakSourceTests pins its
+               7, so dropping one fails loudly and names the file. Both enumerate their files rather than
+               globbing, so MOVING a read has to be re-declared instead of silently shrinking the guard. */
+            SELECT
+                *,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
+                    ORDER BY collection_time DESC, execution_count DESC
+                ) AS rn
+            FROM query_store_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        ),
+        ranked AS (
             SELECT
                 database_name,
                 query_id,
@@ -173,11 +215,8 @@ public sealed partial class ViewerDataService
                 AVG(CAST(avg_num_physical_io_reads AS double precision)) AS avg_num_physical_io_reads,
                 MIN(CAST(min_num_physical_io_reads AS double precision)) AS min_num_physical_io_reads,
                 MAX(CAST(max_num_physical_io_reads AS double precision)) AS max_num_physical_io_reads
-            FROM query_store_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            FROM deduped
+            WHERE rn = 1
             GROUP BY database_name, query_id, plan_id, query_hash, replica_role
             ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC
             LIMIT $4 + 5
@@ -337,12 +376,59 @@ public sealed partial class ViewerDataService
     /// $1 server_id, $2/$3 current window, $4/$5 baseline window (naive UTC).
     /// </summary>
     public const string QueryStoreComparisonSql = """
-        WITH top_current AS (
-            SELECT database_name, query_hash
+        WITH deduped_current AS (
+            /* LOAD-BEARING (correctness, not just perf) — #1841. The rows are CUMULATIVE per-interval
+               snapshots and the collector re-fetches the OPEN interval every cycle, so the SAME interval
+               (same first_execution_time) is stored repeatedly with a growing execution_count. Keep the
+               LATEST snapshot per interval before aggregating.
+
+               The execution-count weighting below does NOT rescue this on its own: the repeated snapshots
+               of one interval carry DIFFERENT (growing) weights AND different avg_* values, so an open
+               interval is weighted by the triangular sum of its own growth. That bias is stronger in the
+               recent window than in the baseline window (recent windows hold more still-open intervals),
+               which skews the very delta this comparison exists to compute. One deduped CTE per window,
+               so both arms are treated identically. */
+            SELECT
+                database_name,
+                query_hash,
+                query_text,
+                execution_count,
+                avg_duration_us,
+                avg_cpu_time_us,
+                avg_logical_io_reads,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
+                    ORDER BY collection_time DESC, execution_count DESC
+                ) AS rn
             FROM query_store_stats
             WHERE server_id = $1
             AND   collection_time >= $2 AND collection_time <= $3
             AND   ($6::text[] IS NULL OR database_name = ANY($6))
+        ),
+        deduped_baseline AS (
+            SELECT
+                database_name,
+                query_hash,
+                query_text,
+                execution_count,
+                avg_duration_us,
+                avg_cpu_time_us,
+                avg_logical_io_reads,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
+                    ORDER BY collection_time DESC, execution_count DESC
+                ) AS rn
+            FROM query_store_stats
+            WHERE server_id = $1
+            AND   collection_time >= $4 AND collection_time <= $5
+            AND   ($6::text[] IS NULL OR database_name = ANY($6))
+        ),
+        top_current AS (
+            SELECT database_name, query_hash
+            FROM deduped_current
+            WHERE rn = 1
             AND   execution_count > 0
             GROUP BY database_name, query_hash
             ORDER BY SUM(execution_count) DESC
@@ -350,10 +436,8 @@ public sealed partial class ViewerDataService
         ),
         top_baseline AS (
             SELECT database_name, query_hash
-            FROM query_store_stats
-            WHERE server_id = $1
-            AND   collection_time >= $4 AND collection_time <= $5
-            AND   ($6::text[] IS NULL OR database_name = ANY($6))
+            FROM deduped_baseline
+            WHERE rn = 1
             AND   execution_count > 0
             GROUP BY database_name, query_hash
             ORDER BY SUM(execution_count) DESC
@@ -375,11 +459,10 @@ public sealed partial class ViewerDataService
                    SUM(qs.execution_count * qs.avg_logical_io_reads::double precision) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads,
                    MAX(qs.query_text) AS query_text
             FROM top_hashes th
-            INNER JOIN query_store_stats qs
+            INNER JOIN deduped_current qs
               ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
               AND qs.database_name IS NOT DISTINCT FROM th.database_name
-            WHERE qs.server_id = $1
-            AND   qs.collection_time >= $2 AND qs.collection_time <= $3
+            WHERE qs.rn = 1
             AND   qs.execution_count > 0
             GROUP BY th.database_name, th.query_hash
         ),
@@ -391,11 +474,10 @@ public sealed partial class ViewerDataService
                    SUM(qs.execution_count * qs.avg_logical_io_reads::double precision) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads,
                    MAX(qs.query_text) AS query_text
             FROM top_hashes th
-            INNER JOIN query_store_stats qs
+            INNER JOIN deduped_baseline qs
               ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
               AND qs.database_name IS NOT DISTINCT FROM th.database_name
-            WHERE qs.server_id = $1
-            AND   qs.collection_time >= $4 AND qs.collection_time <= $5
+            WHERE qs.rn = 1
             AND   qs.execution_count > 0
             GROUP BY th.database_name, th.query_hash
         )
@@ -456,20 +538,84 @@ public sealed partial class ViewerDataService
     /// $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
     public const string QueryStoreSlicerSql = """
+        WITH deduped AS (
+            /* LOAD-BEARING (correctness, not just perf) — #1841. The rows are CUMULATIVE per-interval
+               snapshots and the collector re-fetches the OPEN interval every cycle, so summing the raw
+               rows counts one interval's work once per collection. The bucket is an HOUR and the cadence
+               is ~5 minutes, so an open interval is summed up to ~12 times per bar — and a live store
+               showed 496 collections of a single interval inside one hour bucket. Keep the LATEST
+               snapshot per interval, then bucket, so the bars sum to the true total across the window.
+
+               runtime_stats_interval_id is the REAL interval identity (tier 2), with first_execution_time
+               kept beside it as the tier-1 proxy for rows collected before it existed — both in the key
+               rather than a COALESCE, because the id is NULL on exactly the pre-tier-2 generation and
+               non-NULL on exactly the post-tier-2 one, so the two can never collide and a legacy-only
+               window degrades to precisely tier 1's key. Twins Lite's GetQueryStoreSlicerDataAsync. */
+            SELECT
+                collection_time,
+                interval_start_time_utc,
+                query_id,
+                execution_count,
+                avg_cpu_time_us,
+                avg_duration_us,
+                avg_logical_io_reads,
+                avg_logical_io_writes,
+                avg_physical_io_reads,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
+                    ORDER BY collection_time DESC, execution_count DESC
+                ) AS rn
+            FROM query_store_stats
+            WHERE server_id = $1
+            /* The window is filtered on the SAME expression the bars are keyed on (#1892). It used to filter
+               on collection_time while bucketing on the interval start, and once those stopped being the
+               same instant (#1841 tier 2) the two disagreed at both edges: an interval that started before
+               the window but closed inside it drew an extra bar to the LEFT of the requested range, and the
+               window's own last interval -- whose closing fetch lands after the range ends -- was dropped
+               entirely, which is the collection lag #1841 set out to remove showing up one layer down. */
+            AND   COALESCE(interval_start_time_utc, collection_time) >= $2
+            AND   COALESCE(interval_start_time_utc, collection_time) <= $3
+            /* Chunk-exclusion bounds, NOT filters: neither can exclude a row the predicate above keeps in
+               any realistic store. They matter because query_store_stats is a hypertable partitioned on
+               collection_time -- without bounds on that column TimescaleDB must open and decompress every
+               chunk from the window through the present rather than the ones the window overlaps. Same
+               shape and reasoning as the drill-down collector's last_execution_time bound.
+
+               The FLOOR is free: an interval is always collected after it starts, so
+               interval_start_time_utc <= collection_time, and therefore COALESCE(...) >= $2 already implies
+               collection_time >= $2. The extra day is slack against clock skew between the monitored
+               server's interval clock and ours.
+
+               The CEILING is deliberately enormous rather than tight, because tight is unsafe here. A row's
+               collection_time exceeds its interval start by the interval's own length -- at most 1 day,
+               since Query Store's INTERVAL_LENGTH_MINUTES accepts only 1/5/10/15/30/60/1440 -- plus however
+               long the collector was behind, which nothing bounds. So 30 days is 1 day of engine maximum
+               and 29 of collector-outage allowance. A month-long outage that then back-collects an interval
+               straddling an old window's edge could still omit that one bar; the data stays in the store,
+               and the alternative (no ceiling) makes every historical window scan to the present. */
+            AND   collection_time >= $2 - interval '1 day'
+            AND   collection_time <= $3 + interval '30 days'
+            AND   ($4::text[] IS NULL OR database_name = ANY($4))
+        )
         SELECT
-            date_trunc('hour', collection_time) AS bucket,
+            /* The bar sits in the hour the work RAN, not the hour it was last COLLECTED (#1841 tier 2).
+               Query Store's default interval is 60 minutes and the closing fetch lands in the cycle AFTER
+               the interval ends, so a collection_time bucket was reliably one bar late.
+               interval_start_time_utc is the interval's own start boundary, converted to UTC at collection
+               (the same clock as collection_time), so this is a placement fix and not a timezone trade.
+               Legacy rows have no interval start and keep collection_time placement, so a window spanning
+               the upgrade renders correctly on both sides and the lag disappears as those rows age out. */
+            date_trunc('hour', COALESCE(interval_start_time_utc, collection_time)) AS bucket,
             COUNT(DISTINCT query_id) AS query_count,
             COALESCE(SUM(CAST(avg_cpu_time_us AS double precision) * execution_count), 0) / 1000.0 AS total_cpu_ms,
             COALESCE(SUM(CAST(avg_duration_us AS double precision) * execution_count), 0) / 1000.0 AS total_duration_ms,
             COALESCE(SUM(CAST(avg_logical_io_reads AS double precision) * execution_count), 0) AS total_reads,
             COALESCE(SUM(CAST(avg_logical_io_writes AS double precision) * execution_count), 0) AS total_writes,
             COALESCE(SUM(CAST(avg_physical_io_reads AS double precision) * execution_count), 0) AS total_physical_reads
-        FROM query_store_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
-        AND   ($4::text[] IS NULL OR database_name = ANY($4))
-        GROUP BY date_trunc('hour', collection_time)
+        FROM deduped
+        WHERE rn = 1
+        GROUP BY date_trunc('hour', COALESCE(interval_start_time_utc, collection_time))
         ORDER BY bucket
         """;
 

@@ -83,7 +83,9 @@ public static class PgMigrations
         new Migration(37, "ag-local-replica-and-disconnect-refire", V37Sql),
         new Migration(38, "query-payload-dimensions", PgSchemaGenerator.GenerateV38PayloadDimensions()),
         new Migration(39, "dim-feeding-fact-floor-indexes", V39Sql),
-        new Migration(40, "pagerduty-webhook", V40Sql),
+        new Migration(40, "blocking-wait-threshold", V40Sql),
+        new Migration(41, "query-store-interval-identity", V41Sql),
+        new Migration(42, "pagerduty-webhook", V42Sql),
     };
 
     /// <summary>
@@ -640,7 +642,46 @@ CREATE INDEX IF NOT EXISTS ix_procedure_stats_digest_floor
     WHERE query_plan_digest IS NOT NULL;";
 
     /// <summary>
-    /// V40 — PagerDuty webhook channel (#1780). Adds two columns to <c>config.config_notification</c>:
+    /// V40 — <c>config_alert_settings.blocking_wait_seconds_threshold</c>, the #1839 total-blocked-wait
+    /// gate. A second, independent blocking threshold beside the existing count one, because a count
+    /// cannot distinguish one session blocked for an hour from one blocked for a second.
+    /// <para>NOT NULL DEFAULT 0 = OFF, so an upgraded store alerts byte-for-byte as before and nobody
+    /// starts getting a new alert because they took an update — the same shipped-behavior-preserving
+    /// choice V37's re-fire column made. <c>ADD COLUMN IF NOT EXISTS</c> per the file's additive idiom;
+    /// config.-qualified because the migrate session runs under
+    /// <c>search_path = collect, config, public</c>.</para>
+    /// </summary>
+    private const string V40Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS blocking_wait_seconds_threshold integer NOT NULL DEFAULT 0;";
+
+    /// <summary>
+    /// V41 — the REAL Query Store interval identity on <c>query_store_stats</c> (#1841 tier 2):
+    /// <c>runtime_stats_interval_id</c> (<c>sys.query_store_runtime_stats</c>' own interval key) and
+    /// <c>interval_start_time_utc</c> (<c>sys.query_store_runtime_stats_interval.start_time</c>, converted
+    /// to UTC at collection).
+    /// <para>Query Store rows are CUMULATIVE per-interval snapshots and the collector re-fetches the OPEN
+    /// interval every cycle, so every aggregate read must collapse an interval to its latest snapshot
+    /// before summing. Tier 1 (#1845) did that on the <c>first_execution_time</c> PROXY because the schema
+    /// exposed no interval key; this is the real one, and it is also the only honest x-axis for "when the
+    /// work ran" — <c>collection_time</c> dates an interval to the cycle that last FETCHED it, one bucket
+    /// late on Query Store's default 60-minute interval.</para>
+    /// <para>Both nullable and appended (identical physical column order for the binary COPY whether fresh —
+    /// V1 is generated from the current collector definition, which now includes them — or upgraded;
+    /// <c>ADD COLUMN IF NOT EXISTS</c> no-ops on fresh). Deliberately NOT backfilled: rows already stored
+    /// were collected without the identity and nothing can reconstruct it, so readers key on the real id
+    /// only when present and fall back to the tier-1 proxy otherwise. The trailing
+    /// <c>CREATE OR REPLACE VIEW</c> re-expands <c>v_query_store_stats</c>' pinned <c>SELECT *</c>
+    /// (Postgres freezes it at CREATE; append-only ADDs keep the refresh legal), mirroring V15/V27/V28.
+    /// Runs after V8, so the bare names resolve through <c>search_path = collect, config, public</c>.</para>
+    /// </summary>
+    private const string V41Sql = @"
+ALTER TABLE query_store_stats ADD COLUMN IF NOT EXISTS runtime_stats_interval_id bigint;
+ALTER TABLE query_store_stats ADD COLUMN IF NOT EXISTS interval_start_time_utc timestamp;
+CREATE OR REPLACE VIEW v_query_store_stats AS SELECT * FROM query_store_stats;";
+
+    /// <summary>
+    /// V42 — PagerDuty webhook channel (#1780). Adds two columns to <c>config.config_notification</c>:
     /// <c>pagerduty_routing_key</c> (the 32-character Events API v2 integration key, stored as plaintext
     /// but column-REVOKEd from the read-only viewer role — same secret tier as Teams/Slack/Generic webhook
     /// URLs) and <c>pagerduty_use_eu_region</c> (boolean flag for EU data center endpoint). Both are
@@ -649,7 +690,7 @@ CREATE INDEX IF NOT EXISTS ix_procedure_stats_digest_floor
     /// <c>DarlingManagedRoles.ViewerRestrictedConfigTables</c> and <c>Darling/tools/provision-roles.sql</c>;
     /// the EU flag is non-secret and stays in the viewer's grant.
     /// </summary>
-    private const string V40Sql = @"
+    private const string V42Sql = @"
 ALTER TABLE config.config_notification
     ADD COLUMN IF NOT EXISTS pagerduty_routing_key text NOT NULL DEFAULT '',
     ADD COLUMN IF NOT EXISTS pagerduty_use_eu_region boolean NOT NULL DEFAULT FALSE;";

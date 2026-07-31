@@ -233,12 +233,27 @@ public sealed class DarlingAnalysisPipelineTests
 
         foreach (var sql in PgDrillDownCollector.AllSql)
         {
+            /* Scan the SQL the SERVER sees, not the comments explaining it. Two things in the raw text
+               are not relation references and would be read as one:
+
+               1. `--` comments. These queries carry long rationale comments, and English prose about a
+                  join contains the word "join" followed by a word ("an equi-join here would ...") —
+                  which a bare FROM/JOIN scan reads as a relation named `here`. A guard that fails
+                  because someone explained a join in a comment is a broken guard, not a strict one.
+               2. `IS [NOT] DISTINCT FROM`, a COMPARISON OPERATOR that happens to end in the word FROM,
+                  so its right-hand operand parses as a relation name.
+
+               Stripping both rather than loosening the assertion: the point of this guard is that every
+               real relation reference resolves, and that must stay exact. */
+            var scanSql = Regex.Replace(sql, @"--[^\n]*", " ");
+            scanSql = Regex.Replace(scanSql, @"\bIS\s+(?:NOT\s+)?DISTINCT\s+FROM\b", " ", RegexOptions.IgnoreCase);
+
             /* CTE names defined by this query are legal FROM targets too (WITH x AS ( / , y AS (). */
-            var ctes = Regex.Matches(sql, @"(?:WITH|,)\s*(\w+)\s+AS\s*\(", RegexOptions.Singleline)
+            var ctes = Regex.Matches(scanSql, @"(?:WITH|,)\s*(\w+)\s+AS\s*\(", RegexOptions.Singleline)
                 .Select(m => m.Groups[1].Value)
                 .ToHashSet(StringComparer.Ordinal);
 
-            foreach (Match m in Regex.Matches(sql, @"\b(?:FROM|JOIN)\s+(\w+)", RegexOptions.IgnoreCase))
+            foreach (Match m in Regex.Matches(scanSql, @"\b(?:FROM|JOIN)\s+(\w+)", RegexOptions.IgnoreCase))
             {
                 var target = m.Groups[1].Value;
                 Assert.True(
@@ -312,10 +327,11 @@ public sealed class DarlingAnalysisPipelineTests
         await PgMigrations.MigrateAsync(connection, ct);
 
         /* Clear leftovers from an earlier aborted run so the assertions below are deterministic. */
-        await DeleteTestRowsAsync(connection);
+        await DeleteTestRowsAsync(connection, ct);
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             /* ---- plant >24h of wait_stats history — the AN2b recipe: one hour×dow bucket
@@ -450,10 +466,13 @@ public sealed class DarlingAnalysisPipelineTests
             Assert.Empty(await service.AnalyzeAsync(emptyContext));
             Assert.NotNull(service.InsufficientDataMessage);
             Assert.Contains("Not enough data", service.InsufficientDataMessage, StringComparison.Ordinal);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteTestRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteTestRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -474,13 +493,13 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)", connection);
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 
-    private static async Task DeleteTestRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteTestRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM wait_stats WHERE server_id IN ({TestServerId}, {EmptyServerId}); " +
             $"DELETE FROM analysis_findings WHERE server_id IN ({TestServerId}, {EmptyServerId}); " +
             $"DELETE FROM analysis_muted WHERE server_id IN ({TestServerId}, {EmptyServerId});", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 
     /// <summary>Records every dispatched finding alert; no persisted history (seed = null).</summary>

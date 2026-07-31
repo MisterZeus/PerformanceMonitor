@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor Lite.
@@ -18,10 +18,15 @@ namespace Lite.Tests;
 
 /// <summary>
 /// Pins the parity contract of the extracted query_store definition: the actual_state enumeration
-/// (on-prem AG-aware, Azure not), the live PRODUCTVERSION probe deciding the 2017+/2022+ column
-/// gates (default 13 when the probe fails), the last_execution_time incremental watermark with its
-/// 60-minute fallback, and the 54-column payload. Second Name≠TargetTable case (query_store →
-/// query_store_stats).
+/// (on-prem, AG-aware), the live PRODUCTVERSION probe deciding the 2017+/2022+ column gates (default
+/// 13 when the probe fails), the last_execution_time incremental watermark with its 60-minute
+/// fallback and 24h catch-up clamp, and the 56-column payload. Second Name≠TargetTable case
+/// (query_store → query_store_stats).
+///
+/// <para>Also pins the TWO-SHAPE contract added in #1836: Azure SQL DB runs per database
+/// (RunsPerDatabase → BuildQuery, eligibility gate then payload, no cross-database reference), every
+/// other target keeps enumeration → BuildPerItemQuery, and both are built from ONE payload body —
+/// the containment test is what makes a hand-edited second copy fail loudly instead of drifting.</para>
 /// </summary>
 public sealed class QueryStoreCollectorDefinitionTests
 {
@@ -44,6 +49,21 @@ public sealed class QueryStoreCollectorDefinitionTests
             EnumerationProbeResult = probeResult,
             CapturePlanXml = capturePlanXml,
         };
+
+    /// <summary>
+    /// The emitted payload, with line endings normalized to LF. The template is a verbatim string literal,
+    /// so it carries this source file's CRLF, while the version-gated fragments spliced into it are ordinary
+    /// C# strings carrying LF — a mixture that predates #1907 (the replica join fragment has always been
+    /// built this way) and that SQL Server does not care about. Assertions spanning a line break normalize
+    /// rather than encode one convention and break on the other.
+    /// </summary>
+    private static string Lf(string sql) => sql.Replace("\r\n", "\n", StringComparison.Ordinal);
+
+    private static string PayloadSql(CollectorContext context)
+        => Lf(QueryStoreCollector.Instance.BuildPerItemQuery("SO", context).Text);
+
+    private static string AzurePayloadSql(CollectorContext context)
+        => Lf(QueryStoreCollector.Instance.BuildQuery(context).Text);
 
     [Fact]
     public void Identity_SecondNameTargetTableSplit_WithWatermark()
@@ -102,20 +122,239 @@ public sealed class QueryStoreCollectorDefinitionTests
     }
 
     [Fact]
-    public void BuildEnumerationQuery_Azure_NoAgJoin()
+    public void RunsPerDatabase_OnAzureOnly()
     {
-        var plan = QueryStoreCollector.Instance.BuildEnumerationQuery(MakeContext(isAzureSqlDb: true));
+        /* #1836: Azure SQL DB rejects the cross-database [db].sys.sp_executesql reference the
+           enumeration path is built on, for EVERY database — so there the host connects per database
+           and drives BuildQuery instead. Managed Instance and RDS honor three-part references and keep
+           the enumeration. Same gate as procedure_stats (#1833) and the database-scoped siblings. */
+        Assert.True(QueryStoreCollector.Instance.RunsPerDatabase(new CollectorTargetInfo { IsAzureSqlDb = true }));
+        Assert.False(QueryStoreCollector.Instance.RunsPerDatabase(new CollectorTargetInfo()));
+        Assert.False(QueryStoreCollector.Instance.RunsPerDatabase(new CollectorTargetInfo { IsAzureManagedInstance = true }));
+    }
 
-        Assert.NotNull(plan);
-        Assert.DoesNotContain("dm_hadr_database_replica_states", plan!.Text, StringComparison.Ordinal);
-        /* The same canonical default screen as the box path (#1565) — one shared list, two paths. */
-        Assert.Contains("N'gcloud_cloudsqladmin'", plan.Text, StringComparison.Ordinal);
+    [Fact]
+    public void BuildEnumerationQuery_Azure_IsNull_EnumerationIsNotHowAzureCollects()
+    {
+        /* #1836: the Azure enumeration cursor is GONE, not merely unused. It probed each candidate
+           through QUOTENAME(@db) + N'.sys.sp_executesql' — the cross-database reference Azure SQL DB
+           rejects for every database — into an empty CATCH, so it could only ever return an empty
+           list, which the host logged as SUCCESS with 0 rows forever. Null here is the same signal
+           index_object_stats gives on Azure: this target is collected per database, not by enumeration. */
+        Assert.Null(QueryStoreCollector.Instance.BuildEnumerationQuery(MakeContext(isAzureSqlDb: true)));
+
+        /* Managed Instance is NOT Azure SQL DB here: it supports cross-database references, so it keeps
+           the on-prem enumeration (HADR join and all). */
+        var mi = QueryStoreCollector.Instance.BuildEnumerationQuery(new CollectorContext
+        {
+            ServerId = 42,
+            ServerName = "test-server",
+            CollectionTime = DateTime.UtcNow,
+            Deltas = s_deltas,
+            Target = new CollectorTargetInfo { IsAzureManagedInstance = true },
+        });
+
+        Assert.NotNull(mi);
+        Assert.Contains("sys.dm_hadr_database_replica_states", mi!.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildQuery_Azure_GatesOnEligibility_ThenRunsPayloadAgainstCurrentDatabase()
+    {
+        var plan = QueryStoreCollector.Instance.BuildQuery(MakeContext(isAzureSqlDb: true));
+
+        /* The SAME eligibility predicates the on-prem enumeration probes with (#1546 / #1558), only
+           evaluated locally against the connected database instead of through a three-part reference. */
         Assert.Contains("WHERE actual_state IN (1, 2, 4)", plan.Text, StringComparison.Ordinal);
-        /* #1558: readable-secondary replicas (readonly_reason bit 8 — AG secondaries slip the HADR
-           join on RDS/geo mechanisms) are excluded: their QS is the primary's replicated content.
-           Bitmask form, so a combined reason still excludes. */
         Assert.Contains("AND   readonly_reason & 8 = 0", plan.Text, StringComparison.Ordinal);
-        Assert.Empty(plan.Parameters);
+
+        /* Ineligible databases cost one catalog lookup and return NO result set — the guard runs
+           BEFORE the payload, so an OFF/ERRORed/secondary Query Store never touches the QS views.
+           Verified live: on a database whose sys.database_query_store_options is empty the batch
+           returns zero fields and zero rows, no error. */
+        var gateEnd = plan.Text.IndexOf("RETURN;", StringComparison.Ordinal);
+        var payloadStart = plan.Text.IndexOf("sys.query_store_runtime_stats", StringComparison.Ordinal);
+        Assert.True(gateEnd > 0, "the Azure query must carry the short-circuit guard");
+        Assert.True(payloadStart > gateEnd, "the eligibility guard must precede the payload");
+
+        /* The whole point of the rework: NO cross-database reference anywhere, and no sp_executesql
+           wrapper — this batch runs on a connection already scoped to the database. */
+        Assert.DoesNotContain("sp_executesql", plan.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain(".sys.query_store", plan.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("QUOTENAME", plan.Text, StringComparison.Ordinal);
+
+        /* Payload columns are present and unchanged in shape — the reader contract is the same 55
+           ordinals on both paths. */
+        Assert.Contains("SELECT /* PerformanceMonitorLite */ TOP (50000)", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("query_id = qsq.query_id,", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("query_sql_text = qst.query_sql_text,", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("query_plan_hash = CONVERT(varchar(64), qsp.query_plan_hash, 1),", plan.Text, StringComparison.Ordinal);
+
+        /* Interval-grain incremental filter since #1907, on this path too — the Azure body IS the shared
+           body, so the WHERE→HAVING move lands here by construction rather than by a second edit. */
+        Assert.Contains("HAVING\n        MAX(qsrs.last_execution_time) > @cutoff_time", Lf(plan.Text), StringComparison.Ordinal);
+        Assert.DoesNotContain("WHERE qsrs.last_execution_time > @cutoff_time", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY qsrs.last_execution_time DESC", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("OPTION(RECOMPILE, LOOP JOIN);", plan.Text, StringComparison.Ordinal);
+
+        var parameter = Assert.Single(plan.Parameters);
+        Assert.Equal("@cutoff_time", parameter.Name);
+        Assert.Equal(CollectorParameterType.DateTime2, parameter.Type);
+    }
+
+    [Fact]
+    public void BuildQuery_Azure_AndPerItemWrapper_ShareTheSinglePayloadBody()
+    {
+        /* The drift guard this rework is designed around (#1836). Both builders are handed the SAME
+           context, so they must produce the SAME payload — the per-item form differing ONLY by the
+           quote-doubling that nests it inside [db].sys.sp_executesql. Hand-edit either path's columns
+           and this fails, which is the point: a 56-column payload maintained in two copies is how the
+           two paths silently stop agreeing about what the reader's ordinals mean. */
+        var context = MakeContext(isAzureSqlDb: true, probeResult: 16, capturePlanXml: true);
+
+        var azure = QueryStoreCollector.Instance.BuildQuery(context);
+        var perItem = QueryStoreCollector.Instance.BuildPerItemQuery("SO", context);
+
+        /* The Azure text is [eligibility guard] + [body]; the body starts at the isolation-level SET. */
+        var bodyStart = azure.Text.IndexOf("SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;", StringComparison.Ordinal);
+        Assert.True(bodyStart > 0);
+        var body = azure.Text[bodyStart..];
+
+        /* Long enough that containment cannot be an accident. */
+        Assert.True(body.Length > 2000, $"payload body was only {body.Length} chars — did the extraction break?");
+        Assert.Contains(body.Replace("'", "''", StringComparison.Ordinal), perItem.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildQuery_NonAzure_Throws_EnumerationDrivesThoseTargets()
+    {
+        /* On-prem/RDS/MI must never reach BuildQuery: doing so would collect the connection's own
+           catalog — master, when the server entry leaves its Database field blank — as if it were the
+           whole instance, which is the exact silent-wrong shape #1833 fixed elsewhere. */
+        Assert.Throws<NotSupportedException>(() => QueryStoreCollector.Instance.BuildQuery(MakeContext()));
+        Assert.Throws<NotSupportedException>(() => QueryStoreCollector.Instance.BuildQuery(new CollectorContext
+        {
+            ServerId = 42,
+            ServerName = "test-server",
+            CollectionTime = DateTime.UtcNow,
+            Deltas = s_deltas,
+            Target = new CollectorTargetInfo { IsAzureManagedInstance = true },
+        }));
+    }
+
+    [Fact]
+    public void BuildQuery_Azure_AttributesReplicaRole_ProvenLiveOnBothServiceTiers()
+    {
+        /* This pin was DELIBERATELY INVERTED by #1872 — it previously asserted the attribution absent.
+           #1836 gated it off for bind safety, not taste: replica_group_id's doc page names SQL Server
+           2022+ and is silent on Azure SQL Database while its sibling columns name Azure explicitly,
+           and Query Store for secondary replicas is documented as unavailable on Hyperscale. A column
+           that does not bind fails the WHOLE payload for that database, and on Azure that means every
+           database — so the gate stayed on until the docs' silence was answered by a live run.
+
+           It was, on both tiers the old gate worried about (2026-07-31 UTC, both Microsoft SQL Azure
+           (RTM) 12.0.2000.8, EngineEdition 5): General Purpose GP_S_Gen5_1 (#1848) and Hyperscale
+           HS_S_Gen5_2 (#1872) each returned OBJECT_ID('sys.query_store_replicas') = -660 and
+           COL_LENGTH('sys.query_store_runtime_stats', 'replica_group_id') = 8, and on Hyperscale the
+           full 55-column payload composed with the attribution ON bound 55 of 55 columns and returned
+           replica_role = 'Primary'. Do not re-flip this without new live evidence that it stopped
+           binding — re-read the three issue threads first.
+
+           What #1887 then settled, recorded here so nobody expects more of the column than it can give:
+           on Azure SQL Database this attributes a CONSTANT. A provisioned HS_Gen5_2 WITH a live HA
+           replica still held only the four static ROLE rows in sys.query_store_replicas, every
+           runtime-stats row still carried replica_group_id = 1, and 30 executions run against the
+           readable secondary (ApplicationIntent=ReadOnly) reached neither that replica's Query Store
+           nor the primary's — secondary workload never enters a Query Store under read scale-out, so
+           replica_role always reads 'Primary' on this target. That is honest rather than useless: it
+           replaces a bare NULL that said nothing with the server's own statement that the row is the
+           primary's, and there is no blending here for it to disambiguate. It is NOT a reason to
+           re-gate Azure off. */
+        var plan = QueryStoreCollector.Instance.BuildQuery(MakeContext(isAzureSqlDb: true, probeResult: 16));
+
+        Assert.Contains("replica_role = qsr.replica_name", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN sys.query_store_replicas AS qsr", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("ON qsr.replica_group_id = qsrs.replica_group_id", plan.Text, StringComparison.Ordinal);
+
+        /* Attribute, never filter — the same rule the on-prem 2022+ shape holds to. On Azure the
+           single-quoted body is NOT quote-doubled, so the literal would read N'Primary' here. */
+        Assert.DoesNotContain("replica_name = N'Primary'", plan.Text, StringComparison.Ordinal);
+
+        /* plan_type_desc rides the same "Azure means newest" rule, and always has: it lives on
+           sys.query_store_plan, whose applies-to banner names Azure SQL Database and whose only
+           documented exclusion is Synapse (engine edition 6, never IsAzureSqlDb). Azure SQL DB is
+           evergreen, so the PRODUCTVERSION probe — which reports major 12 there — must not decide it. */
+        Assert.Contains("plan_type = qsp.plan_type_desc,", plan.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildQuery_Azure_AttributesReplicaRole_EvenWhenTheVersionProbeFails()
+    {
+        /* The Azure arm of the gate is an OR, not an AND: Azure SQL DB reports PRODUCTVERSION major 12
+           and the probe can fail outright (defaulting to 13), so if attribution depended on the version
+           at all it would never turn on there. Pins that the edition alone decides it (#1872). */
+        var plan = QueryStoreCollector.Instance.BuildQuery(MakeContext(isAzureSqlDb: true, probeResult: null));
+
+        Assert.Contains("replica_role = qsr.replica_name", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN sys.query_store_replicas AS qsr", plan.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildQuery_Azure_ClampsStaleWatermark_AndFallsBack60Minutes()
+    {
+        /* Query Store is the one unbounded-persisted source (it retains ~30 days), so a service that
+           was down for days must not ask for the whole backlog in one cycle — the #1556 field
+           incident. The host's per-database Azure branch deliberately does NOT clamp (it also serves
+           the XE ring-buffer collectors, where clamping would wrongly truncate legitimate catch-up),
+           so the clamp travels with the COLLECTOR: it is applied inside the cutoff computation and
+           therefore holds on both paths. */
+        var collectionTime = new DateTime(2026, 7, 2, 12, 0, 0, DateTimeKind.Utc);
+
+        var stale = QueryStoreCollector.Instance.BuildQuery(
+            MakeContext(isAzureSqlDb: true, watermark: collectionTime.AddDays(-5), collectionTime: collectionTime));
+        Assert.Equal(collectionTime - WatermarkPolicy.MaxCatchup, Assert.Single(stale.Parameters).Value);
+
+        /* Inside the horizon: passed through untouched. */
+        var fresh = QueryStoreCollector.Instance.BuildQuery(
+            MakeContext(isAzureSqlDb: true, watermark: collectionTime.AddMinutes(-30), collectionTime: collectionTime));
+        Assert.Equal(collectionTime.AddMinutes(-30), Assert.Single(fresh.Parameters).Value);
+
+        /* Nothing collected yet for this database: the documented 60-minute first-run window. */
+        var first = QueryStoreCollector.Instance.BuildQuery(
+            MakeContext(isAzureSqlDb: true, collectionTime: collectionTime));
+        Assert.Equal(collectionTime.AddMinutes(-60), Assert.Single(first.Parameters).Value);
+    }
+
+    [Fact]
+    public void BuildQuery_Azure_SignalsWhenTheClampFires_SoTheHoleStaysLogged()
+    {
+        /* WatermarkPolicy's premise is that the hole it opens is "deliberate, LOGGED, bounded". On the
+           enumeration path the host clamps and logs before the definition sees the watermark; on the
+           Azure per-database path the definition clamps, so it has to hand the host something to log
+           or the one platform this PR fixes would be the one platform where the hole is silent. */
+        var collectionTime = new DateTime(2026, 7, 2, 12, 0, 0, DateTimeKind.Utc);
+
+        var stale = MakeContext(isAzureSqlDb: true, watermark: collectionTime.AddDays(-5), collectionTime: collectionTime);
+        QueryStoreCollector.Instance.BuildQuery(stale);
+        Assert.True(stale.CatchupClampApplied);
+
+        /* Assigned unconditionally, not just set: the host reuses ONE context across every database in
+           a cycle, so a stale true from the previous database would misreport this one. */
+        stale.Watermark = collectionTime.AddMinutes(-30);
+        QueryStoreCollector.Instance.BuildQuery(stale);
+        Assert.False(stale.CatchupClampApplied);
+
+        /* A first run for the database clamps nothing — there is no watermark to floor, and the
+           60-minute fallback is not a hole. */
+        var first = MakeContext(isAzureSqlDb: true, collectionTime: collectionTime);
+        QueryStoreCollector.Instance.BuildQuery(first);
+        Assert.False(first.CatchupClampApplied);
+
+        /* The enumeration path re-clamps an ALREADY-clamped watermark (the host clamped and logged
+           first), so the definition must not raise a second, duplicate warning for it. */
+        var alreadyClamped = MakeContext(watermark: collectionTime - WatermarkPolicy.MaxCatchup, collectionTime: collectionTime);
+        QueryStoreCollector.Instance.BuildPerItemQuery("SO", alreadyClamped);
+        Assert.False(alreadyClamped.CatchupClampApplied);
     }
 
     [Fact]
@@ -206,16 +445,302 @@ public sealed class QueryStoreCollectorDefinitionTests
         Assert.Contains("LEFT JOIN sys.query_store_replicas AS qsr", plan.Text, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #1907: the payload combines the flushed and the still-in-memory slice of one runtime-stats interval
+    /// before emitting, grouped on exactly the natural key of <c>sys.query_store_runtime_stats</c>.
+    ///
+    /// <para>Live on SQL 2022 (16.0.4255.1): 100 executions flushed plus 25 still in memory came back as
+    /// two rows of one <c>runtime_stats_interval_id</c>, and <c>sys.dm_exec_procedure_stats</c> — a wholly
+    /// separate source read at the same instant — said 125. Both slices used to be stored, where they
+    /// shared the entire read-side dedup key AND collection_time, so the survivor was whichever the engine
+    /// emitted first.</para>
+    /// </summary>
+    [Fact]
+    public void BuildPerItemQuery_CombinesTheSlicesOfOneInterval_OnTheViewsNaturalKey()
+    {
+        var text = PayloadSql(MakeContext(probeResult: 16));
+
+        /* The grouping key IS the view's natural key: plan, interval, execution type, replica group.
+           Anything coarser would merge work that is genuinely distinct; anything finer would leave the
+           slices split, which is the bug. */
+        Assert.Contains(
+            "GROUP BY\n        qsrs.plan_id,\n        qsrs.runtime_stats_interval_id,\n        qsrs.execution_type_desc,\n        qsrs.replica_group_id",
+            text,
+            StringComparison.Ordinal);
+
+        /* The additive counter is SUMmed, and the interval's span comes from its slices' extremes. */
+        Assert.Contains("count_executions = SUM(qsrs.count_executions)", text, StringComparison.Ordinal);
+        Assert.Contains("first_execution_time = MIN(qsrs.first_execution_time)", text, StringComparison.Ordinal);
+        Assert.Contains("last_execution_time = MAX(qsrs.last_execution_time)", text, StringComparison.Ordinal);
+
+        /* min_* / max_* keep the extreme, never an average of extremes. min_dop / max_dop are the pair
+           with no avg_ sibling, which is exactly the pair a mechanical edit is most likely to mishandle. */
+        Assert.Contains("min_duration = MIN(qsrs.min_duration)", text, StringComparison.Ordinal);
+        Assert.Contains("max_duration = MAX(qsrs.max_duration)", text, StringComparison.Ordinal);
+        Assert.Contains("min_dop = MIN(qsrs.min_dop)", text, StringComparison.Ordinal);
+        Assert.Contains("max_dop = MAX(qsrs.max_dop)", text, StringComparison.Ordinal);
+
+        /* The pre-filter is a prune, not a semantic: its interval list is a superset of what the HAVING
+           keeps, so it can never subtract a row. Without it the aggregate runs over the database's entire
+           retained Query Store every cycle — measured 1203ms against 375ms on a real 212k-row store. */
+        Assert.Contains("WHERE qsrs.runtime_stats_interval_id IN", text, StringComparison.Ordinal);
+        Assert.Contains("WHERE f.last_execution_time > @cutoff_time", text, StringComparison.Ordinal);
+
+        /* The row SHAPE must not move: 55 selected columns, and the TOP/ORDER BY stay OUTSIDE the
+           aggregate so the cap counts intervals and can never truncate one interval's slices into a
+           partial sum. */
+        Assert.Contains($"TOP ({QueryStoreCollector.MaxRowsPerDatabase})", text, StringComparison.Ordinal);
+        Assert.Contains(") AS qsrs\nJOIN sys.query_store_plan AS qsp", text, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY qsrs.last_execution_time DESC\nOPTION(RECOMPILE, LOOP JOIN);", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #1907: EVERY <c>avg_*</c> column the payload emits must be the count-weighted mean of the slices.
+    ///
+    /// <para>This is the pin that makes the rule enforceable rather than remembered. The wrong forms are
+    /// not compile errors and do not look wrong: a bare <c>AVG(qsrs.avg_duration)</c> reads perfectly
+    /// naturally and silently weights a 25-execution sliver the same as a 100-execution flush, and
+    /// <c>MAX</c> reads naturally too. Query Store exposes an average and a count but never a total, so
+    /// <c>avg * count</c> is the only way to recover a slice's total. Verified live on SQL 2022: slices of
+    /// (1778.42 over 100) and (2245.60 over 25) combined to 1871.856, which is
+    /// (1778.42*100 + 2245.60*25) / 125 and is not the 2012.01 a plain average of the two would give.</para>
+    ///
+    /// <para>Discovers the columns from the emitted SQL rather than listing them, so a newly added
+    /// <c>avg_</c> column is covered the moment it appears instead of when someone remembers to add it
+    /// here. Runs against the 2017+ shape, which is the one where all eleven exist.</para>
+    /// </summary>
+    [Fact]
+    public void Payload_EveryAverageColumn_IsTheCountWeightedMean()
+    {
+        var text = PayloadSql(MakeContext(probeResult: 16));
+
+        /* Only the aggregating derived table — the outer projection references the same names as plain
+           columns, which is correct there and must not be mistaken for an un-weighted aggregate. */
+        var open = text.IndexOf("FROM\n(", StringComparison.Ordinal);
+        var close = text.IndexOf(") AS qsrs", StringComparison.Ordinal);
+        Assert.True(open > 0 && close > open, "could not locate the slice-aggregating derived table");
+        var aggregate = text[open..close];
+
+        var averages = System.Text.RegularExpressions.Regex
+            .Matches(aggregate, @"^\s*(avg_[a-z0-9_]+) = ", System.Text.RegularExpressions.RegexOptions.Multiline)
+            .Select(m => m.Groups[1].Value)
+            .Distinct()
+            .ToList();
+
+        /* duration, cpu_time, logical_io_reads, logical_io_writes, physical_io_reads, clr_time,
+           query_max_used_memory, rowcount, num_physical_io_reads, log_bytes_used, tempdb_space_used. */
+        Assert.Equal(11, averages.Count);
+
+        foreach (var column in averages)
+        {
+            Assert.Contains(
+                $"{column} = SUM(qsrs.{column} * qsrs.count_executions) / NULLIF(SUM(qsrs.count_executions), 0)",
+                aggregate,
+                StringComparison.Ordinal);
+        }
+
+        /* The shapes that would pass a reading but corrupt the numbers. */
+        Assert.DoesNotContain("AVG(qsrs.avg_", aggregate, StringComparison.Ordinal);
+        Assert.DoesNotContain("MAX(qsrs.avg_", aggregate, StringComparison.Ordinal);
+        Assert.DoesNotContain("MIN(qsrs.avg_", aggregate, StringComparison.Ordinal);
+        Assert.DoesNotContain("SUM(qsrs.avg_duration)", aggregate, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #1907 bind safety: <c>replica_group_id</c> joins the GROUP BY on exactly the targets where the
+    /// column exists, and nowhere else.
+    ///
+    /// <para>It carries the same 2022+/Azure gate as the attribution column it feeds, for the same reason:
+    /// naming a column that does not exist in a GROUP BY fails the whole SELECT just as naming it in a
+    /// select list does, and on the Azure per-database path that would fail in EVERY database. It has to
+    /// be in the key where it does exist — two replicas' rows for one interval are DIFFERENT work, and
+    /// summing them would blend a secondary's executions into the primary's, which is the exact bug
+    /// replica attribution was added to prevent.</para>
+    /// </summary>
+    [Fact]
+    public void BuildPerItemQuery_ReplicaGroupIdEntersTheGroupingKey_OnlyWhereItBinds()
+    {
+        foreach (var probe in new object[] { 16, 17 })
+        {
+            var attributed = PayloadSql(MakeContext(probeResult: probe));
+            Assert.Contains("qsrs.execution_type_desc,\n        qsrs.replica_group_id", attributed, StringComparison.Ordinal);
+        }
+
+        var azure = AzurePayloadSql(MakeContext(isAzureSqlDb: true, probeResult: 12));
+        Assert.Contains("qsrs.execution_type_desc,\n        qsrs.replica_group_id", azure, StringComparison.Ordinal);
+
+        /* Pre-2022 box and Managed Instance: the column must not be named anywhere, GROUP BY included. */
+        foreach (var probe in new object?[] { 13, 14, 15, null })
+        {
+            var ungated = PayloadSql(MakeContext(probeResult: probe));
+            Assert.DoesNotContain("replica_group_id", ungated, StringComparison.Ordinal);
+            Assert.Contains("GROUP BY\n        qsrs.plan_id,\n        qsrs.runtime_stats_interval_id,\n        qsrs.execution_type_desc\n", ungated, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// #1907: the version-gated metric families must vanish from the AGGREGATE on a target that lacks
+    /// them while still emitting their typed NULL placeholder in the OUTER projection — the 55-column
+    /// reader contract cannot move, but an unbound column inside an aggregate fails just as hard as one
+    /// outside it. The comma handling is the fragile part: those three fragments carry a LEADING comma
+    /// and end the inner select list precisely because they can be empty.
+    /// </summary>
+    [Fact]
+    public void BuildPerItemQuery_PreSql2017_GatedFamiliesLeaveTheAggregate_ButKeepTheirOrdinals()
+    {
+        var old = PayloadSql(MakeContext(probeResult: 13));
+
+        /* Not aggregated, not referenced — the columns do not exist on SQL 2016. */
+        Assert.DoesNotContain("MIN(qsrs.min_num_physical_io_reads)", old, StringComparison.Ordinal);
+        Assert.DoesNotContain("MIN(qsrs.min_log_bytes_used)", old, StringComparison.Ordinal);
+        Assert.DoesNotContain("MIN(qsrs.min_tempdb_space_used)", old, StringComparison.Ordinal);
+        Assert.DoesNotContain("qsrs.avg_tempdb_space_used * qsrs.count_executions", old, StringComparison.Ordinal);
+
+        /* But the ordinals stay, as typed NULLs, so the reader still sees 55 columns in one order. */
+        Assert.Contains("avg_num_physical_io_reads = NULL, min_num_physical_io_reads = NULL, max_num_physical_io_reads = NULL,", old, StringComparison.Ordinal);
+        Assert.Contains("avg_log_bytes_used = NULL, min_log_bytes_used = NULL, max_log_bytes_used = NULL,", old, StringComparison.Ordinal);
+        Assert.Contains("avg_tempdb_space_used = NULL, min_tempdb_space_used = NULL, max_tempdb_space_used = NULL,", old, StringComparison.Ordinal);
+
+        /* The inner list must end cleanly on the last ungated column when all three are absent. */
+        Assert.Contains("max_rowcount = MAX(qsrs.max_rowcount)\n    FROM sys.query_store_runtime_stats AS qsrs", old, StringComparison.Ordinal);
+
+        /* On 2017+ they are present, aggregated, and the list ends with the last gated family instead. */
+        var newer = PayloadSql(MakeContext(probeResult: 14));
+        Assert.Contains("max_rowcount = MAX(qsrs.max_rowcount),\n", newer, StringComparison.Ordinal);
+        Assert.Contains("max_tempdb_space_used = MAX(qsrs.max_tempdb_space_used)\n    FROM sys.query_store_runtime_stats AS qsrs", newer, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void BuildPerItemQuery_AzureWithFailedProbe_StillNewColumns()
     {
         /* Azure SQL DB reports low PRODUCTVERSION majors historically — the edition overrides
-           the version gate, exactly as the original's isNew computation did. */
+           the version gate, exactly as the original's isNew computation did. Azure SQL DB no longer
+           takes this path in production (#1836 routes it through BuildQuery per database); the gates
+           are resolved in the one shared body builder, so both builders answer identically for a
+           given target and this still pins that answer. */
         var plan = QueryStoreCollector.Instance.BuildPerItemQuery("SO", MakeContext(isAzureSqlDb: true, probeResult: null));
 
         Assert.Contains("qsrs.avg_num_physical_io_reads", plan.Text, StringComparison.Ordinal);
         Assert.Contains("plan_forcing_type = qsp.plan_forcing_type_desc,", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("plan_type = NULL,", plan.Text, StringComparison.Ordinal);
+
+        /* plan_type flipped ON for Azure SQL DB with #1836 (was NULL here before): the probe reports
+           major 12 on Azure, but the engine is evergreen and sys.query_store_plan's applies-to banner
+           names Azure SQL Database — the same "Azure means newest" rule isNew has always used.
+           replica_role joined it with #1872, once the catalog was proven to bind live on both the
+           General Purpose and Hyperscale service tiers. */
+        Assert.Contains("plan_type = qsp.plan_type_desc,", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("replica_role = qsr.replica_name", plan.Text, StringComparison.Ordinal);
+
+        /* Managed Instance joined both gates with #1886, on its OWN live evidence rather than by
+           pattern-matching this Azure SQL DB change — see BuildPerItemQuery_ManagedInstance_CarriesBothVersionGatedColumns below for
+           what was measured and why MI needed a stricter bar than Azure did. */
+        var managedInstance = QueryStoreCollector.Instance.BuildPerItemQuery("SO", new CollectorContext
+        {
+            ServerId = 42,
+            ServerName = "test-server",
+            CollectionTime = new DateTime(2026, 7, 2, 12, 0, 0, DateTimeKind.Utc),
+            Deltas = s_deltas,
+            Target = new CollectorTargetInfo { IsAzureManagedInstance = true },
+        }).Text;
+
+        Assert.Contains("plan_type = qsp.plan_type_desc,", managedInstance, StringComparison.Ordinal);
+        Assert.Contains("replica_role = qsr.replica_name", managedInstance, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildPerItemQuery_ManagedInstance_CarriesBothVersionGatedColumns()
+    {
+        /* #1886. MI reports PRODUCTVERSION major 12 and EngineEdition 8, so the pure version gate can
+           NEVER fire on it — before this, every MI row stored the nvarchar(1) NULL placeholder for
+           replica_role and NULL for plan_type on every instance, regardless of what its engine
+           supported.
+
+           MI was deliberately held back through #1844 and #1872 while Azure SQL DB was flipped, and the
+           reason does not transfer: MI is not evergreen. Its feature set follows a per-instance UPDATE
+           POLICY, so an instance on an older policy genuinely might not have the catalog, and the bar
+           #1886 set for this simple edition gate was correspondingly stricter than Azure's — the catalog
+           had to be present on the OLDEST update policy still in support.
+
+           Measured 2026-07-31 on a GPv2 Gen5 4-vCore MI (westus3, torn down after) reporting
+           ProductUpdateType = 'CU', i.e. the conservative SQL Server 2022 policy rather than
+           Always-up-to-date, which is exactly that oldest-supported case:
+
+             OBJECT_ID('sys.query_store_replicas')                                 = -660
+             COL_LENGTH('sys.query_store_runtime_stats', 'replica_group_id')       = 8
+             COL_LENGTH('sys.query_store_plan', 'plan_type_desc')                  = 120
+
+           and the same two replica values re-answered from a user-database context through
+           [db].sys.sp_executesql — the collector's actual MI mechanism, which is the path the issue
+           noted MI has instead of Azure SQL DB's per-database connection.
+
+           This pins the SOURCE the gate emits, not live MI state: the instance is gone, and the
+           evidence lives on #1886. */
+        var mi = QueryStoreCollector.Instance.BuildPerItemQuery("SO", new CollectorContext
+        {
+            ServerId = 42,
+            ServerName = "test-server",
+            CollectionTime = new DateTime(2026, 7, 2, 12, 0, 0, DateTimeKind.Utc),
+            Deltas = s_deltas,
+            /* No probe result, so productVersion falls to the default — the gate must ride the EDITION,
+               which is the whole point on a platform whose version probe under-reports. */
+            Target = new CollectorTargetInfo { IsAzureManagedInstance = true },
+        }).Text;
+
+        Assert.Contains("plan_type = qsp.plan_type_desc,", mi, StringComparison.Ordinal);
+        Assert.Contains("replica_role = qsr.replica_name", mi, StringComparison.Ordinal);
+
+        /* MUST be a LEFT JOIN, and for MI the reason is sharper than it is anywhere else: a standalone
+           MI's sys.query_store_replicas is an EMPTY enumeration (zero rows), where Azure SQL DB's is a
+           static 4-row roles table even with no replicas. An INNER JOIN would match nothing and silently
+           delete ALL Query Store collection on every standalone MI. */
+        Assert.Contains("LEFT JOIN sys.query_store_replicas AS qsr", mi, StringComparison.Ordinal);
+        Assert.Contains("ON qsr.replica_group_id = qsrs.replica_group_id", mi, StringComparison.Ordinal);
+
+        /* Neither placeholder survives. */
+        Assert.DoesNotContain("plan_type = NULL,", mi, StringComparison.Ordinal);
+        Assert.DoesNotContain("replica_role = CONVERT(nvarchar(1), NULL)", mi, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildPerItemQuery_ManagedInstance_GatesRideTheEditionNotTheProbe()
+    {
+        /* The discriminating pin (#1886). MI's version probe reports major 12, so if either gate were
+           still reading the probe rather than the edition, a LOW probe value would put the NULL
+           placeholders back. Passing the real under-reported major explicitly proves the edition term is
+           what carries both columns — which is exactly the condition that made MI never attribute. */
+        var mi = QueryStoreCollector.Instance.BuildPerItemQuery("SO", new CollectorContext
+        {
+            ServerId = 42,
+            ServerName = "test-server",
+            CollectionTime = new DateTime(2026, 7, 2, 12, 0, 0, DateTimeKind.Utc),
+            Deltas = s_deltas,
+            EnumerationProbeResult = 12,
+            Target = new CollectorTargetInfo { IsAzureManagedInstance = true },
+        }).Text;
+
+        Assert.Contains("plan_type = qsp.plan_type_desc,", mi, StringComparison.Ordinal);
+        Assert.Contains("replica_role = qsr.replica_name", mi, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildPerItemQuery_OnPremBelow2022_StillGetsNeitherColumn()
+    {
+        /* The counterfactual that keeps #1886 honest: widening the two gates must not have widened them
+           for box SQL Server. A 2019 target still emits both NULL placeholders and never references the
+           replicas catalog, which does not exist there. */
+        var onPrem = QueryStoreCollector.Instance.BuildPerItemQuery("SO", new CollectorContext
+        {
+            ServerId = 42,
+            ServerName = "test-server",
+            CollectionTime = new DateTime(2026, 7, 2, 12, 0, 0, DateTimeKind.Utc),
+            Deltas = s_deltas,
+            EnumerationProbeResult = 15,
+            Target = new CollectorTargetInfo(),
+        }).Text;
+
+        Assert.Contains("plan_type = NULL,", onPrem, StringComparison.Ordinal);
+        Assert.Contains("replica_role = CONVERT(nvarchar(1), NULL)", onPrem, StringComparison.Ordinal);
+        Assert.DoesNotContain("sys.query_store_replicas", onPrem, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -226,7 +751,17 @@ public sealed class QueryStoreCollectorDefinitionTests
 
         /* Line-ending agnostic: pin the bracket escaping + the sp_executesql shape. */
         Assert.StartsWith("EXECUTE [we]]ird].sys.sp_executesql", plan.Text.TrimStart('\r', '\n'), StringComparison.Ordinal);
-        Assert.Contains("WHERE qsrs.last_execution_time > @cutoff_time", plan.Text, StringComparison.Ordinal);
+
+        /* The incremental cutoff is asked at INTERVAL grain since #1907, not per slice. Re-pinned
+           deliberately: the old form asserted "WHERE qsrs.last_execution_time > @cutoff_time", and keeping
+           that would have pinned the bug. A per-slice WHERE cannot survive slice aggregation — the flushed
+           slice is STATIC, so as soon as the growing in-memory slice pushes the watermark past it the
+           flushed slice stops qualifying and the SUM silently degrades to the sliver alone, which is the
+           original defect with an aggregate bolted on. HAVING MAX(...) asks whether the INTERVAL saw new
+           activity and then takes all of it. */
+        var normalized = plan.Text.Replace("\r\n", "\n", StringComparison.Ordinal);
+        Assert.Contains("HAVING\n        MAX(qsrs.last_execution_time) > @cutoff_time", normalized, StringComparison.Ordinal);
+        Assert.DoesNotContain("WHERE qsrs.last_execution_time > @cutoff_time", normalized, StringComparison.Ordinal);
         /* #1565: NO SQL-side self-exclusion — the old NOT LIKE was 75% of the read's elapsed time (full
            nvarchar(max) scan per row on a column no index can serve; field A/B: 4.3x without it), and no
            predicate shape fixes a residual text scan. The exclusion is client-side in ReadItemAsync,
@@ -313,7 +848,7 @@ public sealed class QueryStoreCollectorDefinitionTests
         var context = MakeContext();
         context.PerItemTextBudgetExceeded = true;
 
-        var row = new object[53];
+        var row = new object[55];
         row[0] = 101L;
         row[1] = 202L;
         row[2] = "Regular";
@@ -333,6 +868,8 @@ public sealed class QueryStoreCollectorDefinitionTests
         row[50] = DBNull.Value;
         row[51] = "0xPH";
         row[52] = DBNull.Value;
+        row[53] = 9001L;
+        row[54] = new DateTime(2026, 7, 2, 10, 0, 0);
 
         using var reader = new FakeCollectorDataReader(row);
         var rows = new System.Collections.Generic.List<QueryStoreCollector.Row>();
@@ -352,7 +889,7 @@ public sealed class QueryStoreCollectorDefinitionTests
 
         object[] MakeRow(long queryId, string sqlText)
         {
-            var row = new object[53];
+            var row = new object[55];
             row[0] = queryId;
             row[1] = 202L;
             row[2] = "Regular";
@@ -372,6 +909,8 @@ public sealed class QueryStoreCollectorDefinitionTests
             row[50] = DBNull.Value;
             row[51] = "0xPH";
             row[52] = DBNull.Value;
+            row[53] = 9001L;
+            row[54] = new DateTime(2026, 7, 2, 10, 0, 0);
             return row;
         }
 
@@ -388,6 +927,73 @@ public sealed class QueryStoreCollectorDefinitionTests
     }
 
     [Fact]
+    public async Task ReadAsync_Azure_TakesDatabaseNameFromCurrentDatabaseName_AndDropsSelfRows()
+    {
+        /* #1836: on the per-database path the payload carries no database_name column (the on-prem
+           path takes it from the enumerated item), so it comes from the database the host connected
+           to — CollectorContext.CurrentDatabaseName, the same authoritative source the XE collectors
+           use on this path. One read loop serves both shapes, so the client-side self-exclusion
+           applies here too: on Azure our own payload runs INSIDE the database whose Query Store it is
+           reading, so without it the collector would collect itself. */
+        var context = MakeContext(isAzureSqlDb: true);
+        context.CurrentDatabaseName = "ProdDb";
+
+        using var reader = new FakeCollectorDataReader(
+            MakeReaderRow(1, "SELECT 1 FROM UserTable"),
+            MakeReaderRow(2, "SELECT /* " + QueryStoreCollector.SelfQueryMarker + " */ TOP (50000) query_id = qsq.query_id"),
+            MakeReaderRow(3, "UPDATE Another SET x = 1"));
+
+        var rows = await QueryStoreCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(new[] { 1L, 3L }, rows.Select(r => r.QueryId));
+        Assert.All(rows, r => Assert.Equal("ProdDb", r.DatabaseName));
+        Assert.False(context.PerItemTextBudgetExceeded);
+    }
+
+    [Fact]
+    public async Task ReadAsync_WithoutCurrentDatabaseName_Throws_RatherThanWritingBlankDatabaseRows()
+    {
+        /* An empty database_name is not a survivable fallback for this collector: it is the
+           per-database watermark key, so those rows could never advance a watermark and would
+           re-collect every cycle, under a blank database in every grid. A wiring mistake becomes one
+           loud, classified failure instead — the host's per-database catch surfaces it. */
+        var context = MakeContext(isAzureSqlDb: true);
+
+        using var reader = new FakeCollectorDataReader(MakeReaderRow(1, "SELECT 1"));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await QueryStoreCollector.Instance.ReadAsync(reader, context, CancellationToken.None));
+    }
+
+    /// <summary>One reader row shaped to the 55-ordinal payload contract both paths select.</summary>
+    private static object[] MakeReaderRow(long queryId, string sqlText)
+    {
+        var row = new object[55];
+        row[0] = queryId;
+        row[1] = 202L;
+        row[2] = "Regular";
+        row[3] = new DateTimeOffset(2026, 7, 2, 10, 0, 0, TimeSpan.Zero);
+        row[4] = new DateTimeOffset(2026, 7, 2, 11, 0, 0, TimeSpan.Zero);
+        row[5] = "dbo.Proc";
+        row[6] = sqlText;
+        row[7] = "0xQH";
+        row[8] = 33L;
+        for (int i = 9; i <= 43; i++) row[i] = (long)i;
+        row[44] = DBNull.Value;
+        row[45] = "MANUAL";
+        row[46] = true;
+        row[47] = 5L;
+        row[48] = "NONE";
+        row[49] = (short)160;
+        row[50] = DBNull.Value;
+        row[51] = "0xPH";
+        row[52] = DBNull.Value;
+        row[53] = 9001L;                    /* runtime_stats_interval_id */
+        row[54] = new DateTime(2026, 7, 2, 10, 0, 0);  /* interval_start_time_utc (already datetime2) */
+        return row;
+    }
+
+    [Fact]
     public void BuildPerItemQuery_NoWatermark_FallsBack60Minutes()
     {
         var collectionTime = new DateTime(2026, 7, 2, 12, 0, 0, DateTimeKind.Utc);
@@ -396,12 +1002,47 @@ public sealed class QueryStoreCollectorDefinitionTests
         Assert.Equal(collectionTime.AddMinutes(-60), Assert.Single(plan.Parameters).Value);
     }
 
+    [Theory]
+    [InlineData(13, false)]   /* SQL Server 2016 — the AppliesTo floor */
+    [InlineData(16, false)]   /* SQL Server 2022 */
+    [InlineData(12, true)]    /* Azure SQL DB, which under-reports PRODUCTVERSION */
+    public void Payload_SelectsIntervalIdentity_OnEveryVersionAndTarget(int productVersion, bool isAzureSqlDb)
+    {
+        /* #1841 tier 2. Query Store rows are cumulative per-interval snapshots, so the interval is the
+           unit every aggregate has to collapse to — and until this shipped the schema carried no interval
+           key at all, only the first_execution_time proxy, and no interval CLOCK, which is why the slicer
+           bucketed an interval into the hour it was last COLLECTED.
+
+           Deliberately NOT version-gated, unlike plan_type_desc / the log-bytes family / replica_role
+           beside it: sys.query_store_runtime_stats.runtime_stats_interval_id and the
+           sys.query_store_runtime_stats_interval catalog view are original Query Store surface, verified
+           present on SQL Server 2016 SP3 (13.0.6300.2) — the same floor AppliesTo enforces. A gate here
+           would be dead weight AND would silently deny the identity to the oldest supported servers. */
+        var context = MakeContext(isAzureSqlDb: isAzureSqlDb, probeResult: productVersion);
+        var body = isAzureSqlDb
+            ? QueryStoreCollector.Instance.BuildQuery(context).Text
+            : QueryStoreCollector.Instance.BuildEnumerationQuery(context) is not null
+                ? QueryStoreCollector.Instance.BuildPerItemQuery("SO", context).Text
+                : throw new InvalidOperationException("on-prem must enumerate");
+
+        /* The on-prem form is quote-DOUBLED for [db].sys.sp_executesql nesting, so the timezone literal
+           reads ''UTC'' there and 'UTC' on Azure — the one place this pair could have broken the escaping. */
+        var quote = isAzureSqlDb ? "'" : "''";
+        Assert.Contains("runtime_stats_interval_id = qsrs.runtime_stats_interval_id,", body, StringComparison.Ordinal);
+        Assert.Contains($"interval_start_time_utc = CONVERT(datetime2, qsrsi.start_time AT TIME ZONE {quote}UTC{quote})", body, StringComparison.Ordinal);
+
+        /* LEFT JOIN, never INNER: an interval row that failed to resolve must cost this collector ONE
+           column, not every runtime-stats row for that database. Same lesson as the replica join. */
+        Assert.Contains("LEFT JOIN sys.query_store_runtime_stats_interval AS qsrsi", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("JOIN sys.query_store_runtime_stats_interval AS qsrsi\n  ON qsrsi", body.Replace("LEFT JOIN sys.query_store_runtime_stats_interval", "X", StringComparison.Ordinal), StringComparison.Ordinal);
+    }
+
     [Fact]
-    public void PayloadColumns_MatchSchemaOrder_54Columns()
+    public void PayloadColumns_MatchSchemaOrder_56Columns()
     {
         var names = QueryStoreCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray();
 
-        Assert.Equal(54, names.Length);
+        Assert.Equal(56, names.Length);
         Assert.Equal("database_name", names[0]);
         Assert.Equal("query_id", names[1]);
         Assert.Equal("execution_count", names[9]);
@@ -411,21 +1052,24 @@ public sealed class QueryStoreCollectorDefinitionTests
         Assert.Equal("compatibility_level", names[50]);
         Assert.Equal("query_plan_hash", names[52]);
 
-        /* replica_role is pinned LAST deliberately: both hosts' bulk writers are positional, and an
-           upgraded store receives this column from an ALTER TABLE ADD COLUMN, which can only append.
-           Moving it earlier would desync a fresh store (DDL generated from this list) from an upgraded
-           one. See the CollectorColumn comment in QueryStoreCollector. */
+        /* The appended tail is pinned in ORDER deliberately: both hosts' bulk writers are positional, and
+           an upgraded store receives these columns from an ALTER TABLE ADD COLUMN, which can only append.
+           Moving any of them earlier would desync a fresh store (DDL generated from this list) from an
+           upgraded one. replica_role landed first (#1546), then #1841 tier 2's interval-identity pair;
+           anything added later must go AFTER these. See the CollectorColumn comment in QueryStoreCollector. */
         Assert.Equal("replica_role", names[53]);
+        Assert.Equal("runtime_stats_interval_id", names[54]);
+        Assert.Equal("interval_start_time_utc", names[55]);
     }
 
     [Fact]
-    public async Task ReadItemAsync_WritePayload_Pins54ColumnOrder_AndTypeCoercions()
+    public async Task ReadItemAsync_WritePayload_Pins56ColumnOrder_AndTypeCoercions()
     {
         var context = MakeContext();
         var firstExec = new DateTimeOffset(2026, 7, 2, 10, 0, 0, TimeSpan.FromHours(-4));
         var lastExec = new DateTimeOffset(2026, 7, 2, 11, 0, 0, TimeSpan.FromHours(-4));
 
-        var row = new object[53];
+        var row = new object[55];
         row[0] = 101L;                      /* query_id */
         row[1] = 202L;                      /* plan_id */
         row[2] = "Regular";                 /* execution_type_desc */
@@ -451,6 +1095,10 @@ public sealed class QueryStoreCollectorDefinitionTests
         row[50] = DBNull.Value;             /* query_plan_text (always NULL literal) */
         row[51] = "0xPH";                   /* query_plan_hash */
         row[52] = "Secondary";              /* replica_role (2022+ attributed the row to a secondary) */
+        row[53] = 9001L;                    /* runtime_stats_interval_id (#1841 tier 2) */
+        row[54] = new DateTime(2026, 7, 2, 10, 0, 0);  /* interval_start_time_utc: datetime2, NOT datetimeoffset —
+                                                          the SELECT does the AT TIME ZONE conversion, so unlike
+                                                          first/last_execution_time this needs no client shift */
 
         using var reader = new FakeCollectorDataReader(row);
         var rows = new System.Collections.Generic.List<QueryStoreCollector.Row>();
@@ -459,7 +1107,7 @@ public sealed class QueryStoreCollectorDefinitionTests
         var writer = new RecordingCollectorRowWriter();
         QueryStoreCollector.Instance.WritePayload(Assert.Single(rows), writer, context);
 
-        Assert.Equal(54, writer.Values.Count);
+        Assert.Equal(56, writer.Values.Count);
         Assert.Equal("SO", writer.Values[0]);                       /* enumerated item leads the payload */
         Assert.Equal(101L, writer.Values[1]);
         Assert.Equal(firstExec.UtcDateTime, writer.Values[4]);      /* datetimeoffset -> UTC DateTime */
@@ -474,7 +1122,9 @@ public sealed class QueryStoreCollectorDefinitionTests
         Assert.Equal(160, writer.Values[50]);                       /* smallint compat -> int */
         Assert.Null(writer.Values[51]);
         Assert.Equal("0xPH", writer.Values[52]);
-        Assert.Equal("Secondary", writer.Values[53]);               /* replica_role rides last, after query_plan_hash */
+        Assert.Equal("Secondary", writer.Values[53]);               /* replica_role, after query_plan_hash */
+        Assert.Equal(9001L, writer.Values[54]);                     /* runtime_stats_interval_id (#1841 tier 2) */
+        Assert.Equal(new DateTime(2026, 7, 2, 10, 0, 0), writer.Values[55]); /* interval_start_time_utc, no shift applied */
         Assert.Empty(s_deltas.Calls);                               /* incremental snapshot — no deltas */
     }
 }

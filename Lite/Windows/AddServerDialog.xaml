@@ -3,25 +3,39 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Add SQL Server"
         SizeToContent="Height" Width="450"
+        MaxHeight="{Binding Source={x:Static SystemParameters.WorkArea}, Path=Height}"
+        MinWidth="450" MinHeight="360"
         WindowStartupLocation="CenterOwner"
-        ResizeMode="NoResize"
+        ResizeMode="CanResizeWithGrip"
+        SizeChanged="Dialog_SizeChanged"
+        SourceInitialized="Dialog_SourceInitialized"
+        LocationChanged="Dialog_LocationChanged"
         Icon="/EDD.ico"
         Background="{DynamicResource BackgroundBrush}">
+    <!-- #1828: the auth panels grow this dialog past a 1080p work area, and SizeToContent kept growing
+         the window off-screen with the buttons unreachable (NoResize left no recovery). The form scrolls
+         in a star row, the status + buttons are pinned OUTSIDE the scroll so they are always visible,
+         and MaxHeight clamps the window to the work area - the Dashboard twin's proven shape. -->
     <Grid Margin="16">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
+
+        <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
 
         <!-- Header -->
         <TextBlock Grid.Row="0" Text="Add SQL Server Connection" FontSize="18" FontWeight="Bold" Margin="0,0,0,15"
@@ -39,10 +53,10 @@
         <TextBlock Grid.Row="5" Text="Authentication" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
         <StackPanel Grid.Row="6" Margin="0,0,0,12">
             <!-- Credential source: inline (per-server) vs a shared credential profile -->
-            <RadioButton Content="Configure credentials on this server"
+            <RadioButton Content="Configure c_redentials on this server"
                          Foreground="{DynamicResource ForegroundBrush}" IsChecked="True"
                          Checked="CredentialSource_Changed" Margin="0,0,0,4"/>
-            <RadioButton x:Name="UseProfileRadio" Content="Use a credential profile"
+            <RadioButton x:Name="UseProfileRadio" Content="_Use a credential profile"
                          Foreground="{DynamicResource ForegroundBrush}"
                          Checked="CredentialSource_Changed" Margin="0,0,0,4"
                          ToolTip="Use a named, shared credential (set up under Manage Servers → Credential Profiles). The profile fully overrides this server's auth type and credentials."/>
@@ -58,17 +72,17 @@
 
             <!-- Inline per-server auth radios (hidden when a profile is chosen) -->
             <StackPanel x:Name="InlineAuthRadios" Margin="0,4,0,0">
-                <RadioButton x:Name="WindowsAuthRadio" Content="Windows Authentication" Foreground="{DynamicResource ForegroundBrush}"
+                <RadioButton x:Name="WindowsAuthRadio" Content="_Windows Authentication" Foreground="{DynamicResource ForegroundBrush}"
                              IsChecked="True" Checked="AuthMode_Changed" Margin="0,0,0,4"/>
-                <RadioButton x:Name="SqlAuthRadio" Content="SQL Server Authentication" Foreground="{DynamicResource ForegroundBrush}"
+                <RadioButton x:Name="SqlAuthRadio" Content="S_QL Server Authentication" Foreground="{DynamicResource ForegroundBrush}"
                              Checked="AuthMode_Changed" Margin="0,0,0,4"/>
-                <RadioButton x:Name="EntraMfaAuthRadio" Content="Microsoft Entra MFA" Foreground="{DynamicResource ForegroundBrush}"
+                <RadioButton x:Name="EntraMfaAuthRadio" Content="Microsoft _Entra MFA" Foreground="{DynamicResource ForegroundBrush}"
                              Checked="AuthMode_Changed"
                              ToolTip="Interactive authentication with MFA for Azure SQL Database."/>
-                <RadioButton x:Name="ServicePrincipalAuthRadio" Content="Azure — Service Principal" Foreground="{DynamicResource ForegroundBrush}"
+                <RadioButton x:Name="ServicePrincipalAuthRadio" Content="Azure — Service _Principal" Foreground="{DynamicResource ForegroundBrush}"
                              Checked="AuthMode_Changed" Margin="0,4,0,0"
                              ToolTip="Non-interactive Azure SQL auth using an Entra app registration (client id + secret)."/>
-                <RadioButton x:Name="ManagedIdentityAuthRadio" Content="Azure — Managed Identity" Foreground="{DynamicResource ForegroundBrush}"
+                <RadioButton x:Name="ManagedIdentityAuthRadio" Content="Azure — _Managed Identity" Foreground="{DynamicResource ForegroundBrush}"
                              Checked="AuthMode_Changed" Margin="0,4,0,0"
                              ToolTip="Non-interactive Azure SQL auth using the managed identity of the Azure resource running Lite."/>
             </StackPanel>
@@ -121,11 +135,11 @@
                     <ComboBoxItem Content="Strict"/>
                 </ComboBox>
             </StackPanel>
-            <CheckBox x:Name="TrustCertCheckBox" Content="Trust server certificate (skip certificate validation)"
+            <CheckBox x:Name="TrustCertCheckBox" Content="Trust ser_ver certificate (skip certificate validation)"
                       Foreground="{DynamicResource ForegroundBrush}" IsChecked="False"/>
-            <CheckBox x:Name="EnabledCheckBox" Content="Enable data collection for this server"
+            <CheckBox x:Name="EnabledCheckBox" Content="E_nable data collection for this server"
                       Foreground="{DynamicResource ForegroundBrush}" IsChecked="True" Margin="0,6,0,0"/>
-            <CheckBox x:Name="FavoriteCheckBox" Content="Mark as favorite (appears at top of list)"
+            <CheckBox x:Name="FavoriteCheckBox" Content="Mar_k as favorite (appears at top of list)"
                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,6,0,0"/>
             <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
                 <TextBlock Text="Description:" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Width="80"/>
@@ -141,10 +155,10 @@
                 <TextBox x:Name="UtilityDatabaseBox" Width="250"
                          ToolTip="Database where community stored procedures (sp_IndexCleanup) are installed. Leave empty to use the connection database."/>
             </StackPanel>
-            <CheckBox x:Name="ReadOnlyIntentCheckBox" Content="Read-only intent (for AG listeners and readable replicas)"
+            <CheckBox x:Name="ReadOnlyIntentCheckBox" Content="Read-_only intent (for AG listeners and readable replicas)"
                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,6,0,0"
                       ToolTip="Sets ApplicationIntent=ReadOnly. Required when connecting via an AG listener or Azure failover group endpoint to route to a readable secondary."/>
-            <CheckBox x:Name="MultiSubnetFailoverCheckBox" Content="Multi-subnet failover (for AG listeners and FCIs)"
+            <CheckBox x:Name="MultiSubnetFailoverCheckBox" Content="Multi-subnet fai_lover (for AG listeners and FCIs)"
                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,6,0,0"
                       ToolTip="Sets MultiSubnetFailover=true. Connects to all IPs in parallel during failover. Recommended for AG listeners and failover cluster instances spanning multiple subnets."/>
             <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
@@ -163,15 +177,18 @@
             </StackPanel>
         </StackPanel>
 
-        <!-- Status -->
-        <TextBlock Grid.Row="10" x:Name="StatusText" Foreground="{DynamicResource ForegroundMutedBrush}"
-                   TextWrapping="Wrap" VerticalAlignment="Bottom" Margin="0,0,0,8"/>
+            </Grid>
+        </ScrollViewer>
 
-        <!-- Buttons -->
-        <StackPanel Grid.Row="11" Orientation="Horizontal" HorizontalAlignment="Right">
-            <Button x:Name="TestButton" Content="Test Connection" Click="TestButton_Click" Margin="0,0,8,0"/>
-            <Button x:Name="SaveButton" Content="Save" Width="80" Height="30" Click="SaveButton_Click" Style="{StaticResource AccentButton}" Margin="0,0,8,0"/>
-            <Button Content="Cancel" Width="80" Height="30" Click="CancelButton_Click"/>
+        <!-- Status + buttons: pinned below the scroll so they stay visible at any window height. -->
+        <StackPanel Grid.Row="1" Margin="0,8,0,0">
+            <TextBlock x:Name="StatusText" Foreground="{DynamicResource ForegroundMutedBrush}"
+                       TextWrapping="Wrap" Margin="0,0,0,8"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button x:Name="TestButton" Content="_Test Connection" Click="TestButton_Click" Margin="0,0,8,0"/>
+                <Button x:Name="SaveButton" Content="_Save" Width="80" Height="30" Click="SaveButton_Click" Style="{StaticResource AccentButton}" Margin="0,0,8,0"/>
+                <Button Content="_Cancel" Width="80" Height="30" Click="CancelButton_Click" IsCancel="True"/>
+            </StackPanel>
         </StackPanel>
     </Grid>
 </Window>

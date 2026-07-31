@@ -263,10 +263,11 @@ public sealed class DarlingMcpToolsTests
         await PgMigrations.MigrateAsync(connection, ct);
 
         /* Clear leftovers from an earlier aborted run so the assertions below are deterministic. */
-        await DeleteTestRowsAsync(connection);
+        await DeleteTestRowsAsync(connection, ct);
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             /* ---- register both servers the way the worker's connect-upsert does, and plant
@@ -509,10 +510,13 @@ public sealed class DarlingMcpToolsTests
 
             var survivor = Assert.Single(survivors);
             Assert.Equal("an4-mcp-e2e-other-hash", survivor.StoryPathHash);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteTestRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteTestRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -535,12 +539,12 @@ ON CONFLICT (server_id) DO UPDATE SET
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 
-    private static async Task DeleteTestRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteTestRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM servers WHERE server_id IN ({TestServerId}, {EmptyServerId}); " +
             $"DELETE FROM analysis_findings WHERE server_id IN ({TestServerId}, {EmptyServerId}); " +
             $"DELETE FROM analysis_muted WHERE server_id IN ({TestServerId}, {EmptyServerId}) OR story_path_hash = '{AllServersStoryHash}';", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

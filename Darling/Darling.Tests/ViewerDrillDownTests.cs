@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -213,6 +213,22 @@ public sealed class ViewerDrillDownTests
         /* Query Store stores per-execution averages; the per-interval total scales by execution_count. */
         Assert.Contains("execution_count", sql, StringComparison.Ordinal);
         AssertPgPositionalDialect(sql);
+    }
+
+    [Fact]
+    public void QueryStoreItemTimelineSql_DedupsPerInterval_SoTheOverlayAgreesWithTheSlicerBars()
+    {
+        /* #1841. The WHERE narrows to query_id + plan_id but NOT to an interval, and the rows are
+           CUMULATIVE per-interval snapshots re-collected every cycle — so un-deduped this series draws one
+           interval as a rising staircase of restatements, and can emit several points at the SAME
+           collection_time. It is drawn OVER QueryStoreSlicerSql's bars, which ARE deduped, so leaving it
+           raw would make the overlay contradict the bars it annotates. */
+        var sql = ViewerDataService.QueryStoreItemTimelineSql;
+        Assert.Contains(
+            "PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc",
+            sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY collection_time DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE rn = 1", sql, StringComparison.Ordinal);
     }
 
     private static void AssertPgPositionalDialect(string sql)

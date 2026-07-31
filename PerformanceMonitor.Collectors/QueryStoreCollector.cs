@@ -28,6 +28,27 @@ namespace PerformanceMonitor.Collectors;
 /// are decided by a live PRODUCTVERSION probe each cycle (default 13 when the probe fails) —
 /// deliberately probed rather than trusting cached connection status, which can be
 /// version-unknown.
+///
+/// <para>TWO execution shapes, ONE payload (#1836). Everything above describes the on-prem/RDS/MI
+/// path: enumerate, then run the payload per database through <c>[db].sys.sp_executesql</c>.
+/// Azure SQL DB cannot do that at all — a three-part cross-database reference is rejected for EVERY
+/// database, from master and from a user database alike — so there the host connects per database
+/// (<see cref="RunsPerDatabase"/>) and <see cref="BuildQuery"/> runs the eligibility gate and the
+/// payload directly against the connected database. Before #1836 the Azure enumeration probed with
+/// exactly that rejected three-part reference inside an empty CATCH, so every database failed
+/// silently, the item list came back empty, and the collector logged SUCCESS with zero rows forever.
+/// Both shapes are built from the SINGLE body <see cref="BuildPayloadBody"/> returns — the on-prem
+/// wrapper only quote-doubles it for nesting — because two hand-maintained copies of a 55-column
+/// SELECT is precisely the drift this collector cannot survive. (55 selected columns; the stored row
+/// is 56 — <c>database_name</c> is supplied client-side, from the enumerated item or the connected
+/// database.)</para>
+///
+/// <para>ONE ROW PER INTERVAL (#1907). <c>sys.query_store_runtime_stats</c> hands back the flushed and
+/// the still-in-memory slice of one <c>runtime_stats_interval_id</c> as separate, ADDITIVE rows, so the
+/// payload groups on the view's natural key and combines them before emitting. Without it both slices
+/// were stored, shared the whole read-side dedup key AND <c>collection_time</c>, and the survivor was
+/// whichever the engine emitted first — a grid could show an in-memory sliver in place of the interval's
+/// total. The emitted row SHAPE is untouched by that change; only the row COUNT per interval is.</para>
 /// </summary>
 public sealed class QueryStoreCollector : CollectorDefinitionBase<QueryStoreCollector.Row>
 {
@@ -96,10 +117,32 @@ public sealed class QueryStoreCollector : CollectorDefinitionBase<QueryStoreColl
         /// <summary>
         /// The replica role sys.query_store_replicas attributed this runtime-stats row to ('Primary',
         /// 'Secondary', 'Geo Secondary', 'Geo HA Secondary'). NULL = the server did not attribute it
-        /// (pre-2022, or a 2022 standalone whose sys.query_store_replicas is empty) — deliberately not
-        /// coalesced. See hasReplicaAttribution in BuildPerItemQuery.
+        /// (pre-2022, a 2022 standalone whose sys.query_store_replicas is empty, or Managed Instance,
+        /// which keeps the pure version gate) — deliberately not coalesced. Azure SQL DB DOES attribute
+        /// as of #1872, having been gated off for bind safety until the catalog was proven live on both
+        /// General Purpose and Hyperscale. See hasReplicaAttribution in <see cref="BuildPayloadBody"/>.
         /// </summary>
         public string? ReplicaRole { get; set; }
+
+        /// <summary>
+        /// The runtime-stats interval this row is a snapshot OF — <c>sys.query_store_runtime_stats.
+        /// runtime_stats_interval_id</c>, the real interval identity (#1841 tier 2). Query Store rows are
+        /// CUMULATIVE per-interval snapshots and the collector re-fetches the OPEN interval every cycle, so
+        /// every aggregate read must collapse an interval to its latest snapshot before summing; before this
+        /// column the only identity available was the <c>first_execution_time</c> proxy. Per DATABASE, not
+        /// per server — each database has its own Query Store and its own interval sequence — so a dedup key
+        /// carrying it must also carry <c>database_name</c>. NULL only on rows collected by a pre-tier-2
+        /// build.
+        /// </summary>
+        public long? RuntimeStatsIntervalId { get; set; }
+
+        /// <summary>
+        /// When the interval STARTED, in UTC — <c>sys.query_store_runtime_stats_interval.start_time</c>,
+        /// converted at collection (#1841 tier 2). This is the honest x-coordinate for "when the work ran":
+        /// bucketing on <c>collection_time</c> attributes an interval to the cycle that last FETCHED it,
+        /// which on Query Store's default 60-minute interval is reliably one bucket late.
+        /// </summary>
+        public DateTime? IntervalStartTimeUtc { get; set; }
     }
 
     private const string OnPremDatabaseListQueryText = @"
@@ -108,6 +151,13 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 DECLARE
     @result TABLE (name sysname);
+
+/* #1837: every probe failure below used to die in an empty CATCH, so a login that could not enter a
+   single database enumerated 0 items and logged one indistinguishable SUCCESS row. These rows come back
+   as the enumeration's SECOND result set — the driver's probe-failure contract — because the FIRST one
+   is the item list the runners collect from. */
+DECLARE
+    @probe_failures TABLE (name sysname, error_text nvarchar(4000));
 
 DECLARE
     @db sysname,
@@ -125,6 +175,7 @@ DECLARE db_check CURSOR LOCAL FAST_FORWARD FOR
     AND   d.database_id < 32761
     AND   d.state_desc = N'ONLINE'
     AND   d.name <> N'PerformanceMonitor'
+    AND   HAS_DBACCESS(d.name) = 1 /*#1823's screen, which this collector never got: without it a least-privilege login probes every database it cannot enter and takes a 916 per database per cycle. Harmless while those failures were swallowed; with #1837 recording them they would be a permanent probe-failure note and a warning burst every cycle for a permission posture that is not changing. Its three siblings (database_scoped_config, index_object_stats, database_size_stats) already filter this way. On-prem only - from master on Azure SQL DB this returns 0 for every user database, and Azure does not use this enumeration.*/
     /* Default screen (#1565): vendor/system-adjacent databases with no customer workload. First group =
        vendor-controlled names (cannot collide with real customer data): cloud-provider management dbs,
        SSRS catalogs, PolyBase/DW artifacts, plus the id>4 system four as a name-based belt for clarity.
@@ -182,6 +233,12 @@ BEGIN
         EXECUTE @exec_sp @sql;
     END TRY
     BEGIN CATCH
+        /* The failure modes this catches are ordinary and per-database (mid-restore, an AG failover
+           mid-cursor, a login without access, a database that went offline between the cursor and the
+           probe), so the cursor keeps going — but the database is now MISSING from a collection that
+           still reports SUCCESS, which is exactly the hole #1837 closes. */
+        INSERT @probe_failures (name, error_text)
+        VALUES (@db, ERROR_MESSAGE());
     END CATCH;
 
     FETCH NEXT
@@ -196,83 +253,39 @@ SELECT
     name
 FROM @result
 ORDER BY
+    name;
+
+/* Second result set = the driver's probe-failure contract (EnumeratedCollectorDriver.ReadEnumerationAsync).
+   Always returned, normally empty; the driver reads zero rows and attaches no note. */
+SELECT
+    name,
+    error_text
+FROM @probe_failures
+ORDER BY
     name;";
 
-    private const string AzureDatabaseListQueryText = @"
-SET NOCOUNT ON;
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-
-DECLARE
-    @result TABLE (name sysname);
-
-DECLARE
-    @db sysname,
-    @sql NVARCHAR(500),
-    @exec_sp nvarchar(256);
-
-DECLARE db_check CURSOR LOCAL FAST_FORWARD FOR
-    SELECT /* PerformanceMonitorLite */
-        d.name
-    FROM sys.databases AS d
-    WHERE d.database_id > 4
-    AND   d.database_id < 32761
-    AND   d.state_desc = N'ONLINE'
-    AND   d.name <> N'PerformanceMonitor'
-    /* Same default screen as the box/RDS enumeration (#1565) — most vendor names can't exist on Azure
-       SQL DB, but one shared list keeps the two paths identical and covers the DBA-convention names. */
-    AND   d.name NOT IN
-          (
-              N'master', N'model', N'msdb', N'tempdb',
-              N'rdsadmin', N'gcloud_cloudsqladmin',
-              N'ReportServer', N'ReportServerTempDB',
-              N'DWConfiguration', N'DWDiagnostics', N'DWQueue',
-              N'DBAUtil', N'DBAUtils', N'Utility'
-          )
-    /*EXCLUSION_FILTER*/
-    OPTION(RECOMPILE);
-
-OPEN db_check;
-
-FETCH NEXT
-FROM db_check
-INTO @db;
-
-WHILE @@FETCH_STATUS = 0
+    /// <summary>
+    /// The eligibility gate the Azure per-database path runs against the CURRENT database before the
+    /// payload (#1836) — the same two predicates the on-prem enumeration cursor probes with, evaluated
+    /// locally instead of through a cross-database <c>[db].sys.sp_executesql</c> reference that Azure
+    /// SQL DB rejects outright. Ineligible databases (Query Store OFF, ERRORed, or a readable
+    /// secondary) return NO result set at all, which the reader sees as zero rows — the cheapest
+    /// possible answer, and it never touches the Query Store catalog views.
+    /// </summary>
+    private const string AzureEligibilityGateText = @"
+IF NOT EXISTS
+(
+    SELECT
+        1
+    FROM sys.database_query_store_options
+    WHERE actual_state IN (1, 2, 4)
+    AND   readonly_reason & 8 = 0
+)
 BEGIN
-    BEGIN TRY
-        /* Same eligibility gate as the on-prem cursor above — see the readonly_reason & 8 rationale there. */
-        SET @sql = N'
-            SELECT ' + QUOTENAME(@db, '''') + N'
-            WHERE EXISTS
-            (
-                SELECT
-                    1
-                FROM sys.database_query_store_options
-                WHERE actual_state IN (1, 2, 4)
-                AND   readonly_reason & 8 = 0
-            );';
-
-        SET @exec_sp = QUOTENAME(@db) + N'.sys.sp_executesql';
-
-        INSERT @result (name)
-        EXECUTE @exec_sp @sql;
-    END TRY
-    BEGIN CATCH
-    END CATCH;
-
-    FETCH NEXT
-    FROM db_check
-    INTO @db;
+    RETURN;
 END;
 
-CLOSE db_check;
-DEALLOCATE db_check;
-
-SELECT
-    name
-FROM @result
-ORDER BY
-    name;";
+";
 
     /// <summary>The live version probe deciding the 2017+/2022+ column gates (see class remarks).</summary>
     public const string ProductVersionProbeText =
@@ -288,12 +301,18 @@ ORDER BY
     /// TOP 200, procedure_stats TOP 150): those curate the "top N"; this only trims a pathological cycle.
     /// It bounds COUNT, not BYTES — <see cref="MaxTextBytesPerDatabase"/> is the primary memory bound —
     /// and is the same const the host warns on (<see cref="PerItemRowCountWarnThreshold"/>).
+    ///
+    /// <para>Since #1907 the <c>TOP</c> sits OUTSIDE the slice aggregation, so it caps INTERVALS rather
+    /// than the raw slices an interval decomposes into. That is the more useful unit — a cap that fell
+    /// mid-interval would have truncated one interval's slices and emitted a partial sum, which is worse
+    /// than not emitting the interval at all — and it is strictly more generous, since one interval is
+    /// one row where it used to be several.</para>
     /// </summary>
     public const int MaxRowsPerDatabase = 50_000;
 
     /// <summary>
     /// The PRIMARY memory bound (#1556): the cumulative per-database TEXT byte budget the client stops
-    /// reading at, enforced in <see cref="ReadItemAsync"/>. 256 MB per database composes with the #1553
+    /// reading at, enforced in the shared read loop both paths use. 256 MB per database composes with the #1553
     /// 4-wide sweep to a bounded peak of ≈ 4 × 256 MB ≈ 1 GB transient — the field incident (0→13GB) was
     /// exactly this un-bounded: 50k rows × ~40KB plan XML is ~2GB for ONE database, ×4 = 8GB, with the
     /// row cap firing no defense (it caps rows, not bytes). Kept alongside the SQL <c>TOP</c> backstop.
@@ -302,7 +321,7 @@ ORDER BY
 
     /// <summary>
     /// The self-identification marker every collector query carries in its leading comment. Self rows
-    /// are excluded CLIENT-SIDE in <see cref="ReadItemAsync"/> (#1565) — the old SQL-side
+    /// are excluded CLIENT-SIDE in the shared read loop both paths use (#1565) — the old SQL-side
     /// NOT LIKE predicate was 75% of the read's elapsed time (a full nvarchar(max) scan per row on a
     /// column no index can serve), and the text is already materialized here anyway.
     /// </summary>
@@ -334,24 +353,65 @@ ORDER BY
     /// <c>database_name</c> column, the same precedent the deadlocks / blocked_process_report XE
     /// collectors set. With this, each database's commit advances only its own watermark and an abort
     /// loses nothing. This also relocates query_store's cutoff computation into the per-item loop, which
-    /// is exactly where the 24h catch-up clamp (<see cref="WatermarkPolicy"/>) must be applied.
+    /// is exactly where the 24h catch-up clamp (<see cref="WatermarkPolicy"/>) must be applied — and
+    /// since #1836 the clamp is applied by <see cref="BuildCutoffParameters"/> itself, so it holds on the
+    /// Azure per-database path too, where the host reads this same per-database watermark but does not
+    /// clamp (that branch is shared with the XE collectors, which must not be clamped).
     /// </summary>
     public override string? PerDatabaseWatermarkColumn => "database_name";
 
     /// <summary>Host warns when a per-database read hits the row backstop (see <see cref="MaxRowsPerDatabase"/>).</summary>
     public override int? PerItemRowCountWarnThreshold => MaxRowsPerDatabase;
 
-    /// <summary>The client-side per-database text byte budget enforced in <see cref="ReadItemAsync"/> (see <see cref="MaxTextBytesPerDatabase"/>).</summary>
+    /// <summary>The client-side per-database text byte budget the shared read loop enforces (see <see cref="MaxTextBytesPerDatabase"/>).</summary>
     public override int? PerItemTextByteBudget => MaxTextBytesPerDatabase;
 
-    /// <summary>Enumerating collector — the primary query is never used.</summary>
-    public override CollectorQuery BuildQuery(CollectorContext context)
-        => throw new NotSupportedException("query_store enumerates databases; BuildEnumerationQuery drives the cycle.");
+    /// <summary>
+    /// Azure SQL DB only (#1836): the host opens one connection per database and drives
+    /// <see cref="BuildQuery"/>. Every other target — box SQL Server, RDS, and Managed Instance, all
+    /// of which honor the cross-database <c>[db].sys.sp_executesql</c> reference — keeps the single
+    /// connection and the enumeration/per-item pair. Same override, same reasoning, as
+    /// <c>ProcedureStatsCollector</c> (#1833) and the five database-scoped siblings before it.
+    /// </summary>
+    public override bool RunsPerDatabase(CollectorTargetInfo target) => target.IsAzureSqlDb;
 
+    /// <summary>
+    /// The Azure SQL DB per-database query (#1836): the eligibility gate, then the shared payload,
+    /// both against the CURRENT database — the one the host's per-database connection is attached to.
+    /// Never reached on any other target: there the enumeration/per-item pair drives the cycle, and
+    /// this throws to say so rather than silently collecting the connection's own catalog (master,
+    /// when the server entry leaves its Database field blank) as if it were the whole instance.
+    /// </summary>
+    public override CollectorQuery BuildQuery(CollectorContext context)
+    {
+        if (!context.Target.IsAzureSqlDb)
+        {
+            throw new NotSupportedException("query_store enumerates databases on this target; BuildEnumerationQuery drives the cycle.");
+        }
+
+        return new CollectorQuery(
+            AzureEligibilityGateText + BuildPayloadBody(context),
+            BuildCutoffParameters(context));
+    }
+
+    /// <summary>
+    /// On-prem / RDS / Managed Instance only: list the databases whose Query Store is usable, then
+    /// collect each through <see cref="BuildPerItemQuery"/>. Null on Azure SQL DB — enumeration is not
+    /// how that target is collected (<see cref="RunsPerDatabase"/>), and the Azure cursor this replaced
+    /// could never return an item anyway: it probed each candidate through
+    /// <c>QUOTENAME(@db) + N'.sys.sp_executesql'</c>, the cross-database reference Azure SQL DB rejects
+    /// for every database, into an empty CATCH (#1836). Deleted rather than left unreachable, so it
+    /// cannot be revived by a future edit that flips the RunsPerDatabase gate.
+    /// </summary>
     public override CollectorQuery? BuildEnumerationQuery(CollectorContext context)
     {
+        if (context.Target.IsAzureSqlDb)
+        {
+            return null;
+        }
+
         var (exclusionClause, exclusionParameters) = DatabaseExclusionFilter.Build(context.ExcludedDatabases, "d.name");
-        var text = (context.Target.IsAzureSqlDb ? AzureDatabaseListQueryText : OnPremDatabaseListQueryText)
+        var text = OnPremDatabaseListQueryText
             .Replace("/*EXCLUSION_FILTER*/", exclusionClause, StringComparison.Ordinal);
 
         return new CollectorQuery(text, exclusionParameters);
@@ -360,18 +420,43 @@ ORDER BY
     public override CollectorQuery? BuildEnumerationProbe(CollectorContext context)
         => new(ProductVersionProbeText);
 
-    public override CollectorQuery BuildPerItemQuery(string item, CollectorContext context)
+    /// <summary>
+    /// The per-database Query Store payload — the ONE body both execution paths run (#1836). It is
+    /// written as ordinary single-quoted T-SQL because that is what Azure SQL DB's per-database
+    /// connection executes verbatim; <see cref="BuildPerItemQuery"/> quote-doubles the same string to
+    /// nest it inside <c>[db].sys.sp_executesql N'...'</c> for on-prem. Both forms therefore select
+    /// the identical 55 reader ordinals in the identical order, which is the whole point: this method
+    /// is what stops the two paths from drifting into two column sets that one shared
+    /// <see cref="ReadItemAsync"/> then mis-reads.
+    ///
+    /// <para>References <c>@cutoff_time</c>, supplied by <see cref="BuildCutoffParameters"/> — as an
+    /// sp_executesql parameter on-prem, as a command parameter on Azure. Contains no double quotes and
+    /// no braces, so it survives both the interpolation here and the escaping there unchanged.</para>
+    /// </summary>
+    internal static string BuildPayloadBody(CollectorContext context)
     {
         /* Detect server version for version-gated columns.
            isNew = true for SQL Server 2017+ (product version > 13) or Azure SQL DB/MI.
            Controls: avg_num_physical_io_reads, avg_log_bytes_used, avg_tempdb_space_used, plan_forcing_type_desc.
-           hasPlanType = true for SQL Server 2022+ (product version >= 16).
+           hasPlanType = true for SQL Server 2022+ (product version >= 16), and on Azure SQL DB/MI.
            Controls: plan_type_desc. */
         var productVersion = context.EnumerationProbeResult is null
             ? DefaultProductVersion
             : Convert.ToInt32(context.EnumerationProbeResult, CultureInfo.InvariantCulture);
         bool isNew = productVersion > 13 || context.Target.IsAzureSqlDb || context.Target.IsAzureManagedInstance;
-        bool hasPlanType = productVersion >= 16;
+
+        /* plan_type_desc: version-gated on box SQL Server, but ALWAYS on for Azure SQL DB, which the
+           version probe cannot speak for — it reports PRODUCTVERSION major 12 (the same reason isNew
+           overrides above), while the engine underneath is evergreen and never older than 2022. The
+           column's own catalog-view page lists Azure SQL Database in its Applies-to banner and names
+           exactly one platform where referencing it errors — Azure Synapse Analytics, engine edition 6,
+           which is never IsAzureSqlDb (edition 5).
+
+           Managed Instance is ON as of #1886, on the same live-evidence basis Azure SQL DB was flipped on
+           and NOT by pattern-matching the Azure change — see the replica-attribution comment below for
+           the full probe, which answered both gates in one session. The short form: plan_type_desc binds
+           on MI (COL_LENGTH = 120), measured on an instance following the CONSERVATIVE update policy. */
+        bool hasPlanType = productVersion >= 16 || context.Target.IsAzureSqlDb || context.Target.IsAzureManagedInstance;
 
         /* Replica attribution — SQL Server 2022+ (product version >= 16). Controls: replica_role.
 
@@ -399,11 +484,95 @@ ORDER BY
 
            Resulting replica_role: NULL on a 2022 standalone, 'Primary' on a 2025 standalone, the actual
            role on an AG with the feature enabled. NULL honestly means "the server did not attribute
-           this row" and is deliberately NOT coalesced to an invented value. */
-        bool hasReplicaAttribution = productVersion >= 16;
+           this row" and is deliberately NOT coalesced to an invented value.
+
+           Azure SQL DB is ON, riding the same "Azure means newest" rule plan_type_desc gets above —
+           but only because the live probe the previous version of this comment demanded was actually
+           run. It was gated OFF from #1836 until then, and that carve-out was about bind SAFETY, not
+           taste: a missing column is not a NULL, it fails the whole SELECT for that database, and on
+           Azure this collector's per-database loop would then fail in EVERY database — a worse outcome
+           than declining the attribution. The docs still do not settle it (replica_group_id's
+           applies-to note names only "SQL Server (Starting with SQL Server 2022 (16.x))", and Query
+           Store for secondary replicas is documented as unavailable on the Hyperscale service tier,
+           silent on whether the view and column still BIND there), so this is flipped on live evidence
+           instead — gathered on both service tiers the old comment worried about, 2026-07-31 UTC, both
+           running Microsoft SQL Azure (RTM) 12.0.2000.8, EngineEdition 5:
+
+             - The exact probe the old comment specified, answered on both: General Purpose
+               (GP_S_Gen5_1, #1848) and Hyperscale (HS_S_Gen5_2, #1872) each returned
+               OBJECT_ID('sys.query_store_replicas') = -660 and
+               COL_LENGTH('sys.query_store_runtime_stats', 'replica_group_id') = 8.
+             - sys.query_store_replicas binds on both and holds the same 4 role rows box SQL Server has
+               (Primary, Secondary, Geo Secondary, Geo HA Secondary) — a static enumeration of ROLES,
+               not instances, which is why a database with 0 HA replicas does not empty it. Every
+               runtime-stats row carries replica_group_id = 1 and LEFT JOINs cleanly to 'Primary'.
+             - Decisive (#1872): the full 55-column payload composed with hasReplicaAttribution = true —
+               the exact text this method emits — executed on Hyperscale. 55 of 55 columns bound, exit
+               0, and replica_role came back 'Primary' on every row.
+
+           A per-tier gate was considered and rejected: Hyperscale reports EngineEdition 5, the same as
+           General Purpose, so the collector cannot tell the tiers apart at query-build time. It does
+           not need to — both bind identically.
+
+           Managed Instance is ON as of #1886 — the probe the previous version of this comment demanded
+           was run, so nobody needs to provision an MI to re-answer this. MI was held back through #1844
+           and #1872 for a reason that does NOT apply to Azure SQL DB and had to be retired on its own
+           terms: MI is not evergreen. Its feature set follows a per-instance UPDATE POLICY, so "Azure
+           means 2022+" is a claim about the fleet that does not transfer to a specific instance, and an
+           MI on an older policy genuinely might not have the catalog. The bar #1886 set for the simple
+           edition gate was therefore stricter than Azure's: the catalog must be present on the OLDEST
+           update policy still in support, not merely on whatever instance was to hand.
+
+           Measured 2026-07-31 on a GPv2 Gen5 4-vCore Managed Instance, westus3, provisioned for the run
+           and torn down after — reporting ProductVersion 12.0.2000.8, EngineEdition 8, and crucially
+           SERVERPROPERTY('ProductUpdateType') = 'CU', i.e. the CONSERVATIVE (SQL Server 2022) update
+           policy rather than Always-up-to-date. That is exactly the "oldest policy still in support"
+           case, so the bar is met without an AlwaysUpToDate instance: catalog presence is a 2022-surface
+           fact, not an evergreen one.
+
+             - OBJECT_ID('sys.query_store_replicas') = -660 and
+               COL_LENGTH('sys.query_store_runtime_stats', 'replica_group_id') = 8 — the same two-value
+               probe #1848/#1872 ran on Azure SQL DB, non-NULL on both counts.
+             - Answered THROUGH THE COLLECTOR'S OWN MECHANISM, not just in master: the same two values
+               came back from a user-database context via [db].sys.sp_executesql (msdb standing in, since
+               these catalog views are per-database). MI takes the on-prem enumeration path, so binding in
+               master would not have settled it — that path is what the issue said MI lacked.
+             - COL_LENGTH('sys.query_store_plan', 'plan_type_desc') = 120, which is what flips the
+               hasPlanType carve-out above in the same session rather than provisioning MI twice.
+
+           A standalone MI's sys.query_store_replicas is an EMPTY enumeration — zero rows — unlike Azure
+           SQL DB's, which is a static 4-row roles table even with no replicas present. That difference
+           is worth stating because it looks alarming and is not: BINDING is the collection-safety
+           question and the answer is yes, while an empty enumeration only means a GP instance with no
+           read replicas has nothing to attribute. The LEFT JOIN below is what makes that harmless — it
+           is the same shape that keeps a 2022 standalone (whose view is also empty) collecting, and
+           tightening it would break both. replica_role simply reads NULL there, which is the honest
+           state rather than an invented one. */
+        bool hasReplicaAttribution = productVersion >= 16 || context.Target.IsAzureSqlDb || context.Target.IsAzureManagedInstance;
 
         /* Build version-conditional column fragments for the Query Store query.
-           These are injected into the sp_executesql parameter string — no single quotes needed. */
+           None of these contain a single quote, so they splice into the body identically whether the
+           body stays as written (Azure) or gets quote-doubled for sp_executesql nesting (on-prem).
+
+           Each version-gated family now needs TWO fragments (#1907): one INSIDE the slice-aggregating
+           derived table, which must vanish entirely when the columns do not exist (referencing an
+           unbound column inside an aggregate fails the whole SELECT exactly as it would outside one),
+           and one in the OUTER projection, which keeps emitting the typed NULL placeholder at the same
+           ordinal so the 55-column reader contract never moves. The inner fragments carry a LEADING
+           comma and sit at the END of the inner select list precisely because they can be empty; the
+           outer ones keep their original trailing-comma form because they are never empty. */
+        string numPhysIoReadsAgg = isNew
+            ? $",\n        {WeightedAverage("avg_num_physical_io_reads")},\n        min_num_physical_io_reads = MIN(qsrs.min_num_physical_io_reads),\n        max_num_physical_io_reads = MAX(qsrs.max_num_physical_io_reads)"
+            : "";
+
+        string logBytesAgg = isNew
+            ? $",\n        {WeightedAverage("avg_log_bytes_used")},\n        min_log_bytes_used = MIN(qsrs.min_log_bytes_used),\n        max_log_bytes_used = MAX(qsrs.max_log_bytes_used)"
+            : "";
+
+        string tempdbAgg = isNew
+            ? $",\n        {WeightedAverage("avg_tempdb_space_used")},\n        min_tempdb_space_used = MIN(qsrs.min_tempdb_space_used),\n        max_tempdb_space_used = MAX(qsrs.max_tempdb_space_used)"
+            : "";
+
         string numPhysIoReadsCols = isNew
             ? "qsrs.avg_num_physical_io_reads, qsrs.min_num_physical_io_reads, qsrs.max_num_physical_io_reads,"
             : "avg_num_physical_io_reads = NULL, min_num_physical_io_reads = NULL, max_num_physical_io_reads = NULL,";
@@ -442,116 +611,353 @@ ORDER BY
             ? "query_plan_text = CASE WHEN ROW_NUMBER() OVER (PARTITION BY qsp.plan_id ORDER BY qsrs.last_execution_time DESC) = 1 THEN CONVERT(nvarchar(max), qsp.query_plan) ELSE CONVERT(nvarchar(max), NULL) END,"
             : "query_plan_text = CONVERT(nvarchar(1), NULL),";
 
-        /* The replica-attribution column + its join (see hasReplicaAttribution above). Selected LAST,
-           so pre-2022 targets read the nvarchar(1) NULL placeholder at the same ordinal — byte-identical
-           shape to the attributed form. No trailing comma: it is the final SELECT item. */
+        /* The replica-attribution column + its join (see hasReplicaAttribution above). Selected after every
+           version-gated column, so pre-2022 targets read the nvarchar(1) NULL placeholder at the same
+           ordinal — byte-identical shape to the attributed form. The interval-identity pair (#1841 tier 2)
+           follows it and is NOT version-gated, so this fragment stays comma-free and the template supplies
+           the separator. */
         string replicaRoleCol = hasReplicaAttribution
             ? "replica_role = qsr.replica_name"
             : "replica_role = CONVERT(nvarchar(1), NULL)";
 
         string replicaJoin = hasReplicaAttribution
-            ? "LEFT JOIN sys.query_store_replicas AS qsr\n       ON qsr.replica_group_id = qsrs.replica_group_id"
+            ? "LEFT JOIN sys.query_store_replicas AS qsr\n  ON qsr.replica_group_id = qsrs.replica_group_id"
             : "";
 
-        /* Incremental: only fetch runtime_stats intervals newer than what we already have.
+        /* replica_group_id is part of sys.query_store_runtime_stats' natural key, so it belongs in the
+           slice-aggregation grouping (#1907) — two replicas' rows for one interval are DIFFERENT work,
+           not slices of the same work, and summing them together would blend a secondary's executions
+           into the primary's, re-creating by hand the exact bug replica attribution exists to prevent.
+           It carries the SAME 2022+/Azure gate as the attribution column above, and for the same
+           bind-safety reason: the column does not exist on older servers, and naming it in a GROUP BY
+           fails the whole SELECT just as naming it in a select list would. When the gate is off there is
+           only ever one replica group to begin with, so dropping it from the key changes no grouping.
+           Leading comma: it splices into both the inner select list and the GROUP BY, and is empty on
+           targets without the column. */
+        string replicaGroupKey = hasReplicaAttribution
+            ? ",\n        qsrs.replica_group_id"
+            : "";
 
-           Two field-verified cost/behavior notes (#1565, actual-plan evidence from a 103k-row burst):
-           (1) There is deliberately NO self-exclusion predicate in this query. The old form
-           (query_sql_text NOT LIKE N'%marker%') was 75% of the query's total elapsed time — a per-row
-           substring scan over full nvarchar(max) text (11.2s of a 14.9s read; the field A/B measured
-           4.3x faster without it) — and no predicate shape fixes that server-side: the QS internal
-           text table has no index on the column, so every variant is a residual scan whose cost is
-           the bytes it reads. The exclusion instead happens in ReadItemAsync, where the query text is
-           ALREADY materialized for every row — a client-side Contains at zero SQL cost, identical
-           semantics. Self rows cross the wire (~2% of a busy database's rows) and are dropped before
-           they enter the batch (never stored, never counted against the byte budget).
-           (2) Expect a bursty cadence: Query Store buffers in memory and flushes to its persisted
-           tables on DATA_FLUSH_INTERVAL_SECONDS (default 900s), so roughly every third 5-minute cycle
-           returns a burst and the others return ~nothing. That is the SOURCE's behavior, not a
-           watermark bug — do NOT "fix" it by narrowing the poll interval. */
-        var cutoffTime = context.Watermark ?? context.CollectionTime.AddMinutes(-60);
+        /* There is deliberately NO self-exclusion predicate in this query (#1565, actual-plan evidence
+           from a 103k-row burst). The old form (query_sql_text NOT LIKE N'%marker%') was 75% of the
+           query's total elapsed time — a per-row substring scan over full nvarchar(max) text (11.2s of
+           a 14.9s read; the field A/B measured 4.3x faster without it) — and no predicate shape fixes
+           that server-side: the QS internal text table has no index on the column, so every variant is
+           a residual scan whose cost is the bytes it reads. The exclusion instead happens in the read
+           loop, where the query text is ALREADY materialized for every row — a client-side Contains at
+           zero SQL cost, identical semantics. Self rows cross the wire (~2% of a busy database's rows)
+           and are dropped before they enter the batch (never stored, never counted against the byte
+           budget). The query still CONTAINS the marker, in its own leading comment. */
 
+        /* Interval identity (#1841 tier 2), the last two SELECT items. Not version-gated: both
+           sys.query_store_runtime_stats.runtime_stats_interval_id and the
+           sys.query_store_runtime_stats_interval catalog view are original Query Store surface, verified
+           present on SQL Server 2016 SP3 (13.0.6300.2) — the collector's own AppliesTo floor — so there is
+           no target this collector runs on that lacks them.
+
+           LEFT JOIN, not JOIN, for the same reason the replica join above is one: an INNER JOIN here would
+           make every runtime-stats row's survival depend on its interval row resolving, and a Query Store
+           that trimmed an interval row out from under us would silently delete real collection rather than
+           lose one column. The id comes off qsrs directly and is unaffected either way; only
+           interval_start_time_utc goes NULL if the join misses.
+
+           start_time is datetimeoffset. AT TIME ZONE 'UTC' re-expresses it at +00:00 and the CONVERT drops
+           the offset, so the stored value is naive UTC — the same clock as collection_time and as
+           first_execution_time (which ReadRowsAsync already normalizes via DateTimeOffset.UtcDateTime).
+           That is what makes it safe to bucket on: it is NOT the monitored server's local wall clock.
+           AT TIME ZONE is SQL Server 2016+, matching the floor above, and the expression contains no
+           single quote... except the timezone literal, which quote-doubles cleanly for the sp_executesql
+           nesting exactly like the rest of the body. */
+
+        /* Slice aggregation (#1907) — the derived table below, and the reason this query has one.
+
+           sys.query_store_runtime_stats returns the FLUSHED slice and the still-IN-MEMORY slice of one
+           runtime_stats_interval_id as SEPARATE ROWS, and they are ADDITIVE members of one interval, not
+           competing snapshots of it. Verified on box SQL Server 2022 (16.0.4255.1) as well as the Azure
+           SQL Database where it was found: 100 executions flushed + 25 executions in memory came back as
+           two rows, and sys.dm_exec_procedure_stats — an entirely separate source, same instant —
+           reported 125. SUM matches; the larger slice alone (100) does not. With a 900s default flush
+           against a 3600s default interval, ONE interval can hold several flushed slices, so the count
+           is not bounded at two.
+
+           Selecting them straight through stored both, and they then shared every column of the
+           read-side dedup key (#1841/#1845/#1853) AND collection_time, so the ROW_NUMBER survivor and the
+           CAGGs' last() were decided by whichever row the engine happened to emit first — a grid could
+           show the in-memory sliver (8) where the interval's truth was 94. The dedup itself is correct
+           and stays: it exists to collapse RE-COLLECTIONS of one interval across cycles. It just cannot
+           also be asked to ADD two slices within one cycle, and no read-side rule can express both.
+
+           So the slices are combined HERE, where the identity is unambiguous, keyed on exactly the
+           natural key of the view — (plan_id, runtime_stats_interval_id, execution_type, replica_group) —
+           and one interval now yields at most one row per cycle. The EMITTED ROW SHAPE is unchanged: the
+           same 55 columns in the same order, only fewer rows, so the positional writers and every
+           downstream reader are untouched.
+
+           How each column combines:
+             - count_executions      SUM — the additive counter itself.
+             - avg_*                 the count-WEIGHTED mean, SUM(avg * count) / SUM(count). Query Store
+                                     stores avg and count, never a total, so avg * count reconstructs
+                                     each slice's total exactly and the quotient is the interval's true
+                                     average. A plain AVG() of the slice averages would weight a 25-
+                                     execution sliver equally with a 100-execution flush. NULLIF guards
+                                     the divide-by-zero rather than letting a zero-execution row (which
+                                     should not exist, and would still not be worth failing a whole
+                                     database's collection over) raise 8134.
+             - min_* / max_*         MIN / MAX — extremes over a union of slices are the extremes of the
+                                     slice extremes. Includes min_dop / max_dop, which have no avg.
+             - first_execution_time  MIN, last_execution_time MAX — the interval's own span. Both slices
+                                     of a pair share first_execution_time in practice, which is exactly
+                                     why the tier-1 proxy key could not tell them apart either.
+
+           The incremental filter moves from WHERE to HAVING, and that is load-bearing rather than
+           cosmetic. A per-slice WHERE would break the SUM within one cycle of the fix: the flushed slice
+           is STATIC, so once the growing in-memory slice pushes the watermark past the flushed slice's
+           last_execution_time, the flushed slice stops qualifying and the "sum" becomes the sliver alone
+           — the original bug with extra steps. HAVING MAX(last_execution_time) > @cutoff_time asks the
+           question at interval grain: has this interval seen new activity, and if so give me ALL of it.
+           It is strictly more permissive than the old per-slice predicate, so nothing that used to be
+           collected stops being collected.
+
+           The IN (...) pre-filter is a performance prune, not a semantic one — the HAVING already gives
+           the exact answer, and the pre-filter's interval list is by construction a superset of the
+           intervals the HAVING can keep, so it can never subtract a row. It is here because without it
+           the aggregate has to run over the database's ENTIRE retained Query Store every cycle, which is
+           the one shape that made this materially slower. Measured on a real 212k-row Query Store
+           (SQL 2025), full 55-column payload, warm, three runs: pre-fix 453/485/516 ms for 510 rows;
+           post-fix 375/422/438 ms for 262 rows; post-fix WITHOUT the pre-filter 1203/1203/1235 ms. The
+           fixed query is FASTER than the one it replaces despite the added aggregate, because half the
+           rows means half the nvarchar(max) query text and plan XML to materialize and ship. */
+        return $@"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase})
+    query_id = qsq.query_id,
+    plan_id = qsp.plan_id,
+    execution_type_desc = qsrs.execution_type_desc,
+    first_execution_time = qsrs.first_execution_time,
+    last_execution_time = qsrs.last_execution_time,
+    module_name =
+        CASE
+            WHEN qsq.object_id = 0
+            THEN N'Adhoc'
+            ELSE COALESCE(
+                OBJECT_SCHEMA_NAME(qsq.object_id) + N'.' + OBJECT_NAME(qsq.object_id),
+                N'Unknown')
+        END,
+    query_sql_text = qst.query_sql_text,
+    query_hash = CONVERT(varchar(64), qsq.query_hash, 1),
+    count_executions = qsrs.count_executions,
+    avg_duration = qsrs.avg_duration,
+    min_duration = qsrs.min_duration,
+    max_duration = qsrs.max_duration,
+    avg_cpu_time = qsrs.avg_cpu_time,
+    min_cpu_time = qsrs.min_cpu_time,
+    max_cpu_time = qsrs.max_cpu_time,
+    avg_logical_io_reads = qsrs.avg_logical_io_reads,
+    min_logical_io_reads = qsrs.min_logical_io_reads,
+    max_logical_io_reads = qsrs.max_logical_io_reads,
+    avg_logical_io_writes = qsrs.avg_logical_io_writes,
+    min_logical_io_writes = qsrs.min_logical_io_writes,
+    max_logical_io_writes = qsrs.max_logical_io_writes,
+    avg_physical_io_reads = qsrs.avg_physical_io_reads,
+    min_physical_io_reads = qsrs.min_physical_io_reads,
+    max_physical_io_reads = qsrs.max_physical_io_reads,
+    avg_clr_time = qsrs.avg_clr_time,
+    min_clr_time = qsrs.min_clr_time,
+    max_clr_time = qsrs.max_clr_time,
+    min_dop = qsrs.min_dop,
+    max_dop = qsrs.max_dop,
+    avg_query_max_used_memory = qsrs.avg_query_max_used_memory,
+    min_query_max_used_memory = qsrs.min_query_max_used_memory,
+    max_query_max_used_memory = qsrs.max_query_max_used_memory,
+    avg_rowcount = qsrs.avg_rowcount,
+    min_rowcount = qsrs.min_rowcount,
+    max_rowcount = qsrs.max_rowcount,
+    {numPhysIoReadsCols}
+    {logBytesCols}
+    {tempdbCols}
+    {planTypeCol}
+    {planForcingCol}
+    is_forced_plan = qsp.is_forced_plan,
+    force_failure_count = qsp.force_failure_count,
+    last_force_failure_reason = qsp.last_force_failure_reason_desc,
+    compatibility_level = qsp.compatibility_level,
+    {planTextCol}
+    query_plan_hash = CONVERT(varchar(64), qsp.query_plan_hash, 1),
+    {replicaRoleCol},
+    runtime_stats_interval_id = qsrs.runtime_stats_interval_id,
+    interval_start_time_utc = CONVERT(datetime2, qsrsi.start_time AT TIME ZONE 'UTC')
+FROM
+(
+    SELECT
+        qsrs.plan_id,
+        qsrs.runtime_stats_interval_id,
+        qsrs.execution_type_desc{replicaGroupKey},
+        first_execution_time = MIN(qsrs.first_execution_time),
+        last_execution_time = MAX(qsrs.last_execution_time),
+        count_executions = SUM(qsrs.count_executions),
+        {WeightedAverage("avg_duration")},
+        min_duration = MIN(qsrs.min_duration),
+        max_duration = MAX(qsrs.max_duration),
+        {WeightedAverage("avg_cpu_time")},
+        min_cpu_time = MIN(qsrs.min_cpu_time),
+        max_cpu_time = MAX(qsrs.max_cpu_time),
+        {WeightedAverage("avg_logical_io_reads")},
+        min_logical_io_reads = MIN(qsrs.min_logical_io_reads),
+        max_logical_io_reads = MAX(qsrs.max_logical_io_reads),
+        {WeightedAverage("avg_logical_io_writes")},
+        min_logical_io_writes = MIN(qsrs.min_logical_io_writes),
+        max_logical_io_writes = MAX(qsrs.max_logical_io_writes),
+        {WeightedAverage("avg_physical_io_reads")},
+        min_physical_io_reads = MIN(qsrs.min_physical_io_reads),
+        max_physical_io_reads = MAX(qsrs.max_physical_io_reads),
+        {WeightedAverage("avg_clr_time")},
+        min_clr_time = MIN(qsrs.min_clr_time),
+        max_clr_time = MAX(qsrs.max_clr_time),
+        min_dop = MIN(qsrs.min_dop),
+        max_dop = MAX(qsrs.max_dop),
+        {WeightedAverage("avg_query_max_used_memory")},
+        min_query_max_used_memory = MIN(qsrs.min_query_max_used_memory),
+        max_query_max_used_memory = MAX(qsrs.max_query_max_used_memory),
+        {WeightedAverage("avg_rowcount")},
+        min_rowcount = MIN(qsrs.min_rowcount),
+        max_rowcount = MAX(qsrs.max_rowcount){numPhysIoReadsAgg}{logBytesAgg}{tempdbAgg}
+    FROM sys.query_store_runtime_stats AS qsrs
+    WHERE qsrs.runtime_stats_interval_id IN
+    (
+        SELECT
+            f.runtime_stats_interval_id
+        FROM sys.query_store_runtime_stats AS f
+        WHERE f.last_execution_time > @cutoff_time
+    )
+    GROUP BY
+        qsrs.plan_id,
+        qsrs.runtime_stats_interval_id,
+        qsrs.execution_type_desc{replicaGroupKey}
+    HAVING
+        MAX(qsrs.last_execution_time) > @cutoff_time
+) AS qsrs
+JOIN sys.query_store_plan AS qsp
+  ON qsp.plan_id = qsrs.plan_id
+JOIN sys.query_store_query AS qsq
+  ON qsq.query_id = qsp.query_id
+JOIN sys.query_store_query_text AS qst
+  ON qst.query_text_id = qsq.query_text_id
+LEFT JOIN sys.query_store_runtime_stats_interval AS qsrsi
+  ON qsrsi.runtime_stats_interval_id = qsrs.runtime_stats_interval_id
+{replicaJoin}
+ORDER BY qsrs.last_execution_time DESC
+OPTION(RECOMPILE, LOOP JOIN);";
+    }
+
+    /// <summary>
+    /// One slice-combining <c>avg_*</c> column for the aggregation in <see cref="BuildPayloadBody"/>
+    /// (#1907): the count-WEIGHTED mean of the slices, aliased back to the column's own name so the
+    /// outer projection's reference does not change.
+    ///
+    /// <para>Every <c>avg_*</c> column in the payload goes through here rather than being written out
+    /// by hand, because the wrong form is not a compile error and not obviously wrong at a glance —
+    /// a bare <c>AVG(qsrs.avg_x)</c> reads fine and silently weights a 25-execution sliver the same as a
+    /// 100-execution flush. Query Store exposes an average and a count but never a total, so
+    /// <c>avg * count</c> is how a slice's total is recovered, and the quotient of the summed totals
+    /// over the summed counts is the interval's true average. Pinned by test: every <c>avg_</c> column
+    /// the payload emits must match this shape.</para>
+    /// </summary>
+    private static string WeightedAverage(string column) =>
+        $"{column} = SUM(qsrs.{column} * qsrs.count_executions) / NULLIF(SUM(qsrs.count_executions), 0)";
+
+    /// <summary>
+    /// The incremental cutoff both paths bind as <c>@cutoff_time</c>: only runtime_stats intervals
+    /// newer than what this database already has are fetched. Falls back to 60 minutes back when the
+    /// database has nothing stored yet.
+    ///
+    /// <para>The 24h catch-up clamp (<see cref="WatermarkPolicy"/>) is applied HERE, in the definition,
+    /// rather than only in the host's enumeration loop (#1836). Query Store is the one
+    /// unbounded-persisted source among the collectors — it retains ~30 days — so a service that was
+    /// stopped for days must not come back and ask for the entire backlog in one cycle; that is the
+    /// #1556 field incident. On Azure SQL DB the per-database cutoff is now computed on the host's
+    /// generic per-database branch, which deliberately does NOT clamp (it also serves the XE
+    /// ring-buffer collectors, where clamping would WRONGLY truncate legitimate catch-up), so binding
+    /// the clamp to the collector instead of the path is what makes it hold on both. Applying it twice
+    /// on the enumeration path is a no-op — clamping an already-clamped value returns it unchanged —
+    /// and that path keeps its WARNING log, which is the operator-visible half.</para>
+    ///
+    /// <para>Expect a bursty cadence either way: Query Store buffers in memory and flushes to its
+    /// persisted tables on DATA_FLUSH_INTERVAL_SECONDS (default 900s), so roughly every third 5-minute
+    /// cycle returns a burst and the others return ~nothing. That is the SOURCE's behavior, not a
+    /// watermark bug — do NOT "fix" it by narrowing the poll interval.</para>
+    /// </summary>
+    private static List<CollectorParameter> BuildCutoffParameters(CollectorContext context)
+    {
+        var clamped = WatermarkPolicy.ClampCatchup(context.Watermark, context.CollectionTime);
+
+        /* Tell the host the clamp actually fired, so the hole it opens stays LOGGED rather than
+           silent — the enumeration path logs its own clamp before we ever see the watermark, which is
+           why this is false there (re-clamping an already-clamped value changes nothing) and true only
+           on the Azure per-database path. Assigned unconditionally: the context is reused across every
+           database in a cycle, so a stale true from the previous database would misreport this one. */
+        context.CatchupClampApplied = context.Watermark.HasValue && clamped != context.Watermark;
+
+        return new List<CollectorParameter>
+        {
+            new("@cutoff_time", clamped ?? context.CollectionTime.AddMinutes(-60), CollectorParameterType.DateTime2),
+        };
+    }
+
+    /// <summary>
+    /// On-prem / RDS / Managed Instance: the SAME body <see cref="BuildQuery"/> runs on Azure, only
+    /// quote-doubled and nested inside <c>[db].sys.sp_executesql</c> so one connection can reach every
+    /// database. The single <c>Replace</c> is the whole difference between the two paths' SQL — there
+    /// is no second copy of the payload to keep in step (the IndexObjectStatsCollector precedent).
+    /// </summary>
+    public override CollectorQuery BuildPerItemQuery(string item, CollectorContext context)
+    {
+        /* Double single quotes so the body survives nesting inside [db].sys.sp_executesql N'...' */
+        var escapedBody = BuildPayloadBody(context).Replace("'", "''", StringComparison.Ordinal);
         var escapedDbName = item.Replace("]", "]]", StringComparison.Ordinal);
+
         var text = $@"
 EXECUTE [{escapedDbName}].sys.sp_executesql
-    N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-
-     SELECT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase})
-         query_id = qsq.query_id,
-         plan_id = qsp.plan_id,
-         execution_type_desc = qsrs.execution_type_desc,
-         first_execution_time = qsrs.first_execution_time,
-         last_execution_time = qsrs.last_execution_time,
-         module_name =
-             CASE
-                 WHEN qsq.object_id = 0
-                 THEN N''Adhoc''
-                 ELSE COALESCE(
-                     OBJECT_SCHEMA_NAME(qsq.object_id) + N''.'' + OBJECT_NAME(qsq.object_id),
-                     N''Unknown'')
-             END,
-         query_sql_text = qst.query_sql_text,
-         query_hash = CONVERT(varchar(64), qsq.query_hash, 1),
-         count_executions = qsrs.count_executions,
-         avg_duration = qsrs.avg_duration,
-         min_duration = qsrs.min_duration,
-         max_duration = qsrs.max_duration,
-         avg_cpu_time = qsrs.avg_cpu_time,
-         min_cpu_time = qsrs.min_cpu_time,
-         max_cpu_time = qsrs.max_cpu_time,
-         avg_logical_io_reads = qsrs.avg_logical_io_reads,
-         min_logical_io_reads = qsrs.min_logical_io_reads,
-         max_logical_io_reads = qsrs.max_logical_io_reads,
-         avg_logical_io_writes = qsrs.avg_logical_io_writes,
-         min_logical_io_writes = qsrs.min_logical_io_writes,
-         max_logical_io_writes = qsrs.max_logical_io_writes,
-         avg_physical_io_reads = qsrs.avg_physical_io_reads,
-         min_physical_io_reads = qsrs.min_physical_io_reads,
-         max_physical_io_reads = qsrs.max_physical_io_reads,
-         avg_clr_time = qsrs.avg_clr_time,
-         min_clr_time = qsrs.min_clr_time,
-         max_clr_time = qsrs.max_clr_time,
-         min_dop = qsrs.min_dop,
-         max_dop = qsrs.max_dop,
-         avg_query_max_used_memory = qsrs.avg_query_max_used_memory,
-         min_query_max_used_memory = qsrs.min_query_max_used_memory,
-         max_query_max_used_memory = qsrs.max_query_max_used_memory,
-         avg_rowcount = qsrs.avg_rowcount,
-         min_rowcount = qsrs.min_rowcount,
-         max_rowcount = qsrs.max_rowcount,
-         {numPhysIoReadsCols}
-         {logBytesCols}
-         {tempdbCols}
-         {planTypeCol}
-         {planForcingCol}
-         is_forced_plan = qsp.is_forced_plan,
-         force_failure_count = qsp.force_failure_count,
-         last_force_failure_reason = qsp.last_force_failure_reason_desc,
-         compatibility_level = qsp.compatibility_level,
-         {planTextCol}
-         query_plan_hash = CONVERT(varchar(64), qsp.query_plan_hash, 1),
-         {replicaRoleCol}
-     FROM sys.query_store_runtime_stats AS qsrs
-     JOIN sys.query_store_plan AS qsp
-       ON qsp.plan_id = qsrs.plan_id
-     JOIN sys.query_store_query AS qsq
-       ON qsq.query_id = qsp.query_id
-     JOIN sys.query_store_query_text AS qst
-       ON qst.query_text_id = qsq.query_text_id
-     {replicaJoin}
-     WHERE qsrs.last_execution_time > @cutoff_time
-     ORDER BY qsrs.last_execution_time DESC
-     OPTION(RECOMPILE, LOOP JOIN);',
+    N'{escapedBody}',
     N'@cutoff_time datetime2(7)',
     @cutoff_time;";
 
-        return new CollectorQuery(text, new List<CollectorParameter>
-        {
-            new("@cutoff_time", cutoffTime, CollectorParameterType.DateTime2),
-        });
+        return new CollectorQuery(text, BuildCutoffParameters(context));
     }
 
-    public override async ValueTask ReadItemAsync(string item, DbDataReader reader, List<Row> rows, CollectorContext context, CancellationToken cancellationToken)
+    /// <summary>
+    /// On-prem / RDS / MI: the enumerated item IS the database the per-item query ran in.
+    /// </summary>
+    public override ValueTask ReadItemAsync(string item, DbDataReader reader, List<Row> rows, CollectorContext context, CancellationToken cancellationToken)
+        => new(ReadRowsAsync(item, reader, rows, context, cancellationToken));
+
+    /// <summary>
+    /// Azure SQL DB per-database path (#1836). The payload carries no database_name column — the
+    /// on-prem path takes it from the enumerated item — so here it comes from
+    /// <see cref="CollectorContext.CurrentDatabaseName"/>, the database the host's per-database loop
+    /// connected to, which for a per-database connection IS the rows' database. Same reader contract,
+    /// same budget, same self-row exclusion as the enumerated path: one loop serves both.
+    ///
+    /// <para>Throws rather than defaulting when the host left CurrentDatabaseName unset: an empty
+    /// database_name is not a survivable fallback for this collector. It is the per-database watermark
+    /// key (<see cref="PerDatabaseWatermarkColumn"/>), so those rows could never advance a watermark
+    /// and would re-collect every cycle, and they would land in the grids under a blank database. A
+    /// wiring mistake surfaces as one loud, classified failure instead.</para>
+    /// </summary>
+    public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
+    {
+        var databaseName = context.CurrentDatabaseName;
+        if (string.IsNullOrEmpty(databaseName))
+        {
+            throw new InvalidOperationException(
+                "query_store rows read on the per-database path need CollectorContext.CurrentDatabaseName; the host must set it before reading.");
+        }
+
+        var rows = new List<Row>();
+        await ReadRowsAsync(databaseName, reader, rows, context, cancellationToken);
+        return rows;
+    }
+
+    private static async Task ReadRowsAsync(string databaseName, DbDataReader reader, List<Row> rows, CollectorContext context, CancellationToken cancellationToken)
     {
         /* Reset the per-item truncation signal — the host reads it immediately after this returns. */
         context.PerItemTextBudgetExceeded = false;
@@ -560,14 +966,14 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
            the ROW COUNT, but a row carries two nvarchar(max) fields (query text + plan XML), so 50k rows
            can still be gigabytes. Accumulate the materialized text size and STOP reading at the budget,
            disposing the reader early, so one database can never balloon the process. */
-        var budget = PerItemTextByteBudget ?? int.MaxValue;
+        var budget = Instance.PerItemTextByteBudget ?? int.MaxValue;
         long textBytes = 0;
 
         while (await reader.ReadAsync(cancellationToken))
         {
             var row = new Row
             {
-                DatabaseName = item,
+                DatabaseName = databaseName,
                 QueryId = reader.GetInt64(0),
                 PlanId = reader.GetInt64(1),
                 ExecutionTypeDesc = reader.IsDBNull(2) ? null : reader.GetString(2),
@@ -621,12 +1027,19 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
                 QueryPlanText = reader.IsDBNull(50) ? null : reader.GetString(50),
                 QueryPlanHash = reader.IsDBNull(51) ? null : reader.GetString(51),
                 ReplicaRole = reader.IsDBNull(52) ? null : reader.GetString(52),
+                RuntimeStatsIntervalId = reader.IsDBNull(53) ? null : reader.GetInt64(53),
+                /* Already datetime2 (the SELECT does the AT TIME ZONE conversion), so this reads a plain
+                   DateTime — unlike first_execution_time/last_execution_time above, which arrive as
+                   datetimeoffset and need the .UtcDateTime normalization. */
+                IntervalStartTimeUtc = reader.IsDBNull(54) ? null : reader.GetDateTime(54),
             };
 
             /* Client-side self-exclusion (#1565): our own collector queries carry the marker in their
                leading comment. Skipped rows never enter the batch — not stored, not counted against the
                byte budget. This replaced the SQL-side NOT LIKE predicate, which was 75% of the read's
-               elapsed time (full nvarchar(max) scan per row; the field A/B measured 4.3x without it). */
+               elapsed time (full nvarchar(max) scan per row; the field A/B measured 4.3x without it).
+               Reached on BOTH paths: on Azure our own per-database payload runs inside the very
+               database whose Query Store we are reading, so without this it would collect itself. */
             if (row.QueryText?.Contains(SelfQueryMarker, StringComparison.Ordinal) == true)
             {
                 continue;
@@ -648,10 +1061,6 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
             }
         }
     }
-
-    /// <summary>Never called — enumeration drives this collector.</summary>
-    public override ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
-        => throw new NotSupportedException("query_store enumerates databases; ReadItemAsync drives row reads.");
 
     /// <summary>
     /// Reads a nullable int64, converting float/decimal Query Store values to long.
@@ -736,6 +1145,15 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
            UPGRADED one — the same COPY then writing shifted values on one of them. Same reasoning as
            deadlocks.database_name (Darling V27 / Lite v46). */
         new CollectorColumn("replica_role", CollectorColumnType.Varchar),
+        /* #1841 tier 2, appended for the same positional reason replica_role was: an upgraded store gets
+           these from an ALTER TABLE ADD COLUMN, which can only append, while a fresh store's DDL is
+           generated from this list — any other position would give the two stores different physical
+           column orders and the positional bulk writers would then write shifted values on one of them.
+           Both nullable: rows collected by a pre-tier-2 build have no interval identity, and every reader
+           that keys on it must tolerate NULL rather than assume the upgrade backfilled anything (it
+           cannot — the identity was never collected). */
+        new CollectorColumn("runtime_stats_interval_id", CollectorColumnType.BigInt),
+        new CollectorColumn("interval_start_time_utc", CollectorColumnType.Timestamp),
     };
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
@@ -794,6 +1212,8 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
             .Value(row.CompatibilityLevel)
             .Value(row.QueryPlanText)
             .Value(row.QueryPlanHash)
-            .Value(row.ReplicaRole);
+            .Value(row.ReplicaRole)
+            .Value(row.RuntimeStatsIntervalId)
+            .Value(row.IntervalStartTimeUtc);
     }
 }

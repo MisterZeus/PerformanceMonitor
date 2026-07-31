@@ -31,11 +31,19 @@
                 <ItemsControl x:Name="DatabasesItemsControl">
                     <ItemsControl.ItemTemplate>
                         <DataTemplate>
-                            <CheckBox Content="{Binding DisplayName}"
-                                      IsChecked="{Binding IsExcluded, Mode=TwoWay}"
+                            <!-- Label is a nested TextBlock, not Content: a CheckBox's ContentPresenter
+                                 parses a single "_" in a bound string as an access-key marker, which would
+                                 eat the underscore out of a database name like Prod_Reporting and claim
+                                 Alt+R. TextBlock.Text does not parse access keys. The Foreground binding
+                                 must be repeated here because the themes carry an implicit TextBlock style
+                                 that would otherwise win over the CheckBox's inherited value. -->
+                            <CheckBox IsChecked="{Binding IsExcluded, Mode=TwoWay}"
                                       IsEnabled="{Binding IsEnabled}"
                                       Foreground="{Binding ForegroundBrush}"
-                                      Margin="2,3"/>
+                                      Margin="2,3">
+                                <TextBlock Text="{Binding DisplayName}"
+                                           Foreground="{Binding ForegroundBrush}"/>
+                            </CheckBox>
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
@@ -47,15 +55,15 @@
             <TextBox x:Name="ManualAddBox" Width="360" VerticalContentAlignment="Center"
                      KeyDown="ManualAddBox_KeyDown"
                      ToolTip="Enter a database name the service has not collected yet, then click Add."/>
-            <Button Content="Add" Width="70" Height="26" Margin="8,0,0,0" Click="ManualAdd_Click"/>
+            <Button Content="_Add" Width="70" Height="26" Margin="8,0,0,0" Click="ManualAdd_Click"/>
         </StackPanel>
 
         <TextBlock Grid.Row="4" x:Name="StatusText" FontSize="10" FontStyle="Italic"
                    Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,8,0,0"/>
 
         <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
-            <Button Content="Save" Width="80" Height="28" Margin="0,0,8,0" Click="Save_Click" Style="{StaticResource AccentButton}"/>
-            <Button Content="Cancel" Width="80" Height="28" Click="Cancel_Click" IsCancel="True"/>
+            <Button Content="_Save" Width="80" Height="28" Margin="0,0,8,0" Click="Save_Click" Style="{StaticResource AccentButton}"/>
+            <Button Content="_Cancel" Width="80" Height="28" Click="Cancel_Click" IsCancel="True"/>
         </StackPanel>
     </Grid>
 </Window>

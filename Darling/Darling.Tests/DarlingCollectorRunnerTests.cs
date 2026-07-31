@@ -111,6 +111,7 @@ public sealed class DarlingCollectorRunnerTests
             await preclean.ExecuteNonQueryAsync(ct);
         }
 
+        var bodySucceeded = false;
         try
         {
             /* First cycle: baselines — every wait row's deltas are 0 but rows land. */
@@ -129,13 +130,19 @@ public sealed class DarlingCollectorRunnerTests
             /* The watermark helper sees what was just written. */
             var lastCollected = await runner.GetLastCollectedTimeAsync(runtime.ServerId, "wait_stats", "collection_time", ct);
             Assert.NotNull(lastCollected);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await using var cleanupConnection = await dataSource.OpenConnectionAsync(ct);
-            using var cleanup = new NpgsqlCommand("DELETE FROM wait_stats WHERE server_id = $1", cleanupConnection);
-            cleanup.Parameters.AddWithValue(runtime.ServerId);
-            await cleanup.ExecuteNonQueryAsync(ct);
+            /* The data source was never the exposed half here: it hands out a FRESH connection per
+               call, so this teardown could not inherit a session the body had closed. What it lacked is
+               the masking rule, and a token that survives a cancelled run — it used the body's `ct`, which
+               on that path is already signalled, so the delete was skipped exactly when it mattered.
+               LiveStoreCleanup supplies both, and its explicit SET search_path is a third thing the data
+               source's own connections never did (#1902). */
+            await LiveStoreCleanup.RunAsync(pg!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await CleanServerRowsAsync(cleanup, "wait_stats", runtime.ServerId, cleanupCt));
         }
     }
 
@@ -159,6 +166,7 @@ public sealed class DarlingCollectorRunnerTests
         var runtime = await DarlingServerConnector.ConnectAsync(config, null, ct);
         await CleanServerRowsAsync(dataSource, "query_stats", runtime.ServerId, ct);
 
+        var bodySucceeded = false;
         try
         {
             /* Flag OFF (Lite parity): rows land, every query_plan_xml is NULL. */
@@ -179,10 +187,19 @@ public sealed class DarlingCollectorRunnerTests
             var planXml = await FirstNonEmptyAsync(dataSource, "query_stats", "query_plan_xml", runtime.ServerId, ct);
             Assert.False(string.IsNullOrEmpty(planXml), "flag-on capture should store at least one non-empty plan");
             Assert.Equal("ShowPlanXML", XDocument.Parse(planXml!).Root!.Name.LocalName);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await CleanServerRowsAsync(dataSource, "query_stats", runtime.ServerId, ct);
+            /* The data source was never the exposed half here: it hands out a FRESH connection per
+               call, so this teardown could not inherit a session the body had closed. What it lacked is
+               the masking rule, and a token that survives a cancelled run — it used the body's `ct`, which
+               on that path is already signalled, so the delete was skipped exactly when it mattered.
+               LiveStoreCleanup supplies both, and its explicit SET search_path is a third thing the data
+               source's own connections never did (#1902). */
+            await LiveStoreCleanup.RunAsync(pg!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await CleanServerRowsAsync(cleanup, "query_stats", runtime.ServerId, cleanupCt));
         }
     }
 
@@ -206,6 +223,7 @@ public sealed class DarlingCollectorRunnerTests
         var runtime = await DarlingServerConnector.ConnectAsync(config, null, ct);
         await CleanServerRowsAsync(dataSource, "query_store_stats", runtime.ServerId, ct);
 
+        var bodySucceeded = false;
         try
         {
             /* Flag ON: probe by collecting. Zero rows => no Query Store-enabled database with recent
@@ -224,10 +242,19 @@ public sealed class DarlingCollectorRunnerTests
             var off = await offRunner.RunAsync(QueryStoreCollector.Instance, runtime, ct);
             Assert.True(off.Rows > 0, "the same window should re-collect after the reset");
             Assert.Equal(0L, await CountNonEmptyAsync(dataSource, "query_store_stats", "query_plan_text", runtime.ServerId, ct));
+
+            bodySucceeded = true;
         }
         finally
         {
-            await CleanServerRowsAsync(dataSource, "query_store_stats", runtime.ServerId, ct);
+            /* The data source was never the exposed half here: it hands out a FRESH connection per
+               call, so this teardown could not inherit a session the body had closed. What it lacked is
+               the masking rule, and a token that survives a cancelled run — it used the body's `ct`, which
+               on that path is already signalled, so the delete was skipped exactly when it mattered.
+               LiveStoreCleanup supplies both, and its explicit SET search_path is a third thing the data
+               source's own connections never did (#1902). */
+            await LiveStoreCleanup.RunAsync(pg!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await CleanServerRowsAsync(cleanup, "query_store_stats", runtime.ServerId, cleanupCt));
         }
     }
 
@@ -253,6 +280,7 @@ public sealed class DarlingCollectorRunnerTests
 
         await CleanServerRowsAsync(dataSource, "job_history", serverId, ct);
         await CleanServerRowsAsync(dataSource, "job_history", otherServerId, ct);
+        var bodySucceeded = false;
         try
         {
             /* First run: no rows for the server yet → null (caller collects all history). */
@@ -265,11 +293,22 @@ public sealed class DarlingCollectorRunnerTests
 
             var max = await runner.GetLastCollectedInstanceIdAsync(serverId, "job_history", "instance_id", ct);
             Assert.Equal(250L, max);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await CleanServerRowsAsync(dataSource, "job_history", serverId, ct);
-            await CleanServerRowsAsync(dataSource, "job_history", otherServerId, ct);
+            /* The data source was never the exposed half here: it hands out a FRESH connection per
+               call, so this teardown could not inherit a session the body had closed. What it lacked is
+               the masking rule, and a token that survives a cancelled run — it used the body's `ct`, which
+               on that path is already signalled, so the delete was skipped exactly when it mattered.
+               LiveStoreCleanup supplies both, and its explicit SET search_path is a third thing the data
+               source's own connections never did (#1902). */
+            await LiveStoreCleanup.RunAsync(pg!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await CleanServerRowsAsync(cleanup, "job_history", serverId, cleanupCt);
+                await CleanServerRowsAsync(cleanup, "job_history", otherServerId, cleanupCt);
+            });
         }
     }
 
@@ -302,9 +341,18 @@ VALUES ($1, $2, $3, $4, $5)", connection);
         };
     }
 
+    /// <summary>
+    /// The pre-clean form, which legitimately draws a connection from the data source the test already holds.
+    /// TEARDOWN does not use this overload — see the connection overload below (#1902).
+    /// </summary>
     private static async Task CleanServerRowsAsync(NpgsqlDataSource dataSource, string table, int serverId, CancellationToken ct)
     {
         await using var connection = await dataSource.OpenConnectionAsync(ct);
+        await CleanServerRowsAsync(connection, table, serverId, ct);
+    }
+
+    private static async Task CleanServerRowsAsync(NpgsqlConnection connection, string table, int serverId, CancellationToken ct)
+    {
         using var command = new NpgsqlCommand($"DELETE FROM {table} WHERE server_id = $1", connection);
         command.Parameters.AddWithValue(serverId);
         await command.ExecuteNonQueryAsync(ct);

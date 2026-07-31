@@ -274,6 +274,17 @@ OUTER APPLY sys.dm_exec_text_query_plan(s.plan_handle, 0, -1) AS tqp";
 
     public override string TargetTable => "procedure_stats";
 
+    /// <summary>
+    /// #1833: on Azure SQL Database this collector must run per database, like query_stats and the
+    /// other database-scoped collectors already do. Without the override it ran once on the server
+    /// entry's own connection — whose catalog defaults to master when the Database field is blank —
+    /// and the Azure variant's <c>WHERE s.database_id = DB_ID()</c> then filtered to master's
+    /// procedures: zero user rows, logged SUCCESS, and an empty Top Procedures grid that looked
+    /// healthy. The per-database connection makes <c>DB_ID()</c> each user database in turn, which
+    /// is exactly what that predicate was written for.
+    /// </summary>
+    public override bool RunsPerDatabase(CollectorTargetInfo target) => target.IsAzureSqlDb;
+
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
         var planSelect = context.CapturePlanXml ? PlanSelectFragment : "";

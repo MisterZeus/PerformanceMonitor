@@ -84,6 +84,91 @@ public static class ComposeCompiler
 
     private const char ModuleAlias = 'm';
 
+    /// <summary>The one source table whose RAW rows need a per-interval dedup before aggregation (#1841).</summary>
+    private const string QueryStoreTable = "query_store_stats";
+
+    /// <summary>
+    /// The relation the panel aggregates: the routed CAGG, or the raw source table — except
+    /// <c>query_store_stats</c> on the RAW route, which is wrapped in a per-interval dedup first (#1841).
+    ///
+    /// <para>Its rows are CUMULATIVE per-Query-Store-interval snapshots and the collector re-fetches the OPEN
+    /// interval every cycle, so <c>qs_executions</c> (SUM) and the weighted <c>qs_avg_*</c> ratios would count
+    /// one interval's work once per collection. The dedup keeps the LATEST snapshot per interval — the same
+    /// ROW_NUMBER convention the analysis collectors and both apps' Query Store readers use.</para>
+    ///
+    /// <para><c>server_id</c> is in the partition because a composed panel spans the fleet, not one server —
+    /// and <c>server_name</c> is there too, which is NOT redundant: Postgres can push a qual through a
+    /// subquery containing a window function only when the qual's columns appear in EVERY window's
+    /// PARTITION BY, and the panel's server scope is expressed as <c>server_name = ANY(...)</c> in the outer
+    /// WHERE. Without it a fleet store would rank every server's rows before narrowing to the panel's. It is
+    /// 1:1 with <c>server_id</c>, so it only ever makes the partition finer, never over-collapses. The
+    /// grouped/filtered dimensions (<c>database_name</c>) push down for the same reason.</para>
+    ///
+    /// <para>The window is pushed INSIDE so "latest" means latest within the panel's window (the outer WHERE
+    /// re-applies it harmlessly). <c>SELECT *</c> keeps every dimension and filter column available, which a
+    /// compiler that may reference any catalog column needs; the extra <c>qs_rn</c> column is never selected
+    /// or grouped. The cost is that unreferenced columns ride through the window sort — acceptable here
+    /// because the raw route only ever covers the raw retention tier and the result is row-capped, and the
+    /// alternative is hardcoding a column list a new measure would silently outgrow. Composed SQL still names
+    /// only catalog identifiers, and every value is one of the two already-bound window parameters.</para>
+    ///
+    /// <para><b>The CAGG route is repaired since #1849, but only where the corrected rollups reach.</b> The
+    /// original <c>query_store_stats_hourly</c>/<c>_daily</c> materialized their sums from UN-DEDUPED raw
+    /// rows, and no read-side edit can undo that — the duplicates are gone once materialized and the CAGG
+    /// output carries no interval identity to key on. #1849 therefore added a corrected family
+    /// (<c>query_store_stats_interval_hourly</c> dedups at interval grain;
+    /// <c>query_store_stats_corrected_hourly</c>/<c>_daily</c> collapse it to these composer dims) and
+    /// <see cref="ComposeSourceRouter"/> prefers it. The old pair is KEPT — a CAGG cannot be reshaped in
+    /// place, and rebuilding would destroy 21 days of hourly and all daily history (#1759/#1793) — so a
+    /// window older than the corrected rollups have materialized still reads INFLATED numbers, with a
+    /// visible step at that boundary. <c>--backfill-rollups</c> is what moves the boundary; retention aging
+    /// out the old rows is what eventually removes it.</para>
+    ///
+    /// <para><b>A SECOND, permanent understatement sits underneath all of that, from before #1907.</b> Query
+    /// Store returns the flushed and the still-in-memory slice of one interval as two ADDITIVE rows, and
+    /// builds before #1907 stored both; every rollup materialized from them therefore carries ONE SLICE of
+    /// each split interval rather than the sum. On the live evidence that was 8 executions where 94 was true.
+    /// <c>--collapse-legacy-slices</c> (#1912) repairs the stored rows and re-materializes what they fed, but
+    /// only as far back as RAW still reaches — a few days — because a rollup cannot be rebuilt from raw that
+    /// retention has already dropped, and re-materializing a range raw no longer covers DESTROYS the rollup
+    /// there rather than correcting it. So Query Store numbers older than the raw window at the moment that
+    /// verb was run are understated PERMANENTLY, and the daily tiers keep them indefinitely. That is a
+    /// disclosure, not a to-do: no ordering of these operations reaches it, which is why the release notes say
+    /// so plainly and why the verb is worth running promptly after upgrading, while raw still covers the
+    /// period the collector was getting wrong. Nothing about it is visible in a panel — the numbers are simply
+    /// low — which is precisely why it is written down here beside the boundary it shares.</para>
+    ///
+    /// <para><b>At the DAILY tier there is one more rung since #1869.</b> The corrected daily dedups each
+    /// interval within a collection HOUR, so an interval straddling an hour boundary lands in it about twice
+    /// (measured 1.97x); <c>query_store_stats_daygrain_daily</c> dedups across the whole DAY and counts it
+    /// once. It is a newer, shallower aggregate, so the router prefers it only where it has materialized the
+    /// window — three dailies, best-first, each rung the same comparative rule. The hourly tier has no such
+    /// rung because the residual is irreducible there.</para>
+    ///
+    /// <para>The dedup partition below is the SAME key the corrected L1 groups on, and it has to stay that
+    /// way — raw and rollup answering one panel with different notions of "an interval" is the class of
+    /// defect #1784 records. L1 additionally groups <c>module_name</c>/<c>query_hash</c> because it projects
+    /// them; both are functionally dependent on <c>query_id</c>, so they add no groups.</para>
+    /// </summary>
+    private static string BuildFactRelation(
+        string sourceTable, ComposeRoute route, string timeColumn, string startParam, string endParam)
+    {
+        if (route.IsCagg)
+        {
+            return $"{PgSchemaGenerator.CollectSchema}.{route.CaggRelation!}";
+        }
+
+        if (!string.Equals(sourceTable, QueryStoreTable, StringComparison.Ordinal))
+        {
+            return $"{PgSchemaGenerator.CollectSchema}.{sourceTable}";
+        }
+
+        return "(SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY server_id, server_name, database_name, "
+            + $"query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role ORDER BY {timeColumn} DESC, execution_count DESC) AS qs_rn "
+            + $"FROM {PgSchemaGenerator.CollectSchema}.{QueryStoreTable} "
+            + $"WHERE {timeColumn} >= {startParam} AND {timeColumn} <= {endParam}) AS qs_ranked WHERE qs_rn = 1)";
+    }
+
     /// <summary>
     /// Compiles <paramref name="plan"/> against <paramref name="context"/>. Returns the parameterized SQL,
     /// or a caller-facing error for the one runtime-only check (the window×resolution bucket ceiling).
@@ -212,8 +297,7 @@ public static class ComposeCompiler
         }
 
         sql.Append("SELECT ").Append(string.Join(", ", selectExprs)).Append('\n');
-        sql.Append("FROM ").Append(PgSchemaGenerator.CollectSchema).Append('.')
-            .Append(route.IsCagg ? route.CaggRelation! : plan.Measure.SourceTable)
+        sql.Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam))
             .Append(" AS ").Append(FactAlias).Append('\n');
 
         if (plan.UsesModuleJoin)

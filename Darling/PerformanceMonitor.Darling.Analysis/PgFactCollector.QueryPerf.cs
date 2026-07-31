@@ -204,10 +204,21 @@ WITH deduped AS
 (
     -- Collapse incremental re-collections of the same open runtime-stats interval:
     -- keep only the latest collection_time row per logical interval.
+    --
+    -- #1850: replica_role is part of the interval's identity, not a passenger.
+    -- sys.query_store_runtime_stats is keyed by (plan_id, interval, execution_type, replica_group), and
+    -- on a SQL Server 2022+ AG with Query Store for secondary replicas enabled the primary holds ONE
+    -- shared Query Store carrying every replica's rows. Two rows differing only in replica_role are
+    -- distinct legitimate work, so a partition without it does not de-duplicate — it DISCARDS one
+    -- replica's row at the rn = 1 filter. That is an under-count, which is strictly worse than the
+    -- double-count this CTE exists to fix: a double-count is visible in the number, a dropped row is
+    -- silent. Same reasoning, same key as the read side (#1845).
+    -- execution_type_desc is correctly absent: the WHERE pins it to 'Regular', so it is constant here.
     SELECT
         database_name,
         query_id,
         plan_id,
+        replica_role,
         query_plan_hash,
         execution_count,
         avg_cpu_time_us,
@@ -217,8 +228,8 @@ WITH deduped AS
         force_failure_count,
         ROW_NUMBER() OVER
         (
-            PARTITION BY database_name, query_id, plan_id, first_execution_time
-            ORDER BY collection_time DESC
+            PARTITION BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time
+            ORDER BY collection_time DESC, execution_count DESC
         ) AS rn
     FROM v_query_store_stats
     WHERE server_id = $1
@@ -227,11 +238,15 @@ WITH deduped AS
 ),
 plan_agg AS
 (
-    -- Execution-weighted per-exec cost per plan_id.
+    -- Execution-weighted per-exec cost per plan_id, per replica. Keeping replica_role in the grain all
+    -- the way down is what makes the wider dedup key an improvement rather than a blend: were it dropped
+    -- here, both replicas' rows would survive the dedup and then be summed into one number, and primary
+    -- and secondary workload would be indistinguishable in the output.
     SELECT
         database_name,
         query_id,
         plan_id,
+        replica_role,
         any_value(query_plan_hash) AS query_plan_hash,
         SUM(execution_count) AS execs,
         SUM(avg_cpu_time_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS cpu_per_exec,
@@ -241,7 +256,7 @@ plan_agg AS
         MAX(force_failure_count) AS force_failure_count
     FROM deduped
     WHERE rn = 1
-    GROUP BY database_name, query_id, plan_id
+    GROUP BY database_name, query_id, plan_id, replica_role
 ),
 plan_dedup AS
 (
@@ -250,6 +265,7 @@ plan_dedup AS
     SELECT
         database_name,
         query_id,
+        replica_role,
         query_plan_hash,
         SUM(execs) AS execs,
         SUM(cpu_per_exec * execs) / NULLIF(SUM(execs), 0) AS cpu_per_exec,
@@ -258,20 +274,26 @@ plan_dedup AS
         bool_or(is_forced_plan) AS is_forced_plan,
         MAX(force_failure_count) AS force_failure_count
     FROM plan_agg
-    GROUP BY database_name, query_id, query_plan_hash
+    GROUP BY database_name, query_id, replica_role, query_plan_hash
     HAVING SUM(execs) >= 25
 ),
 ranked AS
 (
+    -- Rank WITHIN a replica: a regression means this replica's current plan is worse than the best plan
+    -- this replica has run, never a cross-replica comparison of two different workloads.
     SELECT
         *,
-        ROW_NUMBER() OVER (PARTITION BY database_name, query_id ORDER BY last_exec DESC) AS recency,
-        ROW_NUMBER() OVER (PARTITION BY database_name, query_id ORDER BY cpu_per_exec ASC) AS cheapness
+        ROW_NUMBER() OVER (PARTITION BY database_name, query_id, replica_role ORDER BY last_exec DESC) AS recency,
+        ROW_NUMBER() OVER (PARTITION BY database_name, query_id, replica_role ORDER BY cpu_per_exec ASC) AS cheapness
     FROM plan_dedup
 ),
 compared AS
 (
-    -- Latest active plan vs the best-performing plan for the same query.
+    -- Latest active plan vs the best-performing plan for the same query on the same replica.
+    -- IS NOT DISTINCT FROM, never =: replica_role is NULL on every standalone server, every non-AG
+    -- server and everything below SQL Server 2022, and NULL = NULL is UNKNOWN — an equi-join here would
+    -- match nothing and silently disable plan-regression detection for the overwhelming majority of
+    -- installs. The NULL-safe operator groups those rows the same way the PARTITION BYs above do.
     SELECT
         l.query_id,
         l.cpu_per_exec AS latest_cpu,
@@ -289,6 +311,7 @@ compared AS
     JOIN ranked AS b
       ON  b.database_name = l.database_name
       AND b.query_id = l.query_id
+      AND b.replica_role IS NOT DISTINCT FROM l.replica_role
       AND b.cheapness = 1
     WHERE l.recency = 1
     AND   l.query_plan_hash <> b.query_plan_hash

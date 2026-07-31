@@ -128,12 +128,24 @@ public sealed class CollectorContext
     public object? EnumerationProbeResult { get; set; }
 
     /// <summary>
-    /// Truncation signal for the per-item text-byte budget (#1556), set by a definition's
-    /// <see cref="ICollectorDefinition{TRow}.ReadItemAsync"/> when it stops reading an enumerated item
-    /// because its <see cref="ICollectorDefinition{TRow}.PerItemTextByteBudget"/> was reached, and read
-    /// back by the host to surface the collection WARNING. Written per item (each definition that
-    /// enforces a budget resets it at the top of its ReadItemAsync), so the host reads it immediately
-    /// after ReadItemAsync returns. False in the common case — only budgeted collectors touch it.
+    /// Truncation signal for the per-item text-byte budget (#1556), set by a definition's read method
+    /// when it stops reading a database's rows because its
+    /// <see cref="ICollectorDefinition{TRow}.PerItemTextByteBudget"/> was reached, and read back by the
+    /// host to surface the collection WARNING. Written per database (each definition that enforces a
+    /// budget resets it at the top of its read), so the host reads it immediately after the read
+    /// returns — on the enumerated path from <c>ReadItemAsync</c>, and on the Azure per-database path
+    /// from <c>ReadAsync</c> (#1836). False in the common case — only budgeted collectors touch it.
     /// </summary>
     public bool PerItemTextBudgetExceeded { get; set; }
+
+    /// <summary>
+    /// Catch-up signal (#1836): set by a definition whose cutoff computation floored a stale watermark
+    /// to the <see cref="WatermarkPolicy"/> horizon, so the host can log the bounded history hole the
+    /// clamp deliberately creates. Only query_store clamps, and only the Azure per-database branch
+    /// needs this: on the enumeration path the HOST clamps (and logs) before the definition ever sees
+    /// the watermark, so the definition's own clamp is a no-op there and this stays false — the same
+    /// signal cannot produce a duplicate warning. Written per database, at query build time, so the
+    /// host reads it right after building that database's query.
+    /// </summary>
+    public bool CatchupClampApplied { get; set; }
 }

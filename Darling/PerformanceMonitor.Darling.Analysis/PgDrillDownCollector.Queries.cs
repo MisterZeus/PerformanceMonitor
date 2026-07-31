@@ -288,10 +288,22 @@ WITH deduped AS
     -- interval (same first_execution_time) is collected repeatedly with a GROWING execution_count. Keep
     -- only the LATEST snapshot per interval; summing the accumulating snapshots would multiply-count
     -- executions and corrupt the execution_count-weighted cpu/duration averages.
+    --
+    -- #1850: replica_role is part of the interval's identity, not a passenger.
+    -- sys.query_store_runtime_stats is keyed by (plan_id, interval, execution_type, replica_group), and
+    -- on a SQL Server 2022+ AG with Query Store for secondary replicas enabled the primary holds ONE
+    -- shared Query Store carrying every replica's rows. Two rows differing only in replica_role are
+    -- distinct legitimate work, so a partition without it does not de-duplicate — it DISCARDS one
+    -- replica's row at the rn = 1 filter. That is an under-count, which is strictly worse than the
+    -- double-count this CTE exists to fix: a double-count is visible in the number, a dropped row is
+    -- silent. Same reasoning, same key as the read side (#1845). It is carried through the grouping and
+    -- out into the drill-down row below, so the operator sees WHICH replica regressed.
+    -- execution_type_desc is correctly absent: the WHERE pins it to 'Regular', so it is constant here.
     SELECT
         database_name,
         query_id,
         plan_id,
+        replica_role,
         query_plan_hash,
         execution_count,
         avg_cpu_time_us,
@@ -300,8 +312,8 @@ WITH deduped AS
         query_text,
         ROW_NUMBER() OVER
         (
-            PARTITION BY database_name, query_id, plan_id, first_execution_time
-            ORDER BY collection_time DESC
+            PARTITION BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time
+            ORDER BY collection_time DESC, execution_count DESC
         ) AS rn
     FROM v_query_store_stats
     WHERE server_id = $1
@@ -323,6 +335,7 @@ plan_dedup AS
     SELECT
         database_name,
         query_id,
+        replica_role,
         query_plan_hash,
         MAX(plan_id) AS plan_id,
         any_value(query_text) AS query_text,
@@ -332,23 +345,27 @@ plan_dedup AS
         MAX(last_execution_time) AS last_exec
     FROM deduped
     WHERE rn = 1
-    GROUP BY database_name, query_id, query_plan_hash
+    GROUP BY database_name, query_id, replica_role, query_plan_hash
     HAVING SUM(execution_count) >= 25
 ),
 latest AS
 (
     -- The most recently executed plan per query. DISTINCT ON instead of the old self-referential rank,
     -- so plan_dedup is materialized ONCE rather than the whole pipeline running twice (once per side).
-    SELECT DISTINCT ON (database_name, query_id) *
+    -- Per REPLICA as well as per query: a regression means this replica's current plan is worse than the
+    -- best plan this replica has run, never a cross-replica comparison of two different workloads.
+    -- DISTINCT ON groups NULL replica_role rows together (it is a grouping, not an equality test), so
+    -- non-AG servers behave exactly as before.
+    SELECT DISTINCT ON (database_name, query_id, replica_role) *
     FROM plan_dedup
-    ORDER BY database_name, query_id, last_exec DESC
+    ORDER BY database_name, query_id, replica_role, last_exec DESC
 ),
 cheapest AS
 (
-    -- The cheapest (best) plan per query by cpu-per-exec.
-    SELECT DISTINCT ON (database_name, query_id) *
+    -- The cheapest (best) plan per query by cpu-per-exec, on the same replica.
+    SELECT DISTINCT ON (database_name, query_id, replica_role) *
     FROM plan_dedup
-    ORDER BY database_name, query_id, cpu_per_exec ASC
+    ORDER BY database_name, query_id, replica_role, cpu_per_exec ASC
 )
 SELECT
     l.database_name,
@@ -365,9 +382,17 @@ SELECT
         l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0),
         l.dur_per_exec / NULLIF(b.dur_per_exec, 0)
     ) AS regression_factor,
-    LEFT(l.query_text, 500) AS query_text
+    LEFT(l.query_text, 500) AS query_text,
+    l.replica_role
 FROM latest AS l
-JOIN cheapest AS b USING (database_name, query_id)
+JOIN cheapest AS b
+  ON  b.database_name = l.database_name
+  AND b.query_id = l.query_id
+  -- IS NOT DISTINCT FROM, never = (and never USING, which is an equi-join): replica_role is NULL on
+  -- every standalone server, every non-AG server and everything below SQL Server 2022, and NULL = NULL
+  -- is UNKNOWN — matching on it with = would join nothing and silently empty this drill-down for the
+  -- overwhelming majority of installs. The NULL-safe operator groups those rows as DISTINCT ON does.
+  AND b.replica_role IS NOT DISTINCT FROM l.replica_role
 WHERE l.query_plan_hash <> b.query_plan_hash
 AND   GREATEST
       (
@@ -408,7 +433,13 @@ LIMIT 5";
                 best_cpu_per_exec_us = reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7)),
                 best_duration_per_exec_us = reader.IsDBNull(8) ? 0.0 : Convert.ToDouble(reader.GetValue(8)),
                 regression_factor = reader.IsDBNull(9) ? 0.0 : Convert.ToDouble(reader.GetValue(9)),
-                query_text = reader.IsDBNull(10) ? "" : reader.GetString(10)
+                query_text = reader.IsDBNull(10) ? "" : reader.GetString(10),
+                /* #1850: which replica this regression was measured on. NULL — rendered as "" — on every
+                   standalone/non-AG/pre-2022 server, which is the overwhelming majority; it is only
+                   populated on an AG primary with Query Store for secondary replicas enabled, where two
+                   rows for the same query are now legitimately distinct rather than one silently dropped.
+                   Last in the row so the existing reader ordinals are untouched. */
+                replica_role = reader.IsDBNull(11) ? "" : reader.GetString(11)
             });
         }
 

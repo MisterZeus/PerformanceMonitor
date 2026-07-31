@@ -56,16 +56,94 @@ public sealed partial class ViewerDataService
             -- SKIPPED counts as a healthy run (dedup / version-gated collectors no-op without being stale)
             MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
             MAX(collection_time) AS last_run_time,
-            MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN error_message END) AS last_error,
+            -- #1855: the message from the NEWEST failing run, not MAX()'s lexicographically greatest
+            -- one. The status re-check is load-bearing rather than belt-and-braces: when no failing run
+            -- in the window carried text, error_rank = 1 falls through to the newest row of ANY class,
+            -- and without it a SUCCESS row's note could surface here as a fake last error.
+            MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS') THEN error_message END) AS last_error,
+            -- The newest failure OUTRIGHT, text or not — "when did this last fail" means the run, not
+            -- the message. It can only name a different row than last_error if a failure was written
+            -- with no text.
             MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN collection_time END) AS last_error_time,
             SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
             -- YIELDED = the 1s LOCK_TIMEOUT guard fired (#1805): deliberate, benign for collection,
             -- counted apart from errors because clustering here is a signal about the TARGET's lock
             -- contention rather than a monitoring fault.
-            SUM(CASE WHEN status = 'YIELDED' THEN 1 ELSE 0 END) AS yield_count
-        FROM v_collection_log
-        WHERE server_id = $1
-        AND   collection_time >= $2
+            SUM(CASE WHEN status = 'YIELDED' THEN 1 ELSE 0 END) AS yield_count,
+            -- #1837: the note a SUCCEEDING run can leave behind (an enumeration that yielded 0 items,
+            -- items whose enumeration probe failed). Gated on SUCCESS specifically, rather than on
+            -- every non-failure status: the runners attach a note only to the SUCCESS write, and the looser
+            -- complement would drag SESSION_MISSING and CANCELLED messages into a column whose whole
+            -- claim is that it is NOT an error. Display text only: no band, no count, no threshold
+            -- reads it, and a legitimately empty target stays HEALTHY exactly as before.
+            MAX(CASE WHEN note_rank = 1 AND status = 'SUCCESS' THEN error_message END) AS last_note,
+            -- How many of the window's runs carried one. note_count = total_runs is the
+            -- persistently-empty signal: EVERY run this week came back with nothing.
+            COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count,
+            -- #1852: the one thing that makes a persistently-empty enumeration interesting — does this
+            -- target actually HAVE user databases? Zero items on a server with none is legitimate and
+            -- stays quiet; zero items on a server that HAS them is a login that cannot enter any, or a
+            -- filter that swallowed everything. database_size_stats rather than database_config for
+            -- three reasons: it runs on the scheduled loop (60 min) where database_config is on-load
+            -- and can age past this window on a long-running service; it is indexed on
+            -- (server_id, collection_time) where database_config has no index at all; and it reads
+            -- sys.master_files, so it still sees databases the monitoring login cannot ENTER — exactly
+            -- the case being diagnosed. database_id > 4 excludes the system databases, tempdb
+            -- included: the size collector takes every ONLINE database, so a bare row check
+            -- would be true on every server alive.
+            --
+            -- The inventory window is the health read's OWN ($2) — no second parameter, and an
+            -- inventory that aged out says nothing rather than something stale. Uncorrelated, so both
+            -- engines evaluate it once per query (a Postgres InitPlan) instead of per row, and it
+            -- needs no GROUP BY entry and no join. Feeds display text only, through the shared
+            -- formatter; the banding never sees it.
+            CASE
+                WHEN EXISTS
+                     (
+                         SELECT 1
+                         FROM v_database_size_stats
+                         WHERE server_id = $1
+                         AND   collection_time >= $2
+                         AND   database_id > 4
+                     )
+                THEN 1
+                ELSE 0
+            END AS has_user_databases
+        FROM
+        (
+            -- #1855: rank each class of message newest-first so the two exemplar columns above can take
+            -- the LATEST one instead of the lexicographically greatest. Ordering on whether the class's
+            -- CASE came back empty puts every row that carries such a message ahead of every row that
+            -- does not, so rank 1 is the newest one that has text — and a later clean run no longer
+            -- blanks a note the window still holds. MAX() was never wrong about WHICH rows to consider,
+            -- only about which of them wins, and text does not sort like the number #1837's probe note
+            -- carries: 12 item(s) sorts below 9 item(s). collection_time settles it; error_message DESC
+            -- only breaks an exact-timestamp tie, and breaks it identically here and in Lite's DuckDB
+            -- twin, which binary-vs-locale collation would not.
+            SELECT
+                collector_name,
+                collection_time,
+                duration_ms,
+                status,
+                error_message,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY collector_name
+                    ORDER BY (CASE WHEN status = 'SUCCESS' THEN error_message END) IS NULL,
+                             collection_time DESC,
+                             error_message DESC
+                ) AS note_rank,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY collector_name
+                    ORDER BY (CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN error_message END) IS NULL,
+                             collection_time DESC,
+                             error_message DESC
+                ) AS error_rank
+            FROM v_collection_log
+            WHERE server_id = $1
+            AND   collection_time >= $2
+        ) runs
         GROUP BY collector_name
         ORDER BY collector_name
         """;
@@ -100,11 +178,34 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
-    /// The fleet-cumulative variant of <see cref="CollectionHealthSql"/>: the same 10-column per-collector
+    /// The fleet-cumulative variant of <see cref="CollectionHealthSql"/>: the same 14-column per-collector
     /// aggregate but across ALL enabled monitored servers (GROUP BY server_id, collector_name — one row per
     /// server/collector pair), for the status bar's aggregate-view total (mirrors Lite's cumulative
     /// GetHealthSummary(null)). Scoped to enabled servers so a removed server's aged-out rows don't read as
     /// erroring. $1 window start (naive UTC).
+    /// <para>
+    /// The two exemplar MESSAGE columns are deliberately NULL here rather than ranked as the per-server
+    /// read ranks them (#1855). This query's only caller is <c>UpdateCollectorHealthTextAsync</c>, which
+    /// reads <see cref="CollectorHealthRow.HealthStatus"/> and the collector NAME — no surface renders a
+    /// fleet row's message, and the per-server read behind the Collection Health grid is where the note
+    /// and the last error are actually shown. Ranking them costs more than the whole rest of the query:
+    /// PostgreSQL cannot parallelize above a WindowAgg, so adding the ranks turned this from a parallel
+    /// hash aggregate into a serial sort of every row in the window — 0.84s to 13.9s over a 200-server /
+    /// 4M-row store, measured on PG 18.4, on a status-bar refresh that would display none of it. NULL,
+    /// not the old lexicographic MAX: a fleet rollup carries band INPUTS, exactly like the service-side
+    /// <c>DarlingFleetReader.FleetCollectionHealthSql</c>, which projects no message columns at all. The
+    /// columns stay in the projection because both reads share <see cref="MapHealthRow"/> and its
+    /// ordinals; a surface that ever needs fleet-wide exemplars needs a different read, not this one.
+    /// </para>
+    /// <para>
+    /// #1852's <c>has_user_databases</c> is NULL here for the same two reasons and one more. It qualifies
+    /// a DISPLAYED note, and this read displays none — with <c>last_note</c> already NULL the shared
+    /// formatter returns blank whatever the flag says, so a real value could not change one rendered
+    /// character. And the flag is per-SERVER while this read groups server_id INTO the result, so there is
+    /// no single $1 to probe the inventory for: a truthful fleet version would be a second cross-collector
+    /// join across every enabled server, on a query the status bar re-runs on every aggregate-tab refresh
+    /// — precisely the cost #1855 measured and declined. The column exists to hold the ordinal.
+    /// </para>
     /// </summary>
     public const string FleetCollectionHealthSql = """
         SELECT
@@ -115,10 +216,13 @@ public sealed partial class ViewerDataService
             AVG(duration_ms) AS avg_duration_ms,
             MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
             MAX(collection_time) AS last_run_time,
-            MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN error_message END) AS last_error,
+            CAST(NULL AS text) AS last_error,
             MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN collection_time END) AS last_error_time,
             SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
-            SUM(CASE WHEN status = 'YIELDED' THEN 1 ELSE 0 END) AS yield_count
+            SUM(CASE WHEN status = 'YIELDED' THEN 1 ELSE 0 END) AS yield_count,
+            CAST(NULL AS text) AS last_note,
+            COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count,
+            CAST(NULL AS integer) AS has_user_databases
         FROM v_collection_log
         WHERE collection_time >= $1
         AND   server_id IN (SELECT server_id FROM config_monitored_servers WHERE is_enabled)
@@ -227,7 +331,7 @@ public sealed partial class ViewerDataService
         return items;
     }
 
-    /// <summary>Maps one row of the shared 11-column health projection (per-server or fleet) to a <see cref="CollectorHealthRow"/>.</summary>
+    /// <summary>Maps one row of the shared 14-column health projection (per-server or fleet) to a <see cref="CollectorHealthRow"/>.</summary>
     private static CollectorHealthRow MapHealthRow(NpgsqlDataReader reader) => new()
     {
         CollectorName = reader.GetString(0),
@@ -241,6 +345,11 @@ public sealed partial class ViewerDataService
         LastErrorTime = reader.IsDBNull(8) ? null : reader.GetDateTime(8),
         PermissionDeniedCount = reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9)),
         YieldCount = reader.IsDBNull(10) ? 0 : Convert.ToInt64(reader.GetValue(10)),
+        LastNote = reader.IsDBNull(11) ? null : reader.GetString(11),
+        NoteCount = reader.IsDBNull(12) ? 0 : Convert.ToInt64(reader.GetValue(12)),
+        /* #1852: NULL on the fleet read (see FleetCollectionHealthSql) reads as "no inventory to go on",
+           which is the same silence an install with no size stats gets. */
+        TargetHasUserDatabases = !reader.IsDBNull(13) && Convert.ToInt64(reader.GetValue(13)) != 0,
     };
 
     /// <summary>
@@ -373,6 +482,25 @@ public class CollectorHealthRow
     /// <summary>1s lock-timeout yields (#1805) — deliberate, benign, counted apart from errors.</summary>
     public long YieldCount { get; set; }
 
+    /// <summary>
+    /// The note a non-failing run left behind (#1837): an enumeration that yielded 0 items, items whose
+    /// enumeration probe failed. Null for the ordinary run, which is why the column reads blank for a
+    /// plainly healthy collector. Informational only — see <see cref="NoteFormatted"/>.
+    /// </summary>
+    public string? LastNote { get; set; }
+
+    /// <summary>How many of <see cref="TotalRuns"/> carried a <see cref="LastNote"/>.</summary>
+    public long NoteCount { get; set; }
+
+    /// <summary>
+    /// #1852: whether the store saw user databases on this target inside the health window
+    /// (<c>has_user_databases</c>) — what tells a legitimately empty server apart from one that is
+    /// enumerating nothing despite having databases. False also covers "no inventory to go on" (the fleet
+    /// read's NULL, an install without size stats), which deliberately reads the same as "nothing to say".
+    /// Informational, like <see cref="LastNote"/>: <see cref="HealthStatus"/> never sees it.
+    /// </summary>
+    public bool TargetHasUserDatabases { get; set; }
+
     public double FailureRatePercent => TotalRuns > 0 ? (double)ErrorCount / TotalRuns * 100 : 0;
     public double HoursSinceLastSuccess => LastSuccessTime.HasValue
         ? (DateTime.UtcNow - LastSuccessTime.Value).TotalHours
@@ -404,4 +532,14 @@ public class CollectorHealthRow
     public string LastErrorFormatted => LastErrorTime.HasValue
         ? ViewerTimeHelper.ForDisplay(LastErrorTime.Value).ToString("g")
         : "";
+
+    /// <summary>
+    /// The informational note plus its "all N runs" / "N of M runs" qualifier (#1837) and, when a
+    /// persistently empty enumeration lands on a target the store has seen user databases on, #1852's
+    /// "target has user databases" — or blank. Shared with Lite through
+    /// <see cref="CollectorHealthClassifier.FormatCollectionNote"/> so the two apps' health grids read
+    /// identically. Never feeds <see cref="HealthStatus"/>.
+    /// </summary>
+    public string NoteFormatted =>
+        CollectorHealthClassifier.FormatCollectionNote(LastNote, NoteCount, TotalRuns, CollectorName, TargetHasUserDatabases);
 }

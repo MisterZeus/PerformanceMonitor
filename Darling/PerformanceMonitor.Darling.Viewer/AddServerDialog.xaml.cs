@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -595,4 +596,31 @@ public partial class AddServerDialog : Window
         DialogResult = false;
         Close();
     }
+
+    /// <summary>
+    /// #1828: SizeToContent growth is top-anchored, so expanding a tall auth panel mid-session can
+    /// carry the pinned footer past the bottom of the work area without ever hitting the MaxHeight
+    /// clamp - MaxHeight limits total height, not position. When growth pushes the bottom edge
+    /// off-screen, pull the window up so the footer stays visible: the SizeToContent-friendly form
+    /// of the Dashboard twin's SizeToWorkArea() top-pinning. Mirrors Lite's AddServerDialog.
+    ///
+    /// <para>#1891: the work area is the one belonging to the monitor this dialog is actually on, not
+    /// the primary monitor's. Both the clamp and the height cap live in the shared
+    /// <see cref="WindowWorkArea"/> so this dialog and Lite's twin cannot drift.</para>
+    /// </summary>
+    private void Dialog_SizeChanged(object sender, SizeChangedEventArgs e) => WindowWorkArea.Clamp(this);
+
+    /// <summary>
+    /// The first point at which there is an HWND to ask which monitor we are on, so it is the earliest the
+    /// height cap can be anything better than the primary monitor's. Until now MaxHeight is whatever the
+    /// constructor left, which is the pre-#1891 answer.
+    /// </summary>
+    private void Dialog_SourceInitialized(object sender, EventArgs e) => WindowWorkArea.Clamp(this);
+
+    /// <summary>
+    /// Dragging the dialog to a different monitor changes the answer, and nothing else would notice: the
+    /// MaxHeight this replaced was a one-shot XAML binding to the primary monitor evaluated at load and never
+    /// re-read, so a dialog moved to a shorter screen kept the taller screen's cap forever.
+    /// </summary>
+    private void Dialog_LocationChanged(object sender, EventArgs e) => WindowWorkArea.Clamp(this);
 }

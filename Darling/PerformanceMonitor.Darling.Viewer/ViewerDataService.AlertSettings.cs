@@ -39,7 +39,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 public sealed partial class ViewerDataService
 {
-    /* The 42 AlertsConfig + AnalysisConfig columns in the SAME order the service reads them
+    /* The 43 AlertsConfig + AnalysisConfig columns in the SAME order the service reads them
        (StoreConfigProvider.ReadAlertSettingsAsync), so the parity test pins one list against both ends.
        delivery_mode/per_event_max (V18, #1141) then the six long-running-query read knobs + the connection-change
        notify toggle (V20) are appended so the existing ordinals stay pinned. */
@@ -56,7 +56,7 @@ public sealed partial class ViewerDataService
         "long_running_query_exclude_misc_waits, long_running_query_exclude_cdc, notify_connection_changes, " +
         "notify_connection_down_at_startup, connection_refire_minutes, " +
         "notify_ag_health, ag_lag_alert_seconds, ag_redo_queue_alert_kb, " +
-        "ag_disconnect_refire_minutes";
+        "ag_disconnect_refire_minutes, blocking_wait_seconds_threshold";
 
     /// <summary>The single global alert-settings row (id=1), for the Settings window prefill + the migrate-in
     /// defaults check. Column order matches <see cref="AlertSettingsColumns"/>.</summary>
@@ -65,11 +65,11 @@ public sealed partial class ViewerDataService
 
     /// <summary>Upserts the single global alert-settings row (Settings window Save). ON CONFLICT rewrites every
     /// column and bumps <c>modified_at</c> (and, via the V17 statement trigger, <c>config_version</c> — the
-    /// service reloads on its next sweep). $1..$42 bind the columns in <see cref="AlertSettingsColumns"/> order.</summary>
+    /// service reloads on its next sweep). $1..$43 bind the columns in <see cref="AlertSettingsColumns"/> order.</summary>
     public const string AlertSettingsUpsertSql = @"
 INSERT INTO config_alert_settings (id, " + AlertSettingsColumns + @", modified_at)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
-        $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42,
+        $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43,
         (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     enabled = EXCLUDED.enabled,
@@ -114,6 +114,7 @@ ON CONFLICT (id) DO UPDATE SET
     ag_lag_alert_seconds = EXCLUDED.ag_lag_alert_seconds,
     ag_redo_queue_alert_kb = EXCLUDED.ag_redo_queue_alert_kb,
     ag_disconnect_refire_minutes = EXCLUDED.ag_disconnect_refire_minutes,
+    blocking_wait_seconds_threshold = EXCLUDED.blocking_wait_seconds_threshold,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>The two <c>cpu_mode</c> values the service honors (it compares case-insensitively against
@@ -185,6 +186,7 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.AgLagAlertSeconds });                // $40 (#991, V35)
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = r.AgRedoQueueAlertKb });              // $41 (#991, V35)
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.AgDisconnectRefireMinutes });        // $42 (#1696, V37)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.BlockingWaitSecondsThreshold });    // $43 (#1839, V40)
     }
 
     private static AlertSettingsRow ReadAlertSettingsRow(NpgsqlDataReader reader) => new()
@@ -234,6 +236,8 @@ ON CONFLICT (id) DO UPDATE SET
         AgRedoQueueAlertKb = reader.GetInt64(40),
         /* #1696 AG disconnect re-fire appended (V37) at ordinal 41. */
         AgDisconnectRefireMinutes = reader.GetInt32(41),
+        /* #1839 total-blocked-wait gate appended (V40) at ordinal 42. */
+        BlockingWaitSecondsThreshold = reader.GetInt32(42),
     };
 
     /// <summary>Maps the Settings window's CPU-mode combo tag ("Total"/"SqlOnly") to the store value.</summary>
@@ -290,6 +294,11 @@ public sealed class AlertSettingsRow
 
     public bool BlockingEnabled { get; set; } = true;
     public int BlockingCountThreshold { get; set; } = 1;
+
+    /// <summary>#1839 (V40): fire when the latest blocking snapshot's TOTAL blocked wait reaches this many
+    /// seconds. 0 = off, matching the V40 DDL default — the shipped behavior is unchanged on upgrade.</summary>
+    public int BlockingWaitSecondsThreshold { get; set; }
+
     public bool DeadlockEnabled { get; set; } = true;
     public int DeadlockCountThreshold { get; set; } = 1;
     public bool PoisonWaitEnabled { get; set; } = true;
@@ -363,6 +372,7 @@ public sealed class AlertSettingsRow
             && string.Equals(CpuMode, other.CpuMode, StringComparison.OrdinalIgnoreCase)
             && BlockingEnabled == other.BlockingEnabled
             && BlockingCountThreshold == other.BlockingCountThreshold
+            && BlockingWaitSecondsThreshold == other.BlockingWaitSecondsThreshold
             && DeadlockEnabled == other.DeadlockEnabled
             && DeadlockCountThreshold == other.DeadlockCountThreshold
             && PoisonWaitEnabled == other.PoisonWaitEnabled

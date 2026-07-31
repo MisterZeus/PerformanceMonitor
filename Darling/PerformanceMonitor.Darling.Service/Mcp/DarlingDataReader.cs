@@ -701,7 +701,33 @@ internal static class DarlingDataReader
     /// (naive UTC), $4 top.
     /// </summary>
     public const string QueryStoreTopSql = """
-        WITH ranked AS (
+        WITH deduped AS (
+            /* LOAD-BEARING (correctness, not just perf) — #1841. query_store_stats rows are CUMULATIVE
+               per-Query-Store-interval snapshots, and the collector re-fetches the OPEN interval every
+               cycle as its last_execution_time advances, so the SAME interval (same first_execution_time)
+               is stored repeatedly with a growing execution_count. SUM(execution_count) over the raw rows
+               reports 10 + 25 + 40 for an interval that reached 40, and AVG(avg_*) becomes an avg-of-avgs
+               weighted by how many times each interval happened to be re-collected. This surface feeds
+               BOTH the MCP tool and the REST route, so un-deduped numbers reach an agent's reasoning as
+               readily as the web dashboard. Twins the viewer's QueryStoreTopSql.
+
+               replica_role and execution_type_desc are in the partition because the aggregate below is
+               grouped (or MAXed) on them: the dedup key must be at least as fine as the read's own row
+               identity, or dedup would drop a row the read must return rather than de-duplicate one. */
+            SELECT
+                *,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
+                    ORDER BY collection_time DESC, execution_count DESC
+                ) AS rn
+            FROM query_store_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   ($5::text IS NULL OR database_name = $5)
+        ),
+        ranked AS (
             SELECT
                 database_name,
                 query_id,
@@ -721,11 +747,8 @@ internal static class DarlingDataReader
                 AVG(CAST(avg_rowcount AS double precision)) AS avg_rowcount,
                 MAX(last_execution_time) AS last_execution_time,
                 MAX(query_plan_hash) AS query_plan_hash
-            FROM query_store_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            AND   ($5::text IS NULL OR database_name = $5)
+            FROM deduped
+            WHERE rn = 1
             GROUP BY database_name, query_id, plan_id, query_hash, replica_role
             ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC
             LIMIT $4 + 5
@@ -848,13 +871,84 @@ internal static class DarlingDataReader
             AVG(duration_ms) AS avg_duration_ms,
             MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
             MAX(collection_time) AS last_run_time,
-            MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN error_message END) AS last_error,
+            -- #1855: the message from the NEWEST failing run, not MAX()'s lexicographically greatest
+            -- one. The status re-check is load-bearing rather than belt-and-braces: when no failing run
+            -- in the window carried text, error_rank = 1 falls through to the newest row of ANY class,
+            -- and without it a SUCCESS row's note could surface here as a fake last error.
+            MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS') THEN error_message END) AS last_error,
+            -- The newest failure OUTRIGHT, text or not — "when did this last fail" means the run, not
+            -- the message.
             MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN collection_time END) AS last_error_time,
             SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
-            SUM(CASE WHEN status = 'YIELDED' THEN 1 ELSE 0 END) AS yield_count
-        FROM v_collection_log
-        WHERE server_id = $1
-        AND   collection_time >= $2
+            SUM(CASE WHEN status = 'YIELDED' THEN 1 ELSE 0 END) AS yield_count,
+            -- #1837: the note a SUCCEEDING run can leave behind (an enumeration that yielded 0 items,
+            -- items whose enumeration probe failed) and how many runs carried one. Gated on SUCCESS
+            -- specifically — the runners attach a note only to the SUCCESS write. Informational: it
+            -- feeds no band, and a legitimately empty target stays HEALTHY.
+            MAX(CASE WHEN note_rank = 1 AND status = 'SUCCESS' THEN error_message END) AS last_note,
+            COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count,
+            -- #1852: the one thing that makes a persistently-empty enumeration interesting — does this
+            -- target actually HAVE user databases? Zero items on a server with none is legitimate and
+            -- stays quiet; zero items on a server that HAS them is a login that cannot enter any, or a
+            -- filter that swallowed everything. database_size_stats rather than database_config for
+            -- three reasons: it runs on the scheduled loop (60 min) where database_config is on-load
+            -- and can age past this window on a long-running service; it is indexed on
+            -- (server_id, collection_time) where database_config has no index at all; and it reads
+            -- sys.master_files, so it still sees databases the monitoring login cannot ENTER — exactly
+            -- the case being diagnosed. database_id > 4 excludes the system databases, tempdb
+            -- included: the size collector takes every ONLINE database, so a bare row check
+            -- would be true on every server alive.
+            --
+            -- The inventory window is the health read's OWN ($2) — no second parameter, and an
+            -- inventory that aged out says nothing rather than something stale. Uncorrelated, so both
+            -- engines evaluate it once per query (a Postgres InitPlan) instead of per row, and it
+            -- needs no GROUP BY entry and no join. Feeds display text only, through the shared
+            -- formatter; the banding never sees it.
+            CASE
+                WHEN EXISTS
+                     (
+                         SELECT 1
+                         FROM v_database_size_stats
+                         WHERE server_id = $1
+                         AND   collection_time >= $2
+                         AND   database_id > 4
+                     )
+                THEN 1
+                ELSE 0
+            END AS has_user_databases
+        FROM
+        (
+            -- #1855: rank each class of message newest-first so the two exemplar columns above can take
+            -- the LATEST one instead of the lexicographically greatest. Ordering on whether the class's
+            -- CASE came back empty puts every row that carries such a message ahead of every row that
+            -- does not, so rank 1 is the newest one that has text — and a later clean run no longer
+            -- blanks a note the window still holds. Text does not sort like the number #1837's probe
+            -- note carries: 12 item(s) sorts below 9 item(s). One byte-identical shape with Lite's
+            -- DuckDB read and the Viewer's, down to the error_message DESC tie-break.
+            SELECT
+                collector_name,
+                collection_time,
+                duration_ms,
+                status,
+                error_message,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY collector_name
+                    ORDER BY (CASE WHEN status = 'SUCCESS' THEN error_message END) IS NULL,
+                             collection_time DESC,
+                             error_message DESC
+                ) AS note_rank,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY collector_name
+                    ORDER BY (CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN error_message END) IS NULL,
+                             collection_time DESC,
+                             error_message DESC
+                ) AS error_rank
+            FROM v_collection_log
+            WHERE server_id = $1
+            AND   collection_time >= $2
+        ) runs
         GROUP BY collector_name
         ORDER BY collector_name
         """;
@@ -882,6 +976,9 @@ internal static class DarlingDataReader
                 LastErrorTime = reader.IsDBNull(8) ? null : reader.GetDateTime(8),
                 PermissionDeniedCount = reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9)),
                 YieldCount = reader.IsDBNull(10) ? 0 : Convert.ToInt64(reader.GetValue(10)),
+                LastNote = reader.IsDBNull(11) ? null : reader.GetString(11),
+                NoteCount = reader.IsDBNull(12) ? 0 : Convert.ToInt64(reader.GetValue(12)),
+                TargetHasUserDatabases = !reader.IsDBNull(13) && Convert.ToInt64(reader.GetValue(13)) != 0,
             });
         }
 
@@ -996,6 +1093,25 @@ internal sealed class CollectorHealth
     public long PermissionDeniedCount { get; set; }
     /// <summary>1s lock-timeout yields (#1805) — deliberate, benign, counted apart from errors.</summary>
     public long YieldCount { get; set; }
+
+    /// <summary>
+    /// The note a non-failing run left behind (#1837): an enumeration that yielded 0 items, items whose
+    /// enumeration probe failed. Null for the ordinary run. Informational — never an input to
+    /// <see cref="HealthStatus"/>.
+    /// </summary>
+    public string? LastNote { get; set; }
+
+    /// <summary>How many of <see cref="TotalRuns"/> carried a <see cref="LastNote"/>.</summary>
+    public long NoteCount { get; set; }
+
+    /// <summary>
+    /// #1852: whether the store saw user databases on this target inside the health window
+    /// (<c>has_user_databases</c>) — what tells a legitimately empty server apart from one that is
+    /// enumerating nothing despite having databases. False also covers "no inventory to go on", which
+    /// deliberately reads the same as "nothing to say". Informational, like <see cref="LastNote"/>:
+    /// <see cref="HealthStatus"/> never sees it.
+    /// </summary>
+    public bool TargetHasUserDatabases { get; set; }
 
     public double FailureRatePercent => TotalRuns > 0 ? (double)ErrorCount / TotalRuns * 100 : 0;
 
