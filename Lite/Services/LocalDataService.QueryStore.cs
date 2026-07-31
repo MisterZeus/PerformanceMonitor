@@ -60,7 +60,10 @@ WITH deduped AS
     -- the store, which cannot be rewritten: it deterministically picks the FLUSHED slice, the one holding the
     -- bulk of the interval's work, instead of flapping. Closest-available, not correct — the correct value is
     -- the SUM of the slices, which no read-side rule can express (#1912). This applies to EVERY dedup site in
-    -- both apps; a source-containment test pins all of them, so deleting one here fails loudly.
+    -- both apps: Lite.Tests/QueryStoreSliceTieBreakSourceTests pins all 7 of Lite's across the 3 files that
+    -- hold them, and Darling.Tests/QueryStoreSliceTieBreakSourceTests pins its 12, so dropping one fails
+    -- loudly and names the file. Both enumerate their files rather than globbing, so MOVING a read has to be
+    -- re-declared instead of silently shrinking the guard.
     SELECT
         collection_time,
         interval_start_time_utc,

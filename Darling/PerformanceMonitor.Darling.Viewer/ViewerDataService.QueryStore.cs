@@ -138,7 +138,10 @@ public sealed partial class ViewerDataService
                rewritten: it deterministically picks the FLUSHED slice, the one holding the bulk of the
                interval's work, instead of flapping. Closest-available, not correct — the correct value is the
                SUM of the slices, which no read-side rule can express (#1912). This applies to EVERY dedup
-               site in both apps; a source-containment test pins all of them, so deleting one fails loudly. */
+               site in both apps: Darling.Tests/QueryStoreSliceTieBreakSourceTests pins all 12 of Darling's
+               across the 8 files that hold them, and Lite.Tests/QueryStoreSliceTieBreakSourceTests pins its
+               7, so dropping one fails loudly and names the file. Both enumerate their files rather than
+               globbing, so MOVING a read has to be re-declared instead of silently shrinking the guard. */
             SELECT
                 *,
                 ROW_NUMBER() OVER
