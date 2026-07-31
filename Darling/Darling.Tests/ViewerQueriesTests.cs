@@ -311,22 +311,29 @@ public sealed class ViewerQueriesSqlTests
     }
 
     /// <summary>
-    /// The Query Store slicer keeps a bare collection_time floor even though it no longer WINDOWS on that
-    /// column (#1892). query_store_stats is a hypertable partitioned on collection_time, so without it
-    /// TimescaleDB cannot exclude chunks and must decompress the whole table; with it, the floor is provably
-    /// implied by the COALESCE predicate, so it prunes without ever deciding membership.
+    /// The Query Store slicer keeps collection_time bounds even though it no longer WINDOWS on that column
+    /// (#1892). query_store_stats is a hypertable partitioned on collection_time, so without them TimescaleDB
+    /// cannot exclude chunks and an old fixed date range decompresses everything from the window through the
+    /// present.
     ///
-    /// <para>And no CEILING, deliberately: collection_time can exceed the interval start without bound when
-    /// the collector was down as the interval closed, so an upper bound would silently drop exactly the rows
-    /// a restarted collector just caught up on.</para>
+    /// <para>Both are pinned in their SLACKENED form, which is the whole point: a bare
+    /// <c>collection_time &gt;= $2</c> / <c>&lt;= $3</c> pair would silently be the window filter again and
+    /// re-introduce exactly the edge bug this fixed. The floor is provably implied by the COALESCE
+    /// predicate; the ceiling is a month, being Query Store's 1-day maximum interval plus 29 days of
+    /// collector-outage allowance.</para>
     /// </summary>
     [Fact]
-    public void QueryStoreSlicerSql_KeepsACollectionTimeFloorForChunkExclusion_ButNoCeiling()
+    public void QueryStoreSlicerSql_KeepsSlackenedCollectionTimeBoundsForChunkExclusion()
     {
         var sql = SqlByName(nameof(ViewerDataService.QueryStoreSlicerSql));
 
         Assert.Contains("collection_time >= $2 - interval '1 day'", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("AND   collection_time <= $3", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time <= $3 + interval '30 days'", sql, StringComparison.Ordinal);
+
+        /* The tight forms, asserted absent: either one would be a window filter wearing a pruning bound's
+           clothes, and the failure would look exactly like the bug #1892 fixed. */
+        Assert.DoesNotContain("collection_time >= $2\n", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("collection_time <= $3\n", sql, StringComparison.Ordinal);
     }
 
     // ── PG dialect (all Queries reads) ──

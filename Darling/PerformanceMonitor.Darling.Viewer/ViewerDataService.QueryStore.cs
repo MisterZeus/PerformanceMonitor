@@ -560,17 +560,26 @@ public sealed partial class ViewerDataService
                entirely, which is the collection lag #1841 set out to remove showing up one layer down. */
             AND   COALESCE(interval_start_time_utc, collection_time) >= $2
             AND   COALESCE(interval_start_time_utc, collection_time) <= $3
-            /* Chunk-exclusion bound, NOT a filter: it can never exclude a row the predicate above keeps. An
-               interval is always collected after it starts, so interval_start_time_utc <= collection_time,
-               and therefore COALESCE(...) >= $2 already implies collection_time >= $2; the extra day is
-               slack against clock skew between the monitored server's interval clock and our collection
-               clock. It matters because query_store_stats is a hypertable partitioned on collection_time --
-               without a bound on that column TimescaleDB must open and decompress EVERY chunk rather than
-               the ones the window overlaps. Same shape and same reasoning as the drill-down collector's
-               last_execution_time bound. There is deliberately NO upper twin: collection_time can exceed the
-               interval start without bound if the collector was down when the interval closed, so any
-               ceiling would silently drop exactly the rows a restarted collector just caught up on. */
+            /* Chunk-exclusion bounds, NOT filters: neither can exclude a row the predicate above keeps in
+               any realistic store. They matter because query_store_stats is a hypertable partitioned on
+               collection_time -- without bounds on that column TimescaleDB must open and decompress every
+               chunk from the window through the present rather than the ones the window overlaps. Same
+               shape and reasoning as the drill-down collector's last_execution_time bound.
+
+               The FLOOR is free: an interval is always collected after it starts, so
+               interval_start_time_utc <= collection_time, and therefore COALESCE(...) >= $2 already implies
+               collection_time >= $2. The extra day is slack against clock skew between the monitored
+               server's interval clock and ours.
+
+               The CEILING is deliberately enormous rather than tight, because tight is unsafe here. A row's
+               collection_time exceeds its interval start by the interval's own length -- at most 1 day,
+               since Query Store's INTERVAL_LENGTH_MINUTES accepts only 1/5/10/15/30/60/1440 -- plus however
+               long the collector was behind, which nothing bounds. So 30 days is 1 day of engine maximum
+               and 29 of collector-outage allowance. A month-long outage that then back-collects an interval
+               straddling an old window's edge could still omit that one bar; the data stays in the store,
+               and the alternative (no ceiling) makes every historical window scan to the present. */
             AND   collection_time >= $2 - interval '1 day'
+            AND   collection_time <= $3 + interval '30 days'
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
         )
         SELECT

@@ -147,9 +147,10 @@ public sealed partial class ViewerDataService
                    dropped the range's final interval because its closing fetch had not happened yet. */
                 AND   interval_start_time_utc >= $2
                 AND   interval_start_time_utc <= $3
-                /* Chunk-exclusion bound only; see the slicer for why it cannot drop a row and has no upper
-                   twin. */
+                /* Chunk-exclusion bounds only; see the slicer for why the floor is free and why the ceiling
+                   is a month rather than tight. */
                 AND   collection_time >= $2 - interval '1 day'
+                AND   collection_time <= $3 + interval '30 days'
                 AND   interval_start_time_utc IS NOT NULL
                 AND   ($4::text[] IS NULL OR database_name = ANY($4))
             ) AS identified
