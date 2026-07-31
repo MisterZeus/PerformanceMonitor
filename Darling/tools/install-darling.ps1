@@ -195,7 +195,7 @@ else {
 # inheritable ACEs instead, so on an install under C:\ every past edit left a world-readable copy of the
 # same secrets. The service hardens new backups itself now; these are the ones already on disk.
 #
-# The service account is also made the OWNER, best-effort and separately from the DACL. Ownership carries
+# The service account is also made the OWNER, best-effort and in a try of its own. Ownership carries
 # WRITE_DAC implicitly, which is what lets the service re-assert this ACL at every start. Granting it
 # FullControl below achieves the same thing today; owning the file means it still holds if someone later
 # edits the DACL and drops that grant. Done AFTER the DACL and in its own try, so a SeRestorePrivilege
@@ -231,8 +231,19 @@ foreach ($secretFile in @($configPath) + @(Get-ChildItem -Path $root -Filter 'da
         }
         Set-Acl -Path $secretFile -AclObject $acl
 
+        # The owner goes onto the file's CURRENT descriptor, never a fresh FileSecurity (#1957). Set-Acl applies
+        # the whole descriptor it is handed, so a bare object carrying nothing but an owner also wrote an empty,
+        # UNPROTECTED DACL - which re-enabled inheritance and handed BUILTIN\Users read straight back on an
+        # install under C:\. Measured on a scratch layout under C:\: immediately after this step the file read
+        # protected=False with BUILTIN\Users present, all four inherited ACEs back and every hardened ACE gone.
+        # So the verification below was failing HONESTLY - the file really was exposed at that instant - and the
+        # SECURITY WARNING that fired on three consecutive field installs was right about a hole this script had
+        # just opened itself. It stayed invisible because #1818's startup sweep re-hardens the config and its
+        # backups seconds later at the first service start, so an operator's before/after ACL captures both
+        # looked correct and only the installer disagreed. Re-reading first keeps the DACL written above in the
+        # descriptor that gets applied, which is what makes the verified state the FINAL state.
         try {
-            $owner = New-Object System.Security.AccessControl.FileSecurity
+            $owner = Get-Acl -Path $secretFile
             $owner.SetOwner($serviceSid)
             Set-Acl -Path $secretFile -AclObject $owner
         }
@@ -261,6 +272,7 @@ foreach ($secretFile in @($configPath) + @(Get-ChildItem -Path $root -Filter 'da
 
 if ($hardened.Count -gt 0) {
     Write-Host "Restricted $($hardened.Count) credential file(s) to SYSTEM, Administrators, and the service account (they hold encrypted passwords and access tokens). darling.json additionally allows INTERACTIVE read, which the Viewer and the CLI verbs need; its .bak-* copies do not."
+    Write-Host 'The service re-verifies and re-applies these ACLs on every start (#1818), so this is a floor rather than a one-time act: a later edit that loosens one is repaired at the next start without re-running the installer.'
 }
 if ($failed.Count -gt 0) {
     Write-Host ''

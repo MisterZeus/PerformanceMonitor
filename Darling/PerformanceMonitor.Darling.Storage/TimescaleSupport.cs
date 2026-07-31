@@ -1615,8 +1615,10 @@ WITH NO DATA";
     public const string RawRetentionInterval = "4 days";
 
     /// <summary>Hourly-CAGG-tier retention horizon: keep the hourly rollups 90 days — well past the daily CAGG's
-    /// 3-day refresh window, so the hourly drop never outruns the daily aggregate. The daily CAGGs themselves get
-    /// NO retention policy: they are the coarsened, kept-indefinitely tier.
+    /// 3-day refresh window, so the hourly drop never outruns the daily aggregate. The daily HISTORY CAGGs get
+    /// NO retention policy: they are the coarsened, kept-indefinitely tier. (The interval-grain daily is not one
+    /// of them — it is dedup plumbing and carries <see cref="IntervalDailyRetentionInterval"/>, which is why the
+    /// summary line qualifies this rather than claiming it of every daily, #1958.)
     ///
     /// <para><b>90, not 21 (#1937).</b> The viewer offers month-plus windows and the reason for the number is
     /// entirely about what those windows can RENDER: at 21 days a 30-day view finds three weeks of hourly data
@@ -2062,9 +2064,15 @@ AND   j.hypertable_name = '{relation}'";
     }
 
     /// <summary>
-    /// Attaches the tiered retention policies: the three raw tables drop at <see cref="RawRetentionInterval"/>, the
-    /// three hourly CAGGs at <see cref="HourlyRetentionInterval"/>; the daily CAGGs are kept indefinitely (no
-    /// policy). Ordering safety is by HORIZON, not run order — each tier's drop stays comfortably past the next
+    /// Attaches the tiered retention policies. The three raw tables drop at <see cref="RawRetentionInterval"/>
+    /// and the hourly HISTORY CAGGs at <see cref="HourlyRetentionInterval"/>; the daily history CAGGs get no
+    /// policy at all and are kept indefinitely. Two tiers are deliberately off that ladder and neither is
+    /// history: the interval-identity dedup layers (<see cref="IntervalRetentionInterval"/> hourly,
+    /// <see cref="IntervalDailyRetentionInterval"/> daily) are internal plumbing sized only to outlive what
+    /// gates on them, and the baseline aggregates keep <see cref="BaselineRetentionInterval"/>. The summary this
+    /// logs names all of them, because an operator cross-checking it against
+    /// <c>timescaledb_information.jobs</c> meets every one (#1958).
+    /// Ordering safety is by HORIZON, not run order — each tier's drop stays comfortably past the next
     /// tier's 3-day refresh start_offset (4d raw vs 3d hourly refresh; 90d hourly vs 3d daily refresh), so a drop
     /// never removes history the next tier has not yet materialized. Idempotent (<c>if_not_exists</c>) and
     /// failure-isolated per policy. MUST run AFTER <see cref="EnsureContinuousAggregatesAsync"/> so the hourly
@@ -2202,9 +2210,20 @@ AND   j.hypertable_name = '{relation}'";
             }
         }
 
+        /* EVERY tier that has a policy is named, and every horizon is INTERPOLATED rather than restated
+           (#1942 — this exact line class has drifted before). The parenthetical used to read "raw {Raw}, hourly
+           CAGGs {Hourly}; daily CAGGs kept indefinitely", which is a universal claim with three counterexamples
+           sitting in timescaledb_information.jobs — the very table the docs send an operator to when they want
+           to check it. The interval-dedup L1 is deliberately SHORTER than the hourly tier (it is internal
+           plumbing gated on outliving raw, not history); its daily twin carries a horizon at all, despite the
+           line promising dailies are kept forever; and the nine baseline aggregates have a horizon of their own
+           that went unmentioned. A field operator cross-checking found the first one immediately and had to
+           work out whether they had hit a bug (#1958). A summary line is only worth printing if it survives
+           being checked. */
         logger?.LogInformation(
-            "TimescaleDB: {Applied}/{Total} retention policies in place, {Armed} armed, {Held} held paused pending backfill, {Indeterminate} left as-is (coverage unreadable), {Converged} moved onto a new horizon (raw {Raw}, hourly CAGGs {Hourly}; daily CAGGs kept indefinitely)",
-            applied, RetentionPolicies.Count, armed, held, indeterminate, converged, RawRetentionInterval, HourlyRetentionInterval);
+            "TimescaleDB: {Applied}/{Total} retention policies in place, {Armed} armed, {Held} held paused pending backfill, {Indeterminate} left as-is (coverage unreadable), {Converged} moved onto a new horizon (raw {Raw}, hourly history CAGGs {Hourly}, baseline CAGGs {Baseline}, internal interval-dedup tiers {Interval} hourly and {IntervalDaily} daily; the daily history CAGGs carry no policy and are kept indefinitely)",
+            applied, RetentionPolicies.Count, armed, held, indeterminate, converged,
+            RawRetentionInterval, HourlyRetentionInterval, BaselineRetentionInterval, IntervalRetentionInterval, IntervalDailyRetentionInterval);
         return applied;
     }
 

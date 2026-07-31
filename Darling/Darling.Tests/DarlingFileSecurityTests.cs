@@ -519,4 +519,82 @@ public sealed class DarlingFileSecurityTests
             try { Directory.Delete(directory, recursive: true); } catch { /* best-effort */ }
         }
     }
+
+    /// <summary>
+    /// The installer's owner step must set the owner on the file's CURRENT descriptor, never on a freshly
+    /// constructed <c>FileSecurity</c> (#1957).
+    ///
+    /// <para><b>The bug this pins is a PowerShell semantic no compiler can see.</b> <c>Set-Acl</c> applies the
+    /// whole descriptor it is handed, so a bare <c>FileSecurity</c> carrying nothing but <c>SetOwner</c> also
+    /// wrote an empty, unprotected DACL — re-enabling inheritance and handing <c>BUILTIN\Users</c> read back on
+    /// an install under <c>C:\</c>, one statement after the hardened DACL was applied. Measured on a scratch
+    /// layout under <c>C:\</c>: immediately after that step the file read protected=False with
+    /// <c>BUILTIN\Users</c> present and every hardened ACE gone. The per-file verification that follows was
+    /// therefore correct all along and the SECURITY WARNING it printed on three consecutive field installs was
+    /// honest — about a hole the script itself had just opened.</para>
+    ///
+    /// <para>Pinned STRUCTURALLY rather than behaviourally on purpose. Reproducing the defect needs PowerShell's
+    /// <c>Set-Acl</c> and an elevated <c>SeRestorePrivilege</c> to set a service SID as owner; the equivalent
+    /// .NET call persists only the sections it sees modified, so a C# test would go green against the exact
+    /// code that broke the field boxes. What is checkable here is the shape: one descriptor built for the DACL,
+    /// the owner applied onto a re-read of what was written, and the verification LAST so the state it judges
+    /// is the state the installer leaves behind.</para>
+    /// </summary>
+    [Fact]
+    public void InstallScript_SetsTheOwnerOnTheCurrentDescriptor_SoTheHardenedDaclSurvives()
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", "install-darling.ps1"));
+
+        var setOwner = script.IndexOf("$owner.SetOwner($serviceSid)", StringComparison.Ordinal);
+        Assert.True(setOwner >= 0, "install-darling.ps1 no longer sets the credential files' owner");
+
+        /* The owner descriptor is READ from the file, and read close enough to the SetOwner to be the same
+           object rather than an unrelated Get-Acl elsewhere in the script. */
+        var reRead = script.IndexOf("$owner = Get-Acl -Path $secretFile", StringComparison.Ordinal);
+        Assert.True(reRead >= 0 && reRead < setOwner,
+            "the owner must be set on the file's CURRENT ACL ($owner = Get-Acl ...), not on a fresh " +
+            "FileSecurity — Set-Acl writes the whole descriptor, so a bare one wipes the hardened DACL (#1957).");
+
+        /* Exactly ONE FileSecurity is constructed in the whole script: the hardened DACL. A second one is how
+           this defect looked, and the assertion above alone would stay green with a bare-descriptor Set-Acl
+           left behind after the re-read. */
+        var constructions = script.Split("New-Object System.Security.AccessControl.FileSecurity", StringSplitOptions.None).Length - 1;
+        Assert.True(constructions == 1,
+            $"expected exactly 1 FileSecurity construction (the hardened DACL), found {constructions}. A second " +
+            "bare descriptor applied over the first is #1957: it resets DACL protection and lets the folder's " +
+            "inherited BUILTIN\\Users read come straight back.");
+
+        /* And the verification must judge the FINAL state — after both the DACL and the owner. */
+        var verify = script.IndexOf("$after = Get-Acl -Path $secretFile", StringComparison.Ordinal);
+        Assert.True(verify > setOwner,
+            "the per-file verification must run AFTER the owner step, or it certifies a state the installer " +
+            "then changes.");
+    }
+
+    private static string ReadRepoFile(string relativePath)
+    {
+        var root = FindRepoRoot();
+        Assert.NotNull(root);
+        var path = Path.Combine(root, relativePath);
+        Assert.True(File.Exists(path), $"expected {path} to exist");
+        return File.ReadAllText(path);
+    }
+
+    /// <summary>Walks up from the test output directory to the repo root (the directory holding
+    /// <c>PerformanceMonitor.sln</c>) — the same idiom <c>DarlingFirewallCheckTests</c> uses.</summary>
+    private static string? FindRepoRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        for (var i = 0; i < 10 && directory is not null; i++)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "PerformanceMonitor.sln")))
+            {
+                return directory.FullName;
+            }
+
+            directory = directory.Parent;
+        }
+
+        return null;
+    }
 }
