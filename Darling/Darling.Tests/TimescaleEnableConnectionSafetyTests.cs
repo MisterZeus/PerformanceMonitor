@@ -75,7 +75,7 @@ public sealed class TimescaleEnableConnectionSafetyTests
                     continue;
                 }
 
-                if (!line.Contains("Assert.True(", StringComparison.Ordinal))
+                if (!IsCheckedOnTheSpot(lines, i))
                 {
                     offenders.Add($"{name}:{i + 1}");
                 }
@@ -85,7 +85,8 @@ public sealed class TimescaleEnableConnectionSafetyTests
         Assert.True(offenders.Count == 0,
             "these call TimescaleSupport.TryEnableAsync on a connection they keep using, so an unpreloaded " +
             "TimescaleDB masks the real cause behind \"Connection is not open\" (#1922). Route them through " +
-            $"LiveTimescaleProbe.TryEnableAsync, or assert the result on the spot: {string.Join(", ", offenders)}");
+            "LiveTimescaleProbe.TryEnableAsync, or assert the result immediately — either inline in " +
+            $"Assert.True(...) or captured and asserted within the next three lines: {string.Join(", ", offenders)}");
     }
 
     /// <summary>
@@ -130,6 +131,45 @@ public sealed class TimescaleEnableConnectionSafetyTests
         /* And the connection stays dedicated — a shared one would carry the damage out of the block whatever
            the gate does. */
         Assert.Contains("await using var timescaleConnection = await postgres.OpenConnectionAsync", worker, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Whether the call on <paramref name="index"/> has its result checked before the connection could be
+    /// used again — either asserted inline, or captured and asserted within the next few lines.
+    ///
+    /// <para>Both shapes are accepted deliberately. An inline-only rule would flag this, which is safe:</para>
+    /// <code>
+    /// var enabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+    /// Assert.True(enabled, "the rig is expected to have TimescaleDB");
+    /// </code>
+    /// <para>and a guard that fires on a safe shape is worse than no guard — the next person routes around it
+    /// rather than reading it. The capture form is tied to its OWN variable rather than accepting any nearby
+    /// <c>Assert.True</c>, so an unrelated assertion two lines down cannot launder an unchecked call.</para>
+    /// </summary>
+    private static bool IsCheckedOnTheSpot(string[] lines, int index)
+    {
+        var line = lines[index];
+        if (line.Contains("Assert.True(", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        var captured = Regex.Match(line, @"var\s+(\w+)\s*=\s*await\s+TimescaleSupport\.TryEnableAsync\(");
+        if (!captured.Success)
+        {
+            return false;
+        }
+
+        var variable = captured.Groups[1].Value;
+        for (var i = index + 1; i < Math.Min(index + 4, lines.Length); i++)
+        {
+            if (Regex.IsMatch(lines[i], $@"Assert\.True\(\s*{Regex.Escape(variable)}\b"))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static string? FindTestProjectDirectory()
