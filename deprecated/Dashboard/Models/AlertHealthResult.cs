@@ -73,6 +73,14 @@ namespace PerformanceMonitorDashboard.Models
         public string? CollectionStoppedReason { get; set; }
 
         /// <summary>
+        /// The same cause as <see cref="CollectionStoppedReason"/>, compressed to fit the Alert History
+        /// grid's Value column (e.g. "3 of 6 job(s) disabled", "no collection in 47m"). Null when
+        /// collection is healthy. Computed alongside the reason rather than at the fire site, so the two
+        /// cannot describe different branches of the same incident (#1913).
+        /// </summary>
+        public string? CollectionStoppedShortValue { get; set; }
+
+        /// <summary>
         /// Count of PerformanceMonitor Agent jobs with enabled = 0. 0 when none are disabled,
         /// or when job state couldn't be read (Azure SQL DB / restricted msdb).
         /// </summary>
