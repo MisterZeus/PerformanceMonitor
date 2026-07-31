@@ -907,6 +907,17 @@ public sealed class WebhooksConfig
 
     [JsonPropertyName("genericProxy")]
     public string GenericProxy { get; set; } = "";
+
+    /* PagerDuty webhook — Events API v2. The routing key is a bearer-secret-like opaque token (comparable
+       to the Teams/Slack/Generic webhook URLs), so it is stored as a plaintext column in Postgres with a
+       column-level REVOKE from the read-only viewer role (DarlingManagedRoles.ViewerRestrictedConfigTables).
+       Enabled by a non-empty routing key, like the sibling channels. */
+
+    [JsonPropertyName("pagerDutyRoutingKey")]
+    public string PagerDutyRoutingKey { get; set; } = "";
+
+    [JsonPropertyName("pagerDutyUseEuRegion")]
+    public bool PagerDutyUseEuRegion { get; set; } = false;
 }
 
 public sealed class MonitoredServer

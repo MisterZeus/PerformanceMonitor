@@ -85,6 +85,7 @@ public static class PgMigrations
         new Migration(39, "dim-feeding-fact-floor-indexes", V39Sql),
         new Migration(40, "blocking-wait-threshold", V40Sql),
         new Migration(41, "query-store-interval-identity", V41Sql),
+        new Migration(42, "pagerduty-webhook", V42Sql),
     };
 
     /// <summary>
@@ -678,6 +679,21 @@ ALTER TABLE config.config_alert_settings
 ALTER TABLE query_store_stats ADD COLUMN IF NOT EXISTS runtime_stats_interval_id bigint;
 ALTER TABLE query_store_stats ADD COLUMN IF NOT EXISTS interval_start_time_utc timestamp;
 CREATE OR REPLACE VIEW v_query_store_stats AS SELECT * FROM query_store_stats;";
+
+    /// <summary>
+    /// V42 — PagerDuty webhook channel (#1943). Adds two columns to <c>config.config_notification</c>:
+    /// <c>pagerduty_routing_key</c> (the 32-character Events API v2 integration key, stored as plaintext
+    /// but column-REVOKEd from the read-only viewer role — same secret tier as Teams/Slack/Generic webhook
+    /// URLs) and <c>pagerduty_use_eu_region</c> (boolean flag for EU data center endpoint). Both are
+    /// non-null with safe defaults (empty string / false) so existing rows get valid values without a data
+    /// migration. The routing key is carved from the viewer role's SELECT grant in
+    /// <c>DarlingManagedRoles.ViewerRestrictedConfigTables</c> and <c>Darling/tools/provision-roles.sql</c>;
+    /// the EU flag is non-secret and stays in the viewer's grant.
+    /// </summary>
+    private const string V42Sql = @"
+ALTER TABLE config.config_notification
+    ADD COLUMN IF NOT EXISTS pagerduty_routing_key text NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS pagerduty_use_eu_region boolean NOT NULL DEFAULT FALSE;";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

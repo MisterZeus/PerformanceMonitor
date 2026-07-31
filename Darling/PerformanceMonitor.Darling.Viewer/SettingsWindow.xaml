@@ -620,6 +620,46 @@
                     </Hyperlink>
                 </TextBlock>
 
+                <!-- PagerDuty -->
+                <TextBlock Text="PagerDuty Notifications" FontSize="14" FontWeight="SemiBold"
+                           Foreground="{DynamicResource ForegroundBrush}" Margin="0,20,0,0"/>
+                <TextBlock Text="Send alert notifications to PagerDuty via the Events API v2. Alerts trigger a PagerDuty incident; repeated alerts for the same condition correlate into the same incident."
+                           FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                <CheckBox x:Name="PagerDutyWebhookEnabledCheckBox" Content="Enable PagerDuty notifications" Margin="0,8,0,0"
+                          Foreground="{DynamicResource ForegroundBrush}" Checked="PagerDutyWebhookEnabledCheckBox_Changed" Unchecked="PagerDutyWebhookEnabledCheckBox_Changed"/>
+                <Grid Margin="20,6,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="110"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Routing Key:" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>
+                    <TextBox Grid.Row="0" Grid.Column="1" x:Name="PagerDutyRoutingKeyBox" Margin="0,0,0,4"
+                             ToolTip="The 32-character Integration Key from a PagerDuty Events API v2 integration"/>
+
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="" VerticalAlignment="Center" Margin="0,0,8,4"/>
+                    <CheckBox Grid.Row="1" Grid.Column="1" x:Name="PagerDutyEuRegionCheckBox" Content="Use EU data center (events.eu.pagerduty.com)"
+                              Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+
+                    <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
+                        <Button x:Name="TestPagerDutyButton" Content="Send Test Notification" Click="TestPagerDutyButton_Click"/>
+                        <TextBlock x:Name="PagerDutyStatusText" FontSize="11" FontStyle="Italic"
+                                   Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                    </StackPanel>
+                </Grid>
+                <TextBlock Margin="20,8,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
+                    <Run Text="Setup: Create a service in PagerDuty, add an Events API v2 integration, and copy its Integration Key. "/>
+                    <Hyperlink NavigateUri="https://support.pagerduty.com/docs/services-and-integrations"
+                               RequestNavigate="Hyperlink_RequestNavigate">
+                        PagerDuty Integrations Documentation
+                    </Hyperlink>
+                </TextBlock>
+
                 <!-- Generic webhook -->
                 <TextBlock Text="Generic Webhook (HTTP POST)" FontSize="14" FontWeight="SemiBold"
                            Foreground="{DynamicResource ForegroundBrush}" Margin="0,20,0,0"/>

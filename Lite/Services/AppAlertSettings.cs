@@ -44,6 +44,12 @@ public sealed class AppAlertSettings : IAlertSettings
     public string GenericWebhookBodyTemplate => App.GenericWebhookBodyTemplate;
     public string GenericWebhookProxyAddress => App.GenericWebhookProxyAddress;
 
+    /* PagerDuty: the enable flag AND a non-empty routing key, matching the sibling channels' shape
+       (TrySendWebhookAlertsAsync checks both for every channel). */
+    public bool   PagerDutyEnabled     => App.PagerDutyWebhookEnabled && !string.IsNullOrWhiteSpace(App.PagerDutyRoutingKey);
+    public string PagerDutyRoutingKey  => App.PagerDutyRoutingKey;
+    public bool   PagerDutyUseEuRegion => App.PagerDutyUseEuRegion;
+
     public double AnalysisNotifySeverity        => App.AnalysisNotifySeverity;
     public int    AnalysisNotifyCooldownMinutes => App.AnalysisNotifyCooldownMinutes;
 }

@@ -445,7 +445,8 @@ FROM config_alert_settings WHERE id = 1", connection);
         using var command = new NpgsqlCommand(@"
 SELECT smtp_host, smtp_port, smtp_use_ssl, smtp_username, smtp_encrypted_password, smtp_from_address,
        smtp_recipients, email_cooldown_minutes, teams_url, teams_proxy, slack_url, slack_proxy,
-       generic_url, generic_headers, generic_body_template, generic_proxy
+       generic_url, generic_headers, generic_body_template, generic_proxy,
+       pagerduty_routing_key, pagerduty_use_eu_region
 FROM config_notification WHERE id = 1", connection);
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -474,6 +475,8 @@ FROM config_notification WHERE id = 1", connection);
             GenericHeaders = reader.GetString(13),
             GenericBodyTemplate = reader.GetString(14),
             GenericProxy = reader.GetString(15),
+            PagerDutyRoutingKey = reader.GetString(16),
+            PagerDutyUseEuRegion = reader.GetBoolean(17),
         };
         return (smtp, webhooks);
     }
