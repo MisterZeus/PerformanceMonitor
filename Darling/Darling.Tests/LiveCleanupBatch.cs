@@ -51,8 +51,12 @@ namespace Darling.Tests;
 /// finally REPLACES the body's in-flight exception — the exact masking #1794 was filed for and
 /// <see cref="LiveStoreCleanup"/> exists to prevent. Residue is recorded to <see cref="Ledger"/> instead, and
 /// <see cref="LivePostgresStoreFixture"/> fails the RUN with it once every test in the collection has
-/// finished, where there is no test result left to poison. Sixteen <c>finally</c> blocks across three classes
-/// therefore keep their shape; the loudness is added at the one place that can afford it.</para>
+/// finished, where there is no test result left to poison — the loudness is added at the one place that can
+/// afford it.</para>
+///
+/// <para>Since #1896 the callers reach this through <see cref="LiveStoreCleanup"/> rather than on the body's
+/// own connection, which closes the other half of the same problem: a batch is only as good as the session it
+/// runs on, and the session a failing test leaves behind is exactly the one that cannot answer a probe.</para>
 /// </summary>
 internal sealed class LiveCleanupBatch
 {
@@ -252,7 +256,7 @@ internal sealed class LiveCleanupBatch
     /// <summary>
     /// Removes a continuous aggregate's refresh policy and CONFIRMS it is gone, for the callers that keep the
     /// aggregate and only want the scheduler off it. The unverified form inside
-    /// <see cref="DropContinuousAggregateAsync"/> can afford to be best-effort because the drop that follows
+    /// <see cref="DropContinuousAggregatesAsync"/> can afford to be best-effort because the drop that follows
     /// is checked; a caller that leaves the aggregate standing has no such backstop, and a policy it believes
     /// it removed is precisely the standing race (#1788) that strands aggregates in the first place.
     /// </summary>
@@ -274,13 +278,21 @@ internal sealed class LiveCleanupBatch
             + $"AND hypertable_schema = 'collect' AND hypertable_name = '{view}')",
             ct);
 
-    /// <summary>Drops a table (and, for a hypertable, its chunks and policies) created by a test.</summary>
-    public async Task DropTableAsync(string table, CancellationToken ct)
+    /// <summary>
+    /// Drops a table (and, for a hypertable, its chunks and policies) created by a test.
+    /// </summary>
+    /// <param name="schema">
+    /// Defaults to <c>collect</c>, which is where all but one caller creates. The exception earns the
+    /// parameter rather than a second method: <c>DarlingSecuritySplitLiveTests</c> builds its compressed
+    /// hypertable in <c>public</c> and MOVES it to <c>collect</c>, so depending on how far the body got it can
+    /// be standing in either, and the teardown has to name both.
+    /// </param>
+    public async Task DropTableAsync(string table, CancellationToken ct, string schema = "collect")
         => await RemoveAsync(
-            $"table collect.{table}",
-            $"DROP TABLE IF EXISTS collect.{table} CASCADE",
+            $"table {schema}.{table}",
+            $"DROP TABLE IF EXISTS {schema}.{table} CASCADE",
             "SELECT EXISTS (SELECT 1 FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace "
-            + $"WHERE n.nspname = 'collect' AND c.relname = '{table}')",
+            + $"WHERE n.nspname = '{schema}' AND c.relname = '{table}')",
             ct);
 
     /// <summary>

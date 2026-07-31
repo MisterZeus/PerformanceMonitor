@@ -57,5 +57,13 @@
          the REAL pins (#1706) rather than a second copy that could itself go stale — the exact failure
          mode the test exists to catch. Same Link+copy delivery as the provisioning script above. -->
     <None Include="..\tools\fetch-pg-runtime.ps1" Link="Fixtures\fetch-pg-runtime.ps1" CopyToOutputDirectory="PreserveNewest" />
+    <!-- #1888: the two workflows that stand up the gated-live throwaway cluster, copied beside the test
+         binary so CiClusterWorkerSizingTests parses the REAL files. The cluster's worker sizing has to be
+         hard-coded in YAML (a workflow cannot call into the product), and hard-coded numbers derived from
+         the collector catalog go stale the moment a collector is added — which already happened once to a
+         "40" pin in DarlingManagedPostgresTests. Parsing the workflow against the live formula is the only
+         thing that keeps CI's cluster shaped like the product's as the catalog grows. -->
+    <None Include="..\..\.github\workflows\build.yml" Link="Fixtures\build.yml" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\.github\workflows\nightly.yml" Link="Fixtures\nightly.yml" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
