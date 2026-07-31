@@ -6,8 +6,10 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.IO;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
@@ -156,7 +158,7 @@ public sealed class DarlingEmptyEnumerationNoteTests
 
         var perServer = ViewerDataService.CollectionHealthSql;
         var fleet = ViewerDataService.FleetCollectionHealthSql;
-        foreach (var column in new[] { "AS last_note", "AS note_count" })
+        foreach (var column in new[] { "AS last_note", "AS note_count", "AS has_user_databases" })
         {
             Assert.Contains(column, perServer);
             Assert.Contains(column, fleet);
@@ -164,6 +166,7 @@ public sealed class DarlingEmptyEnumerationNoteTests
 
         Assert.Contains("LastNote = reader.IsDBNull(11)", source);
         Assert.Contains("NoteCount = reader.IsDBNull(12)", source);
+        Assert.Contains("TargetHasUserDatabases = !reader.IsDBNull(13)", source);
 
         /* #1855: the fleet read holds the ORDINALS but deliberately not the exemplar TEXT. Its only
            caller bands and counts; no surface renders a fleet row's message, and ranking them turns a
@@ -176,6 +179,14 @@ public sealed class DarlingEmptyEnumerationNoteTests
         Assert.Contains("CAST(NULL AS text) AS last_error", fleet);
         Assert.Contains("COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count", fleet);
         Assert.DoesNotContain("CAST(NULL AS text)", perServer);
+
+        /* #1852 holds the same line for the same reasons plus one of its own: the fleet read groups
+           server_id INTO the result, so there is no single server to probe an inventory for. A truthful
+           fleet version would be a cross-collector join across every enabled server on a query the status
+           bar re-runs on every aggregate-tab refresh. The per-server read owns the subquery outright. */
+        Assert.Contains("CAST(NULL AS integer) AS has_user_databases", fleet);
+        Assert.Contains("FROM v_database_size_stats", perServer);
+        Assert.DoesNotContain("v_database_size_stats", fleet);
     }
 
     [Fact]
@@ -215,8 +226,17 @@ public sealed class DarlingEmptyEnumerationNoteTests
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs"),
         })
         {
-            var source = ReadRepoFile(relative);
-            Assert.Contains("note_summary = CollectorHealthClassifier.FormatCollectionNote(r.LastNote, r.NoteCount, r.TotalRuns)", source);
+            /* Whitespace-collapsed so the pin survives the line wrapping the argument list needs, rather
+               than pinning one formatting of it. */
+            var source = Regex.Replace(ReadRepoFile(relative), @"\s+", " ");
+            Assert.Contains(
+                "note_summary = CollectorHealthClassifier.FormatCollectionNote( r.LastNote, r.NoteCount, r.TotalRuns, r.CollectorName, r.TargetHasUserDatabases)",
+                source,
+                StringComparison.Ordinal);
+
+            /* #1852: the raw flag rides the payload too, so an MCP caller diagnosing an empty collector
+               gets a boolean rather than having to parse the qualifier out of note_summary's sentence. */
+            Assert.Contains("target_has_user_databases = r.TargetHasUserDatabases", source, StringComparison.Ordinal);
         }
     }
 
@@ -280,6 +300,19 @@ public sealed class DarlingEmptyEnumerationNoteTests
             CollectorHealthClassifier.FormatCollectionNote(row.LastNote, row.NoteCount, row.TotalRuns),
             row.NoteFormatted);
         Assert.Contains("(all 96 runs)", row.NoteFormatted);
+
+        /* #1852 gave the formatter two more inputs, so "the property delegates" is only still a real
+           claim if the property passes them. Asserted on a row where they CHANGE the answer: with the
+           inventory flag set, the three-argument rendering and the property must now DIFFER. */
+        row.TargetHasUserDatabases = true;
+
+        Assert.Equal(
+            CollectorHealthClassifier.FormatCollectionNote(
+                row.LastNote, row.NoteCount, row.TotalRuns, row.CollectorName, row.TargetHasUserDatabases),
+            row.NoteFormatted);
+        Assert.NotEqual(
+            CollectorHealthClassifier.FormatCollectionNote(row.LastNote, row.NoteCount, row.TotalRuns),
+            row.NoteFormatted);
     }
 
     /* Locate the repo from this file — the DarlingLockTimeoutYieldTests idiom; no build-output copying. */

@@ -84,7 +84,34 @@ SELECT
     MAX(CASE WHEN note_rank = 1 AND status = 'SUCCESS' THEN error_message END) AS last_note,
     -- How many of the window's runs carried one. note_count = total_runs is the persistently-empty
     -- signal the operator is actually looking for: EVERY run this week came back with nothing.
-    COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count
+    COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count,
+    -- #1852: the one thing that makes a persistently-empty enumeration interesting — does this target
+    -- actually HAVE user databases? Zero items on a server with none is legitimate and stays quiet;
+    -- zero items on a server that HAS them is a login that cannot enter any, or a filter that
+    -- swallowed everything. database_size_stats rather than database_config for three reasons: it runs
+    -- on the scheduled loop (60 min) where database_config is on-load and can age past this window on
+    -- a long-running install; it is indexed on (server_id, collection_time) where database_config has
+    -- no index at all; and it reads sys.master_files, so it still sees databases the monitoring login
+    -- cannot ENTER — which is exactly the case being diagnosed. database_id > 4 excludes the system
+    -- databases, tempdb included: the size collector takes every ONLINE database, so a bare row check
+    -- would be true on every server alive.
+    --
+    -- The inventory window is the health read's OWN ($2) — no second parameter, and an inventory that
+    -- aged out says nothing rather than something stale. Uncorrelated, so both engines evaluate it
+    -- once per query (a Postgres InitPlan) instead of per row, and it needs no GROUP BY entry and no
+    -- join. Feeds display text only, through the shared formatter; the banding never sees it.
+    CASE
+        WHEN EXISTS
+             (
+                 SELECT 1
+                 FROM v_database_size_stats
+                 WHERE server_id = $1
+                 AND   collection_time >= $2
+                 AND   database_id > 4
+             )
+        THEN 1
+        ELSE 0
+    END AS has_user_databases
 FROM
 (
     -- #1855: rank each class of message newest-first so the two exemplar columns above can take the
@@ -143,7 +170,8 @@ ORDER BY collector_name";
                 PermissionDeniedCount = reader.IsDBNull(9) ? 0 : ToInt64(reader.GetValue(9)),
                 YieldCount = reader.IsDBNull(10) ? 0 : ToInt64(reader.GetValue(10)),
                 LastNote = reader.IsDBNull(11) ? null : reader.GetString(11),
-                NoteCount = reader.IsDBNull(12) ? 0 : ToInt64(reader.GetValue(12))
+                NoteCount = reader.IsDBNull(12) ? 0 : ToInt64(reader.GetValue(12)),
+                TargetHasUserDatabases = !reader.IsDBNull(13) && ToInt64(reader.GetValue(13)) != 0
             });
         }
 
@@ -314,6 +342,15 @@ public class CollectorHealthRow
     /// <summary>How many of <see cref="TotalRuns"/> carried a <see cref="LastNote"/>.</summary>
     public long NoteCount { get; set; }
 
+    /// <summary>
+    /// #1852: whether the store saw user databases on this target inside the health window
+    /// (<c>has_user_databases</c>) — what tells a legitimately empty server apart from one that is
+    /// enumerating nothing despite having databases. False also covers "no inventory to go on", which
+    /// deliberately reads the same as "nothing to say". Informational, like <see cref="LastNote"/>:
+    /// <see cref="HealthStatus"/> never sees it.
+    /// </summary>
+    public bool TargetHasUserDatabases { get; set; }
+
     public double FailureRatePercent => TotalRuns > 0 ? (double)ErrorCount / TotalRuns * 100 : 0;
     public double HoursSinceLastSuccess => LastSuccessTime.HasValue
         ? (DateTime.UtcNow - LastSuccessTime.Value).TotalHours
@@ -346,10 +383,13 @@ public class CollectorHealthRow
         : "";
 
     /// <summary>
-    /// The informational note plus its "all N runs" / "N of M runs" qualifier (#1837), or blank. Shared
-    /// with the Darling Viewer through <see cref="CollectorHealthClassifier.FormatCollectionNote"/> so the
-    /// two apps' health grids read identically. Never feeds <see cref="HealthStatus"/>.
+    /// The informational note plus its "all N runs" / "N of M runs" qualifier (#1837) and, when a
+    /// persistently empty enumeration lands on a target the store has seen user databases on, #1852's
+    /// "target has user databases" — or blank. Shared with the Darling Viewer through
+    /// <see cref="CollectorHealthClassifier.FormatCollectionNote"/> so the two apps' health grids read
+    /// identically. Never feeds <see cref="HealthStatus"/>.
     /// </summary>
-    public string NoteFormatted => CollectorHealthClassifier.FormatCollectionNote(LastNote, NoteCount, TotalRuns);
+    public string NoteFormatted =>
+        CollectorHealthClassifier.FormatCollectionNote(LastNote, NoteCount, TotalRuns, CollectorName, TargetHasUserDatabases);
 }
 
