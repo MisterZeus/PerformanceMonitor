@@ -158,6 +158,20 @@ public static class TimescaleSupport
     /// never create it; a server without the loadable library (or without the privilege to
     /// create it) throws, which degrades gracefully to "not available" — logged once at
     /// Information (plain-PostgreSQL mode is a fully supported configuration, not a problem).
+    ///
+    /// <para><b>A <c>false</c> return may mean <paramref name="connection"/> IS NO LONGER USABLE, and callers
+    /// must not keep using it (#1922).</b> One of the ways this fails is not an ordinary ERROR: when the
+    /// library is present on disk but missing from <c>shared_preload_libraries</c>, <c>CREATE EXTENSION</c>
+    /// TERMINATES THE BACKEND. The catch below turns that into <c>false</c> like any other failure, so the
+    /// contract reads as "carry on in plain-PostgreSQL mode" while the connection is in fact dead, and the
+    /// next statement on it throws <c>InvalidOperationException: Connection is not open</c> from wherever
+    /// that happens to be — naming the cause nowhere.</para>
+    ///
+    /// <para><c>DarlingWorker</c> is safe from this by construction and deliberately so: it opens a DEDICATED
+    /// connection for the TimescaleDB block and gates every subsequent call on the returned flag, so a
+    /// <c>false</c> return means nothing touches that connection again before it is disposed. <b>Keep it that
+    /// way</b> — moving a call out from under the flag, or reusing the connection afterwards, reintroduces
+    /// the same masking in the service.</para>
     /// </summary>
     public static async Task<bool> TryEnableAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
     {
