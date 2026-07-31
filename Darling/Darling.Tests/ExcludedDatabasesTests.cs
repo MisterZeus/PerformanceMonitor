@@ -143,10 +143,11 @@ public sealed class ExcludedDatabasesStoreLiveTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await CleanupAsync(connection);
+        await CleanupAsync(connection, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             await InsertServerAsync(connection);
@@ -168,10 +169,13 @@ public sealed class ExcludedDatabasesStoreLiveTests
 
             /* DISTINCT across both stores, system DBs removed, sorted. */
             Assert.Equal(new[] { "AppA", "AppB", "AppC" }, names);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await CleanupAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await CleanupAsync(cleanup, cleanupCt));
         }
     }
 
@@ -211,13 +215,13 @@ public sealed class ExcludedDatabasesStoreLiveTests
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 
-    private static async Task CleanupAsync(NpgsqlConnection connection)
+    private static async Task CleanupAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         foreach (var table in new[] { "database_config", "database_size_stats", "servers" })
         {
             using var command = new NpgsqlCommand($"DELETE FROM {table} WHERE server_id = $1", connection);
             command.Parameters.AddWithValue(ServerId);
-            await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            await command.ExecuteNonQueryAsync(ct);
         }
     }
 }

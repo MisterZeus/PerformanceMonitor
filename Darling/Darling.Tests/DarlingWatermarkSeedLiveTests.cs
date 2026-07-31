@@ -47,6 +47,7 @@ public sealed class DarlingWatermarkSeedLiveTests
         await DeleteLiveRowsAsync(connection, ct);
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
         try
         {
             /* Whole-second naive-UTC times (the storage form of the collection_time `timestamp` column) so the
@@ -73,10 +74,13 @@ public sealed class DarlingWatermarkSeedLiveTests
             Assert.Equal(DateTimeKind.Utc, watermarks["wait_stats"].Kind);
             Assert.Equal(waitNew.Ticks, watermarks["wait_stats"].Ticks);
             Assert.Equal(indexRun.Ticks, watermarks["index_object_stats"].Ticks);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteLiveRowsAsync(connection, ct);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteLiveRowsAsync(cleanup, cleanupCt));
         }
     }
 

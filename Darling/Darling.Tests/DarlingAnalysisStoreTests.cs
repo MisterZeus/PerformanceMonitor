@@ -259,11 +259,12 @@ public sealed class DarlingAnalysisStoreTests
         }
 
         /* Clear leftovers from an earlier aborted run so the assertions below are deterministic. */
-        await DeleteTestRowsAsync(connection);
+        await DeleteTestRowsAsync(connection, TestContext.Current.CancellationToken);
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
         var store = new PgFindingStore(postgres);
 
+        var bodySucceeded = false;
         try
         {
             /* Whole-second window bounds so the PG microsecond timestamp round-trips exactly. */
@@ -394,21 +395,24 @@ public sealed class DarlingAnalysisStoreTests
                 view.Parameters.AddWithValue(TestServerId);
                 Assert.Equal(0L, await view.ExecuteScalarAsync(TestContext.Current.CancellationToken));
             }
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteTestRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteTestRowsAsync(cleanup, cleanupCt));
         }
     }
 
     private static DateTime TruncateToSeconds(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
 
-    private static async Task DeleteTestRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteTestRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM analysis_findings WHERE server_id = {TestServerId}; DELETE FROM analysis_muted WHERE server_id = {TestServerId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 
     /* ---------------- gated: all-servers (NULL) + legacy-0 mute honoring ---------------- */
@@ -423,11 +427,12 @@ public sealed class DarlingAnalysisStoreTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteGlobalMuteRowsAsync(connection);
+        await DeleteGlobalMuteRowsAsync(connection, TestContext.Current.CancellationToken);
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
         var store = new PgFindingStore(postgres);
 
+        var bodySucceeded = false;
         try
         {
             /* The MCP "mute across all servers" path hands the store serverId 0; the write must persist
@@ -470,10 +475,13 @@ public sealed class DarlingAnalysisStoreTests
             Assert.Contains(OtherServerHash, survivorHashes);         /* other server's mute did not leak */
             Assert.Contains(GlobalSurvivorHash, survivorHashes);
             Assert.Equal(2, survivors.Count);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteGlobalMuteRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteGlobalMuteRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -504,10 +512,10 @@ VALUES ($1, $2, $3, $4, $5, $6)", connection);
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 
-    private static async Task DeleteGlobalMuteRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteGlobalMuteRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM analysis_muted WHERE story_path_hash IN ('{GlobalNullHash}', '{LegacyZeroHash}', '{OtherServerHash}', '{GlobalSurvivorHash}');", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 }
