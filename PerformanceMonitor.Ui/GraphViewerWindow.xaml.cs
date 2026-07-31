@@ -34,6 +34,21 @@ public partial class GraphViewerWindow : Window
     }
 
     /// <summary>
+    /// Esc closes the window. Bubbling KeyDown rather than PreviewKeyDown on purpose: a hosted control that
+    /// wants Esc for itself marks the event handled and never reaches here, whereas a preview handler would
+    /// take Esc away from it. There is no close button to hang <c>IsCancel</c> on — the hosted viewer fills
+    /// the window edge to edge. Same treatment as the per-app PlanViewerWindow.
+    /// </summary>
+    private void Window_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == System.Windows.Input.Key.Escape)
+        {
+            e.Handled = true;
+            Close();
+        }
+    }
+
+    /// <summary>
     /// Opens a new, owned, non-modal graph window hosting <paramref name="content"/>. A new window per
     /// call lets the user compare graphs side by side; owned so it stays usable above a modal host window.
     /// </summary>

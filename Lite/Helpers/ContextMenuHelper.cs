@@ -179,7 +179,7 @@ public static class ContextMenuHelper
         var contextMenu = new ContextMenu();
 
         // Copy Image
-        var copyItem = new MenuItem { Header = "Copy Image", Icon = new TextBlock { Text = "\U0001f4cb" } };
+        var copyItem = new MenuItem { Header = "_Copy Image", Icon = new TextBlock { Text = "\U0001f4cb" } };
         copyItem.Click += (s, e) =>
         {
             var tempFile = Path.Combine(Path.GetTempPath(), $"chart_copy_{Guid.NewGuid()}.png");
@@ -202,7 +202,7 @@ public static class ContextMenuHelper
         contextMenu.Items.Add(copyItem);
 
         // Save Image As
-        var saveItem = new MenuItem { Header = "Save Image As...", Icon = new TextBlock { Text = "\U0001f4be" } };
+        var saveItem = new MenuItem { Header = "_Save Image As...", Icon = new TextBlock { Text = "\U0001f4be" } };
         saveItem.Click += (s, e) =>
         {
             var timestamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss", CultureInfo.InvariantCulture);
@@ -221,7 +221,7 @@ public static class ContextMenuHelper
         contextMenu.Items.Add(saveItem);
 
         // Open in New Window
-        var openWindowItem = new MenuItem { Header = "Open in New Window", Icon = new TextBlock { Text = "\U0001f5d7" } };
+        var openWindowItem = new MenuItem { Header = "_Open in New Window", Icon = new TextBlock { Text = "\U0001f5d7" } };
         openWindowItem.Click += (s, e) =>
         {
             var newWindow = new Window
@@ -255,14 +255,14 @@ public static class ContextMenuHelper
         contextMenu.Items.Add(new Separator());
 
         // Revert (re-pin to the settable window when a revertAction is supplied; AutoScale otherwise)
-        var autoscaleItem = new MenuItem { Header = "Revert (or double-click)", Icon = new TextBlock { Text = "\u21a9" } };
+        var autoscaleItem = new MenuItem { Header = "_Revert (or double-click)", Icon = new TextBlock { Text = "\u21a9" } };
         autoscaleItem.Click += (s, e) => RevertChart(chart, revertAction);
         contextMenu.Items.Add(autoscaleItem);
 
         contextMenu.Items.Add(new Separator());
 
         // Export Data to CSV
-        var exportCsvItem = new MenuItem { Header = "Export Data to CSV...", Icon = new TextBlock { Text = "\U0001f4ca" } };
+        var exportCsvItem = new MenuItem { Header = "_Export Data to CSV...", Icon = new TextBlock { Text = "\U0001f4ca" } };
         exportCsvItem.Click += (s, e) =>
         {
             var timestamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss", CultureInfo.InvariantCulture);
@@ -320,7 +320,7 @@ public static class ContextMenuHelper
         {
             contextMenu.Items.Add(new Separator());
 
-            var dataSourceItem = new MenuItem { Header = "Show Data Source", Icon = new TextBlock { Text = "\u2139" } };
+            var dataSourceItem = new MenuItem { Header = "Show _Data Source", Icon = new TextBlock { Text = "\u2139" } };
             dataSourceItem.Click += (s, e) =>
             {
                 MessageBox.Show(

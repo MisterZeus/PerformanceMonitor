@@ -110,9 +110,10 @@ public sealed class QueryStoreCollector : CollectorDefinitionBase<QueryStoreColl
         /// <summary>
         /// The replica role sys.query_store_replicas attributed this runtime-stats row to ('Primary',
         /// 'Secondary', 'Geo Secondary', 'Geo HA Secondary'). NULL = the server did not attribute it
-        /// (pre-2022, a 2022 standalone whose sys.query_store_replicas is empty, or Azure SQL DB, where
-        /// the attribution is gated off for bind safety) — deliberately not coalesced. See
-        /// hasReplicaAttribution in <see cref="BuildPayloadBody"/>.
+        /// (pre-2022, a 2022 standalone whose sys.query_store_replicas is empty, or Managed Instance,
+        /// which keeps the pure version gate) — deliberately not coalesced. Azure SQL DB DOES attribute
+        /// as of #1872, having been gated off for bind safety until the catalog was proven live on both
+        /// General Purpose and Hyperscale. See hasReplicaAttribution in <see cref="BuildPayloadBody"/>.
         /// </summary>
         public string? ReplicaRole { get; set; }
 
@@ -411,7 +412,7 @@ END;
     /// written as ordinary single-quoted T-SQL because that is what Azure SQL DB's per-database
     /// connection executes verbatim; <see cref="BuildPerItemQuery"/> quote-doubles the same string to
     /// nest it inside <c>[db].sys.sp_executesql N'...'</c> for on-prem. Both forms therefore select
-    /// the identical 53 reader ordinals in the identical order, which is the whole point: this method
+    /// the identical 55 reader ordinals in the identical order, which is the whole point: this method
     /// is what stops the two paths from drifting into two column sets that one shared
     /// <see cref="ReadItemAsync"/> then mis-reads.
     ///
@@ -470,22 +471,40 @@ END;
            role on an AG with the feature enabled. NULL honestly means "the server did not attribute
            this row" and is deliberately NOT coalesced to an invented value.
 
-           Azure SQL DB is gated OFF explicitly (#1836) rather than riding the "Azure means newest"
-           rule plan_type_desc gets above, and the difference is bind SAFETY, not taste. The column
-           set does not change — Azure emits the same nvarchar(1) NULL placeholder at the same
-           ordinal a pre-2022 box does, so the reader contract is identical — only the attribution is
-           given up. Two reasons: sys.query_store_runtime_stats.replica_group_id is documented as
-           "SQL Server (Starting with SQL Server 2022 (16.x))" with NO Azure SQL Database in its
-           applies-to note, on a page whose sibling columns DO name Azure explicitly when they mean
-           it; and Query Store for secondary replicas is documented as unavailable on the Hyperscale
-           service tier, with the docs silent on whether the view and column still BIND there. A
-           missing column is not a NULL — it fails the whole SELECT for that database, and
-           on Azure this collector's per-database loop would then fail in every database, which is a
-           worse outcome than the attribution we are declining. Lifting this needs one live probe, not
-           a docs re-read: SELECT OBJECT_ID('sys.query_store_replicas'),
-           COL_LENGTH('sys.query_store_runtime_stats', 'replica_group_id') on a real Azure SQL DB
-           (including Hyperscale) — non-NULL on both is the evidence to flip it. */
-        bool hasReplicaAttribution = productVersion >= 16 && !context.Target.IsAzureSqlDb;
+           Azure SQL DB is ON, riding the same "Azure means newest" rule plan_type_desc gets above —
+           but only because the live probe the previous version of this comment demanded was actually
+           run. It was gated OFF from #1836 until then, and that carve-out was about bind SAFETY, not
+           taste: a missing column is not a NULL, it fails the whole SELECT for that database, and on
+           Azure this collector's per-database loop would then fail in EVERY database — a worse outcome
+           than declining the attribution. The docs still do not settle it (replica_group_id's
+           applies-to note names only "SQL Server (Starting with SQL Server 2022 (16.x))", and Query
+           Store for secondary replicas is documented as unavailable on the Hyperscale service tier,
+           silent on whether the view and column still BIND there), so this is flipped on live evidence
+           instead — gathered on both service tiers the old comment worried about, 2026-07-31 UTC, both
+           running Microsoft SQL Azure (RTM) 12.0.2000.8, EngineEdition 5:
+
+             - The exact probe the old comment specified, answered on both: General Purpose
+               (GP_S_Gen5_1, #1848) and Hyperscale (HS_S_Gen5_2, #1872) each returned
+               OBJECT_ID('sys.query_store_replicas') = -660 and
+               COL_LENGTH('sys.query_store_runtime_stats', 'replica_group_id') = 8.
+             - sys.query_store_replicas binds on both and holds the same 4 role rows box SQL Server has
+               (Primary, Secondary, Geo Secondary, Geo HA Secondary) — a static enumeration of ROLES,
+               not instances, which is why a database with 0 HA replicas does not empty it. Every
+               runtime-stats row carries replica_group_id = 1 and LEFT JOINs cleanly to 'Primary'.
+             - Decisive (#1872): the full 55-column payload composed with hasReplicaAttribution = true —
+               the exact text this method emits — executed on Hyperscale. 55 of 55 columns bound, exit
+               0, and replica_role came back 'Primary' on every row.
+
+           A per-tier gate was considered and rejected: Hyperscale reports EngineEdition 5, the same as
+           General Purpose, so the collector cannot tell the tiers apart at query-build time. It does
+           not need to — both bind identically.
+
+           Managed Instance deliberately keeps the pure version gate, for the same reason plan_type_desc
+           gives above: MI under-reports PRODUCTVERSION too, but its feature set follows a per-instance
+           update policy rather than being evergreen, so "Azure means 2022+" is not sound there and MI
+           has no per-database path to verify it on. IsAzureSqlDb is false for MI, so MI falls through
+           to productVersion >= 16 and stays off until a probe on MI says otherwise. */
+        bool hasReplicaAttribution = productVersion >= 16 || context.Target.IsAzureSqlDb;
 
         /* Build version-conditional column fragments for the Query Store query.
            None of these contain a single quote, so they splice into the body identically whether the

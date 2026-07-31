@@ -290,14 +290,16 @@ public partial class SettingsWindow : Window
         {
             CollectionStatusText.Text = "Status: not connected to the Darling store";
             PauseResumeButton.IsEnabled = false;
-            PauseResumeButton.Content = "Pause Collection";
+            PauseResumeButton.Content = "Pause Co_llection";
             return;
         }
 
         CollectionStatusText.Text = _paused
             ? "Status: Paused — the Darling service is not collecting"
             : "Status: Collecting — managed by the Darling service";
-        PauseResumeButton.Content = _paused ? "Resume Collection" : "Pause Collection";
+        /* The "_" keeps Alt+L alive across the state swap — see the XAML for why the key is on
+           "Collection" (the word both states share) rather than on the verb. */
+        PauseResumeButton.Content = _paused ? "Resume Co_llection" : "Pause Co_llection";
         PauseResumeButton.IsEnabled = !_dataService.IsReadOnly;
     }
 
@@ -1124,7 +1126,7 @@ public partial class SettingsWindow : Window
         }
         finally
         {
-            TestEmailButton.Content = "Send Test Email";
+            TestEmailButton.Content = "Send Test _Email";
             TestEmailButton.IsEnabled = true;
         }
     }
@@ -1187,7 +1189,7 @@ public partial class SettingsWindow : Window
         }
         finally
         {
-            TestTeamsButton.Content = "Send Test Notification";
+            TestTeamsButton.Content = "Send Test to _Teams";
             TestTeamsButton.IsEnabled = true;
         }
     }
@@ -1218,7 +1220,7 @@ public partial class SettingsWindow : Window
         }
         finally
         {
-            TestSlackButton.Content = "Send Test Notification";
+            TestSlackButton.Content = "Send Test to Slac_k";
             TestSlackButton.IsEnabled = true;
         }
     }
@@ -1279,7 +1281,7 @@ public partial class SettingsWindow : Window
         }
         finally
         {
-            TestGenericButton.Content = "Send Test Notification";
+            TestGenericButton.Content = "Send Test to _Webhook";
             TestGenericButton.IsEnabled = true;
         }
     }

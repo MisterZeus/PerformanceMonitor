@@ -18,15 +18,17 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #1849 end-to-end against a REAL TimescaleDB: the corrected Query Store rollups actually remove the
-/// cumulative-snapshot double-count, and the raw purge cannot outrun them.
+/// #1849 and #1869 end-to-end against a REAL TimescaleDB: the corrected Query Store rollups actually remove
+/// the cumulative-snapshot double-count, the day-grain daily removes the hour-straddle residual that leaves
+/// behind, and no purge can outrun either of them.
 ///
 /// <para>These cannot be unit tests, for the same reason #1759's could not: every load-bearing fact here is
 /// the ENGINE's, not ours. That a continuous aggregate may not bucket on a non-dimension column, that
 /// <c>last(x, collection_time)</c> is accepted where <c>row_number()</c> is not, and — the one that shaped
 /// this design and is in no documentation — that a hierarchical CAGG whose bucket EQUALS its parent's is a
-/// LEAF that nothing can be built on. A C# test can assert we emit a string; only a live store can say
-/// whether TimescaleDB accepts it and what it then computes.</para>
+/// LEAF that nothing can be built on, which is why #1869's re-dedup level had to WIDEN to be legal. A C#
+/// test can assert we emit a string; only a live store can say whether TimescaleDB accepts it and what it
+/// then computes.</para>
 ///
 /// <para><b>#1776 own-store</b> — mints its own scratch database rather than sharing the live fixture, so it
 /// is deliberately NOT in the <c>live-postgres</c> collection. It creates continuous aggregates and retention
@@ -230,6 +232,232 @@ public sealed class QueryStoreCorrectedRollupLiveTests
             "both rollup families now cover raw, so the held purge should have armed itself on this sweep.");
     }
 
+    /// <summary>
+    /// #1869, against a real store: an interval whose snapshots straddle an hour boundary is counted ONCE at
+    /// the daily grain, where <see cref="TimescaleSupport.QueryStoreStatsCorrectedDailyView"/> counts it once
+    /// per collection HOUR.
+    ///
+    /// <para>The seed is the exact shape #1869 published — an interval read 3 by 14:55 and 9 by 15:25 — plus a
+    /// second straddle that puts almost all its work in the FIRST hour, which is where the residual approaches
+    /// its 2x bound, plus a non-straddling interval that must come out identical on both. Every expectation is
+    /// hand-computed from those three numbers rather than transcribed from a run.</para>
+    ///
+    /// <para>WATCHED (mutation): change L2's <c>last(execution_count, bucket)</c> to <c>sum</c> and the
+    /// day-grain daily reports the corrected daily's 1,013 — the residual back in full.</para>
+    /// </summary>
+    [Fact]
+    public async Task DayGrainDaily_CountsAnHourStraddlingIntervalOnce_WhereTheCorrectedDailyCountsItTwice()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #1869 day-grain test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct));
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        var day = new DateTime(2026, 3, 4, 0, 0, 0, DateTimeKind.Unspecified);
+
+        /* ── A: STRADDLES 14:00/15:00. #1869's own example — 3 by the end of hour 14, 9 by the end of the
+               interval. True contribution 9; the corrected daily books 3 + 9 = 12. ── */
+        await SeedSnapshotsAsync(connection, intervalId: 1001, queryId: 42, planId: 77,
+            intervalStart: day.AddHours(14), avgDurationUs: 100, avgCpuUs: 50,
+            snapshots: new[]
+            {
+                (day.AddHours(14).AddMinutes(20), 1L),
+                (day.AddHours(14).AddMinutes(40), 2L),
+                (day.AddHours(14).AddMinutes(55), 3L),
+                (day.AddHours(15).AddMinutes(5), 7L),
+                (day.AddHours(15).AddMinutes(25), 9L),
+            }, ct);
+
+        /* ── B: STRADDLES 16:00/17:00 with nearly all the work already done in the first hour — the ~2x worst
+               case. True contribution 496; the corrected daily books 495 + 496 = 991. ── */
+        await SeedSnapshotsAsync(connection, intervalId: 1002, queryId: 42, planId: 78,
+            intervalStart: day.AddHours(16), avgDurationUs: 200, avgCpuUs: 60,
+            snapshots: new[]
+            {
+                (day.AddHours(16).AddMinutes(10), 494L),
+                (day.AddHours(16).AddMinutes(50), 495L),
+                (day.AddHours(17).AddMinutes(3), 496L),
+            }, ct);
+
+        /* ── C: no straddle at all. Both dailies must agree on it, or the new level is changing something it
+               has no business changing. ── */
+        await SeedSnapshotsAsync(connection, intervalId: 1003, queryId: 42, planId: 79,
+            intervalStart: day.AddHours(10), avgDurationUs: 300, avgCpuUs: 70,
+            snapshots: new[]
+            {
+                (day.AddHours(10).AddMinutes(5), 4L),
+                (day.AddHours(10).AddMinutes(35), 7L),
+                (day.AddHours(10).AddMinutes(55), 10L),
+            }, ct);
+
+        /* ── D: STRADDLES MIDNIGHT, on its own pair of days so it cannot pollute the arithmetic above. This is
+               the residual the day grain does NOT remove, asserted rather than merely documented. ── */
+        await SeedSnapshotsAsync(connection, intervalId: 1004, queryId: 42, planId: 80,
+            intervalStart: day.AddDays(1).AddHours(23), avgDurationUs: 400, avgCpuUs: 80,
+            snapshots: new[]
+            {
+                (day.AddDays(1).AddHours(23).AddMinutes(30), 20L),
+                (day.AddDays(1).AddHours(23).AddMinutes(50), 25L),
+                (day.AddDays(2).AddMinutes(10), 30L),
+                (day.AddDays(2).AddMinutes(40), 33L),
+            }, ct);
+
+        await EnsureAggregatesWithoutRefreshPoliciesAsync(connection, ct);
+        await RefreshAllAsync(connection, ct);
+
+        /* ── 1. L2 ITSELF: one row per interval per DAY, holding that interval's last snapshot of the day. The
+               straddling intervals are back to a single row; the midnight one is legitimately two. ── */
+        var l2 = await ReadIntervalRowsAsync(connection, TimescaleSupport.QueryStoreStatsIntervalDailyView, ct);
+
+        Assert.Equal(9, Assert.Single(l2, r => r.IntervalId == 1001).ExecutionCount);
+        Assert.Equal(496, Assert.Single(l2, r => r.IntervalId == 1002).ExecutionCount);
+        Assert.Equal(10, Assert.Single(l2, r => r.IntervalId == 1003).ExecutionCount);
+
+        /* sample_count still counts RAW SNAPSHOTS, summed up the chain — 5 for A, not the 2 L1 rows it came
+           from. That keeps it comparable with every other rollup's sample_count. */
+        Assert.Equal(5, Assert.Single(l2, r => r.IntervalId == 1001).SampleCount);
+
+        /* ── 2. THE HEADLINE, side by side in one test so neither number can be quietly re-based: the exact
+               day total is 9 + 496 + 10 = 515, and the corrected daily books 12 + 991 + 10 = 1,013. ── */
+        var dayGrain = await ReadCompositeAsync(connection, TimescaleSupport.QueryStoreStatsDayGrainDailyView, day, ct);
+        var corrected = await ReadCompositeAsync(connection, TimescaleSupport.QueryStoreStatsCorrectedDailyView, day, ct);
+
+        Assert.Equal(515, dayGrain.ExecutionCountSum);
+        Assert.Equal(1013, corrected.ExecutionCountSum);
+
+        /* The residual, stated as the ratio the issue is costed against. */
+        Assert.True(corrected.ExecutionCountSum / (double)dayGrain.ExecutionCountSum > 1.9,
+            $"expected the hour-grain daily to be near 2x the day-grain one for this shape, got " +
+            $"{corrected.ExecutionCountSum} vs {dayGrain.ExecutionCountSum}");
+
+        /* ── 3. THE WEIGHTED MEAN STILL COMPOSES off the corrected values, never an avg-of-avgs:
+               (9 x 100 + 496 x 200 + 10 x 300) / 515. ── */
+        var expectedWeightedSum = (9d * 100d) + (496d * 200d) + (10d * 300d);
+        Assert.Equal(expectedWeightedSum, dayGrain.DurationWeightedSum, 6);
+        Assert.Equal(expectedWeightedSum / 515d, dayGrain.DurationWeightedSum / dayGrain.ExecutionCountSum, 6);
+
+        /* ── 4. THE HOURLY IS UNTOUCHED. The straddle residual is irreducible at the hourly grain, so #1869
+               must not have moved the corrected hourly at all: hour 14 still reads 3 and hour 15 still reads
+               9, which is the same 12 the corrected daily inherits. ── */
+        Assert.Equal(3, (await ReadCompositeAsync(connection, TimescaleSupport.QueryStoreStatsCorrectedHourlyView, day.AddHours(14), ct)).ExecutionCountSum);
+        Assert.Equal(9, (await ReadCompositeAsync(connection, TimescaleSupport.QueryStoreStatsCorrectedHourlyView, day.AddHours(15), ct)).ExecutionCountSum);
+
+        /* ── 5. THE RESIDUAL THAT REMAINS, pinned rather than hand-waved. An interval straddling MIDNIGHT is
+               still counted once per collection DAY, so both dailies report 25 and 33 against a true 33. It is
+               the identical argument one grain up and equally irreducible there — this assertion exists so the
+               documentation cannot quietly become a lie. ── */
+        var midnightDay1 = await ReadCompositeAsync(connection, TimescaleSupport.QueryStoreStatsDayGrainDailyView, day.AddDays(1), ct);
+        var midnightDay2 = await ReadCompositeAsync(connection, TimescaleSupport.QueryStoreStatsDayGrainDailyView, day.AddDays(2), ct);
+
+        Assert.Equal(25, midnightDay1.ExecutionCountSum);
+        Assert.Equal(33, midnightDay2.ExecutionCountSum);
+        Assert.Equal(midnightDay1.ExecutionCountSum,
+            (await ReadCompositeAsync(connection, TimescaleSupport.QueryStoreStatsCorrectedDailyView, day.AddDays(1), ct)).ExecutionCountSum);
+    }
+
+    /// <summary>
+    /// WATCHED (mutation): drop <see cref="TimescaleSupport.QueryStoreStatsIntervalDailyView"/> from the
+    /// interval-hourly layer's coverage list and this goes red on the first assertion.
+    ///
+    /// <para>This is the gate #1869 calls out by name. A store taking this build has a fully caught-up L1 and
+    /// an EMPTY interval-grain daily, so a gate that still read only the two #1849 consumers would arm L1's
+    /// purge and drop the exact history the day-grain daily has never materialized — and unlike raw's, that
+    /// history has no other copy at interval grain.</para>
+    /// </summary>
+    [Fact]
+    public async Task IntervalLayerPurgeArming_HeldWhileTheDayGrainLayerIsShort_ThenReleasesWhenItCovers()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #1869 arming-gate test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct));
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var oldest = now.Date.AddDays(-9);
+
+        for (var offset = 0; oldest.AddHours(offset) < now; offset += 3)
+        {
+            await SeedIntervalAsync(connection, oldest.AddHours(offset), intervalId: 3000 + offset, queryId: 11, planId: 13,
+                firstExecution: oldest.AddHours(offset), snapshots: 3, secondsApart: 120,
+                avgDurationUs: 100, avgCpuUs: 40, ct: ct);
+        }
+
+        await EnsureAggregatesWithoutRefreshPoliciesAsync(connection, ct);
+
+        /* Materialize L1 and BOTH #1849 consumers over everything — the state a store running that build is
+           in. Only the #1869 layer is left short, so the gate's verdict turns entirely on the third consumer. */
+        var span = (From: oldest.AddDays(-1), To: now.AddDays(1));
+        foreach (var view in new[]
+        {
+            TimescaleSupport.QueryStoreStatsIntervalHourlyView,
+            TimescaleSupport.QueryStoreStatsCorrectedHourlyView,
+            TimescaleSupport.QueryStoreStatsCorrectedDailyView,
+        })
+        {
+            await RefreshRangeAsync(connection, view, span.From, span.To, ct);
+        }
+
+        var l1Floor = await FloorAsync(connection, TimescaleSupport.QueryStoreStatsIntervalHourlyView, ct);
+        Assert.NotNull(l1Floor);
+        foreach (var consumer in new[]
+        {
+            TimescaleSupport.QueryStoreStatsCorrectedHourlyView,
+            TimescaleSupport.QueryStoreStatsCorrectedDailyView,
+        })
+        {
+            var floor = await FloorAsync(connection, consumer, ct);
+            Assert.True(floor <= l1Floor,
+                $"{consumer} must fully cover L1 here, or the test is not exercising the case where a gate " +
+                $"reading only the #1849 consumers would wrongly arm ({consumer} {floor:O}, L1 {l1Floor:O}).");
+        }
+
+        /* Shallow-or-empty, not empty: refresh policies were stripped, but TimescaleDB runs a new policy's
+           first check IMMEDIATELY (#1564), so under suite load a job can materialize the recent window before
+           the removal lands. Shallow is the real precondition and it is what the gate itself reads. */
+        var dayGrainSourceFloorBefore = await FloorAsync(connection, TimescaleSupport.QueryStoreStatsIntervalDailyView, ct);
+        Assert.True(dayGrainSourceFloorBefore is null || dayGrainSourceFloorBefore > l1Floor,
+            $"the day-grain dedup layer should not yet reach L1's oldest bucket (L2 {dayGrainSourceFloorBefore:O}, L1 {l1Floor:O}).");
+
+        /* ── 1. HELD. L1's purge stays paused because its THIRD consumer holds nothing. ── */
+        await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct);
+        Assert.False(await IsArmedAsync(connection, TimescaleSupport.QueryStoreStatsIntervalHourlyView, ct),
+            "the interval-grain HOURLY layer's purge armed while the interval-grain DAILY layer had " +
+            "materialized nothing — the gate is reading only the #1849 consumers.");
+
+        /* ── 2. Coverage arrives, exactly as the backfill verb's slices deliver it. ── */
+        await RefreshRangeAsync(connection, TimescaleSupport.QueryStoreStatsIntervalDailyView, span.From, span.To, ct);
+
+        var dayGrainSourceFloor = await FloorAsync(connection, TimescaleSupport.QueryStoreStatsIntervalDailyView, ct);
+        Assert.NotNull(dayGrainSourceFloor);
+        Assert.True(dayGrainSourceFloor <= l1Floor,
+            $"the day-grain dedup layer must reach at least as far back as L1 before the gate can release " +
+            $"(L2 {dayGrainSourceFloor:O}, L1 {l1Floor:O})");
+
+        /* ── 3. RELEASED by itself on the next sweep, with no manual step — the self-healing property #1759
+               replaced a caveat with, which a third consumer must not break. ── */
+        await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct);
+        Assert.True(await IsArmedAsync(connection, TimescaleSupport.QueryStoreStatsIntervalHourlyView, ct),
+            "all three consumers now cover L1, so the held purge should have armed itself on this sweep.");
+    }
+
     /* ─────────────────────────── seeding + reading helpers ─────────────────────────── */
 
     /// <summary>
@@ -276,6 +504,45 @@ FROM generate_series(1, $11) AS n";
     }
 
     /// <summary>
+    /// Plants one interval as EXPLICIT (collection time, cumulative count) snapshots, rather than
+    /// <see cref="SeedIntervalAsync"/>'s evenly-spaced 1..n run.
+    ///
+    /// <para>#1869 is entirely about WHERE an interval's snapshots fall relative to a bucket boundary, so the
+    /// placement is the test rather than a detail of it. Spelling each snapshot out is what lets the
+    /// expectations be read straight off the seed — 3 by 14:55 and 9 by 15:25 is the issue's own worked
+    /// example, and a derived-from-spacing seed would hide exactly the fact under examination.</para>
+    /// </summary>
+    private static async Task SeedSnapshotsAsync(
+        NpgsqlConnection connection, long intervalId, long queryId, long planId, DateTime intervalStart,
+        long avgDurationUs, long avgCpuUs, (DateTime When, long Count)[] snapshots, CancellationToken ct)
+    {
+        const string sql = @"
+INSERT INTO collect.query_store_stats
+    (collection_id, collection_time, server_id, server_name, database_name, module_name, query_hash,
+     query_id, plan_id, execution_type_desc, replica_role,
+     runtime_stats_interval_id, interval_start_time_utc, first_execution_time,
+     execution_count, avg_duration_us, avg_cpu_time_us, max_duration_us, max_cpu_time_us)
+VALUES
+    ((extract(epoch FROM $1)::bigint * 100000) + $2, $1, $3, 'SQL01', 'AdventureWorks', 'dbo.GetOrders', '0xABCD',
+     $4, $5, 'Regular', 'PRIMARY', $2, $6, $6, $7, $8, $9, 900, 400)";
+
+        foreach (var (when, count) in snapshots)
+        {
+            await using var command = new NpgsqlCommand(sql, connection);
+            command.Parameters.AddWithValue(when);
+            command.Parameters.AddWithValue(intervalId);
+            command.Parameters.AddWithValue(TestServerId);
+            command.Parameters.AddWithValue(queryId);
+            command.Parameters.AddWithValue(planId);
+            command.Parameters.AddWithValue(intervalStart);
+            command.Parameters.AddWithValue(count);
+            command.Parameters.AddWithValue(avgDurationUs);
+            command.Parameters.AddWithValue(avgCpuUs);
+            await command.ExecuteNonQueryAsync(ct);
+        }
+    }
+
+    /// <summary>
     /// Builds the aggregates, then strips every REFRESH policy the sweep attached.
     ///
     /// <para>TimescaleDB runs a new policy's first check IMMEDIATELY rather than on its next interval
@@ -298,8 +565,10 @@ FROM generate_series(1, $11) AS n";
 
     private static async Task RefreshAllAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        /* Dependency order: L1 before the two corrected views that read it. The original pair is refreshed
-           too, because half of what this test proves is what the OLD view still reports. */
+        /* Dependency order, and it now runs THREE deep (#1869): L1 before everything that reads it, and the
+           interval-grain DAILY before the day-grain daily that reads THAT. Refreshing out of order
+           materializes nothing and reports success. The original pair is refreshed too, because half of what
+           these tests prove is what the OLD views still report. */
         foreach (var view in new[]
         {
             TimescaleSupport.QueryStoreStatsIntervalHourlyView,
@@ -307,6 +576,8 @@ FROM generate_series(1, $11) AS n";
             TimescaleSupport.QueryStoreStatsCorrectedHourlyView,
             TimescaleSupport.QueryStoreStatsCorrectedDailyView,
             TimescaleSupport.QueryStoreStatsDailyView,
+            TimescaleSupport.QueryStoreStatsIntervalDailyView,
+            TimescaleSupport.QueryStoreStatsDayGrainDailyView,
         })
         {
             await using var refresh = new NpgsqlCommand($"CALL refresh_continuous_aggregate('collect.{view}', NULL, NULL)", connection);

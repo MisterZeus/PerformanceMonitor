@@ -90,11 +90,17 @@
                         </ListBox.ItemContainerStyle>
                         <ListBox.ItemTemplate>
                             <DataTemplate>
-                                <CheckBox Content="{Binding DisplayName}"
-                                          IsChecked="{Binding IsChecked, Mode=TwoWay}"
+                                <!-- Label is a nested TextBlock, not Content: a CheckBox's ContentPresenter
+                                     parses a single "_" in a bound string as an access-key marker, which
+                                     would eat the underscore out of a server name like SQL_PROD_01 and
+                                     claim Alt+P. TextBlock.Text does not parse access keys. -->
+                                <CheckBox IsChecked="{Binding IsChecked, Mode=TwoWay}"
                                           Foreground="{DynamicResource ForegroundBrush}"
                                           Margin="4,2"
-                                          Click="ServerCheck_Click"/>
+                                          Click="ServerCheck_Click">
+                                    <TextBlock Text="{Binding DisplayName}"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                </CheckBox>
                             </DataTemplate>
                         </ListBox.ItemTemplate>
                     </ListBox>
@@ -103,7 +109,10 @@
         </Grid>
 
         <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
-            <Button Content="_Close" Width="80" IsDefault="True" IsCancel="True" Click="Close_Click"/>
+            <!-- IsCancel keeps Esc closing the window; IsDefault is gone because Enter in the server
+                 filter box would have closed the window mid-filter, which is the same Enter-from-a-
+                 half-filled-form surprise #1828 declined (#1859). -->
+            <Button Content="_Close" Width="80" IsCancel="True" Click="Close_Click"/>
         </StackPanel>
     </Grid>
 </Window>

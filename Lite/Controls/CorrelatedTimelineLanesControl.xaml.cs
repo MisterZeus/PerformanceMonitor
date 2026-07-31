@@ -82,7 +82,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     private void SetupLaneDrillDown(ScottPlot.WPF.WpfPlot chart)
     {
         var menu = new ContextMenu();
-        var item = new MenuItem { Header = "Show Active Queries at This Time" };
+        var item = new MenuItem { Header = "Show _Active Queries at This Time" };
         menu.Items.Add(item);
 
         menu.Opened += (s, _) =>

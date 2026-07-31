@@ -224,25 +224,49 @@ public sealed class QueryStoreCollectorDefinitionTests
     }
 
     [Fact]
-    public void BuildQuery_Azure_GatesReplicaAttributionOff_ButKeepsTheColumn()
+    public void BuildQuery_Azure_AttributesReplicaRole_ProvenLiveOnBothServiceTiers()
     {
-        /* Explicitly gated off, not dropped (#1836): Azure emits the same nvarchar(1) NULL placeholder
-           at the same ordinal a pre-2022 box does, so the 55-ordinal reader contract is identical.
-           replica_group_id's own doc page names SQL Server 2022+ and is silent on Azure SQL Database
-           while its sibling columns name Azure explicitly, and Query Store for secondary replicas is
-           documented as unavailable on Hyperscale — a column that does not bind fails the WHOLE
-           payload for that database, and on Azure that means every database. */
+        /* This pin was DELIBERATELY INVERTED by #1872 — it previously asserted the attribution absent.
+           #1836 gated it off for bind safety, not taste: replica_group_id's doc page names SQL Server
+           2022+ and is silent on Azure SQL Database while its sibling columns name Azure explicitly,
+           and Query Store for secondary replicas is documented as unavailable on Hyperscale. A column
+           that does not bind fails the WHOLE payload for that database, and on Azure that means every
+           database — so the gate stayed on until the docs' silence was answered by a live run.
+
+           It was, on both tiers the old gate worried about (2026-07-31 UTC, both Microsoft SQL Azure
+           (RTM) 12.0.2000.8, EngineEdition 5): General Purpose GP_S_Gen5_1 (#1848) and Hyperscale
+           HS_S_Gen5_2 (#1872) each returned OBJECT_ID('sys.query_store_replicas') = -660 and
+           COL_LENGTH('sys.query_store_runtime_stats', 'replica_group_id') = 8, and on Hyperscale the
+           full 55-column payload composed with the attribution ON bound 55 of 55 columns and returned
+           replica_role = 'Primary'. Do not re-flip this without new live evidence that it stopped
+           binding — re-read the two issue threads first. */
         var plan = QueryStoreCollector.Instance.BuildQuery(MakeContext(isAzureSqlDb: true, probeResult: 16));
 
-        Assert.Contains("replica_role = CONVERT(nvarchar(1), NULL)", plan.Text, StringComparison.Ordinal);
-        Assert.DoesNotContain("sys.query_store_replicas", plan.Text, StringComparison.Ordinal);
-        Assert.DoesNotContain("replica_group_id", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("replica_role = qsr.replica_name", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN sys.query_store_replicas AS qsr", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("ON qsr.replica_group_id = qsrs.replica_group_id", plan.Text, StringComparison.Ordinal);
 
-        /* plan_type_desc goes the OTHER way, deliberately: it lives on sys.query_store_plan, whose
-           applies-to banner names Azure SQL Database and whose only documented exclusion is Synapse
-           (engine edition 6, never IsAzureSqlDb). Azure SQL DB is evergreen, so the PRODUCTVERSION
-           probe — which reports major 12 there — must not decide it. */
+        /* Attribute, never filter — the same rule the on-prem 2022+ shape holds to. On Azure the
+           single-quoted body is NOT quote-doubled, so the literal would read N'Primary' here. */
+        Assert.DoesNotContain("replica_name = N'Primary'", plan.Text, StringComparison.Ordinal);
+
+        /* plan_type_desc rides the same "Azure means newest" rule, and always has: it lives on
+           sys.query_store_plan, whose applies-to banner names Azure SQL Database and whose only
+           documented exclusion is Synapse (engine edition 6, never IsAzureSqlDb). Azure SQL DB is
+           evergreen, so the PRODUCTVERSION probe — which reports major 12 there — must not decide it. */
         Assert.Contains("plan_type = qsp.plan_type_desc,", plan.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildQuery_Azure_AttributesReplicaRole_EvenWhenTheVersionProbeFails()
+    {
+        /* The Azure arm of the gate is an OR, not an AND: Azure SQL DB reports PRODUCTVERSION major 12
+           and the probe can fail outright (defaulting to 13), so if attribution depended on the version
+           at all it would never turn on there. Pins that the edition alone decides it (#1872). */
+        var plan = QueryStoreCollector.Instance.BuildQuery(MakeContext(isAzureSqlDb: true, probeResult: null));
+
+        Assert.Contains("replica_role = qsr.replica_name", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN sys.query_store_replicas AS qsr", plan.Text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -407,20 +431,28 @@ public sealed class QueryStoreCollectorDefinitionTests
         /* plan_type flipped ON for Azure SQL DB with #1836 (was NULL here before): the probe reports
            major 12 on Azure, but the engine is evergreen and sys.query_store_plan's applies-to banner
            names Azure SQL Database — the same "Azure means newest" rule isNew has always used.
-           Managed Instance keeps the pure version gate, because its feature set follows a per-instance
-           update policy rather than being evergreen. */
+           replica_role joined it with #1872, once the catalog was proven to bind live on both the
+           General Purpose and Hyperscale service tiers. */
         Assert.Contains("plan_type = qsp.plan_type_desc,", plan.Text, StringComparison.Ordinal);
-        Assert.Contains(
-            "plan_type = NULL,",
-            QueryStoreCollector.Instance.BuildPerItemQuery("SO", new CollectorContext
-            {
-                ServerId = 42,
-                ServerName = "test-server",
-                CollectionTime = new DateTime(2026, 7, 2, 12, 0, 0, DateTimeKind.Utc),
-                Deltas = s_deltas,
-                Target = new CollectorTargetInfo { IsAzureManagedInstance = true },
-            }).Text,
-            StringComparison.Ordinal);
+        Assert.Contains("replica_role = qsr.replica_name", plan.Text, StringComparison.Ordinal);
+
+        /* Managed Instance keeps the PURE VERSION GATE on both, and #1872 deliberately did not change
+           that: MI under-reports PRODUCTVERSION too, but its feature set follows a per-instance update
+           policy rather than being evergreen, so "Azure means 2022+" is not sound there — and unlike
+           Azure SQL DB, MI has no per-database path this could have been verified on. Its probe here
+           defaults to 13, so both columns emit their NULL placeholder. */
+        var managedInstance = QueryStoreCollector.Instance.BuildPerItemQuery("SO", new CollectorContext
+        {
+            ServerId = 42,
+            ServerName = "test-server",
+            CollectionTime = new DateTime(2026, 7, 2, 12, 0, 0, DateTimeKind.Utc),
+            Deltas = s_deltas,
+            Target = new CollectorTargetInfo { IsAzureManagedInstance = true },
+        }).Text;
+
+        Assert.Contains("plan_type = NULL,", managedInstance, StringComparison.Ordinal);
+        Assert.Contains("replica_role = CONVERT(nvarchar(1), NULL)", managedInstance, StringComparison.Ordinal);
+        Assert.DoesNotContain("sys.query_store_replicas", managedInstance, StringComparison.Ordinal);
     }
 
     [Fact]
