@@ -513,7 +513,7 @@ BEGIN
         AND DATABASEPROPERTYEX(DB_NAME(@resolve_database_id), 'Status') = N'ONLINE'
         BEGIN
             /* Same screen as the KEY site, for the same reason (#1865): the two guards above
-               answer for a database the login cannot enter, HAS_DBACCESS does not. */
+               both say yes for a database the login cannot enter; HAS_DBACCESS says no. */
             IF HAS_DBACCESS(DB_NAME(@resolve_database_id)) = 1
             BEGIN
                 /* Still dynamic SQL, and it must stay that way even though nothing is spliced
@@ -532,9 +532,9 @@ BEGIN
                 OPTION(RECOMPILE);';
 
                 /* Handler outside the dynamic batch (#1865), which matters more here than at the
-                   KEY site: an Invalid-object-name failure on sys.dm_db_page_info is a COMPILE failure of
-                   the nested batch, and a TRY/CATCH written inside that batch cannot catch its
-                   own compile failure. This one can. */
+                   KEY site: an Invalid-object-name failure on sys.dm_db_page_info is a COMPILE
+                   failure of the nested batch, and a TRY/CATCH written inside that batch cannot
+                   catch its own compile failure. This one can. */
                 BEGIN TRY
                     EXECUTE sys.sp_executesql
                         @resolve_sql,
