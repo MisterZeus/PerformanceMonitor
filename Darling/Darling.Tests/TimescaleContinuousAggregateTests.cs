@@ -19,7 +19,8 @@ namespace Darling.Tests;
 /// Pins the continuous-aggregate + retention-tier SQL so the tested shape can never silently drift: the three
 /// HOURLY rollups (query_stats / procedure_stats / query_store_stats), the two HIERARCHICAL daily rollups (sourced
 /// from the hourly CAGGs, not raw), the per-cadence refresh policies, and the tiered retention (raw 4d, hourly
-/// CAGGs 21d, daily kept indefinitely). All idempotent RUNTIME setup in <see cref="TimescaleSupport"/> (the
+/// history CAGGs 90d since #1937, daily history kept indefinitely, with the interval-dedup and baseline tiers on
+/// horizons of their own). All idempotent RUNTIME setup in <see cref="TimescaleSupport"/> (the
 /// worker's TimescaleDB block), NOT a versioned migration, so there is no schema-version change to pin.
 /// </summary>
 public sealed class TimescaleContinuousAggregateTests

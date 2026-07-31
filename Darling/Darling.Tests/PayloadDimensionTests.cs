@@ -1274,6 +1274,79 @@ public sealed class PayloadDimensionTests
     }
 
     /// <summary>
+    /// The retention sweep's summary line must name EVERY horizon the store actually applies, and must take each
+    /// number from its constant rather than restating it (#1958, enforcing the #1942 interpolation rule).
+    ///
+    /// <para>The line read <c>"(raw {Raw}, hourly CAGGs {Hourly}; daily CAGGs kept indefinitely)"</c>, which is a
+    /// universal claim the store contradicts three times over: the interval-dedup L1 is deliberately SHORTER
+    /// than the hourly tier, its daily twin has a horizon despite the promise about dailies, and the nine
+    /// baseline aggregates have another. An operator on a 24-server field box cross-checked the line against
+    /// <c>timescaledb_information.jobs</c> — where the docs send them — met the first counterexample
+    /// immediately, and had to decide whether they had found a bug.</para>
+    ///
+    /// <para><b>The expectation is DERIVED from <see cref="TimescaleSupport.RetentionPolicies"/>, not listed
+    /// here.</b> That is the whole point: a list written out in the test drifts in exactly the same way the log
+    /// line did, and would have been just as green. Adding a tier on a NEW horizon now fails this until the
+    /// summary mentions it — which is the drift #1958 is, caught at the moment it is introduced rather than by
+    /// the next operator who checks. There was no pin on this line at all before; a doc comment claimed the
+    /// property and nothing enforced it.</para>
+    /// </summary>
+    [Fact]
+    public void RetentionSummaryLine_NamesEveryHorizon_AndInterpolatesEveryNumber()
+    {
+        var root = FindRepoRoot();
+        Assert.True(root is not null, RepoRootNotFound);
+
+        var source = File.ReadAllText(Path.Combine(
+            root!, "Darling", "PerformanceMonitor.Darling.Storage", "TimescaleSupport.cs"));
+
+        const string anchor = "\"TimescaleDB: {Applied}/{Total} retention policies in place";
+        var start = source.IndexOf(anchor, StringComparison.Ordinal);
+        Assert.True(start >= 0,
+            "could not locate the retention summary log line — the guard cannot silently pass on a parse miss");
+
+        /* The format string, then everything from it to the statement's semicolon: the arguments. */
+        var formatEnd = source.IndexOf('"', start + 1);
+        Assert.True(formatEnd > start, "the summary format string is unterminated");
+        var format = source[(start + 1)..formatEnd];
+
+        var statementEnd = source.IndexOf(';', formatEnd);
+        Assert.True(statementEnd > formatEnd, "the summary log statement has no terminating semicolon");
+        var arguments = source[(formatEnd + 1)..statementEnd].TrimEnd(')', ' ', '\r', '\n').Trim(',', ' ', '\r', '\n');
+
+        /* Every DISTINCT horizon the sweep applies, mapped back to the constant that holds it. */
+        var constants = typeof(TimescaleSupport)
+            .GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+            .Where(f => f.IsLiteral && f.FieldType == typeof(string) && f.Name.EndsWith("RetentionInterval", StringComparison.Ordinal))
+            .ToDictionary(f => (string)f.GetRawConstantValue()!, f => f.Name, StringComparer.Ordinal);
+
+        foreach (var horizon in TimescaleSupport.RetentionPolicies.Select(p => p.DropAfter).Distinct(StringComparer.Ordinal))
+        {
+            Assert.True(constants.TryGetValue(horizon, out var constantName),
+                $"a retention policy uses the horizon \"{horizon}\", which no *RetentionInterval constant holds — " +
+                "the summary line cannot interpolate a number that has no name.");
+
+            Assert.True(arguments.Contains(constantName!, StringComparison.Ordinal),
+                $"the summary line never mentions {constantName} (\"{horizon}\"), so it describes a retention " +
+                "posture the store does not have. An operator cross-checking timescaledb_information.jobs finds " +
+                "the counterexample and has to work out whether it is a bug (#1958).");
+
+            Assert.False(format.Contains(horizon, StringComparison.Ordinal),
+                $"the summary line writes \"{horizon}\" out as a literal instead of interpolating {constantName}. " +
+                "This line class has already drifted once that way (#1942) — a horizon changes in one place and " +
+                "the sentence describing it keeps the old number, which is worse than saying nothing.");
+        }
+
+        /* A placeholder with no argument renders empty; an argument with no placeholder is appended as noise.
+           Structured logging binds POSITIONALLY, so either one silently corrupts the tail of the message. */
+        var placeholders = format.Count(c => c == '{');
+        var argumentCount = arguments.Split(',').Length;
+        Assert.True(placeholders == argumentCount,
+            $"the summary line has {placeholders} placeholder(s) and {argumentCount} argument(s) — structured " +
+            "logging binds them positionally, so a mismatch shifts every value after it.");
+    }
+
+    /// <summary>
     /// A field's initializer, from its signature to the terminating semicolon at nesting depth zero, with
     /// comments and string contents removed so neither can truncate the scan or be mistaken for code. Returns
     /// empty when the signature is not found, so a caller can FAIL rather than silently pass on a parse miss.

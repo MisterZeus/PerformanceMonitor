@@ -148,8 +148,8 @@ public sealed class ProcedureStatsCollectorDefinitionTests
         var plan = ProcedureStatsCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas, capturePlanXml: true));
         var collapsed = Collapse(plan.Text);
 
-        Assert.Equal(1, Regex.Matches(collapsed, Regex.Escape("query_plan_xml=tqp.query_plan")).Count);
-        Assert.Equal(1, Regex.Matches(collapsed, Regex.Escape("sys.dm_exec_text_query_plan(CONVERT(varbinary(64),ranked.plan_handle,1),0,-1)AStqp")).Count);
+        Assert.Single(Regex.Matches(collapsed, Regex.Escape("query_plan_xml=tqp.query_plan")));
+        Assert.Single(Regex.Matches(collapsed, Regex.Escape("sys.dm_exec_text_query_plan(CONVERT(varbinary(64),ranked.plan_handle,1),0,-1)AStqp")));
         Assert.DoesNotContain("dm_exec_text_query_plan(s.plan_handle", collapsed, StringComparison.Ordinal);
 
         /* The apply must sit AFTER the ranked derived table closes - rendering below the TOP is the

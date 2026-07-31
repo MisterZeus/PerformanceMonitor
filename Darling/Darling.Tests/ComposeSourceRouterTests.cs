@@ -158,7 +158,8 @@ public sealed class ComposeSourceRouterTests
     public void RouteThresholds_StayBelowRetentionHorizons()
     {
         /* The safety invariant: a route max must be strictly inside its retention horizon, so a drop lagging the
-           boundary can never leave the chosen tier missing its oldest chunk. Raw kept 4d, hourly CAGGs kept 21d. */
+           boundary can never leave the chosen tier missing its oldest chunk. Raw kept 4d, hourly history CAGGs
+           kept 90d since #1937 — the horizon is read from the constant below rather than from this sentence. */
         Assert.True(ComposeSourceRouter.RawRouteMaxAge < TimeSpan.FromDays(4));
         Assert.True(ComposeSourceRouter.HourlyRouteMaxAge < TimescaleSupport.HourlyRetentionSpan);
     }
