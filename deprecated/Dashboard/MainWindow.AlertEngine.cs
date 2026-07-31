@@ -386,8 +386,15 @@ namespace PerformanceMonitorDashboard
                             _muteRuleService);
                     }
 
+                    /* #1913: the history row's Value carries the SAME cause the toast, the email and the
+                       detail text carry, just compressed for the grid — and it is computed with the reason
+                       (DecideCollectionStopped) rather than rebuilt here. The local rebuild disagreed with
+                       the reason on both branches: it dropped the job TOTAL, which is what separates
+                       "partially stopped" from "completely stopped", and on the staleness branch it wrote
+                       the constant "no recent collection" — a restatement of the metric name that discarded
+                       the minutes figure the alert exists to report. */
                     _emailAlertService.RecordAlert(serverId, serverName, "Collection Stopped",
-                        health.DisabledCollectorJobs > 0 ? $"{health.DisabledCollectorJobs} job(s) disabled" : "no recent collection",
+                        health.CollectionStoppedShortValue ?? "no recent collection",
                         "collecting", !isMuted, isMuted ? "muted" : "tray", muted: isMuted, detailText: detailText);
 
                     if (!isMuted)
