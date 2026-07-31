@@ -180,6 +180,80 @@ public class LiteRecommendationsReaderTests
         Assert.Equal(expectedSql, item.CopyPasteSql);
     }
 
+    [Fact]
+    public void ExtractPlanRegressionTargets_TwoReplicasOfOneQuery_YieldsOneForcePlanTarget()
+    {
+        /* #1850 made the plan-regression drill-down per-REPLICA: on an AG primary with Query Store for
+           secondary replicas enabled, one query can regress on the primary AND on a secondary and arrive
+           as two rows with their own best_plan_id. Forcing a plan is per QUERY, so both rows reaching
+           the renderer would emit two sp_query_store_force_plan calls naming the same query with
+           different plan ids — mutually exclusive instructions where whichever the operator runs last
+           silently wins. The worst regression (rows arrive ordered regression_factor DESC) is the one
+           kept. #1882 tracks which replica SHOULD win; this pins only that they cannot both. */
+        var finding = Finding("PLAN_REGRESSION", 1.6, database: "MyDb");
+        finding.DrillDown = new Dictionary<string, object>
+        {
+            ["regressed_queries"] = new[]
+            {
+                new Dictionary<string, object>
+                {
+                    ["database"] = "MyDb",
+                    ["query_id"] = 123L,
+                    ["best_plan_id"] = 7L,
+                    ["regression_factor"] = 12.0,
+                    ["replica_role"] = "PRIMARY"
+                },
+                new Dictionary<string, object>
+                {
+                    ["database"] = "MyDb",
+                    ["query_id"] = 123L,
+                    ["best_plan_id"] = 9L,
+                    ["regression_factor"] = 3.0,
+                    ["replica_role"] = "SECONDARY"
+                }
+            }
+        };
+
+        var targets = FactRemediation.ExtractPlanRegressionTargets(finding);
+
+        var target = Assert.Single(targets);
+        Assert.Equal(7L, target.PlanId);
+        Assert.Equal(12.0, target.RegressionFactor);
+
+        /* And the rendered command names that plan once, not two plans for one query. */
+        var sql = FactRemediation.GenerateForFinding(finding);
+        Assert.Contains("7", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("9", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ExtractPlanRegressionTargets_DistinctQueries_AreAllKept()
+    {
+        /* The dedup is per (database, query_id) — it must not collapse different queries, nor the same
+           query_id in a different database, which the cap of 5 would otherwise be doing silently. */
+        var finding = Finding("PLAN_REGRESSION", 1.6, database: "MyDb");
+        finding.DrillDown = new Dictionary<string, object>
+        {
+            ["regressed_queries"] = new[]
+            {
+                new Dictionary<string, object>
+                {
+                    ["database"] = "MyDb", ["query_id"] = 123L, ["best_plan_id"] = 7L, ["regression_factor"] = 12.0
+                },
+                new Dictionary<string, object>
+                {
+                    ["database"] = "MyDb", ["query_id"] = 124L, ["best_plan_id"] = 8L, ["regression_factor"] = 5.0
+                },
+                new Dictionary<string, object>
+                {
+                    ["database"] = "OtherDb", ["query_id"] = 123L, ["best_plan_id"] = 9L, ["regression_factor"] = 4.0
+                }
+            }
+        };
+
+        Assert.Equal(3, FactRemediation.ExtractPlanRegressionTargets(finding).Count);
+    }
+
     // ── BuildCopyPasteSql: the persisted-action renderer for all seven remediation shapes ──────────
     // Lite delegates to the SAME shared FactRemediation.RenderCopyPasteCommand the Darling viewer uses,
     // so these mirror Darling's ViewerRecommendationsTests and prove Lite produces byte-identical
