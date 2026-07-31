@@ -438,37 +438,39 @@
                                     ContextMenuOpening="ServerRow_ContextMenuOpening">
                                 <Border.ContextMenu>
                                     <ContextMenu>
-                                        <MenuItem Header="Toggle Favorite" Click="ServerContextMenu_ToggleFavorite_Click">
+                                        <MenuItem Header="_Toggle Favorite" Click="ServerContextMenu_ToggleFavorite_Click">
                                             <MenuItem.Icon><TextBlock Text="&#x2B50;"/></MenuItem.Icon>
                                         </MenuItem>
                                         <Separator/>
-                                        <!-- Populated on open by ServerRow_ContextMenuOpening: one checkable item per tag. -->
-                                        <MenuItem Header="Assign Tags">
+                                        <!-- Populated on open by ServerRow_ContextMenuOpening, which locates this
+                                             item by Tag rather than by Header text (the header changes when it
+                                             gains a mnemonic; the tag does not). -->
+                                        <MenuItem Header="_Assign Tags" Tag="AssignTags">
                                             <MenuItem.Icon><TextBlock Text="&#x1F3F7;"/></MenuItem.Icon>
                                         </MenuItem>
                                         <Separator/>
-                                        <MenuItem Header="Edit..." Click="ServerContextMenu_Edit_Click">
+                                        <MenuItem Header="_Edit..." Click="ServerContextMenu_Edit_Click">
                                             <MenuItem.Icon><TextBlock Text="&#x270F;"/></MenuItem.Icon>
                                         </MenuItem>
-                                        <MenuItem Header="Remove" Click="ServerContextMenu_Remove_Click">
+                                        <MenuItem Header="_Remove" Click="ServerContextMenu_Remove_Click">
                                             <MenuItem.Icon><TextBlock Text="&#x1F5D1;"/></MenuItem.Icon>
                                         </MenuItem>
                                         <Separator/>
                                         <!-- One-click whole-server alert silence: writes/removes a server-scoped
                                              mute rule the running service honors (email/Teams/Slack + in-app toasts),
                                              the shortcut over the multi-step Manage Mute Rules dialog. -->
-                                        <MenuItem Header="Silence This Server" Click="ServerContextMenu_Silence_Click"
+                                        <MenuItem Header="_Silence This Server" Click="ServerContextMenu_Silence_Click"
                                                   ToolTip="Mute every alert for this server until you Unsilence it">
                                             <MenuItem.Icon><TextBlock Text="&#x1F507;"/></MenuItem.Icon>
                                         </MenuItem>
-                                        <MenuItem Header="Unsilence" Click="ServerContextMenu_Unsilence_Click"
+                                        <MenuItem Header="_Unsilence" Click="ServerContextMenu_Unsilence_Click"
                                                   ToolTip="Remove this server's whole-server alert silence">
                                             <MenuItem.Icon><TextBlock Text="&#x1F514;"/></MenuItem.Icon>
                                         </MenuItem>
                                         <Separator/>
                                         <!-- Acknowledge: quiet the alert badge (viewer-local) until a NEW alert
                                              arrives — unlike Silence, it does NOT stop the service's delivery. -->
-                                        <MenuItem Header="Acknowledge Alerts" Click="ServerContextMenu_Acknowledge_Click"
+                                        <MenuItem Header="Ac_knowledge Alerts" Click="ServerContextMenu_Acknowledge_Click"
                                                   IsEnabled="{Binding Server.HasAttention}"
                                                   ToolTip="Quiet this server's alert badge until a new alert arrives (delivery continues)">
                                             <MenuItem.Icon><TextBlock Text="&#x2713;" FontWeight="Bold"/></MenuItem.Icon>
@@ -581,20 +583,24 @@
                                     ContextMenuOpening="TagHeader_ContextMenuOpening">
                                 <Border.ContextMenu>
                                     <ContextMenu>
-                                        <MenuItem Header="New Tag..." Click="TagHeaderContextMenu_NewTag_Click">
+                                        <MenuItem Header="_New Tag..." Click="TagHeaderContextMenu_NewTag_Click">
                                             <MenuItem.Icon><TextBlock Text="&#x2795;"/></MenuItem.Icon>
                                         </MenuItem>
-                                        <MenuItem Header="New Child Tag..." Click="TagHeaderContextMenu_NewChildTag_Click">
+                                        <!-- Tag="TagOnly" is how TagHeader_ContextMenuOpening finds the items to
+                                             disable on the Favorites / Untagged pseudo-groups. It used to match
+                                             on the Header text, which silently broke the moment the labels
+                                             gained mnemonics. -->
+                                        <MenuItem Header="New _Child Tag..." Tag="TagOnly" Click="TagHeaderContextMenu_NewChildTag_Click">
                                             <MenuItem.Icon><TextBlock Text="&#x1F4C1;"/></MenuItem.Icon>
                                         </MenuItem>
-                                        <MenuItem Header="Rename..." Click="TagHeaderContextMenu_Rename_Click">
+                                        <MenuItem Header="_Rename..." Tag="TagOnly" Click="TagHeaderContextMenu_Rename_Click">
                                             <MenuItem.Icon><TextBlock Text="&#x270F;"/></MenuItem.Icon>
                                         </MenuItem>
-                                        <MenuItem Header="Delete Tag" Click="TagHeaderContextMenu_Delete_Click">
+                                        <MenuItem Header="_Delete Tag" Tag="TagOnly" Click="TagHeaderContextMenu_Delete_Click">
                                             <MenuItem.Icon><TextBlock Text="&#x1F5D1;"/></MenuItem.Icon>
                                         </MenuItem>
                                         <Separator/>
-                                        <MenuItem Header="Manage Tags..." Click="ManageTags_Click">
+                                        <MenuItem Header="_Manage Tags..." Click="ManageTags_Click">
                                             <MenuItem.Icon><TextBlock Text="&#x1F3F7;"/></MenuItem.Icon>
                                         </MenuItem>
                                     </ContextMenu>
@@ -1056,6 +1062,17 @@
                             <Expander Header="{Binding Header}" IsExpanded="{Binding IsExpanded, Mode=OneTime}"
                                       Foreground="{DynamicResource ForegroundBrush}" FontWeight="SemiBold"
                                       FontSize="14" Margin="0,0,0,10">
+                                <!-- The header is data-derived (finding headline, or the raw fact key such
+                                     as SOS_SCHEDULER_YIELD when no advice prose exists), and an Expander's
+                                     header presenter parses a single "_" as an access-key marker. Rendering
+                                     it through a TextBlock keeps the underscores and claims no Alt key.
+                                     Foreground is restated because the themes' implicit TextBlock style
+                                     would otherwise win. -->
+                                <Expander.HeaderTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding}" Foreground="{DynamicResource ForegroundBrush}"/>
+                                    </DataTemplate>
+                                </Expander.HeaderTemplate>
                                 <ItemsControl ItemsSource="{Binding Cards}"
                                               ItemTemplate="{StaticResource RecoCardTemplate}"
                                               Margin="0,8,0,0"/>

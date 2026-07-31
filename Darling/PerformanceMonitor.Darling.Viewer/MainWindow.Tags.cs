@@ -142,7 +142,9 @@ public partial class MainWindow
         var isRealTag = header.Kind == FleetGroupKind.Tag;
         foreach (var item in fe.ContextMenu.Items.OfType<MenuItem>())
         {
-            if ((item.Header as string) is "New Child Tag..." or "Rename..." or "Delete Tag")
+            /* Matched on Tag, not on the header text: the headers carry Alt mnemonics now, and a
+               display string is the wrong key for behavior to hang on. */
+            if ((item.Tag as string) == "TagOnly")
             {
                 item.IsEnabled = isRealTag;
             }
@@ -311,7 +313,8 @@ public partial class MainWindow
             return;
         }
 
-        var assignItem = fe.ContextMenu.Items.OfType<MenuItem>().FirstOrDefault(m => (m.Header as string) == "Assign Tags");
+        /* Located by Tag, not by header text — the header carries an Alt mnemonic now. */
+        var assignItem = fe.ContextMenu.Items.OfType<MenuItem>().FirstOrDefault(m => (m.Tag as string) == "AssignTags");
         if (assignItem is null)
         {
             return;
@@ -323,7 +326,7 @@ public partial class MainWindow
         {
             assignItem.Items.Add(new MenuItem { Header = "No tags yet", IsEnabled = false });
             assignItem.Items.Add(new Separator());
-            var manage = new MenuItem { Header = "Manage Tags..." };
+            var manage = new MenuItem { Header = "_Manage Tags..." };
             manage.Click += ManageTags_Click;
             assignItem.Items.Add(manage);
             return;
@@ -335,7 +338,10 @@ public partial class MainWindow
         {
             var item = new MenuItem
             {
-                Header = new string(' ', depth * 2) + tag.Name,
+                // A MenuItem header parses a single "_" as an access-key marker, so a tag named
+                // "prod_east" would render as "prodeast" and claim Alt+E. "__" is WPF's escape for a
+                // literal underscore (same guard as the wait-type headers in ViewerServerTab.DrillDown).
+                Header = new string(' ', depth * 2) + tag.Name.Replace("_", "__"),
                 IsCheckable = true,
                 IsChecked = assigned.Contains(tag.Id),
                 Tag = new AssignTarget(row.Server.ServerId, tag.Id)

@@ -45,7 +45,7 @@
                 </ComboBox>
             </StackPanel>
 
-            <CheckBox x:Name="UseDefaultCheckBox" Grid.Column="1" Content="Use default schedule"
+            <CheckBox x:Name="UseDefaultCheckBox" Grid.Column="1" Content="_Use default schedule"
                       Margin="20,0,0,0" VerticalAlignment="Center"
                       Foreground="{DynamicResource ForegroundBrush}"
                       Checked="UseDefaultCheckBox_Changed" Unchecked="UseDefaultCheckBox_Changed"/>

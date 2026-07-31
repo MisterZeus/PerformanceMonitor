@@ -162,14 +162,16 @@ public partial class SettingsWindow : Window
         if (_backgroundService.IsPaused)
         {
             CollectionStatusText.Text = "Status: Paused";
-            PauseResumeButton.Content = "Resume Collection";
+            /* The "_" keeps Alt+L alive across the state swap — see the XAML for why the key is on
+               "Collection" (the word both states share) rather than on the verb. */
+            PauseResumeButton.Content = "Resume Co_llection";
         }
         else
         {
             CollectionStatusText.Text = _backgroundService.IsCollecting
                 ? "Status: Collecting..."
                 : "Status: Active";
-            PauseResumeButton.Content = "Pause Collection";
+            PauseResumeButton.Content = "Pause Co_llection";
         }
     }
 
@@ -955,7 +957,7 @@ public partial class SettingsWindow : Window
             App.SmtpFromAddress = origFrom;
             App.SmtpRecipients = origRecipients;
 
-            TestEmailButton.Content = "Send Test Email";
+            TestEmailButton.Content = "Send Test _Email";
             TestEmailButton.IsEnabled = true;
         }
     }
@@ -1152,7 +1154,7 @@ public partial class SettingsWindow : Window
         }
         finally
         {
-            TestTeamsButton.Content = "Send Test Notification";
+            TestTeamsButton.Content = "Send Test to _Teams";
             TestTeamsButton.IsEnabled = true;
         }
     }
@@ -1183,7 +1185,7 @@ public partial class SettingsWindow : Window
         }
         finally
         {
-            TestSlackButton.Content = "Send Test Notification";
+            TestSlackButton.Content = "Send Test to Slac_k";
             TestSlackButton.IsEnabled = true;
         }
     }
@@ -1244,7 +1246,7 @@ public partial class SettingsWindow : Window
         }
         finally
         {
-            TestGenericButton.Content = "Send Test Notification";
+            TestGenericButton.Content = "Send Test to _Webhook";
             TestGenericButton.IsEnabled = true;
         }
     }

@@ -910,7 +910,7 @@ public partial class MainWindow : Window
 
         var acknowledgeItem = new MenuItem
         {
-            Header = "Acknowledge Alert",
+            Header = "_Acknowledge Alert",
             Tag = serverId,
             Icon = new TextBlock { Text = "✓", FontWeight = FontWeights.Bold }
         };
@@ -918,7 +918,7 @@ public partial class MainWindow : Window
 
         var silenceItem = new MenuItem
         {
-            Header = "Silence This Server",
+            Header = "_Silence This Server",
             Tag = serverId,
             Icon = new TextBlock { Text = "🔇" }
         };
@@ -926,7 +926,7 @@ public partial class MainWindow : Window
 
         var unsilenceItem = new MenuItem
         {
-            Header = "Unsilence",
+            Header = "_Unsilence",
             Tag = serverId,
             Icon = new TextBlock { Text = "🔔" }
         };
