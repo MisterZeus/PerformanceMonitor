@@ -179,6 +179,11 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public string GenericWebhookBodyTemplate => _config.Webhooks.GenericBodyTemplate;
     public string GenericWebhookProxyAddress => _config.Webhooks.GenericProxy;
 
+    /* PagerDuty webhook — enabled by a non-empty routing key, like the sibling channels. */
+    public bool PagerDutyEnabled => !string.IsNullOrWhiteSpace(_config.Webhooks.PagerDutyRoutingKey);
+    public string PagerDutyRoutingKey => _config.Webhooks.PagerDutyRoutingKey;
+    public bool PagerDutyUseEuRegion => _config.Webhooks.PagerDutyUseEuRegion;
+
     /* Scheduled-analysis notifications (AN3): the shared AnalysisNotificationService's severity floor
        + per-finding re-notify cooldown. The severity floor is now a control-plane knob (config Stage
        1) read through the by-reference config seam — a store reload reflects it immediately; clamped

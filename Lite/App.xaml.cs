@@ -214,10 +214,18 @@ public partial class App : Application
     public static string GenericWebhookBodyTemplate { get; set; } = "";
     public static string GenericWebhookProxyAddress { get; set; } = "";
 
+    /* PagerDuty webhook settings — Events API v2. The routing key is a bearer secret like the Teams/Slack
+       URLs, so it lives in Credential Manager, never in settings.json; only the enable flag and the EU-region
+       toggle are plain prefs. */
+    public static bool PagerDutyWebhookEnabled { get; set; } = false;
+    public static string PagerDutyRoutingKey { get; set; } = "";
+    public static bool PagerDutyUseEuRegion { get; set; } = false;
+
     private const string TeamsWebhookCredentialKey = "TeamsWebhook";
     private const string SlackWebhookCredentialKey = "SlackWebhook";
     private const string GenericWebhookCredentialKey = "GenericWebhook";
     private const string GenericWebhookHeadersCredentialKey = "GenericWebhookHeaders";
+    private const string PagerDutyWebhookCredentialKey = "PagerDutyWebhook";
 
     /// <summary>
     /// Gets a webhook URL from Windows Credential Manager.
@@ -650,6 +658,11 @@ public partial class App : Application
             if (root.TryGetProperty("generic_proxy_address", out v)) GenericWebhookProxyAddress = v.GetString() ?? "";
             if (root.TryGetProperty("generic_body_template", out v)) GenericWebhookBodyTemplate = v.GetString() ?? "";
 
+            /* PagerDuty webhook settings. The routing key is a secret and loads from Credential Manager below;
+               only the enable flag and EU-region toggle are plain prefs. */
+            if (root.TryGetProperty("pagerduty_webhook_enabled", out v)) PagerDutyWebhookEnabled = v.GetBoolean();
+            if (root.TryGetProperty("pagerduty_use_eu_region", out v)) PagerDutyUseEuRegion = v.GetBoolean();
+
             /* Migrate webhook URLs from plaintext settings.json to Credential Manager */
             if (root.TryGetProperty("teams_webhook_url", out v))
             {
@@ -674,6 +687,8 @@ public partial class App : Application
             SlackWebhookUrl = GetWebhookUrl(SlackWebhookCredentialKey);
             GenericWebhookUrl = GetWebhookUrl(GenericWebhookCredentialKey);
             GenericWebhookHeadersJson = GetWebhookUrl(GenericWebhookHeadersCredentialKey);
+            PagerDutyRoutingKey = GetWebhookUrl(PagerDutyWebhookCredentialKey);
+            PagerDutyRoutingKey = GetWebhookUrl(PagerDutyWebhookCredentialKey);
 
             /* SMTP settings */
             if (root.TryGetProperty("smtp_enabled", out v)) SmtpEnabled = v.GetBoolean();

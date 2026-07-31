@@ -521,6 +521,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)", connection);
         public string GenericWebhookHeadersJson => "";
         public string GenericWebhookBodyTemplate => "";
         public string GenericWebhookProxyAddress => "";
+        public bool PagerDutyEnabled => false;
+        public string PagerDutyRoutingKey => "";
+        public bool PagerDutyUseEuRegion => false;
         public double AnalysisNotifySeverity { get; init; } = 1.5;
         public int AnalysisNotifyCooldownMinutes { get; init; } = 360;
     }

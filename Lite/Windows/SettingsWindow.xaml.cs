@@ -975,9 +975,13 @@ public partial class SettingsWindow : Window
             ? WebhookAlertService.DefaultGenericBodyTemplate
             : App.GenericWebhookBodyTemplate;
         GenericWebhookProxyAddressBox.Text = App.GenericWebhookProxyAddress;
+        PagerDutyWebhookEnabledCheckBox.IsChecked = App.PagerDutyWebhookEnabled;
+        PagerDutyRoutingKeyBox.Text = App.PagerDutyRoutingKey;
+        PagerDutyEuRegionCheckBox.IsChecked = App.PagerDutyUseEuRegion;
         UpdateTeamsControlStates();
         UpdateSlackControlStates();
         UpdateGenericControlStates();
+        UpdatePagerDutyControlStates();
     }
 
     /// <summary>
@@ -1014,13 +1018,18 @@ public partial class SettingsWindow : Window
             ? ""
             : GenericWebhookBodyBox.Text?.Trim() ?? "";
         App.GenericWebhookProxyAddress = GenericWebhookProxyAddressBox.Text?.Trim() ?? "";
+        App.PagerDutyWebhookEnabled = PagerDutyWebhookEnabledCheckBox.IsChecked == true;
+        App.PagerDutyRoutingKey = PagerDutyRoutingKeyBox.Text?.Trim() ?? "";
+        App.PagerDutyUseEuRegion = PagerDutyEuRegionCheckBox.IsChecked == true;
 
         /* Save webhook URLs to Credential Manager instead of settings.json. The generic channel's headers
-           JSON goes there too — it carries the Authorization bearer token (#1506). */
+           JSON goes there too — it carries the Authorization bearer token (#1506). The PagerDuty routing
+           key is a bearer secret like the webhook URLs. */
         App.SaveWebhookUrl("TeamsWebhook", App.TeamsWebhookUrl);
         App.SaveWebhookUrl("SlackWebhook", App.SlackWebhookUrl);
         App.SaveWebhookUrl("GenericWebhook", App.GenericWebhookUrl);
         App.SaveWebhookUrl("GenericWebhookHeaders", App.GenericWebhookHeadersJson);
+        App.SaveWebhookUrl("PagerDutyWebhook", App.PagerDutyRoutingKey);
 
         var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
         try
@@ -1042,10 +1051,14 @@ public partial class SettingsWindow : Window
             root["slack_proxy_address"] = App.SlackProxyAddress;
 
             /* The generic channel's URL + headers are secrets and live in Credential Manager; only these
-               three are safe to persist in settings.json (#1506). */
+               three are safe to persist in settings.json (#1506). The PagerDuty routing key is also a
+               secret and lives in Credential Manager; only the enable flag and EU-region toggle are safe. */
             root["generic_webhook_enabled"] = App.GenericWebhookEnabled;
             root["generic_proxy_address"] = App.GenericWebhookProxyAddress;
             root["generic_body_template"] = App.GenericWebhookBodyTemplate;
+
+            root["pagerduty_webhook_enabled"] = App.PagerDutyWebhookEnabled;
+            root["pagerduty_use_eu_region"] = App.PagerDutyUseEuRegion;
 
             /* Remove legacy plaintext webhook URLs from settings.json */
             if (root is JsonObject obj)
@@ -1118,6 +1131,50 @@ public partial class SettingsWindow : Window
         SlackWebhookUrlBox.IsEnabled = enabled;
         SlackProxyAddressBox.IsEnabled = enabled;
         TestSlackButton.IsEnabled = enabled;
+    }
+
+    private void PagerDutyWebhookEnabledCheckBox_Changed(object sender, RoutedEventArgs e)
+    {
+        UpdatePagerDutyControlStates();
+    }
+
+    private void UpdatePagerDutyControlStates()
+    {
+        bool enabled = PagerDutyWebhookEnabledCheckBox.IsChecked == true;
+        PagerDutyRoutingKeyBox.IsEnabled = enabled;
+        PagerDutyEuRegionCheckBox.IsEnabled = enabled;
+        TestPagerDutyButton.IsEnabled = enabled;
+    }
+
+    private async void TestPagerDutyButton_Click(object sender, RoutedEventArgs e)
+    {
+        TestPagerDutyButton.IsEnabled = false;
+        TestPagerDutyButton.Content = "Sending...";
+
+        try
+        {
+            var routingKey = PagerDutyRoutingKeyBox.Text?.Trim() ?? "";
+            var useEuRegion = PagerDutyEuRegionCheckBox.IsChecked == true;
+            var error = await WebhookAlertService.SendTestPagerDutyAsync(routingKey, useEuRegion, EmailAlertService.Branding);
+
+            if (error == null)
+            {
+                MessageBox.Show("PagerDuty test notification sent successfully!", "Test Webhook", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            else
+            {
+                MessageBox.Show($"Failed to send PagerDuty test notification:\n\n{error}", "Test Webhook Failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Failed to send PagerDuty test notification:\n\n{ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            TestPagerDutyButton.Content = "Send Test Notification";
+            TestPagerDutyButton.IsEnabled = true;
+        }
     }
 
     private async void TestTeamsButton_Click(object sender, RoutedEventArgs e)
