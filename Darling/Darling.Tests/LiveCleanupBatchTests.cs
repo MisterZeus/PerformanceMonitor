@@ -49,8 +49,7 @@ public sealed class LiveCleanupBatchTests
 
         var ct = TestContext.Current.CancellationToken;
 
-        await using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync(ct);
+        await using var connection = await OpenAsync(connectionString!, ct);
 
         using (var create = new NpgsqlCommand(
             $"CREATE TABLE IF NOT EXISTS collect.{Probe} (id integer)", connection))
@@ -81,8 +80,7 @@ public sealed class LiveCleanupBatchTests
 
         var ct = TestContext.Current.CancellationToken;
 
-        await using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync(ct);
+        await using var connection = await OpenAsync(connectionString!, ct);
 
         using (var create = new NpgsqlCommand(
             $"CREATE TABLE IF NOT EXISTS collect.{Probe} (id integer)", connection))
@@ -113,8 +111,7 @@ public sealed class LiveCleanupBatchTests
         }
         finally
         {
-            await using var cleanup = new NpgsqlConnection(connectionString);
-            await cleanup.OpenAsync(CancellationToken.None);
+            await using var cleanup = await OpenAsync(connectionString!, CancellationToken.None);
             await new LiveCleanupBatch(cleanup).DropTableAsync(Probe, CancellationToken.None);
         }
     }
@@ -136,8 +133,7 @@ public sealed class LiveCleanupBatchTests
 
         var ct = TestContext.Current.CancellationToken;
 
-        await using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync(ct);
+        await using var connection = await OpenAsync(connectionString!, ct);
 
         var batch = new LiveCleanupBatch(connection, publishResidue: false, maxAttempts: 2);
 
@@ -167,8 +163,7 @@ public sealed class LiveCleanupBatchTests
 
         var ct = TestContext.Current.CancellationToken;
 
-        await using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync(ct);
+        await using var connection = await OpenAsync(connectionString!, ct);
 
         using (var create = new NpgsqlCommand(
             $"CREATE TABLE IF NOT EXISTS collect.{Probe} (id integer)", connection))
@@ -220,8 +215,7 @@ public sealed class LiveCleanupBatchTests
         const string Daily = "cagg_1873_raw_daily";
         const string DayGrain = "cagg_1873_raw_day_grain";
 
-        await using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync(ct);
+        await using var connection = await OpenAsync(connectionString!, ct);
 
         try
         {
@@ -265,12 +259,32 @@ WITH NO DATA", ct);
         }
         finally
         {
-            await using var cleanup = new NpgsqlConnection(connectionString);
-            await cleanup.OpenAsync(CancellationToken.None);
+            await using var cleanup = await OpenAsync(connectionString!, CancellationToken.None);
             var batch = new LiveCleanupBatch(cleanup);
             await batch.DropContinuousAggregatesAsync([DayGrain, Daily, Hourly], CancellationToken.None);
             await batch.DropTableAsync(Raw, CancellationToken.None);
         }
+    }
+
+    /// <summary>
+    /// Opens a store connection and SETS the search path, never inherits it — the same rule
+    /// <see cref="LiveStoreCleanup"/> documents, and for the same reason. Npgsql pools physical sessions, and
+    /// the path a pooled one carries depends on when it was first opened. It bites here because
+    /// <see cref="TimescaleSupport.CreateHypertableSql"/> calls <c>by_range(...)</c> UNQUALIFIED and the
+    /// TimescaleDB helpers live in <c>public</c>: a session whose path omits it dies
+    /// <c>42883 function by_range(unknown, interval) does not exist</c>, naming the inner function because it
+    /// is an argument to <c>create_hypertable</c> and resolves first. It passed locally and failed on CI,
+    /// because a connection string that pins its own <c>SearchPath</c> hides exactly this.
+    /// </summary>
+    private static async Task<NpgsqlConnection> OpenAsync(string connectionString, CancellationToken ct)
+    {
+        var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+
+        using var setPath = new NpgsqlCommand("SET search_path = " + PgSchemaGenerator.SearchPath, connection);
+        await setPath.ExecuteNonQueryAsync(ct);
+
+        return connection;
     }
 
     private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
