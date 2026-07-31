@@ -193,6 +193,7 @@ namespace PerformanceMonitorDashboard.Services
                 var collectionStopped = await collectionStoppedTask;
                 result.CollectionStopped = collectionStopped.Stopped;
                 result.CollectionStoppedReason = collectionStopped.Reason;
+                result.CollectionStoppedShortValue = collectionStopped.ShortValue;
                 result.DisabledCollectorJobs = collectionStopped.DisabledJobs;
                 result.TotalCollectorJobs = collectionStopped.TotalJobs;
                 result.MinutesSinceLastCollection = collectionStopped.MinutesSince;
@@ -214,13 +215,29 @@ namespace PerformanceMonitorDashboard.Services
         /// </summary>
         private const int CollectionStaleThresholdMinutes = 30;
 
+        /// <param name="Reason">The full human-readable cause — what the toast, the email and the history
+        /// row's detail text all carry.</param>
+        /// <param name="ShortValue">The same cause compressed to a grid cell: what the Alert History
+        /// grid's Value column shows (#1913). Produced HERE, beside <paramref name="Reason"/>, rather than
+        /// re-derived at the fire site, because the two must agree on which branch fired and a second
+        /// derivation is a second chance to disagree — which is exactly what went wrong. Null when
+        /// collection is healthy, like <paramref name="Reason"/>.</param>
         internal readonly record struct CollectionStoppedResult(
-            bool Stopped, string? Reason, int DisabledJobs, int TotalJobs, int? MinutesSince);
+            bool Stopped, string? Reason, int DisabledJobs, int TotalJobs, int? MinutesSince, string? ShortValue);
 
         /// <summary>
         /// Pure decision: given the two probe results (disabled-job counts and minutes-since-last-collection),
         /// decide whether collection is stopped and why. Disabled jobs win — immediate and specific; the
         /// freshness gap is the catch-all for Agent-stopped / erroring collectors. Extracted for unit testing.
+        ///
+        /// <para><b>Two renderings of one cause, produced together (#1913).</b> The alert needs the cause at
+        /// two lengths: the full sentence for the toast, the email and the row's detail text, and a compact
+        /// form for the Alert History grid's 200px Value column — where the siblings all sit ("87% (Total
+        /// CPU)", "Session #12 running 45m"). The fire site used to build the compact one itself and got a
+        /// different answer: it reported <c>"{N} job(s) disabled"</c>, dropping the total that decides
+        /// whether collection stopped partially or completely, and on the staleness branch it reported the
+        /// constant <c>"no recent collection"</c> — which restates the metric name and throws away the one
+        /// figure an operator wants, the minutes. Both are computed here now, off the same branch.</para>
         /// </summary>
         internal static CollectionStoppedResult DecideCollectionStopped(
             int disabledJobs, int totalJobs, int? minutesSince, int thresholdMinutes)
@@ -230,16 +247,20 @@ namespace PerformanceMonitorDashboard.Services
                 string reason = disabledJobs == totalJobs
                     ? $"All {totalJobs} PerformanceMonitor collector Agent job(s) are disabled — data collection has stopped."
                     : $"{disabledJobs} of {totalJobs} PerformanceMonitor collector Agent job(s) are disabled — collection is partially or fully stopped.";
-                return new CollectionStoppedResult(true, reason, disabledJobs, totalJobs, minutesSince);
+                return new CollectionStoppedResult(
+                    true, reason, disabledJobs, totalJobs, minutesSince,
+                    $"{disabledJobs} of {totalJobs} job(s) disabled");
             }
 
             if (minutesSince.HasValue && minutesSince.Value >= thresholdMinutes)
             {
                 string reason = $"No collector has run in {minutesSince.Value} minutes — the SQL Agent service may be stopped or the collectors are failing.";
-                return new CollectionStoppedResult(true, reason, disabledJobs, totalJobs, minutesSince);
+                return new CollectionStoppedResult(
+                    true, reason, disabledJobs, totalJobs, minutesSince,
+                    $"no collection in {minutesSince.Value}m");
             }
 
-            return new CollectionStoppedResult(false, null, disabledJobs, totalJobs, minutesSince);
+            return new CollectionStoppedResult(false, null, disabledJobs, totalJobs, minutesSince, null);
         }
 
         /// <summary>
