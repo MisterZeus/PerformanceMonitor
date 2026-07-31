@@ -1322,9 +1322,21 @@ public sealed class PayloadDimensionLiveTests
     /// silently strand the aggregate in the shared fixture — which is exactly how query_stats_db_hourly
     /// and query_stats_db_daily came to persist across runs and flip the #1784 gate for every later
     /// test. The tests refresh manually and deterministically; they never need the scheduler.
+    ///
+    /// <para><b>The conversion first is not optional and belongs HERE, not at the call sites (#1862).</b>
+    /// TimescaleDB will not build a continuous aggregate over a heap, and the ensure is failure-isolated per
+    /// aggregate — so against un-converted tables it creates NOTHING and says so only to a logger this class
+    /// passes as null. The next line then force-refreshes a view that was never created and the test dies on
+    /// <c>42P01 relation "collect.query_stats_hourly" does not exist</c>, naming a symptom three steps
+    /// downstream of the cause. Three of this class's four callers already convert on their own way in, which
+    /// is precisely why the fourth survived: on a shared store the conversion is PERSISTENT, so whoever ran
+    /// first covered for whoever ran next, and the gap only surfaced on a fresh database in an unlucky order.
+    /// Putting it in the helper makes "aggregates exist afterwards" true of the helper rather than true of the
+    /// caller's memory, and it costs the other three nothing — <c>if_not_exists</c> makes it a no-op.</para>
     /// </summary>
     private static async Task EnsureAggregatesWithoutPoliciesAsync(NpgsqlConnection connection, CancellationToken ct)
     {
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
         foreach (var (view, _, _, _, _) in TimescaleSupport.RollupViews)
