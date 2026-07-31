@@ -980,17 +980,76 @@ VALUES
             TimescaleSupport.QueryStoreStatsDayGrainDailyView,
         })
         {
-            await using var refresh = new NpgsqlCommand($"CALL refresh_continuous_aggregate('collect.{view}', NULL, NULL)", connection);
-            await refresh.ExecuteNonQueryAsync(ct);
+            /* Same 55P03 window as the ranged refresh below, and the same answer — this loop runs immediately
+               after the aggregates are built, which is exactly when the scheduler is busiest. */
+            await RefreshWithRetryAsync(
+                () => new NpgsqlCommand($"CALL refresh_continuous_aggregate('collect.{view}', NULL, NULL)", connection),
+                ct);
         }
     }
 
-    private static async Task RefreshRangeAsync(NpgsqlConnection connection, string view, DateTime from, DateTime to, CancellationToken ct)
+    /// <summary>
+    /// Materializes a range, retrying while TimescaleDB reports a CONCURRENT REFRESH (55P03).
+    ///
+    /// <para><b>Why the retry, and why it is not papering over anything.</b>
+    /// <see cref="EnsureAggregatesWithoutRefreshPoliciesAsync"/> strips every refresh policy, but it can only do
+    /// so AFTER <c>EnsureContinuousAggregatesAsync</c> has created them — and TimescaleDB runs a new policy's
+    /// first check IMMEDIATELY rather than on its next interval (#1564/#1567). So there is a window, measured in
+    /// the time between two statements, where the background scheduler is already materializing the view this
+    /// test is about to refresh by hand, and the two collide as 55P03.</para>
+    ///
+    /// <para>The window is real but tiny, which is why it went unnoticed until CI lost the race: it is a
+    /// scheduler-timing coincidence, so it fires under load rather than reproducibly, and more classes building
+    /// aggregates concurrently on one cluster makes it likelier. Retrying is the correct response rather than a
+    /// workaround — a refresh is idempotent, the losing side is simply early, and the ALTERNATIVE (asserting the
+    /// first attempt wins) is asserting something the engine never promised. Bounded, so a genuine deadlock
+    /// still fails the test rather than hanging it.</para>
+    /// </summary>
+    private static Task RefreshRangeAsync(NpgsqlConnection connection, string view, DateTime from, DateTime to, CancellationToken ct) =>
+        RefreshWithRetryAsync(
+            () =>
+            {
+                var refresh = new NpgsqlCommand($"CALL refresh_continuous_aggregate('collect.{view}', $1::timestamp, $2::timestamp)", connection);
+                refresh.Parameters.AddWithValue(from);
+                refresh.Parameters.AddWithValue(to);
+                return refresh;
+            },
+            ct);
+
+    /// <summary>
+    /// Runs a refresh, retrying while TimescaleDB reports a CONCURRENT REFRESH (55P03).
+    ///
+    /// <para><b>Why the retry, and why it is not papering over anything.</b>
+    /// <see cref="EnsureAggregatesWithoutRefreshPoliciesAsync"/> strips every refresh policy, but it can only do
+    /// so AFTER <c>EnsureContinuousAggregatesAsync</c> has created them — and TimescaleDB runs a new policy's
+    /// first check IMMEDIATELY rather than on its next interval (#1564/#1567). So there is a window, the length
+    /// of two statements, in which the background scheduler is already materializing the very view the test is
+    /// about to refresh by hand, and the two collide as 55P03.</para>
+    ///
+    /// <para>The window is real but tiny, which is why it went unnoticed until CI lost the race: it is a
+    /// scheduler-timing coincidence, so it fires under load rather than reproducibly, and more classes building
+    /// aggregates concurrently on one cluster makes it likelier. Retrying is the correct response rather than a
+    /// workaround — a refresh is idempotent, the losing side is merely early, and the alternative is asserting
+    /// that the first attempt wins, which the engine never promised. Bounded, so a genuine stall still fails
+    /// the test rather than hanging it.</para>
+    /// </summary>
+    private static async Task RefreshWithRetryAsync(Func<NpgsqlCommand> command, CancellationToken ct)
     {
-        await using var refresh = new NpgsqlCommand($"CALL refresh_continuous_aggregate('collect.{view}', $1::timestamp, $2::timestamp)", connection);
-        refresh.Parameters.AddWithValue(from);
-        refresh.Parameters.AddWithValue(to);
-        await refresh.ExecuteNonQueryAsync(ct);
+        const int maxAttempts = 12;
+
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await using var refresh = command();
+                await refresh.ExecuteNonQueryAsync(ct);
+                return;
+            }
+            catch (PostgresException ex) when (ex.SqlState == "55P03" && attempt < maxAttempts)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(250), ct);
+            }
+        }
     }
 
     private sealed record IntervalRow(long QueryId, long? IntervalId, long ExecutionCount, long SampleCount);
