@@ -10,6 +10,23 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpAlertTools
 {
+    /// <summary>SQL-process CPU only. Darling's <c>cpu_mode</c> spelling, which its own
+    /// <c>update_alert_settings</c> validates against — see <c>ViewerDataService.CpuModeSql</c>.</summary>
+    internal const string CpuModeSql = "sql";
+
+    /// <summary>All non-idle CPU. Darling's <c>ViewerDataService.CpuModeTotal</c>.</summary>
+    internal const string CpuModeTotal = "total";
+
+    /// <summary>
+    /// Lite's <see cref="CpuAlertMode"/> in Darling's wire vocabulary (#1911). Deliberately NOT
+    /// <c>App.AlertCpuMode.ToString()</c>: that emits the C# enum names <c>Total</c>/<c>SqlOnly</c>, which no
+    /// Darling client accepts, and it would silently start emitting a third spelling the day someone renames
+    /// the enum. The mapping is the same shape as Darling's own <c>MapCpuModeToStore</c>, which is the
+    /// authority this mirrors.
+    /// </summary>
+    internal static string CpuModeFor(CpuAlertMode mode) =>
+        mode == CpuAlertMode.SqlOnly ? CpuModeSql : CpuModeTotal;
+
     [McpServerTool(Name = "get_alert_history"), Description("Gets recent alert history from the alert log. Shows what alerts fired, when, and whether email was sent successfully.")]
     public static async Task<string> GetAlertHistory(
         LocalDataService dataService,
@@ -74,7 +91,14 @@ public sealed class McpAlertTools
                 cpu = new
                 {
                     enabled = App.AlertCpuEnabled,
-                    threshold_percent = App.AlertCpuThreshold
+                    threshold_percent = App.AlertCpuThreshold,
+                    /* #1911: Lite did not report the mode at all, and adding it as the raw enum name would
+                       have traded #1895's key-level mismatch for a VALUE-level one — Darling has emitted
+                       "sql"/"total" here since its store schema was written, and its update_alert_settings
+                       validates against exactly those two. Its vocabulary is the older public surface, so
+                       Lite maps onto it rather than the other way round; an agent can now read cpu.mode from
+                       either app and compare the answers. */
+                    mode = McpAlertTools.CpuModeFor(App.AlertCpuMode)
                 },
                 blocking = new
                 {

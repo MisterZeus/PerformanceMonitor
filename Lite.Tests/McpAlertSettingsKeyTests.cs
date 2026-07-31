@@ -6,9 +6,12 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text.Json;
+using PerformanceMonitorLite;
 using PerformanceMonitorLite.Mcp;
 using Xunit;
 
@@ -40,6 +43,76 @@ public sealed class McpAlertSettingsKeyTests
 
     private static IReadOnlyList<string> KeysOf(JsonElement element) =>
         element.EnumerateObject().Select(p => p.Name).ToList();
+
+    /// <summary>
+    /// #1911: the value half of the same alignment. Lite reports <c>cpu.mode</c> in Darling's vocabulary, so
+    /// the enum name must never reach the wire — <c>App.AlertCpuMode.ToString()</c> would emit
+    /// <c>"Total"</c>/<c>"SqlOnly"</c>, which Darling's <c>update_alert_settings</c> rejects outright.
+    /// </summary>
+    [Theory]
+    [InlineData(CpuAlertMode.Total, "total")]
+    [InlineData(CpuAlertMode.SqlOnly, "sql")]
+    public void GetAlertSettings_CpuMode_UsesDarlingsLowercaseVocabulary(CpuAlertMode mode, string expected)
+    {
+        var original = App.AlertCpuMode;
+        try
+        {
+            App.AlertCpuMode = mode;
+            var cpu = Settings().GetProperty("cpu");
+
+            Assert.Contains("mode", KeysOf(cpu));
+            Assert.Equal(expected, cpu.GetProperty("mode").GetString());
+
+            /* The enum names, asserted absent: emitting one is the specific regression this guards. */
+            Assert.NotEqual("Total", cpu.GetProperty("mode").GetString());
+            Assert.NotEqual("SqlOnly", cpu.GetProperty("mode").GetString());
+        }
+        finally
+        {
+            App.AlertCpuMode = original;
+        }
+    }
+
+    /// <summary>
+    /// The cross-app half, and the reason this is source-parsing: Lite.Tests cannot reference the Darling
+    /// Viewer, so the only way to prove the two apps agree on the LITERALS is to read Darling's declaration.
+    /// Asserting Lite's two constants alone would keep passing on the day Darling changes its vocabulary,
+    /// which is the drift the whole issue was about.
+    /// </summary>
+    [Fact]
+    public void CpuModeVocabulary_IsByteForByteDarlings()
+    {
+        var darling = File.ReadAllText(FindRepoFile(
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.AlertSettings.cs")));
+
+        Assert.Contains($"CpuModeSql = \"{McpAlertTools.CpuModeSql}\"", darling, StringComparison.Ordinal);
+        Assert.Contains($"CpuModeTotal = \"{McpAlertTools.CpuModeTotal}\"", darling, StringComparison.Ordinal);
+
+        /* And that Darling's writable surface still accepts exactly these two, so a read from either app
+           round-trips through the other's update_alert_settings. */
+        var darlingTools = File.ReadAllText(FindRepoFile(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs")));
+        Assert.Contains(
+            $"AddEnum(\"cpu_mode\", n, \"cpu.mode\", \"{McpAlertTools.CpuModeSql}\", \"{McpAlertTools.CpuModeTotal}\")",
+            darlingTools,
+            StringComparison.Ordinal);
+    }
+
+    private static string FindRepoFile(string relativePath)
+    {
+        var dir = AppContext.BaseDirectory;
+        for (var i = 0; i < 8 && dir is not null; i++)
+        {
+            var candidate = Path.Combine(dir, relativePath);
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        throw new FileNotFoundException($"Could not locate {relativePath} walking up from {AppContext.BaseDirectory}");
+    }
 
     [Fact]
     public void GetAlertSettings_TopLevelMasterSwitch_IsAlertsEnabled()

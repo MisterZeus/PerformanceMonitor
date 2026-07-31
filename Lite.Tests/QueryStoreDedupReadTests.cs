@@ -357,6 +357,89 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.Equal(5.0, bucket.TotalCpu, precision: 6);
     }
 
+    /// <summary>
+    /// WATCHED (mutation): put the window filter back on collection_time and this goes red.
+    ///
+    /// <para>#1892's left edge. Once the bars were keyed on the interval's start (#1841 tier 2) but the window
+    /// was still filtered on collection_time, the two stopped agreeing: an interval that STARTED before the
+    /// requested range but whose closing fetch landed inside it passed the filter and then drew a bar dated
+    /// before the range began. A "last 24 hours" chart grew a bar to the left of 24 hours ago.</para>
+    ///
+    /// <para>The seeded row is deliberately well clear of the edge in both directions -- the interval starts
+    /// 26 hours back, the collection lands 22 hours back -- so the window moving by however long the test
+    /// takes to run cannot decide the outcome.</para>
+    /// </summary>
+    [Fact]
+    public async Task Slicer_DropsAnIntervalThatStartedBeforeTheWindow_EvenWhenItWasCollectedInsideIt()
+    {
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var startedBeforeWindow = HourFloor(now.AddHours(-26));
+        var collectedInsideWindow = now.AddHours(-22);
+
+        await SeedAsync(collectedInsideWindow, queryId: 90, planId: 990, FirstExecA,
+            executionCount: 4, avgCpuUs: 1_000, avgDurationUs: 2_000, avgReads: 6, queryHash: "0xEDGE",
+            intervalId: 9001, intervalStart: startedBeforeWindow);
+
+        /* One row in the window on the old filter, none on the new one. */
+        var buckets = await new LocalDataService(_duckDb).GetQueryStoreSlicerDataAsync(ServerId, hoursBack: 24);
+
+        Assert.DoesNotContain(buckets, b => b.BucketTime == startedBeforeWindow);
+        Assert.Empty(buckets);
+    }
+
+    /// <summary>
+    /// WATCHED (mutation): restore the collection_time ceiling and this goes red.
+    ///
+    /// <para>#1892's right edge, and the half that COSTS data rather than adding it. A window's final interval
+    /// is still open when the window ends, so its closing fetch happens afterwards -- and a
+    /// <c>collection_time &lt;= end</c> filter therefore dropped the newest bar entirely. That is the
+    /// collection lag #1841 set out to remove, reappearing one layer down as a missing bar instead of a
+    /// misplaced one.</para>
+    ///
+    /// <para>The collection is seeded AFTER the window's end, which for a "last N hours" window means a
+    /// timestamp in the future. That is a stand-in, stated plainly: the shape occurs for real whenever the
+    /// requested range ends in the past, which is every historical window the date pickers produce. Using
+    /// hoursBack keeps the test off <c>ServerTimeHelper.UtcOffsetMinutes</c>, a process-wide mutable static
+    /// that an explicit range would drag in.</para>
+    /// </summary>
+    [Fact]
+    public async Task Slicer_KeepsAnIntervalThatStartedInsideTheWindow_ThoughItsClosingFetchLandedAfterIt()
+    {
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var startedInsideWindow = HourFloor(now.AddHours(-2));
+        var collectedAfterWindow = now.AddHours(2);
+
+        await SeedAsync(collectedAfterWindow, queryId: 91, planId: 991, FirstExecB,
+            executionCount: 6, avgCpuUs: 1_000, avgDurationUs: 2_000, avgReads: 6, queryHash: "0xEDGE2",
+            intervalId: 9002, intervalStart: startedInsideWindow);
+
+        var buckets = await new LocalDataService(_duckDb).GetQueryStoreSlicerDataAsync(ServerId, hoursBack: 24);
+
+        var bucket = Assert.Single(buckets);
+        Assert.Equal(startedInsideWindow, bucket.BucketTime);
+        Assert.Equal(6.0, bucket.TotalCpu, precision: 6);
+    }
+
+    /// <summary>
+    /// WATCHED (mutation): the duration trend carries the identical mismatch, and fixing only the slicer
+    /// leaves the two charts on the same screen disagreeing about which interval is in the window.
+    /// </summary>
+    [Fact]
+    public async Task DurationTrend_DropsAnIntervalThatStartedBeforeTheWindow_LikeTheSlicerDoes()
+    {
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var startedBeforeWindow = HourFloor(now.AddHours(-26));
+
+        await SeedAsync(now.AddHours(-22), queryId: 92, planId: 992, FirstExecA,
+            executionCount: 4, avgCpuUs: 1_000, avgDurationUs: 2_000, avgReads: 6, queryHash: "0xEDGE3",
+            intervalId: 9003, intervalStart: startedBeforeWindow);
+
+        var points = await new LocalDataService(_duckDb).GetQueryStoreDurationTrendAsync(ServerId, hoursBack: 24);
+
+        Assert.DoesNotContain(points, p => p.CollectionTime == startedBeforeWindow);
+        Assert.Empty(points);
+    }
+
     [Fact]
     public async Task DedupKeysOnTheRealIntervalId_WhenFirstExecutionTimeCannotTellIntervalsApart()
     {

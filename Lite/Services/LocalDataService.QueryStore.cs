@@ -66,8 +66,34 @@ WITH deduped AS
         ) AS rn
     FROM v_query_store_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3" + dbClause + @"
+    -- The window is filtered on the SAME expression the bars are keyed on (#1892). It used to filter on
+    -- collection_time while bucketing on the interval start, and once those stopped being the same instant
+    -- (#1841 tier 2) the two disagreed at both edges: an interval that started before the window but closed
+    -- inside it drew an extra bar to the LEFT of the requested range, and the window's own last interval --
+    -- whose closing fetch lands after the range ends -- was dropped entirely, which is the collection lag
+    -- #1841 set out to remove showing up one layer down.
+    AND   COALESCE(interval_start_time_utc, collection_time) >= $2
+    AND   COALESCE(interval_start_time_utc, collection_time) <= $3
+    -- Pruning bounds, NOT filters: neither can exclude a row the predicate above keeps in any realistic
+    -- store. They earn their place because v_query_store_stats unions the live table with the parquet
+    -- archive, and bounds on collection_time are what let the reader skip archive row groups instead of
+    -- scanning the whole glob -- without them an old fixed date range reads every file from the window
+    -- through the present.
+    --
+    -- The FLOOR is free: an interval is always collected after it starts, so
+    -- interval_start_time_utc <= collection_time, and therefore COALESCE(...) >= $2 already implies
+    -- collection_time >= $2. The extra day is slack against clock skew between the monitored server's
+    -- interval clock and ours.
+    --
+    -- The CEILING is deliberately enormous rather than tight, because tight is unsafe here. A row's
+    -- collection_time exceeds its interval start by the interval's own length -- at most 1 day, since
+    -- Query Store's INTERVAL_LENGTH_MINUTES accepts only 1/5/10/15/30/60/1440 -- plus however long the
+    -- collector was behind, which nothing bounds. So 30 days is 1 day of engine maximum and 29 of
+    -- collector-outage allowance. A month-long outage that then back-collects an interval straddling an
+    -- old window's edge could still omit that one bar; the data stays in the store, and the alternative
+    -- (no ceiling) makes every historical window scan to the present.
+    AND   collection_time >= $2 - INTERVAL '1 day'
+    AND   collection_time <= $3 + INTERVAL '30 days'" + dbClause + @"
 )
 SELECT
     -- The bar sits in the hour the work RAN, not the hour it was last COLLECTED (#1841 tier 2). Query
@@ -773,8 +799,16 @@ WITH placed AS
             ) AS rn
         FROM v_query_store_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
+        -- Windowed on the column this arm PLACES its points at (#1892), which inside the IS NOT NULL guard
+        -- below is what COALESCE(interval_start_time_utc, collection_time) resolves to anyway. Filtering on
+        -- collection_time here put a point outside the range the caller asked for, and dropped the range's
+        -- final interval because its closing fetch had not happened yet.
+        AND   interval_start_time_utc >= $2
+        AND   interval_start_time_utc <= $3
+        -- Pruning bounds only; see the slicer above for why the floor is free and why the ceiling is a
+        -- month rather than tight.
+        AND   collection_time >= $2 - INTERVAL '1 day'
+        AND   collection_time <= $3 + INTERVAL '30 days'
         AND   interval_start_time_utc IS NOT NULL" + dbClause + @"
     ) identified
     WHERE rn = 1
