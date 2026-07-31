@@ -366,6 +366,95 @@ AND   j.scheduled", ct);
     }
 
     /// <summary>
+    /// #1869: the backfill verb converges the THREE-level Query Store chain, not just its first two rungs.
+    ///
+    /// <para>The verb derives its targets from <c>RollupViews</c>, so a new rollup is picked up automatically —
+    /// but "picked up" and "converged" are different claims when the chain gets deeper. A rollup refreshed
+    /// before its source reads an empty source, materializes nothing, RETURNS SUCCESS, and burns the
+    /// invalidation records that would have let a later pass repair it. Two levels could be ordered by a
+    /// boolean; three cannot, and the failure mode is silent. So this drives the real verb over a store holding
+    /// real Query Store history and then asks the STORE whether each level actually reaches its own source.</para>
+    ///
+    /// <para>The day-grain daily is the one that can only pass by ordering: its source is
+    /// <c>query_store_stats_interval_daily</c>, which is itself hierarchical, so it converges only if BOTH
+    /// hops ran in order.</para>
+    /// </summary>
+    [Fact]
+    public async Task BackfillRollupsVerb_ConvergesTheThreeLevelQueryStoreChain_IncludingTheDayGrainDaily()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #1869 backfill test.");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "--backfill-rollups is Windows-only (DPAPI store credential in managed mode).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using (var setup = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await setup.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(setup, ct);
+            Assert.True(await TimescaleSupport.TryEnableAsync(setup, null, ct));
+            await TimescaleSupport.ConvertToHypertablesAsync(setup, null, ct);
+
+            var seedNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            await SeedHourlyQueryStoreStatsAsync(setup, seedNow.AddDays(-HistoryDays), seedNow, ct);
+            await TimescaleSupport.EnsureContinuousAggregatesAsync(setup, null, ct);
+        }
+
+        var configPath = Path.Combine(Path.GetTempPath(), $"darling-1869-{Guid.NewGuid():N}.json");
+        await File.WriteAllTextAsync(
+            configPath,
+            $$"""{"postgres":{"managed":false,"connectionString":{{System.Text.Json.JsonSerializer.Serialize(scratch.ConnectionString)}}},"servers":[]}""",
+            ct);
+
+        try
+        {
+            var runOut = new StringWriter();
+            var runErr = new StringWriter();
+            var exit = await DarlingCliCommands.BackfillRollupsAsync(configPath, dryRun: false, runOut, runErr, ct);
+
+            var runText = runOut.ToString();
+            Assert.True(exit == 0, $"the verb reported failure.\nSTDOUT:\n{runText}\nSTDERR:\n{runErr}");
+            Assert.Contains("DONE. Every rollup now covers its own source", runText, StringComparison.Ordinal);
+
+            /* Named in the operator's own output, because a rollup the verb silently skipped would still let
+               the run report DONE — the contract line is about the targets it PROCESSED. */
+            Assert.Contains(TimescaleSupport.QueryStoreStatsIntervalDailyView, runText, StringComparison.Ordinal);
+            Assert.Contains(TimescaleSupport.QueryStoreStatsDayGrainDailyView, runText, StringComparison.Ordinal);
+
+            await using var verify = new NpgsqlConnection(scratch.ConnectionString);
+            await verify.OpenAsync(ct);
+
+            foreach (var view in new[]
+            {
+                TimescaleSupport.QueryStoreStatsIntervalHourlyView,
+                TimescaleSupport.QueryStoreStatsCorrectedHourlyView,
+                TimescaleSupport.QueryStoreStatsCorrectedDailyView,
+                TimescaleSupport.QueryStoreStatsIntervalDailyView,
+                TimescaleSupport.QueryStoreStatsDayGrainDailyView,
+            })
+            {
+                var target = RollupBackfill.Targets.Single(t => string.Equals(t.View, view, StringComparison.Ordinal));
+                var probe = await RollupBackfill.ProbeAsync(verify, target.View, target.Source, target.SourceTimeColumn, ct);
+
+                Assert.True(probe.CoverageOldestUtc is not null,
+                    $"{view} materialized nothing at all — the verb reported DONE over an empty rollup.");
+                Assert.True(probe.CoverageOldestUtc <= probe.SourceOldestUtc,
+                    $"{view} starts at {probe.CoverageOldestUtc:O}, after its source {target.Source}'s oldest row " +
+                    $"{probe.SourceOldestUtc:O} — refreshed before its source had been deepened.");
+            }
+        }
+        finally
+        {
+            if (File.Exists(configPath))
+            {
+                File.Delete(configPath);
+            }
+        }
+    }
+
+    /// <summary>
     /// THE ESTIMATOR'S CALIBRATION SAMPLE IS BUCKETS, NOT ROWS — proven against a live rollup rather than a
     /// string pin, because the defect was a UNIT mismatch and only real data shows the two diverging.
     ///
@@ -949,6 +1038,49 @@ SELECT
     1000,
     2000,
     10
+FROM generate_series($1::timestamp, $2::timestamp, INTERVAL '1 hour') AS g
+CROSS JOIN generate_series(1, $4::int) AS q", connection);
+
+        insert.Parameters.AddWithValue(from);
+        insert.Parameters.AddWithValue(to);
+        insert.Parameters.AddWithValue(TestServerId);
+        insert.Parameters.AddWithValue(QueriesPerBucket);
+        await insert.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary><see cref="QueriesPerBucket"/> Query Store rows per hour across [from, to), each a distinct
+    /// query/plan and each carrying a real <c>runtime_stats_interval_id</c> — the identity the whole corrected
+    /// chain keys on, so a seed without it would collapse every row into one interval and make the deeper
+    /// levels trivially converge.</summary>
+    private static async Task SeedHourlyQueryStoreStatsAsync(
+        NpgsqlConnection connection, DateTime from, DateTime to, CancellationToken cancellationToken)
+    {
+        await using var insert = new NpgsqlCommand(@"
+INSERT INTO collect.query_store_stats
+    (collection_id, collection_time, server_id, server_name, database_name, module_name, query_hash,
+     query_id, plan_id, execution_type_desc, replica_role,
+     runtime_stats_interval_id, interval_start_time_utc, first_execution_time,
+     execution_count, avg_duration_us, avg_cpu_time_us, max_duration_us, max_cpu_time_us)
+SELECT
+    (extract(epoch FROM g)::bigint * 100 + q),
+    g,
+    $3,
+    'backfill-e2e',
+    'TestDb',
+    'dbo.Proc' || q::text,
+    '0x' || lpad(to_hex(q), 16, '0'),
+    q,
+    q + 1000,
+    'Regular',
+    'PRIMARY',
+    extract(epoch FROM date_trunc('hour', g))::bigint,
+    date_trunc('hour', g),
+    date_trunc('hour', g),
+    q * 10,
+    1200,
+    600,
+    9000,
+    4000
 FROM generate_series($1::timestamp, $2::timestamp, INTERVAL '1 hour') AS g
 CROSS JOIN generate_series(1, $4::int) AS q", connection);
 
