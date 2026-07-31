@@ -258,7 +258,18 @@ public sealed class QueryStoreCollectorDefinitionTests
            COL_LENGTH('sys.query_store_runtime_stats', 'replica_group_id') = 8, and on Hyperscale the
            full 55-column payload composed with the attribution ON bound 55 of 55 columns and returned
            replica_role = 'Primary'. Do not re-flip this without new live evidence that it stopped
-           binding — re-read the two issue threads first. */
+           binding — re-read the three issue threads first.
+
+           What #1887 then settled, recorded here so nobody expects more of the column than it can give:
+           on Azure SQL Database this attributes a CONSTANT. A provisioned HS_Gen5_2 WITH a live HA
+           replica still held only the four static ROLE rows in sys.query_store_replicas, every
+           runtime-stats row still carried replica_group_id = 1, and 30 executions run against the
+           readable secondary (ApplicationIntent=ReadOnly) reached neither that replica's Query Store
+           nor the primary's — secondary workload never enters a Query Store under read scale-out, so
+           replica_role always reads 'Primary' on this target. That is honest rather than useless: it
+           replaces a bare NULL that said nothing with the server's own statement that the row is the
+           primary's, and there is no blending here for it to disambiguate. It is NOT a reason to
+           re-gate Azure off. */
         var plan = QueryStoreCollector.Instance.BuildQuery(MakeContext(isAzureSqlDb: true, probeResult: 16));
 
         Assert.Contains("replica_role = qsr.replica_name", plan.Text, StringComparison.Ordinal);

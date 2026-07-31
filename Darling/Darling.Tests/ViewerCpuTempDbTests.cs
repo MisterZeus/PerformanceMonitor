@@ -216,10 +216,11 @@ public sealed class ViewerCpuTempDbLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "cpu_utilization_stats", CpuServerId);
+        await DeleteRowsAsync(connection, "cpu_utilization_stats", CpuServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var collUtc = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
@@ -243,10 +244,13 @@ public sealed class ViewerCpuTempDbLivePostgresTests
             Assert.Equal(new[] { 10, 20, 30 }, samples.Select(s => s.SqlServerCpu));
             /* Middle sample's NULL other-process CPU reads as 0. */
             Assert.Equal(new[] { 5, 0, 15 }, samples.Select(s => s.OtherProcessCpu));
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "cpu_utilization_stats", CpuServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "cpu_utilization_stats", CpuServerId, cleanupCt));
         }
     }
 
@@ -260,10 +264,11 @@ public sealed class ViewerCpuTempDbLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "cpu_utilization_stats", SkewServerId);
+        await DeleteRowsAsync(connection, "cpu_utilization_stats", SkewServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             /* #1262 round-trip. cpu_utilization_stats stores sample_time as the monitored server's LOCAL
@@ -345,10 +350,13 @@ public sealed class ViewerCpuTempDbLivePostgresTests
             Assert.NotEqual((truePstNew + pacificWinter).Ticks, samples[3].SampleTime.Ticks);
             Assert.NotEqual((trueIndNew + indiaStandard).Ticks, samples[5].SampleTime.Ticks);
             Assert.Equal(trueUtcNew.Ticks, samples[7].SampleTime.Ticks);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "cpu_utilization_stats", SkewServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "cpu_utilization_stats", SkewServerId, cleanupCt));
         }
     }
 
@@ -362,10 +370,11 @@ public sealed class ViewerCpuTempDbLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "tempdb_stats", TempDbServerId);
+        await DeleteRowsAsync(connection, "tempdb_stats", TempDbServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
@@ -400,10 +409,13 @@ public sealed class ViewerCpuTempDbLivePostgresTests
             Assert.Equal(bigSessionCount, samples[1].TotalSessionsUsingTempDb);
             Assert.Equal(77, samples[1].TopSessionId);
             Assert.Equal(25.50, samples[1].TopSessionTempDbMb, precision: 3);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "tempdb_stats", TempDbServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "tempdb_stats", TempDbServerId, cleanupCt));
         }
     }
 
@@ -417,10 +429,11 @@ public sealed class ViewerCpuTempDbLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "file_io_stats", FileIoServerId);
+        await DeleteRowsAsync(connection, "file_io_stats", FileIoServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
@@ -447,10 +460,13 @@ public sealed class ViewerCpuTempDbLivePostgresTests
             /* tempdb_log: 0 reads → CASE ELSE 0 read latency; 80 stall / 8 writes = 10 ms write. */
             Assert.Equal(0.0, rows[1].AvgReadLatencyMs, precision: 3);
             Assert.Equal(10.0, rows[1].AvgWriteLatencyMs, precision: 3);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "file_io_stats", FileIoServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "file_io_stats", FileIoServerId, cleanupCt));
         }
     }
 
@@ -529,9 +545,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)", connection);
     private static DateTime TruncateToSeconds(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
 
-    private static async Task DeleteRowsAsync(NpgsqlConnection connection, string table, int serverId)
+    private static async Task DeleteRowsAsync(NpgsqlConnection connection, string table, int serverId, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand($"DELETE FROM {table} WHERE server_id = {serverId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

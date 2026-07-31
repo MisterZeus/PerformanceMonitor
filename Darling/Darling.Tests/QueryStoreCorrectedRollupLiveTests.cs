@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -459,6 +459,227 @@ public sealed class QueryStoreCorrectedRollupLiveTests
     }
 
     /// <summary>
+    /// #1877, the case the gate could not reach: a policy this store ALREADY ARMED, whose coverage list then
+    /// GREW a consumer. RED under an arm-only gate at step 3.
+    ///
+    /// <para>The test above proves the gate holds a policy it is creating. This one starts from the opposite
+    /// state — L1's purge armed and running, every consumer caught up, exactly what a store on the #1849 build
+    /// looks like — and then does what #1869 did to it: hands it a new consumer that holds nothing.
+    /// <c>add_retention_policy(if_not_exists =&gt; true)</c> returns -1 for the policy that already exists, so
+    /// nothing pauses it, and under the old code L1 kept purging its own source while the new consumer could
+    /// only ever be backfilled as deep as what survived.</para>
+    ///
+    /// <para>The consumer is added by DROPping and rebuilding it (WITH NO DATA) rather than by editing the
+    /// coverage list, because that is what an upgrading store experiences: the relation appears, born empty,
+    /// under a policy that is already armed. Dropping it CASCADEs to the day-grain daily that reads it, and the
+    /// ensure sweep rebuilds both — so this is the real #1869 upgrade shape, not a simulation of it.</para>
+    ///
+    /// <para>WATCHED (mutation): make the <c>Short</c> branch of the sweep skip its hold statement — i.e. put
+    /// the gate back to arm-only — and step 3 goes red while every other assertion here still passes.</para>
+    /// </summary>
+    [Fact]
+    public async Task ArmedIntervalPurge_IsReHeldWhenItsCoverageListGainsAnEmptyConsumer_ThenReleasesOnBackfill()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #1877 re-hold test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct));
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var oldest = now.Date.AddDays(-9);
+        var span = (From: oldest.AddDays(-1), To: now.AddDays(1));
+
+        for (var offset = 0; oldest.AddHours(offset) < now; offset += 3)
+        {
+            await SeedIntervalAsync(connection, oldest.AddHours(offset), intervalId: 4000 + offset, queryId: 17, planId: 19,
+                firstExecution: oldest.AddHours(offset), snapshots: 3, secondsApart: 120,
+                avgDurationUs: 100, avgCpuUs: 40, ct: ct);
+        }
+
+        await EnsureAggregatesWithoutRefreshPoliciesAsync(connection, ct);
+
+        /* ── 1. A HEALTHY, FULLY-COVERED STORE. Every consumer materialized over everything L1 holds. ── */
+        foreach (var view in new[]
+        {
+            TimescaleSupport.QueryStoreStatsIntervalHourlyView,
+            TimescaleSupport.QueryStoreStatsCorrectedHourlyView,
+            TimescaleSupport.QueryStoreStatsCorrectedDailyView,
+            TimescaleSupport.QueryStoreStatsIntervalDailyView,
+            TimescaleSupport.QueryStoreStatsDayGrainDailyView,
+        })
+        {
+            await RefreshRangeAsync(connection, view, span.From, span.To, ct);
+        }
+
+        await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct);
+        Assert.True(await IsArmedAsync(connection, TimescaleSupport.QueryStoreStatsIntervalHourlyView, ct),
+            "L1's purge must be ARMED here or the test is not starting from the state #1877 is about — an " +
+            "already-armed policy is the only thing the arm-only gate could not re-hold.");
+
+        /* ── 2. THE UPGRADE. The coverage list gains a consumer, born empty, exactly as #1869 delivered one to
+               stores already running #1849. The policy is untouched and stays armed through this. ── */
+        await using (var drop = new NpgsqlCommand(
+            $"DROP MATERIALIZED VIEW collect.{TimescaleSupport.QueryStoreStatsIntervalDailyView} CASCADE", connection))
+        {
+            await drop.ExecuteNonQueryAsync(ct);
+        }
+
+        await EnsureAggregatesWithoutRefreshPoliciesAsync(connection, ct);
+
+        var l1Floor = await FloorAsync(connection, TimescaleSupport.QueryStoreStatsIntervalHourlyView, ct);
+        Assert.NotNull(l1Floor);
+
+        /* Shallow-or-empty rather than empty: the rebuild re-attaches a refresh policy whose first check runs
+           IMMEDIATELY (#1564), so under suite load the recent window can materialize before the strip lands. */
+        var newConsumerFloor = await FloorAsync(connection, TimescaleSupport.QueryStoreStatsIntervalDailyView, ct);
+        Assert.True(newConsumerFloor is null || newConsumerFloor > l1Floor,
+            $"the rebuilt consumer should not already cover L1, or there is no coverage gap to re-hold on " +
+            $"(new consumer {newConsumerFloor:O}, L1 {l1Floor:O}).");
+
+        /* ── 3. RE-HELD. The property #1877 exists for: a running purge is STOPPED once its own coverage list
+               no longer reaches, rather than left arming-only and quietly outrunning the new tier. ── */
+        await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct);
+        Assert.False(await IsArmedAsync(connection, TimescaleSupport.QueryStoreStatsIntervalHourlyView, ct),
+            "L1's purge is still armed while its newly-added consumer holds nothing — the gate is arm-only, so " +
+            "it keeps dropping the only interval-grain copy of history that consumer has never seen (#1877).");
+
+        /* ── 4. SELF-RELEASE, through the existing arming path and with no manual step — the same way a
+               first-time hold releases. This is what makes the re-hold safe to ship: it is not a latch. ── */
+        await RefreshRangeAsync(connection, TimescaleSupport.QueryStoreStatsIntervalDailyView, span.From, span.To, ct);
+
+        var backfilledFloor = await FloorAsync(connection, TimescaleSupport.QueryStoreStatsIntervalDailyView, ct);
+        Assert.NotNull(backfilledFloor);
+        Assert.True(backfilledFloor <= l1Floor,
+            $"the backfill must carry the new consumer past L1's oldest bucket before the gate can release " +
+            $"(consumer {backfilledFloor:O}, L1 {l1Floor:O})");
+
+        await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct);
+        Assert.True(await IsArmedAsync(connection, TimescaleSupport.QueryStoreStatsIntervalHourlyView, ct),
+            "the new consumer now covers L1, so the re-held purge should have armed itself on this sweep.");
+    }
+
+    /// <summary>
+    /// The property that makes #1877's re-hold shippable at all: a probe that FAILS is not a coverage
+    /// regression. #1877 filed the naive fix — "unsafe implies disarm" — as materially worse than the gap,
+    /// because the coverage probe is deliberately fail-closed and one bad probe on a busy store would have
+    /// stopped purging across every tier at once, growing disk without bound.
+    ///
+    /// <para>Driven with a genuinely missing relation, which is the strongest available stand-in for the
+    /// timeout or permission blip that motivates the rule: the probe's statement throws 42P01 rather than
+    /// returning a measurement, and there is no way for the gate to tell that apart from any other failure.</para>
+    ///
+    /// <para>Three separate things are asserted, because a hold-nothing implementation would pass the first
+    /// alone: the armed policy whose probe threw stays ARMED, a DIFFERENT policy whose probe succeeded is still
+    /// judged on its own merits in the same sweep, and a policy that is NOT yet armed when its probe throws
+    /// stays PAUSED — the original fail-closed direction, which the tristate must not have inverted.</para>
+    ///
+    /// <para>WATCHED (mutation): return <c>Short</c> instead of <c>Unknown</c> from the probe's catch and the
+    /// first assertion goes red — that mutation is precisely the fleet-wide purge stop #1877 refused to ship.</para>
+    /// </summary>
+    [Fact]
+    public async Task RetentionSweep_TreatsAFailedProbeAsUnknown_NeverAsACoverageRegression()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #1877 fail-closed test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct));
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var oldest = now.Date.AddDays(-9);
+        var span = (From: oldest.AddDays(-1), To: now.AddDays(1));
+
+        for (var offset = 0; oldest.AddHours(offset) < now; offset += 3)
+        {
+            await SeedIntervalAsync(connection, oldest.AddHours(offset), intervalId: 5000 + offset, queryId: 23, planId: 29,
+                firstExecution: oldest.AddHours(offset), snapshots: 3, secondsApart: 120,
+                avgDurationUs: 100, avgCpuUs: 40, ct: ct);
+        }
+
+        /* The second subject: a raw tier on a completely different rollup family, so "one bad probe does not
+           stop the others" is a claim about independent policies rather than about one relation twice. */
+        await SeedQueryStatsAsync(connection, oldest, now, ct);
+
+        await EnsureAggregatesWithoutRefreshPoliciesAsync(connection, ct);
+
+        foreach (var view in new[]
+        {
+            TimescaleSupport.QueryStoreStatsIntervalHourlyView,
+            TimescaleSupport.QueryStoreStatsCorrectedHourlyView,
+            TimescaleSupport.QueryStoreStatsCorrectedDailyView,
+            TimescaleSupport.QueryStoreStatsIntervalDailyView,
+            TimescaleSupport.QueryStoreStatsDayGrainDailyView,
+            TimescaleSupport.QueryStatsHourlyView,
+        })
+        {
+            await RefreshRangeAsync(connection, view, span.From, span.To, ct);
+        }
+
+        await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct);
+        Assert.True(await IsArmedAsync(connection, TimescaleSupport.QueryStoreStatsIntervalHourlyView, ct),
+            "L1's purge must be armed before the probe is broken, or there is nothing for a failed probe to " +
+            "wrongly disarm.");
+        Assert.True(await IsArmedAsync(connection, "query_stats", ct),
+            "raw query_stats' purge must be armed here so the isolation assertion below means something.");
+
+        /* THE BREAK: L1's third consumer stops existing, so its probe throws instead of measuring. */
+        await using (var drop = new NpgsqlCommand(
+            $"DROP MATERIALIZED VIEW collect.{TimescaleSupport.QueryStoreStatsIntervalDailyView} CASCADE", connection))
+        {
+            await drop.ExecuteNonQueryAsync(ct);
+        }
+
+        await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct);
+
+        Assert.True(await IsArmedAsync(connection, TimescaleSupport.QueryStoreStatsIntervalHourlyView, ct),
+            "a FAILED coverage probe disarmed a running purge — an unreadable store is not evidence that " +
+            "coverage regressed, and treating it as one stops retention fleet-wide on one bad probe (#1877).");
+        Assert.True(await IsArmedAsync(connection, "query_stats", ct),
+            "one relation's failed probe changed a DIFFERENT policy's verdict — the per-policy judgment is " +
+            "supposed to be independent.");
+
+        /* And the original direction, unchanged: an unmeasurable store may not ARM either. Re-created from
+           scratch (its policy removed, its consumer dropped) so the sweep meets it as a new policy. */
+        await using (var removePolicy = new NpgsqlCommand(
+            "SELECT remove_retention_policy('collect.query_stats', if_exists => true)", connection))
+        {
+            await removePolicy.ExecuteNonQueryAsync(ct);
+        }
+
+        await using (var drop = new NpgsqlCommand(
+            $"DROP MATERIALIZED VIEW collect.{TimescaleSupport.QueryStatsHourlyView} CASCADE", connection))
+        {
+            await drop.ExecuteNonQueryAsync(ct);
+        }
+
+        Assert.False(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "query_stats", ct),
+            "an unreadable coverage state must still answer 'not safe to drop' — the catalog sweep and the " +
+            "tiered policy have to keep judging the same drop the same way (#1793).");
+
+        await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct);
+        Assert.False(await IsArmedAsync(connection, "query_stats", ct),
+            "a policy whose coverage could not be established ARMED itself — the fail-closed direction the " +
+            "tristate had to preserve.");
+    }
+
+    /// <summary>
     /// #1907 against the real TimescaleDB: what the corrected rollups compute when an interval arrives as ONE
     /// row per collection (the post-fix collector) versus as the two tied slice rows every pre-fix build
     /// stored, proving the defect reached the materialized rollup and that the fix resolves it exactly.
@@ -611,6 +832,7 @@ VALUES
         }
     }
 
+
     /// <summary>
     /// Plants one Query Store interval as <paramref name="snapshots"/> CUMULATIVE re-collections of the same
     /// interval — <c>execution_count</c> running 1..n, which is what the collector actually stores when it
@@ -652,6 +874,33 @@ FROM generate_series(1, $11) AS n";
         command.Parameters.AddWithValue(avgCpuUs);
         command.Parameters.AddWithValue(snapshots);
         await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// Plants plain <c>query_stats</c> rows, one per hour — the second, independent raw tier the fail-closed
+    /// test needs so "one relation's broken probe did not change another policy's verdict" is a claim about two
+    /// unrelated rollup families rather than about one relation examined twice.
+    /// </summary>
+    private static async Task SeedQueryStatsAsync(
+        NpgsqlConnection connection, DateTime from, DateTime to, CancellationToken ct)
+    {
+        await using var insert = new NpgsqlCommand(@"
+INSERT INTO collect.query_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
+     delta_worker_time, delta_elapsed_time, delta_execution_count)
+SELECT
+    extract(epoch FROM g)::bigint * 100,
+    g,
+    $3, 'SQL01', 'AdventureWorks',
+    decode(md5('pm1877'), 'hex'),
+    decode(md5('pm1877handle'), 'hex'),
+    1000, 2000, 10
+FROM generate_series($1::timestamp, $2::timestamp, INTERVAL '1 hour') AS g", connection);
+
+        insert.Parameters.AddWithValue(from);
+        insert.Parameters.AddWithValue(to);
+        insert.Parameters.AddWithValue(TestServerId);
+        await insert.ExecuteNonQueryAsync(ct);
     }
 
     /// <summary>

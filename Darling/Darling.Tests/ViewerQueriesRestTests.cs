@@ -352,7 +352,7 @@ public sealed class ViewerQueriesRestLivePostgresTests
         using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "query_stats", TrendServerId);
+        await DeleteRowsAsync(connection, "query_stats", TrendServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(cs!);
         var end = TruncateToSeconds(DateTime.UtcNow);
@@ -360,6 +360,7 @@ public sealed class ViewerQueriesRestLivePostgresTests
         var t1 = start.AddHours(1);
         var t2 = t1.AddSeconds(60); /* one 60-second interval later */
 
+        var bodySucceeded = false;
         try
         {
             await InsertQueryStatsAsync(connection, TrendServerId, t1, "0xA", deltaExec: 10, deltaWorker: 30_000, deltaElapsed: 60_000, deltaReads: 100, deltaWrites: 0, queryText: "SELECT a");
@@ -373,10 +374,13 @@ public sealed class ViewerQueriesRestLivePostgresTests
             Assert.Equal(t2, points[1].CollectionTime);
             Assert.Equal(2.0, points[1].Value, 3);          /* 120_000 us = 120 ms over 60 s -> 2 ms/sec */
             Assert.Equal(2, points[1].ExecutionCount);       /* 120 execs over 60 s -> 2/sec (truncated) */
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "query_stats", TrendServerId);
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "query_stats", TrendServerId, cleanupCt));
         }
     }
 
@@ -389,13 +393,14 @@ public sealed class ViewerQueriesRestLivePostgresTests
         using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "query_stats", HeatmapServerId);
+        await DeleteRowsAsync(connection, "query_stats", HeatmapServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(cs!);
         var end = TruncateToSeconds(DateTime.UtcNow);
         var start = end.AddHours(-24);
         var t1 = start.AddHours(1); /* all rows share one collection_time -> one 5-min bin */
 
+        var bodySucceeded = false;
         try
         {
             /* Duration metric = (delta_elapsed_time / 1000) / delta_exec (ms/exec).
@@ -417,10 +422,13 @@ public sealed class ViewerQueriesRestLivePostgresTests
             Assert.Equal("0xLOW", result.CellDetails[0, 0].TopQueryHash);
             /* 0xZERO (delta_exec = 0) contributed to no cell. */
             Assert.Equal(0.0, result.Intensities[6, 0]);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "query_stats", HeatmapServerId);
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "query_stats", HeatmapServerId, cleanupCt));
         }
     }
 
@@ -433,7 +441,7 @@ public sealed class ViewerQueriesRestLivePostgresTests
         using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "query_snapshots", SnapshotServerId);
+        await DeleteRowsAsync(connection, "query_snapshots", SnapshotServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(cs!);
         var end = TruncateToSeconds(DateTime.UtcNow);
@@ -441,6 +449,7 @@ public sealed class ViewerQueriesRestLivePostgresTests
         var older = start.AddHours(1);
         var newer = start.AddHours(2);
 
+        var bodySucceeded = false;
         try
         {
             await InsertQuerySnapshotAsync(connection, SnapshotServerId, older, spid: 51, cpu: 100, hash: "0xB1", queryText: "SELECT older");
@@ -462,10 +471,13 @@ public sealed class ViewerQueriesRestLivePostgresTests
             Assert.Equal(2, batch.Count);
             Assert.Equal(53, batch[0].SessionId);              /* cpu DESC within the batch */
             Assert.Equal(52, batch[1].SessionId);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "query_snapshots", SnapshotServerId);
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "query_snapshots", SnapshotServerId, cleanupCt));
         }
     }
 
@@ -478,7 +490,7 @@ public sealed class ViewerQueriesRestLivePostgresTests
         using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "query_snapshots", SlicerServerId);
+        await DeleteRowsAsync(connection, "query_snapshots", SlicerServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(cs!);
         var end = TruncateToSeconds(DateTime.UtcNow);
@@ -486,6 +498,7 @@ public sealed class ViewerQueriesRestLivePostgresTests
         var hour1 = TruncateToHour(start.AddHours(3));
         var hour2 = TruncateToHour(start.AddHours(5));
 
+        var bodySucceeded = false;
         try
         {
             await InsertQuerySnapshotAsync(connection, SlicerServerId, hour1.AddMinutes(5), spid: 60, cpu: 100, hash: "0xA", queryText: "a");
@@ -498,10 +511,13 @@ public sealed class ViewerQueriesRestLivePostgresTests
             Assert.Equal(hour1, buckets[0].BucketTime);
             Assert.Equal(2, buckets[0].SessionCount);      /* two snapshots in hour1 */
             Assert.Equal(300.0, buckets[0].TotalCpu, 3);   /* 100 + 200 */
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, "query_snapshots", SlicerServerId);
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "query_snapshots", SlicerServerId, cleanupCt));
         }
     }
 
@@ -568,9 +584,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)", conn
     private static DateTime TruncateToHour(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Year, value.Month, value.Day, value.Hour, 0, 0), DateTimeKind.Unspecified);
 
-    private static async Task DeleteRowsAsync(NpgsqlConnection connection, string table, int serverId)
+    private static async Task DeleteRowsAsync(NpgsqlConnection connection, string table, int serverId, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand($"DELETE FROM {table} WHERE server_id = {serverId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

@@ -76,6 +76,7 @@ public sealed class DarlingCustomViewsLiveTests
 
         var name1 = "cv_live_" + Guid.NewGuid().ToString("N");
         var name2 = "cv_live_" + Guid.NewGuid().ToString("N");
+        var bodySucceeded = false;
         try
         {
             /* create -> Ok, version 1, fields round-trip. */
@@ -127,15 +128,22 @@ public sealed class DarlingCustomViewsLiveTests
             Assert.IsType<CustomViewResult.Ok>(await store.DeleteAsync(view.Id, ct));
             Assert.IsType<CustomViewResult.NotFound>(await store.GetAsync(view.Id, ct));
             Assert.IsType<CustomViewResult.NotFound>(await store.DeleteAsync(view.Id, ct));
+
+            bodySucceeded = true;
         }
         finally
         {
-            await using var owner = new NpgsqlConnection(connectionString);
-            await owner.OpenAsync(ct);
-            using var cleanup = new NpgsqlCommand("DELETE FROM config.custom_views WHERE name = $1 OR name = $2", owner);
-            cleanup.Parameters.AddWithValue(name1);
-            cleanup.Parameters.AddWithValue(name2);
-            await cleanup.ExecuteNonQueryAsync(ct);
+            /* This teardown already opened its own connection, so it was half-right before #1902 — what it
+               did not have is the other half: it still threw straight out of the finally, and it still used
+               the test's own token, which on a CANCELLED run is already signalled and would have skipped the
+               delete entirely. LiveStoreCleanup supplies both, and the hand-rolled connection goes with it. */
+            await LiveStoreCleanup.RunAsync(connectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                using var command = new NpgsqlCommand("DELETE FROM config.custom_views WHERE name = $1 OR name = $2", cleanup);
+                command.Parameters.AddWithValue(name1);
+                command.Parameters.AddWithValue(name2);
+                await command.ExecuteNonQueryAsync(cleanupCt);
+            });
         }
     }
 

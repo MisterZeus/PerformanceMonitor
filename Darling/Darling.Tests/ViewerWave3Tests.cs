@@ -392,12 +392,13 @@ public sealed class ViewerWave3LivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteFindingRowsAsync(connection);
+        await DeleteFindingRowsAsync(connection, TestContext.Current.CancellationToken);
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
         var store = new PgFindingStore(postgres);
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             /* Seed one persisted finding for the server. */
@@ -442,10 +443,13 @@ public sealed class ViewerWave3LivePostgresTests
             /* Unmute via the viewer — the flag clears on the next read. */
             await viewer.UnmuteFindingAsync(afterMute.MuteId!.Value);
             Assert.False(Assert.Single(await viewer.GetLatestFindingsAsync(FindingServerId)).IsMuted);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteFindingRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteFindingRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -459,10 +463,11 @@ public sealed class ViewerWave3LivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteMuteRuleRowsAsync(connection);
+        await DeleteMuteRuleRowsAsync(connection, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var rule = new MuteRule
@@ -512,10 +517,13 @@ public sealed class ViewerWave3LivePostgresTests
             var removed = await viewer.PurgeExpiredMuteRulesAsync();
             Assert.True(removed >= 1);
             Assert.DoesNotContain(await viewer.GetMuteRulesAsync(), r => r.Id == MuteRuleId);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteMuteRuleRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteMuteRuleRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -529,10 +537,11 @@ public sealed class ViewerWave3LivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteAlertRowsAsync(connection);
+        await DeleteAlertRowsAsync(connection, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var now = TruncateToSeconds(DateTime.UtcNow);
@@ -554,10 +563,13 @@ public sealed class ViewerWave3LivePostgresTests
             /* The read carries the raw context_json (the #1140 dedup fingerprint) through unchanged. */
             Assert.NotNull(row.ContextJson);
             Assert.Contains("DedupKey", row.ContextJson, StringComparison.Ordinal);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteAlertRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteAlertRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -590,25 +602,25 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)", connection);
     private static DateTime TruncateToSeconds(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
 
-    private static async Task DeleteFindingRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteFindingRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM analysis_findings WHERE server_id = {FindingServerId}; DELETE FROM analysis_muted WHERE server_id = {FindingServerId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task DeleteMuteRuleRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteMuteRuleRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand("DELETE FROM config_mute_rules WHERE id = $1 OR server_name = $2", connection);
         cleanup.Parameters.AddWithValue(MuteRuleId);
         cleanup.Parameters.AddWithValue(MuteRuleServer);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task DeleteAlertRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteAlertRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM config_alert_log WHERE server_id = {AlertServerId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

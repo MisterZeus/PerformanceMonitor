@@ -444,8 +444,8 @@ public class AlertHistoryRow
     public bool IsArchived => string.Equals(Source, "archive", StringComparison.OrdinalIgnoreCase);
 
     public string TimeLocal => AlertTime.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
-    public string CurrentValueDisplay => FormatValue(MetricName, CurrentValue);
-    public string ThresholdValueDisplay => FormatValue(MetricName, ThresholdValue);
+    public string CurrentValueDisplay => AlertMetricClassifier.FormatHistoryValue(MetricName, CurrentValue);
+    public string ThresholdValueDisplay => AlertMetricClassifier.FormatHistoryValue(MetricName, ThresholdValue);
 
     public string StatusDisplay
     {
@@ -461,39 +461,4 @@ public class AlertHistoryRow
     public bool IsCritical => AlertMetricClassifier.IsCritical(MetricName);
     public bool IsWarning => AlertMetricClassifier.IsWarning(MetricName);
 
-    /* #1134: render the stored alert value with the unit and precision that match each metric the
-       Lite alert engine emits (MainWindow.AlertEngine.cs), keyed on the exact metric_name strings it
-       logs to config_alert_log. The fallback is :F2 (never :G) so an unmapped metric — e.g. an
-       "Analysis: <category> [<hash>]" finding severity — can never render as a raw full-precision
-       float (the reported Volume Free Space 0.9746057751382348). The same formatter drives the
-       Value and Threshold columns, so both carry the unit. */
-    private static string FormatValue(string metricName, double value) => metricName switch
-    {
-        /* Percent metrics — CPU/tempdb usage, free space, and the job's "% of average".
-           "TempDB Space" is the PRE-RENAME spelling of "tempdb Space" (the tempdb token was
-           lowercased across both apps' UI in c0109f34, which changed the metric_name KEY). That
-           commit accepted "historical alert-history rows keep the old name", so archived rows
-           still carry it — and matching here is ordinal, so those rows were falling through to
-           the bare :F2 default and rendering a percentage with no unit. Nothing writes the old
-           name any more; it is kept solely so already-stored rows format like the new ones. */
-        "High CPU" or "tempdb Space" or "TempDB Space" or "Volume Free Space" or "Long-Running Job" => $"{value:F1}%",
-
-        /* Poison wait carries an average ms/wait; long-running query carries elapsed minutes. */
-        "Poison Wait" => $"{value:F0} ms",
-        "Long-Running Query" => $"{value:F0} m",
-
-        /* #1839 total blocked wait — seconds, whole (the numeric is already seconds, not ms). */
-        "Blocking Wait Time" => $"{value:F0} s",
-
-        /* Count metrics — whole-number event counts. */
-        "Blocking Detected" or "Deadlocks Detected" or "Failed Agent Job" => $"{value:F0}",
-
-        /* #1846: a state-only metric never had a number — its display value was a role, a connection
-           state or the literal "resolved", which the write side's digit-scanning parser turns into the
-           0 sentinel because the column is NOT NULL. Render the dash instead of inventing "0.00".
-           Gated on value == 0 so a future producer that starts passing a real numeric still shows it. */
-        _ when value == 0 && AlertMetricClassifier.IsStateOnly(metricName) => AlertMetricClassifier.StateOnlyDisplay,
-
-        _ => $"{value:F2}"
-    };
 }

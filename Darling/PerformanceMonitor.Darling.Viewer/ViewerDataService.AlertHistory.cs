@@ -57,9 +57,9 @@ public sealed class ViewerAlertRow
     /// <summary>Stored naive-UTC; shown in the viewer machine's local time (the viewer convention).</summary>
     public string TimeLocal => ViewerTimeHelper.ForDisplay(AlertTime).ToString("yyyy-MM-dd HH:mm:ss");
 
-    public string CurrentValueDisplay => FormatValue(MetricName, CurrentValue);
+    public string CurrentValueDisplay => AlertMetricClassifier.FormatHistoryValue(MetricName, CurrentValue);
 
-    public string ThresholdValueDisplay => FormatValue(MetricName, ThresholdValue);
+    public string ThresholdValueDisplay => AlertMetricClassifier.FormatHistoryValue(MetricName, ThresholdValue);
 
     /// <summary>Email rows show send outcome; tray/other rows show shown-vs-delivered (Lite's mapping).</summary>
     public string StatusDisplay
@@ -81,32 +81,6 @@ public sealed class ViewerAlertRow
 
     public bool IsWarning => AlertMetricClassifier.IsWarning(MetricName);
 
-    /* #1134 — render the stored value with the unit/precision matching each metric the alert engine
-       emits, keyed on the exact metric_name strings. Copied from Lite's AlertHistoryRow.FormatValue
-       so both grids read identically; the :F2 fallback (never :G) keeps an unmapped metric — e.g. an
-       "Analysis: <category> [<hash>]" finding severity — from rendering as a raw full-precision float. */
-    private static string FormatValue(string metricName, double value) => metricName switch
-    {
-        /* "TempDB Space" is the PRE-RENAME spelling of "tempdb Space" (c0109f34 lowercased the tempdb
-           token across both apps' UI, which changed the metric_name KEY; that commit accepted that
-           historical alert-history rows keep the old name). Matching is ordinal, so stored rows with
-           the old name fell through to the bare :F2 default instead of the percent format. Nothing
-           writes it any more — it is kept solely so already-stored rows format like the new ones. */
-        "High CPU" or "tempdb Space" or "TempDB Space" or "Volume Free Space" or "Long-Running Job" => $"{value:F1}%",
-        "Poison Wait" => $"{value:F0} ms",
-        "Long-Running Query" => $"{value:F0} m",
-        /* #1839 total blocked wait — seconds, whole (the numeric is already seconds, not ms). */
-        "Blocking Wait Time" => $"{value:F0} s",
-        "Blocking Detected" or "Deadlocks Detected" or "Failed Agent Job" => $"{value:F0}",
-        /* #1846: a state-only metric never had a number — its display value was a role, a connection
-           state or the literal "resolved", which the write side's digit-scanning parser turns into the
-           0 sentinel because the column is NOT NULL. Render the dash instead of inventing "0.00".
-           Gated on value == 0 so a future producer that starts passing a real numeric still shows it.
-           Darling carries the bulk of these rows: every self-alert recovery and every shared-engine
-           resolution reaches alert history HERE, where Lite's resolution callback is toast-only. */
-        _ when value == 0 && AlertMetricClassifier.IsStateOnly(metricName) => AlertMetricClassifier.StateOnlyDisplay,
-        _ => $"{value:F2}",
-    };
 }
 
 public sealed partial class ViewerDataService

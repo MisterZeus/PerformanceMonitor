@@ -184,6 +184,7 @@ public sealed class DarlingMcpDefaultTraceToolsLivePostgresTests
         await DeleteRowsAsync(connection, ct);
         await using var postgres = NpgsqlDataSource.Create(cs!);
 
+        var bodySucceeded = false;
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
@@ -215,10 +216,13 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
             Assert.StartsWith("Could not resolve server.", await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(postgres, "darling-no-such-server"), StringComparison.Ordinal);
             await DeleteRowsAsync(connection, ct, keepServer: true);
             Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(postgres, ServerName)));
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, ct);
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
         }
     }
 
