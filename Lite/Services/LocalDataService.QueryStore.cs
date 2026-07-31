@@ -66,8 +66,24 @@ WITH deduped AS
         ) AS rn
     FROM v_query_store_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3" + dbClause + @"
+    -- The window is filtered on the SAME expression the bars are keyed on (#1892). It used to filter on
+    -- collection_time while bucketing on the interval start, and once those stopped being the same instant
+    -- (#1841 tier 2) the two disagreed at both edges: an interval that started before the window but closed
+    -- inside it drew an extra bar to the LEFT of the requested range, and the window's own last interval --
+    -- whose closing fetch lands after the range ends -- was dropped entirely, which is the collection lag
+    -- #1841 set out to remove showing up one layer down.
+    AND   COALESCE(interval_start_time_utc, collection_time) >= $2
+    AND   COALESCE(interval_start_time_utc, collection_time) <= $3
+    -- Pruning bound, NOT a filter: it can never exclude a row the predicate above keeps. An interval is
+    -- always collected after it starts, so interval_start_time_utc <= collection_time, and therefore
+    -- COALESCE(...) >= $2 already implies collection_time >= $2; the extra day is slack against clock skew
+    -- between the monitored server's interval clock and our collection clock. It earns its place because
+    -- v_query_store_stats unions the live table with the parquet archive, and a bare collection_time bound
+    -- is what lets the reader skip archive row groups instead of scanning the whole glob. There is
+    -- deliberately NO upper twin: collection_time can exceed the interval start without bound if the
+    -- collector was down when the interval closed, so any ceiling would silently drop exactly the rows a
+    -- restarted collector just caught up on -- the failure this fix exists to end.
+    AND   collection_time >= $2 - INTERVAL '1 day'" + dbClause + @"
 )
 SELECT
     -- The bar sits in the hour the work RAN, not the hour it was last COLLECTED (#1841 tier 2). Query
@@ -773,8 +789,14 @@ WITH placed AS
             ) AS rn
         FROM v_query_store_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
+        -- Windowed on the column this arm PLACES its points at (#1892), which inside the IS NOT NULL guard
+        -- below is what COALESCE(interval_start_time_utc, collection_time) resolves to anyway. Filtering on
+        -- collection_time here put a point outside the range the caller asked for, and dropped the range's
+        -- final interval because its closing fetch had not happened yet.
+        AND   interval_start_time_utc >= $2
+        AND   interval_start_time_utc <= $3
+        -- Pruning bound only; see the slicer above for why it cannot drop a row and why it has no upper twin.
+        AND   collection_time >= $2 - INTERVAL '1 day'
         AND   interval_start_time_utc IS NOT NULL" + dbClause + @"
     ) identified
     WHERE rn = 1

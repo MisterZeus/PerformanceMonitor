@@ -552,8 +552,25 @@ public sealed partial class ViewerDataService
                 ) AS rn
             FROM query_store_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
+            /* The window is filtered on the SAME expression the bars are keyed on (#1892). It used to filter
+               on collection_time while bucketing on the interval start, and once those stopped being the
+               same instant (#1841 tier 2) the two disagreed at both edges: an interval that started before
+               the window but closed inside it drew an extra bar to the LEFT of the requested range, and the
+               window's own last interval -- whose closing fetch lands after the range ends -- was dropped
+               entirely, which is the collection lag #1841 set out to remove showing up one layer down. */
+            AND   COALESCE(interval_start_time_utc, collection_time) >= $2
+            AND   COALESCE(interval_start_time_utc, collection_time) <= $3
+            /* Chunk-exclusion bound, NOT a filter: it can never exclude a row the predicate above keeps. An
+               interval is always collected after it starts, so interval_start_time_utc <= collection_time,
+               and therefore COALESCE(...) >= $2 already implies collection_time >= $2; the extra day is
+               slack against clock skew between the monitored server's interval clock and our collection
+               clock. It matters because query_store_stats is a hypertable partitioned on collection_time --
+               without a bound on that column TimescaleDB must open and decompress EVERY chunk rather than
+               the ones the window overlaps. Same shape and same reasoning as the drill-down collector's
+               last_execution_time bound. There is deliberately NO upper twin: collection_time can exceed the
+               interval start without bound if the collector was down when the interval closed, so any
+               ceiling would silently drop exactly the rows a restarted collector just caught up on. */
+            AND   collection_time >= $2 - interval '1 day'
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
         )
         SELECT
