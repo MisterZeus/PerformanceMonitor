@@ -179,10 +179,11 @@ public sealed class ViewerLatchSpinlockLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteAsync(connection, "latch_stats", LatchServerId);
+        await DeleteAsync(connection, "latch_stats", LatchServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
@@ -198,10 +199,13 @@ public sealed class ViewerLatchSpinlockLivePostgresTests
             Assert.Equal(2, buffer.Count);
             Assert.Equal(0.0, buffer[0].WaitTimeMsPerSecond, precision: 3);
             Assert.Equal(1.0, buffer[1].WaitTimeMsPerSecond, precision: 3);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteAsync(connection, "latch_stats", LatchServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteAsync(cleanup, "latch_stats", LatchServerId, cleanupCt));
         }
     }
 
@@ -215,10 +219,11 @@ public sealed class ViewerLatchSpinlockLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteAsync(connection, "spinlock_stats", SpinlockServerId);
+        await DeleteAsync(connection, "spinlock_stats", SpinlockServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
@@ -236,10 +241,13 @@ public sealed class ViewerLatchSpinlockLivePostgresTests
             Assert.Equal("LOCK_HASH", snapshot[0].SpinlockName);   // larger delta first
             Assert.Equal(400, snapshot[0].DeltaCollisions);
             Assert.Equal("SOS_CACHESTORE", snapshot[1].SpinlockName);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteAsync(connection, "spinlock_stats", SpinlockServerId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteAsync(cleanup, "spinlock_stats", SpinlockServerId, cleanupCt));
         }
     }
 
@@ -286,9 +294,9 @@ VALUES ($1, $2, $3, $4, $5, $6, 0, 0, 0, 0, $7, 0, 0, 0)", connection);
     private static DateTime TruncateToSeconds(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
 
-    private static async Task DeleteAsync(NpgsqlConnection connection, string table, int serverId)
+    private static async Task DeleteAsync(NpgsqlConnection connection, string table, int serverId, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand($"DELETE FROM {table} WHERE server_id = {serverId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

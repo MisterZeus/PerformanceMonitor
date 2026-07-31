@@ -432,10 +432,11 @@ public sealed class ViewerDailyHealthLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteSummaryRowsAsync(connection);
+        await DeleteSummaryRowsAsync(connection, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var day = DateTime.UtcNow.Date.AddDays(-2);
@@ -471,10 +472,13 @@ public sealed class ViewerDailyHealthLivePostgresTests
             Assert.Equal(1, summary.HighCpuEvents);                // only the 90% sample
             Assert.Equal(1, summary.CollectionErrors);
             Assert.Equal("Critical", summary.OverallHealth);       // deadlocks -> Critical composite band
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteSummaryRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteSummaryRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -488,10 +492,11 @@ public sealed class ViewerDailyHealthLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteSummaryRowsAsync(connection);
+        await DeleteSummaryRowsAsync(connection, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var day = DateTime.UtcNow.Date.AddDays(-3);
@@ -509,10 +514,13 @@ public sealed class ViewerDailyHealthLivePostgresTests
             Assert.Equal(2, summary!.BlockingEvents);
             Assert.Equal(0, summary.DeadlockCount);
             Assert.Equal("Warning", summary.OverallHealth);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteSummaryRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteSummaryRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -533,10 +541,11 @@ public sealed class ViewerDailyHealthLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteSummaryRowsAsync(connection);
+        await DeleteSummaryRowsAsync(connection, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             /* -10 days is deterministically Hourly-age (the -3d sibling above straddles the margin by
@@ -551,10 +560,13 @@ public sealed class ViewerDailyHealthLivePostgresTests
 
             Assert.NotNull(summary);
             Assert.Equal(2, summary!.BlockingEvents);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteSummaryRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteSummaryRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -568,10 +580,11 @@ public sealed class ViewerDailyHealthLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteHealthLogRowsAsync(connection);
+        await DeleteHealthLogRowsAsync(connection, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var recent = DateTime.UtcNow.AddMinutes(-5);
@@ -595,10 +608,13 @@ public sealed class ViewerDailyHealthLivePostgresTests
             Assert.Equal("FAILING", failing.HealthStatus);
             Assert.Equal(1, healthy.TotalRuns);
             Assert.Equal(1, healthy.SuccessCount);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteHealthLogRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteHealthLogRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -612,10 +628,11 @@ public sealed class ViewerDailyHealthLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteHealthLogRowsAsync(connection);
+        await DeleteHealthLogRowsAsync(connection, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-20));
@@ -634,10 +651,13 @@ public sealed class ViewerDailyHealthLivePostgresTests
             Assert.Equal(t1.Ticks, logs[1].CollectionTime.Ticks);
             Assert.Equal(120, logs[1].DurationMs);
             Assert.Equal(20, logs[1].DuckDbDurationMs);             // the store-phase column
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteHealthLogRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteHealthLogRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -651,10 +671,11 @@ public sealed class ViewerDailyHealthLivePostgresTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteHealthLogRowsAsync(connection);
+        await DeleteHealthLogRowsAsync(connection, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             /* A three-hour custom window [start, end] set entirely in the PAST (end is an hour ago). A row 30
@@ -679,10 +700,13 @@ public sealed class ViewerDailyHealthLivePostgresTests
             Assert.All(logs, l => Assert.InRange(l.CollectionTime.Ticks, start.Ticks, end.Ticks));
             Assert.Equal(inWindowLate.Ticks, logs[0].CollectionTime.Ticks);    // newest first
             Assert.Equal(inWindowEarly.Ticks, logs[1].CollectionTime.Ticks);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteHealthLogRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteHealthLogRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -789,7 +813,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)", connection);
     private static DateTime TruncateToSeconds(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
 
-    private static async Task DeleteSummaryRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteSummaryRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         foreach (var table in new[]
         {
@@ -798,13 +822,13 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)", connection);
         })
         {
             using var cleanup = new NpgsqlCommand($"DELETE FROM {table} WHERE server_id = {SummaryServerId};", connection);
-            await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            await cleanup.ExecuteNonQueryAsync(ct);
         }
     }
 
-    private static async Task DeleteHealthLogRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteHealthLogRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand($"DELETE FROM collection_log WHERE server_id = {HealthServerId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

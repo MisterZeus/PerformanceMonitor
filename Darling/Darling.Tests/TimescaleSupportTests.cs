@@ -1482,7 +1482,15 @@ LIMIT 1", connection))
                this test is the catalog's behaviour rather than a second dialect of the same DDL. */
             await ExecuteAsync(connection, TimescaleSupport.CreateHypertableSql(table, "collection_time"), ct);
             await ExecuteAsync(connection, TimescaleSupport.EnableCompressionSql(table), ct);
-            await ExecuteAsync(connection, TimescaleSupport.AddCompressionPolicySql(table), ct);
+
+            /* PARKED, in one transaction — the same lever #1889 pulled for the three compression tests, and
+               this one needs it MORE than they do. Their assertions are about which chunks a run compressed;
+               this one asserts the job has NEVER RUN (last_run_started_at = '-infinity', the #1760 sentinel),
+               which a single background launch destroys outright and no amount of re-reading recovers. An
+               unparked add_compression_policy creates the job SCHEDULED and TimescaleDB launches it within a
+               second or two (#1788), so the window between creating it and parking it below was the whole
+               defect: observed failing as Expected: True / Actual: False on a full-suite run, twice. */
+            await AddCompressionPolicyParkedAsync(connection, table, ct);
 
             long jobId;
             using (var find = new NpgsqlCommand(
