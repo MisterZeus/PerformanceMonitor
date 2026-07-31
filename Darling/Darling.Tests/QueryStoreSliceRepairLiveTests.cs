@@ -159,6 +159,15 @@ public sealed class QueryStoreSliceRepairLiveTests
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
 
+        /* #1940: this test builds a RAW scratch hypertable with no migrations, so the scratch database has
+           no collect/config schemas. A DARLING_TEST_PG carrying SearchPath=collect,config (the local-rig
+           recipe's CI-parity pin) rides into the scratch connection string, leaving NO writable schema on
+           the path - CREATE TABLE dies 3F000 and the extension's functions would not resolve either. The
+           session path is set explicitly so the test is self-sufficient under BOTH connection-string
+           flavors; the sibling tests in this class migrate first, which creates the pinned schemas, and are
+           unaffected. */
+        await ExecAsync(connection, "SET search_path = public", ct);
+
         await ExecAsync(connection, "CREATE EXTENSION IF NOT EXISTS timescaledb", ct);
         await ExecAsync(connection, "CREATE TABLE r (t timestamp NOT NULL, v bigint NOT NULL)", ct);
         await ExecAsync(connection, "SELECT create_hypertable('r', 't', chunk_time_interval => INTERVAL '1 day')", ct);
