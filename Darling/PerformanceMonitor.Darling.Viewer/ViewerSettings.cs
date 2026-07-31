@@ -17,6 +17,70 @@ using Npgsql;
 namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>
+/// Which of <see cref="ViewerSettings.ResolveConfigPath"/>'s rules produced the path the viewer read.
+/// Reported verbatim in the startup diagnostics (#1954): "it read the wrong file" is only diagnosable
+/// when the viewer says WHICH rule won, because the four candidates are indistinguishable from the path
+/// alone (an operator who set DARLING_CONFIG and also has a darling.json beside the binary cannot
+/// otherwise tell which one the viewer is honoring).
+/// </summary>
+public enum ViewerConfigSource
+{
+    /// <summary>The first non-option command-line argument — outranks everything.</summary>
+    CommandLine,
+
+    /// <summary>The <c>DARLING_CONFIG</c> environment variable.</summary>
+    EnvironmentVariable,
+
+    /// <summary>darling.json beside the viewer binary (also the reported path when nothing was found).</summary>
+    BesideViewer,
+
+    /// <summary>darling.json one level up — the release zip's viewer\ under the service root.</summary>
+    ServiceRoot,
+}
+
+/// <summary>
+/// Where the viewer's darling.json came from: the rule that won, the path it named (verbatim and
+/// fully resolved), and whether that file exists. Produced by
+/// <see cref="ViewerSettings.ResolveConfigLocation"/>, which IS the resolver — <see cref="ViewerSettings.ResolveConfigPath"/>
+/// delegates to it, so the diagnostics can never describe a different resolution than the one performed.
+/// </summary>
+public sealed class ViewerConfigLocation
+{
+    internal ViewerConfigLocation(string path, ViewerConfigSource source, bool exists)
+    {
+        Path = path;
+        Source = source;
+        Exists = exists;
+
+        /* The operator-supplied paths (command line / DARLING_CONFIG) can be relative, and a relative path
+           is exactly the case where "which file did you read?" is unanswerable — so carry the absolute form
+           too. GetFullPath throws on a syntactically invalid path (illegal characters, a bare drive-relative
+           form we cannot expand); a diagnostic must never be the thing that crashes startup, so fall back to
+           the verbatim path. */
+        try
+        {
+            FullPath = System.IO.Path.GetFullPath(path);
+        }
+        catch (Exception)
+        {
+            FullPath = path;
+        }
+    }
+
+    /// <summary>The path as the winning rule produced it (verbatim for an operator-supplied path).</summary>
+    public string Path { get; }
+
+    /// <summary>The absolute form of <see cref="Path"/> (falls back to <see cref="Path"/> if it cannot be expanded).</summary>
+    public string FullPath { get; }
+
+    /// <summary>Which resolution rule produced <see cref="Path"/>.</summary>
+    public ViewerConfigSource Source { get; }
+
+    /// <summary>Whether the file at <see cref="Path"/> exists.</summary>
+    public bool Exists { get; }
+}
+
+/// <summary>
 /// The viewer's read of darling.json — the SAME file the Darling service uses, but the viewer
 /// only needs the postgres section (it talks to the central store, never to monitored
 /// SQL Servers). This intentionally duplicates a sliver of the service's DarlingConfig — the
@@ -62,31 +126,52 @@ public sealed class ViewerSettings
 
     public string ConnectionString { get; }
 
-    private ViewerSettings(string connectionString)
+    /// <summary>
+    /// True when the connection string was DERIVED by the viewer from <c>postgres.managed = true</c> rather
+    /// than read out of the file. Reported in the startup diagnostics (#1954), because it decides whether
+    /// <c>postgres.connectionString</c> in the file is even being consulted — an operator editing that
+    /// property on a managed install is editing something nothing reads.
+    /// </summary>
+    public bool Managed { get; }
+
+    private ViewerSettings(string connectionString, bool managed)
     {
         ConnectionString = connectionString;
+        Managed = managed;
     }
 
     /// <param name="explicitPath">A path handed on the command line; wins outright.</param>
     /// <param name="baseDirectory">The viewer binary's directory; null means AppContext.BaseDirectory (tests pass a temp directory).</param>
-    public static string ResolveConfigPath(string? explicitPath = null, string? baseDirectory = null)
+    public static string ResolveConfigPath(string? explicitPath = null, string? baseDirectory = null) =>
+        ResolveConfigLocation(explicitPath, baseDirectory).Path;
+
+    /// <summary>
+    /// The resolver itself: the same explicit path → <c>DARLING_CONFIG</c> → beside-the-viewer →
+    /// service-root order, but reporting WHICH rule won and whether the file exists, for the startup
+    /// diagnostics (#1954). <see cref="ResolveConfigPath"/> is a projection of this, so the diagnostics and
+    /// the load can never disagree about which file was chosen.
+    /// </summary>
+    /// <param name="explicitPath">A path handed on the command line; wins outright.</param>
+    /// <param name="baseDirectory">The viewer binary's directory; null means AppContext.BaseDirectory (tests pass a temp directory).</param>
+    public static ViewerConfigLocation ResolveConfigLocation(string? explicitPath = null, string? baseDirectory = null)
     {
         if (!string.IsNullOrWhiteSpace(explicitPath))
         {
-            return explicitPath;
+            return new ViewerConfigLocation(explicitPath, ViewerConfigSource.CommandLine, File.Exists(explicitPath));
         }
 
         var fromEnvironment = Environment.GetEnvironmentVariable("DARLING_CONFIG");
         if (!string.IsNullOrWhiteSpace(fromEnvironment))
         {
-            return fromEnvironment;
+            return new ViewerConfigLocation(
+                fromEnvironment, ViewerConfigSource.EnvironmentVariable, File.Exists(fromEnvironment));
         }
 
         baseDirectory ??= AppContext.BaseDirectory;
         var besideBinary = Path.Combine(baseDirectory, "darling.json");
         if (File.Exists(besideBinary))
         {
-            return besideBinary;
+            return new ViewerConfigLocation(besideBinary, ViewerConfigSource.BesideViewer, true);
         }
 
         /* The release zip ships the viewer in a viewer\ subfolder under the service root, and
@@ -99,11 +184,11 @@ public sealed class ViewerSettings
             var besideService = Path.Combine(parent, "darling.json");
             if (File.Exists(besideService))
             {
-                return besideService;
+                return new ViewerConfigLocation(besideService, ViewerConfigSource.ServiceRoot, true);
             }
         }
 
-        return besideBinary;
+        return new ViewerConfigLocation(besideBinary, ViewerConfigSource.BesideViewer, false);
     }
 
     /// <summary>
@@ -128,7 +213,7 @@ public sealed class ViewerSettings
 
         if (config?.Postgres?.Managed == true)
         {
-            return new ViewerSettings(DeriveManagedConnectionString(config.Postgres));
+            return new ViewerSettings(DeriveManagedConnectionString(config.Postgres), managed: true);
         }
 
         var connectionString = config?.Postgres?.ConnectionString;
@@ -137,7 +222,7 @@ public sealed class ViewerSettings
             throw new InvalidDataException("darling.json has no postgres.connectionString (and postgres.managed is not true).");
         }
 
-        return new ViewerSettings(connectionString);
+        return new ViewerSettings(connectionString, managed: false);
     }
 
     /// <summary>
