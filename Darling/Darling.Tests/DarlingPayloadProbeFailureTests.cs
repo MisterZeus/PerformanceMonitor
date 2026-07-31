@@ -219,13 +219,18 @@ public sealed class DarlingPayloadProbeFailureTests
     /* ── the declaration, and who holds it ── */
 
     [Fact]
-    public void Only_DatabaseSizeStats_Declares_The_Contract()
+    public void Exactly_Two_Collectors_Declare_The_Contract()
     {
         /* The opt-in is the back-compat guarantee: a collector that does not declare it never has its reader
            advanced past the payload, which is the pre-#1851 behavior exactly. Asserted over the whole
            catalog rather than a sample, so a collector adopting the channel cannot arrive without its own
            SQL and tests — tempdb_stats in particular reads TWO result sets of its own, and a runner that
-           advanced unconditionally would read one of them as failures. */
+           advanced unconditionally would read one of them as failures.
+
+           blocked_process_report joined in #1865, and is the reason this list is worth keeping exact rather
+           than loosening to a Contains: it adopted the channel for ONE of its two failure causes and screens
+           the other out entirely, so a future collector that declares the flag without making that same
+           decision is exactly what should fail here. */
         var declaring = CollectorCatalog.All
             .Where(c => c.GetType().GetProperty(nameof(ICollectorDefinition<int>.EmitsProbeFailures))
                 ?.GetValue(c) is true)
@@ -233,7 +238,7 @@ public sealed class DarlingPayloadProbeFailureTests
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
 
-        Assert.Equal(new[] { "database_size_stats" }, declaring);
+        Assert.Equal(new[] { "blocked_process_report", "database_size_stats" }, declaring);
         Assert.False(TempDbStatsCollector.Instance.EmitsProbeFailures);
     }
 
