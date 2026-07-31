@@ -662,7 +662,15 @@ SET
                 THEN N''
                 ELSE LOWER(b.lock_type) + N' lock, '
             END +
-            N'database: ' + ISNULL(DB_NAME(b.database_id), N'unknown') +
+            /* #1876: the LOCK RESOURCE's database, not the event's. These are the same database for
+               almost every blocking wait, and different for exactly the case this label is least able
+               to afford being wrong about: a cross-database lock, where the event's database_id names
+               where the blocked session was RUNNING while the object nobody could name lives somewhere
+               else entirely -- so the row named one database and the reason described another.
+               resource_database_id is parsed straight out of the wait resource, so it is authoritative
+               when present; it is NULL only for a resource shape with no database in it, where the
+               event's database is the best remaining answer. */
+            N'database: ' + COALESCE(DB_NAME(b.resource_database_id), DB_NAME(b.database_id), N'unknown') +
             /* #1865: the reason, where one is known. This is the fix the issue actually asked for --
                the operator reading the grid gets the answer on the row instead of a bare
                Unresolved whose two causes -- grant the login access, versus the page moved

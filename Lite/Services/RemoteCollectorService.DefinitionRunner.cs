@@ -127,6 +127,11 @@ public partial class RemoteCollectorService
             var failed = 0;
             Exception? firstFailure = null;
 
+            /* #1875: this path reads the trailing probe-failure set once PER DATABASE, so the note and the
+               log cap are decided for the cycle after the loop rather than inside it — see
+               CycleProbeFailures for why neither generalizes from the single-read plain path. */
+            var cycleProbeFailures = new CycleProbeFailures();
+
             /* One DuckDB connection for the whole body; one appender per database on it (disposing an
                appender flushes that database — commit-1..N-1 semantics on abort). */
             using var duckConnection = _duckDb.CreateConnection();
@@ -177,6 +182,18 @@ public partial class RemoteCollectorService
                     using (var dbReader = await dbCommand.ExecuteReaderAsync(cancellationToken))
                     {
                         batch = await definition.ReadAsync(dbReader, context, cancellationToken);
+
+                        /* #1875: the payload path's probe-failure contract, on the path that used to
+                           ignore it. blocked_process_report is the declaring collector that also runs per
+                           database (Azure SQL DB, #1535), so before this its batch produced the trailing
+                           set and the loop simply never advanced the reader to it — the rows were built
+                           and dropped. Read HERE, still inside the reader and inside the per-database
+                           try, so a diagnostics fault stays a one-database skip like any other. */
+                        if (definition.EmitsProbeFailures)
+                        {
+                            cycleProbeFailures.Add(
+                                await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(dbReader, cancellationToken));
+                        }
                     }
                     sqlMs += sqlSlice.ElapsedMilliseconds;
 
@@ -214,6 +231,12 @@ public partial class RemoteCollectorService
             }
 
             context.CurrentDatabaseName = null;
+
+            /* #1875: ONE note for the cycle and ONE capped log burst, composed from every database's
+               failures together. Assigned unconditionally — a cycle where nothing failed composes null,
+               which is exactly what this path carried before. */
+            telemetry.Note = cycleProbeFailures.Note;
+            LogEnumerationProbeFailures(definition, server, cycleProbeFailures.Failures);
 
             /* One database failing is routine (offline, mid-restore, a permissions oddity) and stays a
                debug-logged skip. EVERY database failing is a systemic fault — before this check the
