@@ -43,6 +43,8 @@ public sealed class QueryStatsCollectorDefinitionTests
         Assert.Contains("AND d.name NOT IN (@excl_db_0)", plan.Text, StringComparison.Ordinal);
         Assert.Contains("NOT LIKE N'%PerformanceMonitorLite%'", plan.Text, StringComparison.Ordinal);
         Assert.Equal("SO", Assert.Single(plan.Parameters).Value);
+
+        AssertAppliesRunAgainstSurvivorsOnly(plan.Text);
     }
 
     [Fact]
@@ -54,6 +56,8 @@ public sealed class QueryStatsCollectorDefinitionTests
         Assert.Contains("database_name = DB_NAME()", plan.Text, StringComparison.Ordinal);
         Assert.True(QueryStatsCollector.Instance.RunsPerDatabase(new CollectorTargetInfo { IsAzureSqlDb = true }));
         Assert.Empty(plan.Parameters);
+
+        AssertAppliesRunAgainstSurvivorsOnly(plan.Text);
     }
 
     [Fact]

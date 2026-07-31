@@ -138,7 +138,7 @@ public sealed class ProcedureStatsCollectorDefinitionTests
     }
 
     [Fact]
-    public void BuildQuery_PlanCaptureOn_Standard_SplicesWholeModuleTextPlanIntoEveryBranch()
+    public void BuildQuery_PlanCaptureOn_Standard_SplicesWholeModuleTextPlanOnceAfterRank()
     {
         /* #1959: the render happens ONCE, OUTSIDE the ranked derived table, against at most 150
            survivors - not once per branch below the TOP, which rendered module-grain plans for every
