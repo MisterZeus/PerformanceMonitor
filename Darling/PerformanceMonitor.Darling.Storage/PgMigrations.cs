@@ -681,7 +681,7 @@ ALTER TABLE query_store_stats ADD COLUMN IF NOT EXISTS interval_start_time_utc t
 CREATE OR REPLACE VIEW v_query_store_stats AS SELECT * FROM query_store_stats;";
 
     /// <summary>
-    /// V42 — PagerDuty webhook channel (#1780). Adds two columns to <c>config.config_notification</c>:
+    /// V42 — PagerDuty webhook channel (#1943). Adds two columns to <c>config.config_notification</c>:
     /// <c>pagerduty_routing_key</c> (the 32-character Events API v2 integration key, stored as plaintext
     /// but column-REVOKEd from the read-only viewer role — same secret tier as Teams/Slack/Generic webhook
     /// URLs) and <c>pagerduty_use_eu_region</c> (boolean flag for EU data center endpoint). Both are

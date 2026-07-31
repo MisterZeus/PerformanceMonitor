@@ -27,6 +27,19 @@
           "xunit.v3.mtp-v1": "[3.2.2]"
         }
       },
+      "Apache.Arrow": {
+        "type": "Transitive",
+        "resolved": "23.0.0",
+        "contentHash": "cU4Zm7byFwnb82Ea9ZRvVnq2nJNf/TF9j+rj/MHlvu9RBYMqYtu4sJaR1JmMh3MmSIuwMafVg7PfJxPAMv9dGw==",
+        "dependencies": {
+          "Apache.Arrow.Scalars": "23.0.0"
+        }
+      },
+      "Apache.Arrow.Scalars": {
+        "type": "Transitive",
+        "resolved": "23.0.0",
+        "contentHash": "i53VmQ505ASXsStf7y29Z5qvhN6PGgFGNb6UUU7z1WmbzEgSjKQuIJkKKVbh+K5rtXRiKyr1Ah3Rmvbeb2BEHQ=="
+      },
       "Azure.Core": {
         "type": "Transitive",
         "resolved": "1.51.1",
@@ -56,20 +69,21 @@
       },
       "DuckDB.NET.Bindings": {
         "type": "Transitive",
-        "resolved": "1.5.3",
-        "contentHash": "Weve7OzvXBG83BwyQN6oc02ZZkinvoz5UF+QedDqd3LJTUuPNepfqVY9fpbym8E5qsef4LZg1VnzKQO5JvNvQA=="
+        "resolved": "1.5.5",
+        "contentHash": "DrQS4YgORTdmQ7ZkPosk/Wo/f3ctlBQSmz0O23BKbIc/7Tb+hgCOgYSX5Bdy2/Oqmc3t8J9Dz8Z/BQOqCfpoww=="
       },
       "DuckDB.NET.Bindings.Full": {
         "type": "Transitive",
-        "resolved": "1.5.3",
-        "contentHash": "3vkxzLkCmPUTRtEBBYrXvl9jOTXJ42uYswsokpysTulOS963ZIcMJRKpcHH2zwa63YI4YchjYvPz0pcR2Helbg=="
+        "resolved": "1.5.5",
+        "contentHash": "QIyg93jXN+ebHtsl3UhNmoKV+UoBlHxicycGUVY8cw/kwTGB8CrrULcLr7ngUkk5pftaPoyIHycxTgshBOalaA=="
       },
       "DuckDB.NET.Data": {
         "type": "Transitive",
-        "resolved": "1.5.3",
-        "contentHash": "Bl0HQAJsisnjk/tPdYCw+MKavFzlfuh0qM3wSTI3YOZL4YwnK7MPFKe1yQQ0cHPJV35J3UtFF5d2FFHLKgb1Zg==",
+        "resolved": "1.5.5",
+        "contentHash": "VerE5IRph9ui+E8Ljz1xNuErbuZMrYvfwxo+KLZmBngrpj3UVdYWXmr2FwvHRJWwuCpuk7PcouEbdhNnU5DYlQ==",
         "dependencies": {
-          "DuckDB.NET.Bindings": "1.5.3"
+          "Apache.Arrow": "23.0.0",
+          "DuckDB.NET.Bindings": "1.5.5"
         }
       },
       "Hardcodet.NotifyIcon.Wpf": {
@@ -941,8 +955,8 @@
         "type": "Project",
         "dependencies": {
           "CredentialManagement": "[1.0.2, )",
-          "DuckDB.NET.Bindings.Full": "[1.5.3, )",
-          "DuckDB.NET.Data": "[1.5.3, )",
+          "DuckDB.NET.Bindings.Full": "[1.5.5, )",
+          "DuckDB.NET.Data": "[1.5.5, )",
           "Hardcodet.NotifyIcon.Wpf": "[2.0.1, )",
           "Microsoft.Data.SqlClient": "[7.0.2, )",
           "Microsoft.Data.SqlClient.Extensions.Azure": "[7.0.2, )",

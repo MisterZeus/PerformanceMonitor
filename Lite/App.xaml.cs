@@ -585,6 +585,7 @@ public partial class App : Application
         SlackWebhookUrl = readSecret(SlackWebhookCredentialKey);
         GenericWebhookUrl = readSecret(GenericWebhookCredentialKey);
         GenericWebhookHeadersJson = readSecret(GenericWebhookHeadersCredentialKey);
+        PagerDutyRoutingKey = readSecret(PagerDutyWebhookCredentialKey);
 
         try
         {
@@ -735,15 +736,6 @@ public partial class App : Application
                     SlackWebhookUrl = legacyUrl;
                 }
             }
-
-            /* Load webhook URLs from Credential Manager. The generic channel's headers JSON rides the same
-               secure store as a URL — it carries the Authorization bearer token (#1506). The PagerDuty routing
-               key is a bearer secret like the webhook URLs. */
-            TeamsWebhookUrl = GetWebhookUrl(TeamsWebhookCredentialKey);
-            SlackWebhookUrl = GetWebhookUrl(SlackWebhookCredentialKey);
-            GenericWebhookUrl = GetWebhookUrl(GenericWebhookCredentialKey);
-            GenericWebhookHeadersJson = GetWebhookUrl(GenericWebhookHeadersCredentialKey);
-            PagerDutyRoutingKey = GetWebhookUrl(PagerDutyWebhookCredentialKey);
 
             /* SMTP settings */
             if (root.TryGetProperty("smtp_enabled", out v)) SmtpEnabled = v.GetBoolean();
