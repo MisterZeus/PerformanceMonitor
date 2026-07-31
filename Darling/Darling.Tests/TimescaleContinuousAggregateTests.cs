@@ -7,7 +7,9 @@
  */
 
 using System;
+using System.Globalization;
 using System.Linq;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -540,32 +542,170 @@ public sealed class TimescaleContinuousAggregateTests
     }
 
     /// <summary>
-    /// The retention ordering that keeps the three-level chain's gates satisfiable. Each level's purge waits on
-    /// its CONSUMER covering it, so a consumer that expired FIRST would hold its own source's purge forever:
-    /// raw (4d) &lt; L1 (7d) &lt; the interval-grain daily (10d), and the two composer-grain dailies are kept
-    /// indefinitely. Written as one chain because that is the invariant — the individual numbers are tunable,
-    /// their order is not.
+    /// EVERY retention policy's consumers must outlive the policy itself, walked over
+    /// <see cref="TimescaleSupport.RetentionPolicies"/> rather than asserted against the pairs that happen to
+    /// exist today (#1905).
     ///
-    /// <para><b>#1877 raised the stakes on this ordering.</b> Under the old arm-only gate, inverting a pair cost
-    /// an arming failure: the source's policy simply never armed and that tier grew. Now that a positively
-    /// measured shortfall RE-HOLDS a running policy, an inverted pair would stop a purge that is already armed
-    /// on a perfectly healthy store, and it would not self-release. Steady state is safe by construction —
-    /// every consumer here outlives its source AND materialization chunks are never finer than their source's
-    /// (measured at 10 days against the raw tables' 1, on TimescaleDB 2.28.1), so a consumer always retains at
-    /// least as far back as its source. Both halves of that are what this ordering has to keep true.</para>
+    /// <para><b>What an inversion costs, post-#1877.</b> Each level's purge waits on its consumer covering it,
+    /// so a consumer that expired FIRST would hold its own source's purge forever. That used to be the whole
+    /// cost: the source's policy simply never armed and that tier grew, loudly, with a WARN every start. Since
+    /// #1877 a positively measured shortfall also RE-HOLDS a policy that is already armed — so an inverted pair
+    /// would STOP A PURGE ON A COMPLETELY HEALTHY STORE, and because holding makes the source deeper the gap
+    /// widens rather than closes, so it would never self-release. That is a latch, and it is why this moved
+    /// from three hand-written comparisons to a walk.</para>
+    ///
+    /// <para>The three cases, all of them real: a consumer with its own policy is compared; a consumer with NO
+    /// policy is kept indefinitely, which is an infinite horizon and always satisfies; and a consumer that IS
+    /// the source is the leaf rule (#1757), where the real consumer is the baseline COMPUTATION rather than a
+    /// relation, so what has to hold is that the tier outlives the baseline WINDOW.</para>
+    ///
+    /// <para>The other half of the safety argument is geometry, not ordering, and is not assertable here:
+    /// materialization chunks are never finer than their source's (measured at 10 days against the raw tables'
+    /// 1, on PostgreSQL 18.4 / TimescaleDB 2.28.1), so a consumer never retains LESS than its source at a chunk
+    /// boundary. Ordering plus that is what makes a healthy store unable to read as short.</para>
+    ///
+    /// <para>WATCHED (mutation): set <c>IntervalDailyRetentionInterval</c> below
+    /// <c>IntervalRetentionInterval</c> and this goes red naming both relations — and, unlike the three
+    /// comparisons it replaced, it would equally catch an inversion on a policy nobody has written yet.</para>
     /// </summary>
     [Fact]
-    public void RetentionHorizons_RiseDownTheQueryStoreDedupChain_SoNoGateWaitsOnSomethingAlreadyDropped()
+    public void EveryRetentionPolicysConsumersOutliveIt_WalkedOverTheListItself()
     {
-        Assert.True(TimescaleSupport.IntervalRetentionSpan > TimescaleSupport.RawRetentionSpan);
-        Assert.True(TimescaleSupport.HourlyRetentionSpan > TimescaleSupport.RawRetentionSpan,
-            "the hourly rollups gate raw's purge too, so they must outlive raw for the same reason L1 does.");
-        Assert.True(TimescaleSupport.IntervalDailyRetentionSpan > TimescaleSupport.IntervalRetentionSpan,
-            "the interval-grain DAILY layer must outlive the hourly one whose purge is gated on it, or L1's " +
-            "policy can never arm and L1 grows without bound.");
+        Assert.NotEmpty(TimescaleSupport.RetentionPolicies);
 
-        /* The TimeSpan twins must equal the interval literals the policies are actually created with. */
-        Assert.Equal("10 days", TimescaleSupport.IntervalDailyRetentionInterval);
-        Assert.Equal(TimeSpan.FromDays(10), TimescaleSupport.IntervalDailyRetentionSpan);
+        var horizons = TimescaleSupport.RetentionPolicies
+            .ToDictionary(p => p.Relation, p => ParseInterval(p.DropAfter), StringComparer.Ordinal);
+
+        /* Pairs where BOTH sides carry a finite horizon — the only ones an ordering comparison can be made
+           about, and therefore the ones a vacuous walk would silently skip. Counted so a change that made
+           every consumer look policy-less cannot pass by comparing nothing. */
+        var compared = 0;
+        var leaves = 0;
+
+        foreach (var (relation, dropAfter, _, coverage) in TimescaleSupport.RetentionPolicies)
+        {
+            var sourceHorizon = ParseInterval(dropAfter);
+            Assert.True(sourceHorizon > TimeSpan.Zero, $"{relation}'s horizon \"{dropAfter}\" did not parse");
+            Assert.NotEmpty(coverage);
+
+            foreach (var consumer in coverage)
+            {
+                if (string.Equals(consumer, relation, StringComparison.Ordinal))
+                {
+                    /* Self-coverage is the leaf rule (#1757), not an inversion: the tier cannot outlive itself,
+                       and its real consumer is the baseline computation, whose capture requirement is the
+                       window. That is the comparison that means something here. */
+                    leaves++;
+                    Assert.True(
+                        sourceHorizon > TimeSpan.FromDays(BaselineMath.BaselineWindowDays),
+                        $"{relation} covers ITSELF (the #1757 leaf rule), so its horizon has to exceed the " +
+                        $"{BaselineMath.BaselineWindowDays}-day baseline window its real consumer reads — it is " +
+                        $"{sourceHorizon.TotalDays}d.");
+                    continue;
+                }
+
+                if (!horizons.TryGetValue(consumer, out var consumerHorizon))
+                {
+                    /* No policy at all: kept indefinitely, so its horizon is infinite and nothing to compare. */
+                    continue;
+                }
+
+                compared++;
+                Assert.True(
+                    consumerHorizon > sourceHorizon,
+                    $"{relation} keeps {sourceHorizon.TotalDays}d but its consumer {consumer} keeps only " +
+                    $"{consumerHorizon.TotalDays}d. A consumer that expires FIRST can never cover its source, so " +
+                    $"{relation}'s purge is held forever — and since #1877 a policy already armed is STOPPED by " +
+                    "that same measurement, on a healthy store, and holding only deepens the source so it never " +
+                    "self-releases. Every consumer must outlive the tier whose purge waits on it.");
+            }
+        }
+
+        /* Floors, not exact counts: both rise as policies are added, and a walk that compared nothing would
+           otherwise be indistinguishable from a walk that found everything in order. */
+        Assert.True(compared >= 6,
+            $"only {compared} finite consumer pair(s) were actually compared; the list has at least 6, so the " +
+            "walk is skipping pairs it should be judging and would pass over an inversion.");
+        Assert.True(leaves >= TimescaleSupport.BaselineAggregates.Length,
+            $"only {leaves} self-covering tier(s) were seen; the {TimescaleSupport.BaselineAggregates.Length} " +
+            "baseline aggregates all cover themselves under the #1757 leaf rule.");
+    }
+
+    /// <summary>
+    /// The three coverage-gated raw tiers must appear in <see cref="TimescaleSupport.RetentionPolicies"/> with
+    /// exactly the coverage <see cref="TimescaleSupport.RawTierCoverage"/> names, at the raw horizon (#1905).
+    ///
+    /// <para>Deliberately a VALUE check standing behind a structural one. The structural guard —
+    /// <c>RawTierRetentionPolicies_AreDerivedFromTheCoverageMap_NotRehardcodedBesideIt</c> — is what proves the
+    /// rows are DERIVED, because a correct hand-copy produces identical values and no value test can tell the
+    /// difference. This one catches the case where someone defeats or outlives that guard and hand-copies the
+    /// rows WRONG, which is the harm rather than the mechanism. Both, because the mechanism is what rots and
+    /// the harm is what hurts.</para>
+    /// </summary>
+    [Fact]
+    public void EveryCoverageGatedRawTier_HasAPolicyMatchingTheMap()
+    {
+        foreach (var (relation, _, coverage) in TimescaleSupport.RawTierCoverage)
+        {
+            var policy = TimescaleSupport.RetentionPolicies
+                .SingleOrDefault(p => string.Equals(p.Relation, relation, StringComparison.Ordinal));
+
+            Assert.False(policy.Relation is null,
+                $"{relation} is coverage-gated in RawTierCoverage but has no retention policy — the two purge " +
+                "paths (#1784) no longer agree about which tables are gated.");
+            Assert.Equal(TimescaleSupport.RawRetentionInterval, policy.DropAfter);
+            Assert.Equal(coverage, policy.Coverage);
+        }
+    }
+
+    /// <summary>
+    /// Every retention horizon exists TWICE — as the interval literal the policy is actually created with, and
+    /// as a <see cref="TimeSpan"/> twin the router and the gates compare against — so every one of them has to
+    /// be pinned equal.
+    ///
+    /// <para>Pinned as a set rather than one pair at a time, which is what closes the hole this replaced:
+    /// <c>RawRetentionSpan</c> and <c>HourlyRetentionSpan</c> were pinned in RetentionTierRouterTests,
+    /// <c>IntervalDailyRetentionSpan</c> had a hand-written pin here, and <c>IntervalRetentionSpan</c> and
+    /// <c>BaselineRetentionSpan</c> had none at all despite their doc comments claiming otherwise. A twin that
+    /// disagrees is the worst shape available: the policy drops on one number while every gate and route
+    /// reasons about another, and nothing reads wrong until data is already gone.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(nameof(TimescaleSupport.RawRetentionInterval))]
+    [InlineData(nameof(TimescaleSupport.IntervalRetentionInterval))]
+    [InlineData(nameof(TimescaleSupport.IntervalDailyRetentionInterval))]
+    [InlineData(nameof(TimescaleSupport.HourlyRetentionInterval))]
+    [InlineData(nameof(TimescaleSupport.BaselineRetentionInterval))]
+    public void EveryRetentionIntervalLiteral_EqualsItsTimeSpanTwin(string intervalName)
+    {
+        /* SUFFIX swap, not Replace: IntervalRetentionInterval contains "Interval" twice, and replacing both
+           asks for a field named SpanRetentionSpan — which is how this test first ran red. */
+        const string suffix = "Interval";
+        Assert.EndsWith(suffix, intervalName, StringComparison.Ordinal);
+        var spanName = string.Concat(intervalName.AsSpan(0, intervalName.Length - suffix.Length), "Span");
+
+        var literal = (string)typeof(TimescaleSupport).GetField(intervalName)!.GetValue(null)!;
+        var spanField = typeof(TimescaleSupport).GetField(spanName);
+
+        Assert.True(spanField is not null, $"{intervalName} has no {spanName} twin to compare against");
+        Assert.Equal(ParseInterval(literal), (TimeSpan)spanField!.GetValue(null)!);
+    }
+
+    /// <summary>"4 days" / "21 days" -> a <see cref="TimeSpan"/>. The policies are created with these literals,
+    /// so parsing what is actually sent is what keeps the comparison honest — a separate TimeSpan field would
+    /// be a second representation to drift.</summary>
+    private static TimeSpan ParseInterval(string interval)
+    {
+        var parts = interval.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != 2 || !int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var count))
+        {
+            return TimeSpan.Zero;
+        }
+
+        return parts[1].StartsWith("day", StringComparison.OrdinalIgnoreCase)
+            ? TimeSpan.FromDays(count)
+            : parts[1].StartsWith("hour", StringComparison.OrdinalIgnoreCase)
+                ? TimeSpan.FromHours(count)
+                : TimeSpan.Zero;
     }
 }
