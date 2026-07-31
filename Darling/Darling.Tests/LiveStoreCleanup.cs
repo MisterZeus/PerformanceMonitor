@@ -83,4 +83,29 @@ internal static class LiveStoreCleanup
                "Connection is not open" standing in front of it. */
         }
     }
+
+    /// <summary>
+    /// The same masking rule for cleanup that CANNOT move to a fresh connection (#1896).
+    ///
+    /// <para>Most teardown wants <see cref="RunAsync"/>, because a fresh connection is strictly safer than the
+    /// one the failure may have destroyed. A few do not, and for them a fresh connection would be actively
+    /// WRONG rather than merely unnecessary: resetting <c>lock_timeout</c> is a SESSION setting, so it has to
+    /// run on the very session the test changed, and rolling back a blocking transaction has to run on the
+    /// second connection holding it. Handing those a new connection would leave the real session altered and
+    /// the real lock held while reporting success.</para>
+    ///
+    /// <para>What they share with <see cref="RunAsync"/> is the half that matters here: a throw from a
+    /// <c>finally</c> REPLACES the body's in-flight exception, so cleanup stays silent when the body already
+    /// failed and speaks up when it succeeded. Same rule, one place, whichever connection the work needs.</para>
+    /// </summary>
+    public static async Task RunOwnedAsync(bool bodySucceeded, Func<Task> cleanup)
+    {
+        try
+        {
+            await cleanup();
+        }
+        catch when (!bodySucceeded)
+        {
+        }
+    }
 }

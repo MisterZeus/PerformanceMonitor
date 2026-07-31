@@ -113,6 +113,7 @@ public sealed class DarlingSecuritySplitLiveTests
         await PgMigrations.MigrateAsync(owner, ct);
 
         await CreateTestRolesAndGrantsAsync(owner, ct);
+        var bodySucceeded = false;
         try
         {
             var adminString = RoleConnectionString(connectionString, AdminRole);
@@ -143,20 +144,26 @@ public sealed class DarlingSecuritySplitLiveTests
             /* ALTER DEFAULT PRIVILEGES proof: a table created into collect AFTER the grants is
                readable by both roles with no explicit per-table grant. */
             await ExecAsync(owner, "CREATE TABLE IF NOT EXISTS collect.sec_split_newtable (id integer)", ct);
-            try
+
+            await using (var viewer = new NpgsqlConnection(viewerString))
             {
-                await using var viewer = new NpgsqlConnection(viewerString);
                 await viewer.OpenAsync(ct);
                 await ExecAsync(viewer, "SELECT count(*) FROM collect.sec_split_newtable", ct);
             }
-            finally
-            {
-                await ExecAsync(owner, "DROP TABLE IF EXISTS collect.sec_split_newtable", ct);
-            }
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DropTestRolesAsync(owner, ct);
+            /* The table's own inner try/finally is gone (#1896) rather than converted: the outer finally runs
+               whether or not the block above threw, so dropping it here is the same guarantee with one less
+               nesting level and one less cleanup connection — and it now goes through the verified removal
+               path instead of a bare DROP that could report success on a closed session. */
+            await LiveStoreCleanup.RunAsync(connectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await new LiveCleanupBatch(cleanup).DropTableAsync("sec_split_newtable", cleanupCt);
+                await DropTestRolesAsync(cleanup, cleanupCt);
+            });
         }
     }
 
@@ -172,6 +179,7 @@ public sealed class DarlingSecuritySplitLiveTests
         await PgMigrations.MigrateAsync(owner, ct);
 
         await CreateTestRolesAndGrantsAsync(owner, ct);
+        var bodySucceeded = false;
         try
         {
             await using var viewer = new NpgsqlConnection(RoleConnectionString(connectionString, ViewerRole));
@@ -207,10 +215,13 @@ public sealed class DarlingSecuritySplitLiveTests
                     await ExecAsync(viewer, $"SELECT * FROM config.{acl.Table} LIMIT 1", ct));
                 Assert.Equal("42501", star.SqlState);
             }
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DropTestRolesAsync(owner, ct);
+            await LiveStoreCleanup.RunAsync(connectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DropTestRolesAsync(cleanup, cleanupCt));
         }
     }
 
@@ -228,6 +239,7 @@ public sealed class DarlingSecuritySplitLiveTests
         await CreateTestRolesAndGrantsAsync(owner, ct);
         /* Own-scoped: a GUID-suffixed hex name (safe to interpolate) so the shared store is never clobbered. */
         var viewName = "cv_sec_" + Guid.NewGuid().ToString("N");
+        var bodySucceeded = false;
         try
         {
             await using var viewer = new NpgsqlConnection(RoleConnectionString(connectionString, ViewerRole));
@@ -248,12 +260,17 @@ public sealed class DarlingSecuritySplitLiveTests
                 await ExecAsync(viewer,
                     "INSERT INTO config_mute_rules (id, enabled, created_at_utc) VALUES ('cv-sec-viewer', true, now())", ct));
             Assert.Equal("42501", denied.SqlState);
+
+            bodySucceeded = true;
         }
         finally
         {
             /* Belt-and-suspenders cleanup (the DELETE above already removed it on the happy path). */
-            await ExecAsync(owner, $"DELETE FROM config.custom_views WHERE name = '{viewName}'", ct);
-            await DropTestRolesAsync(owner, ct);
+            await LiveStoreCleanup.RunAsync(connectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await ExecAsync(cleanup, $"DELETE FROM config.custom_views WHERE name = '{viewName}'", cleanupCt);
+                await DropTestRolesAsync(cleanup, cleanupCt);
+            });
         }
     }
 
@@ -272,6 +289,7 @@ public sealed class DarlingSecuritySplitLiveTests
         await CreateTestRolesAndGrantsAsync(owner, ct);
         /* Own-scoped GUID name so the mcp custom_views round-trip below never clobbers the shared store. */
         var viewName = "cv_sec_mcp_" + Guid.NewGuid().ToString("N");
+        var bodySucceeded = false;
         try
         {
             await using var mcp = new NpgsqlConnection(RoleConnectionString(connectionString, McpRole));
@@ -354,14 +372,19 @@ public sealed class DarlingSecuritySplitLiveTests
             var beaconOnly = await Assert.ThrowsAsync<PostgresException>(async () =>
                 await ExecAsync(mcp, "UPDATE config.config_service SET paused = NOT paused WHERE id = 1", ct));
             Assert.Equal("42501", beaconOnly.SqlState);
+
+            bodySucceeded = true;
         }
         finally
         {
             /* Belt-and-suspenders cleanup (the DELETEs above already removed these on the happy path). */
-            await ExecAsync(owner, $"DELETE FROM config.custom_views WHERE name = '{viewName}'", ct);
-            await ExecAsync(owner, "DELETE FROM config.config_mute_rules WHERE id = 'sec-mcp-mute'", ct);
-            await ExecAsync(owner, "DELETE FROM config.config_monitored_servers WHERE server_id = -424242", ct);
-            await DropTestRolesAsync(owner, ct);
+            await LiveStoreCleanup.RunAsync(connectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await ExecAsync(cleanup, $"DELETE FROM config.custom_views WHERE name = '{viewName}'", cleanupCt);
+                await ExecAsync(cleanup, "DELETE FROM config.config_mute_rules WHERE id = 'sec-mcp-mute'", cleanupCt);
+                await ExecAsync(cleanup, "DELETE FROM config.config_monitored_servers WHERE server_id = -424242", cleanupCt);
+                await DropTestRolesAsync(cleanup, cleanupCt);
+            });
         }
     }
 
@@ -380,6 +403,7 @@ public sealed class DarlingSecuritySplitLiveTests
 
         await CreateTestRolesAndGrantsAsync(owner, ct);
         const string table = "sec_split_compress";
+        var bodySucceeded = false;
         try
         {
             /* Build a compressed hypertable in public, then move it to collect and confirm the least-
@@ -408,11 +432,20 @@ public sealed class DarlingSecuritySplitLiveTests
             await viewer.OpenAsync(ct);
             using var count = new NpgsqlCommand($"SELECT count(*) FROM collect.{table}", viewer);
             Assert.Equal(40L, Convert.ToInt64(await count.ExecuteScalarAsync(ct)));
+
+            bodySucceeded = true;
         }
         finally
         {
-            await ExecAsync(owner, $"DROP TABLE IF EXISTS public.{table}, collect.{table}", ct);
-            await DropTestRolesAsync(owner, ct);
+            /* The table is created in public and MOVED to collect, so it can be standing in either schema
+               depending on where the body got to — both are dropped, and both are verified (#1873). */
+            await LiveStoreCleanup.RunAsync(connectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                var batch = new LiveCleanupBatch(cleanup);
+                await batch.DropTableAsync(table, cleanupCt);
+                await batch.DropTableAsync(table, cleanupCt, schema: "public");
+                await DropTestRolesAsync(cleanup, cleanupCt);
+            });
         }
     }
 
@@ -441,6 +474,7 @@ BEGIN
 END $$;";
 
         await ExecAsync(owner, $"DROP ROLE IF EXISTS {role}", ct);
+        var bodySucceeded = false;
         try
         {
             /* Fresh: creates + stamps the marker (round-trips through shobj_description). */
@@ -456,10 +490,14 @@ END $$;";
             var ex = await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(owner, Guard(), ct));
             Assert.Equal("P0001", ex.SqlState); // raise_exception
             Assert.Contains("was not created by Darling", ex.MessageText, StringComparison.Ordinal);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await ExecAsync(owner, $"DROP ROLE IF EXISTS {role}", ct);
+            await LiveStoreCleanup.RunAsync(connectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+                await new LiveCleanupBatch(cleanup).DropRolesAsync(
+                    $"DROP ROLE IF EXISTS {role}", [role], cleanupCt));
         }
     }
 

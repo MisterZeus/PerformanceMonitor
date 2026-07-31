@@ -315,9 +315,23 @@ jobs:
       # ONLY here: an ephemeral CI runner, loopback-only, throwaway data. The PRODUCT default is
       # the opposite (scram-sha-256 + a generated credential; see DarlingManagedPostgres). The
       # appended settings mirror DarlingManagedPostgres.BuildConfAppend (timescaledb preload —
-      # the Timescale-gated tests detect and use it — plus the port and loopback bind). Port 5541
-      # is fixed and distinct; the managed-bootstrap E2E starts its OWN postgres on a random free
-      # port, so there is no collision.
+      # the Timescale-gated tests detect and use it — plus the port and loopback bind) and
+      # BuildWorkerSizingConfAppend (the two worker settings). Port 5541 is fixed and distinct; the
+      # managed-bootstrap E2E starts its OWN postgres on a random free port, so there is no collision.
+      #
+      # #1888: the worker settings are load-bearing, not garnish. PostgreSQL's default
+      # max_worker_processes = 8 cannot launch TimescaleDB's per-hypertable compression, retention
+      # and continuous-aggregate policy jobs, so without them this job tested a configuration no
+      # customer runs and made scheduler-racing failures luck-of-the-slot instead of reproducible.
+      # Values are the product's own derivation from the live hypertable count
+      # (TimescaleSupport.HypertableCount = the 38-collector catalog + collection_log = 39):
+      #   timescaledb.max_background_workers = HypertableCount + 2  = 41
+      #   max_worker_processes = 3 + (HypertableCount + 2) + 8      = 52
+      # Kept honest by CiClusterWorkerSizingTests (parses this file against the formula) and
+      # CiClusterWorkerSizingLiveTests (asserts the running cluster serves them). Must configure
+      # the cluster identically to build.yml's darling-pg job: that guard parses the appended
+      # settings out of BOTH files and requires the two sets to be equal, so a fix applied to one
+      # workflow and not the other — the ordinary way these hand-maintained copies drift — fails.
       - name: Initialize and start throwaway PostgreSQL
         shell: pwsh
         run: |
@@ -333,6 +347,8 @@ jobs:
           Add-Content -Path "$dataDir\postgresql.conf" -Value "shared_preload_libraries = 'timescaledb'"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "port = 5541"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 41"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 52"
           & "$bin\pg_ctl.exe" -D $dataDir -l $logFile -w start
           if ($LASTEXITCODE -ne 0) { if (Test-Path $logFile) { Get-Content $logFile -Tail 50 }; throw "pg_ctl start failed ($LASTEXITCODE)" }
           & "$bin\createdb.exe" -h 127.0.0.1 -p 5541 -U darling darling
