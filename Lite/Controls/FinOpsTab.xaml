@@ -10,17 +10,17 @@
     <UserControl.Resources>
         <ResourceDictionary>
             <ContextMenu x:Key="DataGridContextMenu">
-                <MenuItem Header="Copy Cell" Click="CopyCell_Click">
+                <MenuItem Header="Copy _Cell" Click="CopyCell_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>
                 </MenuItem>
-                <MenuItem Header="Copy Row" Click="CopyRow_Click">
+                <MenuItem Header="Copy _Row" Click="CopyRow_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon>
                 </MenuItem>
-                <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click">
+                <MenuItem Header="Copy _All Rows" Click="CopyAllRows_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon>
                 </MenuItem>
                 <Separator/>
-                <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click">
+                <MenuItem Header="_Export to CSV..." Click="ExportToCsv_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
                 </MenuItem>
             </ContextMenu>
@@ -32,14 +32,14 @@
             <!-- Plan-navigation menus for the query-identifying FinOps grids (a dedicated menu so the
                  plan items don't leak onto the non-query FinOps grids that share DataGridContextMenu). -->
             <ContextMenu x:Key="HighImpactPlanContextMenu">
-                <MenuItem Header="Copy Cell" Click="CopyCell_Click"><MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon></MenuItem>
-                <MenuItem Header="Copy Row" Click="CopyRow_Click"><MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon></MenuItem>
-                <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click"><MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon></MenuItem>
+                <MenuItem Header="Copy _Cell" Click="CopyCell_Click"><MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon></MenuItem>
+                <MenuItem Header="Copy _Row" Click="CopyRow_Click"><MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon></MenuItem>
+                <MenuItem Header="Copy _All Rows" Click="CopyAllRows_Click"><MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon></MenuItem>
                 <Separator/>
-                <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click"><MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon></MenuItem>
+                <MenuItem Header="_Export to CSV..." Click="ExportToCsv_Click"><MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon></MenuItem>
                 <Separator/>
-                <MenuItem Header="View Stored Plan" Click="FinOpsViewPlan_Click"><MenuItem.Icon><TextBlock Text="&#x1F50D;"/></MenuItem.Icon></MenuItem>
-                <MenuItem Header="Get Actual Plan (re-run)" Click="FinOpsGetActualPlan_Click"><MenuItem.Icon><TextBlock Text="&#x25B6;"/></MenuItem.Icon></MenuItem>
+                <MenuItem Header="_View Stored Plan" Click="FinOpsViewPlan_Click"><MenuItem.Icon><TextBlock Text="&#x1F50D;"/></MenuItem.Icon></MenuItem>
+                <MenuItem Header="_Get Actual Plan (re-run)" Click="FinOpsGetActualPlan_Click"><MenuItem.Icon><TextBlock Text="&#x25B6;"/></MenuItem.Icon></MenuItem>
             </ContextMenu>
             <Style x:Key="HighImpactRowStyle" TargetType="DataGridRow">
                 <Setter Property="ContextMenu" Value="{StaticResource HighImpactPlanContextMenu}"/>
@@ -48,13 +48,13 @@
             <!-- Expensive Queries carry only the full query text (no query_hash / plan_id), so they get
                  Get Actual Plan only — there is no stored plan key to fetch a collected plan with. -->
             <ContextMenu x:Key="ExpensiveQueryPlanContextMenu">
-                <MenuItem Header="Copy Cell" Click="CopyCell_Click"><MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon></MenuItem>
-                <MenuItem Header="Copy Row" Click="CopyRow_Click"><MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon></MenuItem>
-                <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click"><MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon></MenuItem>
+                <MenuItem Header="Copy _Cell" Click="CopyCell_Click"><MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon></MenuItem>
+                <MenuItem Header="Copy _Row" Click="CopyRow_Click"><MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon></MenuItem>
+                <MenuItem Header="Copy _All Rows" Click="CopyAllRows_Click"><MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon></MenuItem>
                 <Separator/>
-                <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click"><MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon></MenuItem>
+                <MenuItem Header="_Export to CSV..." Click="ExportToCsv_Click"><MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon></MenuItem>
                 <Separator/>
-                <MenuItem Header="Get Actual Plan (re-run)" Click="FinOpsGetActualPlan_Click"><MenuItem.Icon><TextBlock Text="&#x25B6;"/></MenuItem.Icon></MenuItem>
+                <MenuItem Header="_Get Actual Plan (re-run)" Click="FinOpsGetActualPlan_Click"><MenuItem.Icon><TextBlock Text="&#x25B6;"/></MenuItem.Icon></MenuItem>
             </ContextMenu>
             <Style x:Key="ExpensiveQueryRowStyle" TargetType="DataGridRow">
                 <Setter Property="ContextMenu" Value="{StaticResource ExpensiveQueryPlanContextMenu}"/>
@@ -63,13 +63,13 @@
             <!-- Storage Growth parent grid: base Copy/Export + the #1138 drill entry into the
                  per-object growth heatmap. Dedicated so "Show objects" does not leak onto the other grids. -->
             <ContextMenu x:Key="StorageGrowthContextMenu">
-                <MenuItem Header="Copy Cell" Click="CopyCell_Click"><MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon></MenuItem>
-                <MenuItem Header="Copy Row" Click="CopyRow_Click"><MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon></MenuItem>
-                <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click"><MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon></MenuItem>
+                <MenuItem Header="Copy _Cell" Click="CopyCell_Click"><MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon></MenuItem>
+                <MenuItem Header="Copy _Row" Click="CopyRow_Click"><MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon></MenuItem>
+                <MenuItem Header="Copy _All Rows" Click="CopyAllRows_Click"><MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon></MenuItem>
                 <Separator/>
-                <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click"><MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon></MenuItem>
+                <MenuItem Header="_Export to CSV..." Click="ExportToCsv_Click"><MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon></MenuItem>
                 <Separator/>
-                <MenuItem Header="Show objects" Click="StorageGrowthShowObjects_Click"><MenuItem.Icon><TextBlock Text="&#x1F50E;"/></MenuItem.Icon></MenuItem>
+                <MenuItem Header="Show _objects" Click="StorageGrowthShowObjects_Click"><MenuItem.Icon><TextBlock Text="&#x1F50E;"/></MenuItem.Icon></MenuItem>
             </ContextMenu>
             <Style x:Key="StorageGrowthRowStyle" TargetType="DataGridRow">
                 <Setter Property="ContextMenu" Value="{StaticResource StorageGrowthContextMenu}"/>

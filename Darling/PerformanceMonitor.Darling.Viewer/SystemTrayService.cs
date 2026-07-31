@@ -111,13 +111,13 @@ public sealed class SystemTrayService : IDisposable
         /* Build context menu — Show Window / Exit. The viewer has no in-process collection to pause. */
         var contextMenu = new ContextMenu();
 
-        var showItem = new MenuItem { Header = "Show Window", Icon = new TextBlock { Text = "📊", Background = Brushes.Transparent } };
+        var showItem = new MenuItem { Header = "_Show Window", Icon = new TextBlock { Text = "📊", Background = Brushes.Transparent } };
         showItem.Click += (s, e) => _restoreWindow();
         contextMenu.Items.Add(showItem);
 
         contextMenu.Items.Add(new Separator());
 
-        var exitItem = new MenuItem { Header = "Exit", Icon = new TextBlock { Text = "✕", Background = Brushes.Transparent } };
+        var exitItem = new MenuItem { Header = "E_xit", Icon = new TextBlock { Text = "✕", Background = Brushes.Transparent } };
         exitItem.Click += (s, e) => ExitApplication();
         contextMenu.Items.Add(exitItem);
 

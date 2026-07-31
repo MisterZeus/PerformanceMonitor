@@ -10,20 +10,20 @@
 
             <!-- Context Menu for DataGrid Copy -->
             <ContextMenu x:Key="DataGridContextMenu">
-                <MenuItem Header="Copy Cell" Click="CopyCell_Click">
+                <MenuItem Header="Copy _Cell" Click="CopyCell_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>
                 </MenuItem>
-                <MenuItem Header="Copy Row" Click="CopyRow_Click">
+                <MenuItem Header="Copy _Row" Click="CopyRow_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon>
                 </MenuItem>
-                <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click">
+                <MenuItem Header="Copy _All Rows" Click="CopyAllRows_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon>
                 </MenuItem>
-                <MenuItem Header="Copy Repro Script" Click="CopyReproScript_Click">
+                <MenuItem Header="Copy Repro _Script" Click="CopyReproScript_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4DD;"/></MenuItem.Icon>
                 </MenuItem>
                 <Separator/>
-                <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click">
+                <MenuItem Header="_Export to CSV..." Click="ExportToCsv_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
                 </MenuItem>
             </ContextMenu>
@@ -37,27 +37,27 @@
                  supports fewer row types than View Stored Plan does - the Procedure rows have no re-run
                  case, so the binding falls back to Collapsed there. Mirrors the Darling viewer's menus. -->
             <ContextMenu x:Key="DataGridPlanContextMenu">
-                <MenuItem Header="Copy Cell" Click="CopyCell_Click">
+                <MenuItem Header="Copy _Cell" Click="CopyCell_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>
                 </MenuItem>
-                <MenuItem Header="Copy Row" Click="CopyRow_Click">
+                <MenuItem Header="Copy _Row" Click="CopyRow_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon>
                 </MenuItem>
-                <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click">
+                <MenuItem Header="Copy _All Rows" Click="CopyAllRows_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon>
                 </MenuItem>
-                <MenuItem Header="Copy Repro Script" Click="CopyReproScript_Click">
+                <MenuItem Header="Copy Repro _Script" Click="CopyReproScript_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4DD;"/></MenuItem.Icon>
                 </MenuItem>
                 <Separator/>
-                <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click">
+                <MenuItem Header="_Export to CSV..." Click="ExportToCsv_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
                 </MenuItem>
                 <Separator/>
-                <MenuItem Header="View Stored Plan" Click="ViewEstimatedPlan_Click">
+                <MenuItem Header="_View Stored Plan" Click="ViewEstimatedPlan_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F50D;"/></MenuItem.Icon>
                 </MenuItem>
-                <MenuItem Header="Get Actual Plan (re-run)" Click="GetActualPlan_Click"
+                <MenuItem Header="_Get Actual Plan (re-run)" Click="GetActualPlan_Click"
                           Visibility="{Binding PlacementTarget.DataContext.CanGetActualPlan, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVis}, FallbackValue=Collapsed}">
                     <MenuItem.Icon><TextBlock Text="&#x25B6;"/></MenuItem.Icon>
                 </MenuItem>
@@ -66,27 +66,27 @@
             <!-- Context menu for Blocked Process Reports: separate Blocked/Blocking plan
                  actions; no Get Actual Plan because re-executing a blocked query is a foot-gun. -->
             <ContextMenu x:Key="BlockedProcessContextMenu">
-                <MenuItem Header="Copy Cell" Click="CopyCell_Click">
+                <MenuItem Header="Copy _Cell" Click="CopyCell_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>
                 </MenuItem>
-                <MenuItem Header="Copy Row" Click="CopyRow_Click">
+                <MenuItem Header="Copy _Row" Click="CopyRow_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon>
                 </MenuItem>
-                <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click">
+                <MenuItem Header="Copy _All Rows" Click="CopyAllRows_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon>
                 </MenuItem>
                 <Separator/>
-                <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click">
+                <MenuItem Header="_Export to CSV..." Click="ExportToCsv_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
                 </MenuItem>
                 <Separator/>
-                <MenuItem Header="View Block Chain" Click="ViewBlockChain_Click">
+                <MenuItem Header="View Block Chai_n" Click="ViewBlockChain_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F517;"/></MenuItem.Icon>
                 </MenuItem>
-                <MenuItem Header="View Blocked Plan" Click="ViewBlockedSidePlan_Click">
+                <MenuItem Header="View _Blocked Plan" Click="ViewBlockedSidePlan_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F50D;"/></MenuItem.Icon>
                 </MenuItem>
-                <MenuItem Header="View Blocking Plan" Click="ViewBlockingSidePlan_Click">
+                <MenuItem Header="View Blocking _Plan" Click="ViewBlockingSidePlan_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F50D;"/></MenuItem.Icon>
                 </MenuItem>
             </ContextMenu>
@@ -96,24 +96,24 @@
                  No Get Actual Plan — re-running a mid-transaction query that just
                  deadlocked is a foot-gun. -->
             <ContextMenu x:Key="DeadlockContextMenu">
-                <MenuItem Header="Copy Cell" Click="CopyCell_Click">
+                <MenuItem Header="Copy _Cell" Click="CopyCell_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>
                 </MenuItem>
-                <MenuItem Header="Copy Row" Click="CopyRow_Click">
+                <MenuItem Header="Copy _Row" Click="CopyRow_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon>
                 </MenuItem>
-                <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click">
+                <MenuItem Header="Copy _All Rows" Click="CopyAllRows_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon>
                 </MenuItem>
                 <Separator/>
-                <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click">
+                <MenuItem Header="_Export to CSV..." Click="ExportToCsv_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
                 </MenuItem>
                 <Separator/>
-                <MenuItem Header="View Deadlock Graph" Click="ViewDeadlockGraph_Click">
+                <MenuItem Header="View _Deadlock Graph" Click="ViewDeadlockGraph_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F578;"/></MenuItem.Icon>
                 </MenuItem>
-                <MenuItem Header="View Stored Plan" Click="ViewDeadlockProcessPlan_Click">
+                <MenuItem Header="_View Stored Plan" Click="ViewDeadlockProcessPlan_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F50D;"/></MenuItem.Icon>
                 </MenuItem>
             </ContextMenu>

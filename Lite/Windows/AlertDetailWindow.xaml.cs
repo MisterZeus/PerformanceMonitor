@@ -71,6 +71,11 @@ public partial class AlertDetailWindow : Window
         return views.Count > 0;
     }
 
+    private void Close_Click(object sender, RoutedEventArgs e)
+    {
+        Close();
+    }
+
     private void CopyTsqlButton_Click(object sender, RoutedEventArgs e)
     {
         if (sender is FrameworkElement { DataContext: DetailItemView view } && !string.IsNullOrEmpty(view.Body))

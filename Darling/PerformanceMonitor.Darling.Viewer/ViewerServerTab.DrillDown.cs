@@ -62,48 +62,48 @@ public partial class ViewerServerTab
         AddWaitDrillDownMenuItem(WaitStatsChart, BuildChartContextMenu(WaitStatsChart, "Wait_Stats"), () => _waitStatsHover);
 
         /* CPU / Memory / tempdb / Perfmon — "Show Active Queries at This Time" (Item 2, 10 charts). */
-        AddChartDrillDownMenuItem(CpuChart, BuildChartContextMenu(CpuChart, "CPU_Usage"), () => _cpuHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(MemoryChart, BuildChartContextMenu(MemoryChart, "Memory_Usage"), () => _memoryHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(MemoryClerksChart, BuildChartContextMenu(MemoryClerksChart, "Memory_Clerks"), () => _memoryClerksHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(MemoryGrantSizingChart, BuildChartContextMenu(MemoryGrantSizingChart, "Memory_Grant_Sizing"), () => _memoryGrantSizingHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(MemoryGrantActivityChart, BuildChartContextMenu(MemoryGrantActivityChart, "Memory_Grant_Activity"), () => _memoryGrantActivityHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(MemoryPressureEventsChart, BuildChartContextMenu(MemoryPressureEventsChart, "Memory_Pressure_Events"), () => _memoryPressureEventsHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(TempDbChart, BuildChartContextMenu(TempDbChart, "TempDB_Stats"), () => _tempDbHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(TempDbSizeChart, BuildChartContextMenu(TempDbSizeChart, "TempDB_Allocated_Size"), () => _tempDbSizeHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(TempDbFileIoChart, BuildChartContextMenu(TempDbFileIoChart, "TempDB_File_IO"), () => _tempDbFileIoHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(PerfmonChart, BuildChartContextMenu(PerfmonChart, "Perfmon_Counters"), () => _perfmonHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(CpuChart, BuildChartContextMenu(CpuChart, "CPU_Usage"), () => _cpuHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(MemoryChart, BuildChartContextMenu(MemoryChart, "Memory_Usage"), () => _memoryHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(MemoryClerksChart, BuildChartContextMenu(MemoryClerksChart, "Memory_Clerks"), () => _memoryClerksHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(MemoryGrantSizingChart, BuildChartContextMenu(MemoryGrantSizingChart, "Memory_Grant_Sizing"), () => _memoryGrantSizingHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(MemoryGrantActivityChart, BuildChartContextMenu(MemoryGrantActivityChart, "Memory_Grant_Activity"), () => _memoryGrantActivityHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(MemoryPressureEventsChart, BuildChartContextMenu(MemoryPressureEventsChart, "Memory_Pressure_Events"), () => _memoryPressureEventsHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(TempDbChart, BuildChartContextMenu(TempDbChart, "TempDB_Stats"), () => _tempDbHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(TempDbSizeChart, BuildChartContextMenu(TempDbSizeChart, "TempDB_Allocated_Size"), () => _tempDbSizeHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(TempDbFileIoChart, BuildChartContextMenu(TempDbFileIoChart, "TempDB_File_IO"), () => _tempDbFileIoHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(PerfmonChart, BuildChartContextMenu(PerfmonChart, "Perfmon_Counters"), () => _perfmonHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
 
         /* Performance Trends — "Show Active Queries at This Time" (Item 3, 4 charts). */
-        AddChartDrillDownMenuItem(QueryDurationTrendChart, BuildChartContextMenu(QueryDurationTrendChart, "Query_Duration_Trends"), () => _queryDurationTrendHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(ProcDurationTrendChart, BuildChartContextMenu(ProcDurationTrendChart, "Procedure_Duration_Trends"), () => _procDurationTrendHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(QueryStoreDurationTrendChart, BuildChartContextMenu(QueryStoreDurationTrendChart, "QueryStore_Duration_Trends"), () => _queryStoreDurationTrendHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(ExecutionCountTrendChart, BuildChartContextMenu(ExecutionCountTrendChart, "Execution_Count_Trends"), () => _executionCountTrendHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(QueryDurationTrendChart, BuildChartContextMenu(QueryDurationTrendChart, "Query_Duration_Trends"), () => _queryDurationTrendHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(ProcDurationTrendChart, BuildChartContextMenu(ProcDurationTrendChart, "Procedure_Duration_Trends"), () => _procDurationTrendHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(QueryStoreDurationTrendChart, BuildChartContextMenu(QueryStoreDurationTrendChart, "QueryStore_Duration_Trends"), () => _queryStoreDurationTrendHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(ExecutionCountTrendChart, BuildChartContextMenu(ExecutionCountTrendChart, "Execution_Count_Trends"), () => _executionCountTrendHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
 
         /* Blocking Trends — Lock Wait + Blocking -> "Show Blocking at This Time"; Deadlock ->
            "Show Deadlocks at This Time" (Item 3, 3 charts). */
-        AddChartDrillDownMenuItem(LockWaitTrendChart, BuildChartContextMenu(LockWaitTrendChart, "Lock_Wait_Trends"), () => _lockWaitTrendHover, "Show Blocking at This Time", OnBlockingDrillDown);
-        AddChartDrillDownMenuItem(BlockingTrendChart, BuildChartContextMenu(BlockingTrendChart, "Blocking_Trends"), () => _blockingTrendHover, "Show Blocking at This Time", OnBlockingDrillDown);
-        AddChartDrillDownMenuItem(DeadlockTrendChart, BuildChartContextMenu(DeadlockTrendChart, "Deadlock_Trends"), () => _deadlockTrendHover, "Show Deadlocks at This Time", OnDeadlockDrillDown);
+        AddChartDrillDownMenuItem(LockWaitTrendChart, BuildChartContextMenu(LockWaitTrendChart, "Lock_Wait_Trends"), () => _lockWaitTrendHover, "Show _Blocking at This Time", OnBlockingDrillDown);
+        AddChartDrillDownMenuItem(BlockingTrendChart, BuildChartContextMenu(BlockingTrendChart, "Blocking_Trends"), () => _blockingTrendHover, "Show _Blocking at This Time", OnBlockingDrillDown);
+        AddChartDrillDownMenuItem(DeadlockTrendChart, BuildChartContextMenu(DeadlockTrendChart, "Deadlock_Trends"), () => _deadlockTrendHover, "Show Deadloc_ks at This Time", OnDeadlockDrillDown);
 
         /* Blocking Stats (this feature) — the severity duration charts drill to the same blocked-process
            reports as their count-trend siblings, so right-clicking a duration spike opens the blocks at that
            time ("Show Blocking at This Time" -> OnBlockingDrillDown). The deadlock-severity charts drill to
            the Deadlocks grid instead ("Show Deadlocks at This Time" -> OnDeadlockDrillDown), matching the
            Trends tab's deadlock-count chart. */
-        AddChartDrillDownMenuItem(BlockingDurationChart, BuildChartContextMenu(BlockingDurationChart, "Blocking_Duration"), () => _blockingDurationHover, "Show Blocking at This Time", OnBlockingDrillDown);
-        AddChartDrillDownMenuItem(BlockingTotalDurationChart, BuildChartContextMenu(BlockingTotalDurationChart, "Blocking_Total_Duration"), () => _blockingTotalDurationHover, "Show Blocking at This Time", OnBlockingDrillDown);
-        AddChartDrillDownMenuItem(DeadlockWaitChart, BuildChartContextMenu(DeadlockWaitChart, "Deadlock_Wait"), () => _deadlockWaitHover, "Show Deadlocks at This Time", OnDeadlockDrillDown);
-        AddChartDrillDownMenuItem(DeadlockTotalWaitChart, BuildChartContextMenu(DeadlockTotalWaitChart, "Deadlock_Total_Wait"), () => _deadlockTotalWaitHover, "Show Deadlocks at This Time", OnDeadlockDrillDown);
+        AddChartDrillDownMenuItem(BlockingDurationChart, BuildChartContextMenu(BlockingDurationChart, "Blocking_Duration"), () => _blockingDurationHover, "Show _Blocking at This Time", OnBlockingDrillDown);
+        AddChartDrillDownMenuItem(BlockingTotalDurationChart, BuildChartContextMenu(BlockingTotalDurationChart, "Blocking_Total_Duration"), () => _blockingTotalDurationHover, "Show _Blocking at This Time", OnBlockingDrillDown);
+        AddChartDrillDownMenuItem(DeadlockWaitChart, BuildChartContextMenu(DeadlockWaitChart, "Deadlock_Wait"), () => _deadlockWaitHover, "Show Deadloc_ks at This Time", OnDeadlockDrillDown);
+        AddChartDrillDownMenuItem(DeadlockTotalWaitChart, BuildChartContextMenu(DeadlockTotalWaitChart, "Deadlock_Total_Wait"), () => _deadlockTotalWaitHover, "Show Deadloc_ks at This Time", OnDeadlockDrillDown);
 
         /* File I/O (4) + Blocking > Current Waits (2) — the rest of Lite's "Show Active Queries at This Time"
            set (ServerTab.xaml.cs:340-363, in the same referenced block). Charts in this same viewer surface,
            same drill target; wired for faithful parity so no sibling chart is left without the drill-down. */
-        AddChartDrillDownMenuItem(FileIoReadChart, BuildChartContextMenu(FileIoReadChart, "File_IO_Read_Latency"), () => _fileIoReadHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(FileIoWriteChart, BuildChartContextMenu(FileIoWriteChart, "File_IO_Write_Latency"), () => _fileIoWriteHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(FileIoReadThroughputChart, BuildChartContextMenu(FileIoReadThroughputChart, "File_IO_Read_Throughput"), () => _fileIoReadThroughputHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(FileIoWriteThroughputChart, BuildChartContextMenu(FileIoWriteThroughputChart, "File_IO_Write_Throughput"), () => _fileIoWriteThroughputHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(CurrentWaitsDurationChart, BuildChartContextMenu(CurrentWaitsDurationChart, "Current_Waits_Duration"), () => _currentWaitsDurationHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(CurrentWaitsBlockedChart, BuildChartContextMenu(CurrentWaitsBlockedChart, "Current_Waits_Blocked"), () => _currentWaitsBlockedHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(FileIoReadChart, BuildChartContextMenu(FileIoReadChart, "File_IO_Read_Latency"), () => _fileIoReadHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(FileIoWriteChart, BuildChartContextMenu(FileIoWriteChart, "File_IO_Write_Latency"), () => _fileIoWriteHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(FileIoReadThroughputChart, BuildChartContextMenu(FileIoReadThroughputChart, "File_IO_Read_Throughput"), () => _fileIoReadThroughputHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(FileIoWriteThroughputChart, BuildChartContextMenu(FileIoWriteThroughputChart, "File_IO_Write_Throughput"), () => _fileIoWriteThroughputHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(CurrentWaitsDurationChart, BuildChartContextMenu(CurrentWaitsDurationChart, "Current_Waits_Duration"), () => _currentWaitsDurationHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(CurrentWaitsBlockedChart, BuildChartContextMenu(CurrentWaitsBlockedChart, "Current_Waits_Blocked"), () => _currentWaitsBlockedHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
 
         /* Darling-only time-series charts Lite lacks — CPU Scheduler, Latch/Spinlock contention, Plan Cache,
            Session Counts, and the eight System Events (system_health XE) counter charts. All plot display-time
@@ -111,20 +111,20 @@ public partial class ViewerServerTab
            window exactly like their sibling resource/trend charts. Peer-consistency (these previously had only
            the copy/export menu); no per-latch/per-spinlock-type drill (no correlation data captured). Only
            CollectorDuration stays menu-only, matching Lite's drill-less collector-duration chart. */
-        AddChartDrillDownMenuItem(CpuSchedulerChart, BuildChartContextMenu(CpuSchedulerChart, "CPU_Scheduler"), () => _cpuSchedulerHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(LatchStatsChart, BuildChartContextMenu(LatchStatsChart, "Latch_Stats"), () => _latchStatsHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(SpinlockStatsChart, BuildChartContextMenu(SpinlockStatsChart, "Spinlock_Stats"), () => _spinlockStatsHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(SessionStatsChart, BuildChartContextMenu(SessionStatsChart, "Session_Stats"), () => _sessionStatsHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(PlanCacheChart, BuildChartContextMenu(PlanCacheChart, "Plan_Cache"), () => _planCacheHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(CpuSchedulerChart, BuildChartContextMenu(CpuSchedulerChart, "CPU_Scheduler"), () => _cpuSchedulerHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(LatchStatsChart, BuildChartContextMenu(LatchStatsChart, "Latch_Stats"), () => _latchStatsHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(SpinlockStatsChart, BuildChartContextMenu(SpinlockStatsChart, "Spinlock_Stats"), () => _spinlockStatsHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(SessionStatsChart, BuildChartContextMenu(SessionStatsChart, "Session_Stats"), () => _sessionStatsHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(PlanCacheChart, BuildChartContextMenu(PlanCacheChart, "Plan_Cache"), () => _planCacheHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
 
-        AddChartDrillDownMenuItem(BadPagesChart, BuildChartContextMenu(BadPagesChart, "Bad_Pages"), () => _badPagesHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(DumpRequestsChart, BuildChartContextMenu(DumpRequestsChart, "Dump_Requests"), () => _dumpRequestsHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(AccessViolationsChart, BuildChartContextMenu(AccessViolationsChart, "Access_Violations"), () => _accessViolationsHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(WriteAccessViolationsChart, BuildChartContextMenu(WriteAccessViolationsChart, "Write_Access_Violations"), () => _writeAccessViolationsHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(NonYieldingTasksChart, BuildChartContextMenu(NonYieldingTasksChart, "Non_Yielding_Tasks"), () => _nonYieldingTasksHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(LatchWarningsChart, BuildChartContextMenu(LatchWarningsChart, "Latch_Warnings"), () => _latchWarningsHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(SickSpinlocksChart, BuildChartContextMenu(SickSpinlocksChart, "Sick_Spinlocks"), () => _sickSpinlocksHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
-        AddChartDrillDownMenuItem(CpuComparisonChart, BuildChartContextMenu(CpuComparisonChart, "CPU_Comparison"), () => _cpuComparisonHover, "Show Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(BadPagesChart, BuildChartContextMenu(BadPagesChart, "Bad_Pages"), () => _badPagesHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(DumpRequestsChart, BuildChartContextMenu(DumpRequestsChart, "Dump_Requests"), () => _dumpRequestsHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(AccessViolationsChart, BuildChartContextMenu(AccessViolationsChart, "Access_Violations"), () => _accessViolationsHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(WriteAccessViolationsChart, BuildChartContextMenu(WriteAccessViolationsChart, "Write_Access_Violations"), () => _writeAccessViolationsHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(NonYieldingTasksChart, BuildChartContextMenu(NonYieldingTasksChart, "Non_Yielding_Tasks"), () => _nonYieldingTasksHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(LatchWarningsChart, BuildChartContextMenu(LatchWarningsChart, "Latch_Warnings"), () => _latchWarningsHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(SickSpinlocksChart, BuildChartContextMenu(SickSpinlocksChart, "Sick_Spinlocks"), () => _sickSpinlocksHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
+        AddChartDrillDownMenuItem(CpuComparisonChart, BuildChartContextMenu(CpuComparisonChart, "CPU_Comparison"), () => _cpuComparisonHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
     }
 
     /// <summary>
@@ -178,7 +178,7 @@ public partial class ViewerServerTab
     private void AddWaitDrillDownMenuItem(ScottPlot.WPF.WpfPlot chart, ContextMenu menu, Func<ChartHoverHelper?> hoverAccessor)
     {
         menu.Items.Insert(0, new Separator());
-        var item = new MenuItem { Header = "Show Queries With This Wait" };
+        var item = new MenuItem { Header = "Show _Queries With This Wait" };
         menu.Items.Insert(0, item);
 
         menu.Opened += (_, _) =>
@@ -187,13 +187,13 @@ public partial class ViewerServerTab
             if (nearest.HasValue)
             {
                 item.Tag = (nearest.Value.Label, nearest.Value.Time);
-                item.Header = $"Show Queries With {nearest.Value.Label.Replace("_", "__")}";
+                item.Header = $"Show _Queries With {nearest.Value.Label.Replace("_", "__")}";
                 item.IsEnabled = true;
             }
             else
             {
                 item.Tag = null;
-                item.Header = "Show Queries With This Wait";
+                item.Header = "Show _Queries With This Wait";
                 item.IsEnabled = false;
             }
         };
