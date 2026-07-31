@@ -81,6 +81,8 @@ public class WebhookAlertService
     private string? _lastSlackError;
     private int _consecutiveGenericFailures;
     private string? _lastGenericError;
+    private int _consecutivePagerDutyFailures;
+    private string? _lastPagerDutyError;
 
     /// <param name="historyStore">
     /// Optional alert-history store used to seed the per-fingerprint webhook cooldown across an app
@@ -148,6 +150,11 @@ public class WebhookAlertService
             if (_settings.GenericWebhookEnabled && !string.IsNullOrWhiteSpace(_settings.GenericWebhookUrl))
             {
                 sent |= await TrySendGenericAlertAsync(metricName, serverName, currentValue, thresholdValue, context);
+            }
+
+            if (_settings.PagerDutyEnabled && !string.IsNullOrWhiteSpace(_settings.PagerDutyRoutingKey))
+            {
+                sent |= await TrySendPagerDutyAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, context);
             }
 
             if (sent)
@@ -243,6 +250,9 @@ public class WebhookAlertService
 
     public (int ConsecutiveFailures, string? LastError) GetGenericHealth() =>
         (_consecutiveGenericFailures, _lastGenericError);
+
+    public (int ConsecutiveFailures, string? LastError) GetPagerDutyHealth() =>
+        (_consecutivePagerDutyFailures, _lastPagerDutyError);
 
     #region Teams
 
@@ -869,6 +879,237 @@ public class WebhookAlertService
         {
             error = $"Webhook body template did not produce valid JSON: {ex.Message}";
             return false;
+        }
+    }
+
+    #endregion
+
+    #region PagerDuty
+
+    private async Task<bool> TrySendPagerDutyAlertAsync(
+        string metricName,
+        string serverName,
+        string currentValue,
+        string thresholdValue,
+        string serverId,
+        AlertContext? context)
+    {
+        try
+        {
+            /* Derive the dedup_key from the same fingerprint the cooldown uses, so repeated alerts for
+               the same ongoing incident correlate into one PagerDuty alert. Falls back to a stable
+               metric+server key when there is no incident. */
+            var dedupKey = DerivePagerDutyDedupKey(serverId, metricName, context);
+
+            var payload = BuildPagerDutyPayload(
+                metricName, serverName, currentValue, thresholdValue, _branding,
+                _settings.PagerDutyRoutingKey, context: context, dedupKey: dedupKey);
+
+            var endpoint = PagerDutyEndpoint(_settings.PagerDutyUseEuRegion);
+            var error = await PostWebhookAsync(endpoint, payload, proxyAddress: null);
+
+            if (error != null)
+            {
+                _consecutivePagerDutyFailures++;
+                _lastPagerDutyError = error;
+
+                if (_consecutivePagerDutyFailures <= 3)
+                    _logger.LogError($"PAGERDUTY WEBHOOK FAILED ({_consecutivePagerDutyFailures}x): {error}");
+                else if (_consecutivePagerDutyFailures % 50 == 0)
+                    _logger.LogError($"PAGERDUTY WEBHOOK STILL FAILING: {_consecutivePagerDutyFailures} failures. Last: {error}");
+
+                return false;
+            }
+
+            if (_consecutivePagerDutyFailures > 0)
+                _logger.LogInformation($"PagerDuty webhook recovered after {_consecutivePagerDutyFailures} failure(s)");
+
+            _consecutivePagerDutyFailures = 0;
+            _lastPagerDutyError = null;
+            _logger.LogInformation($"PagerDuty webhook sent for {metricName} on {serverName}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _consecutivePagerDutyFailures++;
+            _lastPagerDutyError = ex.Message;
+            _logger.LogError($"PagerDuty webhook error: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Builds a PagerDuty Events API v2 payload. Always sends event_action: "trigger" (no resolve wiring —
+    /// matches Teams/Slack/Generic which also don't deliver "Cleared" notifications). The dedup_key correlates
+    /// repeated triggers for the same ongoing incident into one PagerDuty alert.
+    /// </summary>
+    internal static string BuildPagerDutyPayload(
+        string metricName,
+        string serverName,
+        string currentValue,
+        string thresholdValue,
+        AlertBranding branding,
+        string routingKey,
+        bool isTest = false,
+        AlertContext? context = null,
+        string? dedupKey = null,
+        string? serverId = null)
+    {
+        var (_, badgeText, _) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
+        var severity = MapToPagerDutySeverity(badgeText);
+        var utcNow = DateTime.UtcNow;
+
+        /* PD-CEF caps summary at 1024 chars — no truncation needed given the source strings, but document
+           the constraint matching this codebase's habit of documenting limits even when unreachable. */
+        var summary = isTest
+            ? "Webhook configuration verified"
+            : $"{metricName} on {serverName}: {currentValue} (threshold {thresholdValue})";
+
+        var source = isTest
+            ? branding.EditionName
+            : serverName;
+
+        var customDetails = BuildPagerDutyCustomDetails(isTest, branding, context);
+
+        /* Derive dedup_key from the incident fingerprint when not explicitly provided, falling back to a
+           stable metric+server key. This ensures PagerDuty correlates repeated alerts for the same incident. */
+        var effectiveDedupKey = dedupKey ?? DerivePagerDutyDedupKey(serverId ?? serverName, metricName, context);
+
+        var payload = new
+        {
+            routing_key = routingKey,
+            event_action = "trigger",
+            dedup_key = effectiveDedupKey,
+            payload = new
+            {
+                summary,
+                source,
+                severity,
+                timestamp = utcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture),
+                component = "SQL Server Performance Monitor",
+                custom_details = customDetails
+            },
+            client = branding.EditionName
+        };
+
+        return JsonSerializer.Serialize(payload, s_jsonOptions);
+    }
+
+    /// <summary>
+    /// Maps the internal AlertSeverity badge text to PagerDuty's four-level severity enum.
+    /// CRITICAL → critical, ALERT → error, WARNING → warning, RESOLVED/INFO/other → info.
+    /// </summary>
+    private static string MapToPagerDutySeverity(string badgeText)
+    {
+        return badgeText.ToUpperInvariant() switch
+        {
+            "CRITICAL" => "critical",
+            "ALERT" => "error",
+            "WARNING" => "warning",
+            _ => "info"
+        };
+    }
+
+    /// <summary>
+    /// Builds the custom_details object for the PagerDuty payload. Flattens context details the same way
+    /// Teams/Slack do (T-SQL code blocks → TsqlWebhookHint, never inlined), but as a JSON object (key/value
+    /// pairs) rather than a flattened string, since PD-CEF's custom_details renders as a table in the UI.
+    /// </summary>
+    private static Dictionary<string, object> BuildPagerDutyCustomDetails(
+        bool isTest,
+        AlertBranding branding,
+        AlertContext? context)
+    {
+        var details = new Dictionary<string, object>();
+
+        if (isTest)
+        {
+            details["Status"] = "Webhook configuration is working correctly";
+            details["Sent by"] = branding.EditionName;
+            return details;
+        }
+
+        if (context?.Details is null || context.Details.Count == 0)
+        {
+            details["Sent by"] = branding.EditionName;
+            return details;
+        }
+
+        foreach (var detail in context.Details)
+        {
+            if (detail.IsCodeBlock)
+            {
+                /* Remediation T-SQL: point at the email / in-app dialog, never inline it. */
+                details[detail.Heading] = TsqlWebhookHint;
+                continue;
+            }
+
+            if (!string.IsNullOrEmpty(detail.Body))
+            {
+                /* Advice prose: flatten paragraphs into a single string (PD custom_details values are strings). */
+                details[detail.Heading] = detail.Body.Replace("\n\n", " | ", StringComparison.Ordinal)
+                                                      .Replace("\n", " ", StringComparison.Ordinal);
+                continue;
+            }
+
+            foreach (var (label, value) in detail.Fields)
+            {
+                details[$"{detail.Heading} — {label}"] = value;
+            }
+        }
+
+        return details;
+    }
+
+    /// <summary>
+    /// Derives the PagerDuty dedup_key from the same fingerprint the cooldown uses, so repeated alerts for
+    /// the same ongoing incident correlate into one PagerDuty alert. Falls back to a stable metric+server
+    /// key when there is no incident (mirrors the cooldown's own "no incidents → metric-level fallback key" rule).
+    /// </summary>
+    private static string DerivePagerDutyDedupKey(string serverId, string metricName, AlertContext? context)
+    {
+        var incidents = context?.Incidents;
+        if (incidents is { Count: > 0 })
+        {
+            /* Use the first incident's dedup key — PagerDuty correlates on a single dedup_key, and multiple
+               distinct incidents in one alert are rare; if they occur, the first incident's key is as good
+               a correlation anchor as any (the cooldown already evaluated all of them). */
+            var firstKey = incidents[0].DedupKey;
+            if (!string.IsNullOrEmpty(firstKey))
+                return firstKey;
+        }
+
+        /* No incident or blank key: fall back to a stable metric+server key, matching the cooldown's
+           own fallback shape (without the "webhook:" prefix — PagerDuty's dedup_key is its own namespace). */
+        return $"{serverId}:{metricName}";
+    }
+
+    private static string PagerDutyEndpoint(bool useEuRegion) =>
+        useEuRegion ? "https://events.eu.pagerduty.com/v2/enqueue" : "https://events.pagerduty.com/v2/enqueue";
+
+    /// <summary>
+    /// Sends a test notification to PagerDuty. Returns null on success, error message on failure.
+    /// </summary>
+    public static async Task<string?> SendTestPagerDutyAsync(string routingKey, bool useEuRegion, AlertBranding branding)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(routingKey))
+                return "PagerDuty routing key is not configured.";
+
+            /* Synthetic dedup key so repeated test sends don't collide with real incidents. */
+            var testDedupKey = "test-" + Guid.NewGuid();
+
+            var payload = BuildPagerDutyPayload(
+                "Test Notification", "", "Webhook configuration verified", "",
+                branding, routingKey, isTest: true, dedupKey: testDedupKey);
+
+            var endpoint = PagerDutyEndpoint(useEuRegion);
+            return await PostWebhookAsync(endpoint, payload, proxyAddress: null);
+        }
+        catch (Exception ex)
+        {
+            return ex.Message;
         }
     }
 

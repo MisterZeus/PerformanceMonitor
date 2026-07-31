@@ -76,8 +76,8 @@ public sealed class DarlingObservabilityTests
         Assert.Equal(33, PgMigrations.Scripts[32].Version);
         /* The newest migration is asserted by identity rather than by ordinal: this ladder is walked by every
            stacked branch at once, and a positional pin turns each addition into a conflict for the next. */
-        Assert.Equal(41, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(41, StorageVersion.SchemaVersion);
+        Assert.Equal(42, PgMigrations.Scripts[^1].Version);
+        Assert.Equal(42, StorageVersion.SchemaVersion);
 
         /* V34 (#991) creates the two Availability Group collector tables. Schema-qualified collect.* and
            CREATE TABLE IF NOT EXISTS, per the file's additive-create idiom (V29): a no-op on a fresh store

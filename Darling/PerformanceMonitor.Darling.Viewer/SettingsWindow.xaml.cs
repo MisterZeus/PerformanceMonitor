@@ -981,10 +981,15 @@ public partial class SettingsWindow : Window
             : r.GenericBodyTemplate;
         GenericWebhookProxyAddressBox.Text = r.GenericProxy;
 
+        PagerDutyWebhookEnabledCheckBox.IsChecked = !string.IsNullOrWhiteSpace(r.PagerDutyRoutingKey);
+        PagerDutyRoutingKeyBox.Text = r.PagerDutyRoutingKey;
+        PagerDutyEuRegionCheckBox.IsChecked = r.PagerDutyUseEuRegion;
+
         UpdateSmtpControlStates();
         UpdateTeamsControlStates();
         UpdateSlackControlStates();
         UpdateGenericControlStates();
+        UpdatePagerDutyControlStates();
     }
 
     /// <summary>Builds the <see cref="NotificationRow"/> from the SMTP + webhook controls. A DISABLED channel
@@ -1042,6 +1047,12 @@ public partial class SettingsWindow : Window
             {
                 errors.Add(configError);
             }
+        }
+
+        if (PagerDutyWebhookEnabledCheckBox.IsChecked == true)
+        {
+            row.PagerDutyRoutingKey = PagerDutyRoutingKeyBox.Text?.Trim() ?? "";
+            row.PagerDutyUseEuRegion = PagerDutyEuRegionCheckBox.IsChecked == true;
         }
 
         return row;
@@ -1161,6 +1172,47 @@ public partial class SettingsWindow : Window
         GenericWebhookBodyBox.IsEnabled = enabled;
         GenericWebhookProxyAddressBox.IsEnabled = enabled;
         TestGenericButton.IsEnabled = enabled;
+    }
+
+    private void PagerDutyWebhookEnabledCheckBox_Changed(object sender, RoutedEventArgs e) => UpdatePagerDutyControlStates();
+
+    private void UpdatePagerDutyControlStates()
+    {
+        var enabled = PagerDutyWebhookEnabledCheckBox.IsChecked == true;
+        PagerDutyRoutingKeyBox.IsEnabled = enabled;
+        PagerDutyEuRegionCheckBox.IsEnabled = enabled;
+        TestPagerDutyButton.IsEnabled = enabled;
+    }
+
+    private async void TestPagerDutyButton_Click(object sender, RoutedEventArgs e)
+    {
+        TestPagerDutyButton.IsEnabled = false;
+        TestPagerDutyButton.Content = "Sending...";
+
+        try
+        {
+            var routingKey = PagerDutyRoutingKeyBox.Text?.Trim() ?? "";
+            var useEuRegion = PagerDutyEuRegionCheckBox.IsChecked == true;
+            var error = await WebhookAlertService.SendTestPagerDutyAsync(routingKey, useEuRegion, s_branding);
+
+            if (error == null)
+            {
+                MessageBox.Show("PagerDuty test notification sent successfully!", "Test Webhook", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            else
+            {
+                MessageBox.Show($"Failed to send PagerDuty test notification:\n\n{error}", "Test Webhook Failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Failed to send PagerDuty test notification:\n\n{ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            TestPagerDutyButton.Content = "Send Test Notification";
+            TestPagerDutyButton.IsEnabled = true;
+        }
     }
 
     private async void TestTeamsButton_Click(object sender, RoutedEventArgs e)
@@ -1438,6 +1490,10 @@ public partial class SettingsWindow : Window
         public string GenericWebhookHeadersJson { get; private init; } = "";
         public string GenericWebhookBodyTemplate { get; private init; } = "";
         public string GenericWebhookProxyAddress { get; private init; } = "";
+
+        public bool PagerDutyEnabled { get; private init; }
+        public string PagerDutyRoutingKey { get; private init; } = "";
+        public bool PagerDutyUseEuRegion { get; private init; }
 
         public double AnalysisNotifySeverity { get; private init; }
         public int AnalysisNotifyCooldownMinutes { get; private init; }
