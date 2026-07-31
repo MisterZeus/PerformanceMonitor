@@ -305,6 +305,7 @@ public sealed class DarlingMcpServerAdminToolsLivePostgresTests
         await CleanupAsync(connection, ct, sqlId, winId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config_service (id) VALUES (1) ON CONFLICT (id) DO NOTHING");
 
+        var bodySucceeded = false;
         try
         {
             var versionBefore = Convert.ToInt64(await ScalarAsync(connection, ct, "SELECT config_version FROM config_service WHERE id = 1"));
@@ -362,10 +363,13 @@ public sealed class DarlingMcpServerAdminToolsLivePostgresTests
 
             /* A name that does not resolve at all → not_found. */
             Assert.Equal("not_found", DarlingMcpTestData.StatusOf(await DarlingMcpServerAdminTools.RemoveServer(postgres, "no-such-server-" + suffix)));
+
+            bodySucceeded = true;
         }
         finally
         {
-            await CleanupAsync(connection, ct, sqlId, winId);
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await CleanupAsync(cleanup, cleanupCt, sqlId, winId));
         }
     }
 

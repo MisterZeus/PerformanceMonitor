@@ -210,6 +210,7 @@ public sealed class DarlingMcpSessionToolsLivePostgresTests
         await DeleteRowsAsync(connection, ct);
         await using var postgres = NpgsqlDataSource.Create(cs!);
 
+        var bodySucceeded = false;
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
@@ -240,10 +241,13 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
             await DeleteRowsAsync(connection, ct, keepServer: true);
             Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(await DarlingMcpSessionTools.GetSessionStats(postgres, ServerName)));
             Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpSessionTools.GetWaitingTasks(postgres, ServerName)));
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, ct);
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
         }
     }
 
