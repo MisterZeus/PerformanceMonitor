@@ -12,14 +12,31 @@ namespace PerformanceMonitor.Common
 {
     /// <summary>
     /// The single, app-agnostic source of truth for classifying an alert-history row by its metric
-    /// NAME. Used by both apps' Alert History grids (resolved / critical / warning row styling) and
-    /// by the Dashboard sidebar Alert badge count.
+    /// NAME. The row-styling predicates (<see cref="IsResolution"/> / <see cref="IsCritical"/> /
+    /// <see cref="IsWarning"/>) are used by ALL THREE Alert History grids — Lite's, the Darling
+    /// Viewer's and the deprecated Dashboard's — and by the Dashboard sidebar's Alert badge count.
     ///
     /// Alert classification across this codebase is metric-name based — there is no structural "kind"
     /// field on a row — so this centralizes a string convention that was previously duplicated inline
     /// in Dashboard's AlertsHistoryContent and Lite's AlertHistoryRow, and had drifted: both copies
     /// recognized only the "Cleared"/"Resolved" resolution suffixes and missed "Restored", even though
     /// the UI legend documents "Server Restored" as a resolved/green state (#1225).
+    ///
+    /// <para><b>The VALUE members below are a narrower set — read this before "fixing" the Dashboard to
+    /// use them (#1913).</b> <see cref="IsStateOnly"/>, <see cref="StateOnlyDisplay"/> and
+    /// <see cref="FormatHistoryValue"/> apply ONLY to the two stores that persist an alert's value as a
+    /// <c>double</c>: Lite's DuckDB <c>config_alert_log</c> and Darling's PostgreSQL one. The em dash
+    /// exists because those columns are NOT NULL doubles, so a metric whose value is a state
+    /// ("DISCONNECTED", "Blocking and Deadlock") has nowhere to put it and stores a 0 that would render
+    /// as "0.00".</para>
+    ///
+    /// <para>The deprecated Dashboard is <b>structurally immune and deliberately excluded</b>. Its store
+    /// (<c>JsonAlertHistoryStore</c>) keeps <c>CurrentValue</c>/<c>ThresholdValue</c> as STRINGS and
+    /// discards <c>AlertHistoryRecord</c>'s numeric slots entirely, so its grid renders the producer's
+    /// display text verbatim — "Blocking and Deadlock", not a dash. It never coerces, so it never had
+    /// the defect, and routing it through <see cref="FormatHistoryValue"/> would mean inventing a
+    /// numeric column in order to REPLACE readable text with an em dash. That is a regression, not a
+    /// parity fix. The dash is damage control for a lossy store, not the better rendering.</para>
     /// </summary>
     public static class AlertMetricClassifier
     {
@@ -84,7 +101,9 @@ namespace PerformanceMonitor.Common
 
         /// <summary>
         /// Renders one stored alert-history double with the unit and precision that match its metric
-        /// (#1134), for both the Value and Threshold columns of both apps' Alert History grids.
+        /// (#1134), for the Value and Threshold columns of the two grids whose stores are double-typed:
+        /// Lite's and the Darling Viewer's. The deprecated Dashboard's is string-typed and does not call
+        /// this — see the class summary for why that is correct rather than a gap.
         ///
         /// <para>This lived as two copies — Lite's <c>AlertHistoryRow.FormatValue</c> and the Darling
         /// Viewer's, the second one carrying the comment "Copied from Lite's ... so both grids read
