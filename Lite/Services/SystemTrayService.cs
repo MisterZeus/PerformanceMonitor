@@ -95,19 +95,19 @@ public class SystemTrayService : IDisposable
         /* Build context menu */
         var contextMenu = new ContextMenu();
 
-        var showItem = new MenuItem { Header = "Show Window", Icon = new TextBlock { Text = "📊", Background = Brushes.Transparent } };
+        var showItem = new MenuItem { Header = "_Show Window", Icon = new TextBlock { Text = "📊", Background = Brushes.Transparent } };
         showItem.Click += (s, e) => _restoreWindow();
         contextMenu.Items.Add(showItem);
 
         contextMenu.Items.Add(new Separator());
 
-        _pauseResumeItem = new MenuItem { Header = "Pause Collection", Icon = new TextBlock { Text = "⏸", Background = Brushes.Transparent } };
+        _pauseResumeItem = new MenuItem { Header = "Pause Co_llection", Icon = new TextBlock { Text = "⏸", Background = Brushes.Transparent } };
         _pauseResumeItem.Click += (s, e) => ToggleCollection();
         contextMenu.Items.Add(_pauseResumeItem);
 
         contextMenu.Items.Add(new Separator());
 
-        var exitItem = new MenuItem { Header = "Exit", Icon = new TextBlock { Text = "✕", Background = Brushes.Transparent } };
+        var exitItem = new MenuItem { Header = "E_xit", Icon = new TextBlock { Text = "✕", Background = Brushes.Transparent } };
         exitItem.Click += (s, e) => ExitApplication();
         contextMenu.Items.Add(exitItem);
 
@@ -138,7 +138,7 @@ public class SystemTrayService : IDisposable
 
         if (_pauseResumeItem != null)
         {
-            _pauseResumeItem.Header = _backgroundService.IsPaused ? "Resume Collection" : "Pause Collection";
+            _pauseResumeItem.Header = _backgroundService.IsPaused ? "Resume Co_llection" : "Pause Co_llection";
             _pauseResumeItem.Icon = new TextBlock { Text = _backgroundService.IsPaused ? "▶" : "⏸", Background = Brushes.Transparent };
         }
 

@@ -55,17 +55,17 @@
              shared PerformanceMonitor.Ui DataGridExport (ViewerServerTab.CopyExport.cs). Defined before
              DarkGridRow so the StaticResource resolves. -->
         <ContextMenu x:Key="DataGridContextMenu">
-            <MenuItem Header="Copy Cell" Click="CopyCell_Click">
+            <MenuItem Header="Copy _Cell" Click="CopyCell_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>
             </MenuItem>
-            <MenuItem Header="Copy Row" Click="CopyRow_Click">
+            <MenuItem Header="Copy _Row" Click="CopyRow_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon>
             </MenuItem>
-            <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click">
+            <MenuItem Header="Copy _All Rows" Click="CopyAllRows_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon>
             </MenuItem>
             <Separator/>
-            <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click">
+            <MenuItem Header="_Export to CSV..." Click="ExportToCsv_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
             </MenuItem>
         </ContextMenu>
@@ -127,59 +127,59 @@
              to the shared PerformanceMonitor.Ui DataGridExport; the graph actions open the shared .Ui
              BlockingChainControl / DeadlockGraphControl in a GraphViewerWindow. -->
         <ContextMenu x:Key="BlockedProcessContextMenu">
-            <MenuItem Header="Copy Cell" Click="CopyCell_Click">
+            <MenuItem Header="Copy _Cell" Click="CopyCell_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>
             </MenuItem>
-            <MenuItem Header="Copy Row" Click="CopyRow_Click">
+            <MenuItem Header="Copy _Row" Click="CopyRow_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon>
             </MenuItem>
-            <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click">
+            <MenuItem Header="Copy _All Rows" Click="CopyAllRows_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon>
             </MenuItem>
             <Separator/>
-            <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click">
+            <MenuItem Header="_Export to CSV..." Click="ExportToCsv_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
             </MenuItem>
             <Separator/>
             <!-- Stored blocked / blocking query plans (#1368 / V7), gated per row on the row's Has*QueryPlan
                  flag via the ContextMenu's PlacementTarget so a plan-less row (best-effort NULL, or a DMV
                  fallback row) shows the item disabled instead of shown-and-failed. -->
-            <MenuItem Header="View Blocked Query Plan" Click="ViewBlockedQueryPlan_Click"
+            <MenuItem Header="View _Blocked Query Plan" Click="ViewBlockedQueryPlan_Click"
                       IsEnabled="{Binding PlacementTarget.DataContext.HasBlockedQueryPlan, RelativeSource={RelativeSource AncestorType=ContextMenu}, FallbackValue=False}">
                 <MenuItem.Icon><TextBlock Text="&#x1F50D;"/></MenuItem.Icon>
             </MenuItem>
-            <MenuItem Header="View Blocking Query Plan" Click="ViewBlockingQueryPlan_Click"
+            <MenuItem Header="View Blocking _Query Plan" Click="ViewBlockingQueryPlan_Click"
                       IsEnabled="{Binding PlacementTarget.DataContext.HasBlockingQueryPlan, RelativeSource={RelativeSource AncestorType=ContextMenu}, FallbackValue=False}">
                 <MenuItem.Icon><TextBlock Text="&#x1F50D;"/></MenuItem.Icon>
             </MenuItem>
             <!-- Live plan fetch (headless-plan live-plan wave): asks the service to read the process's plan from
                  the target's LIVE cache by the sql_handle in its report XML — works for a process whose plan the
                  collector never stashed. Gated on HasReportXml so a DMV-snapshot fallback row (no XML) disables it. -->
-            <MenuItem Header="View Blocked Cached Plan" Click="FetchBlockedSideLivePlan_Click"
+            <MenuItem Header="View Blocked Cac_hed Plan" Click="FetchBlockedSideLivePlan_Click"
                       IsEnabled="{Binding PlacementTarget.DataContext.HasReportXml, RelativeSource={RelativeSource AncestorType=ContextMenu}, FallbackValue=False}">
                 <MenuItem.Icon><TextBlock Text="&#x1F310;"/></MenuItem.Icon>
             </MenuItem>
-            <MenuItem Header="View Blocking Cached Plan" Click="FetchBlockingSideLivePlan_Click"
+            <MenuItem Header="View Blocking Cached _Plan" Click="FetchBlockingSideLivePlan_Click"
                       IsEnabled="{Binding PlacementTarget.DataContext.HasReportXml, RelativeSource={RelativeSource AncestorType=ContextMenu}, FallbackValue=False}">
                 <MenuItem.Icon><TextBlock Text="&#x1F310;"/></MenuItem.Icon>
             </MenuItem>
-            <MenuItem Header="View Block Chain" Click="ViewBlockChain_Click">
+            <MenuItem Header="View Block Chai_n" Click="ViewBlockChain_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F517;"/></MenuItem.Icon>
             </MenuItem>
         </ContextMenu>
 
         <ContextMenu x:Key="DeadlockContextMenu">
-            <MenuItem Header="Copy Cell" Click="CopyCell_Click">
+            <MenuItem Header="Copy _Cell" Click="CopyCell_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>
             </MenuItem>
-            <MenuItem Header="Copy Row" Click="CopyRow_Click">
+            <MenuItem Header="Copy _Row" Click="CopyRow_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon>
             </MenuItem>
-            <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click">
+            <MenuItem Header="Copy _All Rows" Click="CopyAllRows_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon>
             </MenuItem>
             <Separator/>
-            <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click">
+            <MenuItem Header="_Export to CSV..." Click="ExportToCsv_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
             </MenuItem>
             <Separator/>
@@ -188,7 +188,7 @@
                  process row, so gating on IsVictim keeps the item from reading as active on the deadlocker rows
                  (where it is NOT that process's plan); a plan-less deadlock (best-effort NULL, the common case)
                  still shows it disabled. -->
-            <MenuItem Header="View Victim Plan" Click="ViewVictimQueryPlan_Click"
+            <MenuItem Header="View _Victim Plan" Click="ViewVictimQueryPlan_Click"
                       IsEnabled="{Binding PlacementTarget.DataContext.CanViewVictimPlan, RelativeSource={RelativeSource AncestorType=ContextMenu}, FallbackValue=False}">
                 <MenuItem.Icon><TextBlock Text="&#x1F50D;"/></MenuItem.Icon>
             </MenuItem>
@@ -197,11 +197,11 @@
                  deadlock graph — not limited to the single best-effort victim plan the collector stashed. Gated
                  on HasDeadlockXml (the graph is where the sql_handle is resolved from) for consistency with the
                  query-grid + blocked-process Fetch items, which disable rather than error when there's no source. -->
-            <MenuItem Header="View Cached Plan (This Process)" Click="FetchDeadlockProcessLivePlan_Click"
+            <MenuItem Header="View Cac_hed Plan (This Process)" Click="FetchDeadlockProcessLivePlan_Click"
                       IsEnabled="{Binding PlacementTarget.DataContext.HasDeadlockXml, RelativeSource={RelativeSource AncestorType=ContextMenu}, FallbackValue=False}">
                 <MenuItem.Icon><TextBlock Text="&#x1F310;"/></MenuItem.Icon>
             </MenuItem>
-            <MenuItem Header="View Deadlock Graph" Click="ViewDeadlockGraph_Click">
+            <MenuItem Header="View _Deadlock Graph" Click="ViewDeadlockGraph_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F578;"/></MenuItem.Icon>
             </MenuItem>
         </ContextMenu>
@@ -233,20 +233,20 @@
              "Get Actual Plan" (a LIVE re-execution) stays omitted. Copy/Export/Repro delegate to
              ViewerServerTab.CopyExport.cs (Copy/Export via the shared PerformanceMonitor.Ui DataGridExport). -->
         <ContextMenu x:Key="QueryGridContextMenu">
-            <MenuItem Header="Copy Cell" Click="CopyCell_Click">
+            <MenuItem Header="Copy _Cell" Click="CopyCell_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>
             </MenuItem>
-            <MenuItem Header="Copy Row" Click="CopyRow_Click">
+            <MenuItem Header="Copy _Row" Click="CopyRow_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon>
             </MenuItem>
-            <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click">
+            <MenuItem Header="Copy _All Rows" Click="CopyAllRows_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon>
             </MenuItem>
-            <MenuItem Header="Copy Repro Script" Click="CopyReproScript_Click">
+            <MenuItem Header="Copy Repro _Script" Click="CopyReproScript_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4DD;"/></MenuItem.Icon>
             </MenuItem>
             <Separator/>
-            <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click">
+            <MenuItem Header="_Export to CSV..." Click="ExportToCsv_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
             </MenuItem>
         </ContextMenu>
@@ -261,30 +261,30 @@
              is enabled here on Top Queries rows only, gated per-row on CanGetActualPlan (the service re-executes
              via the execute_actual_plan command — ViewerServerTab.ActualPlan.cs). -->
         <ContextMenu x:Key="QueryPlanGridContextMenu">
-            <MenuItem Header="Copy Cell" Click="CopyCell_Click">
+            <MenuItem Header="Copy _Cell" Click="CopyCell_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>
             </MenuItem>
-            <MenuItem Header="Copy Row" Click="CopyRow_Click">
+            <MenuItem Header="Copy _Row" Click="CopyRow_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon>
             </MenuItem>
-            <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click">
+            <MenuItem Header="Copy _All Rows" Click="CopyAllRows_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon>
             </MenuItem>
-            <MenuItem Header="Copy Repro Script" Click="CopyReproScript_Click">
+            <MenuItem Header="Copy Repro _Script" Click="CopyReproScript_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4DD;"/></MenuItem.Icon>
             </MenuItem>
             <Separator/>
-            <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click">
+            <MenuItem Header="_Export to CSV..." Click="ExportToCsv_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
             </MenuItem>
             <Separator/>
-            <MenuItem Header="View Stored Plan" Click="ViewPlan_Click">
+            <MenuItem Header="_View Stored Plan" Click="ViewPlan_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F50D;"/></MenuItem.Icon>
             </MenuItem>
             <!-- Live plan fetch (headless-plan live-plan wave): asks the service to read the plan CURRENTLY in
                  the target's cache by this row's plan_handle — distinct from the stored plan "View Plan" opens.
                  Gated on HasLivePlanHandle so rows without a plan_handle (Query Store) disable it. -->
-            <MenuItem Header="View Cached Plan" Click="FetchLiveQueryPlan_Click"
+            <MenuItem Header="View Cac_hed Plan" Click="FetchLiveQueryPlan_Click"
                       Visibility="{Binding PlacementTarget.DataContext.HasLivePlanHandle, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVis}, FallbackValue=Collapsed}">
                 <MenuItem.Icon><TextBlock Text="&#x1F310;"/></MenuItem.Icon>
             </MenuItem>
@@ -293,7 +293,7 @@
                  rows (query text + query_hash) enable it — Query Store / Top Procedures rows (no CanGetActualPlan)
                  fall back to disabled. Side-effecting: the click runs an informed-consent dialog that flags
                  data-modifying queries prominently before enqueuing. -->
-            <MenuItem Header="Get Actual Plan (re-run)" Click="GetActualQueryPlan_Click"
+            <MenuItem Header="_Get Actual Plan (re-run)" Click="GetActualQueryPlan_Click"
                       Visibility="{Binding PlacementTarget.DataContext.CanGetActualPlan, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVis}, FallbackValue=Collapsed}">
                 <MenuItem.Icon><TextBlock Text="&#x25B6;"/></MenuItem.Icon>
             </MenuItem>
@@ -316,28 +316,28 @@
              buttons so plan access is available by right-click too (Lite parity). Each item is gated on the
              row's HasQueryPlan / HasLiveQueryPlan exactly like the buttons. -->
         <ContextMenu x:Key="QuerySnapshotGridContextMenu">
-            <MenuItem Header="Copy Cell" Click="CopyCell_Click">
+            <MenuItem Header="Copy _Cell" Click="CopyCell_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>
             </MenuItem>
-            <MenuItem Header="Copy Row" Click="CopyRow_Click">
+            <MenuItem Header="Copy _Row" Click="CopyRow_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon>
             </MenuItem>
-            <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click">
+            <MenuItem Header="Copy _All Rows" Click="CopyAllRows_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon>
             </MenuItem>
-            <MenuItem Header="Copy Repro Script" Click="CopyReproScript_Click">
+            <MenuItem Header="Copy Repro _Script" Click="CopyReproScript_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4DD;"/></MenuItem.Icon>
             </MenuItem>
             <Separator/>
-            <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click">
+            <MenuItem Header="_Export to CSV..." Click="ExportToCsv_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
             </MenuItem>
             <Separator/>
-            <MenuItem Header="View Estimated Plan" Click="ViewSnapshotEstimatedPlan_Click"
+            <MenuItem Header="View Estimate_d Plan" Click="ViewSnapshotEstimatedPlan_Click"
                       IsEnabled="{Binding PlacementTarget.DataContext.HasQueryPlan, RelativeSource={RelativeSource AncestorType=ContextMenu}, FallbackValue=False}">
                 <MenuItem.Icon><TextBlock Text="&#x1F50D;"/></MenuItem.Icon>
             </MenuItem>
-            <MenuItem Header="View Live Plan" Click="ViewSnapshotActualPlan_Click"
+            <MenuItem Header="View _Live Plan" Click="ViewSnapshotActualPlan_Click"
                       IsEnabled="{Binding PlacementTarget.DataContext.HasLiveQueryPlan, RelativeSource={RelativeSource AncestorType=ContextMenu}, FallbackValue=False}">
                 <MenuItem.Icon><TextBlock Text="&#x1F310;"/></MenuItem.Icon>
             </MenuItem>
@@ -354,28 +354,28 @@
              service path the Query Store history window uses. Non-applicable verbs are HIDDEN (BoolToVis), not
              greyed, so neither grid shows a disabled item. -->
         <ContextMenu x:Key="QueryStorePlanContextMenu">
-            <MenuItem Header="Copy Cell" Click="CopyCell_Click">
+            <MenuItem Header="Copy _Cell" Click="CopyCell_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>
             </MenuItem>
-            <MenuItem Header="Copy Row" Click="CopyRow_Click">
+            <MenuItem Header="Copy _Row" Click="CopyRow_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon>
             </MenuItem>
-            <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click">
+            <MenuItem Header="Copy _All Rows" Click="CopyAllRows_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon>
             </MenuItem>
-            <MenuItem Header="Copy Repro Script" Click="CopyReproScript_Click">
+            <MenuItem Header="Copy Repro _Script" Click="CopyReproScript_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4DD;"/></MenuItem.Icon>
             </MenuItem>
             <Separator/>
-            <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click">
+            <MenuItem Header="_Export to CSV..." Click="ExportToCsv_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
             </MenuItem>
             <Separator/>
-            <MenuItem Header="View Stored Plan" Click="ViewPlan_Click"
+            <MenuItem Header="_View Stored Plan" Click="ViewPlan_Click"
                       Visibility="{Binding PlacementTarget.DataContext.HasStoredPlan, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVis}, FallbackValue=Collapsed}">
                 <MenuItem.Icon><TextBlock Text="&#x1F50D;"/></MenuItem.Icon>
             </MenuItem>
-            <MenuItem Header="Get Actual Plan (re-run)" Click="GetActualQueryStorePlan_Click"
+            <MenuItem Header="_Get Actual Plan (re-run)" Click="GetActualQueryStorePlan_Click"
                       Visibility="{Binding PlacementTarget.DataContext.CanGetActualPlan, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVis}, FallbackValue=Collapsed}">
                 <MenuItem.Icon><TextBlock Text="&#x25B6;"/></MenuItem.Icon>
             </MenuItem>

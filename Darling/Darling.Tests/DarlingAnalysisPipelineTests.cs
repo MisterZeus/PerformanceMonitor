@@ -233,12 +233,27 @@ public sealed class DarlingAnalysisPipelineTests
 
         foreach (var sql in PgDrillDownCollector.AllSql)
         {
+            /* Scan the SQL the SERVER sees, not the comments explaining it. Two things in the raw text
+               are not relation references and would be read as one:
+
+               1. `--` comments. These queries carry long rationale comments, and English prose about a
+                  join contains the word "join" followed by a word ("an equi-join here would ...") —
+                  which a bare FROM/JOIN scan reads as a relation named `here`. A guard that fails
+                  because someone explained a join in a comment is a broken guard, not a strict one.
+               2. `IS [NOT] DISTINCT FROM`, a COMPARISON OPERATOR that happens to end in the word FROM,
+                  so its right-hand operand parses as a relation name.
+
+               Stripping both rather than loosening the assertion: the point of this guard is that every
+               real relation reference resolves, and that must stay exact. */
+            var scanSql = Regex.Replace(sql, @"--[^\n]*", " ");
+            scanSql = Regex.Replace(scanSql, @"\bIS\s+(?:NOT\s+)?DISTINCT\s+FROM\b", " ", RegexOptions.IgnoreCase);
+
             /* CTE names defined by this query are legal FROM targets too (WITH x AS ( / , y AS (). */
-            var ctes = Regex.Matches(sql, @"(?:WITH|,)\s*(\w+)\s+AS\s*\(", RegexOptions.Singleline)
+            var ctes = Regex.Matches(scanSql, @"(?:WITH|,)\s*(\w+)\s+AS\s*\(", RegexOptions.Singleline)
                 .Select(m => m.Groups[1].Value)
                 .ToHashSet(StringComparer.Ordinal);
 
-            foreach (Match m in Regex.Matches(sql, @"\b(?:FROM|JOIN)\s+(\w+)", RegexOptions.IgnoreCase))
+            foreach (Match m in Regex.Matches(scanSql, @"\b(?:FROM|JOIN)\s+(\w+)", RegexOptions.IgnoreCase))
             {
                 var target = m.Groups[1].Value;
                 Assert.True(

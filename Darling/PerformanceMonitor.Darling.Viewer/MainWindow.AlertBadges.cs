@@ -108,7 +108,7 @@ public partial class MainWindow
 
         var acknowledgeItem = new MenuItem
         {
-            Header = "Acknowledge Alerts",
+            Header = "Ac_knowledge Alerts",
             Icon = new TextBlock { Text = "✓", FontWeight = FontWeights.Bold }
         };
         acknowledgeItem.Click += (_, _) => AcknowledgeServer(serverId);
