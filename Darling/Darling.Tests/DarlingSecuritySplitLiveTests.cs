@@ -519,24 +519,31 @@ GRANT INSERT, UPDATE, DELETE ON config.config_monitored_servers TO {McpRole};";
     private static string OwnerRoleOf(NpgsqlConnection owner)
         => new NpgsqlConnectionStringBuilder(owner.ConnectionString).Username ?? "darling";
 
+    /// <summary>
+    /// Drops the three disposable test roles, and CONFIRMS they are gone (#1873).
+    ///
+    /// <para>DROP OWNED BY revokes EVERY privilege granted to these roles — table, the column-level secret
+    /// carve, schema-usage, and the owner's default privileges naming them — so the following DROP ROLE has no
+    /// dependent grants to trip on (a plain table-level REVOKE would leave the column grants and block the
+    /// drop).</para>
+    ///
+    /// <para>The swallow this replaces was load-bearing for a reason worth keeping: <c>DROP OWNED BY</c> has
+    /// no <c>IF EXISTS</c> form, so on the pre-test call — before any of the three roles has been created — it
+    /// throws <c>42704</c> every single time, and that is not a fault. Verifying the POSTCONDITION instead of
+    /// classifying the error keeps that case free: the roles are absent, which is the whole objective, so the
+    /// removal succeeded. What no longer passes silently is the case that matters — roles that survive. They
+    /// are CLUSTER-wide, so a leak outlives even a DROP DATABASE and greets the next run on the same
+    /// cluster.</para>
+    /// </summary>
     private static async Task DropTestRolesAsync(NpgsqlConnection owner, System.Threading.CancellationToken ct)
-    {
-        /* DROP OWNED BY revokes EVERY privilege granted to these roles — table, the new column-level secret
-           carve, schema-usage, and the owner's default privileges naming them — so the following DROP ROLE
-           has no dependent grants to trip on (a plain table-level REVOKE would leave the column grants and
-           block the drop). Best-effort: a leftover disposable role in a dev store is harmless. */
-        try
-        {
-            await ExecAsync(owner, $@"
+        => await new LiveCleanupBatch(owner).DropRolesAsync(
+            $@"
 DROP OWNED BY {AdminRole}, {ViewerRole}, {McpRole};
 DROP ROLE IF EXISTS {AdminRole};
 DROP ROLE IF EXISTS {ViewerRole};
-DROP ROLE IF EXISTS {McpRole};", ct);
-        }
-        catch (PostgresException)
-        {
-        }
-    }
+DROP ROLE IF EXISTS {McpRole};",
+            [AdminRole, ViewerRole, McpRole],
+            ct);
 
     /// <summary>The actual column names of a <c>config</c>-schema table (for the ACL drift/partition guard).</summary>
     private static async Task<HashSet<string>> ColumnsOfConfigTableAsync(
