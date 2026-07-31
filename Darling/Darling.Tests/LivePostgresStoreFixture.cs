@@ -112,7 +112,13 @@ public sealed class LivePostgresStoreFixture : IAsyncLifetime
            A THROW here is the right outcome, not a swallow: it fails every test in the collection with the
            real reason, which is strictly better than the moving 42P01 this replaces. */
         await PgMigrations.MigrateAsync(connection, cancellationToken);
-        TimescaleAvailable = await TimescaleSupport.TryEnableAsync(connection, null, cancellationToken);
+
+        /* #1922: on its OWN connection, because a CREATE EXTENSION that finds the library unpreloaded kills
+           the backend rather than merely erroring. TryEnableAsync then correctly returns false while the
+           connection it was handed is dead, and the three calls below would fail with "Connection is not
+           open" pointing at RelationsAsync — naming neither the cause nor the file that caused it, which is
+           how this presented and what it cost to diagnose. */
+        TimescaleAvailable = await LiveTimescaleProbe.TryEnableAsync(connectionString, cancellationToken);
 
         /* The other relation no migration creates and the SERVICE establishes at runtime (DarlingWorker's
            maintenance sweep calls exactly this), so it belongs with CREATE EXTENSION rather than with the
