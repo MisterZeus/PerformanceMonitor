@@ -207,6 +207,97 @@ public sealed class ViewerWave3DisplayTests
             AlertRow(metric: "TempDB Space", current: 87.3).CurrentValueDisplay);
     }
 
+    /* ── #1846 state-only metrics ──────────────────────────────────────────────────────────────────
+       Lite's twin pins live in AlertHistoryValueFormatTests; both grids run the SAME shared predicate
+       (AlertMetricClassifier.IsStateOnly), so this suite pins the Darling side of that contract. Darling
+       carries the bulk of these rows: every self-alert recovery and every shared-engine resolution
+       reaches alert history through Darling's deliverer, where Lite's resolution callback is toast-only
+       and writes no row at all. */
+
+    /// <summary>
+    /// The exact metric-name strings whose stored 0 is a sentinel rather than a measurement. Held
+    /// separately from Lite's copy on purpose: if the two lists ever diverge, that IS the bug.
+    /// </summary>
+    public static TheoryData<string> StateOnlyMetrics() => new()
+    {
+        /* The five actionable state metrics — a role_desc, a connected_state_desc, JudgeSync's prose
+           reason, the suspend_reason_desc, and the connection failure reason. */
+        "AG Failover",
+        "AG Replica Disconnected",
+        "AG Sync Fell Behind",
+        "AG Database Suspended",
+        "Server Unreachable",
+
+        /* The AG/connection resolutions. */
+        "AG Replica Reconnected",
+        "AG Sync Recovered",
+        "AG Data Movement Resumed",
+        "Server Restored",
+
+        /* Darling's own self-alert recoveries, all written by BuildResolutionRecord, which hardcodes
+           CurrentValueText: "resolved" and ThresholdValueText: "" with both numerics null. */
+        "Collection Resumed",
+        "Capture Restored",
+        "Agent Restarted",
+        "Store Disk Pressure Resolved",
+        "Compression Job Recovered",
+
+        /* The shared alert engine's resolution callback, which reaches history only in Darling. */
+        "CPU Resolved",
+        "Blocking Cleared",
+        "Blocking Wait Cleared",
+        "Deadlocks Cleared",
+        "Poison Waits Cleared",
+        "Long-Running Queries Cleared",
+        "tempdb Space Resolved",
+        "Volume Free Space Resolved",
+        "Long-Running Jobs Cleared",
+    };
+
+    [Theory]
+    [MemberData(nameof(StateOnlyMetrics))]
+    public void StateOnlyMetric_StoredZero_RendersDashNotZeroPointZeroZero(string metric)
+    {
+        Assert.Equal("—", AlertRow(metric: metric, current: 0).CurrentValueDisplay);
+        Assert.Equal("—", AlertRow(metric: metric, threshold: 0).ThresholdValueDisplay);
+    }
+
+    [Theory]
+    [MemberData(nameof(StateOnlyMetrics))]
+    public void StateOnlyMetric_NonZero_StillRendersTheNumber(string metric)
+    {
+        /* Defensive: the dash is gated on the 0 sentinel, not the metric name alone, so a future
+           producer that starts passing a real numeric is not hidden behind it. */
+        Assert.Equal("42.00", AlertRow(metric: metric, current: 42).CurrentValueDisplay);
+    }
+
+    [Theory]
+    [InlineData("High CPU", "0.0%")]
+    [InlineData("tempdb Space", "0.0%")]
+    [InlineData("Volume Free Space", "0.0%")]
+    [InlineData("Long-Running Job", "0.0%")]
+    [InlineData("Poison Wait", "0 ms")]
+    [InlineData("Long-Running Query", "0 m")]
+    [InlineData("Blocking Wait Time", "0 s")]
+    [InlineData("Blocking Detected", "0")]
+    [InlineData("Deadlocks Detected", "0")]
+    [InlineData("Failed Agent Job", "0")]
+    public void MeasuredMetric_AtZero_KeepsItsNumber(string metric, string expected)
+    {
+        /* The dash must never swallow a real measurement that happens to be zero — "no blocking right
+           now" and "no value was ever measured" are different statements. */
+        Assert.Equal(expected, AlertRow(metric: metric, current: 0).CurrentValueDisplay);
+    }
+
+    [Fact]
+    public void StoreDiskPressure_AtZero_RendersZero_BecauseZeroPercentFreeIsReal()
+    {
+        /* Deliberately NOT state-only even though its producer passes no numeric: its text
+           ("… has only 3% free (…)") carries a digit, so the parser stores percent-free, and a genuine 0
+           there means a FULL VOLUME. This is a Darling-only self-alert, so this pin only exists here. */
+        Assert.Equal("0.00", AlertRow(metric: "Store Disk Pressure", current: 0).CurrentValueDisplay);
+    }
+
     [Theory]
     [InlineData("email", true, null, "Sent")]
     [InlineData("email", false, "smtp exploded", "Failed")]
