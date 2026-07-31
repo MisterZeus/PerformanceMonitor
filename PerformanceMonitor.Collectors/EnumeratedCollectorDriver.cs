@@ -125,9 +125,13 @@ public static class EnumeratedCollectorDriver
     /// rather than thrown so that a bad enumeration surfaces through the very mechanism this contract
     /// exists for — a note in Collection Health plus an app-log line — instead of failing an otherwise
     /// working collection cycle.
+    ///
+    /// <para>Names the set by its ROLE rather than its position, because the two channels place it
+    /// differently: it is an enumeration's SECOND result set (#1837) and a payload collector's TRAILING
+    /// one (#1851). One wording covers both; naming a position would be wrong on one of them.</para>
     /// </summary>
     public const string ContractViolationError =
-        "the enumeration's second result set must be (item_name, error_text); probe failures were not read";
+        "the probe-failure result set must be (item_name, error_text); probe failures were not read";
 
     /// <summary>
     /// What an UNREADABLE trailing probe-failure set reports on the payload path (#1851), <c>{0}</c> = the
