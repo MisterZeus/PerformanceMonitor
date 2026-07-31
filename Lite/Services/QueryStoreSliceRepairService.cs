@@ -34,8 +34,13 @@ namespace PerformanceMonitorLite.Services;
 /// parquets, 6.6–8.5% of their rows carried the split signature, and the largest (28 MB / 533,109 rows)
 /// rewrote in under a second.</para>
 ///
-/// <para><b>Operator-invoked, never automatic.</b> It rewrites files on disk, so it runs when a person asks
-/// for it, after a survey they can read — the same principle as Darling's <c>--collapse-legacy-slices</c>.</para>
+/// <para><b>Automatic, once, on the first launch after upgrading</b> — unlike Darling's
+/// <c>--collapse-legacy-slices</c> verb, and the asymmetry is deliberate. What the two apps must share is the
+/// SEMANTICS of the fix — the same collapse, the same weighted math, the same disclosure — not the way it is
+/// invoked; each follows its own precedent, and Lite's is the automatic startup store migration that v39 and
+/// #1832's data-root move already established. A button was considered and rejected: a repair gated behind UI
+/// discovery leaves the users least equipped to find it holding wrong numbers permanently. See
+/// <see cref="RepairOnStartupAsync"/> for the once-only marker and the retry-on-partial behavior.</para>
 /// </summary>
 public sealed class QueryStoreSliceRepairService
 {
@@ -450,11 +455,9 @@ HAVING COUNT(*) > 1";
 
         if (rewroteArchive)
         {
-            await FlushExternalFileCacheAsync(connection, cancellationToken);
-
-            /* Rebuild the archive views as well — the method the archive cycle already calls after it writes
-               new files, for the same reason: the views ARE the app's read path onto the archive. */
-            await _duckDb.CreateArchiveViewsAsync();
+            /* The cache eviction and the view rebuild are NOT done here — PromoteRewrittenFileAsync does both
+               as part of the swap itself, so a rewrite cannot be correct-only-if-the-caller-remembers. This is
+               just the operator-facing line. */
             progress?.Report("Archive views rebuilt so readers pick up the repaired files.");
         }
 
@@ -523,8 +526,7 @@ COPY (
                 $"(expected {file.Executions:N0}). The original was left untouched and will be retried.");
         }
 
-        File.Delete(file.Path);
-        File.Move(temp, file.Path);
+        await PromoteRewrittenFileAsync(connection, file.Path, temp, cancellationToken);
 
         var afterBytes = new FileInfo(file.Path).Length;
 
@@ -551,18 +553,45 @@ COPY (
     /// <summary>
     /// Drops DuckDB's cached view of every external file, by toggling the cache off and back on.
     ///
-    /// <para><b>Without this an in-place archive rewrite leaves the store unable to read its own archive.</b>
-    /// DuckDB caches a parquet file's state against its PATH at INSTANCE scope — not per connection — so once
-    /// a file has been read, replacing the bytes at that path makes every subsequent read fail with
-    /// "No magic bytes found at end of file", on new connections too, until the process restarts. Reproduced
-    /// standalone rather than inferred, and the instance scope is the part that matters: opening a fresh
-    /// connection looks like a fix on a separate in-memory instance and is not one here.</para>
+    /// <summary>
+    /// Promotes a rewritten file over the original, and makes the store able to READ it — the two are one
+    /// operation, which is why they live in one helper rather than being two things a caller must remember.
     ///
-    /// <para>The toggle is the flush. <c>PRAGMA clear_cache</c> does not exist and
-    /// <c>enable_object_cache</c> is a different cache that does not help; turning
-    /// <c>enable_external_file_cache</c> off evicts the entries, and turning it back on restores normal
-    /// behavior — verified, including that a subsequent connection reads the repaired file correctly and the
-    /// setting is left enabled.</para>
+    /// <para><b>Replacing the bytes at a path DuckDB has already read leaves that path unreadable.</b> DuckDB
+    /// caches a parquet file's state against its PATH at INSTANCE scope, so after an in-place swap every
+    /// subsequent read fails with "No magic bytes found at end of file" — on NEW connections too, because the
+    /// cache is not per connection — until the process restarts. Reproduced standalone rather than inferred,
+    /// and the instance scope is the whole trap: opening a fresh connection LOOKS like a fix when tried
+    /// against a separate in-memory instance, and is not one against a real store.</para>
+    ///
+    /// <para>So the swap evicts the cache and rebuilds the archive views here, by construction. Any future
+    /// in-place rewrite that goes through this helper is correct without its author having to know any of the
+    /// above; one that hand-rolls <c>File.Move</c> instead will silently break the archive it just fixed.</para>
+    ///
+    /// <para><b>The eviction is the OFF/ON toggle, and the alternatives do not work.</b>
+    /// <c>PRAGMA clear_cache</c> does not exist, and <c>enable_object_cache</c> is a different cache that
+    /// leaves this one populated. Turning <c>enable_external_file_cache</c> off evicts the entries and turning
+    /// it back on restores normal behavior, verified including that a later connection reads the promoted file
+    /// and the setting is left enabled.</para>
+    ///
+    /// <para><b>Deliberately NOT applied to the monthly archive cycle, and that is not an oversight.</b> That
+    /// path only ever writes NEW file names and deletes old ones — it never replaces the bytes behind a path
+    /// that has been read — so it was never exposed to this and adding the eviction there would be defensive
+    /// noise that implies a hazard it does not have.</para>
+    /// </summary>
+    private async Task PromoteRewrittenFileAsync(
+        DuckDBConnection connection, string originalPath, string tempPath, CancellationToken cancellationToken)
+    {
+        File.Delete(originalPath);
+        File.Move(tempPath, originalPath);
+
+        await FlushExternalFileCacheAsync(connection, cancellationToken);
+        await _duckDb.CreateArchiveViewsAsync();
+    }
+
+    /// <summary>
+    /// Evicts DuckDB's cached view of every external file, by toggling the cache off and back on. The WHY is
+    /// on <see cref="PromoteRewrittenFileAsync"/>, which is the only thing that should ever need this.
     /// </summary>
     private static async Task FlushExternalFileCacheAsync(DuckDBConnection connection, CancellationToken cancellationToken)
     {
