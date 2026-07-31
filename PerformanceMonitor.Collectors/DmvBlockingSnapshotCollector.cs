@@ -79,6 +79,19 @@ SELECT /* PerformanceMonitorLite */
         CASE
             WHEN objparse.object_id IS NOT NULL
             THEN ISNULL(QUOTENAME(OBJECT_SCHEMA_NAME(objparse.object_id, objparse.database_id)) + N'.' + QUOTENAME(OBJECT_NAME(objparse.object_id, objparse.database_id)), der_b.wait_resource)
+            /* #1893: a lock this collector does not resolve now says WHICH DATABASE the contended object
+               lives in, in the blocked_process_report collector's exact sentinel shape, so the two
+               collectors' rows for one object fingerprint identically (#1876). The database has to come
+               from the RESOURCE, not the session: a cross-database lock is held in one database by a
+               session running in another, and database_name above is the session's. */
+            WHEN resparse.resource_database_id IS NOT NULL
+            THEN N'Unresolved: ' +
+                 CASE
+                     WHEN resparse.lock_type IS NULL
+                     THEN N''
+                     ELSE LOWER(resparse.lock_type) + N' lock, '
+                 END +
+                 N'database: ' + COALESCE(DB_NAME(resparse.resource_database_id), DB_NAME(der_b.database_id), N'unknown')
             ELSE der_b.wait_resource
         END,
     blocked_sql_text = dest_b.text,
@@ -127,6 +140,45 @@ OUTER APPLY
         object_id = TRY_CONVERT(integer, PARSENAME(REPLACE(SUBSTRING(der_b.wait_resource, 9, 200), N':', N'.'), 2))
     WHERE der_b.wait_resource LIKE N'OBJECT: %'
 ) AS objparse
+/* #1893: the resource's database id, and the lock type to name it with.
+   The id comes from sys.dm_os_waiting_tasks.resource_description rather than from wait_resource,
+   because MS Learn documents EVERY lock resource type's description as carrying a dbid= token --
+   keylock, pagelock, ridlock, objectlock, databaselock, filelock, extentlock, applicationlock,
+   metadatalock, hobtlock and allocunitlock all end with (or contain) dbid=<db-id> -- so one parse
+   covers every lock shape instead of a per-type positional split of wait_resource. Verified live on
+   SQL 2022: a cross-database KEY lock reports
+   'keylock hobtid=72057594045726720 dbid=11 id=lock... mode=X associatedObjectId=...'.
+   The lock TYPE still comes from wait_resource, using the report collector's classifier verbatim, so
+   the two sides produce the same token for the same lock.
+   Restricted to LCK_% waits with a wait_resource: latch and RESOURCE_SEMAPHORE rows have no
+   'TYPE: ' resource shape and no dbid= to read, and they keep exactly the value they had. */
+OUTER APPLY
+(
+    SELECT
+        resource_database_id =
+            TRY_CONVERT
+            (
+                integer,
+                NULLIF(LEFT(d.tail, PATINDEX(N'%[^0-9]%', d.tail + N'.') - 1), N'')
+            ),
+        lock_type =
+            CASE
+                WHEN der_b.wait_resource LIKE N'%KEY: %'    THEN N'KEY'
+                WHEN der_b.wait_resource LIKE N'%OBJECT: %' THEN N'OBJECT'
+                WHEN der_b.wait_resource LIKE N'%RID: %'    THEN N'RID'
+                WHEN der_b.wait_resource LIKE N'%PAGE: %'   THEN N'PAGE'
+                ELSE LEFT(UPPER(LEFT(der_b.wait_resource, CHARINDEX(N':', der_b.wait_resource + N':') - 1)), 32)
+            END
+    FROM
+    (
+        SELECT
+            tail = SUBSTRING(wt.resource_description, CHARINDEX(N'dbid=', wt.resource_description) + 5, 10)
+    ) AS d
+    WHERE wt.wait_type LIKE N'LCK[_]%'
+    AND   der_b.wait_resource IS NOT NULL
+    AND   der_b.wait_resource <> N''
+    AND   CHARINDEX(N'dbid=', wt.resource_description) > 0
+) AS resparse
 WHERE wt.blocking_session_id IS NOT NULL
 AND   wt.blocking_session_id <> 0
 AND   wt.blocking_session_id <> wt.session_id
