@@ -64,8 +64,10 @@ public static class AlertValueParser
                 continue;
             }
 
-            int end = signed ? start + 1 : start;
+            int digitsStart = signed ? start + 1 : start;
+            int end = digitsStart;
             bool seenSeparator = false;
+            bool seenGroup = false;
             while (end < span.Length)
             {
                 if (char.IsAsciiDigit(span[end]))
@@ -84,8 +86,17 @@ public static class AlertValueParser
                     continue;
                 }
 
-                if (!seenSeparator && IsGroup(span, end, groupSeparator))
+                /* The LEADING run has to be a valid first group too (1-3 digits), or "1234,567" would fuse
+                   into 1234567 — a new way to join two adjacent numbers, which is the exact thing the
+                   strictness below exists to prevent, and worse than the 1234 it returned before grouping
+                   was handled at all. Only the first separator needs the check: every later run is exactly
+                   three digits because IsGroup already required it. The bound is on GROUPS only — a plain
+                   "1234.56" has no group separator and is untouched. */
+                if (!seenSeparator
+                    && (seenGroup || end - digitsStart is >= 1 and <= GroupSize)
+                    && IsGroup(span, end, groupSeparator))
                 {
+                    seenGroup = true;
                     end += groupSeparator.Length + GroupSize;
                     continue;
                 }

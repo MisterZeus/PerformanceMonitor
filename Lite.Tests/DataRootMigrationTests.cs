@@ -261,6 +261,53 @@ public class DataRootMigrationTests
     }
 
     /// <summary>
+    /// The multi-LAUNCH hole (#1842 review, second pass). Launch 1 relocates some artifacts and fails on one,
+    /// so it writes a marker naming what is still here. Launch 2 sees only the leftover pending, finishes it,
+    /// and rewrites the marker - which must still name what launch 1 relocated, even though launch 2's own
+    /// lists never contained it. Nothing but the filesystem remembers across launches, so the marker has to
+    /// be read off the filesystem rather than off either run's bookkeeping.
+    /// </summary>
+    [Fact]
+    public void Migrate_MarkerNamesArtifactsFromEarlierLaunches_NotJustThisRuns()
+    {
+        var parent = NewTempDir("multilaunch");
+        try
+        {
+            var legacy = Path.Combine(parent, "PerformanceMonitorLite");
+            var target = Path.Combine(parent, "PerformanceMonitorLite-Data");
+            PopulateLegacyRoot(legacy);
+
+            /* Launch 1: config collides with a seeded stand-in, so it is quarantined; a lock on archive\
+               (simulated by an occupied quarantine name it cannot take, with a colliding target) leaves it
+               behind. Everything else migrates. */
+            WriteFile(target, Path.Combine("config", "ignored_waits.json"), "[]");
+            WriteFile(target, Path.Combine("archive", "already-here.parquet"), "x");
+            WriteFile(target, Path.Combine(DataRootMigration.RescuedDirName, "archive", "taken.parquet"), "x");
+
+            var first = DataRootMigration.Migrate(legacy, target, _ => { });
+            Assert.Contains("config", first.Rescued);
+            Assert.Contains("archive", first.Kept);
+            Assert.True(File.Exists(Path.Combine(legacy, DataRootMigration.MarkerFileName)));
+
+            /* Launch 2: only the leftover is pending. Clear the collision so it can finish. */
+            Directory.Delete(Path.Combine(target, "archive"), true);
+            var second = DataRootMigration.Migrate(legacy, target, _ => { });
+            Assert.Equal(new[] { "archive" }, second.Moved);
+            Assert.Empty(second.Rescued);
+
+            /* The rewritten marker must still name config, which only launch 1 ever touched. */
+            var marker = File.ReadAllText(Path.Combine(legacy, DataRootMigration.MarkerFileName));
+            Assert.Contains("config", marker, StringComparison.Ordinal);
+            Assert.Contains("archive", marker, StringComparison.Ordinal);
+            Assert.Contains(Path.Combine(target, DataRootMigration.RescuedDirName), marker, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(parent, true);
+        }
+    }
+
+    /// <summary>
     /// Every rescue in the already-populated branch fails (the quarantine names are all taken by an earlier
     /// partial run). The log must NOT claim a move that did not happen: this runs before the logger exists,
     /// so it is the only channel out, and an operator told "moved it to the quarantine" who then finds an

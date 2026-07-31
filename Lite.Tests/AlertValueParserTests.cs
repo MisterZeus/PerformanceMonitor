@@ -51,6 +51,7 @@ public sealed class AlertValueParserTests
     [InlineData("1,234", 1234)]              /* grouped count — stored 1 before (#1834 review) */
     [InlineData("1,234,567 reads", 1234567)] /* several groups, then a label */
     [InlineData("1,234.56%", 1234.56)]       /* groups AND a decimal */
+    [InlineData("1234.56%", 1234.56)]        /* a long run before a DECIMAL point is fine - no group here */
     [InlineData("-1,024", -1024)]
     public void ParseOrDefault_ReadsGroupedNumbers_EnUs(string text, double expected)
     {
@@ -65,6 +66,8 @@ public sealed class AlertValueParserTests
     [InlineData("1,2,3", 1)]                 /* a comma-joined LIST must not fuse into 123 */
     [InlineData("1,2345", 1)]                /* not a group: four digits follow */
     [InlineData("3 sessions, 500 ms", 3)]    /* an ordinary space is not en-US's group separator */
+    [InlineData("1234,567", 1234)]           /* leading run of 4 is no valid first group - must not fuse */
+    [InlineData("12345,678,901", 12345)]     /* same, with more well-formed groups behind it */
     public void ParseOrDefault_RejectsMalformedGroups_EnUs(string text, double expected)
     {
         /* .NET's own AllowThousands does NOT validate group placement — double.Parse("1,2,3", en-US)

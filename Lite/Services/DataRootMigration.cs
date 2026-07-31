@@ -187,11 +187,11 @@ internal static class DataRootMigration
                         "deletes that folder.");
                 }
 
-                if (rescued.Count > 0 && kept.Count == 0)
+                /* Written as soon as anything leaves, not only once nothing is left: the marker now states
+                   what is STILL in this folder, so it can no longer read as a premature "all done". */
+                if (rescued.Count > 0)
                 {
-                    /* Nothing went live on this path — the new root was already complete — so every name
-                       belongs under the quarantine heading, not the moved one. */
-                    TryWriteMarker(legacyRoot, newRoot, new List<string>(), rescued, log);
+                    TryWriteMarker(legacyRoot, newRoot, log);
                 }
 
                 return new DataRootMigrationResult
@@ -266,14 +266,13 @@ internal static class DataRootMigration
                     "Setup.exe deletes that folder.");
             }
 
-            /* Only claim the move in the marker once nothing is still behind — a partial run retries next
-               launch and writes the marker then, and a `kept` artifact is still sitting in there. Rescued
-               names go in too, under their own destination: they also left this folder, and a marker that
-               named only `moved` would tell someone hunting for their settings.json that it was never
-               touched. */
-            if (failed.Count == 0 && kept.Count == 0)
+            /* Written as soon as anything leaves this folder, whether it went live or into the quarantine.
+               Waiting for a clean run was the old rule — it kept the marker from claiming a completeness it
+               did not have — but the marker now names what is still here, so it is honest mid-migration and
+               a partial run gets a signpost instead of silence. */
+            if (moved.Count > 0 || rescued.Count > 0)
             {
-                TryWriteMarker(legacyRoot, newRoot, moved, rescued, log);
+                TryWriteMarker(legacyRoot, newRoot, log);
             }
 
             return new DataRootMigrationResult
@@ -298,6 +297,31 @@ internal static class DataRootMigration
                 Kept = kept,
                 Failed = failed
             };
+        }
+    }
+
+    /// <summary>Which of Lite's own artifacts are sitting in <paramref name="root"/> right now, in the
+    /// declaration order of the allow-list so the marker reads the same way every time.</summary>
+    private static List<string> OurArtifactsIn(string root)
+    {
+        var names = new List<string>();
+        foreach (var name in s_directories)
+        {
+            if (Directory.Exists(Path.Combine(root, name))) names.Add(name);
+        }
+        foreach (var name in s_files)
+        {
+            if (File.Exists(Path.Combine(root, name))) names.Add(name);
+        }
+
+        return names;
+    }
+
+    private static void AppendNames(StringBuilder text, List<string> names)
+    {
+        foreach (var name in names)
+        {
+            text.Append("    ").AppendLine(name);
         }
     }
 
@@ -375,16 +399,27 @@ internal static class DataRootMigration
     /// Drops a plain-text signpost in the legacy root. The old root is NOT deleted — it is the Velopack
     /// install directory and still holds Update.exe, current\ and packages\.
     ///
-    /// <para>Lists <paramref name="moved"/> and <paramref name="rescued"/> under separate headings because
-    /// they went to different places, and someone reads this file precisely because they are hunting for one
-    /// artifact by name. A marker naming only the artifacts that went live would read, to the person whose
-    /// <c>settings.json</c> collided and got quarantined, as proof it was never touched at all.</para>
+    /// <para>Lists what is at each of the three locations under its own heading, because they mean different
+    /// things and someone reads this file precisely because they are hunting for ONE artifact by name. A
+    /// marker naming only the artifacts that went live would read, to the person whose <c>settings.json</c>
+    /// collided and got quarantined, as proof it was never touched at all.</para>
+    ///
+    /// <para><b>The lists are read off the filesystem, not from the calling run's <c>moved</c>/<c>rescued</c>
+    /// (#1842 review, second pass).</b> Those are local to one <c>Migrate</c> call, and the marker is written
+    /// on the first run that leaves nothing behind — which may not be the run that moved most of it. Launch 1
+    /// rescues A and fails on B, so it correctly writes nothing; launch 2 sees only B pending, succeeds, and
+    /// would have written a marker naming B alone, with A safe in the quarantine and unmentioned forever
+    /// (a later launch finds nothing pending and returns before any marker logic). Ground truth at write time
+    /// has no such hole and needs no state carried between runs.</para>
     /// </summary>
-    private static void TryWriteMarker(
-        string legacyRoot, string newRoot, List<string> moved, List<string> rescued, Action<string> log)
+    private static void TryWriteMarker(string legacyRoot, string newRoot, Action<string> log)
     {
         try
         {
+            var live = OurArtifactsIn(newRoot);
+            var quarantined = OurArtifactsIn(Path.Combine(newRoot, RescuedDirName));
+            var stillHere = OurArtifactsIn(legacyRoot);
+
             var marker = Path.Combine(legacyRoot, MarkerFileName);
             var text = new StringBuilder();
             text.AppendLine("Performance Monitor Lite data has MOVED.");
@@ -393,25 +428,13 @@ internal static class DataRootMigration
             text.AppendLine("Setup.exe again renames it aside and deletes it, which used to destroy the");
             text.AppendLine("monitoring history stored here (issue #1832).");
             text.AppendLine();
-            text.AppendLine("Your data now lives in:");
+            text.Append("As of ").Append(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)).AppendLine(", your data lives in:");
             text.AppendLine();
             text.AppendLine("    " + newRoot);
             text.AppendLine();
-            text.Append("Moved on ").Append(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)).AppendLine(":");
+            AppendNames(text, live);
 
-            if (moved.Count > 0)
-            {
-                foreach (var name in moved)
-                {
-                    text.Append("    ").AppendLine(name);
-                }
-            }
-            else
-            {
-                text.AppendLine("    (nothing went live - see below)");
-            }
-
-            if (rescued.Count > 0)
+            if (quarantined.Count > 0)
             {
                 text.AppendLine();
                 text.AppendLine("These already existed at the new location, so the copies from this folder did NOT");
@@ -420,10 +443,16 @@ internal static class DataRootMigration
                 text.AppendLine();
                 text.AppendLine("    " + Path.Combine(newRoot, RescuedDirName));
                 text.AppendLine();
-                foreach (var name in rescued)
-                {
-                    text.Append("    ").AppendLine(name);
-                }
+                AppendNames(text, quarantined);
+            }
+
+            if (stillHere.Count > 0)
+            {
+                text.AppendLine();
+                text.AppendLine("These could NOT be moved and are still in this folder. Re-running Setup.exe will");
+                text.AppendLine("delete them - copy them somewhere safe, or start Lite again to retry the move:");
+                text.AppendLine();
+                AppendNames(text, stillHere);
             }
 
             text.AppendLine();
