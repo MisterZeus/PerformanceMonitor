@@ -482,9 +482,9 @@ public sealed class DarlingComposeTests
     [Fact]
     public void Compile_VeryOldWindow_RoutesToDailyCagg_AndCoarsensDisplayGrainToDay()
     {
-        /* hour requested, but 40 days old -> daily CAGG, and the grain clamps up to day (can't render finer). */
+        /* hour requested, but 120 days old -> daily CAGG, and the grain clamps up to day (can't render finer). */
         var (compiled, error) = CompileAged(
-            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 40);
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 120);
         Assert.True(error is null, error);
         Assert.Contains("FROM collect.query_stats_daily AS f", compiled!.Sql, StringComparison.Ordinal);
         Assert.Contains("date_trunc('day', f.bucket)", compiled.Sql, StringComparison.Ordinal);
@@ -525,11 +525,11 @@ public sealed class DarlingComposeTests
     [Fact]
     public void Compile_VeryOldWindow_QueryStore_RoutesToDailyCagg()
     {
-        /* A 40-day QS window routes to the corrected daily (same weighted-sum columns as the hourly). This
+        /* A 120-day QS window routes to the corrected daily (same weighted-sum columns as the hourly). This
            helper measures no coverage, and #1869's day-grain daily wins only on positive evidence that it
            holds the window — so with none, the corrected daily keeps it. */
         var (compiled, error) = CompileAged(
-            "{\"source\":\"query_store_stats\",\"ratio\":\"qs_avg_duration_us\",\"timeBucket\":\"day\",\"viz\":\"line\"}", daysOld: 40);
+            "{\"source\":\"query_store_stats\",\"ratio\":\"qs_avg_duration_us\",\"timeBucket\":\"day\",\"viz\":\"line\"}", daysOld: 120);
         Assert.True(error is null, error);
         Assert.Contains("FROM collect.query_store_stats_corrected_daily AS f", compiled!.Sql, StringComparison.Ordinal);
         Assert.Contains("SUM(f.duration_us_weighted_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0)", compiled.Sql, StringComparison.Ordinal);
@@ -578,11 +578,11 @@ public sealed class DarlingComposeTests
     [Fact]
     public void Compile_OldWindow_ObjectName_RoutesToCagg_JoinsModuleMap()
     {
-        /* object_name on query_stats now routes to the CAGG (40d -> daily) and joins the retained module_map for
+        /* object_name on query_stats now routes to the CAGG (120d -> daily) and joins the retained module_map for
            attribution, instead of the window-bounded procedure_stats #1568 CTE. */
         var (compiled, error) = CompileAged(
             "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"object_name\"],\"viz\":\"bar\"}",
-            daysOld: 40, servers: new[] { "PROD-01" });
+            daysOld: 120, servers: new[] { "PROD-01" });
         Assert.True(error is null, error);
         Assert.Contains("FROM collect.query_stats_daily AS f", compiled!.Sql, StringComparison.Ordinal);
         Assert.Contains("LEFT JOIN collect.module_map AS m ON m.sql_handle = f.sql_handle AND m.server_name = f.server_name", compiled.Sql, StringComparison.Ordinal);
@@ -1866,13 +1866,20 @@ public sealed class DarlingComposeTests
         Assert.Contains("4 days", rawNotice, StringComparison.Ordinal);
         Assert.Contains("10 days back", rawNotice, StringComparison.Ordinal);
 
-        /* Hourly route past its 21-day horizon (daily view missing on this store): partial. */
+        /* Hourly route PAST its horizon (daily view missing on this store): partial. The window and the
+           expected text are both derived from HourlyRetentionSpan rather than written out, because #1937 moved
+           that horizon from 21 days to 90 and a hardcoded window silently stopped exercising this branch —
+           40 days used to be past the horizon and is now comfortably inside it. */
         var partial = RollupAvailability.All with { QueryGrainDaily = false };
-        var hourlyNotice = ComposeStoreAvailability.BuildRetentionNotice("query_stats", hourlyRoute, now.AddDays(-40), now, partial, RollupCoverage.Unknown);
+        var pastHourly = now - TimescaleSupport.HourlyRetentionSpan - TimeSpan.FromDays(10);
+        var hourlyNotice = ComposeStoreAvailability.BuildRetentionNotice("query_stats", hourlyRoute, pastHourly, now, partial, RollupCoverage.Unknown);
         Assert.NotNull(hourlyNotice);
-        Assert.Contains("21 days", hourlyNotice, StringComparison.Ordinal);
+        Assert.Contains(
+            $"{TimescaleSupport.HourlyRetentionSpan.TotalDays:0} days",
+            hourlyNotice,
+            StringComparison.Ordinal);
 
-        /* Hourly route, window inside 21 days: silent. */
+        /* Hourly route, window INSIDE the horizon: silent. */
         Assert.Null(ComposeStoreAvailability.BuildRetentionNotice("query_stats", hourlyRoute, now.AddDays(-10), now, RollupAvailability.All, RollupCoverage.Unknown));
 
         /* Daily route: kept indefinitely — silent no matter the window. */
@@ -1976,7 +1983,7 @@ public sealed class DarlingComposeTests
         var now = WindowEnd;
         var plan = ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"day\",\"viz\":\"line\"}");
         var context = new ComposeRunContext(
-            null, now.AddDays(-30), now.AddDays(-25), ComposeRunContext.NoVariables, RollupAvailability.All, now, RollupCoverage.Unknown);
+            null, now.AddDays(-120), now.AddDays(-115), ComposeRunContext.NoVariables, RollupAvailability.All, now, RollupCoverage.Unknown);
         var (compiled, error) = ComposeCompiler.Compile(plan, context);
         Assert.True(error is null, error);
         Assert.Contains("query_stats_daily", compiled!.Sql, StringComparison.Ordinal);

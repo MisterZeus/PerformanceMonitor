@@ -1254,6 +1254,170 @@ AND   ((SELECT min(bucket) FROM collect.query_stats_hourly) IS NULL
         }
     }
 
+    /// <summary>
+    /// #1937's upgrade half, measured rather than assumed: <c>add_retention_policy(if_not_exists)</c> leaves an
+    /// existing policy's <c>drop_after</c> alone, so a horizon change would reach fresh installs only — the
+    /// sweep must CONVERGE existing policies onto the constants, and the convergence must not touch anything
+    /// else about the job. Both scheduled states are proven here: a policy demoted to the old 21-day horizon
+    /// while HELD comes back at 90 still held, and one demoted while ARMED comes back at 90 still armed with
+    /// its <c>next_start</c> unmoved — converging a horizon must never trigger an immediate purge (#1680's
+    /// never-expose-an-armed-window discipline, held through an update rather than only at creation).
+    /// </summary>
+    [Fact]
+    public async Task EnsureRetentionPolicies_ConvergesAnOldHorizon_PreservingScheduledStateAndNextStart_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live convergence test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+        Assert.Equal(CollectorCatalog.All.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
+
+        var preexistingCaggs = await ExistingCaggsAsync(connection, ct);
+
+        const string HeldRelation = "query_stats";
+        const string ArmedRelation = "procedure_stats_hourly";
+
+        var bodySucceeded = false;
+        try
+        {
+            /* One query_stats row 30 days back keeps that relation's coverage SHORT for the whole test: it is
+               outside the hourly CAGG's 3-day refresh window, so even the policies' immediate first fire
+               (#1788) cannot materialize it, and the #1909 gate keeps HOLDING the policy on every sweep. That
+               makes held-ness the gate's own genuine verdict rather than test-forced state — on an empty
+               relation the gate legitimately ARMS (nothing to protect), which is exactly what the
+               procedure_stats side demonstrates. */
+            using (var seed = new NpgsqlCommand(@"
+INSERT INTO collect.query_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
+     delta_worker_time, delta_elapsed_time, delta_execution_count)
+VALUES (1, $1, 9137, 'converge-1937', 'TestDb', decode(md5('converge'), 'hex'), decode(md5('h'), 'hex'), 1, 1, 1)", connection))
+            {
+                seed.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-30), DateTimeKind.Unspecified));
+                await seed.ExecuteNonQueryAsync(ct);
+            }
+
+            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+            Assert.Equal(RetentionPolicyCount, await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct));
+
+            /* The gate's own verdicts, asserted as preconditions: short coverage holds, empty coverage arms. */
+            var created = new
+            {
+                Held = await PolicyStateAsync(connection, HeldRelation, ct),
+                Armed = await PolicyStateAsync(connection, ArmedRelation, ct),
+            };
+            Assert.False(created.Held.Scheduled, "short coverage must HOLD the policy at creation");
+            Assert.True(created.Armed.Scheduled, "empty coverage must ARM the policy at creation");
+
+            /* Demote both to the pre-#1937 horizon, exactly as an upgraded store presents them. The armed one
+               gets a far-future next_start, so it cannot fire a real purge while the test runs — and that
+               pushed-out next_start is precisely what must survive the convergence unmoved. */
+            await DemoteHorizonAsync(connection, HeldRelation, "21 days", ct);
+            await DemoteHorizonAsync(connection, ArmedRelation, "21 days", ct);
+            using (var push = new NpgsqlCommand(@"
+SELECT alter_job(j.job_id, next_start => now() + interval '1 hour')
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '" + ArmedRelation + "'", connection))
+            {
+                await push.ExecuteNonQueryAsync(ct);
+            }
+
+            var before = new
+            {
+                Held = await PolicyStateAsync(connection, HeldRelation, ct),
+                Armed = await PolicyStateAsync(connection, ArmedRelation, ct),
+            };
+            Assert.Equal(("21 days", false), (before.Held.DropAfter, before.Held.Scheduled));
+            Assert.Equal(("21 days", true), (before.Armed.DropAfter, before.Armed.Scheduled));
+
+            /* THE measured claim: the sweep converges both onto the constant, preserving everything else. */
+            Assert.Equal(RetentionPolicyCount, await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct));
+
+            var after = new
+            {
+                Held = await PolicyStateAsync(connection, HeldRelation, ct),
+                Armed = await PolicyStateAsync(connection, ArmedRelation, ct),
+            };
+            /* Each relation converges to ITS OWN constant: the raw table to 4 days, the hourly CAGG to
+               #1937's 90 - the sweep reads the horizon per policy from RetentionPolicies, not one number. */
+            Assert.Equal("4 days", after.Held.DropAfter);
+            Assert.False(after.Held.Scheduled, "a HELD policy must stay held across a horizon convergence");
+            Assert.Equal("90 days", after.Armed.DropAfter);
+            Assert.True(after.Armed.Scheduled, "an ARMED policy must stay armed across a horizon convergence");
+            Assert.Equal(before.Armed.NextStart, after.Armed.NextStart);
+
+            /* Idempotence: a third sweep finds nothing distinct from the constants and moves nothing. */
+            Assert.Equal(RetentionPolicyCount, await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct));
+            var settled = await PolicyStateAsync(connection, ArmedRelation, ct);
+            Assert.Equal(("90 days", true, after.Armed.NextStart), (settled.DropAfter, settled.Scheduled, settled.NextStart));
+            Assert.Equal("4 days", (await PolicyStateAsync(connection, HeldRelation, ct)).DropAfter);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                var batch = new LiveCleanupBatch(cleanup);
+
+                foreach (var relation in RetentionRelations)
+                {
+                    await batch.RemoveRetentionPolicyAsync(relation, cleanupCt);
+                }
+
+                await batch.DropContinuousAggregatesAsync(
+                    (await ExistingCaggsAsync(cleanup, cleanupCt)).Except(preexistingCaggs, StringComparer.Ordinal), cleanupCt);
+
+                using var unseed = new NpgsqlCommand(
+                    "DELETE FROM collect.query_stats WHERE server_name = 'converge-1937'", cleanup);
+                await unseed.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>Sets a retention policy's <c>drop_after</c> directly, standing in for a store created under an
+    /// older default. Named <c>config</c> only, like the convergence itself, so the demotion cannot arm.</summary>
+    private static async Task DemoteHorizonAsync(NpgsqlConnection connection, string relation, string horizon, System.Threading.CancellationToken ct)
+    {
+        using var demote = new NpgsqlCommand(@"
+SELECT alter_job(j.job_id, config => jsonb_set(j.config, '{drop_after}', to_jsonb($1::text)))
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '" + relation + "'", connection);
+        demote.Parameters.AddWithValue(horizon);
+        await demote.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>One policy's observable state: the horizon it would drop at, whether it is armed, and when it
+    /// would next run.</summary>
+    private static async Task<(string DropAfter, bool Scheduled, DateTime? NextStart)> PolicyStateAsync(
+        NpgsqlConnection connection, string relation, System.Threading.CancellationToken ct)
+    {
+        using var read = new NpgsqlCommand(@"
+SELECT j.config->>'drop_after', j.scheduled, j.next_start
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '" + relation + "'", connection);
+        using var reader = await read.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct), $"no policy_retention job found for collect.{relation}");
+
+        /* next_start is NULL for a HELD job - a paused policy has no next run (the same sentinel family as
+           job_stats' -infinity). */
+        return (reader.GetString(0), reader.GetBoolean(1),
+            await reader.IsDBNullAsync(2, ct) ? null : reader.GetDateTime(2));
+    }
+
     /// <summary>The continuous aggregates present in <c>collect</c> right now, so the retention test can drop
     /// exactly the ones it created and leave a pre-existing store's shape alone.</summary>
     private static async Task<string[]> ExistingCaggsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)

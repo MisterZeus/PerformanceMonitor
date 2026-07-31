@@ -62,7 +62,7 @@ public sealed class ComposeSourceRouterTests
     [Fact]
     public void OldWindow_RoutesDailyCagg()
     {
-        var route = ComposeSourceRouter.Resolve(Plan("query_worker_us"), Now, Now.AddDays(-40), RollupAvailability.All, RollupCoverage.Unknown);
+        var route = ComposeSourceRouter.Resolve(Plan("query_worker_us"), Now, Now.AddDays(-120), RollupAvailability.All, RollupCoverage.Unknown);
         Assert.Equal(ComposeSourceTier.Daily, route.Tier);
         Assert.Equal("query_stats_daily", route.CaggRelation);
     }
@@ -70,9 +70,10 @@ public sealed class ComposeSourceRouterTests
     [Fact]
     public void HistoricalWindow_RoutesByAge_NotWindowSpan()
     {
-        /* A 5-day-SPAN window that is 30→25 days OLD must route by age (30d → daily), NOT by span (5d → hourly):
-           the hourly chunks for that range were already dropped, so span-based routing would return empty. */
-        var route = ComposeSourceRouter.Resolve(Plan("query_worker_us"), Now, Now.AddDays(-30), RollupAvailability.All, RollupCoverage.Unknown);
+        /* A 5-day-SPAN window that is 120→115 days OLD must route by age (120d → daily), NOT by span (5d → hourly):
+           the hourly chunks for that range were already dropped, so span-based routing would return empty.
+           (30 days was past the hourly horizon when this was written; since #1937 old means past 90.) */
+        var route = ComposeSourceRouter.Resolve(Plan("query_worker_us"), Now, Now.AddDays(-120), RollupAvailability.All, RollupCoverage.Unknown);
         Assert.Equal(ComposeSourceTier.Daily, route.Tier);
     }
 
@@ -80,8 +81,8 @@ public sealed class ComposeSourceRouterTests
     public void RankedMode_RoutesByAge_WithNoDisplayGrain()
     {
         /* Ranked panels resolve no display grain at all — the v1-killer case. Age-based routing still works:
-           a 40-day "top N" reaches the daily CAGG instead of truncating at raw's 4 days. */
-        var route = ComposeSourceRouter.Resolve(Plan("query_worker_us", PanelMode.Ranked), Now, Now.AddDays(-40), RollupAvailability.All, RollupCoverage.Unknown);
+           a 120-day "top N" reaches the daily CAGG instead of truncating at raw's 4 days. */
+        var route = ComposeSourceRouter.Resolve(Plan("query_worker_us", PanelMode.Ranked), Now, Now.AddDays(-120), RollupAvailability.All, RollupCoverage.Unknown);
         Assert.Equal(ComposeSourceTier.Daily, route.Tier);
     }
 
@@ -101,7 +102,7 @@ public sealed class ComposeSourceRouterTests
         var objectName = MeasureCatalog.Dimension("query_stats", "object_name")!;
         var plan = Plan("query_worker_us", groupBy: new[] { objectName });
         Assert.True(plan.UsesModuleJoin);
-        var route = ComposeSourceRouter.Resolve(plan, Now, Now.AddDays(-40), RollupAvailability.All, RollupCoverage.Unknown);
+        var route = ComposeSourceRouter.Resolve(plan, Now, Now.AddDays(-120), RollupAvailability.All, RollupCoverage.Unknown);
         Assert.Equal(ComposeSourceTier.Daily, route.Tier);
         Assert.Equal("query_stats_daily", route.CaggRelation);
     }
@@ -145,10 +146,10 @@ public sealed class ComposeSourceRouterTests
     [Fact]
     public void QueryStore_OldWindow_RoutesToDailyCagg()
     {
-        /* A 40-day window routes to the daily tier, not the 21d-capped hourly — and to the CORRECTED daily
+        /* A 120-day window routes to the daily tier, not the 90d-capped (#1937) hourly — and to the CORRECTED daily
            since #1849. With no coverage evidence the corrected pair wins: the legacy fallback is comparative
            and fires only where legacy is MEASURED to reach further back. */
-        var route = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-40), RollupAvailability.All, RollupCoverage.Unknown);
+        var route = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-120), RollupAvailability.All, RollupCoverage.Unknown);
         Assert.Equal(ComposeSourceTier.Daily, route.Tier);
         Assert.Equal("query_store_stats_corrected_daily", route.CaggRelation);
     }
@@ -159,7 +160,7 @@ public sealed class ComposeSourceRouterTests
         /* The safety invariant: a route max must be strictly inside its retention horizon, so a drop lagging the
            boundary can never leave the chosen tier missing its oldest chunk. Raw kept 4d, hourly CAGGs kept 21d. */
         Assert.True(ComposeSourceRouter.RawRouteMaxAge < TimeSpan.FromDays(4));
-        Assert.True(ComposeSourceRouter.HourlyRouteMaxAge < TimeSpan.FromDays(21));
+        Assert.True(ComposeSourceRouter.HourlyRouteMaxAge < TimescaleSupport.HourlyRetentionSpan);
     }
 
     /* ── #1665: availability gates the age decision — route to what the store HAS ── */
@@ -227,7 +228,7 @@ public sealed class ComposeSourceRouterTests
         var hourly = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-10), old, RollupCoverage.Unknown);
         Assert.Equal(TimescaleSupport.QueryStoreStatsHourlyView, hourly.CaggRelation);
 
-        var daily = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-40), old, RollupCoverage.Unknown);
+        var daily = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-120), old, RollupCoverage.Unknown);
         Assert.Equal(TimescaleSupport.QueryStoreStatsDailyView, daily.CaggRelation);
     }
 
@@ -245,14 +246,14 @@ public sealed class ComposeSourceRouterTests
     [Fact]
     public void QueryStore_BeyondCorrectedCoverage_FallsBackToTheLegacyPair()
     {
-        /* Corrected materialized back 5 days; legacy back 30. */
+        /* Corrected materialized back 5 days; legacy back 120. */
         var coverage = new RollupCoverage(
             new Dictionary<string, DateTime>(StringComparer.Ordinal)
             {
                 [TimescaleSupport.QueryStoreStatsCorrectedHourlyView] = Now.AddDays(-5),
                 [TimescaleSupport.QueryStoreStatsCorrectedDailyView] = Now.AddDays(-5),
-                [TimescaleSupport.QueryStoreStatsHourlyView] = Now.AddDays(-30),
-                [TimescaleSupport.QueryStoreStatsDailyView] = Now.AddDays(-30),
+                [TimescaleSupport.QueryStoreStatsHourlyView] = Now.AddDays(-120),
+                [TimescaleSupport.QueryStoreStatsDailyView] = Now.AddDays(-120),
             },
             new Dictionary<string, DateTime>(StringComparer.Ordinal) { ["query_store_stats"] = Now.AddDays(-4) });
 
@@ -261,7 +262,7 @@ public sealed class ComposeSourceRouterTests
         Assert.Equal(TimescaleSupport.QueryStoreStatsCorrectedHourlyView, inside.CaggRelation);
 
         /* Past it → the legacy pair, which is the only tier holding that history. */
-        var beyond = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-25), RollupAvailability.All, coverage);
+        var beyond = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-100), RollupAvailability.All, coverage);
         Assert.Equal(TimescaleSupport.QueryStoreStatsDailyView, beyond.CaggRelation);
     }
 
@@ -298,16 +299,16 @@ public sealed class ComposeSourceRouterTests
 
     /* ─────────────── the DAY-grain daily (#1869) ─────────────── */
 
-    /// <summary>Corrected back 30 days, day-grain back <paramref name="dayGrainDays"/>, legacy back 60 —
+    /// <summary>Corrected back 120 days, day-grain back <paramref name="dayGrainDays"/>, legacy back 240 —
     /// the three-deep Query Store daily ladder with each rung's floor stated explicitly.</summary>
     private static RollupCoverage QueryStoreLadder(int dayGrainDays) => new(
         new Dictionary<string, DateTime>(StringComparer.Ordinal)
         {
-            [TimescaleSupport.QueryStoreStatsCorrectedHourlyView] = Now.AddDays(-30),
-            [TimescaleSupport.QueryStoreStatsCorrectedDailyView] = Now.AddDays(-30),
+            [TimescaleSupport.QueryStoreStatsCorrectedHourlyView] = Now.AddDays(-120),
+            [TimescaleSupport.QueryStoreStatsCorrectedDailyView] = Now.AddDays(-120),
             [TimescaleSupport.QueryStoreStatsDayGrainDailyView] = Now.AddDays(-dayGrainDays),
-            [TimescaleSupport.QueryStoreStatsHourlyView] = Now.AddDays(-60),
-            [TimescaleSupport.QueryStoreStatsDailyView] = Now.AddDays(-60),
+            [TimescaleSupport.QueryStoreStatsHourlyView] = Now.AddDays(-240),
+            [TimescaleSupport.QueryStoreStatsDailyView] = Now.AddDays(-240),
         },
         new Dictionary<string, DateTime>(StringComparer.Ordinal) { ["query_store_stats"] = Now.AddDays(-4) });
 
@@ -321,7 +322,7 @@ public sealed class ComposeSourceRouterTests
     public void QueryStore_DayGrainDailyCoversTheWindow_WinsOverTheCorrectedDaily()
     {
         var route = ComposeSourceRouter.Resolve(
-            Plan("qs_executions"), Now, Now.AddDays(-25), RollupAvailability.All, QueryStoreLadder(dayGrainDays: 30));
+            Plan("qs_executions"), Now, Now.AddDays(-100), RollupAvailability.All, QueryStoreLadder(dayGrainDays: 120));
 
         Assert.Equal(ComposeSourceTier.Daily, route.Tier);
         Assert.Equal(TimescaleSupport.QueryStoreStatsDayGrainDailyView, route.CaggRelation);
@@ -336,20 +337,20 @@ public sealed class ComposeSourceRouterTests
     [Fact]
     public void QueryStore_BeyondDayGrainCoverage_FallsBackToTheCorrectedDaily()
     {
-        /* Every age here is past HourlyRouteMaxAge (20 days): the preference lives at the DAILY tier, so a
-           younger window would be answered by the hourly rung and prove nothing about this ladder. */
-        var coverage = QueryStoreLadder(dayGrainDays: 25);
+        /* Every age here is past HourlyRouteMaxAge (89 days since #1937): the preference lives at the DAILY tier,
+           so a younger window would be answered by the hourly rung and prove nothing about this ladder. */
+        var coverage = QueryStoreLadder(dayGrainDays: 100);
 
         /* Inside the day-grain coverage → the exactly-counted view. */
-        var inside = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-22), RollupAvailability.All, coverage);
+        var inside = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-95), RollupAvailability.All, coverage);
         Assert.Equal(TimescaleSupport.QueryStoreStatsDayGrainDailyView, inside.CaggRelation);
 
         /* Past it but inside the corrected daily → the corrected daily, NOT the legacy pair below it. */
-        var beyond = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-28), RollupAvailability.All, coverage);
+        var beyond = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-110), RollupAvailability.All, coverage);
         Assert.Equal(TimescaleSupport.QueryStoreStatsCorrectedDailyView, beyond.CaggRelation);
 
         /* Past BOTH → the superseded daily, the only relation holding it. The full three-rung ladder. */
-        var ancient = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-50), RollupAvailability.All, coverage);
+        var ancient = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-300), RollupAvailability.All, coverage);
         Assert.Equal(TimescaleSupport.QueryStoreStatsDailyView, ancient.CaggRelation);
     }
 
@@ -373,17 +374,17 @@ public sealed class ComposeSourceRouterTests
         var coverage = new RollupCoverage(
             new Dictionary<string, DateTime>(StringComparer.Ordinal)
             {
-                [TimescaleSupport.QueryStoreStatsCorrectedHourlyView] = Now.AddDays(-30),
-                [TimescaleSupport.QueryStoreStatsCorrectedDailyView] = Now.AddDays(-30),
-                [TimescaleSupport.QueryStoreStatsDayGrainDailyView] = Now.AddDays(-40),
-                [TimescaleSupport.QueryStoreStatsHourlyView] = Now.AddDays(-35),
-                [TimescaleSupport.QueryStoreStatsDailyView] = Now.AddDays(-35),
+                [TimescaleSupport.QueryStoreStatsCorrectedHourlyView] = Now.AddDays(-120),
+                [TimescaleSupport.QueryStoreStatsCorrectedDailyView] = Now.AddDays(-120),
+                [TimescaleSupport.QueryStoreStatsDayGrainDailyView] = Now.AddDays(-160),
+                [TimescaleSupport.QueryStoreStatsHourlyView] = Now.AddDays(-140),
+                [TimescaleSupport.QueryStoreStatsDailyView] = Now.AddDays(-140),
             },
             new Dictionary<string, DateTime>(StringComparer.Ordinal) { ["query_store_stats"] = Now.AddDays(-4) });
 
-        /* -50 days: past every floor on the ladder, so nothing COVERS it and only depth can decide. */
+        /* -200 days: past every floor on the ladder, so nothing COVERS it and only depth can decide. */
         var route = ComposeSourceRouter.Resolve(
-            Plan("qs_executions"), Now, Now.AddDays(-50), RollupAvailability.All, coverage);
+            Plan("qs_executions"), Now, Now.AddDays(-200), RollupAvailability.All, coverage);
 
         Assert.Equal(ComposeSourceTier.Daily, route.Tier);
         Assert.Equal(TimescaleSupport.QueryStoreStatsDayGrainDailyView, route.CaggRelation);
@@ -398,7 +399,7 @@ public sealed class ComposeSourceRouterTests
     public void QueryStore_HourlyAgeWindow_IsUntouchedByTheDayGrainDaily()
     {
         var route = ComposeSourceRouter.Resolve(
-            Plan("qs_executions"), Now, Now.AddDays(-10), RollupAvailability.All, QueryStoreLadder(dayGrainDays: 30));
+            Plan("qs_executions"), Now, Now.AddDays(-10), RollupAvailability.All, QueryStoreLadder(dayGrainDays: 120));
 
         Assert.Equal(ComposeSourceTier.Hourly, route.Tier);
         Assert.Equal(TimescaleSupport.QueryStoreStatsCorrectedHourlyView, route.CaggRelation);
@@ -414,8 +415,8 @@ public sealed class ComposeSourceRouterTests
     public void QueryStore_DayGrainDailyAbsent_KeepsRoutingToTheCorrectedDaily()
     {
         var route = ComposeSourceRouter.Resolve(
-            Plan("qs_executions"), Now, Now.AddDays(-25),
-            RollupAvailability.WithoutDayGrainQueryStore, QueryStoreLadder(dayGrainDays: 30));
+            Plan("qs_executions"), Now, Now.AddDays(-100),
+            RollupAvailability.WithoutDayGrainQueryStore, QueryStoreLadder(dayGrainDays: 120));
 
         Assert.Equal(TimescaleSupport.QueryStoreStatsCorrectedDailyView, route.CaggRelation);
     }
@@ -429,18 +430,18 @@ public sealed class ComposeSourceRouterTests
     public void QueryStore_NoCoverageEvidence_LeavesTheCorrectedDailyInPlace()
     {
         var route = ComposeSourceRouter.Resolve(
-            Plan("qs_executions"), Now, Now.AddDays(-40), RollupAvailability.All, RollupCoverage.Unknown);
+            Plan("qs_executions"), Now, Now.AddDays(-120), RollupAvailability.All, RollupCoverage.Unknown);
 
         Assert.Equal(TimescaleSupport.QueryStoreStatsCorrectedDailyView, route.CaggRelation);
     }
 
     /// <summary>Daily-age window, daily view missing but hourly present: fall to the hourly view (capped at
-    /// its 21-day horizon) — the same ladder the built-in tabs use, better than raw's 4 days.</summary>
+    /// its 90-day horizon, #1937) — the same ladder the built-in tabs use, better than raw's 4 days.</summary>
     [Fact]
     public void DailyAgeWindow_DailyMissing_FallsToHourly()
     {
         var partial = RollupAvailability.All with { QueryGrainDaily = false };
-        var route = ComposeSourceRouter.Resolve(Plan("query_worker_us"), Now, Now.AddDays(-40), partial, RollupCoverage.Unknown);
+        var route = ComposeSourceRouter.Resolve(Plan("query_worker_us"), Now, Now.AddDays(-120), partial, RollupCoverage.Unknown);
         Assert.Equal(ComposeSourceTier.Hourly, route.Tier);
         Assert.Equal("query_stats_hourly", route.CaggRelation);
     }
