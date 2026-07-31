@@ -1219,9 +1219,20 @@ public sealed class PayloadDimensionTests
     /// A behavioural test cannot see that, because a duplicated list produces the same policies; only reading
     /// the construction can.</para>
     ///
-    /// <para>So this asserts the method BUILDS from the map and names none of the gated relations as literals.
+    /// <para>So this asserts the list BUILDS from the map and names none of the gated relations as literals.
     /// It is the "enforce it, don't document it" shape: the failure it prevents is a green test suite over a
     /// broken invariant.</para>
+    ///
+    /// <para><b>Re-pointed by #1905, deliberately.</b> The list used to be a local inside
+    /// <c>EnsureRetentionPoliciesAsync</c> and this read that method's body; #1905 hoisted it to
+    /// <see cref="TimescaleSupport.RetentionPolicies"/> so the horizon-ordering invariant could be walked over
+    /// it from outside. The guard reads the field's initializer now instead, and it is exactly the same
+    /// property over exactly the same text — the move was verified by watching this test go red against a
+    /// hand-rewritten raw block BEFORE the hoist and again AFTER it, which is the only way to know a re-pointed
+    /// structural guard still points at something.</para>
+    ///
+    /// <para>Comments are stripped before the literal check: a comment that happens to quote a gated relation
+    /// is prose, not a re-hardcode, and the guard is about the code.</para>
     /// </summary>
     [Fact]
     public void RawTierRetentionPolicies_AreDerivedFromTheCoverageMap_NotRehardcodedBesideIt()
@@ -1232,21 +1243,116 @@ public sealed class PayloadDimensionTests
         var source = File.ReadAllText(Path.Combine(
             root!, "Darling", "PerformanceMonitor.Darling.Storage", "TimescaleSupport.cs"));
 
-        var body = MethodBody(source, "public static async Task<int> EnsureRetentionPoliciesAsync");
-        Assert.False(string.IsNullOrEmpty(body),
-            "could not locate EnsureRetentionPoliciesAsync — the guard cannot silently pass on a parse miss");
+        var declaration = DeclarationInitializer(source, $"> {nameof(TimescaleSupport.RetentionPolicies)} =");
+        Assert.False(string.IsNullOrEmpty(declaration),
+            "could not locate the RetentionPolicies declaration — the guard cannot silently pass on a parse miss");
 
-        Assert.Contains(nameof(TimescaleSupport.RawTierCoverage), body, StringComparison.Ordinal);
+        Assert.Contains(nameof(TimescaleSupport.RawTierCoverage), declaration, StringComparison.Ordinal);
+
+        /* ANTI-TRUNCATION. A scan that ended early would still contain RawTierCoverage — it is the first token
+           — and would then check the literals below over only the part it read, passing over a hardcode
+           further down. So demand the LAST thing the initializer builds from, which only a scan that reached
+           the terminating semicolon can have seen. */
+        Assert.Contains(nameof(TimescaleSupport.BaselineAggregates), declaration, StringComparison.Ordinal);
 
         foreach (var (relation, _, _) in TimescaleSupport.RawTierCoverage)
         {
             Assert.False(
-                body.Contains('"' + relation + '"', StringComparison.Ordinal),
-                $"EnsureRetentionPoliciesAsync names \"{relation}\" as a literal. The coverage-gated tiers must " +
+                declaration.Contains('"' + relation + '"', StringComparison.Ordinal),
+                $"RetentionPolicies names \"{relation}\" as a literal. The coverage-gated tiers must " +
                 "come from RawTierCoverage so the retention policy and the catalog sweep (#1784) cannot drift " +
                 "apart about which tables are gated — re-hardcoding them passes every behavioural test until " +
                 "the two lists disagree.");
         }
+
+        /* And the sweep must still iterate the hoisted list rather than rebuilding one beside it — otherwise
+           everything above could be true of a field nothing reads. */
+        var sweep = MethodBody(source, "public static async Task<int> EnsureRetentionPoliciesAsync");
+        Assert.False(string.IsNullOrEmpty(sweep),
+            "could not locate EnsureRetentionPoliciesAsync — the guard cannot silently pass on a parse miss");
+        Assert.Contains(nameof(TimescaleSupport.RetentionPolicies), sweep, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A field's initializer, from its signature to the terminating semicolon at nesting depth zero, with
+    /// comments and string contents removed so neither can truncate the scan or be mistaken for code. Returns
+    /// empty when the signature is not found, so a caller can FAIL rather than silently pass on a parse miss.
+    /// </summary>
+    private static string DeclarationInitializer(string source, string signature)
+    {
+        var start = source.IndexOf(signature, StringComparison.Ordinal);
+        if (start < 0)
+        {
+            return string.Empty;
+        }
+
+        var code = new System.Text.StringBuilder();
+        var depth = 0;
+
+        for (var i = start; i < source.Length; i++)
+        {
+            /* Comments: skipped entirely. */
+            if (source[i] == '/' && i + 1 < source.Length && source[i + 1] == '/')
+            {
+                while (i < source.Length && source[i] != '\n')
+                {
+                    i++;
+                }
+
+                continue;
+            }
+
+            if (source[i] == '/' && i + 1 < source.Length && source[i + 1] == '*')
+            {
+                var close = source.IndexOf("*/", i + 2, StringComparison.Ordinal);
+                if (close < 0)
+                {
+                    return string.Empty;
+                }
+
+                i = close + 1;
+                continue;
+            }
+
+            /* String and char literals: kept, because the whole point is spotting a quoted relation name, but
+               their CONTENTS must not move the depth counters or end the scan. */
+            if (source[i] == '"' || source[i] == '\'')
+            {
+                var quote = source[i];
+                code.Append(quote);
+                for (i++; i < source.Length && source[i] != quote; i++)
+                {
+                    code.Append(source[i]);
+                    if (source[i] == '\\' && i + 1 < source.Length)
+                    {
+                        code.Append(source[++i]);
+                    }
+                }
+
+                code.Append(quote);
+                continue;
+            }
+
+            code.Append(source[i]);
+
+            switch (source[i])
+            {
+                case '{':
+                case '(':
+                case '[':
+                    depth++;
+                    break;
+                case '}':
+                case ')':
+                case ']':
+                    depth--;
+                    break;
+                case ';' when depth == 0:
+                    return code.ToString();
+            }
+        }
+
+        return string.Empty;
     }
 
     /// <summary>
