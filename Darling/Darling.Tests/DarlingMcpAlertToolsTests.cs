@@ -284,6 +284,7 @@ public sealed class DarlingMcpAlertToolsLivePostgresTests
         await DeleteRowsAsync(connection, ct);
         await using var postgres = NpgsqlDataSource.Create(cs!);
 
+        var bodySucceeded = false;
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
@@ -323,10 +324,13 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
             var mutes = await DarlingMcpAlertTools.GetMuteRules(postgres);
             Assert.False(mutes.StartsWith("Error during", StringComparison.Ordinal), mutes);
             Assert.Contains(MuteRuleId, mutes, StringComparison.Ordinal);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, ct);
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -351,6 +355,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
         var newThreshold = originalThreshold == 91 ? 71 : 91;                 // a distinct, in-range value
         var muteTag = "mcp_alert_write_e2e_" + Guid.NewGuid().ToString("N");  // own-scoped cleanup tag
 
+        var bodySucceeded = false;
         try
         {
             /* update_alert_settings — a PARTIAL update flips ONE threshold; the response echoes the full new settings. */
@@ -388,12 +393,21 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
             Assert.Equal("deleted", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.DeleteMuteRule(postgres, ruleId)));
             Assert.DoesNotContain(ruleId, await DarlingMcpAlertTools.GetMuteRules(postgres), StringComparison.Ordinal);
             Assert.Equal("not_found", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.DeleteMuteRule(postgres, ruleId)));
+
+            bodySucceeded = true;
         }
         finally
         {
-            /* Restore the singleton threshold and drop any leftover test mute rule (own-scoped by the GUID reason). */
-            await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE config_alert_settings SET cpu_threshold_percent = $1 WHERE id = 1", originalThreshold);
-            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM config_mute_rules WHERE reason = $1", muteTag);
+            /* Restore the singleton threshold and drop any leftover test mute rule (own-scoped by the GUID reason).
+
+               The RESTORE is why this teardown matters more than most (#1902): config_alert_settings is a
+               SINGLETON the whole store shares, so abandoning this leaves every later test — and every later
+               run on a reused database — reading a CPU threshold this test invented. */
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "UPDATE config_alert_settings SET cpu_threshold_percent = $1 WHERE id = 1", originalThreshold);
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "DELETE FROM config_mute_rules WHERE reason = $1", muteTag);
+            });
         }
     }
 

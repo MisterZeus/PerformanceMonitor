@@ -224,6 +224,7 @@ public sealed class DarlingMcpHealthToolsLivePostgresTests
         await DeleteRowsAsync(connection, ct);
         await using var postgres = NpgsqlDataSource.Create(cs!);
 
+        var bodySucceeded = false;
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
@@ -255,10 +256,13 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
             }
 
             Assert.DoesNotContain("2026-07-20", onToday, StringComparison.Ordinal);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, ct);
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -275,6 +279,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
         await DeleteRowsAsync(connection, ct);
         await using var postgres = NpgsqlDataSource.Create(cs!);
 
+        var bodySucceeded = false;
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
@@ -321,10 +326,13 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
                 postgres, ServerName, when.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
             DarlingMcpTestData.AssertEnvelope(daily, ServerName, "overall_health");
             Assert.Contains("Critical", daily, StringComparison.Ordinal);   /* the deadlock makes the day Critical */
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, ct);
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
         }
     }
 

@@ -426,10 +426,11 @@ public sealed class DarlingMcpPlanToolsLivePostgresTests
         using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
-        await DeleteRowsAsync(connection);
+        await DeleteRowsAsync(connection, ct);
 
         await using var postgres = NpgsqlDataSource.Create(cs!);
 
+        var bodySucceeded = false;
         try
         {
             await RegisterServerAsync(connection);
@@ -492,10 +493,13 @@ public sealed class DarlingMcpPlanToolsLivePostgresTests
             /* ---- server resolution flows through the tool: an unknown name returns the listing error. */
             var unknown = await DarlingMcpPlanTools.AnalyzeQueryPlan(postgres, QueryHash, "darling-mcp-no-such-server");
             Assert.StartsWith("Could not resolve server.", unknown, StringComparison.Ordinal);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -594,13 +598,13 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", connection);
     private static DateTime TruncateToSeconds(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
 
-    private static async Task DeleteRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM query_stats WHERE server_id = {ServerId}; " +
             $"DELETE FROM procedure_stats WHERE server_id = {ServerId}; " +
             $"DELETE FROM query_store_stats WHERE server_id = {ServerId}; " +
             $"DELETE FROM servers WHERE server_id = {ServerId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 }
