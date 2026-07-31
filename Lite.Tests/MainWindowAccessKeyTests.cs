@@ -245,7 +245,7 @@ public sealed class MainWindowAccessKeyTests
     /// </summary>
     private static char AccessKeyOf(string label)
     {
-        var m = Regex.Match(label.Replace("__", " ", StringComparison.Ordinal), "_(.)");
+        var m = Regex.Match(label.Replace("__", "\0", StringComparison.Ordinal), "_(.)");
         return m.Success ? char.ToUpperInvariant(m.Groups[1].Value[0]) : '\0';
     }
 
