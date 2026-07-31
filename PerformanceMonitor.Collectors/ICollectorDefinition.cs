@@ -119,6 +119,32 @@ public interface ICollectorDefinition<TRow> : ICollectorSchemaInfo
     ValueTask ApplySupplementalAsync(List<TRow> rows, DbDataReader reader, CollectorContext context, CancellationToken cancellationToken);
 
     /// <summary>
+    /// True when this definition's batch may return an OPTIONAL trailing (item_name, error_text) result
+    /// set AFTER its payload rows, naming items it reached but could not probe (#1851) — the payload
+    /// path's half of the probe-failure contract #1837 gave the enumerating collectors. The host reads it
+    /// through <see cref="EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync"/> once
+    /// <see cref="ReadAsync"/> returns, summarizing it onto the run's collection_log row and logging the
+    /// per-item errors capped. Set by a definition whose own server-side cursor would otherwise discard
+    /// per-database failures in a CATCH, leaving a database silently absent from a SUCCESS row.
+    ///
+    /// <para>False (the common case) means the host never advances the reader past the payload — the
+    /// pre-#1851 behavior exactly. The declaration is required rather than inferred because a payload
+    /// reader can legitimately carry several result sets that belong to the definition itself
+    /// (<c>tempdb_stats</c> reads two), and a trailing-set read must never mistake one of those for
+    /// failures. An enumeration needs no such flag: its first result set is a bare item list, so anything
+    /// after it can only be the failure set.</para>
+    ///
+    /// <para>Declaring it does NOT oblige every run to produce the set. A declaring collector that
+    /// returns only its payload reads as zero failures and no note, which is what lets one definition
+    /// cover a shape that only some targets take — <c>database_size_stats</c> emits the set from its
+    /// on-prem cursor and runs a single cursor-less query on Azure SQL DB.</para>
+    ///
+    /// <para>Not consulted on the per-database or enumeration paths: those read through their own
+    /// contracts.</para>
+    /// </summary>
+    bool EmitsProbeFailures { get; }
+
+    /// <summary>
     /// Optional enumeration shape (the "[db].sys.sp_executesql" idiom): when non-null, the host
     /// runs this query first (single string column, e.g. database names), then executes
     /// <see cref="BuildPerItemQuery"/> once per item ON THE SAME CONNECTION, feeding each reader

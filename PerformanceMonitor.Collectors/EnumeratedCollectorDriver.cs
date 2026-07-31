@@ -39,6 +39,17 @@ public sealed record EnumerationOutcome(
     string? Note);
 
 /// <summary>
+/// What the shared PAYLOAD-path probe-failure read produced (#1851): the items the collector's own
+/// internal enumeration could not probe, and the collection-log note (null on the ordinary path) the host
+/// attaches to the run's row. The payload twin of <see cref="EnumerationOutcome"/>, minus the item list —
+/// on this path the result set the host already consumed IS the payload, so there is no item list to
+/// return.
+/// </summary>
+public sealed record ProbeFailureOutcome(
+    IReadOnlyList<EnumerationProbeFailure> ProbeFailures,
+    string? Note);
+
+/// <summary>
 /// The shared control-flow driver for the enumeration collectors' per-item loop (#1556). Both hosts
 /// (Lite → DuckDB, Darling → Postgres) ran a byte-identical per-item loop that accumulated EVERY
 /// database's rows into one list before a single write — the shape that let one 24-server query_store
@@ -102,8 +113,10 @@ public static class EnumeratedCollectorDriver
         "{Collector} on '{Server}': {Total} item(s) failed their enumeration probe; {Suppressed} beyond the first {Shown} not logged.";
 
     /// <summary>
-    /// The item name reported for a malformed probe-failure result set — see
-    /// <see cref="ReadEnumerationAsync"/>. Not a database name, so it cannot collide with one.
+    /// The item name reported when the probe-failure result set itself could not be read as
+    /// (item_name, error_text) — the wrong SHAPE (see <see cref="ReadEnumerationAsync"/>) or a reader
+    /// that faulted while advancing to it (see <see cref="ReadPayloadProbeFailuresAsync"/>). Not a
+    /// database name, so it cannot collide with one.
     /// </summary>
     public const string ContractViolationItem = "(enumeration)";
 
@@ -112,9 +125,23 @@ public static class EnumeratedCollectorDriver
     /// rather than thrown so that a bad enumeration surfaces through the very mechanism this contract
     /// exists for — a note in Collection Health plus an app-log line — instead of failing an otherwise
     /// working collection cycle.
+    ///
+    /// <para>Names the set by its ROLE rather than its position, because the two channels place it
+    /// differently: it is an enumeration's SECOND result set (#1837) and a payload collector's TRAILING
+    /// one (#1851). One wording covers both; naming a position would be wrong on one of them.</para>
     /// </summary>
     public const string ContractViolationError =
-        "the enumeration's second result set must be (item_name, error_text); probe failures were not read";
+        "the probe-failure result set must be (item_name, error_text); probe failures were not read";
+
+    /// <summary>
+    /// What an UNREADABLE trailing probe-failure set reports on the payload path (#1851), <c>{0}</c> = the
+    /// reader's own message. Reached when advancing past the payload throws — a batch that raised an error
+    /// after emitting its rows is the realistic case. Reported AS a probe failure for the same reason a
+    /// malformed set is: the payload rows already read are good and about to be written, so failing the
+    /// whole cycle to announce a diagnostics fault would trade a quiet problem for a loud unrelated one.
+    /// </summary>
+    public const string UnreadableFailureSetErrorFormat =
+        "the trailing probe-failure result set could not be read - {0}";
 
     /// <summary>Stand-in for a probe failure whose error column came back NULL — the failure still counts.</summary>
     public const string NoErrorText = "(no error text)";
@@ -130,6 +157,9 @@ public static class EnumeratedCollectorDriver
 
     /// <summary><see cref="ProbeFailureNoteFormat"/> parsed once (CA1863) — the const stays the greppable, pinnable text.</summary>
     private static readonly CompositeFormat s_probeFailureNote = CompositeFormat.Parse(ProbeFailureNoteFormat);
+
+    /// <summary><see cref="UnreadableFailureSetErrorFormat"/> parsed once (CA1863).</summary>
+    private static readonly CompositeFormat s_unreadableFailureSet = CompositeFormat.Parse(UnreadableFailureSetErrorFormat);
 
     /// <summary>
     /// Reads an enumeration query's result: the item list, then the OPTIONAL SECOND RESULT SET of
@@ -165,6 +195,62 @@ public static class EnumeratedCollectorDriver
     }
 
     /// <summary>
+    /// The PAYLOAD path's half of the probe-failure contract (#1851). #1837 gave the ENUMERATING
+    /// collectors a channel for items they could not probe; the collectors whose one result set IS the
+    /// payload had none, so <c>database_size_stats</c>'s server-side cursor discarded every
+    /// inaccessible database in an empty CATCH and reported SUCCESS with that database's rows simply
+    /// missing. Such a collector may now return an OPTIONAL result set of (item_name, error_text)
+    /// AFTER its payload, which the host reads here — through the same reader, composer, templates and
+    /// log cap as the enumeration path, so the two channels cannot drift into two wordings.
+    ///
+    /// <para>
+    /// Call this AFTER <see cref="ICollectorDefinition{TRow}.ReadAsync"/> has drained the payload and
+    /// only when the definition declares <see cref="ICollectorDefinition{TRow}.EmitsProbeFailures"/>.
+    /// The declaration is what makes the read safe: unlike an enumeration — whose first result set is a
+    /// bare item list, so anything after it can only be the failure set — a payload collector's reader
+    /// may legitimately hold result sets its own <c>ReadAsync</c> chose to consume or ignore
+    /// (<c>tempdb_stats</c> reads two), and this read must never reinterpret one of those as failures.
+    /// </para>
+    ///
+    /// <para>
+    /// A declaring collector that returns NO trailing set is the healthy case, not a fault: it reads as
+    /// zero failures and no note, exactly like the empty set. That tolerance is what lets one definition
+    /// declare the contract for a shape that only some targets produce — <c>database_size_stats</c>
+    /// emits the set from its on-prem cursor and has no cursor at all on Azure SQL DB.
+    /// </para>
+    /// </summary>
+    /// <param name="reader">The payload reader, already drained by the definition's own read.</param>
+    public static async Task<ProbeFailureOutcome> ReadPayloadProbeFailuresAsync(
+        DbDataReader reader,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(reader);
+
+        IReadOnlyList<EnumerationProbeFailure> failures;
+        try
+        {
+            failures = await ReadProbeFailuresAsync(reader, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* Advancing past the payload can throw where an enumeration's read cannot: the batch may
+               have raised an error AFTER emitting its rows, and the provider surfaces that here. The
+               payload rows are already materialized and are about to be written, so this reports itself
+               through the contract instead of discarding a good collection to announce it. */
+            failures = new[]
+            {
+                new EnumerationProbeFailure(
+                    ContractViolationItem,
+                    string.Format(CultureInfo.InvariantCulture, s_unreadableFailureSet, ex.Message)),
+            };
+        }
+
+        /* enumerationWasEmpty: false — a payload collector has no enumeration whose emptiness could be
+           reported, and its own empty-payload case is already visible as rows_collected = 0. */
+        return new ProbeFailureOutcome(failures, BuildNote(enumerationWasEmpty: false, failures.Count));
+    }
+
+    /// <summary>
     /// Composes the collection-log note for one enumeration: the empty-enumeration breadcrumb, the
     /// probe-failure summary, both (all probes failed, so nothing was enumerable), or null for the
     /// ordinary path. The single place either note text is built, so the two hosts write the same string
@@ -185,8 +271,10 @@ public static class EnumeratedCollectorDriver
     }
 
     /// <summary>
-    /// Advances to the optional second result set and reads its (item_name, error_text) rows. No second
-    /// result set — the shape every enumeration had before #1837 — returns an empty list.
+    /// Advances to the optional trailing result set and reads its (item_name, error_text) rows. No such
+    /// result set — the shape every enumeration had before #1837, and every payload collector before
+    /// #1851 — returns an empty list. The single implementation behind BOTH channels: the enumeration
+    /// read above and <see cref="ReadPayloadProbeFailuresAsync"/>.
     /// </summary>
     private static async Task<IReadOnlyList<EnumerationProbeFailure>> ReadProbeFailuresAsync(
         DbDataReader reader,

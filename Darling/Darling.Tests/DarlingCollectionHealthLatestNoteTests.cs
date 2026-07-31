@@ -96,6 +96,15 @@ public sealed class DarlingCollectionHealthLatestNoteTests
             await SeedAsync(connection, ct, "blocking", MinutesAgo(30), "SUCCESS", EnumeratedCollectorDriver.EmptyEnumerationMessage);
             await SeedAsync(connection, ct, "blocking", MinutesAgo(20), "SESSION_MISSING", "zzz session missing");
 
+            /* #1851 made database_size_stats — a collector with no enumeration at all — the first
+               NON-enumerating source of a note. The read must treat it identically: same newest-first rank
+               over the same counted text, same qualifier, and still nowhere near last_error. A rank or a
+               gate that had quietly assumed "notes come from enumerations" would pass every #1854 case
+               above and fail here. */
+            await SeedAsync(connection, ct, "database_size_stats", MinutesAgo(30), "SUCCESS", ProbeNote(12));
+            await SeedAsync(connection, ct, "database_size_stats", MinutesAgo(20), "SUCCESS", ProbeNote(3));
+            await SeedAsync(connection, ct, "database_size_stats", MinutesAgo(10), "SUCCESS", null);
+
             /* ── the Viewer's read (the Collection Health grid) ── */
             await using (var viewer = new ViewerDataService(cs!))
             {
@@ -119,6 +128,12 @@ public sealed class DarlingCollectionHealthLatestNoteTests
                 var blocking = health.Single(h => h.CollectorName == "blocking");
                 Assert.Equal(EnumeratedCollectorDriver.EmptyEnumerationMessage, blocking.LastNote);
                 Assert.Equal(1, blocking.NoteCount);
+
+                var databaseSize = health.Single(h => h.CollectorName == "database_size_stats");
+                Assert.Equal(ProbeNote(3), databaseSize.LastNote);
+                Assert.Equal(ProbeNote(3) + " (2 of 3 runs)", databaseSize.NoteFormatted);
+                Assert.Equal(2, databaseSize.NoteCount);
+                Assert.Null(databaseSize.LastError);
             }
 
             /* ── the MCP service's read (get_collection_health, and the web dashboard's table behind it) ── */

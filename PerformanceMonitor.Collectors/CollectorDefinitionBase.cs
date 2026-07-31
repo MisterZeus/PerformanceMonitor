@@ -58,6 +58,8 @@ public abstract class CollectorDefinitionBase<TRow> : ICollectorDefinition<TRow>
     public virtual ValueTask ApplySupplementalAsync(List<TRow> rows, DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
         => ValueTask.CompletedTask;
 
+    public virtual bool EmitsProbeFailures => false;
+
     public virtual CollectorQuery? BuildEnumerationQuery(CollectorContext context) => null;
 
     public virtual CollectorQuery? BuildEnumerationProbe(CollectorContext context) => null;
