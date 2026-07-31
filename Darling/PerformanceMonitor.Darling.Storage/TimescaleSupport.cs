@@ -1656,22 +1656,25 @@ WITH NO DATA";
     public const string IntervalDailyRetentionInterval = "10 days";
 
     /// <summary><see cref="TimeSpan"/> twin of <see cref="RawRetentionInterval"/> for callers doing arithmetic
-    /// (the #1665 partial-window notice); RetentionTierRouterTests pins the two equal so they can't drift.</summary>
+    /// (the #1665 partial-window notice). RetentionTierRouterTests pins the two equal, as does the all-five
+    /// sweep in TimescaleContinuousAggregateTests (#1905), so they can't drift.</summary>
     public static readonly TimeSpan RawRetentionSpan = TimeSpan.FromDays(4);
 
-    /// <summary><see cref="TimeSpan"/> twin of <see cref="IntervalRetentionInterval"/>; pinned equal, and
-    /// pinned STRICTLY GREATER than <see cref="RawRetentionSpan"/>, by TimescaleSupportTests — that ordering
-    /// is what keeps the raw arming gate satisfiable in steady state.</summary>
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="IntervalRetentionInterval"/>, pinned equal by
+    /// TimescaleContinuousAggregateTests. The ORDERING that keeps the raw arming gate satisfiable — this
+    /// strictly greater than <see cref="RawRetentionSpan"/> — is no longer pinned here by hand: it is one pair
+    /// in the walk over <see cref="RetentionPolicies"/> (#1905).</summary>
     public static readonly TimeSpan IntervalRetentionSpan = TimeSpan.FromDays(7);
 
-    /// <summary><see cref="TimeSpan"/> twin of <see cref="IntervalDailyRetentionInterval"/>; pinned equal, and
-    /// pinned STRICTLY GREATER than <see cref="IntervalRetentionSpan"/>, by TimescaleSupportTests — a
-    /// consumer that expired before its source would hold its source's purge forever, and since #1877 would
-    /// also STOP one that is already running, on a healthy store, without self-releasing.</summary>
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="IntervalDailyRetentionInterval"/>, pinned equal by
+    /// TimescaleContinuousAggregateTests. Its ordering against <see cref="IntervalRetentionSpan"/> is checked
+    /// by the walk over <see cref="RetentionPolicies"/> (#1905), like every other pair: a consumer that expired
+    /// before its source would hold its source's purge forever, and since #1877 would also STOP one that is
+    /// already running, on a healthy store, without self-releasing.</summary>
     public static readonly TimeSpan IntervalDailyRetentionSpan = TimeSpan.FromDays(10);
 
     /// <summary><see cref="TimeSpan"/> twin of <see cref="HourlyRetentionInterval"/>; pinned equal by
-    /// RetentionTierRouterTests.</summary>
+    /// RetentionTierRouterTests and by the all-five sweep in TimescaleContinuousAggregateTests (#1905).</summary>
     public static readonly TimeSpan HourlyRetentionSpan = TimeSpan.FromDays(21);
 
     /// <summary>
@@ -1786,6 +1789,77 @@ AND   j.hypertable_name = '{relation}'";
         ("procedure_stats", "collection_time", new[] { ProcedureStatsHourlyView }),
         ("query_store_stats", "collection_time", new[] { QueryStoreStatsHourlyView, QueryStoreStatsIntervalHourlyView }),
     };
+
+    /// <summary>
+    /// EVERY retention policy this store attaches, each naming the tier(s) that must already cover it before
+    /// arming is safe (#1680). The rule this list enforces is: NEVER DROP WHAT YOUR CONSUMER HAS NOT CAPTURED
+    /// YET. Iterated by <see cref="EnsureRetentionPoliciesAsync"/>, which used to build it as a local.
+    ///
+    /// <para><b>Declared rather than built inline (#1905), because the ORDERING it encodes became testable
+    /// only once something outside the sweep could enumerate it.</b> Every entry's consumers must outlive the
+    /// entry itself — a consumer that expired first would hold its own source's purge forever, and since #1877
+    /// would also STOP a purge already running on a healthy store, without self-releasing. That invariant used
+    /// to be asserted by hand against the pairs that happened to exist; it is now walked over this list, so a
+    /// policy added to a tier that has none today is covered the day it is added rather than the day someone
+    /// remembers to extend a test.</para>
+    ///
+    /// <para>MUST stay declared AFTER <see cref="RawTierCoverage"/> and <see cref="BaselineAggregates"/>:
+    /// static field initializers run in textual order, so moving it above either one reads a null and throws
+    /// <c>TypeInitializationException</c> on first touch.</para>
+    ///
+    /// <para>For the raw and hourly tiers the consumer is the next aggregate down the ladder — raw tables are
+    /// covered by their hourly CAGG, hourly CAGGs by their daily one — so "coverage" names that tier.</para>
+    ///
+    /// <para>THE LEAF RULE (#1757): a tier with nothing below it is not exempt, it just has a different
+    /// consumer. The baseline aggregates are leaves; their consumer is the baseline COMPUTATION, whose capture
+    /// requirement is <c>BaselineMath.BaselineWindowDays</c> (30). Their arming condition is therefore "the
+    /// tier holds at least the baseline window of buckets" — the same rule with the consumer named honestly,
+    /// still runtime-evaluable like the other seven rather than a degenerate always-open gate. It is
+    /// belt-and-braces by construction: <see cref="BaselineRetentionSpan"/> (35d) already exceeds the window,
+    /// so even an immediately-armed policy could not eat it. A policy with no identifiable consumer at all
+    /// still does not belong in this list.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<(string Relation, string DropAfter, string TimeColumn, IReadOnlyList<string> Coverage)> RetentionPolicies =
+        RawTierCoverage
+            .Select(t => (Relation: t.Relation, DropAfter: RawRetentionInterval, TimeColumn: t.TimeColumn, Coverage: t.Coverage))
+            .Concat(new (string Relation, string DropAfter, string TimeColumn, IReadOnlyList<string> Coverage)[]
+        {
+            (Relation: QueryStatsHourlyView,      DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: new[] { QueryStatsDailyView }),
+            (Relation: ProcedureStatsHourlyView,  DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: new[] { ProcedureStatsDailyView }),
+            (Relation: QueryStoreStatsHourlyView, DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: new[] { QueryStoreStatsDailyView }),
+            (Relation: QueryStatsDbHourlyView,    DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: new[] { QueryStatsDbDailyView }),
+
+            /* The corrected Query Store tier (#1849, extended by #1869).
+
+               L1 has THREE consumers. Two because the corrected daily is its SIBLING rather than the corrected
+               hourly's child (identity-width hierarchical CAGGs are leaves — see
+               CreateQueryStoreStatsCorrectedDailySql), and a third because #1869 hung the interval-grain DAILY
+               layer off it as well. All three are named, so L1 cannot purge over history ANY of them is still
+               missing — and the third is the load-bearing one on a store taking this build, because that store
+               has a fully-caught-up L1 and an empty interval_daily, which is precisely the state where a gate
+               reading only the older two would drop the only copy of history the day-grain daily has never
+               seen. That store's L1 policy was ALREADY ARMED under #1849, and until #1877 the gate could only
+               arm — so it kept purging while the new consumer held nothing, capping how deep the day-grain
+               daily could ever be backfilled. The sweep now RE-HOLDS it on the measured shortfall.
+
+               The corrected HOURLY is a leaf, so the leaf rule applies (#1757): its consumer is the composed
+               READ, which routes past HourlyRouteMaxAge to the corrected DAILY — exactly the relationship the
+               original hourly has to the original daily, so it takes the same horizon and the same coverage
+               tier.
+
+               The interval-grain DAILY (#1869) mirrors L1 one level down: one consumer (the day-grain daily it
+               feeds), and a short horizon that must still EXCEED L1's, since it is what L1's own gate waits on.
+               Both composer-grain dailies are kept indefinitely and get no policy. */
+            (Relation: QueryStoreStatsIntervalHourlyView,  DropAfter: IntervalRetentionInterval,      TimeColumn: "bucket", Coverage: new[] { QueryStoreStatsCorrectedHourlyView, QueryStoreStatsCorrectedDailyView, QueryStoreStatsIntervalDailyView }),
+            (Relation: QueryStoreStatsCorrectedHourlyView, DropAfter: HourlyRetentionInterval,        TimeColumn: "bucket", Coverage: new[] { QueryStoreStatsCorrectedDailyView }),
+            (Relation: QueryStoreStatsIntervalDailyView,   DropAfter: IntervalDailyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { QueryStoreStatsDayGrainDailyView }),
+        })
+        /* The nine baseline-tier policies (#1757). Coverage is the tier ITSELF: see the leaf rule in the
+           summary above -- their consumer is the baseline computation, whose capture requirement is the
+           30-day window, and BaselineRetentionSpan (35d) exceeds it by construction. */
+        .Concat(BaselineAggregates.Select(a =>
+            (Relation: a.View, DropAfter: BaselineRetentionInterval, TimeColumn: "bucket", Coverage: (IReadOnlyList<string>)new[] { a.View })))
+        .ToArray();
 
     /// <summary>
     /// Is <paramref name="relation"/> one of the coverage-gated raw tiers? Lets a caller skip the cost of a
@@ -1957,67 +2031,12 @@ AND   j.hypertable_name = '{relation}'";
             throw new ArgumentNullException(nameof(connection));
         }
 
-        /* Each policy names the tier that must already cover it before arming is safe (#1680). The rule this
-           list enforces is: NEVER DROP WHAT YOUR CONSUMER HAS NOT CAPTURED YET.
-
-           For the raw and hourly tiers the consumer is the next aggregate down the ladder -- raw tables are
-           covered by their hourly CAGG, hourly CAGGs by their daily one -- so "coverage" names that tier.
-
-           THE LEAF RULE (#1757): a tier with nothing below it is not exempt, it just has a different consumer.
-           The baseline aggregates are leaves; their consumer is the baseline COMPUTATION, whose capture
-           requirement is BaselineMath.BaselineWindowDays (30). Their arming condition is therefore "the tier
-           holds at least the baseline window of buckets" -- the same rule with the consumer named honestly,
-           still runtime-evaluable like the other seven rather than a degenerate always-open gate. It is
-           belt-and-braces by construction: BaselineRetentionSpan (35d) already exceeds the window, so even an
-           immediately-armed policy could not eat it, and Darling.Tests pins that static relation. A policy
-           with no identifiable consumer at all still does not belong in this list. */
-        var policies = RawTierCoverage
-            .Select(t => (Relation: t.Relation, DropAfter: RawRetentionInterval, TimeColumn: t.TimeColumn, Coverage: t.Coverage))
-            .Concat(new (string Relation, string DropAfter, string TimeColumn, IReadOnlyList<string> Coverage)[]
-        {
-            (Relation: QueryStatsHourlyView,      DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: new[] { QueryStatsDailyView }),
-            (Relation: ProcedureStatsHourlyView,  DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: new[] { ProcedureStatsDailyView }),
-            (Relation: QueryStoreStatsHourlyView, DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: new[] { QueryStoreStatsDailyView }),
-            (Relation: QueryStatsDbHourlyView,    DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: new[] { QueryStatsDbDailyView }),
-
-            /* The corrected Query Store tier (#1849, extended by #1869).
-
-               L1 has THREE consumers. Two because the corrected daily is its SIBLING rather than the corrected
-               hourly's child (identity-width hierarchical CAGGs are leaves — see
-               CreateQueryStoreStatsCorrectedDailySql), and a third because #1869 hung the interval-grain DAILY
-               layer off it as well. All three are named, so L1 cannot purge over history ANY of them is still
-               missing — and the third is the load-bearing one on a store taking this build, because that store
-               has a fully-caught-up L1 and an empty interval_daily, which is precisely the state where a gate
-               reading only the older two would drop the only copy of history the day-grain daily has never
-               seen. That store's L1 policy was ALREADY ARMED under #1849, and until #1877 the gate could only
-               arm — so it kept purging while the new consumer held nothing, capping how deep the day-grain
-               daily could ever be backfilled. The sweep below now RE-HOLDS it on the measured shortfall.
-
-               The corrected HOURLY is a leaf, so the leaf rule applies (#1757): its consumer is the composed
-               READ, which routes past HourlyRouteMaxAge to the corrected DAILY — exactly the relationship the
-               original hourly has to the original daily, so it takes the same horizon and the same coverage
-               tier.
-
-               The interval-grain DAILY (#1869) mirrors L1 one level down: one consumer (the day-grain daily it
-               feeds), and a short horizon that must still EXCEED L1's, since it is what L1's own gate waits on.
-               Both composer-grain dailies are kept indefinitely and get no policy. */
-            (Relation: QueryStoreStatsIntervalHourlyView,  DropAfter: IntervalRetentionInterval,      TimeColumn: "bucket", Coverage: new[] { QueryStoreStatsCorrectedHourlyView, QueryStoreStatsCorrectedDailyView, QueryStoreStatsIntervalDailyView }),
-            (Relation: QueryStoreStatsCorrectedHourlyView, DropAfter: HourlyRetentionInterval,        TimeColumn: "bucket", Coverage: new[] { QueryStoreStatsCorrectedDailyView }),
-            (Relation: QueryStoreStatsIntervalDailyView,   DropAfter: IntervalDailyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { QueryStoreStatsDayGrainDailyView }),
-        })
-        /* The nine baseline-tier policies (#1757). Coverage is the tier ITSELF: see the leaf rule in the
-           comment above -- their consumer is the baseline computation, whose capture requirement is the
-           30-day window, and BaselineRetentionSpan (35d) exceeds it by construction. */
-        .Concat(BaselineAggregates.Select(a =>
-            (Relation: a.View, DropAfter: BaselineRetentionInterval, TimeColumn: "bucket", Coverage: (IReadOnlyList<string>)new[] { a.View })))
-        .ToArray();
-
         var applied = 0;
         var armed = 0;
         var held = 0;
         var indeterminate = 0;
 
-        foreach (var (relation, dropAfter, timeColumn, coverage) in policies)
+        foreach (var (relation, dropAfter, timeColumn, coverage) in RetentionPolicies)
         {
             try
             {
@@ -2104,7 +2123,7 @@ AND   j.hypertable_name = '{relation}'";
 
         logger?.LogInformation(
             "TimescaleDB: {Applied}/{Total} retention policies in place, {Armed} armed, {Held} held paused pending backfill, {Indeterminate} left as-is (coverage unreadable) (raw {Raw}, hourly CAGGs {Hourly}; daily CAGGs kept indefinitely)",
-            applied, policies.Length, armed, held, indeterminate, RawRetentionInterval, HourlyRetentionInterval);
+            applied, RetentionPolicies.Count, armed, held, indeterminate, RawRetentionInterval, HourlyRetentionInterval);
         return applied;
     }
 
