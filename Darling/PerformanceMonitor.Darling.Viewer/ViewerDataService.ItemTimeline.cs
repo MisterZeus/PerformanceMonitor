@@ -32,7 +32,7 @@ public sealed partial class ViewerDataService
     /// in the same units the slicer's sort-driven metric overlay uses (ms for CPU/elapsed, raw counts for
     /// reads/writes).</summary>
     public sealed record ItemTimelinePoint(
-        DateTime CollectionTime, double CpuMs, double ElapsedMs, double Reads, double Writes, double PhysicalReads);
+        DateTime PointTime, double CpuMs, double ElapsedMs, double Reads, double Writes, double PhysicalReads);
 
     public const string QueryStatsItemTimelineSql = """
         SELECT

@@ -867,7 +867,7 @@ public sealed class ViewerQueriesLivePostgresTests
                   agrees with the deduped bars it is drawn over instead of showing a rising staircase. */
             var timeline = await viewer.GetQueryStoreItemTimelineAsync(DedupServerId, "DedupDb", queryId: 2, planId: 22, start, end);
             var point = Assert.Single(timeline);
-            Assert.Equal(bucketStart.AddMinutes(15), point.CollectionTime);
+            Assert.Equal(bucketStart.AddMinutes(15), point.PointTime);
             Assert.Equal(280.0, point.ElapsedMs, 3);       /* 40 x 7,000us; un-deduped this is 3 points, 50/150/280 */
             Assert.Equal(12.0, point.CpuMs, 3);            /* 40 x 300us */
 
@@ -1062,8 +1062,8 @@ public sealed class ViewerQueriesLivePostgresTests
             var overlay = await viewer.GetQueryStoreItemTimelineAsync(
                 IntervalIdentityServerId, "IdentityDb", queryId: 1, planId: 11, start, end);
             var overlayPoint = Assert.Single(overlay);
-            Assert.Equal(h0, overlayPoint.CollectionTime);
-            Assert.NotEqual(h1.AddMinutes(10), overlayPoint.CollectionTime);
+            Assert.Equal(h0, overlayPoint.PointTime);
+            Assert.NotEqual(h1.AddMinutes(10), overlayPoint.PointTime);
             Assert.Equal(280.0, overlayPoint.ElapsedMs, 3);
             Assert.Equal(12.0, overlayPoint.CpuMs, 3);
             Assert.Equal(buckets[0].TotalCpu, overlayPoint.CpuMs, 3);
