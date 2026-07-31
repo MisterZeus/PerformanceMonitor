@@ -70,7 +70,11 @@ DECLARE
     @sql nvarchar(max);
 
 SET @sql = CAST(N'
-SELECT /* PerformanceMonitorLite */ TOP (150) * FROM (
+SELECT /* PerformanceMonitorLite */ TOP (150)
+    ranked.*/*PLAN_SELECT*/
+FROM
+(
+SELECT TOP (150) * FROM (
 SELECT
     database_name = d.name,
     schema_name = OBJECT_SCHEMA_NAME(s.object_id, s.database_id),
@@ -96,8 +100,8 @@ SELECT
     max_logical_writes = s.max_logical_writes,
     ' AS nvarchar(max)) + @spills_cols + N'
     sql_handle = CONVERT(varchar(130), s.sql_handle, 1),
-    plan_handle = CONVERT(varchar(130), s.plan_handle, 1)/*PLAN_SELECT*/
-FROM sys.dm_exec_procedure_stats AS s/*PLAN_APPLY*/
+    plan_handle = CONVERT(varchar(130), s.plan_handle, 1)
+FROM sys.dm_exec_procedure_stats AS s
 CROSS APPLY
 (
     SELECT
@@ -151,8 +155,8 @@ SELECT
     max_logical_writes = s.max_logical_writes,
     ' + @spills_cols + CAST(N'
     sql_handle = CONVERT(varchar(130), s.sql_handle, 1),
-    plan_handle = CONVERT(varchar(130), s.plan_handle, 1)/*PLAN_SELECT*/
-FROM sys.dm_exec_trigger_stats AS s/*PLAN_APPLY*/
+    plan_handle = CONVERT(varchar(130), s.plan_handle, 1)
+FROM sys.dm_exec_trigger_stats AS s
 CROSS APPLY sys.dm_exec_sql_text(s.sql_handle) AS st
 CROSS APPLY
 (
@@ -195,8 +199,8 @@ SELECT
     max_logical_writes = s.max_logical_writes,
     ' AS nvarchar(max)) + @fn_spills_cols + CAST(N'
     sql_handle = CONVERT(varchar(130), s.sql_handle, 1),
-    plan_handle = CONVERT(varchar(130), s.plan_handle, 1)/*PLAN_SELECT*/
-FROM sys.dm_exec_function_stats AS s/*PLAN_APPLY*/
+    plan_handle = CONVERT(varchar(130), s.plan_handle, 1)
+FROM sys.dm_exec_function_stats AS s
 CROSS APPLY
 (
     SELECT
@@ -212,6 +216,8 @@ AND   s.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
 /*EXCLUSION_FILTER*/
 ) AS combined
 ORDER BY total_elapsed_time DESC
+) AS ranked/*PLAN_APPLY*/
+ORDER BY ranked.total_elapsed_time DESC
 OPTION(RECOMPILE);' AS nvarchar(max));
 
 EXECUTE sys.sp_executesql @sql;";
@@ -220,6 +226,10 @@ EXECUTE sys.sp_executesql @sql;";
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT /* PerformanceMonitorLite */ TOP (150)
+    ranked.*/*PLAN_SELECT*/
+FROM
+(
+SELECT TOP (150)
     database_name = DB_NAME(),
     schema_name = OBJECT_SCHEMA_NAME(s.object_id, s.database_id),
     object_name = OBJECT_NAME(s.object_id, s.database_id),
@@ -246,12 +256,14 @@ SELECT /* PerformanceMonitorLite */ TOP (150)
     min_spills = ISNULL(s.min_spills, 0),
     max_spills = ISNULL(s.max_spills, 0),
     sql_handle = CONVERT(varchar(130), s.sql_handle, 1),
-    plan_handle = CONVERT(varchar(130), s.plan_handle, 1)/*PLAN_SELECT*/
-FROM sys.dm_exec_procedure_stats AS s/*PLAN_APPLY*/
+    plan_handle = CONVERT(varchar(130), s.plan_handle, 1)
+FROM sys.dm_exec_procedure_stats AS s
 WHERE s.database_id = DB_ID()
 AND   s.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
 /*EXCLUSION_FILTER*/
 ORDER BY s.total_elapsed_time DESC
+) AS ranked/*PLAN_APPLY*/
+ORDER BY ranked.total_elapsed_time DESC
 OPTION(RECOMPILE);";
 
     /* Execution-plan capture — spliced into every branch (procedure/trigger/function) and the Azure
@@ -264,11 +276,20 @@ OPTION(RECOMPILE);";
        module's plan. Still the TEXT DMV (not sys.dm_exec_query_plan) so large/deep plans that overflow
        the xml type still return. dm_exec_text_query_plan(plan_handle, 0, -1) returns a single row, so
        the OUTER APPLY never multiplies rows and never drops one (NULL plan for an aged-out handle). */
+    /* #1959: the apply used to sit INSIDE each branch, below the TOP - so a burst window rendered a
+       module-grain plan (the big ones) for every candidate the TOP then discarded, which is the same
+       defect the field investigation measured at 81% of query_stats' runtime. The render now happens
+       ONCE, outside the ranked derived table, against at most 150 survivors: free when candidates fit
+       under the TOP (the daytime case the field measured as noise) and bounded when they do not (the
+       25-second overnight tails). The handle round-trips through CONVERT(varbinary(64), ..., 1) from
+       the varchar(130) the payload already carries, so no extra column threads through the branches
+       and the stored shape is untouched. Placement inside the shell keeps the fragment identical for
+       the standard (dynamic SQL) and Azure variants. */
     private const string PlanSelectFragment = @",
     query_plan_xml = tqp.query_plan";
 
     private const string PlanApplyFragment = @"
-OUTER APPLY sys.dm_exec_text_query_plan(s.plan_handle, 0, -1) AS tqp";
+OUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handle, 1), 0, -1) AS tqp";
 
     public override string Name => "procedure_stats";
 
