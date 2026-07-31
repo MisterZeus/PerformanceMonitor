@@ -51,6 +51,7 @@ PerformanceMonitor_Install_*.txt
 .internal/
 .claude/
 CLAUDE.md
+AGENTS.md
 Dashboard/todo.md
 Lite/TODO.md
 nul
