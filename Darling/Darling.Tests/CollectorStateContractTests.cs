@@ -7,9 +7,14 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
+using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -30,6 +35,7 @@ namespace Darling.Tests;
 /// Lite's DDL and both runners' wiring live in projects this one cannot all reference, so they are pinned
 /// at source, the idiom this suite already uses for cross-artifact contracts.</para>
 /// </summary>
+[Collection("live-postgres")]
 public sealed class CollectorStateContractTests
 {
     private const string RepoRootNotFound = "repo root not found -- the source pin cannot run";
@@ -151,6 +157,144 @@ public sealed class CollectorStateContractTests
                 source.Contains("SaveCollectorStateAsync(", StringComparison.Ordinal),
                 $"{name} must persist the observed state after the cycle");
         }
+    }
+
+    /* ---------------- gated: live store round-trip ---------------- */
+
+    /// <summary>Distinctive fake id — a real server_id is a storage-name hash, never this.</summary>
+    private const int TestServerId = -196200;
+
+    /// <summary>
+    /// The live round-trip through the REAL runner against a REAL store, which is the only thing that can
+    /// see this seam. Everything else in this file reads source or migration text.
+    ///
+    /// <para><b>Why the source pins were not enough, concretely.</b> The first version of this change bound
+    /// <c>DateTime.UtcNow</c> (Kind=Utc) for <c>updated_at</c>, and <c>collector_state.updated_at</c> is
+    /// <c>timestamp</c> WITHOUT time zone — Npgsql THROWS on that combination. The throw landed in
+    /// <see cref="DarlingCollectorRunner.SaveCollectorStateAsync"/>'s own best-effort catch, so nothing
+    /// failed, nothing logged above debug, and every source pin still passed while Darling persisted
+    /// NOTHING and paid the expensive fallback on every cycle forever. Lite was unaffected (DuckDB accepts
+    /// Kind=Utc), so this is exactly the single-SKU drift the rest of this file exists to prevent and could
+    /// not detect.</para>
+    ///
+    /// <para>That is why this test asserts the value is READABLE rather than that the save did not throw:
+    /// the save is best-effort by design and CANNOT throw at the caller. A write that silently does nothing
+    /// and a write that works are distinguishable only by reading it back.</para>
+    /// </summary>
+    [Fact]
+    public async Task CollectorState_SavesAndReloads_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live collector-state test.");
+
+        using (var connection = new NpgsqlConnection(connectionString))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+
+            /* Idempotent — brings an older store to current (so V44 exists), no-ops on a current one. */
+            await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+
+            await DeleteTestRowsAsync(connection, TestContext.Current.CancellationToken);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+
+        var bodySucceeded = false;
+        try
+        {
+            var first = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [DefaultTraceEventsCollector.LastTraceFilePathStateKey] = @"S:\MSSQL\Log\log_766.trc",
+            };
+
+            await runner.SaveCollectorStateAsync(
+                TestServerId, DefaultTraceEventsCollector.Instance.Name, first, TestContext.Current.CancellationToken);
+
+            var loaded = await runner.GetCollectorStateAsync(
+                TestServerId, DefaultTraceEventsCollector.Instance.Name, TestContext.Current.CancellationToken);
+
+            Assert.Equal(
+                @"S:\MSSQL\Log\log_766.trc",
+                Assert.Contains(DefaultTraceEventsCollector.LastTraceFilePathStateKey, loaded));
+
+            /* The path is rewritten on EVERY rollover, so the upsert's conflict target has to be right or
+               the collector starts failing at the first rollover — the exact moment the state must hold. */
+            var second = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [DefaultTraceEventsCollector.LastTraceFilePathStateKey] = @"S:\MSSQL\Log\log_767.trc",
+            };
+
+            await runner.SaveCollectorStateAsync(
+                TestServerId, DefaultTraceEventsCollector.Instance.Name, second, TestContext.Current.CancellationToken);
+
+            var reloaded = await runner.GetCollectorStateAsync(
+                TestServerId, DefaultTraceEventsCollector.Instance.Name, TestContext.Current.CancellationToken);
+
+            Assert.Equal(
+                @"S:\MSSQL\Log\log_767.trc",
+                Assert.Contains(DefaultTraceEventsCollector.LastTraceFilePathStateKey, reloaded));
+
+            using var connection = new NpgsqlConnection(connectionString);
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+
+            /* Exactly one row survived the second save, and updated_at was really written — a Kind=Utc bind
+               never gets this far, and a broken conflict target would leave two rows. */
+            /* Schema-qualified: this is the TEST's own housekeeping, and it must not depend on session
+               search_path. The runner's own SQL stays bare (`collector_state`) and resolves through the
+               store's `collect, config, public` path exactly as it does in production — that resolution is
+               part of what this test exercises; only the assertions around it are pinned down. On a store
+               migrated within this same run, a pooled physical connection can still carry the session path
+               it was established with, which is a rig artifact rather than anything about the product. */
+            using var check = new NpgsqlCommand(
+                "SELECT COUNT(*), MAX(updated_at) FROM collect.collector_state WHERE server_id = $1", connection);
+            check.Parameters.AddWithValue(TestServerId);
+            using var reader = await check.ExecuteReaderAsync(TestContext.Current.CancellationToken);
+            Assert.True(await reader.ReadAsync(TestContext.Current.CancellationToken));
+            Assert.Equal(1L, reader.GetInt64(0));
+            Assert.False(reader.IsDBNull(1), "updated_at must be stored, not left null");
+
+            /* NAIVE UTC — the store-wide convention every other timestamp column follows, and the assertion
+               that actually has teeth here. Checking Kind alone would be vacuous: a `timestamp` column
+               ALWAYS reads back Unspecified regardless of what was written. What can really go wrong is the
+               VALUE: bind a Kind=Utc DateTime and Npgsql infers `timestamptz`, PostgreSQL casts it into the
+               `timestamp` column, and the cast renders it in the SERVER's zone — so updated_at silently
+               lands offset by the server's UTC offset (four hours on this rig, America/New_York) while
+               every other timestamp in the store is UTC. A generous window keeps this about the offset
+               rather than about clock skew or test duration. */
+            var storedUpdatedAt = reader.GetDateTime(1);
+            Assert.Equal(DateTimeKind.Unspecified, storedUpdatedAt.Kind);
+
+            var driftFromUtc = (DateTime.UtcNow - storedUpdatedAt).Duration();
+            Assert.True(
+                driftFromUtc < TimeSpan.FromMinutes(5),
+                $"updated_at must be naive UTC; stored {storedUpdatedAt:o} is {driftFromUtc} from UtcNow "
+                + "(a whole-hour gap means it was written as timestamptz and rendered in the server's zone)");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            /* #1902: teardown goes through LiveStoreCleanup, never a hand-rolled finally. A cleanup that
+               throws on its own connection would REPLACE the body's real failure with a connection error,
+               which is how the #1794 flake hid its actual cause for so long. */
+            await LiveStoreCleanup.RunAsync(
+                connectionString!,
+                bodySucceeded,
+                (connection, cancellationToken) => DeleteTestRowsAsync(connection, cancellationToken));
+        }
+    }
+
+    /// <summary>
+    /// Removes this test's rows so the shared live store is left exactly as found — the
+    /// <see cref="LivePostgresStoreFixture"/> cleanup check fails the collection otherwise (#1873).
+    /// </summary>
+    private static async Task DeleteTestRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken cancellationToken)
+    {
+        using var delete = new NpgsqlCommand("DELETE FROM collect.collector_state WHERE server_id = $1", connection);
+        delete.Parameters.AddWithValue(TestServerId);
+        await delete.ExecuteNonQueryAsync(cancellationToken);
     }
 
     /// <summary>

@@ -778,7 +778,15 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
                 command.Parameters.AddWithValue(collectorName);
                 command.Parameters.AddWithValue(entry.Key);
                 command.Parameters.AddWithValue(entry.Value);
-                command.Parameters.AddWithValue(DateTime.UtcNow);
+                /* Naive UTC, Kind-Unspecified — the product-wide PG timestamp discipline
+                   (PgAlertStateStore.NaiveUtcNow, DarlingObservability, the storedCollectionTime below).
+                   updated_at is `timestamp` WITHOUT time zone, and binding a Kind=Utc DateTime does not
+                   fail: Npgsql infers `timestamptz` from the Kind, PostgreSQL casts it into the column,
+                   and the cast renders it in the SERVER's zone — so the row lands silently offset by the
+                   server's UTC offset (measured at exactly 4h on an America/New_York store) while every
+                   other timestamp in the store is UTC. Nothing throws and nothing logs; the column simply
+                   disagrees with the rest of the store. */
+                command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
                 await command.ExecuteNonQueryAsync(cancellationToken);
             }
         }
