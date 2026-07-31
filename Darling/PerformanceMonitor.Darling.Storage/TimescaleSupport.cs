@@ -863,7 +863,7 @@ $do$";
 
     /// <summary>The Query Store DAILY continuous aggregate — hierarchical from <see cref="QueryStoreStatsHourlyView"/>,
     /// same composer dims (module_name / query_hash) + weighted sums. Kept indefinitely; a QS window past the
-    /// hourly's 21d horizon routes here.</summary>
+    /// hourly's horizon routes here.</summary>
     public const string QueryStoreStatsDailyView = "query_store_stats_daily";
 
     /// <summary>
@@ -1022,7 +1022,7 @@ WITH NO DATA";
     /// The per-DATABASE query_stats rollup (#1661). Added rather than folded into
     /// <see cref="CreateQueryStatsHourlySql"/> deliberately: TimescaleDB cannot ALTER columns into a continuous
     /// aggregate, so widening that one would mean DROP + recreate, and now that retention is active the rebuild
-    /// would re-materialize from 4 days of raw and permanently destroy the 21-day hourly and indefinite daily
+    /// would re-materialize from 4 days of raw and permanently destroy the retained hourly and indefinite daily
     /// history the tiers exist to preserve. A NEW aggregate costs nothing existing; its history simply starts
     /// accumulating from deploy.
     ///
@@ -1156,7 +1156,7 @@ WITH NO DATA";
 
        WHY THREE NEW OBJECTS INSTEAD OF FIXING THE TWO ABOVE. A continuous aggregate's columns cannot be
        ALTERed, so reshaping means DROP + recreate — and with retention active the rebuild re-materializes
-       from 4 days of raw and PERMANENTLY DESTROYS the 21-day hourly and indefinite daily history (the same
+       from 4 days of raw and PERMANENTLY DESTROYS the retained hourly and indefinite daily history (the same
        reason CreateQueryStatsDbHourlySql was added rather than folded in). Per #1759/#1793 materialized
        history is never destroyed, so the corrected rollups are NEW objects alongside; the old pair keeps its
        identity, data, retention and jobs, and still answers windows the corrected tier has not reached.
@@ -2065,7 +2065,7 @@ AND   j.hypertable_name = '{relation}'";
     /// Attaches the tiered retention policies: the three raw tables drop at <see cref="RawRetentionInterval"/>, the
     /// three hourly CAGGs at <see cref="HourlyRetentionInterval"/>; the daily CAGGs are kept indefinitely (no
     /// policy). Ordering safety is by HORIZON, not run order — each tier's drop stays comfortably past the next
-    /// tier's 3-day refresh start_offset (4d raw vs 3d hourly refresh; 21d hourly vs 3d daily refresh), so a drop
+    /// tier's 3-day refresh start_offset (4d raw vs 3d hourly refresh; 90d hourly vs 3d daily refresh), so a drop
     /// never removes history the next tier has not yet materialized. Idempotent (<c>if_not_exists</c>) and
     /// failure-isolated per policy. MUST run AFTER <see cref="EnsureContinuousAggregatesAsync"/> so the hourly
     /// CAGGs the hourly policies target already exist. Returns the number of policies in place.

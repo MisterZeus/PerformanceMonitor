@@ -149,7 +149,7 @@ public static class RetentionTierRouter
     /// <para>Daily degrades to hourly before either degrades to raw, mirroring the availability ladder. That
     /// step matters for exactly one live shape: a daily rollup still empty while its hourly has materialized
     /// (the transient state after a rollup pair is created, before the daily policy's first run). Without it
-    /// a 30-day window there would skip a 21-day hourly tier to reach a 4-day raw one.</para>
+    /// a 30-day window there would skip a populated hourly tier to reach a 4-day raw one.</para>
     ///
     /// <para>Unknown coverage is INERT by construction — see <see cref="TierCoverage"/>. A failed probe, a
     /// plain-PostgreSQL store and a partially-built one all produce nulls, and nulls never move a window.</para>

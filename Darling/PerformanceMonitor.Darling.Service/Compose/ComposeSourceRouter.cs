@@ -52,7 +52,7 @@ public sealed record ComposeRoute(ComposeSourceTier Tier, string? CaggRelation)
 /// bake in the cumulative-snapshot double-count — measured at up to 496x for a single Query Store interval. The
 /// corrected rollups above replace them, but the old pair CANNOT be dropped and rebuilt: a continuous aggregate's
 /// columns cannot be ALTERed, and with retention active a rebuild would re-materialize from 4 days of raw and
-/// permanently destroy the 21-day hourly and indefinite daily history (#1759/#1793). So the corrected pair starts
+/// permanently destroy the retained hourly and indefinite daily history (#1759/#1793). So the corrected pair starts
 /// empty and deepens from deploy, the old pair keeps everything it already holds, and reads prefer the corrected
 /// one wherever it reaches. <b>Past that boundary a window is still served INFLATED numbers</b> — a visible step
 /// where the two meet, unavoidable while the old history is the only history, and shrinking every day as the
@@ -131,7 +131,7 @@ public static class ComposeCaggCatalog
 /// <c>nowUtc</c> (deterministic for tests), not from the window's end — a purely historical window ("30 to 25 days
 /// ago") must reach the tier that still retains it or the query returns empty rows.
 ///
-/// <para>Route thresholds sit a margin BELOW each retention horizon (raw kept 4d → route ≤3d; hourly kept 21d →
+/// <para>Route thresholds sit a margin BELOW each retention horizon (raw kept 4d → route ≤3d; hourly kept 90d →
 /// route ≤20d), so a drop lagging the boundary (1-day chunk granularity + the 3-day CAGG refresh) can never leave
 /// the chosen tier missing the oldest chunk. The margin is pinned as a test invariant against the retention
 /// constants. A whole window routes to the single tier its OLDEST point needs — uniform coarsening, no cross-tier
@@ -144,7 +144,7 @@ public static class ComposeSourceRouter
     /// viewer's built-in tabs route off the same value.</summary>
     public static readonly TimeSpan RawRouteMaxAge = RetentionTierRouter.RawMaxAge;
 
-    /// <summary>The hourly CAGG is chosen up to this age — a day inside the 21-day hourly retention; older windows
+    /// <summary>The hourly CAGG is chosen up to this age — a day inside the 90-day (#1937) hourly retention; older windows
     /// fall to the daily CAGG (or stay on the hourly, capped, when no daily CAGG exists yet). Aliases the shared
     /// definition (#1661).</summary>
     public static readonly TimeSpan HourlyRouteMaxAge = RetentionTierRouter.HourlyMaxAge;
@@ -219,7 +219,7 @@ public static class ComposeSourceRouter
 
         /* ── the corrected/legacy boundary (#1849) ────────────────────────────────────────────────────────
            The corrected Query Store rollups are NEW objects that start empty and deepen from deploy, beside
-           an old pair that already holds up to 21 days (hourly) and unbounded (daily) of INFLATED history.
+           an old pair that already holds up to the full hourly horizon (90d) and unbounded daily of INFLATED history.
            The rule is: use the corrected pair wherever it has actually materialized the window, and only
            reach for the superseded pair where it measurably reaches further back.
 
