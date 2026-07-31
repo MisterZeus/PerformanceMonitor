@@ -327,10 +327,11 @@ public sealed class DarlingAnalysisPipelineTests
         await PgMigrations.MigrateAsync(connection, ct);
 
         /* Clear leftovers from an earlier aborted run so the assertions below are deterministic. */
-        await DeleteTestRowsAsync(connection);
+        await DeleteTestRowsAsync(connection, ct);
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             /* ---- plant >24h of wait_stats history — the AN2b recipe: one hour×dow bucket
@@ -465,10 +466,13 @@ public sealed class DarlingAnalysisPipelineTests
             Assert.Empty(await service.AnalyzeAsync(emptyContext));
             Assert.NotNull(service.InsufficientDataMessage);
             Assert.Contains("Not enough data", service.InsufficientDataMessage, StringComparison.Ordinal);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteTestRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteTestRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -489,13 +493,13 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)", connection);
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 
-    private static async Task DeleteTestRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteTestRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM wait_stats WHERE server_id IN ({TestServerId}, {EmptyServerId}); " +
             $"DELETE FROM analysis_findings WHERE server_id IN ({TestServerId}, {EmptyServerId}); " +
             $"DELETE FROM analysis_muted WHERE server_id IN ({TestServerId}, {EmptyServerId});", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 
     /// <summary>Records every dispatched finding alert; no persisted history (seed = null).</summary>

@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 using Xunit;
@@ -16,41 +15,34 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// A one-number ratchet over the #1902 conversion, so the backlog can only shrink.
+/// No live test cleans up on the connection its own body used (#1902).
 ///
-/// <para><b>What it guards.</b> A live class's <c>finally</c> that cleans up on the BODY's connection and throws
-/// straight out of the finally reports the teardown's error instead of the test's, and abandons every statement
-/// after the throwing one (#1794's shape, demonstrated end to end in #1896). #1902 is the backlog of those, being
-/// converted onto <see cref="LiveStoreCleanup"/> in batches. This test counts what is left.</para>
+/// <para><b>The defect this closes.</b> A <c>finally</c> that runs its teardown on the BODY's connection and
+/// throws straight out of the finally reports the teardown's error instead of the test's — a throw from a
+/// finally REPLACES the exception already in flight — and abandons every statement after the throwing one,
+/// leaving debris the next run inherits as an unrelated flake. The two halves compound: it is the body's
+/// failure that closes the connection, so the teardown fails BECAUSE of the thing it then hides. #1896
+/// demonstrated it end to end — with a body failure and a cleanup failure forced into one test, the old shape
+/// reported the cleanup's <c>42883</c> and lost the body's exception entirely.</para>
 ///
-/// <para><b>Why a ceiling rather than a list.</b> A named allowlist of eighty-odd sites is a merge-conflict
-/// generator that every batch has to edit by hand, and a list that is edited by hand is a list people delete
-/// entries from for the wrong reasons. A single number cannot be partially wrong: a new unconverted teardown
-/// pushes the count above the ceiling and the build goes red, and a batch that lands has to lower it, which is
-/// the one edit worth forcing. It is deliberately not an equality assertion while the backlog is non-zero —
-/// converting MORE than a batch promised should never fail a build.</para>
+/// <para><b>This started as a ratchet and is now an invariant.</b> Through batches one and two it was a
+/// ceiling — 126 sites, then 87, then 19 — that had to come DOWN with each batch and could never go up, so the
+/// backlog could not regrow behind the conversions. Batch three took the last of them, so the number is zero
+/// and the assertion now says what it always meant: there are none. The ceiling constant is gone with it, on
+/// the grounds that a number which can only be zero is a worse way of writing zero.</para>
 ///
-/// <para><b>When the ceiling reaches zero</b> the remaining assertion becomes the real invariant — no live class
-/// cleans up on the body's connection — and #1902 closes. Until then this is the thing that stops the backlog
-/// growing behind the batches, which is the failure mode a purely manual sweep has: sixty classes, three PRs,
-/// and any pull request in between free to add a sixty-first.</para>
+/// <para><b>What counts as compliant.</b> Only going through <see cref="LiveStoreCleanup"/> — either
+/// <c>RunAsync</c>, which opens its own connection, or <c>RunOwnedAsync</c> for the few teardowns that MUST
+/// use resources the test already holds (a session-scoped <c>lock_timeout</c>, a blocking transaction's own
+/// rollback, a store that owns its data source). Opening a fresh connection BY HAND is deliberately not
+/// accepted: it is half the fix, it still throws from the finally, and an exemption shaped "this one is
+/// correct by hand" is one a later incorrect site inherits. The two live classes that had been doing exactly
+/// that were converted rather than exempted.</para>
 /// </summary>
 public sealed class LiveCleanupConversionRatchetTests
 {
-    /// <summary>
-    /// Unconverted teardowns remaining. MUST ONLY EVER GO DOWN.
-    ///
-    /// <para>126 when #1902 was filed; 87 after batch one (the config-writing and server-registering classes,
-    /// which were the highest blast radius — a leaked <c>config_mute_rules</c> row mutes another test's alerts
-    /// and a leaked <c>collect.servers</c> row is a phantom server in every fleet read); 19 after batch two,
-    /// which took the whole <c>Viewer*</c> read-path family. What is left is the Darling engine classes,
-    /// including the one teardown that cleans up through an <c>NpgsqlDataSource</c> rather than a connection —
-    /// deliberately isolated into batch three rather than buried in a sixty-eight-site diff.</para>
-    /// </summary>
-    private const int Ceiling = 19;
-
     [Fact]
-    public void UnconvertedLiveTeardowns_NeverExceedTheRatchet()
+    public void NoLiveTestCleansUpOnItsOwnBodysConnection()
     {
         var directory = FindTestProjectDirectory();
         Assert.True(directory is not null,
@@ -58,31 +50,13 @@ public sealed class LiveCleanupConversionRatchetTests
 
         var offenders = Offenders(directory!);
 
-        Assert.True(offenders.Count <= Ceiling,
-            $"{offenders.Count} live-test teardowns still clean up on the body's connection, above the #1902 "
-            + $"ratchet of {Ceiling}. A NEW one was added: convert it to LiveStoreCleanup.RunAsync (or "
-            + "RunOwnedAsync when the cleanup must use connections the test already holds) rather than raising "
-            + "the ceiling — the ceiling only ever goes down."
-            + Environment.NewLine + string.Join(Environment.NewLine, offenders.Take(20)));
-    }
-
-    /// <summary>
-    /// The other direction: when a batch lands, the ceiling must come down with it. Without this a batch could
-    /// convert forty teardowns and leave the ratchet where it was, which quietly re-opens the room for forty new
-    /// ones — the guard would still be green and would be guarding nothing.
-    /// </summary>
-    [Fact]
-    public void TheRatchet_IsNotLeftSlackAfterABatch()
-    {
-        var directory = FindTestProjectDirectory();
-        Assert.True(directory is not null, "could not locate Darling/Darling.Tests.");
-
-        var offenders = Offenders(directory!);
-
-        Assert.True(offenders.Count == Ceiling,
-            $"the #1902 ratchet is set to {Ceiling} but only {offenders.Count} unconverted teardowns remain. "
-            + "Lower Ceiling to " + offenders.Count.ToString(CultureInfo.InvariantCulture)
-            + " so the slack cannot be spent on new ones.");
+        Assert.True(offenders.Count == 0,
+            $"{offenders.Count} live-test teardown(s) do not go through LiveStoreCleanup (#1902). Wrap the "
+            + "finally body in LiveStoreCleanup.RunAsync(connectionString, bodySucceeded, ...) — or "
+            + "RunOwnedAsync when the cleanup must use connections the test already holds — and set "
+            + "bodySucceeded as the last statement of the try. Opening a connection by hand is not enough: it "
+            + "leaves the throw-from-finally that replaces the body's exception."
+            + Environment.NewLine + string.Join(Environment.NewLine, offenders));
     }
 
     /// <summary>
@@ -90,8 +64,15 @@ public sealed class LiveCleanupConversionRatchetTests
     /// <see cref="LiveStoreCleanup"/>, reported as <c>file:line</c>.
     ///
     /// <para>Own-store classes are exempt for the same reason #1776 exempts them: they mint and drop their own
-    /// database, so an abandoned teardown cannot reach anyone else. File and process teardown is excluded because
-    /// it is not store state and has nothing to do with a connection.</para>
+    /// database, so an abandoned teardown cannot reach anyone else. File and process teardown is excluded
+    /// because it is not store state and has nothing to do with a connection.</para>
+    ///
+    /// <para><b>The block is brace-matched, not a fixed line window.</b> Batches one and two scanned thirteen
+    /// lines after the <c>finally</c>, which a long explanatory comment pushes the actual statements past — so
+    /// the richest teardown in the suite (the retention test's, which carries a twelve-line comment) counted as
+    /// an offender while being fully converted. The same blind spot works the other way and matters more: an
+    /// genuinely unconverted teardown could hide behind a comment of its own. Matching braces reads the block
+    /// the compiler reads.</para>
     /// </summary>
     private static List<string> Offenders(string directory)
     {
@@ -114,20 +95,20 @@ public sealed class LiveCleanupConversionRatchetTests
             var lines = source.Split('\n');
             for (var i = 0; i < lines.Length; i++)
             {
-                if (lines[i].Trim() != "finally")
+                if (lines[i].Trim() != "finally" || i + 1 >= lines.Length || lines[i + 1].Trim() != "{")
                 {
                     continue;
                 }
 
-                var window = string.Join("\n", lines.Skip(i + 1).Take(13));
-                if (window.Contains("LiveStoreCleanup", StringComparison.Ordinal))
+                var block = BlockAt(lines, i + 1);
+                if (block.Contains("LiveStoreCleanup", StringComparison.Ordinal))
                 {
                     continue;
                 }
 
-                if (window.Contains("File.", StringComparison.Ordinal)
-                    || window.Contains("Directory.", StringComparison.Ordinal)
-                    || window.Contains("Kill", StringComparison.Ordinal))
+                if (block.Contains("File.", StringComparison.Ordinal)
+                    || block.Contains("Directory.", StringComparison.Ordinal)
+                    || block.Contains("Kill", StringComparison.Ordinal))
                 {
                     continue;
                 }
@@ -137,6 +118,24 @@ public sealed class LiveCleanupConversionRatchetTests
         }
 
         return offenders;
+    }
+
+    /// <summary>The text of the brace-delimited block whose opening brace is on <paramref name="openLine"/>.</summary>
+    private static string BlockAt(string[] lines, int openLine)
+    {
+        var depth = 0;
+        for (var i = openLine; i < lines.Length; i++)
+        {
+            depth += lines[i].Count(c => c == '{') - lines[i].Count(c => c == '}');
+            if (depth == 0)
+            {
+                return string.Join("\n", lines.Skip(openLine).Take(i - openLine + 1));
+            }
+        }
+
+        /* Unbalanced braces mean the parse is wrong, and a parse that cannot find the end of a block must not
+           quietly report that block as clean. Returning the remainder makes it fail loudly instead. */
+        return string.Join("\n", lines.Skip(openLine));
     }
 
     /// <summary>

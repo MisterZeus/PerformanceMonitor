@@ -298,6 +298,7 @@ public sealed class DarlingFleetReaderLivePostgresTests
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
 
+        var bodySucceeded = false;
         try
         {
             var now = DateTime.UtcNow;
@@ -353,10 +354,13 @@ public sealed class DarlingFleetReaderLivePostgresTests
             var xeScore = ServerHealthClassifier.FleetHealthScore(xe.Band, xe.ToHealthMetrics());
             var dmvScore = ServerHealthClassifier.FleetHealthScore(dmv.Band, dmv.ToHealthMetrics());
             Assert.True(dmvScore > xeScore);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteSentinelRowsAsync(connection, ct);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteSentinelRowsAsync(cleanup, cleanupCt));
         }
     }
 
