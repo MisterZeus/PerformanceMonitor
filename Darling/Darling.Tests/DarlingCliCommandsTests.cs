@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.IO;
 using System.Text.Json;
 using System.Threading;
@@ -141,11 +142,62 @@ public sealed class DarlingStartupArgsTests
     [InlineData("--validate-config", true)]
     [InlineData("--print-viewer-connection", true)]
     [InlineData("--configure-network", true)]
+    [InlineData("--backfill-rollups", true)]
+    [InlineData("--collapse-legacy-slices", true)]
     [InlineData("--version", false)]   // its own classification, not a "known verb"
     [InlineData("--help", false)]
     [InlineData("--nonsense", false)]
     public void IsKnownVerb_CoversEveryDispatchedVerb(string arg, bool expected) =>
         Assert.Equal(expected, DarlingCliCommands.IsKnownVerb(arg));
+
+    /// <summary>
+    /// The drift this guards against SHIPPED (#1912's field deploy): --collapse-legacy-slices had a full
+    /// dispatch block in Program.cs, its help text listed it, and IsKnownVerb never learned it - so the
+    /// #1581 startup classifier bounced the verb to "Unknown option" and the dispatch was unreachable. The
+    /// verb's own live tests could not see it because they call DarlingCliCommands directly, never the
+    /// Program.Main seam. Every Is*Verb classifier on the class must therefore be REACHABLE through
+    /// IsKnownVerb - a new verb whose author forgets the allow-list fails here by name, not in the field.
+    /// </summary>
+    [Fact]
+    public void IsKnownVerb_ReachesEveryVerbClassifierOnTheClass()
+    {
+        var classifiers = typeof(DarlingCliCommands)
+            .GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+            .Where(m => m.Name.StartsWith("Is", StringComparison.Ordinal)
+                && m.Name.EndsWith("Verb", StringComparison.Ordinal)
+                && m.Name != "IsKnownVerb"
+                && m.ReturnType == typeof(bool))
+            .ToList();
+        Assert.True(classifiers.Count >= 12, $"expected the full classifier family, found {classifiers.Count}");
+
+        /* Version/help classify separately by design (StartupAction handles them before the verb dispatch). */
+        var separatelyClassified = new[] { "IsVersionVerb", "IsHelpVerb" };
+
+        foreach (var classifier in classifiers.Where(c => !separatelyClassified.Contains(c.Name)))
+        {
+            var verb = VerbLiteralFor(classifier.Name);
+            Assert.True((bool)classifier.Invoke(null, new object[] { verb })!,
+                $"{classifier.Name} does not accept its own literal '{verb}' - fix VerbLiteralFor");
+            Assert.True(DarlingCliCommands.IsKnownVerb(verb),
+                $"IsKnownVerb does not reach {classifier.Name}'s verb '{verb}' - the Program.cs dispatch for it is UNREACHABLE");
+        }
+    }
+
+    /// <summary>The CLI literal for a classifier name: IsEncryptPasswordVerb -> --encrypt-password.</summary>
+    private static string VerbLiteralFor(string classifierName)
+    {
+        var core = classifierName.Substring(2, classifierName.Length - 2 - 4);
+        var sb = new System.Text.StringBuilder("--");
+        for (var i = 0; i < core.Length; i++)
+        {
+            if (char.IsUpper(core[i]) && i > 0)
+            {
+                sb.Append('-');
+            }
+            sb.Append(char.ToLowerInvariant(core[i]));
+        }
+        return sb.ToString();
+    }
 
     [Fact]
     public void ClassifyStartupArgs_NoArgs_StartsHost()

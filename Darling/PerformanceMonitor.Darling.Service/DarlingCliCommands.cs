@@ -137,7 +137,8 @@ public static class DarlingCliCommands
         || IsDisableMcpVerb(arg)
         || IsEnableWebVerb(arg)
         || IsDisableWebVerb(arg)
-        || IsBackfillRollupsVerb(arg);
+        || IsBackfillRollupsVerb(arg)
+        || IsCollapseLegacySlicesVerb(arg);
 
     /// <summary>
     /// Classifies the exe's command line from its FIRST argument (#1581): no args → run the host; a recognized
