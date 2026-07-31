@@ -26,6 +26,21 @@ public partial class PlanViewerWindow : Window
         Closed += (_, _) => Viewer.Cleanup();
     }
 
+    /// <summary>
+    /// Esc closes the window. This is the bubbling KeyDown rather than PreviewKeyDown on purpose: a
+    /// child that wants Esc for itself (a filter popup clearing its value, say) marks the event handled
+    /// and never reaches here, whereas a preview handler would take Esc away from it. There is no close
+    /// button to hang <c>IsCancel</c> on — the plan control fills the window edge to edge.
+    /// </summary>
+    private void Window_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == System.Windows.Input.Key.Escape)
+        {
+            e.Handled = true;
+            Close();
+        }
+    }
+
     /// <summary>Loads a plan into this window's viewer. Throws <see cref="System.Xml.XmlException"/> for invalid XML.</summary>
     public async Task LoadPlanAsync(string planXml, string label, string? queryText)
     {

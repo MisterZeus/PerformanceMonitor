@@ -47,7 +47,7 @@
             <ComboBox x:Name="ScopeCombo" Width="280" VerticalAlignment="Center"
                       SelectionChanged="ScopeCombo_SelectionChanged"
                       ToolTip="Edit the fleet-wide default schedule or one server's custom override"/>
-            <CheckBox x:Name="UseDefaultCheckBox" Content="Use default schedule" VerticalAlignment="Center" Margin="20,0,0,0"
+            <CheckBox x:Name="UseDefaultCheckBox" Content="_Use default schedule" VerticalAlignment="Center" Margin="20,0,0,0"
                       Visibility="Collapsed"
                       Checked="UseDefaultCheckBox_Changed" Unchecked="UseDefaultCheckBox_Changed"
                       ToolTip="When checked, this server follows the fleet-wide default (no custom override)"/>

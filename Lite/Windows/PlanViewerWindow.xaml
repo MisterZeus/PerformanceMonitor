@@ -4,7 +4,8 @@
         xmlns:controls="clr-namespace:PerformanceMonitor.Ui;assembly=PerformanceMonitor.Ui"
         Title="Query Plan" Width="1200" Height="800"
         WindowStartupLocation="CenterOwner"
-        Background="{DynamicResource BackgroundBrush}">
+        Background="{DynamicResource BackgroundBrush}"
+        KeyDown="Window_KeyDown">
     <Grid>
         <controls:PlanViewerControl x:Name="Viewer"/>
     </Grid>

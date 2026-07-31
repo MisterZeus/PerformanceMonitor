@@ -27,11 +27,19 @@
                 <ItemsControl x:Name="DatabasesItemsControl">
                     <ItemsControl.ItemTemplate>
                         <DataTemplate>
-                            <CheckBox Content="{Binding DisplayName}"
-                                      IsChecked="{Binding IsExcluded, Mode=TwoWay}"
+                            <!-- Label is a nested TextBlock, not Content: a CheckBox's ContentPresenter
+                                 parses a single "_" in a bound string as an access-key marker, which would
+                                 eat the underscore out of a database name like Prod_Reporting and claim
+                                 Alt+R. TextBlock.Text does not parse access keys. The Foreground binding
+                                 must be repeated here because the themes carry an implicit TextBlock style
+                                 that would otherwise win over the CheckBox's inherited value. -->
+                            <CheckBox IsChecked="{Binding IsExcluded, Mode=TwoWay}"
                                       IsEnabled="{Binding IsEnabled}"
                                       Foreground="{Binding ForegroundBrush}"
-                                      Margin="2,3"/>
+                                      Margin="2,3">
+                                <TextBlock Text="{Binding DisplayName}"
+                                           Foreground="{Binding ForegroundBrush}"/>
+                            </CheckBox>
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
