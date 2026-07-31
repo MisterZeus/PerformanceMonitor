@@ -356,13 +356,19 @@ public sealed class ViewerConfigDiagnosticsTests
     [Fact]
     public void EveryFailureSurfaceInTheShellGoesThroughTheDiagnosticsCarryingHelper()
     {
-        var source = File.ReadAllText(Path.Combine(ViewerDirectory(), "MainWindow.xaml.cs"));
+        /* MainWindow is a PARTIAL class across several files, and partial members are visible from every
+           part - so a failure branch added in ANY part file could call the raw renderer directly. Scan the
+           whole partial set, derived by glob so a new part file joins the pin the day it exists (review on
+           #1966 caught the single-file version guarding less than it documented). */
+        var partFiles = Directory.GetFiles(ViewerDirectory(), "MainWindow*.cs");
+        Assert.True(partFiles.Length >= 5, $"expected the MainWindow partial family, found {partFiles.Length} file(s)");
+        var source = string.Concat(partFiles.Select(File.ReadAllText));
 
         /* The definition reads "private void ShowMessage(", so exclude a preceding "void ". */
         var directCalls = Regex.Matches(source, @"(?<!void )ShowMessage\(").Count;
         Assert.True(
             directCalls == 1,
-            $"MainWindow.xaml.cs calls ShowMessage directly {directCalls} time(s); exactly one is expected " +
+            $"the MainWindow partial family calls ShowMessage directly {directCalls} time(s); exactly one is expected " +
             "(inside ShowConnectionFailure). A failure surface that calls ShowMessage itself shows the " +
             "operator a message with no configuration context — route it through ShowConnectionFailure, or " +
             "update this pin deliberately if a message genuinely has none.");
