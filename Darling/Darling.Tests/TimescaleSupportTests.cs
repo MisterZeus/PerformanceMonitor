@@ -978,9 +978,10 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
         await ExecAsync(connection, TimescaleSupport.EnableCompressionSql($"collect.{table}"), ct);
     }
 
-    /* DROP TABLE takes the hypertable, its chunks and its compression policy with it. */
+    /* DROP TABLE takes the hypertable, its chunks and its compression policy with it — and #1873 makes the
+       removal verified, so a leftover tick table cannot masquerade as a clean teardown. */
     private static async Task DropTickTableAsync(NpgsqlConnection connection, string table, System.Threading.CancellationToken ct)
-        => await TryExecAsync(connection, $"DROP TABLE IF EXISTS collect.{table} CASCADE", ct);
+        => await new LiveCleanupBatch(connection).DropTableAsync(table, ct);
 
     private static async Task<TimeSpan?> ScheduleIntervalAsync(NpgsqlConnection connection, string table, System.Threading.CancellationToken ct)
     {
@@ -1150,16 +1151,24 @@ AND   ((SELECT min(bucket) FROM collect.query_stats_hourly) IS NULL
         finally
         {
             /* Retention policies first (they reference the relations), then only the CAGGs this test created —
-               DROP ... CASCADE takes each aggregate's own policy with it. */
+               DROP ... CASCADE takes each aggregate's own policy with it.
+
+               Every removal is VERIFIED (#1873), and this is the site with the most to verify: unlike its
+               sibling in PayloadDimensionLiveTests, this test calls EnsureContinuousAggregatesAsync DIRECTLY,
+               so the refresh policies it attaches are still armed and still firing immediately (#1788) while
+               the drops below run. DropContinuousAggregateAsync takes each policy off before dropping its
+               aggregate, which bounds the collision to the one refresh already executing; the retry then
+               outlasts that. Left as it was, this finally raced an active scheduler and reported success
+               either way. */
+            var batch = new LiveCleanupBatch(connection);
+
             foreach (var relation in RetentionRelations)
             {
-                await TryExecAsync(connection, $"SELECT remove_retention_policy('collect.{relation}', if_exists => true)", ct);
+                await batch.RemoveRetentionPolicyAsync(relation, ct);
             }
 
-            foreach (var cagg in (await ExistingCaggsAsync(connection, ct)).Except(preexistingCaggs, StringComparer.Ordinal))
-            {
-                await TryExecAsync(connection, $"DROP MATERIALIZED VIEW IF EXISTS collect.{cagg} CASCADE", ct);
-            }
+            await batch.DropContinuousAggregatesAsync(
+                (await ExistingCaggsAsync(connection, ct)).Except(preexistingCaggs, StringComparer.Ordinal), ct);
         }
     }
 
@@ -1179,18 +1188,6 @@ AND   ((SELECT min(bucket) FROM collect.query_stats_hourly) IS NULL
         return names.ToArray();
     }
 
-    /// <summary>Best-effort cleanup statement — a teardown failure must not mask the assertion that already ran.</summary>
-    private static async Task TryExecAsync(NpgsqlConnection connection, string sql, System.Threading.CancellationToken ct)
-    {
-        try
-        {
-            using var command = new NpgsqlCommand(sql, connection);
-            await command.ExecuteNonQueryAsync(ct);
-        }
-        catch (PostgresException)
-        {
-        }
-    }
 
     /// <summary>
     /// The relations EnsureRetentionPoliciesAsync attaches policies to, for teardown: the three raw tables,
