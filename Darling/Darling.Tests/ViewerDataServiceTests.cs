@@ -475,6 +475,15 @@ public sealed class ViewerSchemaVersionGateTests
         Assert.Equal(21, ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, false, true, false, false, false, false, false, false, false, false, false));
     }
 
+    /// <summary>The #1962 rung: every sentinel through V43 present but collector_state absent — the probe
+    /// must report 43, so a V43 store is correctly seen as one migration behind. This rung is unusual in
+    /// that the viewer never reads collector_state (service-only state, no view, no viewer query), so
+    /// nothing here is about a failing read: it exists so a FULLY-migrated store maps to 44 instead of
+    /// capping at 43, which is what would make the connect-time gate refuse every healthy store.</summary>
+    [Fact]
+    public void MapProbedSchemaVersion_CollectorStateAbsent_CapsAt43() =>
+        Assert.Equal(43, ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+
     [Fact]
     public void RequiredStoreSchemaVersion_TracksTheBuildSchemaVersion_AndTheProbeCoversIt()
     {
@@ -487,7 +496,7 @@ public sealed class ViewerSchemaVersionGateTests
            the connect-time gate refuse to open the viewer against a perfectly healthy store. */
          Assert.Equal(
              ViewerDataService.RequiredStoreSchemaVersion,
-             ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+             ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
     }
 }
 

@@ -404,7 +404,8 @@ SELECT
     EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_alert_settings' AND column_name = 'blocking_wait_seconds_threshold'),
     EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'query_store_stats' AND column_name = 'runtime_stats_interval_id'),
     EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_notification' AND column_name = 'pagerduty_routing_key'),
-    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_notification' AND column_name = 'pagerduty_proxy')";
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_notification' AND column_name = 'pagerduty_proxy'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'collector_state')";
 
     /// <summary>The store schema version this viewer build requires — the highest migration it knows
     /// (<see cref="StorageVersion.SchemaVersion"/>). The connect-time gate blocks a store below this.</summary>
@@ -425,7 +426,7 @@ SELECT
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {
-                return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15), reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18), reader.GetBoolean(19), reader.GetBoolean(20), reader.GetBoolean(21), reader.GetBoolean(22), reader.GetBoolean(23), reader.GetBoolean(24), reader.GetBoolean(25), reader.GetBoolean(26));
+                return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15), reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18), reader.GetBoolean(19), reader.GetBoolean(20), reader.GetBoolean(21), reader.GetBoolean(22), reader.GetBoolean(23), reader.GetBoolean(24), reader.GetBoolean(25), reader.GetBoolean(26), reader.GetBoolean(27));
             }
 
             return null;
@@ -450,8 +451,21 @@ SELECT
     /// is unit-tested without a live store; any schema bump past the newest arm trips the pinning test that keeps
     /// this in step with <see cref="StorageVersion.SchemaVersion"/>.
     /// </summary>
-    internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false, bool hasAgCollectors = false, bool hasAgAlertKnobs = false, bool hasAgLatencyColumns = false, bool hasAgDisconnectRefire = false, bool hasPayloadDimensions = false, bool hasDimFloorIndexes = false, bool hasBlockingWaitThreshold = false, bool hasQueryStoreIntervalIdentity = false, bool hasPagerDutyWebhook = false, bool hasPagerDutyProxy = false)
+    internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false, bool hasAgCollectors = false, bool hasAgAlertKnobs = false, bool hasAgLatencyColumns = false, bool hasAgDisconnectRefire = false, bool hasPayloadDimensions = false, bool hasDimFloorIndexes = false, bool hasBlockingWaitThreshold = false, bool hasQueryStoreIntervalIdentity = false, bool hasPagerDutyWebhook = false, bool hasPagerDutyProxy = false, bool hasCollectorState = false)
     {
+        /* V44 (collector state, #1962): table-existence sentinel, newest-first arm.
+           collect.collector_state exists only at V44 or later. The viewer never READS this table — it is
+           service-only state (default_trace_events' last-seen trace file) with no view and no viewer query
+           — so unlike the arms below, nothing in the viewer would fail against a V43 store. The rung
+           exists so a FULLY-migrated V44 store maps to 44 rather than capping at 43: the connect-time gate
+           compares the probe against RequiredStoreSchemaVersion, and a probe that cannot see the newest
+           migration reports every healthy store as skewed and refuses to open it. Under-reporting is the
+           failure mode this ladder guards, and it does not care whether the viewer reads the table. */
+        if (hasCollectorState)
+        {
+            return 44;
+        }
+
         /* V43 (PagerDuty proxy, #1945): column-existence sentinel, newest-first arm.
            config_notification.pagerduty_proxy exists only at V43 or later. The viewer MUST gate on it: the
            Settings notification read and upsert name the column, so pointed at a V42 store they would fail
