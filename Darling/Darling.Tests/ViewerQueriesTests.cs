@@ -284,20 +284,56 @@ public sealed class ViewerQueriesSqlTests
     /// otherwise drawn in the hour it was last COLLECTED, reliably one bar late on Query Store's default
     /// 60-minute interval. COALESCE, not a bare column, so pre-tier-2 rows keep collection_time.
     /// </param>
+    /// <param name="windowFilter">
+    /// The predicate the window is applied through — which must be the SAME expression as
+    /// <paramref name="bucketExpression"/>, and is now a per-slicer fact rather than a shared assertion
+    /// (#1892). Filtering on one instant while bucketing on another puts rows in bars outside the range the
+    /// caller asked for; the delta slicers never had the problem because for them the two are one column.
+    /// </param>
     [Theory]
-    [InlineData(nameof(ViewerDataService.QueryStatsSlicerSql), "query_stats", "COUNT(DISTINCT query_hash)", "date_trunc('hour', collection_time)")]
-    [InlineData(nameof(ViewerDataService.ProcStatsSlicerSql), "procedure_stats", "COUNT(DISTINCT object_name)", "date_trunc('hour', collection_time)")]
-    [InlineData(nameof(ViewerDataService.QueryStoreSlicerSql), "query_store_stats", "COUNT(DISTINCT query_id)", "date_trunc('hour', COALESCE(interval_start_time_utc, collection_time))")]
-    public void SlicerSql_BucketsByHour_SevenColumnShape(string sqlName, string table, string distinctCount, string bucketExpression)
+    [InlineData(nameof(ViewerDataService.QueryStatsSlicerSql), "query_stats", "COUNT(DISTINCT query_hash)", "date_trunc('hour', collection_time)", "collection_time")]
+    [InlineData(nameof(ViewerDataService.ProcStatsSlicerSql), "procedure_stats", "COUNT(DISTINCT object_name)", "date_trunc('hour', collection_time)", "collection_time")]
+    [InlineData(nameof(ViewerDataService.QueryStoreSlicerSql), "query_store_stats", "COUNT(DISTINCT query_id)", "date_trunc('hour', COALESCE(interval_start_time_utc, collection_time))", "COALESCE(interval_start_time_utc, collection_time)")]
+    public void SlicerSql_BucketsByHour_SevenColumnShape(string sqlName, string table, string distinctCount, string bucketExpression, string windowFilter)
     {
         var sql = SqlByName(sqlName);
         Assert.Contains(bucketExpression, sql, StringComparison.Ordinal);
         Assert.Contains($"FROM {table}", sql, StringComparison.Ordinal);
         Assert.Contains(distinctCount, sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
+        Assert.Contains($"{windowFilter} >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains($"{windowFilter} <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY bucket", sql, StringComparison.Ordinal);
+
+        /* The bucket key and the window filter agree, stated as the invariant rather than left implicit in
+           two InlineData columns that a future edit could change one of. */
+        Assert.Contains(windowFilter, bucketExpression, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The Query Store slicer keeps collection_time bounds even though it no longer WINDOWS on that column
+    /// (#1892). query_store_stats is a hypertable partitioned on collection_time, so without them TimescaleDB
+    /// cannot exclude chunks and an old fixed date range decompresses everything from the window through the
+    /// present.
+    ///
+    /// <para>Both are pinned in their SLACKENED form, which is the whole point: a bare
+    /// <c>collection_time &gt;= $2</c> / <c>&lt;= $3</c> pair would silently be the window filter again and
+    /// re-introduce exactly the edge bug this fixed. The floor is provably implied by the COALESCE
+    /// predicate; the ceiling is a month, being Query Store's 1-day maximum interval plus 29 days of
+    /// collector-outage allowance.</para>
+    /// </summary>
+    [Fact]
+    public void QueryStoreSlicerSql_KeepsSlackenedCollectionTimeBoundsForChunkExclusion()
+    {
+        var sql = SqlByName(nameof(ViewerDataService.QueryStoreSlicerSql));
+
+        Assert.Contains("collection_time >= $2 - interval '1 day'", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time <= $3 + interval '30 days'", sql, StringComparison.Ordinal);
+
+        /* The tight forms, asserted absent: either one would be a window filter wearing a pruning bound's
+           clothes, and the failure would look exactly like the bug #1892 fixed. */
+        Assert.DoesNotContain("collection_time >= $2\n", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("collection_time <= $3\n", sql, StringComparison.Ordinal);
     }
 
     // ── PG dialect (all Queries reads) ──
@@ -488,6 +524,7 @@ public sealed class ViewerQueriesLivePostgresTests
     private const int ModuleAttributionServerId = -970808;
     private const int DedupServerId = -970809;
     private const int IntervalIdentityServerId = -970810;
+    private const int WindowEdgeServerId = -970811;
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -848,6 +885,99 @@ public sealed class ViewerQueriesLivePostgresTests
         {
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, "query_store_stats", DedupServerId, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// WATCHED (mutation): put the window filter back on collection_time and both halves go red.
+    ///
+    /// <para>#1892 against a real store. Once #1841 keyed the bars on the interval's start while the window
+    /// was still filtered on collection_time, the two disagreed at BOTH edges, in opposite directions:</para>
+    ///
+    /// <list type="bullet">
+    /// <item>an interval that STARTED before the range but whose closing fetch landed inside it passed the
+    /// filter and drew a bar dated before the range began — a chart with a bar outside its own axis;</item>
+    /// <item>the range's own final interval, still open when the range ended and therefore collected after
+    /// it, failed the filter and vanished — the newest bar simply missing.</item>
+    /// </list>
+    ///
+    /// <para>Live rather than a string pin because the string pins cannot tell which ROWS come back, and the
+    /// left-edge case in particular reads as a perfectly ordinary bar until you notice its timestamp.</para>
+    /// </summary>
+    [Fact]
+    public async Task QueryStoreWindowEdges_MatchTheBucketKey_NotTheCollectionClock_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live Query Store window-edge test.");
+
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "query_store_stats", WindowEdgeServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(cs!);
+
+        /* h1..h3 is the requested range. h0 sits an hour before it and h4 an hour after, so each edge case
+           is a whole bucket outside the window rather than a near-miss. */
+        var h0 = TruncateToHour(TruncateToSeconds(DateTime.UtcNow).AddHours(-8));
+        var h1 = h0.AddHours(1);
+        var h3 = h0.AddHours(3);
+        var h4 = h0.AddHours(4);
+        var start = h1;
+        var end = h3.AddMinutes(59);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* BEFORE the window, collected INSIDE it: the interval ran in h0 and its closing fetch landed in
+               h2. Filtering on collection_time admits it, and it then buckets at h0 — left of `start`. */
+            await InsertQueryStoreAsync(connection, WindowEdgeServerId, h0.AddHours(2).AddMinutes(5), "EdgeDb",
+                queryId: 1, planId: 11, execCount: 3, avgDurationUs: 2_000, avgCpuUs: 1_000, forced: false,
+                maxMemPages: 0, queryText: "SELECT before", firstExecutionTimeUtc: h0.AddMinutes(1),
+                intervalId: 8801, intervalStartUtc: h0);
+
+            /* INSIDE the window, collected AFTER it: the interval ran in h3 — the range's last hour — and is
+               still open when the range ends, so its closing fetch lands in h4. Filtering on collection_time
+               drops it and the newest bar disappears. */
+            await InsertQueryStoreAsync(connection, WindowEdgeServerId, h4.AddMinutes(5), "EdgeDb",
+                queryId: 2, planId: 22, execCount: 7, avgDurationUs: 3_000, avgCpuUs: 1_000, forced: false,
+                maxMemPages: 0, queryText: "SELECT after", firstExecutionTimeUtc: h3.AddMinutes(1),
+                intervalId: 8802, intervalStartUtc: h3);
+
+            /* A plain interior interval, so the assertions below are about the edges rather than about the
+               window returning anything at all. */
+            await InsertQueryStoreAsync(connection, WindowEdgeServerId, h1.AddMinutes(50), "EdgeDb",
+                queryId: 3, planId: 33, execCount: 5, avgDurationUs: 1_000, avgCpuUs: 1_000, forced: false,
+                maxMemPages: 0, queryText: "SELECT inside", firstExecutionTimeUtc: h1.AddMinutes(1),
+                intervalId: 8803, intervalStartUtc: h1);
+
+            var buckets = await viewer.GetQueryStoreSlicerDataAsync(WindowEdgeServerId, start, end);
+
+            /* Exactly the two intervals whose work RAN inside the range, and nothing dated outside it. */
+            Assert.Equal(2, buckets.Count);
+            Assert.DoesNotContain(buckets, b => b.BucketTime < start || b.BucketTime > end);
+            Assert.DoesNotContain(buckets, b => b.BucketTime == h0);
+
+            var interior = Assert.Single(buckets, b => b.BucketTime == h1);
+            Assert.Equal(5.0, interior.TotalCpu, 3);        /* 5 x 1,000us */
+
+            var lastBar = Assert.Single(buckets, b => b.BucketTime == h3);
+            Assert.Equal(7.0, lastBar.TotalCpu, 3);         /* 7 x 1,000us — the bar that used to be missing */
+
+            /* The duration trend carries the identical mismatch, and the two charts share a screen. */
+            var trend = await viewer.GetQueryStoreDurationTrendAsync(WindowEdgeServerId, start, end);
+            Assert.DoesNotContain(trend, p => p.CollectionTime < start || p.CollectionTime > end);
+            Assert.Contains(trend, p => p.CollectionTime == h3);
+            Assert.DoesNotContain(trend, p => p.CollectionTime == h0);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            /* #1902: cleanup gets its OWN connection, so a failure in the body cannot leave these rows
+               behind for the next run to trip over. */
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "query_store_stats", WindowEdgeServerId, cleanupCt));
         }
     }
 

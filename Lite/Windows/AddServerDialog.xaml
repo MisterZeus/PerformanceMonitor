@@ -8,6 +8,8 @@
         WindowStartupLocation="CenterOwner"
         ResizeMode="CanResizeWithGrip"
         SizeChanged="Dialog_SizeChanged"
+        SourceInitialized="Dialog_SourceInitialized"
+        LocationChanged="Dialog_LocationChanged"
         Icon="/EDD.ico"
         Background="{DynamicResource BackgroundBrush}">
     <!-- #1828: the auth panels grow this dialog past a 1080p work area, and SizeToContent kept growing
