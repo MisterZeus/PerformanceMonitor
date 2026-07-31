@@ -128,6 +128,13 @@ public sealed class DarlingCollectorRunner
             && watermark is null
             && await HasPriorCollectorSuccessAsync(server.ServerId, definition.Name, cancellationToken);
 
+        /* Per-server state the definition declared keys for — the watermark's sibling for facts no MAX()
+           over the collected rows can produce (default_trace_events' last-seen trace FILE, #1962). No
+           declared keys (every other collector) means no query runs. Mirrors Lite. */
+        var collectorState = definition.StateKeys.Count == 0
+            ? null
+            : await GetCollectorStateAsync(server.ServerId, definition.Name, cancellationToken);
+
         var context = new CollectorContext
         {
             ServerId = server.ServerId,
@@ -138,6 +145,7 @@ public sealed class DarlingCollectorRunner
             Watermark = watermark,
             NumericWatermark = numericWatermark,
             HasCollectedBefore = hasCollectedBefore,
+            State = collectorState ?? CollectorContext.NoState,
             IgnoredWaitTypes = IgnoredWaitDefaults.All,
             ExcludedDatabases = server.Config.ExcludedDatabases?.ToArray() ?? Array.Empty<string>(),
             PerfmonCounterOverride = null,
@@ -488,6 +496,15 @@ public sealed class DarlingCollectorRunner
             }
         }
 
+        /* Persist what the definition observed, AFTER the cycle completed — including a cycle that wrote
+           zero rows, which is exactly the case a row-derived watermark cannot cover (#1962). A cycle that
+           threw never reaches here, so the older state survives and the next run takes its conservative
+           path. Outside the storage-phase timer: this is host bookkeeping, not collected data. */
+        if (context.PendingState.Count > 0)
+        {
+            await SaveCollectorStateAsync(server.ServerId, definition.Name, context.PendingState, cancellationToken);
+        }
+
         _logger?.LogDebug("Collected {RowCount} {Collector} rows for server '{Server}'",
             rowsWritten, definition.Name, server.Config.DisplayName);
         return new CollectorRunResult(rowsWritten, sqlMs, storageMs, collectionNote);
@@ -692,6 +709,83 @@ public sealed class DarlingCollectorRunner
             /* If the Postgres query fails, caller uses fallback window */
         }
         return null;
+    }
+
+    /// <summary>
+    /// The stored per-server state for one collector's declared keys (#1962) — the sibling of
+    /// <see cref="GetLastCollectedTimeAsync"/> for state no MAX() over the collected rows can produce.
+    /// Read only for the collectors that declare keys, so it costs the rest nothing. An empty result on
+    /// failure is the SAFE direction: every definition treats absent state as its conservative path
+    /// (default_trace_events re-reads the whole rollover set), so a broken read costs time, never events.
+    /// Lite's twin is <c>RemoteCollectorService.GetCollectorStateAsync</c> — same table, same columns.
+    /// </summary>
+    public async Task<Dictionary<string, string>> GetCollectorStateAsync(
+        int serverId, string collectorName, CancellationToken cancellationToken)
+    {
+        var state = new Dictionary<string, string>(StringComparer.Ordinal);
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            using var command = new NpgsqlCommand(
+                "SELECT state_key, state_value FROM collector_state WHERE server_id = $1 AND collector_name = $2", connection);
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.AddWithValue(collectorName);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (!reader.IsDBNull(1))
+                {
+                    state[reader.GetString(0)] = reader.GetString(1);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            /* Fail toward "no state" — the definition's conservative path, never a wrong-but-plausible one. */
+            _logger?.LogDebug(ex, "Reading collector state for {Collector} failed; using the no-state path", collectorName);
+        }
+        return state;
+    }
+
+    /// <summary>
+    /// Upserts what the definition observed this cycle (<see cref="CollectorContext.PendingState"/>),
+    /// after the cycle completed — so a cycle that collected zero rows still records what it saw, which is
+    /// the whole point of keeping this state off the payload. Best-effort: a failed write leaves the older
+    /// value, and the next cycle re-derives from it or falls back.
+    /// </summary>
+    public async Task SaveCollectorStateAsync(
+        int serverId, string collectorName, IReadOnlyDictionary<string, string> state, CancellationToken cancellationToken)
+    {
+        if (state.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            foreach (var entry in state)
+            {
+                /* One statement per key: Npgsql's positional parameters cannot span a multi-statement
+                   batch (they bind to the FIRST statement and the rest fail silently), and this loop
+                   runs over a single declared key today. */
+                using var command = new NpgsqlCommand(@"
+INSERT INTO collector_state (server_id, collector_name, state_key, state_value, updated_at)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (server_id, collector_name, state_key)
+DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_at", connection);
+                command.Parameters.AddWithValue(serverId);
+                command.Parameters.AddWithValue(collectorName);
+                command.Parameters.AddWithValue(entry.Key);
+                command.Parameters.AddWithValue(entry.Value);
+                command.Parameters.AddWithValue(DateTime.UtcNow);
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Storing collector state for {Collector} failed; next cycle uses the older value", collectorName);
+        }
     }
 
     /// <summary>
@@ -957,6 +1051,7 @@ public sealed class DarlingCollectorRunner
     {
         CollectorParameterType.DateTime2 => new SqlParameter(parameter.Name, SqlDbType.DateTime2) { Value = parameter.Value ?? DBNull.Value },
         CollectorParameterType.NVarChar128 => new SqlParameter(parameter.Name, SqlDbType.NVarChar, 128) { Value = parameter.Value ?? DBNull.Value },
+        CollectorParameterType.NVarChar260 => new SqlParameter(parameter.Name, SqlDbType.NVarChar, 260) { Value = parameter.Value ?? DBNull.Value },
         CollectorParameterType.Int32 => new SqlParameter(parameter.Name, SqlDbType.Int) { Value = parameter.Value ?? DBNull.Value },
         CollectorParameterType.BigInt => new SqlParameter(parameter.Name, SqlDbType.BigInt) { Value = parameter.Value ?? DBNull.Value },
         _ => throw new ArgumentOutOfRangeException(nameof(parameter), parameter.Type, "Unmapped collector parameter type"),

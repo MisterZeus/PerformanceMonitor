@@ -30,7 +30,7 @@ namespace PerformanceMonitor.Darling.Storage;
 ///
 /// Scope: the COLLECTOR tables only (<see cref="HypertableTables"/> = the shared catalog). The
 /// registry/config tables (servers, config_alert_log, config_edge_trigger_watermarks,
-/// config_mute_rules, analysis_muted, darling_schema_version) are deliberately excluded —
+/// config_mute_rules, analysis_muted, collector_state, darling_schema_version) are deliberately excluded —
 /// registries keep their PRIMARY KEYs, which TimescaleDB would reject or force onto the partition
 /// column, and none of them is time-series-shaped growth. analysis_findings COULD be a hypertable
 /// later (it was designed keyless for exactly this, see the V4 remarks) — deliberately not

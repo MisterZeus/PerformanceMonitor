@@ -519,6 +519,8 @@ public sealed class PgSchemaGeneratorTests
         public bool AppliesTo(CollectorTargetInfo target) => _inner.AppliesTo(target);
 
         public bool YieldsOnLockTimeout => _inner.YieldsOnLockTimeout;
+
+        public IReadOnlyList<string> StateKeys => _inner.StateKeys;
     }
 
     [Fact]

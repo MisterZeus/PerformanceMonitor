@@ -62,6 +62,9 @@ public interface ICollectorDefinition<TRow> : ICollectorSchemaInfo
     /// </summary>
     string? NumericWatermarkColumn { get; }
 
+    /* StateKeys is declared on the base ICollectorSchemaInfo — like AppliesTo and YieldsOnLockTimeout,
+       so the declaring collectors are enumerable off CollectorCatalog.All without the row type. */
+
     /// <summary>
     /// Table column that scopes <see cref="WatermarkColumn"/> per database when the collector
     /// <see cref="RunsPerDatabase"/> (Azure SQL DB). Non-null means each per-database run gets its

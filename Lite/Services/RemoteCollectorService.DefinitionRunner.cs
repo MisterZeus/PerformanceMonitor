@@ -83,6 +83,13 @@ public partial class RemoteCollectorService
             && watermark is null
             && await HasPriorCollectorSuccessAsync(serverId, definition.Name, cancellationToken);
 
+        /* Per-server state the definition declared keys for — the watermark's sibling for facts no MAX()
+           over the collected rows can produce (default_trace_events' last-seen trace FILE, #1962). No
+           declared keys (every other collector) means no query runs. */
+        var collectorState = definition.StateKeys.Count == 0
+            ? null
+            : await GetCollectorStateAsync(serverId, definition.Name, cancellationToken);
+
         var context = new CollectorContext
         {
             ServerId = serverId,
@@ -93,6 +100,7 @@ public partial class RemoteCollectorService
             Watermark = watermark,
             NumericWatermark = numericWatermark,
             HasCollectedBefore = hasCollectedBefore,
+            State = collectorState ?? CollectorContext.NoState,
             IgnoredWaitTypes = _ignoredWaitTypes.Value,
             ExcludedDatabases = server.ExcludedDatabases?.ToArray() ?? Array.Empty<string>(),
             PerfmonCounterOverride = GetPerfmonCounterOverride(),
@@ -441,6 +449,15 @@ public partial class RemoteCollectorService
             }
         }
 
+        /* Persist what the definition observed, AFTER the cycle completed — including a cycle that wrote
+           zero rows, which is exactly the case a row-derived watermark cannot cover (#1962). A cycle that
+           threw never reaches here, so the older state survives and the next run takes its conservative
+           path. Outside the storage-phase timer: this is host bookkeeping, not collected data. */
+        if (context.PendingState.Count > 0)
+        {
+            await SaveCollectorStateAsync(serverId, definition.Name, context.PendingState, cancellationToken);
+        }
+
         telemetry.SqlMs = sqlMs;
         telemetry.StorageMs = storageMs;
 
@@ -552,6 +569,7 @@ public partial class RemoteCollectorService
     {
         CollectorParameterType.DateTime2 => new SqlParameter(parameter.Name, SqlDbType.DateTime2) { Value = parameter.Value ?? DBNull.Value },
         CollectorParameterType.NVarChar128 => new SqlParameter(parameter.Name, SqlDbType.NVarChar, 128) { Value = parameter.Value ?? DBNull.Value },
+        CollectorParameterType.NVarChar260 => new SqlParameter(parameter.Name, SqlDbType.NVarChar, 260) { Value = parameter.Value ?? DBNull.Value },
         CollectorParameterType.Int32 => new SqlParameter(parameter.Name, SqlDbType.Int) { Value = parameter.Value ?? DBNull.Value },
         CollectorParameterType.BigInt => new SqlParameter(parameter.Name, SqlDbType.BigInt) { Value = parameter.Value ?? DBNull.Value },
         _ => throw new ArgumentOutOfRangeException(nameof(parameter), parameter.Type, "Unmapped collector parameter type"),

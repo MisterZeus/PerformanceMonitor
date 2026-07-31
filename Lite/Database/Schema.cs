@@ -97,6 +97,25 @@ CREATE TABLE IF NOT EXISTS config_edge_trigger_watermarks (
     PRIMARY KEY (server_id, metric_name)
 )";
 
+    /* Per-server collector state that is NOT derivable from the collected rows, so it cannot be a MAX()
+       over the collector's own table the way the event_time / instance_id watermarks are (#1962). Today
+       one collector declares state: default_trace_events stores the trace FILE it read, and compares it
+       next cycle to decide whether it can read just the current rollover file (the 5.0x steady-state
+       saving) or must re-read the whole set because the trace rolled. It has to live here rather than on
+       the payload because the cycles that need it most collect zero rows — a server whose trace churns
+       without producing curated events must still notice the rollover. Keyed (server_id, collector_name,
+       state_key); one short row per collector that declares a key, upserted after every cycle. Darling's
+       twin is collect.collector_state (PgMigrations V44) — same columns, same key. */
+    public const string CreateCollectorStateTable = @"
+CREATE TABLE IF NOT EXISTS collector_state (
+    server_id INTEGER NOT NULL,
+    collector_name VARCHAR NOT NULL,
+    state_key VARCHAR NOT NULL,
+    state_value VARCHAR NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (server_id, collector_name, state_key)
+)";
+
     public const string CreateMuteRulesTable = @"
 CREATE TABLE IF NOT EXISTS config_mute_rules (
     id VARCHAR NOT NULL PRIMARY KEY,
@@ -137,6 +156,7 @@ ON dismissed_archive_alerts (alert_time, server_id, metric_name)";
         yield return CreateCollectionLogTable;
         yield return CreateAlertLogTable;
         yield return CreateEdgeTriggerWatermarksTable;
+        yield return CreateCollectorStateTable;
         yield return CreateMuteRulesTable;
         yield return CreateDismissedArchiveAlertsTable;
 

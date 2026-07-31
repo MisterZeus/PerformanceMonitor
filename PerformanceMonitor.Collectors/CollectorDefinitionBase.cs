@@ -41,6 +41,8 @@ public abstract class CollectorDefinitionBase<TRow> : ICollectorDefinition<TRow>
 
     public virtual string? PerDatabaseWatermarkColumn => null;
 
+    public virtual IReadOnlyList<string> StateKeys => System.Array.Empty<string>();
+
     public virtual int? PerItemRowCountWarnThreshold => null;
 
     public virtual int? PerItemTextByteBudget => null;
