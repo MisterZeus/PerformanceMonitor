@@ -270,6 +270,19 @@ public class EmptyEnumerationNoteTests
             CollectorHealthClassifier.FormatCollectionNote(row.LastNote, row.NoteCount, row.TotalRuns),
             row.NoteFormatted);
         Assert.Contains("(all 96 runs)", row.NoteFormatted);
+
+        /* #1852 gave the formatter two more inputs, so "the property delegates" is only still a real
+           claim if the property passes them. Asserted on a row where they CHANGE the answer: with the
+           inventory flag set, the three-argument rendering and the property must now DIFFER. */
+        row.TargetHasUserDatabases = true;
+
+        Assert.Equal(
+            CollectorHealthClassifier.FormatCollectionNote(
+                row.LastNote, row.NoteCount, row.TotalRuns, row.CollectorName, row.TargetHasUserDatabases),
+            row.NoteFormatted);
+        Assert.NotEqual(
+            CollectorHealthClassifier.FormatCollectionNote(row.LastNote, row.NoteCount, row.TotalRuns),
+            row.NoteFormatted);
     }
 
     /* ── helpers ── */

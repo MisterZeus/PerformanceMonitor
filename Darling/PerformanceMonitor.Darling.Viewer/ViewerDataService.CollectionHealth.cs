@@ -79,7 +79,36 @@ public sealed partial class ViewerDataService
             MAX(CASE WHEN note_rank = 1 AND status = 'SUCCESS' THEN error_message END) AS last_note,
             -- How many of the window's runs carried one. note_count = total_runs is the
             -- persistently-empty signal: EVERY run this week came back with nothing.
-            COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count
+            COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count,
+            -- #1852: the one thing that makes a persistently-empty enumeration interesting — does this
+            -- target actually HAVE user databases? Zero items on a server with none is legitimate and
+            -- stays quiet; zero items on a server that HAS them is a login that cannot enter any, or a
+            -- filter that swallowed everything. database_size_stats rather than database_config for
+            -- three reasons: it runs on the scheduled loop (60 min) where database_config is on-load
+            -- and can age past this window on a long-running service; it is indexed on
+            -- (server_id, collection_time) where database_config has no index at all; and it reads
+            -- sys.master_files, so it still sees databases the monitoring login cannot ENTER — exactly
+            -- the case being diagnosed. database_id > 4 excludes the system databases, tempdb
+            -- included: the size collector takes every ONLINE database, so a bare row check
+            -- would be true on every server alive.
+            --
+            -- The inventory window is the health read's OWN ($2) — no second parameter, and an
+            -- inventory that aged out says nothing rather than something stale. Uncorrelated, so both
+            -- engines evaluate it once per query (a Postgres InitPlan) instead of per row, and it
+            -- needs no GROUP BY entry and no join. Feeds display text only, through the shared
+            -- formatter; the banding never sees it.
+            CASE
+                WHEN EXISTS
+                     (
+                         SELECT 1
+                         FROM v_database_size_stats
+                         WHERE server_id = $1
+                         AND   collection_time >= $2
+                         AND   database_id > 4
+                     )
+                THEN 1
+                ELSE 0
+            END AS has_user_databases
         FROM
         (
             -- #1855: rank each class of message newest-first so the two exemplar columns above can take
@@ -149,7 +178,7 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
-    /// The fleet-cumulative variant of <see cref="CollectionHealthSql"/>: the same 13-column per-collector
+    /// The fleet-cumulative variant of <see cref="CollectionHealthSql"/>: the same 14-column per-collector
     /// aggregate but across ALL enabled monitored servers (GROUP BY server_id, collector_name — one row per
     /// server/collector pair), for the status bar's aggregate-view total (mirrors Lite's cumulative
     /// GetHealthSummary(null)). Scoped to enabled servers so a removed server's aged-out rows don't read as
@@ -168,6 +197,15 @@ public sealed partial class ViewerDataService
     /// columns stay in the projection because both reads share <see cref="MapHealthRow"/> and its
     /// ordinals; a surface that ever needs fleet-wide exemplars needs a different read, not this one.
     /// </para>
+    /// <para>
+    /// #1852's <c>has_user_databases</c> is NULL here for the same two reasons and one more. It qualifies
+    /// a DISPLAYED note, and this read displays none — with <c>last_note</c> already NULL the shared
+    /// formatter returns blank whatever the flag says, so a real value could not change one rendered
+    /// character. And the flag is per-SERVER while this read groups server_id INTO the result, so there is
+    /// no single $1 to probe the inventory for: a truthful fleet version would be a second cross-collector
+    /// join across every enabled server, on a query the status bar re-runs on every aggregate-tab refresh
+    /// — precisely the cost #1855 measured and declined. The column exists to hold the ordinal.
+    /// </para>
     /// </summary>
     public const string FleetCollectionHealthSql = """
         SELECT
@@ -183,7 +221,8 @@ public sealed partial class ViewerDataService
             SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
             SUM(CASE WHEN status = 'YIELDED' THEN 1 ELSE 0 END) AS yield_count,
             CAST(NULL AS text) AS last_note,
-            COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count
+            COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count,
+            CAST(NULL AS integer) AS has_user_databases
         FROM v_collection_log
         WHERE collection_time >= $1
         AND   server_id IN (SELECT server_id FROM config_monitored_servers WHERE is_enabled)
@@ -292,7 +331,7 @@ public sealed partial class ViewerDataService
         return items;
     }
 
-    /// <summary>Maps one row of the shared 13-column health projection (per-server or fleet) to a <see cref="CollectorHealthRow"/>.</summary>
+    /// <summary>Maps one row of the shared 14-column health projection (per-server or fleet) to a <see cref="CollectorHealthRow"/>.</summary>
     private static CollectorHealthRow MapHealthRow(NpgsqlDataReader reader) => new()
     {
         CollectorName = reader.GetString(0),
@@ -308,6 +347,9 @@ public sealed partial class ViewerDataService
         YieldCount = reader.IsDBNull(10) ? 0 : Convert.ToInt64(reader.GetValue(10)),
         LastNote = reader.IsDBNull(11) ? null : reader.GetString(11),
         NoteCount = reader.IsDBNull(12) ? 0 : Convert.ToInt64(reader.GetValue(12)),
+        /* #1852: NULL on the fleet read (see FleetCollectionHealthSql) reads as "no inventory to go on",
+           which is the same silence an install with no size stats gets. */
+        TargetHasUserDatabases = !reader.IsDBNull(13) && Convert.ToInt64(reader.GetValue(13)) != 0,
     };
 
     /// <summary>
@@ -450,6 +492,15 @@ public class CollectorHealthRow
     /// <summary>How many of <see cref="TotalRuns"/> carried a <see cref="LastNote"/>.</summary>
     public long NoteCount { get; set; }
 
+    /// <summary>
+    /// #1852: whether the store saw user databases on this target inside the health window
+    /// (<c>has_user_databases</c>) — what tells a legitimately empty server apart from one that is
+    /// enumerating nothing despite having databases. False also covers "no inventory to go on" (the fleet
+    /// read's NULL, an install without size stats), which deliberately reads the same as "nothing to say".
+    /// Informational, like <see cref="LastNote"/>: <see cref="HealthStatus"/> never sees it.
+    /// </summary>
+    public bool TargetHasUserDatabases { get; set; }
+
     public double FailureRatePercent => TotalRuns > 0 ? (double)ErrorCount / TotalRuns * 100 : 0;
     public double HoursSinceLastSuccess => LastSuccessTime.HasValue
         ? (DateTime.UtcNow - LastSuccessTime.Value).TotalHours
@@ -483,9 +534,12 @@ public class CollectorHealthRow
         : "";
 
     /// <summary>
-    /// The informational note plus its "all N runs" / "N of M runs" qualifier (#1837), or blank. Shared
-    /// with Lite through <see cref="CollectorHealthClassifier.FormatCollectionNote"/> so the two apps'
-    /// health grids read identically. Never feeds <see cref="HealthStatus"/>.
+    /// The informational note plus its "all N runs" / "N of M runs" qualifier (#1837) and, when a
+    /// persistently empty enumeration lands on a target the store has seen user databases on, #1852's
+    /// "target has user databases" — or blank. Shared with Lite through
+    /// <see cref="CollectorHealthClassifier.FormatCollectionNote"/> so the two apps' health grids read
+    /// identically. Never feeds <see cref="HealthStatus"/>.
     /// </summary>
-    public string NoteFormatted => CollectorHealthClassifier.FormatCollectionNote(LastNote, NoteCount, TotalRuns);
+    public string NoteFormatted =>
+        CollectorHealthClassifier.FormatCollectionNote(LastNote, NoteCount, TotalRuns, CollectorName, TargetHasUserDatabases);
 }
