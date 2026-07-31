@@ -104,14 +104,6 @@ internal sealed class LiveCleanupBatch
     /// </summary>
     public static IReadOnlyList<string> Ledger => Recorded.ToList();
 
-    /// <summary>Test-only reset, so the ledger's own coverage does not inherit a sibling's entries.</summary>
-    public static void ClearLedger()
-    {
-        while (Recorded.TryDequeue(out _))
-        {
-        }
-    }
-
     /// <summary>
     /// Runs <paramref name="removeSql"/> until <paramref name="survivesSql"/> reports the object gone.
     /// </summary>
@@ -169,33 +161,92 @@ internal sealed class LiveCleanupBatch
     /* ---- the shared store's removable shapes, each with its probe in exactly one place ---- */
 
     /// <summary>
-    /// Drops a continuous aggregate, refresh policy first.
+    /// Drops a SET of continuous aggregates, retrying the whole set rather than each one to exhaustion.
     ///
-    /// <para>The policy removal is the half that stops the race rather than surviving it: an
-    /// <c>EnsureContinuousAggregatesAsync</c> attaches policies whose jobs fire IMMEDIATELY (#1788), so a
-    /// caller that did not go through <c>EnsureAggregatesWithoutPoliciesAsync</c> is dropping an aggregate the
-    /// scheduler is still starting refreshes for — and a retry loop against a policy that keeps launching new
-    /// runs can lose every attempt. Removing it first bounds the collision to the ONE run that was already
-    /// executing, which is what the retry then outlasts. It is best-effort by design: if the policy is already
-    /// gone, or was never attached, the drop below is the thing that has to be true, and it is verified.</para>
+    /// <para><b>Taking the set is what makes it correct, not merely convenient.</b> The dailies are
+    /// HIERARCHICAL aggregates — built over their hourly, not over raw — so dropping an hourly while its daily
+    /// still stands fails <c>2BP01 cannot drop ... because other objects depend on it</c>, and
+    /// <c>CASCADE</c> does not save it: TimescaleDB refuses to cascade through a dependent aggregate that has
+    /// dependents of its own. Retrying that one aggregate cannot ever succeed, because what has to change is a
+    /// DIFFERENT aggregate. Sweeping the whole set per round lets the daily go in the round that the hourly
+    /// fails, and the hourly go in the next — to any depth, without this helper having to know the hierarchy.
+    /// Found by the residue check itself on the second run against a reused database, where the old swallow had
+    /// been stranding <c>query_store_stats_interval_hourly</c> silently.</para>
+    ///
+    /// <para><b>The refresh policy comes off first, every round.</b> That is the half that stops the race
+    /// rather than surviving it: <c>EnsureContinuousAggregatesAsync</c> attaches policies whose jobs fire
+    /// IMMEDIATELY (#1788), so a caller that did not go through <c>EnsureAggregatesWithoutPoliciesAsync</c> is
+    /// dropping an aggregate the scheduler is still launching refreshes for, and a retry loop against a policy
+    /// that keeps starting new ones can lose every round. Removing it bounds the collision to the ONE run
+    /// already executing, which is what the retry then outlasts. It is best-effort by design — if the policy is
+    /// already gone, or was never attached, the drop that follows is the thing that has to be true, and that
+    /// one is verified.</para>
     /// </summary>
-    public async Task DropContinuousAggregateAsync(string view, CancellationToken ct)
+    public async Task DropContinuousAggregatesAsync(IEnumerable<string> views, CancellationToken ct)
+    {
+        var remaining = views.ToList();
+        var lastFailure = new Dictionary<string, Exception?>(StringComparer.Ordinal);
+
+        for (var round = 1; round <= _maxAttempts && remaining.Count > 0; round++)
+        {
+            foreach (var view in remaining.ToList())
+            {
+                try
+                {
+                    await ExecuteAsync($"SELECT remove_continuous_aggregate_policy('collect.{view}', if_exists => true)", ct);
+                }
+                catch (Exception ex)
+                {
+                    _ = ex;
+                }
+
+                try
+                {
+                    await ExecuteAsync($"DROP MATERIALIZED VIEW IF EXISTS collect.{view} CASCADE", ct);
+                    lastFailure[view] = null;
+                }
+                catch (Exception ex)
+                {
+                    lastFailure[view] = ex;
+                }
+
+                if (!await StillThereAsync(AggregateProbe(view), view, lastFailure, ct))
+                {
+                    remaining.Remove(view);
+                }
+            }
+
+            if (remaining.Count > 0 && round < _maxAttempts)
+            {
+                await Task.Delay(BackoffFor(round), ct);
+            }
+        }
+
+        foreach (var view in remaining)
+        {
+            Record($"continuous aggregate collect.{view}",
+                $"DROP MATERIALIZED VIEW IF EXISTS collect.{view} CASCADE",
+                lastFailure.GetValueOrDefault(view));
+        }
+    }
+
+    private static string AggregateProbe(string view)
+        => "SELECT EXISTS (SELECT 1 FROM timescaledb_information.continuous_aggregates "
+           + $"WHERE view_schema = 'collect' AND view_name = '{view}')";
+
+    /// <summary>The probe, with an unanswerable probe counted as "still there" — unknowable is not gone.</summary>
+    private async Task<bool> StillThereAsync(
+        string survivesSql, string key, Dictionary<string, Exception?> lastFailure, CancellationToken ct)
     {
         try
         {
-            await ExecuteAsync($"SELECT remove_continuous_aggregate_policy('collect.{view}', if_exists => true)", ct);
+            return await SurvivesAsync(survivesSql, ct);
         }
         catch (Exception ex)
         {
-            _ = ex;
+            lastFailure[key] = ex;
+            return true;
         }
-
-        await RemoveAsync(
-            $"continuous aggregate collect.{view}",
-            $"DROP MATERIALIZED VIEW IF EXISTS collect.{view} CASCADE",
-            "SELECT EXISTS (SELECT 1 FROM timescaledb_information.continuous_aggregates "
-            + $"WHERE view_schema = 'collect' AND view_name = '{view}')",
-            ct);
     }
 
     /// <summary>

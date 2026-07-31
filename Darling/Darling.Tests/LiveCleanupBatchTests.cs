@@ -10,6 +10,7 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -189,6 +190,101 @@ public sealed class LiveCleanupBatchTests
         Assert.Single(batch.Residue);
         Assert.False(await ExistsAsync(connection, Probe, ct),
             $"collect.{Probe} should still have been dropped after an earlier removal failed.");
+    }
+
+    /// <summary>
+    /// A three-level aggregate hierarchy is dropped whole, even when the ROOT is offered first.
+    ///
+    /// <para>This is the second #1873 mechanism, and the residue check found it in the field rather than
+    /// reasoning predicting it — on the second run against a reused database, naming
+    /// <c>query_store_stats_interval_hourly</c> and the test that stranded it.</para>
+    ///
+    /// <para><b>Three levels, not two, and that is the whole point.</b> <c>CASCADE</c> handles a two-level
+    /// hierarchy by itself: dropping an hourly whose daily has no dependents of its own takes both, so a test
+    /// built that way passes with or without the fix — verified by mutation, which is how this test came to be
+    /// three levels deep. The real shape is <c>query_store_stats_interval_hourly</c> → <c>interval_daily</c> →
+    /// <c>day_grain_daily</c> (#1849 and #1869), and there TimescaleDB refuses to cascade THROUGH the middle
+    /// aggregate because it has a dependent: <c>2BP01 cannot drop view ... because other objects depend on
+    /// it</c>. Retrying the root cannot ever succeed, because what has to change is a different relation - so
+    /// the helper sweeps the whole set per round, and the leaf goes in the round the root fails.</para>
+    /// </summary>
+    [Fact]
+    public async Task AThreeLevelAggregateHierarchy_IsDroppedWhole_EvenWhenTheRootIsOfferedFirst_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), SkipReason);
+
+        var ct = TestContext.Current.CancellationToken;
+        const string Raw = "cagg_1873_raw";
+        const string Hourly = "cagg_1873_raw_hourly";
+        const string Daily = "cagg_1873_raw_daily";
+        const string DayGrain = "cagg_1873_raw_day_grain";
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+
+        try
+        {
+            await ExecAsync(connection,
+                $"CREATE TABLE IF NOT EXISTS collect.{Raw} (collection_time timestamp NOT NULL, server_id integer NOT NULL)", ct);
+            await ExecAsync(connection, TimescaleSupport.CreateHypertableSql($"collect.{Raw}", "collection_time"), ct);
+
+            await ExecAsync(connection, $@"
+CREATE MATERIALIZED VIEW collect.{Hourly}
+WITH (timescaledb.continuous, timescaledb.materialized_only = true) AS
+SELECT time_bucket(INTERVAL '1 hour', collection_time) AS bucket, server_id, count(*) AS samples
+FROM collect.{Raw}
+GROUP BY 1, 2
+WITH NO DATA", ct);
+
+            await ExecAsync(connection, $@"
+CREATE MATERIALIZED VIEW collect.{Daily}
+WITH (timescaledb.continuous, timescaledb.materialized_only = true) AS
+SELECT time_bucket(INTERVAL '1 day', bucket) AS bucket, server_id, sum(samples) AS samples
+FROM collect.{Hourly}
+GROUP BY 1, 2
+WITH NO DATA", ct);
+
+            await ExecAsync(connection, $@"
+CREATE MATERIALIZED VIEW collect.{DayGrain}
+WITH (timescaledb.continuous, timescaledb.materialized_only = true) AS
+SELECT time_bucket(INTERVAL '1 day', bucket) AS bucket, server_id, sum(samples) AS samples
+FROM collect.{Daily}
+GROUP BY 1, 2
+WITH NO DATA", ct);
+
+            var batch = new LiveCleanupBatch(connection);
+
+            /* Root FIRST — the order in which no amount of retrying one aggregate can succeed. */
+            await batch.DropContinuousAggregatesAsync([Hourly, Daily, DayGrain], ct);
+
+            Assert.Empty(batch.Residue);
+            Assert.False(await AggregateExistsAsync(connection, Hourly, ct), $"collect.{Hourly} should be gone.");
+            Assert.False(await AggregateExistsAsync(connection, Daily, ct), $"collect.{Daily} should be gone.");
+            Assert.False(await AggregateExistsAsync(connection, DayGrain, ct), $"collect.{DayGrain} should be gone.");
+        }
+        finally
+        {
+            await using var cleanup = new NpgsqlConnection(connectionString);
+            await cleanup.OpenAsync(CancellationToken.None);
+            var batch = new LiveCleanupBatch(cleanup);
+            await batch.DropContinuousAggregatesAsync([DayGrain, Daily, Hourly], CancellationToken.None);
+            await batch.DropTableAsync(Raw, CancellationToken.None);
+        }
+    }
+
+    private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(sql, connection);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task<bool> AggregateExistsAsync(NpgsqlConnection connection, string view, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(
+            "SELECT EXISTS (SELECT 1 FROM timescaledb_information.continuous_aggregates "
+            + $"WHERE view_schema = 'collect' AND view_name = '{view}')", connection);
+        return (bool)(await command.ExecuteScalarAsync(ct))!;
     }
 
     private static async Task<bool> ExistsAsync(NpgsqlConnection connection, string table, CancellationToken ct)

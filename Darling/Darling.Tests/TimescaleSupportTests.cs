@@ -1167,10 +1167,8 @@ AND   ((SELECT min(bucket) FROM collect.query_stats_hourly) IS NULL
                 await batch.RemoveRetentionPolicyAsync(relation, ct);
             }
 
-            foreach (var cagg in (await ExistingCaggsAsync(connection, ct)).Except(preexistingCaggs, StringComparer.Ordinal))
-            {
-                await batch.DropContinuousAggregateAsync(cagg, ct);
-            }
+            await batch.DropContinuousAggregatesAsync(
+                (await ExistingCaggsAsync(connection, ct)).Except(preexistingCaggs, StringComparer.Ordinal), ct);
         }
     }
 

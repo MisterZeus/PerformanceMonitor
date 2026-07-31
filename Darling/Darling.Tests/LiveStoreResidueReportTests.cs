@@ -36,11 +36,12 @@ public sealed class LiveStoreResidueReportTests
     [Fact]
     public void LeakedRelationsWithNoLedger_NameThemAndSayNoCleanupEvenTried()
     {
-        var report = LivePostgresStoreFixture.BuildResidueReport(["query_stats_hourly", "tick1778_fresh"], []);
+        var report = LivePostgresStoreFixture.BuildResidueReport(
+            ["collect.query_stats_hourly", "public.sec_split_compress"], []);
 
         Assert.NotNull(report);
         Assert.Contains("collect.query_stats_hourly", report, StringComparison.Ordinal);
-        Assert.Contains("collect.tick1778_fresh", report, StringComparison.Ordinal);
+        Assert.Contains("public.sec_split_compress", report, StringComparison.Ordinal);
         Assert.Contains("never tries to remove them at all", report, StringComparison.Ordinal);
     }
 
@@ -68,7 +69,7 @@ public sealed class LiveStoreResidueReportTests
     public void RelationsAndLedgerTogether_AreBothReported()
     {
         var report = LivePostgresStoreFixture.BuildResidueReport(
-            ["query_stats_db_hourly"],
+            ["collect.query_stats_db_hourly"],
             ["continuous aggregate collect.query_stats_db_hourly survived 7 removal attempts — "
              + "PostgresException (40P01): deadlock detected"]);
 

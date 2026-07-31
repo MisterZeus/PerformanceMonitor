@@ -1388,10 +1388,8 @@ public sealed class PayloadDimensionLiveTests
             _ = coverage;
         }
 
-        foreach (var cagg in (await ExistingCaggsAsync(connection, ct)).Except(preexisting, StringComparer.Ordinal))
-        {
-            await batch.DropContinuousAggregateAsync(cagg, ct);
-        }
+        await batch.DropContinuousAggregatesAsync(
+            (await ExistingCaggsAsync(connection, ct)).Except(preexisting, StringComparer.Ordinal), ct);
     }
 
     /// <summary>

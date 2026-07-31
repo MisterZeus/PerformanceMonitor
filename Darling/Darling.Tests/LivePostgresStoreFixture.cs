@@ -114,8 +114,18 @@ public sealed class LivePostgresStoreFixture : IAsyncLifetime
         await PgMigrations.MigrateAsync(connection, cancellationToken);
         TimescaleAvailable = await TimescaleSupport.TryEnableAsync(connection, null, cancellationToken);
 
-        /* AFTER migrating: the baseline has to describe the store the tests will actually see, and migration
-           is what creates most of what is in it. */
+        /* The other relation no migration creates and the SERVICE establishes at runtime (DarlingWorker's
+           maintenance sweep calls exactly this), so it belongs with CREATE EXTENSION rather than with the
+           hypertables and aggregates the fixture deliberately leaves to the tests. Establishing it here is
+           what keeps the residue baseline below honest: DarlingModuleMapTests creates it through the product
+           and correctly deletes only its ROWS, so a run that started without it ended one relation richer and
+           the #1873 check read product infrastructure as test debris — which it did, on the first full run
+           after the check landed. CREATE TABLE IF NOT EXISTS, so the test's own EnsureTableAsync call still
+           returns true and still covers the path. */
+        _ = await DarlingModuleMap.EnsureTableAsync(connection, null, cancellationToken);
+
+        /* AFTER establishing: the baseline has to describe the store the tests will actually see, and
+           migration plus the runtime setup above is what creates everything in it. */
         _baselineRelations = await RelationsAsync(connection, cancellationToken);
 
         ConnectionString = connectionString;
@@ -197,10 +207,10 @@ public sealed class LivePostgresStoreFixture : IAsyncLifetime
         if (leaked.Count > 0)
         {
             report.AppendLine();
-            report.AppendLine(CultureInfo.InvariantCulture, $"Relations in collect that the run created and did not remove ({leaked.Count}):");
+            report.AppendLine(CultureInfo.InvariantCulture, $"Relations the run created and did not remove ({leaked.Count}):");
             foreach (var relation in leaked)
             {
-                report.AppendLine(CultureInfo.InvariantCulture, $"  - collect.{relation}");
+                report.AppendLine(CultureInfo.InvariantCulture, $"  - {relation}");
             }
         }
 
@@ -226,13 +236,16 @@ public sealed class LivePostgresStoreFixture : IAsyncLifetime
 
     private static async Task<string[]> RelationsAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
-        /* Ordinary relations, views and materialized views in `collect`. Chunks are excluded for free: they
-           live in _timescaledb_internal, not here. */
+        /* Ordinary relations, views and materialized views in the schemas a test can leave something in.
+           `public` earns its place: DarlingSecuritySplitLiveTests CREATEs its compressed hypertable there
+           before moving it to collect, so a failure between the two would strand it somewhere a
+           collect-only sweep cannot see. Chunks are excluded for free — they live in _timescaledb_internal,
+           which is the extension's business and not a schema tests write to. */
         using var command = new NpgsqlCommand(@"
-SELECT c.relname
+SELECT n.nspname || '.' || c.relname
 FROM pg_class AS c
 JOIN pg_namespace AS n ON n.oid = c.relnamespace
-WHERE n.nspname = 'collect'
+WHERE n.nspname IN ('collect', 'config', 'public')
 AND   c.relkind IN ('r', 'p', 'v', 'm', 'f')", connection);
 
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
