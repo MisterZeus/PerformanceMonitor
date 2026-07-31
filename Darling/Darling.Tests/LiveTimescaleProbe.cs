@@ -56,9 +56,18 @@ internal static class LiveTimescaleProbe
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        /* SET, never inherit — the same Npgsql pooling trap LiveStoreCleanup documents: a physical session
-           opened before the store's first migration keeps the pre-ALTER search_path for its whole life, and
-           the hypertable helpers downstream use unqualified names. */
+        /* SET, and it is load-bearing here for a DIFFERENT reason than in LiveStoreCleanup — this is not the
+           unqualified-name trap copied across. timescaledb's control file is `relocatable = false` but, as it
+           says itself, "relocatable during installation", so CREATE EXTENSION with no SCHEMA clause puts the
+           extension in the FIRST SCHEMA ON THE SEARCH PATH. Verified on PostgreSQL 18.4 + TimescaleDB 2.28.1:
+           on a database with no default search_path, `SET search_path = collect, public` before CREATE lands
+           the extension in `collect`.
+
+           The store gets `collect` because MigrateAsync sets it as the DATABASE default and always runs
+           first — which is exactly why this line stays rather than leaning on that. Relying on the database
+           default would make which schema the extension lands in depend on migration having already run on
+           this database, and an ordering dependency nobody states is the shape #1862 fixed in this very
+           fixture. Setting it explicitly makes the probe answer the same way whatever ran before it. */
         await using (var setPath = new NpgsqlCommand("SET search_path = " + PgSchemaGenerator.SearchPath, connection))
         {
             await setPath.ExecuteNonQueryAsync(cancellationToken);
