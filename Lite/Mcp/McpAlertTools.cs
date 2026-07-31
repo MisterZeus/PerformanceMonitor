@@ -66,7 +66,10 @@ public sealed class McpAlertTools
         {
             var settings = new
             {
-                notifications_enabled = App.AlertsEnabled,
+                /* alerts_enabled, not notifications_enabled: Darling reports the master switch under this
+                   name, and it spells notifications_enabled something else entirely (the analysis
+                   sub-object's own toggle), so the old Lite name was not merely different — it collided. */
+                alerts_enabled = App.AlertsEnabled,
                 notify_connection_changes = App.NotifyConnectionChanges,
                 cpu = new
                 {
@@ -79,14 +82,17 @@ public sealed class McpAlertTools
                     /* Renamed from threshold_seconds (#1839): this gate has always been a COUNT of
                        blocked-process events — the seconds name was copied from the Dashboard, whose
                        blocking threshold really is seconds. Leaving it would now collide with the real
-                       seconds threshold below. */
-                    threshold_count = App.AlertBlockingThreshold,
+                       seconds threshold below. The spelling is Darling's count_threshold, not a new
+                       threshold_count: Darling's get_alert_settings/update_alert_settings pair already
+                       used it for this exact field, and one MCP schema across both apps is the point. */
+                    count_threshold = App.AlertBlockingThreshold,
                     wait_threshold_seconds = App.AlertBlockingWaitSecondsThreshold
                 },
                 deadlocks = new
                 {
                     enabled = App.AlertDeadlockEnabled,
-                    threshold = App.AlertDeadlockThreshold
+                    /* Same alignment: Darling reports this as count_threshold too. */
+                    count_threshold = App.AlertDeadlockThreshold
                 },
                 smtp = new
                 {

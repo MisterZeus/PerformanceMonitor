@@ -44,8 +44,8 @@ namespace PerformanceMonitorDashboard.Models
 
         /// <summary>
         /// SQL Agent job runs that failed within the failed-job lookback window. Live
-        /// msdb query — empty on Azure SQL DB (no Agent) or when the login lacks msdb /
-        /// SQLAgentReaderRole access.
+        /// msdb query — empty on Azure SQL DB (no Agent) or when the login cannot SELECT the
+        /// msdb job tables.
         /// </summary>
         public List<FailedJobInfo> RecentlyFailedJobs { get; set; } = new();
         public bool IsOnline { get; set; } = true;

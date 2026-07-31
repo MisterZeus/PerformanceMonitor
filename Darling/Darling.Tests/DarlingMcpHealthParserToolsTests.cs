@@ -314,6 +314,7 @@ public sealed class DarlingMcpHealthParserToolsLivePostgresTests
         await DeleteRowsAsync(connection, ct);
         await using var postgres = NpgsqlDataSource.Create(cs!);
 
+        var bodySucceeded = false;
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
@@ -358,10 +359,13 @@ VALUES ($1,$2,$3,$4,$5,$6)", CollectionIdGenerator.Next(), t, ServerId, ServerNa
             /* an empty store returns the miss. */
             await DeleteRowsAsync(connection, ct, keepServer: true);
             Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpHealthParserTools.GetSchedulerIssues(postgres, ServerName)));
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, ct);
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
         }
     }
 

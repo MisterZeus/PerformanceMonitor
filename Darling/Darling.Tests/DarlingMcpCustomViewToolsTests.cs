@@ -251,6 +251,7 @@ public sealed class DarlingMcpCustomViewToolsLivePostgresTests
         var name = "cv_mcp_live_" + Guid.NewGuid().ToString("N");
         var seedServerName = "cv_mcp_seed_" + Guid.NewGuid().ToString("N");
         var seedServerId = ServerIdHelper.GetDeterministicHashCode(seedServerName);
+        var bodySucceeded = false;
         try
         {
             /* validate (dry-run) — valid + invalid, no persistence. */
@@ -352,17 +353,24 @@ public sealed class DarlingMcpCustomViewToolsLivePostgresTests
             Assert.Equal("deleted", DarlingMcpTestData.StatusOf(await DarlingMcpCustomViewTools.DeleteCustomView(postgres, id)));
             Assert.Equal("not_found", DarlingMcpTestData.StatusOf(await DarlingMcpCustomViewTools.GetCustomView(postgres, id)));
             Assert.Equal("not_found", DarlingMcpTestData.StatusOf(await DarlingMcpCustomViewTools.DeleteCustomView(postgres, id)));
+
+            bodySucceeded = true;
         }
         finally
         {
             /* Separate single-statement commands: Npgsql cannot run a multi-command batch as one parameterized
-               (prepared) statement (42601). Own-scoped by GUID name + seed server id, so nothing else is touched. */
-            await using var owner = new NpgsqlConnection(cs);
-            await owner.OpenAsync(ct);
-            await DarlingMcpTestData.ExecAsync(owner, ct,
-                "DELETE FROM config.custom_views WHERE name = $1 OR name = $2", name, name + "_invalid");
-            await DarlingMcpTestData.ExecAsync(owner, ct, "DELETE FROM collect.wait_stats WHERE server_id = $1", seedServerId);
-            await DarlingMcpTestData.ExecAsync(owner, ct, "DELETE FROM collect.servers WHERE server_id = $1", seedServerId);
+               (prepared) statement (42601). Own-scoped by GUID name + seed server id, so nothing else is touched.
+
+               The hand-rolled cleanup connection is gone (#1902): LiveStoreCleanup already supplies one, and
+               with it the two things this did not have — a token that survives a cancelled run, and silence
+               while the body's own exception is in flight. */
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt,
+                    "DELETE FROM config.custom_views WHERE name = $1 OR name = $2", name, name + "_invalid");
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "DELETE FROM collect.wait_stats WHERE server_id = $1", seedServerId);
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "DELETE FROM collect.servers WHERE server_id = $1", seedServerId);
+            });
         }
     }
 }
