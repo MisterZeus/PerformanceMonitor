@@ -409,6 +409,180 @@ public sealed class DarlingExportViewerConfigTests
         }
     }
 
+    /// <summary>
+    /// The unrecoverable one. Exporting into the SERVICE's own config directory would overwrite its
+    /// darling.json with the viewer's — destroying every monitored server, every DPAPI encryptedPassword and
+    /// the MCP/web tokens, none of which exist anywhere else — and it is one keystroke from a legitimate
+    /// command, since the install directory is the obvious place to put a handoff folder. Reproduced before
+    /// the guard existed: a 390-byte service config became the 2813-byte viewer config, exit 0, no warning.
+    /// </summary>
+    [Fact]
+    public async Task ExportViewerConfigAsync_DestinationIsTheServiceConfigDirectory_RefusesAndLeavesItIntact()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "DPAPI requires Windows.");
+
+        var root = Directory.CreateTempSubdirectory("darling-export-selfdestruct-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            var credentialPath = DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory);
+            File.WriteAllText(credentialPath, DarlingSecrets.Protect("viewer-secret-pw"));
+            File.WriteAllText(
+                Path.Combine(Path.GetDirectoryName(credentialPath)!, DarlingManagedPostgres.ServerCertFileName),
+                Pem);
+
+            var configPath = Path.Combine(root.FullName, "darling.json");
+            var original = ManagedConfigJson(dataDirectory);
+            await File.WriteAllTextAsync(configPath, original);
+
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            /* The destination is the directory the service's own darling.json lives in. */
+            var exit = await DarlingCliCommands.ExportViewerConfigAsync(
+                configPath, root.FullName, output, error, CancellationToken.None);
+
+            Assert.Equal(1, exit);
+            Assert.Contains("SERVICE's own", error.ToString(), StringComparison.Ordinal);
+            Assert.Equal("", output.ToString());
+
+            /* The whole point: the service config is byte-for-byte what it was. */
+            Assert.Equal(original, await File.ReadAllTextAsync(configPath));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// A darling.json in the destination that this verb did not write is someone else's file — an operator's
+    /// real config, or one pre-created by a local attacker who would keep OWNERSHIP of it through the harden
+    /// (a Windows owner retains WRITE_DAC). Stop rather than write a live password into it.
+    /// </summary>
+    [Fact]
+    public async Task ExportViewerConfigAsync_DestinationHoldsAForeignDarlingJson_RefusesToOverwriteIt()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "DPAPI requires Windows.");
+
+        var root = Directory.CreateTempSubdirectory("darling-export-foreign-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            var credentialPath = DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory);
+            File.WriteAllText(credentialPath, DarlingSecrets.Protect("viewer-secret-pw"));
+            File.WriteAllText(
+                Path.Combine(Path.GetDirectoryName(credentialPath)!, DarlingManagedPostgres.ServerCertFileName),
+                Pem);
+
+            var configPath = Path.Combine(root.FullName, "darling.json");
+            await File.WriteAllTextAsync(configPath, ManagedConfigJson(dataDirectory));
+
+            var destination = Path.Combine(root.FullName, "handoff");
+            Directory.CreateDirectory(destination);
+            const string foreign = """{ "postgres": { "managed": true }, "servers": [ { "name": "MINE" } ] }""";
+            await File.WriteAllTextAsync(Path.Combine(destination, "darling.json"), foreign);
+
+            var output = new StringWriter();
+            var error = new StringWriter();
+            var exit = await DarlingCliCommands.ExportViewerConfigAsync(
+                configPath, destination, output, error, CancellationToken.None);
+
+            Assert.Equal(1, exit);
+            Assert.Contains("not written by --export-viewer-config", error.ToString(), StringComparison.Ordinal);
+            Assert.Equal(foreign, await File.ReadAllTextAsync(Path.Combine(destination, "darling.json")));
+
+            /* And no part of the credential leaked into the refusal. */
+            Assert.DoesNotContain("viewer-secret-pw", error.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>Re-exporting after a credential or certificate rotation is a documented workflow, so the
+    /// verb's OWN previous output is replaced without ceremony — the guard above must not break that.</summary>
+    [Fact]
+    public async Task ExportViewerConfigAsync_RerunOverItsOwnOutput_OverwritesSilently()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "DPAPI requires Windows.");
+
+        var root = Directory.CreateTempSubdirectory("darling-export-rerun-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            var credentialPath = DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory);
+            File.WriteAllText(credentialPath, DarlingSecrets.Protect("viewer-secret-pw"));
+            var certPath = Path.Combine(Path.GetDirectoryName(credentialPath)!, DarlingManagedPostgres.ServerCertFileName);
+            File.WriteAllText(certPath, Pem);
+
+            var configPath = Path.Combine(root.FullName, "darling.json");
+            await File.WriteAllTextAsync(configPath, ManagedConfigJson(dataDirectory));
+
+            var first = await DarlingCliCommands.ExportViewerConfigAsync(
+                configPath, null, new StringWriter(), new StringWriter(), CancellationToken.None);
+            Assert.Equal(0, first);
+
+            /* The certificate rotates, which is exactly when the docs say to re-run. */
+            const string rotated = "-----BEGIN CERTIFICATE-----\nMIIBROTATEDPEM\n-----END CERTIFICATE-----";
+            File.WriteAllText(certPath, rotated);
+
+            var error = new StringWriter();
+            var second = await DarlingCliCommands.ExportViewerConfigAsync(
+                configPath, null, new StringWriter(), error, CancellationToken.None);
+
+            Assert.Equal(0, second);
+            Assert.DoesNotContain("Refusing", error.ToString(), StringComparison.Ordinal);
+
+            var exported = Path.Combine(root.FullName, "viewer-config");
+            Assert.Contains(rotated, await File.ReadAllTextAsync(Path.Combine(exported, "server.crt")), StringComparison.Ordinal);
+            Assert.Contains(
+                DarlingCliCommands.ViewerConfigMarker,
+                await File.ReadAllTextAsync(Path.Combine(exported, "darling.json")),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>The exported secret must not be left readable by ordinary users — the file is CLEARTEXT, so
+    /// read access is the credential with no further step.</summary>
+    [Fact]
+    public async Task ExportViewerConfigAsync_HardensTheExportedSecret_NotReadableByOrdinaryUsers()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs require Windows.");
+
+        var root = Directory.CreateTempSubdirectory("darling-export-acl-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            var credentialPath = DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory);
+            File.WriteAllText(credentialPath, DarlingSecrets.Protect("viewer-secret-pw"));
+            File.WriteAllText(
+                Path.Combine(Path.GetDirectoryName(credentialPath)!, DarlingManagedPostgres.ServerCertFileName),
+                Pem);
+
+            var configPath = Path.Combine(root.FullName, "darling.json");
+            await File.WriteAllTextAsync(configPath, ManagedConfigJson(dataDirectory));
+
+            var exit = await DarlingCliCommands.ExportViewerConfigAsync(
+                configPath, null, new StringWriter(), new StringWriter(), CancellationToken.None);
+
+            /* Exit 0 is itself the claim that the secret is protected — the verb returns non-zero when it is
+               not, so this assertion and the ACL check below pin the same contract from both sides. */
+            Assert.Equal(0, exit);
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(
+                Path.Combine(root.FullName, "viewer-config", "darling.json")));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
     private static string ManagedConfigJson(string dataDirectory) =>
         $$"""
         {

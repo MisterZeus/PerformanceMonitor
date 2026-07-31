@@ -104,19 +104,42 @@ if (args.Length > 0 && DarlingCliCommands.IsExportViewerConfigVerb(args[0]))
         return 1;
     }
 
+    /* Parsed STRICTLY, in the spirit of #1581's classifier: never guess at an argument. An unrecognized flag
+       taken as the destination would write a cleartext credential to a path nobody chose — a bare --config
+       with no value would land it in a folder literally named "--config", under whatever the CWD is (for the
+       elevated prompt the docs tell operators to use, that is C:\Windows\System32). */
     var rest = args.AsSpan(1);
     string? exportConfigPath = null;
     string? exportDirectory = null;
     for (var i = 0; i < rest.Length; i++)
     {
-        if (string.Equals(rest[i], "--config", StringComparison.OrdinalIgnoreCase) && i + 1 < rest.Length)
+        var arg = rest[i];
+        if (string.Equals(arg, "--config", StringComparison.OrdinalIgnoreCase))
         {
+            if (i + 1 >= rest.Length)
+            {
+                Console.Error.WriteLine("--config needs a path: --export-viewer-config [directory] --config <path to darling.json>");
+                return 1;
+            }
+
             exportConfigPath = rest[++i];
+            continue;
         }
-        else
+
+        if (arg.StartsWith('-'))
         {
-            exportDirectory = rest[i];
+            Console.Error.WriteLine($"Unknown option for --export-viewer-config: {arg}");
+            Console.Error.WriteLine("Usage: --export-viewer-config [destination directory] [--config <path to darling.json>]");
+            return 1;
         }
+
+        if (exportDirectory is not null)
+        {
+            Console.Error.WriteLine($"--export-viewer-config takes ONE destination directory; got '{exportDirectory}' and '{arg}'.");
+            return 1;
+        }
+
+        exportDirectory = arg;
     }
 
     return await DarlingCliCommands.ExportViewerConfigAsync(

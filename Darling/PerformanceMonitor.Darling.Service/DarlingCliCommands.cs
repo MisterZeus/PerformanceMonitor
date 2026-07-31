@@ -510,20 +510,83 @@ public static class DarlingCliCommands
     public static async Task<int> ExportViewerConfigAsync(
         string? configPath, string? outputDirectory, TextWriter output, TextWriter error, CancellationToken cancellationToken)
     {
-        var targetDirectory = ResolveViewerExportDirectory(DarlingConfig.ResolveConfigPath(configPath), outputDirectory);
+        var servicePath = DarlingConfig.ResolveConfigPath(configPath);
+        var targetDirectory = ResolveViewerExportDirectory(servicePath, outputDirectory);
 
-        /* Argument shape first, before any config load or credential decrypt: this verb's positional argument
-           is the DESTINATION, while every sibling verb's is a config path, so an operator with sibling muscle
-           memory types darling.json here. Say that plainly rather than failing later on a directory-create
-           against an existing file — and say it without having touched DPAPI. */
+        /* Destination guards run FIRST — before any config load or credential decrypt — because they are pure
+           path questions and because the failure they prevent is unrecoverable. Nothing below has touched
+           DPAPI yet, so a bad argument costs nothing. */
         if (File.Exists(targetDirectory)
             || targetDirectory.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
         {
+            /* This verb's positional argument is the DESTINATION, while every sibling verb's is a config path,
+               so an operator with sibling muscle memory types darling.json here. */
             error.WriteLine(
                 $"'{targetDirectory}' is a file, not a directory. This verb's argument is the DESTINATION folder " +
                 "for the exported viewer files; to point it at a different darling.json, use --config <path> " +
                 "(e.g. --export-viewer-config D:\\handoff --config C:\\Darling\\darling.json).");
             return 1;
+        }
+
+        var exportedConfigPath = Path.Combine(targetDirectory, ViewerConfigFileName);
+
+        /* The unrecoverable one: exporting INTO the service's own config directory would overwrite the
+           service's darling.json with the viewer's, destroying every monitored server, every DPAPI
+           encryptedPassword, and the MCP/web tokens — none of which exist anywhere else. One keystroke from
+           a legitimate command (the install directory is the obvious place to put a handoff folder). */
+        if (string.Equals(
+                Path.GetFullPath(exportedConfigPath), Path.GetFullPath(servicePath), StringComparison.OrdinalIgnoreCase))
+        {
+            error.WriteLine(
+                $"Refusing to export into {targetDirectory}: that would overwrite the SERVICE's own {ViewerConfigFileName} " +
+                $"({servicePath}) with the viewer's, destroying its monitored servers, encrypted passwords and tokens. " +
+                "Name a different destination — the default (no argument) is a viewer-config subfolder beside it.");
+            return 1;
+        }
+
+        /* A destination that is a junction/symlink is refused: creating one needs no privilege on Windows, so
+           it is how an unprivileged local user redirects a cleartext credential into a directory they control. */
+        if (Directory.Exists(targetDirectory)
+            && new DirectoryInfo(targetDirectory).Attributes.HasFlag(FileAttributes.ReparsePoint))
+        {
+            error.WriteLine(
+                $"Refusing to export into {targetDirectory}: it is a junction or symbolic link, so the real " +
+                "destination is somewhere else. Export to a real directory.");
+            return 1;
+        }
+
+        /* Overwrite only what THIS verb wrote. Re-exporting after a credential or certificate rotation is a
+           documented workflow, so an export of ours is replaced silently; anything else — an operator's own
+           file, or one an attacker pre-created to keep ownership of (a Windows owner retains WRITE_DAC no
+           matter what DACL the harden below applies) — stops the run. */
+        if (File.Exists(exportedConfigPath))
+        {
+            string existing;
+            try
+            {
+                existing = await File.ReadAllTextAsync(exportedConfigPath, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                error.WriteLine($"Could not read the existing {exportedConfigPath} to check whether it is ours: {ex.Message}");
+                return 1;
+            }
+
+            if (!existing.Contains(ViewerConfigMarker, StringComparison.Ordinal))
+            {
+                error.WriteLine(
+                    $"Refusing to overwrite {exportedConfigPath}: it was not written by --export-viewer-config. " +
+                    "Export to an empty directory, or move that file aside first.");
+                return 1;
+            }
+        }
+
+        if (targetDirectory.StartsWith(@"\\", StringComparison.Ordinal))
+        {
+            error.WriteLine(
+                $"WARNING: {targetDirectory} is a network path. The exported {ViewerConfigFileName} holds a live " +
+                "password, and the file ACL this verb applies locally does not necessarily hold on a remote share — " +
+                "check the share's permissions yourself.");
         }
 
         DarlingConfig config;
@@ -565,7 +628,7 @@ public static class DarlingCliCommands
             return 1;
         }
 
-        var configFile = Path.Combine(targetDirectory, ViewerConfigFileName);
+        var configFile = exportedConfigPath;
         var certificateFile = Path.Combine(targetDirectory, ViewerClientCertificateFileName);
         var readmeFile = Path.Combine(targetDirectory, ViewerReadmeFileName);
 
@@ -582,9 +645,15 @@ public static class DarlingCliCommands
            can straddle a second boundary and print two. */
         var generatedUtc = DateTimeOffset.UtcNow;
 
+        bool secretProtected;
         try
         {
             Directory.CreateDirectory(targetDirectory);
+
+            /* Delete rather than truncate: writing over an existing file keeps its OWNER, and on Windows an
+               owner keeps WRITE_DAC — so overwriting a file someone else created would hand them a DACL they
+               can undo after the harden below. Recreating makes this process the owner. */
+            File.Delete(configFile);
             await File.WriteAllTextAsync(
                 configFile,
                 BuildViewerConfigJson(
@@ -592,7 +661,7 @@ public static class DarlingCliCommands
                         handoff.Host, handoff.Port, handoff.Role, handoff.Password, ViewerClientCertificateFileName),
                     generatedUtc),
                 cancellationToken);
-            TryHardenExportedSecret(configFile, error);
+            secretProtected = TryHardenExportedSecret(configFile, error);
 
             await File.WriteAllTextAsync(certificateFile, certificate + Environment.NewLine, cancellationToken);
             await File.WriteAllTextAsync(
@@ -603,6 +672,24 @@ public static class DarlingCliCommands
         catch (Exception ex)
         {
             error.WriteLine($"Could not write the viewer config to {targetDirectory}: {ex.Message}");
+
+            /* A write that died part-way can leave a file holding the start of a live password. Remove it, and
+               say so either way — "the export failed" must not leave an unmentioned secret on disk. */
+            try
+            {
+                if (File.Exists(configFile))
+                {
+                    File.Delete(configFile);
+                    error.WriteLine($"Removed the partially-written {configFile} (it would have held part of a live password).");
+                }
+            }
+            catch (Exception cleanupFailure)
+            {
+                error.WriteLine(
+                    $"WARNING: {configFile} was left behind and may hold part of a live password " +
+                    $"({cleanupFailure.Message}). Delete it yourself.");
+            }
+
             return 1;
         }
 
@@ -624,13 +711,25 @@ public static class DarlingCliCommands
         output.WriteLine(configFile);
         output.WriteLine(certificateFile);
         output.WriteLine(readmeFile);
-        return 0;
+
+        /* The files exist and work, but an unprotected cleartext credential is not a success an automation
+           should read as one — exit non-zero so a script stops, with the manifest already printed so the
+           operator can act on the exact file. */
+        return secretProtected ? 0 : 2;
     }
 
     /// <summary>The exported viewer folder's file names — the JSON the Viewer resolves by name, the cert its
     /// <c>Root Certificate=</c> points at, and the operator-facing field reference (#1953 item 4).</summary>
     public const string ViewerConfigFileName = "darling.json";
     public const string ViewerReadmeFileName = "README.txt";
+
+    /// <summary>
+    /// The first comment line of an exported viewer config, and the way a re-export tells ITS OWN previous
+    /// output apart from a file it must not clobber (an operator's real darling.json, or a pre-created one an
+    /// attacker wants to keep ownership of). Re-exporting after a rotation is a documented workflow, so our
+    /// own file is replaced silently; anything lacking this line stops the run.
+    /// </summary>
+    public const string ViewerConfigMarker = "PerformanceMonitor Darling - VIEWER configuration.";
 
     /// <summary>
     /// Where <see cref="ExportViewerConfigAsync"/> writes: the operator's directory when they named one,
@@ -662,7 +761,7 @@ public static class DarlingCliCommands
     /// </summary>
     public static string BuildViewerConfigJson(string connectionString, DateTimeOffset generatedUtc) =>
         "{" + Environment.NewLine +
-        "  // PerformanceMonitor Darling - VIEWER configuration." + Environment.NewLine +
+        "  // " + ViewerConfigMarker + Environment.NewLine +
         $"  // Generated by --export-viewer-config at {generatedUtc.ToUniversalTime():yyyy-MM-dd HH:mm:ss}Z. Nothing here needs hand-editing." + Environment.NewLine +
         "  //" + Environment.NewLine +
         "  // THIS FILE CONTAINS A LIVE DATABASE PASSWORD. Keep it ACL'd to the operator account." + Environment.NewLine +
@@ -766,12 +865,14 @@ public static class DarlingCliCommands
     /// <summary>
     /// ACLs the exported darling.json down to SYSTEM + Administrators + this account + INTERACTIVE (the
     /// admin/viewer-credential posture — the Viewer reads it interactively), so it does not sit in a folder
-    /// that inherited BUILTIN\Users read. Never fatal: the export's value is the file, and an ACL failure is
-    /// reported with the icacls that fixes it rather than throwing the folder away — mirroring
-    /// <c>DarlingManagedPostgres.TryHardenCredentialFile</c>.
+    /// that inherited BUILTIN\Users read, then CONFIRMS the result. Returns whether the file is protected —
+    /// "we tried" is not the same claim as "the secret is not readable", which is why every sibling harden
+    /// site pairs the call with <see cref="DarlingFileSecurity.IsReadableByOrdinaryUsers"/> and why the
+    /// caller's exit code depends on this answer. Never throws: the export's value is the file, so a failure
+    /// is reported with the icacls that fixes it rather than throwing the folder away.
     /// </summary>
     [SupportedOSPlatform("windows")]
-    private static void TryHardenExportedSecret(string path, TextWriter error)
+    private static bool TryHardenExportedSecret(string path, TextWriter error)
     {
         try
         {
@@ -780,9 +881,33 @@ public static class DarlingCliCommands
         catch (Exception ex)
         {
             error.WriteLine(
-                $"NOTE: could not restrict the ACL on {path} ({ex.Message}){DarlingFileSecurity.DescribeOwnerAndExposure(path)}. " +
-                $"It holds a live password, so ACL it yourself: icacls \"{path}\" /inheritance:r /grant \"{DarlingFileSecurity.ServiceAccountDisplayName}\":F");
+                $"WARNING: could not restrict the ACL on {path} ({ex.Message}){DarlingFileSecurity.DescribeOwnerAndExposure(path)}. " +
+                "It holds a LIVE password in cleartext. Delete it, or restrict it by hand before leaving this machine: " +
+                $"icacls \"{path}\" /inheritance:r /grant \"{DarlingFileSecurity.ServiceAccountDisplayName}\":F");
+            return false;
         }
+
+        try
+        {
+            if (DarlingFileSecurity.IsReadableByOrdinaryUsers(path))
+            {
+                error.WriteLine(
+                    $"WARNING: {path} is STILL readable by ordinary users after hardening" +
+                    $"{DarlingFileSecurity.DescribeOwnerAndExposure(path)}. It holds a LIVE password in cleartext. " +
+                    "Delete it, or restrict it by hand before leaving this machine: " +
+                    $"icacls \"{path}\" /inheritance:r /grant \"{DarlingFileSecurity.ServiceAccountDisplayName}\":F");
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine(
+                $"WARNING: could not confirm the ACL on {path} ({ex.Message}). It holds a LIVE password in " +
+                "cleartext — check its permissions before leaving this machine.");
+            return false;
+        }
+
+        return true;
     }
 
     /// <summary>

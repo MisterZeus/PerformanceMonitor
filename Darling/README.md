@@ -831,7 +831,9 @@ viewer-config\README.txt      the same field reference in plain text, including 
 
 Copy that folder to the viewer machine and point `DARLING_CONFIG` at its `darling.json` (or drop the files beside the Viewer executable) — then start the Viewer. By default the folder lands beside the service's own `darling.json`; pass a directory to put it somewhere else (`--export-viewer-config D:\handoff`), and `--config <path>` if darling.json is not where the service would resolve it.
 
-The exported `darling.json` **contains a live database password** (that is what the viewer authenticates with), so the verb says so before it writes, and ACLs the file to SYSTEM + Administrators + you. Copy the folder over a channel you trust, and keep it ACL'd on the viewer machine. Re-run the export after a credential or certificate rotation.
+The exported `darling.json` **contains a live database password** (that is what the viewer authenticates with), so the verb says so before it writes, ACLs the file to SYSTEM + Administrators + you, and confirms that ACL took — if the secret is still readable by ordinary users it says so and exits non-zero. Copy the folder over a channel you trust, and keep it ACL'd on the viewer machine. Re-run the export after a credential or certificate rotation; it replaces its own previous output without ceremony.
+
+It refuses rather than clobbers: it will not export into the **service's own config directory** (that would overwrite the service's `darling.json` with the viewer's, destroying its servers, encrypted passwords and tokens), will not overwrite a `darling.json` it did not write, and will not follow a junction or symlink. A destination it cannot use is named in the refusal.
 
 `--print-viewer-connection` remains for the case where you want the string itself — to paste into an existing config, or to check what the viewer will dial:
 
