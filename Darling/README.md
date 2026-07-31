@@ -561,6 +561,22 @@ A purge runs on the first sweep after startup and then daily, driven by the same
 
 On plain PostgreSQL the purge is DELETE-based. With TimescaleDB it switches to `drop_chunks` — a metadata-only detach of whole expired chunks (rows inside a partially-expired chunk survive until the whole chunk ages out; up to ~1 day of grace at the 1-day chunk width), with a per-table DELETE fallback for any table that is not a hypertable. Failure-isolated per table: one stuck purge is logged and retried the next day without stopping the sweep.
 
+#### The rollup tiers, on a TimescaleDB store
+
+The table above is the **collector** horizon, and for three tables it is not the binding one. `query_stats`, `procedure_stats` and `query_store_stats` are rolled up into hourly and daily continuous aggregates, and a separate tiered policy drops their raw chunks at **4 days** — the aggregates hold the history past that point, and a read is routed to whichever tier covers the window it asks for. On a store without TimescaleDB none of this exists and the collector horizons above are the whole story.
+
+| Tier | Horizon |
+|---|---|
+| Raw `query_stats`, `procedure_stats`, `query_store_stats` | 4 days |
+| Hourly **history** rollups | 90 days |
+| Daily **history** rollups | kept indefinitely (no policy) |
+| Baseline aggregates | 35 days |
+| `query_store_stats_interval_hourly`, `query_store_stats_interval_daily` | 7 days, 10 days |
+
+Every one of these is visible in `timescaledb_information.jobs`, and the last row is the one worth knowing before you look: those two are **internal dedup plumbing, not history**. The corrected Query Store rollups are built from them, nothing reads them directly, and each horizon is sized only to outlive whatever gates on it — 7 days has to exceed raw's 4, and the 10-day layer has to outlive the 7-day one it consumes. So a horizon SHORTER than the tier above it is correct there and costs no history, which is the opposite of how it reads at a glance. The service's startup summary line names all of these for the same reason.
+
+No raw tier is ever dropped before the aggregate that preserves it has caught up: each policy is created paused, and arms itself only once its rollup demonstrably covers what the tier below holds.
+
 ### Logs
 
 The service's PRIMARY log is a **rolling file** under `%ProgramData%\PerformanceMonitorDarling\logs\darling-service_yyyyMMdd.log` — every collector run line, connect edge, reload notice, warning, and error lands there (buffered writes, one file per day, 14-day retention, and a logging failure can never crash the service). Console runs write the same file plus console output.
