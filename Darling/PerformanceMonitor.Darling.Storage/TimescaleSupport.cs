@@ -870,8 +870,32 @@ $do$";
 
     /// <summary>The CORRECTED composer-grain DAILY rollup (#1849). A SIBLING of
     /// <see cref="QueryStoreStatsCorrectedHourlyView"/>, not its child — see that view's remarks for the
-    /// identity-width leaf constraint that forces the fan-out.</summary>
+    /// identity-width leaf constraint that forces the fan-out.
+    ///
+    /// <para>Superseded at the daily grain by <see cref="QueryStoreStatsDayGrainDailyView"/> (#1869), and kept
+    /// for the same reason the original pair is kept: it holds history the newer level starts empty of.</para>
+    /// </summary>
     public const string QueryStoreStatsCorrectedDailyView = "query_store_stats_corrected_daily";
+
+    /// <summary>
+    /// L2 of the corrected Query Store rollups (#1869): the interval-grain DAILY dedup layer — one row per
+    /// INTERVAL IDENTITY per DAY, holding that interval's last snapshot of the day.
+    ///
+    /// <para>Like <see cref="QueryStoreStatsIntervalHourlyView"/> this is not a read target. It exists so
+    /// <see cref="QueryStoreStatsDayGrainDailyView"/> has a source in which each interval appears once PER DAY
+    /// rather than once per collection HOUR, which is the whole of the hour-straddle residual #1849 left
+    /// behind.</para>
+    /// </summary>
+    public const string QueryStoreStatsIntervalDailyView = "query_store_stats_interval_daily";
+
+    /// <summary>The composer-grain DAILY rollup deduped at the DAY grain (#1869) —
+    /// <see cref="QueryStoreStatsCorrectedDailyView"/>'s replacement for windows it covers, carrying the
+    /// IDENTICAL column names so <c>ComposeCaggValueMapper</c> reads it unchanged.
+    ///
+    /// <para>Named for its dedup GRAIN and deliberately not for exactness: it removes the HOUR-straddle
+    /// residual, and an interval whose snapshots straddle MIDNIGHT is still counted once per collection DAY.
+    /// See <see cref="CreateQueryStoreStatsDayGrainDailySql"/> for the measured size of what remains.</para></summary>
+    public const string QueryStoreStatsDayGrainDailyView = "query_store_stats_daygrain_daily";
 
     /// <summary>
     /// The query_stats hourly continuous aggregate. 1-hour buckets grouped by the SAME dimensions the composer's
@@ -1148,9 +1172,15 @@ WITH NO DATA";
        rows, each holding a CUMULATIVE value, so the composer-grain sum counts it once per collection HOUR
        (~2) instead of once per COLLECTION (up to 496). That is a ~250x correction, not exactness. At the
        hourly grain the residual is irreducible — an interval genuinely collected in two hours has to appear
-       in both. At the DAILY grain it is removable by an interval-grain re-dedup level between L1 and the
-       collapse (both halves live-probed ACCEPTED here), at the cost of a FOURTH near-raw-cardinality object.
-       That is filed as its own capacity-gated decision rather than guessed at; see #1869. */
+       in both, and CreateQueryStoreStatsCorrectedHourlySql still carries it.
+
+       AT THE DAILY GRAIN IT IS REMOVED, by #1869: an interval-grain re-dedup level (L2,
+       CreateQueryStoreStatsIntervalDailySql) sits between L1 and a second composer-grain collapse
+       (CreateQueryStoreStatsDayGrainDailySql), so the interval is deduped across the WHOLE DAY before it is
+       summed. That makes the stack three levels deep, which is legal only because L2 WIDENS 1h -> 1d: the
+       leaf rule above forbids building on an identity-width child, not on a depth. The old corrected daily
+       stays exactly where it is, for the same reason the original pair does — it holds history the day-grain
+       level starts empty of, and reads prefer whichever actually covers the window. */
 
     /// <summary>
     /// L1 of the corrected Query Store rollups (#1849): one row per INTERVAL IDENTITY per collection hour,
@@ -1272,6 +1302,101 @@ SELECT
     max(max_cpu_time_us) AS max_cpu_time_us_max,
     sum(sample_count) AS sample_count
 FROM collect.query_store_stats_interval_hourly
+GROUP BY server_id, server_name, database_name, module_name, query_hash, time_bucket('1 day', bucket)
+WITH NO DATA";
+
+    /// <summary>
+    /// L2 of the corrected Query Store rollups (#1869): L1 re-deduped at the DAY grain — one row per interval
+    /// identity per DAY, projecting that interval's LAST snapshot of the day.
+    ///
+    /// <para><b>What this removes.</b> L1 keys on the collection HOUR, so an interval collected across an hour
+    /// boundary leaves TWO rows, each holding a cumulative value, and
+    /// <see cref="CreateQueryStoreStatsCorrectedDailySql"/>'s <c>sum</c> counts it once per hour it was
+    /// collected in rather than once. Bounded by 2x and measured at <b>1.97x</b> on this repo's own seeded
+    /// proof (1,013 against an exact 515). Taking <c>last(execution_count, bucket)</c> over the day collapses
+    /// those rows back to one before the collapse to composer dims.</para>
+    ///
+    /// <para><b>Legal only because it WIDENS.</b> A hierarchical CAGG whose bucket equals its parent's is a
+    /// leaf (see the block comment above), so this level could not exist at 1 hour — it is 1 DAY over L1's
+    /// 1 hour, and the <c>1h -> 1d -> 1d</c> chain it creates was live-probed ACCEPTED on PostgreSQL 18.4 /
+    /// TimescaleDB 2.28.1 together with its refresh and retention policies.</para>
+    ///
+    /// <para><b>What it does NOT remove, stated because the whole point of #1869 is that a permanent
+    /// mis-count is a permanent lie.</b> An interval whose snapshots straddle MIDNIGHT still produces two
+    /// rows here, one per day, and is still counted twice across them — the identical argument one grain up,
+    /// and equally irreducible at the daily grain. It is a far smaller residual than the hourly one and the
+    /// difference is structural, not a guess: <c>QueryStoreCollector</c> fetches an interval while its
+    /// <c>last_execution_time</c> keeps advancing, so a 60-minute interval is collected over roughly one hour
+    /// of wall clock and crosses an hour boundary almost ALWAYS but a day boundary about once per 24
+    /// intervals — a ~4% over-count against the 97% removed. Measured, pinned by a live test, and filed with
+    /// the cost of a fifth near-raw-cardinality level as #1879 rather than left as a comment.</para>
+    ///
+    /// <para><b>Capacity.</b> Keyed on interval identity, so near-raw cardinality like L1 — but at a day
+    /// bucket rather than an hour bucket, which makes it the SMALLER of the two: an interval spans ~2 hourly
+    /// buckets and 1 daily one. It therefore takes a short horizon too
+    /// (<see cref="IntervalDailyRetentionInterval"/>).</para>
+    /// </summary>
+    public const string CreateQueryStoreStatsIntervalDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_interval_daily
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    module_name,
+    query_hash,
+    query_id,
+    plan_id,
+    execution_type_desc,
+    replica_role,
+    runtime_stats_interval_id,
+    first_execution_time,
+    time_bucket('1 day', bucket) AS bucket,
+    last(execution_count, bucket) AS execution_count,
+    last(avg_duration_us, bucket) AS avg_duration_us,
+    last(avg_cpu_time_us, bucket) AS avg_cpu_time_us,
+    last(interval_start_time_utc, bucket) AS interval_start_time_utc,
+    max(max_duration_us) AS max_duration_us,
+    max(max_cpu_time_us) AS max_cpu_time_us,
+    sum(sample_count) AS sample_count
+FROM collect.query_store_stats_interval_hourly
+GROUP BY server_id, server_name, database_name, module_name, query_hash, query_id, plan_id,
+         execution_type_desc, replica_role, runtime_stats_interval_id, first_execution_time,
+         time_bucket('1 day', bucket)
+WITH NO DATA";
+
+    /// <summary>
+    /// The composer-grain DAILY rollup computed from the DAY-grain dedup (#1869) —
+    /// <see cref="CreateQueryStoreStatsCorrectedDailySql"/>'s column set to the byte, sourced from L2 instead
+    /// of L1 so an hour-straddling interval is counted ONCE.
+    ///
+    /// <para>Same column names again, so <c>ComposeCaggValueMapper</c> and every composed panel read it with
+    /// no change — only which relation the router names differs. <c>sample_count</c> still carries the number
+    /// of RAW SNAPSHOTS behind the bucket (L2 sums L1's, this sums L2's), so it stays comparable with both
+    /// dailies it sits beside.</para>
+    ///
+    /// <para>This is an identity-width hierarchical CAGG (1 day over L2's 1 day) and therefore a LEAF —
+    /// nothing can be built on it. Nothing needs to be: it is the end of the chain, which is exactly why the
+    /// identity width is spendable HERE and was not at L2.</para>
+    ///
+    /// <para>Kept indefinitely (no retention policy), like every other daily. That is also why #1869 was
+    /// worth its cost: the daily tier is the one whose numbers persist and get compared year over year.</para>
+    /// </summary>
+    public const string CreateQueryStoreStatsDayGrainDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_daygrain_daily
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    module_name,
+    query_hash,
+    time_bucket('1 day', bucket) AS bucket,
+    sum(execution_count) AS execution_count_sum,
+    sum(avg_duration_us::double precision * execution_count) AS duration_us_weighted_sum,
+    sum(avg_cpu_time_us::double precision * execution_count) AS cpu_us_weighted_sum,
+    max(max_duration_us) AS max_duration_us_max,
+    max(max_cpu_time_us) AS max_cpu_time_us_max,
+    sum(sample_count) AS sample_count
+FROM collect.query_store_stats_interval_daily
 GROUP BY server_id, server_name, database_name, module_name, query_hash, time_bucket('1 day', bucket)
 WITH NO DATA";
 
@@ -1403,6 +1528,11 @@ WITH NO DATA";
             (CreateSql: CreateQueryStoreStatsDailySql,  View: QueryStoreStatsDailyView,  PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsDailyView, "1 day", "1 day")),
             (CreateSql: CreateQueryStoreStatsCorrectedDailySql, View: QueryStoreStatsCorrectedDailyView, PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsCorrectedDailyView, "1 day", "1 day")),
             (CreateSql: CreateQueryStatsDbDailySql,     View: QueryStatsDbDailyView,     PolicySql: AddContinuousAggregatePolicySql(QueryStatsDbDailyView, "1 day", "1 day")),
+            /* The DAY-grain corrected daily (#1869), THREE levels deep: L1 (above) -> L2 interval_daily ->
+               daygrain_daily. Both must follow L1 and L2 must precede its own child, which this ordered sweep
+               gives — the same requirement the daily tier has, one level longer. */
+            (CreateSql: CreateQueryStoreStatsIntervalDailySql, View: QueryStoreStatsIntervalDailyView, PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsIntervalDailyView, "1 day", "1 day")),
+            (CreateSql: CreateQueryStoreStatsDayGrainDailySql, View: QueryStoreStatsDayGrainDailyView, PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsDayGrainDailyView, "1 day", "1 day")),
         }
         /* The nine baseline-tier aggregates (#1757) take the helper's hourly defaults: they are sourced from
            raw like the hourly tier, not hierarchically from another CAGG, so they carry no ordering
@@ -1496,6 +1626,35 @@ WITH NO DATA";
     /// </summary>
     public const string IntervalRetentionInterval = "7 days";
 
+    /// <summary>
+    /// Retention horizon for the interval-grain DAILY dedup layer (#1869): keep
+    /// <see cref="QueryStoreStatsIntervalDailyView"/> 10 days.
+    ///
+    /// <para>Picked by the same rule that picked <see cref="IntervalRetentionInterval"/>, one tier up, and it
+    /// is the OPPOSITE direction from the one instinct suggests. This layer is downstream of L1, so it is L1's
+    /// purge that is gated on THIS view covering it — meaning it must OUTLIVE ITS OWN SOURCE with margin, or
+    /// L1's gate can never release and L1 grows without bound. 10 against L1's 7 is the same 3-day margin L1
+    /// takes over raw's 4, and the ordering is pinned as a test invariant so a future tuning pass cannot
+    /// invert it silently.</para>
+    ///
+    /// <para><b>Capacity (#1581), MEASURED at the same scale #1849 used</b> — a seeded 600-query store at the
+    /// default 5-minute <c>query_store</c> cadence, 24 hours of collection (187,200 raw rows). The rig
+    /// reproduces #1849's own L1 figures to the row (28,800 rows / 11 MB), which is what makes the rest
+    /// comparable rather than merely plausible:
+    ///
+    /// <list type="bullet">
+    /// <item>this view: <b>15,000 rows / 4.7 MB per day</b> — near-raw cardinality like L1, but keyed on
+    /// interval identity x DAY where L1 keys on interval identity x HOUR, and an interval spans ~2 hourly
+    /// buckets against 1 daily one. So the fourth near-raw-cardinality object is the SMALLEST of them:
+    /// <b>~47 MB at 10 days</b> against L1's 79 MB at 7.</item>
+    /// <item><see cref="QueryStoreStatsDayGrainDailyView"/> above it: ~600 rows/day at composer grain, and
+    /// measured byte-for-byte identical to the corrected daily it sits beside (448 kB each over the same
+    /// span) — which is why it is kept indefinitely like every other daily rather than needing a horizon of
+    /// its own.</item>
+    /// </list></para>
+    /// </summary>
+    public const string IntervalDailyRetentionInterval = "10 days";
+
     /// <summary><see cref="TimeSpan"/> twin of <see cref="RawRetentionInterval"/> for callers doing arithmetic
     /// (the #1665 partial-window notice); RetentionTierRouterTests pins the two equal so they can't drift.</summary>
     public static readonly TimeSpan RawRetentionSpan = TimeSpan.FromDays(4);
@@ -1504,6 +1663,11 @@ WITH NO DATA";
     /// pinned STRICTLY GREATER than <see cref="RawRetentionSpan"/>, by TimescaleSupportTests — that ordering
     /// is what keeps the raw arming gate satisfiable in steady state.</summary>
     public static readonly TimeSpan IntervalRetentionSpan = TimeSpan.FromDays(7);
+
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="IntervalDailyRetentionInterval"/>; pinned equal, and
+    /// pinned STRICTLY GREATER than <see cref="IntervalRetentionSpan"/>, by TimescaleSupportTests — a
+    /// consumer that expired before its source would hold its source's purge forever.</summary>
+    public static readonly TimeSpan IntervalDailyRetentionSpan = TimeSpan.FromDays(10);
 
     /// <summary><see cref="TimeSpan"/> twin of <see cref="HourlyRetentionInterval"/>; pinned equal by
     /// RetentionTierRouterTests.</summary>
@@ -1750,20 +1914,30 @@ AND   j.hypertable_name = '{relation}'";
             (Relation: QueryStoreStatsHourlyView, DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: new[] { QueryStoreStatsDailyView }),
             (Relation: QueryStatsDbHourlyView,    DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: new[] { QueryStatsDbDailyView }),
 
-            /* The corrected Query Store tier (#1849).
+            /* The corrected Query Store tier (#1849, extended by #1869).
 
-               L1 has TWO consumers, because the corrected daily is its SIBLING rather than the corrected
+               L1 has THREE consumers. Two because the corrected daily is its SIBLING rather than the corrected
                hourly's child (identity-width hierarchical CAGGs are leaves — see
-               CreateQueryStoreStatsCorrectedDailySql). Both are named, so L1 cannot purge over history either
-               corrected rollup is still missing. Its horizon is the short IntervalRetentionInterval: nothing
-               reads L1, so it exists only to outlive raw for the arming gate.
+               CreateQueryStoreStatsCorrectedDailySql), and a third because #1869 hung the interval-grain DAILY
+               layer off it as well. All three are named, so L1 cannot purge over history ANY of them is still
+               missing — and the third is the load-bearing one on a store taking this build, because that store
+               has a fully-caught-up L1 and an empty interval_daily, which is precisely the state where a gate
+               reading only the older two would drop the only copy of history the day-grain daily has never
+               seen. NOTE that this gate is arm-only: a store whose L1 policy was ALREADY armed under #1849
+               keeps purging while the new consumer catches up, which caps how deep the day-grain daily can
+               ever be backfilled rather than losing anything a read can reach — see #1877.
 
                The corrected HOURLY is a leaf, so the leaf rule applies (#1757): its consumer is the composed
                READ, which routes past HourlyRouteMaxAge to the corrected DAILY — exactly the relationship the
                original hourly has to the original daily, so it takes the same horizon and the same coverage
-               tier. The corrected daily, like every other daily, is kept indefinitely and gets no policy. */
-            (Relation: QueryStoreStatsIntervalHourlyView,  DropAfter: IntervalRetentionInterval, TimeColumn: "bucket", Coverage: new[] { QueryStoreStatsCorrectedHourlyView, QueryStoreStatsCorrectedDailyView }),
-            (Relation: QueryStoreStatsCorrectedHourlyView, DropAfter: HourlyRetentionInterval,   TimeColumn: "bucket", Coverage: new[] { QueryStoreStatsCorrectedDailyView }),
+               tier.
+
+               The interval-grain DAILY (#1869) mirrors L1 one level down: one consumer (the day-grain daily it
+               feeds), and a short horizon that must still EXCEED L1's, since it is what L1's own gate waits on.
+               Both composer-grain dailies are kept indefinitely and get no policy. */
+            (Relation: QueryStoreStatsIntervalHourlyView,  DropAfter: IntervalRetentionInterval,      TimeColumn: "bucket", Coverage: new[] { QueryStoreStatsCorrectedHourlyView, QueryStoreStatsCorrectedDailyView, QueryStoreStatsIntervalDailyView }),
+            (Relation: QueryStoreStatsCorrectedHourlyView, DropAfter: HourlyRetentionInterval,        TimeColumn: "bucket", Coverage: new[] { QueryStoreStatsCorrectedDailyView }),
+            (Relation: QueryStoreStatsIntervalDailyView,   DropAfter: IntervalDailyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { QueryStoreStatsDayGrainDailyView }),
         })
         /* The nine baseline-tier policies (#1757). Coverage is the tier ITSELF: see the leaf rule in the
            comment above -- their consumer is the baseline computation, whose capture requirement is the
@@ -1864,7 +2038,11 @@ AND   j.hypertable_name = '{relation}'";
            no schema migration or version gate: existence IS the probe. */
         $"to_regclass('collect.{QueryStoreStatsIntervalHourlyView}') IS NOT NULL, " +
         $"to_regclass('collect.{QueryStoreStatsCorrectedHourlyView}') IS NOT NULL, " +
-        $"to_regclass('collect.{QueryStoreStatsCorrectedDailyView}') IS NOT NULL";
+        $"to_regclass('collect.{QueryStoreStatsCorrectedDailyView}') IS NOT NULL, " +
+        /* The day-grain daily and its dedup layer (#1869) — the same existence-is-the-probe degrade, so a
+           store on a #1849-era service keeps reading the corrected daily and needs no version gate either. */
+        $"to_regclass('collect.{QueryStoreStatsIntervalDailyView}') IS NOT NULL, " +
+        $"to_regclass('collect.{QueryStoreStatsDayGrainDailyView}') IS NOT NULL";
 
     /// <summary>
     /// Detects which continuous-aggregate rollups exist in the store (<see cref="RollupProbeSql"/>). On a
@@ -1888,7 +2066,8 @@ AND   j.hypertable_name = '{relation}'";
         return new RollupAvailability(
             reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3),
             reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7),
-            reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10));
+            reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10),
+            reader.GetBoolean(11), reader.GetBoolean(12));
     }
 
     /* ─────────────── rollup COVERAGE (the un-materialized-history guard, #1759) ─────────────── */
@@ -1951,6 +2130,12 @@ AND   j.hypertable_name = '{relation}'";
         (QueryStoreStatsIntervalHourlyView, "query_store_stats", "query_store_stats", "collection_time", HourlyBucket),
         (QueryStoreStatsCorrectedHourlyView, "query_store_stats", QueryStoreStatsIntervalHourlyView, "bucket", HourlyBucket),
         (QueryStoreStatsCorrectedDailyView, "query_store_stats", QueryStoreStatsIntervalHourlyView, "bucket", DailyBucket),
+
+        /* The day-grain daily and its dedup layer (#1869) — L1's THIRD child, and the first rollup in this
+           list whose own source is itself hierarchical. Both are DAY-bucketed, which is why the explicit
+           BucketWidth above is what keeps the backfill honest here as well. */
+        (QueryStoreStatsIntervalDailyView, "query_store_stats", QueryStoreStatsIntervalHourlyView, "bucket", DailyBucket),
+        (QueryStoreStatsDayGrainDailyView, "query_store_stats", QueryStoreStatsIntervalDailyView, "bucket", DailyBucket),
     };
 
     /// <summary>The three raw tables the rollups roll up, in coverage-probe order (deduplicated
@@ -2701,24 +2886,31 @@ public sealed record CompressionActivity(
 public readonly record struct RollupAvailability(
     bool QueryGrainHourly, bool QueryGrainDaily, bool DbGrainHourly, bool DbGrainDaily,
     bool ProcedureGrainHourly, bool ProcedureGrainDaily, bool QueryStoreGrainHourly, bool QueryStoreGrainDaily,
-    bool QueryStoreIntervalHourly = false, bool QueryStoreCorrectedHourly = false, bool QueryStoreCorrectedDaily = false)
+    bool QueryStoreIntervalHourly = false, bool QueryStoreCorrectedHourly = false, bool QueryStoreCorrectedDaily = false,
+    bool QueryStoreIntervalDaily = false, bool QueryStoreDayGrainDaily = false)
 {
     /// <summary>True when every rollup exists — the steady state on a TimescaleDB store, safe to cache
     /// permanently (a created continuous aggregate is never dropped outside the reshape sweep).</summary>
     public bool AllPresent =>
         QueryGrainHourly && QueryGrainDaily && DbGrainHourly && DbGrainDaily
         && ProcedureGrainHourly && ProcedureGrainDaily && QueryStoreGrainHourly && QueryStoreGrainDaily
-        && QueryStoreIntervalHourly && QueryStoreCorrectedHourly && QueryStoreCorrectedDaily;
+        && QueryStoreIntervalHourly && QueryStoreCorrectedHourly && QueryStoreCorrectedDaily
+        && QueryStoreIntervalDaily && QueryStoreDayGrainDaily;
 
     /// <summary>No rollups at all — the plain-PostgreSQL shape, and the safe fallback when a probe fails.</summary>
     public static RollupAvailability None => default;
 
     /// <summary>Every flag true — the fully-built TimescaleDB shape (and the test shorthand for it).</summary>
-    public static RollupAvailability All => new(true, true, true, true, true, true, true, true, true, true, true);
+    public static RollupAvailability All => new(true, true, true, true, true, true, true, true, true, true, true, true, true);
 
     /// <summary>The pre-#1849 shape: every ORIGINAL rollup present, none of the corrected Query Store ones —
     /// i.e. a store whose service has not yet created them. The routing fallback's test shorthand.</summary>
     public static RollupAvailability WithoutCorrectedQueryStore => new(true, true, true, true, true, true, true, true);
+
+    /// <summary>The #1849-era shape: the corrected rollups present, but not the #1869 day-grain daily pair —
+    /// a store whose service predates this build. Its Query Store dailies must keep routing to the corrected
+    /// daily, which is the degrade that lets #1869 ship with no migration either.</summary>
+    public static RollupAvailability WithoutDayGrainQueryStore => new(true, true, true, true, true, true, true, true, true, true, true);
 
     /// <summary>
     /// Whether <paramref name="caggView"/> (an unqualified <c>collect.*</c> rollup view name — the strings the
@@ -2739,6 +2931,8 @@ public readonly record struct RollupAvailability(
         TimescaleSupport.QueryStoreStatsIntervalHourlyView => QueryStoreIntervalHourly,
         TimescaleSupport.QueryStoreStatsCorrectedHourlyView => QueryStoreCorrectedHourly,
         TimescaleSupport.QueryStoreStatsCorrectedDailyView => QueryStoreCorrectedDaily,
+        TimescaleSupport.QueryStoreStatsIntervalDailyView => QueryStoreIntervalDaily,
+        TimescaleSupport.QueryStoreStatsDayGrainDailyView => QueryStoreDayGrainDaily,
         _ => false,
     };
 }

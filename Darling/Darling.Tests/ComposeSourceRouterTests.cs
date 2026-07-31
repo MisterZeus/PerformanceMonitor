@@ -296,6 +296,108 @@ public sealed class ComposeSourceRouterTests
         }
     }
 
+    /* ─────────────── the DAY-grain daily (#1869) ─────────────── */
+
+    /// <summary>Corrected back 30 days, day-grain back <paramref name="dayGrainDays"/>, legacy back 60 —
+    /// the three-deep Query Store daily ladder with each rung's floor stated explicitly.</summary>
+    private static RollupCoverage QueryStoreLadder(int dayGrainDays) => new(
+        new Dictionary<string, DateTime>(StringComparer.Ordinal)
+        {
+            [TimescaleSupport.QueryStoreStatsCorrectedHourlyView] = Now.AddDays(-30),
+            [TimescaleSupport.QueryStoreStatsCorrectedDailyView] = Now.AddDays(-30),
+            [TimescaleSupport.QueryStoreStatsDayGrainDailyView] = Now.AddDays(-dayGrainDays),
+            [TimescaleSupport.QueryStoreStatsHourlyView] = Now.AddDays(-60),
+            [TimescaleSupport.QueryStoreStatsDailyView] = Now.AddDays(-60),
+        },
+        new Dictionary<string, DateTime>(StringComparer.Ordinal) { ["query_store_stats"] = Now.AddDays(-4) });
+
+    /// <summary>
+    /// WATCHED (mutation): delete the day-grain preference and this goes red. The corrected daily sums each
+    /// interval once per collection HOUR, so an interval straddling an hour boundary lands in it about twice
+    /// (measured 1.97x on the live proof); the day-grain daily counts it once. Where the newer view has
+    /// materialized the window, it is simply the more correct answer and must win.
+    /// </summary>
+    [Fact]
+    public void QueryStore_DayGrainDailyCoversTheWindow_WinsOverTheCorrectedDaily()
+    {
+        var route = ComposeSourceRouter.Resolve(
+            Plan("qs_executions"), Now, Now.AddDays(-25), RollupAvailability.All, QueryStoreLadder(dayGrainDays: 30));
+
+        Assert.Equal(ComposeSourceTier.Daily, route.Tier);
+        Assert.Equal(TimescaleSupport.QueryStoreStatsDayGrainDailyView, route.CaggRelation);
+    }
+
+    /// <summary>
+    /// WATCHED (mutation): make the preference absolute — prefer the day-grain daily whenever it EXISTS — and
+    /// this goes red. It is a NEW aggregate that starts empty and deepens from deploy, so beyond its floor it
+    /// holds nothing, and serving a window off it would return empty rows where the corrected daily still has
+    /// the (slightly over-counted) history. Coverage beats correctness by exactly one rung, every time.
+    /// </summary>
+    [Fact]
+    public void QueryStore_BeyondDayGrainCoverage_FallsBackToTheCorrectedDaily()
+    {
+        /* Every age here is past HourlyRouteMaxAge (20 days): the preference lives at the DAILY tier, so a
+           younger window would be answered by the hourly rung and prove nothing about this ladder. */
+        var coverage = QueryStoreLadder(dayGrainDays: 25);
+
+        /* Inside the day-grain coverage → the exactly-counted view. */
+        var inside = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-22), RollupAvailability.All, coverage);
+        Assert.Equal(TimescaleSupport.QueryStoreStatsDayGrainDailyView, inside.CaggRelation);
+
+        /* Past it but inside the corrected daily → the corrected daily, NOT the legacy pair below it. */
+        var beyond = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-28), RollupAvailability.All, coverage);
+        Assert.Equal(TimescaleSupport.QueryStoreStatsCorrectedDailyView, beyond.CaggRelation);
+
+        /* Past BOTH → the superseded daily, the only relation holding it. The full three-rung ladder. */
+        var ancient = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-50), RollupAvailability.All, coverage);
+        Assert.Equal(TimescaleSupport.QueryStoreStatsDailyView, ancient.CaggRelation);
+    }
+
+    /// <summary>
+    /// The residual is IRREDUCIBLE at the hourly grain — an interval genuinely collected across two hours has
+    /// to appear in both — so #1869 buys nothing there and must change nothing there. An hourly-age window
+    /// routes exactly where #1849 left it, whatever the day-grain daily has materialized.
+    /// </summary>
+    [Fact]
+    public void QueryStore_HourlyAgeWindow_IsUntouchedByTheDayGrainDaily()
+    {
+        var route = ComposeSourceRouter.Resolve(
+            Plan("qs_executions"), Now, Now.AddDays(-10), RollupAvailability.All, QueryStoreLadder(dayGrainDays: 30));
+
+        Assert.Equal(ComposeSourceTier.Hourly, route.Tier);
+        Assert.Equal(TimescaleSupport.QueryStoreStatsCorrectedHourlyView, route.CaggRelation);
+    }
+
+    /// <summary>
+    /// A store whose service predates #1869 has the corrected rollups but no day-grain pair, and every Query
+    /// Store daily window must keep routing to the corrected daily rather than compiling SQL against a
+    /// relation that does not exist. The same existence-is-the-probe degrade that let #1849 ship with no
+    /// schema migration, which is why #1869 needs none either.
+    /// </summary>
+    [Fact]
+    public void QueryStore_DayGrainDailyAbsent_KeepsRoutingToTheCorrectedDaily()
+    {
+        var route = ComposeSourceRouter.Resolve(
+            Plan("qs_executions"), Now, Now.AddDays(-25),
+            RollupAvailability.WithoutDayGrainQueryStore, QueryStoreLadder(dayGrainDays: 30));
+
+        Assert.Equal(TimescaleSupport.QueryStoreStatsCorrectedDailyView, route.CaggRelation);
+    }
+
+    /// <summary>
+    /// No coverage measured at all (a failed probe) moves nothing: null is "no evidence" everywhere else in
+    /// this router, and a rollup that might be empty must not displace one that was already answering. This is
+    /// also what keeps every pre-#1869 routing pin in this file honest rather than silently re-targeted.
+    /// </summary>
+    [Fact]
+    public void QueryStore_NoCoverageEvidence_LeavesTheCorrectedDailyInPlace()
+    {
+        var route = ComposeSourceRouter.Resolve(
+            Plan("qs_executions"), Now, Now.AddDays(-40), RollupAvailability.All, RollupCoverage.Unknown);
+
+        Assert.Equal(TimescaleSupport.QueryStoreStatsCorrectedDailyView, route.CaggRelation);
+    }
+
     /// <summary>Daily-age window, daily view missing but hourly present: fall to the hourly view (capped at
     /// its 21-day horizon) — the same ladder the built-in tabs use, better than raw's 4 days.</summary>
     [Fact]

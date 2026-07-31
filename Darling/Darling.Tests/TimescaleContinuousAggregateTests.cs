@@ -433,4 +433,96 @@ public sealed class TimescaleContinuousAggregateTests
             "the interval-grain dedup layer must be retained strictly longer than raw, or arming raw's purge " +
             "races its own coverage gate.");
     }
+
+    /* ─────────────── the DAY-grain corrected daily (#1869) ─────────────── */
+
+    /// <summary>
+    /// L2: L1 re-deduped at the DAY grain. The two facts that make it work are the source edge (it reads L1,
+    /// not raw — a CAGG on query_store_stats cannot bucket on anything but collection_time) and
+    /// <c>last(x, bucket)</c> over the full INTERVAL IDENTITY, which is what collapses an interval's two
+    /// hourly rows back to one. A <c>sum</c> here would reproduce exactly the residual this exists to remove.
+    /// </summary>
+    [Fact]
+    public void QueryStoreStatsIntervalDaily_RededupsTheIntervalAcrossTheDay_FromL1()
+    {
+        var sql = TimescaleSupport.CreateQueryStoreStatsIntervalDailySql;
+
+        Assert.Contains("CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_interval_daily", sql, StringComparison.Ordinal);
+        Assert.Contains("WITH (timescaledb.continuous)", sql, StringComparison.Ordinal);
+        Assert.Contains($"FROM collect.{TimescaleSupport.QueryStoreStatsIntervalHourlyView}", sql, StringComparison.Ordinal);
+
+        /* WIDENING, and that is what makes the level legal at all: an identity-width hierarchical CAGG is a
+           LEAF, so a 1-hour re-dedup over L1 could exist but nothing could be built on it. */
+        Assert.Contains("time_bucket('1 day', bucket) AS bucket", sql, StringComparison.Ordinal);
+
+        /* The dedup itself — LAST, never SUM, and ordered by the parent's bucket because that is the only
+           time column an L1 row carries. */
+        Assert.Contains("last(execution_count, bucket) AS execution_count", sql, StringComparison.Ordinal);
+        Assert.Contains("last(avg_duration_us, bucket) AS avg_duration_us", sql, StringComparison.Ordinal);
+        Assert.Contains("last(avg_cpu_time_us, bucket) AS avg_cpu_time_us", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("sum(execution_count)", sql, StringComparison.Ordinal);
+
+        /* Grouped on the SAME interval identity L1 keys on, both generations included (#1853): the real id and
+           the tier-1 proxy, deliberately not COALESCEd into one column. */
+        Assert.Contains("runtime_stats_interval_id, first_execution_time,", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY server_id, server_name, database_name, module_name, query_hash, query_id, plan_id,", sql, StringComparison.Ordinal);
+
+        /* sample_count keeps meaning RAW SNAPSHOTS, so it stays comparable with every other rollup here. */
+        Assert.Contains("sum(sample_count) AS sample_count", sql, StringComparison.Ordinal);
+        Assert.Contains("WITH NO DATA", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// L3: the composer-grain collapse of L2, carrying <see cref="TimescaleSupport.CreateQueryStoreStatsCorrectedDailySql"/>'s
+    /// column set to the byte so ComposeCaggValueMapper reads either one unchanged. The load-bearing
+    /// difference is one line — the relation it reads.
+    /// </summary>
+    [Fact]
+    public void QueryStoreStatsDayGrainDaily_CollapsesL2_WithTheCorrectedDailysColumnsExactly()
+    {
+        var sql = TimescaleSupport.CreateQueryStoreStatsDayGrainDailySql;
+
+        Assert.Contains("CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_daygrain_daily", sql, StringComparison.Ordinal);
+        Assert.Contains($"FROM collect.{TimescaleSupport.QueryStoreStatsIntervalDailyView}", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY server_id, server_name, database_name, module_name, query_hash, time_bucket('1 day', bucket)", sql, StringComparison.Ordinal);
+
+        /* Every projected column of the corrected daily, identically named and identically computed — asserted
+           against the corrected daily's own SQL rather than a transcription, so the two cannot drift into
+           column sets one shared value mapper then mis-reads. */
+        foreach (var projection in new[]
+        {
+            "sum(execution_count) AS execution_count_sum",
+            "sum(avg_duration_us::double precision * execution_count) AS duration_us_weighted_sum",
+            "sum(avg_cpu_time_us::double precision * execution_count) AS cpu_us_weighted_sum",
+            "max(max_duration_us) AS max_duration_us_max",
+            "max(max_cpu_time_us) AS max_cpu_time_us_max",
+            "sum(sample_count) AS sample_count",
+        })
+        {
+            Assert.Contains(projection, TimescaleSupport.CreateQueryStoreStatsCorrectedDailySql, StringComparison.Ordinal);
+            Assert.Contains(projection, sql, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("WITH NO DATA", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The retention ordering that keeps the three-level chain's gates satisfiable. Each level's purge waits on
+    /// its CONSUMER covering it, so a consumer that expired FIRST would hold its own source's purge forever:
+    /// raw (4d) &lt; L1 (7d) &lt; the interval-grain daily (10d), and the two composer-grain dailies are kept
+    /// indefinitely. Written as one chain because that is the invariant — the individual numbers are tunable,
+    /// their order is not.
+    /// </summary>
+    [Fact]
+    public void RetentionHorizons_RiseDownTheQueryStoreDedupChain_SoNoGateWaitsOnSomethingAlreadyDropped()
+    {
+        Assert.True(TimescaleSupport.IntervalRetentionSpan > TimescaleSupport.RawRetentionSpan);
+        Assert.True(TimescaleSupport.IntervalDailyRetentionSpan > TimescaleSupport.IntervalRetentionSpan,
+            "the interval-grain DAILY layer must outlive the hourly one whose purge is gated on it, or L1's " +
+            "policy can never arm and L1 grows without bound.");
+
+        /* The TimeSpan twins must equal the interval literals the policies are actually created with. */
+        Assert.Equal("10 days", TimescaleSupport.IntervalDailyRetentionInterval);
+        Assert.Equal(TimeSpan.FromDays(10), TimescaleSupport.IntervalDailyRetentionSpan);
+    }
 }
