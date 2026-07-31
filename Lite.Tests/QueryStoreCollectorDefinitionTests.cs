@@ -632,7 +632,7 @@ public sealed class QueryStoreCollectorDefinitionTests
         Assert.Contains("replica_role = qsr.replica_name", plan.Text, StringComparison.Ordinal);
 
         /* Managed Instance joined both gates with #1886, on its OWN live evidence rather than by
-           pattern-matching this Azure SQL DB change — see MiCarriesBothVersionGatedColumns below for
+           pattern-matching this Azure SQL DB change — see BuildPerItemQuery_ManagedInstance_CarriesBothVersionGatedColumns below for
            what was measured and why MI needed a stricter bar than Azure did. */
         var managedInstance = QueryStoreCollector.Instance.BuildPerItemQuery("SO", new CollectorContext
         {
