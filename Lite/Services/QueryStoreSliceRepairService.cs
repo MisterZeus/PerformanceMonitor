@@ -135,8 +135,18 @@ public sealed class QueryStoreSliceRepairService
         return $"ANY_VALUE({column})";
     }
 
+    /// <summary>
+    /// What a repair did. <paramref name="Failures"/> is per FILE, and a non-empty list is not an exception:
+    /// each file's original survives its own failure and the next startup retries it, so the honest report is
+    /// "these were repaired, these were not, here is why" rather than one thrown error that hides the rest.
+    /// </summary>
+    public sealed record RepairResult(long RowsRemoved, IReadOnlyList<string> Failures)
+    {
+        public bool FullyRepaired => Failures.Count == 0;
+    }
+
     /// <summary>What a survey found, in the hot store and across the archive.</summary>
-    public sealed record Survey(long HotGroups, long HotRows, IReadOnlyList<ArchiveFileSurvey> Archive)
+    public sealed record Survey(long HotGroups, long HotRows, IReadOnlyList<ArchiveFileSurvey> Archive, IReadOnlyList<string> Unreadable)
     {
         public long HotRowsRemoved => HotRows - HotGroups;
 
@@ -145,8 +155,12 @@ public sealed class QueryStoreSliceRepairService
         public bool HasWork => HotGroups > 0 || Archive.Any(a => a.Groups > 0);
     }
 
-    /// <summary>One archive file's share of the work.</summary>
-    public sealed record ArchiveFileSurvey(string Path, long Rows, long Groups, long SplitRows, bool HasIntervalId)
+    /// <summary>
+    /// One archive file's share of the work. <paramref name="Executions"/> is the file's total
+    /// <c>SUM(execution_count)</c> BEFORE the rewrite — the conservation baseline, since the collapse sums the
+    /// counter within a group and therefore cannot change the file's total.
+    /// </summary>
+    public sealed record ArchiveFileSurvey(string Path, long Rows, long Groups, long SplitRows, long Executions, bool HasIntervalId)
     {
         public long RowsRemoved => SplitRows - Groups;
     }
@@ -178,12 +192,25 @@ FROM (SELECT COUNT(*) AS c FROM {Table} GROUP BY {string.Join(", ", hotKey)} HAV
         }
 
         var archive = new List<ArchiveFileSurvey>();
+        var unreadable = new List<string>();
         foreach (var file in ArchiveFiles())
         {
-            archive.Add(await SurveyArchiveFileAsync(connection, file, cancellationToken));
+            /* Per-file isolation in the SURVEY too, not only in the rewrite. An archive file that cannot even
+               be inspected — a shape the collapse cannot express, a truncated file — must not stop the others
+               being surveyed and repaired. It is reported and skipped, and its original is untouched by
+               definition because nothing was written. */
+            try
+            {
+                archive.Add(await SurveyArchiveFileAsync(connection, file, cancellationToken));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                unreadable.Add($"{Path.GetFileName(file)}: {ex.Message}");
+                _logger?.LogWarning(ex, "#1912 could not survey archive file {File}; skipped and left untouched", file);
+            }
         }
 
-        return new Survey(groups, rows, archive);
+        return new Survey(groups, rows, archive, unreadable);
     }
 
     /// <summary>The archived Query Store parquet files, oldest name first.</summary>
@@ -203,13 +230,14 @@ FROM (SELECT COUNT(*) AS c FROM {Table} GROUP BY {string.Join(", ", hotKey)} HAV
 SELECT
     (SELECT COUNT(*) FROM read_parquet('{EscapePath(file)}')) AS total_rows,
     COUNT(*) AS groups,
-    CAST(COALESCE(SUM(c), 0) AS BIGINT) AS rows_in_groups
+    CAST(COALESCE(SUM(c), 0) AS BIGINT) AS rows_in_groups,
+    (SELECT CAST(COALESCE(SUM(execution_count), 0) AS BIGINT) FROM read_parquet('{EscapePath(file)}')) AS executions
 FROM (SELECT COUNT(*) AS c FROM read_parquet('{EscapePath(file)}') GROUP BY {string.Join(", ", key)} HAVING COUNT(*) > 1)";
 
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
-            return new ArchiveFileSurvey(file, 0, 0, 0, key.Contains("runtime_stats_interval_id"));
+            return new ArchiveFileSurvey(file, 0, 0, 0, 0, key.Contains("runtime_stats_interval_id"));
         }
 
         return new ArchiveFileSurvey(
@@ -217,6 +245,7 @@ FROM (SELECT COUNT(*) AS c FROM read_parquet('{EscapePath(file)}') GROUP BY {str
             Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture),
             Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture),
             Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture),
+            Convert.ToInt64(reader.GetValue(3), CultureInfo.InvariantCulture),
             key.Contains("runtime_stats_interval_id"));
     }
 
@@ -228,10 +257,11 @@ FROM (SELECT COUNT(*) AS c FROM read_parquet('{EscapePath(file)}') GROUP BY {str
     /// archive. The COPY carries <c>COMPRESSION ZSTD</c> because that is what wrote these files — omitting it
     /// silently switches codec and inflates them (measured: 28 MB becoming 69 MB).</para>
     /// </summary>
-    public async Task<long> RepairAsync(IProgress<string>? progress = null, CancellationToken cancellationToken = default)
+    public async Task<RepairResult> RepairAsync(IProgress<string>? progress = null, CancellationToken cancellationToken = default)
     {
         var survey = await SurveyAsync(cancellationToken);
         long removed = 0;
+        var failures = new List<string>(survey.Unreadable);
 
         using var readLock = _duckDb.AcquireReadLock();
         using var connection = _duckDb.CreateConnection();
@@ -279,11 +309,24 @@ HAVING COUNT(*) > 1";
             progress?.Report($"Hot store: {survey.HotRowsRemoved:N0} row(s) removed from {survey.HotGroups:N0} split interval(s).");
         }
 
+        /* PER-FILE ISOLATION. One archive file that cannot be repaired must not stop the others: each file is
+           an independent unit, its original survives its own failure, and the next startup retries it. Letting
+           the first failure abort the run would leave every LATER file un-repaired too — and since files are
+           processed in name order, that means one bad old file could permanently block every newer one. */
         var rewroteArchive = false;
         foreach (var file in survey.Archive.Where(a => a.Groups > 0))
         {
-            removed += await RewriteArchiveFileAsync(connection, file, progress, cancellationToken);
-            rewroteArchive = true;
+            try
+            {
+                removed += await RewriteArchiveFileAsync(connection, file, progress, cancellationToken);
+                rewroteArchive = true;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                failures.Add($"{Path.GetFileName(file.Path)}: {ex.Message}");
+                _logger?.LogError(ex, "#1912 archive repair failed for {File}; the original was left in place and will be retried", file.Path);
+                progress?.Report($"Archive {Path.GetFileName(file.Path)}: NOT repaired — {ex.Message}");
+            }
         }
 
         if (rewroteArchive)
@@ -296,7 +339,7 @@ HAVING COUNT(*) > 1";
             progress?.Report("Archive views rebuilt so readers pick up the repaired files.");
         }
 
-        return removed;
+        return new RepairResult(removed, failures);
     }
 
     private async Task<long> RewriteArchiveFileAsync(
@@ -321,27 +364,50 @@ COPY (
             await command.ExecuteNonQueryAsync(cancellationToken);
         });
 
-        /* Verify before swapping: a rewrite that lost rows for any reason must not replace the original. */
+        /* VERIFY BEFORE PROMOTING — this is the safety, since no backup copy is kept (the v39 migration kept
+           none either). Two CONSERVATION invariants, not a smoke test, and they are the ones the collapse's own
+           arithmetic guarantees:
+
+             - Row count must land on exactly (rows - rowsRemoved): every split group becomes one row and
+               nothing else moves, so any other number means the GROUP BY grouped something it should not have
+               — which is precisely the damage an era-wrong key would do.
+             - SUM(execution_count) must be UNCHANGED. The collapse sums the counter within a group, so the
+               file's total is invariant across the rewrite. This is the check that would catch a mis-typed
+               aggregate that still produced the right row count, and it is the number the whole defect is
+               about.
+
+           A failure deletes the temp file and leaves the ORIGINAL in place. Startup logs it loudly and the
+           next launch retries: the pre-fix signature makes the repair idempotent, and until it succeeds the
+           union_by_name view keeps reading the un-rewritten file with the #1907 read-side tie-break still
+           resolving it deterministically. A half-repaired archive is therefore a delay, never a corruption. */
         long rewrittenRows;
+        long rewrittenExecutions;
         using (var verify = connection.CreateCommand())
         {
-            verify.CommandText = $"SELECT COUNT(*) FROM read_parquet('{EscapePath(temp)}')";
-            rewrittenRows = Convert.ToInt64(await verify.ExecuteScalarAsync(cancellationToken) ?? 0L, CultureInfo.InvariantCulture);
+            verify.CommandText =
+                $"SELECT COUNT(*), CAST(COALESCE(SUM(execution_count), 0) AS BIGINT) FROM read_parquet('{EscapePath(temp)}')";
+            using var reader = await verify.ExecuteReaderAsync(cancellationToken);
+            await reader.ReadAsync(cancellationToken);
+            rewrittenRows = Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture);
+            rewrittenExecutions = Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture);
         }
 
-        var expected = file.Rows - file.RowsRemoved;
-        if (rewrittenRows != expected)
+        var expectedRows = file.Rows - file.RowsRemoved;
+        var name = Path.GetFileName(file.Path);
+
+        if (rewrittenRows != expectedRows || rewrittenExecutions != file.Executions)
         {
             File.Delete(temp);
             throw new InvalidOperationException(
-                $"Archive repair of {Path.GetFileName(file.Path)} produced {rewrittenRows:N0} rows where {expected:N0} were expected; the original was left untouched.");
+                $"Archive repair of {name} did not conserve its contents — " +
+                $"{rewrittenRows:N0} rows (expected {expectedRows:N0}) and {rewrittenExecutions:N0} executions " +
+                $"(expected {file.Executions:N0}). The original was left untouched and will be retried.");
         }
 
         File.Delete(file.Path);
         File.Move(temp, file.Path);
 
         var afterBytes = new FileInfo(file.Path).Length;
-        var name = Path.GetFileName(file.Path);
 
         progress?.Report($"Archive {name}: {file.RowsRemoved:N0} row(s) removed ({FormatBytes(beforeBytes)} -> {FormatBytes(afterBytes)}).");
 

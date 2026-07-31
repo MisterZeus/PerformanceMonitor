@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor Lite.
@@ -143,7 +143,7 @@ public sealed class QueryStoreSliceRepairTests : IClassFixture<SharedDuckDbFixtu
         Assert.Equal(1, survey.HotRowsRemoved);
         Assert.True(survey.HasWork);
 
-        Assert.Equal(1, await service.RepairAsync());
+        Assert.Equal(1, (await service.RepairAsync()).RowsRemoved);
 
         Assert.Equal(125L, await ScalarAsync("SELECT execution_count FROM query_store_stats WHERE query_id = 1"));
         Assert.Equal(1871L, await ScalarAsync("SELECT avg_duration_us FROM query_store_stats WHERE query_id = 1"));
@@ -156,7 +156,7 @@ public sealed class QueryStoreSliceRepairTests : IClassFixture<SharedDuckDbFixtu
         /* Idempotent: the signature cannot match what the repair produced. */
         var second = await service.SurveyAsync();
         Assert.False(second.HasWork);
-        Assert.Equal(0, await service.RepairAsync());
+        Assert.Equal(0, (await service.RepairAsync()).RowsRemoved);
     }
 
     /// <summary>
@@ -180,7 +180,7 @@ public sealed class QueryStoreSliceRepairTests : IClassFixture<SharedDuckDbFixtu
         Assert.Equal(2, archived.SplitRows);
         Assert.Equal(1, archived.RowsRemoved);
 
-        Assert.Equal(1, await service.RepairAsync());
+        Assert.Equal(1, (await service.RepairAsync()).RowsRemoved);
 
         /* The split pair became one row carrying the summed count and the weighted mean; the third row, a
            different interval, is still there untouched. */
@@ -192,6 +192,50 @@ public sealed class QueryStoreSliceRepairTests : IClassFixture<SharedDuckDbFixtu
         /* Still readable as parquet, and the file survived the swap. */
         Assert.True(File.Exists(file));
         Assert.Empty(Directory.GetFiles(_archivePath, "*.repair-tmp"));
+    }
+
+    /// <summary>
+    /// A file that fails verification must leave the ORIGINAL intact — no backup copy is kept, so
+    /// verify-before-promote IS the safety.
+    ///
+    /// <para>The failure is induced honestly rather than by mocking: a second archive file is left holding a
+    /// column set the projection cannot combine, so its rewrite throws mid-run. The assertions are that the
+    /// good file was still repaired, the bad file is byte-identical to what it was, and no temp file is left
+    /// behind. Startup logs the failure and retries next launch; until then the union_by_name view keeps
+    /// reading the un-rewritten file with #1907's read-side tie-break resolving it deterministically, so a
+    /// half-repaired archive is a delay rather than a corruption.</para>
+    /// </summary>
+    [Fact]
+    public async Task ArchiveRewrite_ThatFailsVerification_LeavesTheOriginalUntouched()
+    {
+        var good = Path.Combine(_archivePath, "202605_query_store_stats.parquet");
+        await WriteLegacyArchiveAsync(good);
+
+        /* A file whose execution_count is TEXT: the weighted-mean expression cannot combine it, so the COPY
+           throws — a real failure of the real code path, not a stubbed one. */
+        var bad = Path.Combine(_archivePath, "202604_query_store_stats.parquet");
+        await WriteUncombinableArchiveAsync(bad);
+
+        var badBefore = await File.ReadAllBytesAsync(bad);
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath);
+
+        var result = await service.RepairAsync();
+
+        /* Per-FILE failure, not a thrown run: the bad file is reported, the good one is still repaired. */
+        Assert.False(result.FullyRepaired);
+        var failure = Assert.Single(result.Failures);
+        Assert.Contains("202604_query_store_stats.parquet", failure, StringComparison.Ordinal);
+
+        /* The bad file is exactly as it was — same bytes, not merely same length. */
+        Assert.Equal(badBefore, await File.ReadAllBytesAsync(bad));
+
+        /* No temp file survives a failure. */
+        Assert.Empty(Directory.GetFiles(_archivePath, "*.repair-tmp"));
+
+        /* And the file that CAN be repaired was, since the run processes files independently. */
+        var rows = await QueryArchiveAsync(good, "SELECT query_id, execution_count FROM read_parquet('{0}') ORDER BY query_id");
+        Assert.Equal(2, rows.Count);
+        Assert.Equal([1L, 125L], rows[0]);
     }
 
     /* ─────────────────────────── helpers ─────────────────────────── */
@@ -265,6 +309,29 @@ COPY (
     /// the archive views after rewriting, and why this reader does not reuse the seeding connection: using the
     /// stale one here would be testing DuckDB's cache rather than the repair.</para>
     /// </summary>
+    /// <summary>
+    /// An archive file the collapse cannot combine: <c>execution_count</c> is TEXT, so the weighted-mean
+    /// expression fails on it. It still carries the split signature, so the run reaches the rewrite and
+    /// throws there — which is the point, since a file that simply had no work would never be touched.
+    /// </summary>
+    private async Task WriteUncombinableArchiveAsync(string file)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = $@"
+COPY (
+    SELECT * FROM (VALUES
+        (1::BIGINT, TIMESTAMP '2026-04-10 10:00:00', {ServerId}::INTEGER, 'DB', 1::BIGINT, 11::BIGINT, 'Regular',
+         TIMESTAMP '2026-04-10 09:55:00', 'not-a-number', 1778::BIGINT),
+        (2::BIGINT, TIMESTAMP '2026-04-10 10:00:00', {ServerId}::INTEGER, 'DB', 1::BIGINT, 11::BIGINT, 'Regular',
+         TIMESTAMP '2026-04-10 09:55:00', 'also-not', 2245::BIGINT)
+    ) AS t(collection_id, collection_time, server_id, database_name, query_id, plan_id,
+           execution_type_desc, first_execution_time, execution_count, avg_duration_us)
+) TO '{file.Replace("'", "''", StringComparison.Ordinal)}' (FORMAT PARQUET, COMPRESSION ZSTD)";
+        await cmd.ExecuteNonQueryAsync();
+    }
+
     private async Task<List<object[]>> QueryArchiveAsync(string file, string sqlTemplate)
     {
         using var readLock = _duckDb.AcquireReadLock();
