@@ -22,7 +22,9 @@ namespace PerformanceMonitor.Collectors;
 /// object resolution (KEY via sys.partitions, PAGE/RID via sys.dm_db_page_info on 2019+/Azure,
 /// mirroring sp_HumanEventsBlockViewer so the #1140 dedup fingerprint agrees across apps), the
 /// event_time watermark that keeps ring-buffer lingerers from re-inserting (10-minute fallback),
-/// and the C# blocked-process-report XML parse (read phase). Session lifecycle — including the
+/// and the C# blocked-process-report XML parse (read phase). Since #1865 a row the resolution could
+/// not name says WHY in its own label — the permission posture screened before it is attempted, the
+/// reallocated page reported once through the payload probe-failure channel. Session lifecycle — including the
 /// blocked-process-threshold sp_configure bootstrap — stays host-side; the session name lives
 /// here so the reader and the lifecycle can never disagree on it.
 /// </summary>
@@ -103,7 +105,8 @@ public sealed class BlockedProcessReportCollector : CollectorDefinitionBase<Bloc
     /// database and this read then runs per database, exactly like the other Azure per-database
     /// collectors. The per-database contentious-object resolution degrades exactly as the
     /// single-database form did: cross-database lookups that can't run on Azure fall to the
-    /// labeled-Unresolved sentinel via the existing TRY/CATCH guards.
+    /// labeled-Unresolved sentinel via the existing TRY/CATCH guards, which since #1865 carry the
+    /// reason for the fall in the label itself.
     /// </summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => target.IsAzureSqlDb;
 
@@ -114,6 +117,29 @@ public sealed class BlockedProcessReportCollector : CollectorDefinitionBase<Bloc
     /// another's older one.
     /// </summary>
     public override string? PerDatabaseWatermarkColumn => "database_name";
+
+    /// <summary>
+    /// This collector's object-resolution cursors return, after the payload, the per-database lookups
+    /// they attempted and lost (#1865). Deliberately NOT every failure: the two causes behind an
+    /// <c>Unresolved:</c> row want opposite responses, and only one of them is news.
+    ///
+    /// <para>A login with no metadata access to the contended database is a PERMISSION POSTURE — true
+    /// again on the next cycle and the one after — and these cursors run per contended database on
+    /// every blocked-process cycle, so routing it here would be a permanent note plus a warning burst
+    /// every five minutes for something that is not changing. That is the burst #1854 had to add
+    /// <c>HAS_DBACCESS</c> to <c>query_store</c>'s enumeration to stop. So the posture is screened
+    /// before it is ever attempted and answers on the ROW instead, in the <c>Unresolved: … (no
+    /// metadata access)</c> label an operator is already looking at; it reaches this channel zero
+    /// times, not once per database per cycle. A page that was reallocated between the event firing
+    /// and this read is the opposite — transient, unpredictable, and worth saying — so it rides the
+    /// channel with its cause already named, and labels its row too.</para>
+    ///
+    /// <para>Not consulted on the Azure SQL DB path, which runs per database and reads through its own
+    /// contract (see <see cref="ICollectorDefinition{TRow}.EmitsProbeFailures"/>): the trailing set is
+    /// still emitted there and simply goes unread. The labels — the part of #1865 an operator reads —
+    /// are produced by the same batch and are unaffected.</para>
+    /// </summary>
+    public override bool EmitsProbeFailures => true;
 
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
@@ -177,12 +203,34 @@ DECLARE
     @resolve_sql nvarchar(max),
     @resolve_database_id integer,
     @key_dbs CURSOR,
-    @page_dbs CURSOR;
+    @page_dbs CURSOR,
+    /* #1865: why a row could not be named. The two reasons want opposite responses, so they are
+       spelled once here and referenced everywhere below -- the screens stamp them without an
+       attempt, the CATCHes stamp them after one, and the posture reason is also the one the
+       probe-failure channel deliberately never reports. */
+    @posture_reason nvarchar(64) = N'no metadata access',
+    @unavailable_reason nvarchar(64) = N'database unavailable',
+    @resolve_error integer,
+    @resolve_message nvarchar(4000),
+    @resolve_reason nvarchar(64);
 
 DECLARE
     @PerformanceMonitor_BlockedProcess TABLE
 (
     ring_buffer xml NOT NULL
+);
+
+/* #1865: the trailing (item_name, error_text) result set of the payload path's probe-failure
+   contract (#1851, EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync), selected at the very
+   end and normally empty. A table VARIABLE on purpose, mirroring database_size_stats: every write
+   below happens in THIS batch, and a table variable is invisible to the nested @resolve_sql, so the
+   handlers cannot quietly migrate back inside the dynamic SQL where they would stop catching its
+   compile-time failures. */
+DECLARE
+    @probe_failures TABLE
+(
+    name sysname NOT NULL,
+    error_text nvarchar(4000) NULL
 );
 
 INSERT
@@ -210,7 +258,8 @@ SELECT
     resource_file_id = CONVERT(integer, NULL),
     resource_page_id = CONVERT(bigint, NULL),
     resource_object_id = CONVERT(integer, NULL),
-    contentious_object = CONVERT(nvarchar(4000), NULL)
+    contentious_object = CONVERT(nvarchar(4000), NULL),
+    unresolved_reason = CONVERT(nvarchar(64), NULL)
 INTO #bpr
 FROM
 (
@@ -334,8 +383,17 @@ BEGIN
     IF DB_NAME(@resolve_database_id) IS NOT NULL
     AND DATABASEPROPERTYEX(DB_NAME(@resolve_database_id), 'Status') = N'ONLINE'
     BEGIN
-        SET @resolve_sql = N'
-        BEGIN TRY
+        /* #1865: HAS_DBACCESS is the screen, and it is the ONLY one of these three that answers the
+           permission question. Verified on SQL 2022 against a login with no user in the target
+           database: DB_NAME() still returns the name and DATABASEPROPERTYEX still returns ONLINE, so
+           the guard above was never a screen -- the cross-database reference was attempted and raised
+           916 on EVERY cycle, forever, for a least-privilege login whose posture is not changing.
+           Screening it here is the same move #1854 made on query_store's enumeration, for the same
+           burst: the row still says why, in its own label, instead of in a note repeated every five
+           minutes. */
+        IF HAS_DBACCESS(DB_NAME(@resolve_database_id)) = 1
+        BEGIN
+            SET @resolve_sql = N'
             UPDATE b
             SET b.resource_object_id = p.object_id
             FROM #bpr AS b
@@ -343,15 +401,81 @@ BEGIN
               ON p.hobt_id = b.resource_hobt_id
             WHERE b.lock_type = ''KEY''
             AND   b.resource_database_id = @resolve_database_id
+            OPTION(RECOMPILE);';
+
+            /* The handler moved OUT of @resolve_sql (#1865). A TRY/CATCH inside a dynamic batch
+               cannot catch that batch's own compile-time failure, which is precisely how a
+               cross-database reference fails; the caller's can, and does -- verified live, 916
+               caught here with ERROR_NUMBER/ERROR_MESSAGE intact. */
+            BEGIN TRY
+                EXECUTE sys.sp_executesql
+                    @resolve_sql,
+                  N'@resolve_database_id integer',
+                    @resolve_database_id;
+            END TRY
+            BEGIN CATCH
+                SELECT
+                    @resolve_error = ERROR_NUMBER(),
+                    @resolve_message = ERROR_MESSAGE();
+
+                SET @resolve_reason =
+                    CASE
+                        WHEN @resolve_error IN (229, 230, 262, 297, 300, 916)
+                        THEN @posture_reason
+                        ELSE N'lookup error ' + CONVERT(nvarchar(11), @resolve_error)
+                    END;
+
+                UPDATE
+                    b
+                SET
+                    b.unresolved_reason = @resolve_reason
+                FROM #bpr AS b
+                WHERE b.lock_type = 'KEY'
+                AND   b.resource_database_id = @resolve_database_id
+                OPTION(RECOMPILE);
+
+                /* The posture is reported on the ROW and nowhere else. Everything the screen did not
+                   anticipate is news, so it rides the #1851 channel with its cause already named. */
+                IF @resolve_reason <> @posture_reason
+                BEGIN
+                    INSERT
+                        @probe_failures
+                    (
+                        name,
+                        error_text
+                    )
+                    VALUES
+                    (
+                        DB_NAME(@resolve_database_id),
+                        N'KEY lock resolution (' + @resolve_reason + N'): ' + @resolve_message
+                    );
+                END;
+            END CATCH;
+        END;
+        ELSE
+        BEGIN
+            UPDATE
+                b
+            SET
+                b.unresolved_reason = @posture_reason
+            FROM #bpr AS b
+            WHERE b.lock_type = 'KEY'
+            AND   b.resource_database_id = @resolve_database_id
             OPTION(RECOMPILE);
-        END TRY
-        BEGIN CATCH
-            /* no metadata access to the database -> leave for labeling */
-        END CATCH;';
-        EXECUTE sys.sp_executesql
-            @resolve_sql,
-          N'@resolve_database_id integer',
-            @resolve_database_id;
+        END;
+    END;
+    ELSE
+    BEGIN
+        /* Dropped between the event and the read, or offline/restoring: not a permission problem and
+           not the operator's to fix, but it is the answer an operator needs for why this row is Unresolved. */
+        UPDATE
+            b
+        SET
+            b.unresolved_reason = @unavailable_reason
+        FROM #bpr AS b
+        WHERE b.lock_type = 'KEY'
+        AND   b.resource_database_id = @resolve_database_id
+        OPTION(RECOMPILE);
     END;
     FETCH NEXT FROM @key_dbs INTO @resolve_database_id;
 END;
@@ -360,6 +484,16 @@ END;
 IF @product_version >= 15
 OR @azure = 1
 BEGIN
+    /* #1865: deliberately NO server-level permission screen here, though sys.dm_db_page_info is
+       gated by one (VIEW SERVER STATE; VIEW SERVER PERFORMANCE STATE on 2022+). So is the
+       sys.dm_xe_session_targets read this batch opens with -- verified on SQL 2022, a login without
+       it fails that first statement with 297 and never reaches this line -- so a screen for it could
+       only ever answer yes, and would be machinery that never fires.
+       What DOES vary per database, and is what actually fails here, is metadata access to the
+       database the page belongs to: holding VIEW SERVER STATE but having no user in that database,
+       sys.dm_db_page_info raises 916, the same cross-database access error the KEY lookup raises,
+       NOT a permission-class denial. Verified. That is what the HAS_DBACCESS screen below catches,
+       and it is why the page site needs the same screen as the key site rather than a different one. */
     SET @page_dbs =
         CURSOR
         LOCAL FAST_FORWARD
@@ -378,26 +512,121 @@ BEGIN
         IF DB_NAME(@resolve_database_id) IS NOT NULL
         AND DATABASEPROPERTYEX(DB_NAME(@resolve_database_id), 'Status') = N'ONLINE'
         BEGIN
-            SET @resolve_sql = N'
-            BEGIN TRY
+            /* Same screen as the KEY site, for the same reason (#1865): the two guards above
+               answer for a database the login cannot enter, HAS_DBACCESS does not. */
+            IF HAS_DBACCESS(DB_NAME(@resolve_database_id)) = 1
+            BEGIN
+                /* Still dynamic SQL, and it must stay that way even though nothing is spliced
+                   into it: sys.dm_db_page_info does not exist before SQL Server 2019, and an
+                   outer-batch reference to it would fail to compile the WHOLE collection query
+                   there -- the runtime version gate above would never get the chance to skip it.
+                   Deferring it to a nested batch is what keeps this collector runnable on 2016
+                   and 2017 at all. */
+                SET @resolve_sql = N'
                 UPDATE b
                 SET b.resource_object_id = pi.object_id
                 FROM #bpr AS b
                 CROSS APPLY sys.dm_db_page_info(b.resource_database_id, b.resource_file_id, b.resource_page_id, ''LIMITED'') AS pi
                 WHERE b.lock_type IN (''PAGE'', ''RID'')
                 AND   b.resource_database_id = @resolve_database_id
+                OPTION(RECOMPILE);';
+
+                /* Handler outside the dynamic batch (#1865), which matters more here than at the
+                   KEY site: an Invalid-object-name failure on sys.dm_db_page_info is a COMPILE failure of
+                   the nested batch, and a TRY/CATCH written inside that batch cannot catch its
+                   own compile failure. This one can. */
+                BEGIN TRY
+                    EXECUTE sys.sp_executesql
+                        @resolve_sql,
+                      N'@resolve_database_id integer',
+                        @resolve_database_id;
+                END TRY
+                BEGIN CATCH
+                    SELECT
+                        @resolve_error = ERROR_NUMBER(),
+                        @resolve_message = ERROR_MESSAGE();
+
+                    /* 2561 is the engine's answer for a page that is not what the report said --
+                       past the end of the file, unallocated, or handed back to another object
+                       between the event firing and this read. Verified live: every one of those
+                       shapes raises 2561, Parameter 3 is incorrect for this statement. It is
+                       transient and nobody's to fix, which is exactly why it is worth saying
+                       once rather than screening away. */
+                    SET @resolve_reason =
+                        CASE
+                            WHEN @resolve_error IN (229, 230, 262, 297, 300, 916)
+                            THEN @posture_reason
+                            WHEN @resolve_error = 2561
+                            THEN N'page reallocated'
+                            ELSE N'lookup error ' + CONVERT(nvarchar(11), @resolve_error)
+                        END;
+
+                    UPDATE
+                        b
+                    SET
+                        b.unresolved_reason = @resolve_reason
+                    FROM #bpr AS b
+                    WHERE b.lock_type IN ('PAGE', 'RID')
+                    AND   b.resource_database_id = @resolve_database_id
+                    OPTION(RECOMPILE);
+
+                    IF @resolve_reason <> @posture_reason
+                    BEGIN
+                        INSERT
+                            @probe_failures
+                        (
+                            name,
+                            error_text
+                        )
+                        VALUES
+                        (
+                            DB_NAME(@resolve_database_id),
+                            N'PAGE/RID lock resolution (' + @resolve_reason + N'): ' + @resolve_message
+                        );
+                    END;
+                END CATCH;
+            END;
+            ELSE
+            BEGIN
+                UPDATE
+                    b
+                SET
+                    b.unresolved_reason = @posture_reason
+                FROM #bpr AS b
+                WHERE b.lock_type IN ('PAGE', 'RID')
+                AND   b.resource_database_id = @resolve_database_id
                 OPTION(RECOMPILE);
-            END TRY
-            BEGIN CATCH
-                /* no VIEW DATABASE STATE / page reallocated -> leave for labeling */
-            END CATCH;';
-            EXECUTE sys.sp_executesql
-                @resolve_sql,
-              N'@resolve_database_id integer',
-                @resolve_database_id;
+            END;
+        END;
+        ELSE
+        BEGIN
+            UPDATE
+                b
+            SET
+                b.unresolved_reason = @unavailable_reason
+            FROM #bpr AS b
+            WHERE b.lock_type IN ('PAGE', 'RID')
+            AND   b.resource_database_id = @resolve_database_id
+            OPTION(RECOMPILE);
         END;
         FETCH NEXT FROM @page_dbs INTO @resolve_database_id;
     END;
+END;
+ELSE
+BEGIN
+    /* Pre-2019 on-prem: there is no sys.dm_db_page_info to call, so every PAGE/RID row here is
+       unresolvable for a reason that has nothing to do with permissions or with this server's
+       health. Saying so is the whole point of #1865 -- an operator on 2016 or 2017 otherwise sees a
+       bare Unresolved forever with no way to learn that the engine simply cannot answer. */
+    UPDATE
+        b
+    SET
+        b.unresolved_reason = N'page lookup needs sql server 2019'
+    FROM #bpr AS b
+    WHERE b.lock_type IN ('PAGE', 'RID')
+    AND   b.resource_database_id IS NOT NULL
+    AND   b.resource_page_id IS NOT NULL
+    OPTION(RECOMPILE);
 END;
 
 /* Format (plain schema.object) + label; the event object_id is the fallback, then the Unresolved sentinel. */
@@ -433,7 +662,14 @@ SET
                 THEN N''
                 ELSE LOWER(b.lock_type) + N' lock, '
             END +
-            N'database: ' + ISNULL(DB_NAME(b.database_id), N'unknown')
+            N'database: ' + ISNULL(DB_NAME(b.database_id), N'unknown') +
+            /* #1865: the reason, where one is known. This is the fix the issue actually asked for --
+               the operator reading the grid gets the answer on the row instead of a bare
+               bare Unresolved whose two causes -- grant the login access, versus the page moved
+               and there is nothing to fix -- could not be told apart. ISNULL over the fragment, so a row nobody
+               attempted to resolve (an OBJECT lock, or a resource type with no lookup path) is
+               labeled exactly as it always was. */
+            ISNULL(N' (' + b.unresolved_reason + N')', N'')
         )
 FROM #bpr AS b
 OPTION(RECOMPILE);
@@ -445,7 +681,20 @@ SELECT
     b.database_id,
     b.contentious_object{planSelect}
 FROM #bpr AS b{planApply}
-OPTION(RECOMPILE);";
+OPTION(RECOMPILE);
+
+/* Trailing result set = the payload path's probe-failure contract (#1851/#1865,
+   EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync). Always returned, and empty on both of
+   the postures this collector can recognize -- a login without metadata access is screened before
+   it is attempted and answers on the row instead, which is the whole reason #1865 needed a design
+   rather than a mechanical adoption of the channel. What arrives here is what the screens did not
+   anticipate. */
+SELECT
+    name,
+    error_text
+FROM @probe_failures
+ORDER BY
+    name;";
 
         /* Use the most recent timestamp from the host store as the cutoff, or fall back to a
            10-minute window on first run. */
