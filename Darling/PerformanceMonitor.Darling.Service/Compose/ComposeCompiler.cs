@@ -119,7 +119,7 @@ public static class ComposeCompiler
     /// (<c>query_store_stats_interval_hourly</c> dedups at interval grain;
     /// <c>query_store_stats_corrected_hourly</c>/<c>_daily</c> collapse it to these composer dims) and
     /// <see cref="ComposeSourceRouter"/> prefers it. The old pair is KEPT — a CAGG cannot be reshaped in
-    /// place, and rebuilding would destroy 21 days of hourly and all daily history (#1759/#1793) — so a
+    /// place, and rebuilding would destroy the entire retained hourly tier and all daily history (#1759/#1793) — so a
     /// window older than the corrected rollups have materialized still reads INFLATED numbers, with a
     /// visible step at that boundary. <c>--backfill-rollups</c> is what moves the boundary; retention aging
     /// out the old rows is what eventually removes it.</para>
