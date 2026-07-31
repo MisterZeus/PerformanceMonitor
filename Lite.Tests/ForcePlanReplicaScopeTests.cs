@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Notifications;
 using Xunit;
@@ -250,11 +251,77 @@ public sealed class ForcePlanReplicaScopeTests
         Assert.Contains("sys.query_store_replicas", sql, StringComparison.Ordinal);
         Assert.Contains(ForceDocUrl, sql, StringComparison.Ordinal);
 
-        /* The statement itself is unchanged: we do NOT emit @replica_group_id, because the collector
+        /* The RUNNABLE statement is unchanged: we do NOT emit @replica_group_id, because the collector
            stores replica_name (a role) and not the replica_group_id, so there is no correct value to
            put there. Emitting a guess would be worse than disclosing the default. */
         Assert.Contains("EXEC sys.sp_query_store_force_plan @query_id = 123, @plan_id = 99;", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("@replica_group_id =", sql, StringComparison.Ordinal);
+
+        /* Asserted over the EXECUTABLE lines only, not the whole blob. #1914 added the scoped form to the
+           disclosure — as a COMMENT, so the operator can see the shape they would have to write — and a
+           bare DoesNotContain over the whole string could not tell that apart from us emitting it. What
+           must stay true is that nothing SQL Server would run carries a replica group id. */
+        var runnableLines = sql!.Split('\n')
+            .Select(line => line.Trim())
+            .Where(line => line.Length > 0 && !line.StartsWith("--", StringComparison.Ordinal));
+
+        Assert.DoesNotContain(runnableLines, line => line.Contains("@replica_group_id", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void TheScopedFormItSuggests_IsTheOneThatActuallyWorks()
+    {
+        /* #1914 probed sp_query_store_force_plan live, because it is an EXTENDED_STORED_PROCEDURE and
+           sys.system_parameters is empty for it — its argument surface can only be established by
+           executing it. Measured on SQL Server 2022 (16.0.4255.1) and 2025 (17.0.4045.5), each form run
+           from a freshly-unforced plan:
+
+             @query_id, @plan_id, @replica_group_id = 1                              -> OK on both
+             @query_id, @plan_id, @disable_optimized_plan_forcing = 0, @rg = 1        -> ERROR 12463 on both
+
+           The four-argument form the reference page's syntax block documents is the one that FAILS, with
+           "Role id should be between (including) 1 and 4" for a role id of 1. #1882 shipped guidance
+           telling the operator to pass it "as the fourth argument" because "the documented order matters"
+           — which would have sent them to the failing form. This pins the corrected shape. */
+        var finding = PlanRegressionFinding(
+            Row(queryId: 123, bestPlanId: 99, regressionFactor: 12.0, replicaRole: "Secondary"));
+
+        var sql = FactRemediation.GenerateForFinding(finding);
+
+        /* The three-argument named form, which is what works. */
+        Assert.Contains(
+            "EXEC sys.sp_query_store_force_plan @query_id = 123, @plan_id = 99, @replica_group_id = <id>;",
+            sql!, StringComparison.Ordinal);
+
+        /* And an explicit steer AWAY from the documented four-argument form. */
+        Assert.Contains("@disable_optimized_plan_forcing", sql, StringComparison.Ordinal);
+        Assert.Contains("12463", sql, StringComparison.Ordinal);
+
+        /* The stale claim must be gone: named arguments were measured to work in ANY order (@plan_id
+           before @query_id succeeds), so "the documented order matters" was never true of them. */
+        Assert.DoesNotContain("documented order", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("fourth argument", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ItTellsTheOperatorToVerifyTheGroupId_BecauseSql2025DoesNotValidateIt()
+    {
+        /* The finding that most justifies not COMPUTING a group id for them (#1914). On SQL Server 2025 —
+           the version where Query Store for secondary replicas is GA — @replica_group_id = 99 SUCCEEDED
+           on a standalone server with one replica, and wrote a row into
+           sys.query_store_plan_forcing_locations naming replica group 99. SQL Server 2022 rejects the
+           same call with 12463. So on the version that matters, a wrong id does not fail loudly; it
+           records a forcing against a replica that does not exist. Anything we computed and shipped —
+           including a correct id that later re-pointed across a failover — would land the same way. */
+        var finding = PlanRegressionFinding(
+            Row(queryId: 123, bestPlanId: 99, regressionFactor: 12.0, replicaRole: "Secondary"));
+
+        var sql = FactRemediation.GenerateForFinding(finding);
+
+        Assert.Contains("SELECT replica_group_id, replica_name, role_type FROM sys.query_store_replicas;",
+                        sql!, StringComparison.Ordinal);
+        Assert.Contains("does", sql, StringComparison.Ordinal);
+        Assert.Contains("not exist", sql, StringComparison.Ordinal);
+        Assert.Contains("2025", sql, StringComparison.Ordinal);
     }
 
     [Fact]
