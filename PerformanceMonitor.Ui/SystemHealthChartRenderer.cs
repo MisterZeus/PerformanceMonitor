@@ -60,7 +60,7 @@ internal sealed class SystemHealthChartRenderer
             var xs = data.Select(d => _project(d.EventTime!.Value).ToOADate()).ToArray();
             var ys = data.Select(d => (double)(selector(d) ?? 0)).ToArray();
 
-            var scatter = chart.Plot.Add.Scatter(xs, ys);
+            var scatter = chart.Plot.Add.TimeSeries(xs, ys);
             scatter.Color = ScottPlot.Color.FromHex(colorHex);
             ChartStyle.StyleScatter(scatter);
             hover?.Add(scatter, label);
@@ -113,7 +113,7 @@ internal sealed class SystemHealthChartRenderer
                 var xs = typeData.Select(d => _project(d.EventTime!.Value).ToOADate()).ToArray();
                 var ys = typeData.Select(d => (double)(d.SpinlockBackoffs ?? 1)).ToArray();
 
-                var scatter = chart.Plot.Add.Scatter(xs, ys);
+                var scatter = chart.Plot.Add.TimeSeries(xs, ys);
                 scatter.Color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
                 ChartStyle.StyleScatter(scatter);
                 scatter.LegendText = spinlockType ?? "Unknown";
@@ -155,13 +155,13 @@ internal sealed class SystemHealthChartRenderer
         {
             var xs = data.Select(d => _project(d.EventTime!.Value).ToOADate()).ToArray();
 
-            var sysScatter = chart.Plot.Add.Scatter(xs, data.Select(d => (double)(d.SystemCpuUtilization ?? 0)).ToArray());
+            var sysScatter = chart.Plot.Add.TimeSeries(xs, data.Select(d => (double)(d.SystemCpuUtilization ?? 0)).ToArray());
             sysScatter.Color = ScottPlot.Color.FromHex(ChartPalette.CyclingColor(0));
             ChartStyle.StyleScatter(sysScatter);
             sysScatter.LegendText = "System CPU %";
             hover?.Add(sysScatter, "System CPU %");
 
-            var sqlScatter = chart.Plot.Add.Scatter(xs, data.Select(d => (double)(d.SqlCpuUtilization ?? 0)).ToArray());
+            var sqlScatter = chart.Plot.Add.TimeSeries(xs, data.Select(d => (double)(d.SqlCpuUtilization ?? 0)).ToArray());
             sqlScatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("SqlCpu"));
             ChartStyle.StyleScatter(sqlScatter);
             sqlScatter.LegendText = "SQL CPU %";

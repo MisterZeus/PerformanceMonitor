@@ -177,20 +177,20 @@ public partial class ViewerServerTab
         var targetMem = data.Select(d => d.TargetServerMemoryMb / 1024.0).ToArray();
         var bufferPool = data.Select(d => d.BufferPoolMb / 1024.0).ToArray();
 
-        var totalPlot = MemoryChart.Plot.Add.Scatter(times, totalMem);
+        var totalPlot = MemoryChart.Plot.Add.TimeSeries(times, totalMem);
         totalPlot.LegendText = "Total Server Memory";
         totalPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("TotalServerMemory"));
         ChartStyle.StyleScatter(totalPlot);
         _memoryHover?.Add(totalPlot, "Total Server Memory");
 
-        var targetPlot = MemoryChart.Plot.Add.Scatter(times, targetMem);
+        var targetPlot = MemoryChart.Plot.Add.TimeSeries(times, targetMem);
         targetPlot.LegendText = "Target Memory";
         targetPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("TargetMemory"));
         ChartStyle.StyleScatter(targetPlot);
         targetPlot.LineStyle.Pattern = ScottPlot.LinePattern.Dashed;
         _memoryHover?.Add(targetPlot, "Target Memory");
 
-        var bpPlot = MemoryChart.Plot.Add.Scatter(times, bufferPool);
+        var bpPlot = MemoryChart.Plot.Add.TimeSeries(times, bufferPool);
         bpPlot.LegendText = "Buffer Pool";
         bpPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("BufferPool"));
         ChartStyle.StyleScatter(bpPlot);
@@ -209,7 +209,7 @@ public partial class ViewerServerTab
             grantMb = new[] { 0.0, 0.0 };
         }
 
-        var grantPlot = MemoryChart.Plot.Add.Scatter(grantTimes, grantMb);
+        var grantPlot = MemoryChart.Plot.Add.TimeSeries(grantTimes, grantMb);
         grantPlot.LegendText = "Memory Grants";
         grantPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("MemoryGrants"));
         ChartStyle.StyleScatter(grantPlot);
@@ -282,7 +282,7 @@ public partial class ViewerServerTab
             foreach (var metric in sizingMetrics)
             {
                 var values = poolData.Select(d => metric.Selector(d)).ToArray();
-                var plot = MemoryGrantSizingChart.Plot.Add.Scatter(times, values);
+                var plot = MemoryGrantSizingChart.Plot.Add.TimeSeries(times, values);
                 var label = $"Pool {poolId}: {metric.Name}";
                 plot.LegendText = label;
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[colorIndex % SeriesColors.Length]);
@@ -323,7 +323,7 @@ public partial class ViewerServerTab
             foreach (var metric in activityMetrics)
             {
                 var values = poolData.Select(d => metric.Selector(d)).ToArray();
-                var plot = MemoryGrantActivityChart.Plot.Add.Scatter(times, values);
+                var plot = MemoryGrantActivityChart.Plot.Add.TimeSeries(times, values);
                 var label = $"Pool {poolId}: {metric.Name}";
                 plot.LegendText = label;
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[colorIndex % SeriesColors.Length]);
@@ -582,7 +582,7 @@ public partial class ViewerServerTab
                 var times = trend.Select(t => ViewerTimeHelper.ForDisplay(t.CollectionTime).ToOADate()).ToArray();
                 var values = trend.Select(t => t.MemoryMb).ToArray();
 
-                var plot = MemoryClerksChart.Plot.Add.Scatter(times, values);
+                var plot = MemoryClerksChart.Plot.Add.TimeSeries(times, values);
                 plot.LegendText = selected[i].DisplayName;
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
                 ChartStyle.StyleScatter(plot);

@@ -86,13 +86,13 @@ public partial class ServerTab : UserControl
         var sqlCpu = data.Select(d => (double)d.SqlServerCpu).ToArray();
         var otherCpu = data.Select(d => (double)d.OtherProcessCpu).ToArray();
 
-        var sqlPlot = CpuChart.Plot.Add.Scatter(times, sqlCpu);
+        var sqlPlot = CpuChart.Plot.Add.TimeSeries(times, sqlCpu);
         sqlPlot.LegendText = "SQL Server";
         sqlPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("SqlCpu"));
         ChartStyle.StyleScatter(sqlPlot);
         _cpuHover?.Add(sqlPlot, "SQL Server");
 
-        var otherPlot = CpuChart.Plot.Add.Scatter(times, otherCpu);
+        var otherPlot = CpuChart.Plot.Add.TimeSeries(times, otherCpu);
         otherPlot.LegendText = "Other";
         otherPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("OtherCpu"));
         ChartStyle.StyleScatter(otherPlot);
@@ -133,20 +133,20 @@ public partial class ServerTab : UserControl
         var targetMem = data.Select(d => d.TargetServerMemoryMb / 1024.0).ToArray();
         var bufferPool = data.Select(d => d.BufferPoolMb / 1024.0).ToArray();
 
-        var totalPlot = MemoryChart.Plot.Add.Scatter(times, totalMem);
+        var totalPlot = MemoryChart.Plot.Add.TimeSeries(times, totalMem);
         totalPlot.LegendText = "Total Server Memory";
         totalPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("TotalServerMemory"));
         ChartStyle.StyleScatter(totalPlot);
         _memoryHover?.Add(totalPlot, "Total Server Memory");
 
-        var targetPlot = MemoryChart.Plot.Add.Scatter(times, targetMem);
+        var targetPlot = MemoryChart.Plot.Add.TimeSeries(times, targetMem);
         targetPlot.LegendText = "Target Memory";
         targetPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("TargetMemory"));
         ChartStyle.StyleScatter(targetPlot);
         targetPlot.LineStyle.Pattern = LinePattern.Dashed;
         _memoryHover?.Add(targetPlot, "Target Memory");
 
-        var bpPlot = MemoryChart.Plot.Add.Scatter(times, bufferPool);
+        var bpPlot = MemoryChart.Plot.Add.TimeSeries(times, bufferPool);
         bpPlot.LegendText = "Buffer Pool";
         bpPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("BufferPool"));
         ChartStyle.StyleScatter(bpPlot);
@@ -165,7 +165,7 @@ public partial class ServerTab : UserControl
             grantMb = new[] { 0.0, 0.0 };
         }
 
-        var grantPlot = MemoryChart.Plot.Add.Scatter(grantTimes, grantMb);
+        var grantPlot = MemoryChart.Plot.Add.TimeSeries(grantTimes, grantMb);
         grantPlot.LegendText = "Memory Grants";
         grantPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("MemoryGrants"));
         ChartStyle.StyleScatter(grantPlot);
@@ -229,7 +229,7 @@ public partial class ServerTab : UserControl
             foreach (var metric in sizingMetrics)
             {
                 var values = poolData.Select(d => metric.Selector(d)).ToArray();
-                var plot = MemoryGrantSizingChart.Plot.Add.Scatter(times, values);
+                var plot = MemoryGrantSizingChart.Plot.Add.TimeSeries(times, values);
                 var label = $"Pool {poolId}: {metric.Name}";
                 plot.LegendText = label;
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[colorIndex % SeriesColors.Length]);
@@ -267,7 +267,7 @@ public partial class ServerTab : UserControl
             foreach (var metric in activityMetrics)
             {
                 var values = poolData.Select(d => metric.Selector(d)).ToArray();
-                var plot = MemoryGrantActivityChart.Plot.Add.Scatter(times, values);
+                var plot = MemoryGrantActivityChart.Plot.Add.TimeSeries(times, values);
                 var label = $"Pool {poolId}: {metric.Name}";
                 plot.LegendText = label;
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[colorIndex % SeriesColors.Length]);
@@ -425,19 +425,19 @@ public partial class ServerTab : UserControl
         var internalObj = data.Select(d => d.InternalObjectReservedMb).ToArray();
         var versionStore = data.Select(d => d.VersionStoreReservedMb).ToArray();
 
-        var userPlot = TempDbChart.Plot.Add.Scatter(times, userObj);
+        var userPlot = TempDbChart.Plot.Add.TimeSeries(times, userObj);
         userPlot.LegendText = "User Objects";
         userPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("UserObjects"));
         ChartStyle.StyleScatter(userPlot);
         _tempDbHover?.Add(userPlot, "User Objects");
 
-        var internalPlot = TempDbChart.Plot.Add.Scatter(times, internalObj);
+        var internalPlot = TempDbChart.Plot.Add.TimeSeries(times, internalObj);
         internalPlot.LegendText = "Internal Objects";
         internalPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("InternalObjects"));
         ChartStyle.StyleScatter(internalPlot);
         _tempDbHover?.Add(internalPlot, "Internal Objects");
 
-        var vsPlot = TempDbChart.Plot.Add.Scatter(times, versionStore);
+        var vsPlot = TempDbChart.Plot.Add.TimeSeries(times, versionStore);
         vsPlot.LegendText = "Version Store";
         vsPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("VersionStore"));
         ChartStyle.StyleScatter(vsPlot);
@@ -481,7 +481,7 @@ public partial class ServerTab : UserControl
         var times = sorted.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
         var totals = sorted.Select(d => d.TotalReservedMb + d.UnallocatedMb).ToArray();
 
-        var sizePlot = TempDbSizeChart.Plot.Add.Scatter(times, totals);
+        var sizePlot = TempDbSizeChart.Plot.Add.TimeSeries(times, totals);
         sizePlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("UnallocatedTempdb"));
         ChartStyle.StyleScatter(sizePlot);
         _tempDbSizeHover?.Add(sizePlot, "Allocated MB");
@@ -533,7 +533,7 @@ public partial class ServerTab : UserControl
 
             if (latency.Length > 0)
             {
-                var plot = TempDbFileIoChart.Plot.Add.Scatter(times, latency);
+                var plot = TempDbFileIoChart.Plot.Add.TimeSeries(times, latency);
                 plot.LegendText = fileGroup.Key;
                 plot.Color = color;
                 ChartStyle.StyleScatter(plot);
@@ -600,7 +600,7 @@ public partial class ServerTab : UserControl
 
             if (readLatency.Length > 0)
             {
-                var readPlot = FileIoReadChart.Plot.Add.Scatter(times, readLatency);
+                var readPlot = FileIoReadChart.Plot.Add.TimeSeries(times, readLatency);
                 readPlot.LegendText = dbGroup.Key;
                 readPlot.Color = color;
                 ChartStyle.StyleScatter(readPlot);
@@ -610,7 +610,7 @@ public partial class ServerTab : UserControl
 
             if (writeLatency.Length > 0)
             {
-                var writePlot = FileIoWriteChart.Plot.Add.Scatter(times, writeLatency);
+                var writePlot = FileIoWriteChart.Plot.Add.TimeSeries(times, writeLatency);
                 writePlot.LegendText = dbGroup.Key;
                 writePlot.Color = color;
                 ChartStyle.StyleScatter(writePlot);
@@ -626,7 +626,7 @@ public partial class ServerTab : UserControl
 
                 if (queuedReadLatency.Any(v => v > 0))
                 {
-                    var qReadPlot = FileIoReadChart.Plot.Add.Scatter(times, queuedReadLatency);
+                    var qReadPlot = FileIoReadChart.Plot.Add.TimeSeries(times, queuedReadLatency);
                     qReadPlot.LegendText = $"{dbGroup.Key} (queued)";
                     qReadPlot.Color = color;
                     ChartStyle.StyleScatter(qReadPlot);
@@ -636,7 +636,7 @@ public partial class ServerTab : UserControl
 
                 if (queuedWriteLatency.Any(v => v > 0))
                 {
-                    var qWritePlot = FileIoWriteChart.Plot.Add.Scatter(times, queuedWriteLatency);
+                    var qWritePlot = FileIoWriteChart.Plot.Add.TimeSeries(times, queuedWriteLatency);
                     qWritePlot.LegendText = $"{dbGroup.Key} (queued)";
                     qWritePlot.Color = color;
                     ChartStyle.StyleScatter(qWritePlot);
@@ -710,7 +710,7 @@ public partial class ServerTab : UserControl
 
             if (readThroughput.Length > 0)
             {
-                var readPlot = FileIoReadThroughputChart.Plot.Add.Scatter(times, readThroughput);
+                var readPlot = FileIoReadThroughputChart.Plot.Add.TimeSeries(times, readThroughput);
                 readPlot.LegendText = fileGroup.Key;
                 readPlot.Color = color;
                 ChartStyle.StyleScatter(readPlot);
@@ -720,7 +720,7 @@ public partial class ServerTab : UserControl
 
             if (writeThroughput.Length > 0)
             {
-                var writePlot = FileIoWriteThroughputChart.Plot.Add.Scatter(times, writeThroughput);
+                var writePlot = FileIoWriteThroughputChart.Plot.Add.TimeSeries(times, writeThroughput);
                 writePlot.LegendText = fileGroup.Key;
                 writePlot.Color = color;
                 ChartStyle.StyleScatter(writePlot);
@@ -793,7 +793,7 @@ public partial class ServerTab : UserControl
             var times = group.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
             var values = group.Select(t => t.WaitTimeMsPerSecond).ToArray();
 
-            var plot = LockWaitTrendChart.Plot.Add.Scatter(times, values);
+            var plot = LockWaitTrendChart.Plot.Add.TimeSeries(times, values);
             plot.LegendText = group.Key;
             plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
             ChartStyle.StyleScatter(plot);
@@ -875,7 +875,7 @@ public partial class ServerTab : UserControl
         expandedTimes.Add(rangeEnd.ToOADate());
         expandedCounts.Add(0);
 
-        var plot = BlockingTrendChart.Plot.Add.Scatter(expandedTimes.ToArray(), expandedCounts.ToArray());
+        var plot = BlockingTrendChart.Plot.Add.TimeSeries(expandedTimes.ToArray(), expandedCounts.ToArray());
         plot.LegendText = "Blocking Incidents";
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Blocking"));
         plot.MarkerSize = 0; /* No markers, just lines */
@@ -954,7 +954,7 @@ public partial class ServerTab : UserControl
         expandedTimes.Add(rangeEnd.ToOADate());
         expandedCounts.Add(0);
 
-        var plot = DeadlockTrendChart.Plot.Add.Scatter(expandedTimes.ToArray(), expandedCounts.ToArray());
+        var plot = DeadlockTrendChart.Plot.Add.TimeSeries(expandedTimes.ToArray(), expandedCounts.ToArray());
         plot.LegendText = "Deadlocks";
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Deadlocks"));
         plot.MarkerSize = 0; /* No markers, just lines */
@@ -1017,7 +1017,7 @@ public partial class ServerTab : UserControl
             var times = ordered.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
             var values = ordered.Select(t => (double)t.TotalWaitMs).ToArray();
 
-            var plot = CurrentWaitsDurationChart.Plot.Add.Scatter(times, values);
+            var plot = CurrentWaitsDurationChart.Plot.Add.TimeSeries(times, values);
             plot.LegendText = group.Key;
             plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
             ChartStyle.StyleScatter(plot);
@@ -1081,7 +1081,7 @@ public partial class ServerTab : UserControl
             var times = ordered.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
             var values = ordered.Select(t => (double)t.BlockedCount).ToArray();
 
-            var plot = CurrentWaitsBlockedChart.Plot.Add.Scatter(times, values);
+            var plot = CurrentWaitsBlockedChart.Plot.Add.TimeSeries(times, values);
             plot.LegendText = group.Key;
             plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
             ChartStyle.StyleScatter(plot);
@@ -1117,7 +1117,7 @@ public partial class ServerTab : UserControl
         var values = data.Select(d => d.Value).ToArray();
 
         _queryDurationTrendHover?.Clear();
-        var plot = QueryDurationTrendChart.Plot.Add.Scatter(times, values);
+        var plot = QueryDurationTrendChart.Plot.Add.TimeSeries(times, values);
         plot.LegendText = "Query Duration";
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("QueryDuration"));
         ChartStyle.StyleScatter(plot);
@@ -1148,7 +1148,7 @@ public partial class ServerTab : UserControl
         var values = data.Select(d => d.Value).ToArray();
 
         _procDurationTrendHover?.Clear();
-        var plot = ProcDurationTrendChart.Plot.Add.Scatter(times, values);
+        var plot = ProcDurationTrendChart.Plot.Add.TimeSeries(times, values);
         plot.LegendText = "Procedure Duration";
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("ProcedureDuration"));
         ChartStyle.StyleScatter(plot);
@@ -1179,7 +1179,7 @@ public partial class ServerTab : UserControl
         var values = data.Select(d => d.Value).ToArray();
 
         _queryStoreDurationTrendHover?.Clear();
-        var plot = QueryStoreDurationTrendChart.Plot.Add.Scatter(times, values);
+        var plot = QueryStoreDurationTrendChart.Plot.Add.TimeSeries(times, values);
         plot.LegendText = "Query Store Duration";
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("QueryStoreDuration"));
         ChartStyle.StyleScatter(plot);
@@ -1210,7 +1210,7 @@ public partial class ServerTab : UserControl
         var values = data.Select(d => d.Value).ToArray();
 
         _executionCountTrendHover?.Clear();
-        var plot = ExecutionCountTrendChart.Plot.Add.Scatter(times, values);
+        var plot = ExecutionCountTrendChart.Plot.Add.TimeSeries(times, values);
         plot.LegendText = "Executions";
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Executions"));
         ChartStyle.StyleScatter(plot);
@@ -1533,7 +1533,7 @@ public partial class ServerTab : UserControl
             var times = points.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
             var durations = points.Select(d => (double)d.DurationMs!.Value).ToArray();
 
-            var scatter = CollectorDurationChart.Plot.Add.Scatter(times, durations);
+            var scatter = CollectorDurationChart.Plot.Add.TimeSeries(times, durations);
             scatter.LegendText = group.Key;
             scatter.Color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
             scatter.LineWidth = 2;

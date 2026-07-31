@@ -200,7 +200,7 @@ public partial class ViewerServerTab
                     ? trend.Select(t => t.AvgMsPerWait).ToArray()
                     : trend.Select(t => t.WaitTimeMsPerSecond).ToArray();
 
-                var plot = WaitStatsChart.Plot.Add.Scatter(times, values);
+                var plot = WaitStatsChart.Plot.Add.TimeSeries(times, values);
                 plot.LegendText = selected[i].DisplayName;
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
                 ChartStyle.StyleScatter(plot);

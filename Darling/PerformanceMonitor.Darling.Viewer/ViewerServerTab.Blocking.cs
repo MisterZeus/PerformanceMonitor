@@ -378,7 +378,7 @@ public partial class ViewerServerTab
             var times = group.Select(t => ViewerTimeHelper.ForDisplay(t.CollectionTime).ToOADate()).ToArray();
             var values = group.Select(t => t.WaitTimeMsPerSecond).ToArray();
 
-            var plot = LockWaitTrendChart.Plot.Add.Scatter(times, values);
+            var plot = LockWaitTrendChart.Plot.Add.TimeSeries(times, values);
             plot.LegendText = group.Key;
             plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
             ChartStyle.StyleScatter(plot);
@@ -451,7 +451,7 @@ public partial class ViewerServerTab
         expandedTimes.Add(rangeEnd.ToOADate());
         expandedCounts.Add(0);
 
-        var plot = BlockingTrendChart.Plot.Add.Scatter(expandedTimes.ToArray(), expandedCounts.ToArray());
+        var plot = BlockingTrendChart.Plot.Add.TimeSeries(expandedTimes.ToArray(), expandedCounts.ToArray());
         plot.LegendText = "Blocking Incidents";
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Blocking"));
         plot.MarkerSize = 0; /* No markers, just lines */
@@ -521,7 +521,7 @@ public partial class ViewerServerTab
         expandedTimes.Add(rangeEnd.ToOADate());
         expandedCounts.Add(0);
 
-        var plot = DeadlockTrendChart.Plot.Add.Scatter(expandedTimes.ToArray(), expandedCounts.ToArray());
+        var plot = DeadlockTrendChart.Plot.Add.TimeSeries(expandedTimes.ToArray(), expandedCounts.ToArray());
         plot.LegendText = "Deadlocks";
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Deadlocks"));
         plot.MarkerSize = 0; /* No markers, just lines */
@@ -575,13 +575,13 @@ public partial class ViewerServerTab
         var maxValues = PadEnds(ordered.Select(d => (double)d.MaxDurationMs).ToArray(), 0, 0);
         var avgValues = PadEnds(ordered.Select(d => d.AvgDurationMs).ToArray(), 0, 0);
 
-        var maxPlot = BlockingDurationChart.Plot.Add.Scatter(times, maxValues);
+        var maxPlot = BlockingDurationChart.Plot.Add.TimeSeries(times, maxValues);
         maxPlot.LegendText = "Max Block Duration";
         maxPlot.Color = ScottPlot.Color.FromHex(SeriesColors[0]);
         ChartStyle.StyleScatter(maxPlot);
         _blockingDurationHover?.Add(maxPlot, "Max Block Duration");
 
-        var avgPlot = BlockingDurationChart.Plot.Add.Scatter(times, avgValues);
+        var avgPlot = BlockingDurationChart.Plot.Add.TimeSeries(times, avgValues);
         avgPlot.LegendText = "Avg Block Duration";
         avgPlot.Color = ScottPlot.Color.FromHex(SeriesColors[1]);
         ChartStyle.StyleScatter(avgPlot);
@@ -636,7 +636,7 @@ public partial class ViewerServerTab
         var times = PadEnds(ordered.Select(d => ViewerTimeHelper.ForDisplay(d.Time).ToOADate()).ToArray(), rangeStart.ToOADate(), rangeEnd.ToOADate());
         var totals = PadEnds(ordered.Select(d => (double)d.TotalDurationMs).ToArray(), 0, 0);
 
-        var plot = BlockingTotalDurationChart.Plot.Add.Scatter(times, totals);
+        var plot = BlockingTotalDurationChart.Plot.Add.TimeSeries(times, totals);
         plot.LegendText = "Total Block Duration";
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Blocking"));
         ChartStyle.StyleScatter(plot);
@@ -693,13 +693,13 @@ public partial class ViewerServerTab
         var maxValues = PadEnds(ordered.Select(d => (double)d.MaxWaitMs).ToArray(), 0, 0);
         var avgValues = PadEnds(ordered.Select(d => d.AvgWaitMs).ToArray(), 0, 0);
 
-        var maxPlot = DeadlockWaitChart.Plot.Add.Scatter(times, maxValues);
+        var maxPlot = DeadlockWaitChart.Plot.Add.TimeSeries(times, maxValues);
         maxPlot.LegendText = "Max Deadlock Wait";
         maxPlot.Color = ScottPlot.Color.FromHex(SeriesColors[0]);
         ChartStyle.StyleScatter(maxPlot);
         _deadlockWaitHover?.Add(maxPlot, "Max Deadlock Wait");
 
-        var avgPlot = DeadlockWaitChart.Plot.Add.Scatter(times, avgValues);
+        var avgPlot = DeadlockWaitChart.Plot.Add.TimeSeries(times, avgValues);
         avgPlot.LegendText = "Avg Deadlock Wait";
         avgPlot.Color = ScottPlot.Color.FromHex(SeriesColors[1]);
         ChartStyle.StyleScatter(avgPlot);
@@ -754,7 +754,7 @@ public partial class ViewerServerTab
         var times = PadEnds(ordered.Select(d => ViewerTimeHelper.ForDisplay(d.Time).ToOADate()).ToArray(), rangeStart.ToOADate(), rangeEnd.ToOADate());
         var totals = PadEnds(ordered.Select(d => (double)d.TotalWaitMs).ToArray(), 0, 0);
 
-        var plot = DeadlockTotalWaitChart.Plot.Add.Scatter(times, totals);
+        var plot = DeadlockTotalWaitChart.Plot.Add.TimeSeries(times, totals);
         plot.LegendText = "Total Deadlock Wait";
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Deadlocks"));
         ChartStyle.StyleScatter(plot);
@@ -856,7 +856,7 @@ public partial class ViewerServerTab
             var times = ordered.Select(t => ViewerTimeHelper.ForDisplay(t.CollectionTime).ToOADate()).ToArray();
             var values = ordered.Select(t => (double)t.TotalWaitMs).ToArray();
 
-            var plot = CurrentWaitsDurationChart.Plot.Add.Scatter(times, values);
+            var plot = CurrentWaitsDurationChart.Plot.Add.TimeSeries(times, values);
             plot.LegendText = group.Key;
             plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
             ChartStyle.StyleScatter(plot);
@@ -912,7 +912,7 @@ public partial class ViewerServerTab
             var times = ordered.Select(t => ViewerTimeHelper.ForDisplay(t.CollectionTime).ToOADate()).ToArray();
             var values = ordered.Select(t => (double)t.BlockedCount).ToArray();
 
-            var plot = CurrentWaitsBlockedChart.Plot.Add.Scatter(times, values);
+            var plot = CurrentWaitsBlockedChart.Plot.Add.TimeSeries(times, values);
             plot.LegendText = group.Key;
             plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
             ChartStyle.StyleScatter(plot);

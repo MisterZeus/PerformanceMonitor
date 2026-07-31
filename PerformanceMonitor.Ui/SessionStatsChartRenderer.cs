@@ -88,7 +88,7 @@ internal sealed class SessionStatsChartRenderer
                     continue;
                 }
 
-                var plot = chart.Plot.Add.Scatter(times, values);
+                var plot = chart.Plot.Add.TimeSeries(times, values);
                 plot.LegendText = spec.Legend;
                 plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor(spec.PaletteKey));
                 ChartStyle.StyleScatter(plot);

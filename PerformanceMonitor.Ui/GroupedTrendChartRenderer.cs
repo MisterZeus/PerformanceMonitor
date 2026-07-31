@@ -95,7 +95,7 @@ internal sealed class GroupedTrendChartRenderer
             var times = points.Select(d => _project(time(d)).ToOADate()).ToArray();
             var values = points.Select(value).ToArray();
 
-            var plot = chart.Plot.Add.Scatter(times, values);
+            var plot = chart.Plot.Add.TimeSeries(times, values);
             plot.LegendText = TruncateName(group.Key);
             plot.Color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
             ChartStyle.StyleScatter(plot);
