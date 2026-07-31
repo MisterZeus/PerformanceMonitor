@@ -578,6 +578,10 @@ public static class DarlingCliCommands
             "because that is what the viewer connects with. Copy the folder over a channel you trust, and keep the " +
             "file ACL'd to the operator account on the viewer machine.");
 
+        /* One timestamp for the whole export: the two files date the same act, and sampling the clock twice
+           can straddle a second boundary and print two. */
+        var generatedUtc = DateTimeOffset.UtcNow;
+
         try
         {
             Directory.CreateDirectory(targetDirectory);
@@ -586,14 +590,14 @@ public static class DarlingCliCommands
                 BuildViewerConfigJson(
                     BuildViewerConnectionString(
                         handoff.Host, handoff.Port, handoff.Role, handoff.Password, ViewerClientCertificateFileName),
-                    DateTimeOffset.UtcNow),
+                    generatedUtc),
                 cancellationToken);
             TryHardenExportedSecret(configFile, error);
 
             await File.WriteAllTextAsync(certificateFile, certificate + Environment.NewLine, cancellationToken);
             await File.WriteAllTextAsync(
                 readmeFile,
-                BuildViewerConfigReadme(handoff.Host, handoff.Port, handoff.Role, DateTimeOffset.UtcNow),
+                BuildViewerConfigReadme(handoff.Host, handoff.Port, handoff.Role, generatedUtc),
                 cancellationToken);
         }
         catch (Exception ex)
