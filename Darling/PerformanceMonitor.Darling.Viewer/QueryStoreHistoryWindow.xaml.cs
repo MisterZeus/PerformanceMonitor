@@ -158,7 +158,7 @@ public partial class QueryStoreHistoryWindow : Window
             var xs = ordered.Select(r => ViewerTimeHelper.ForDisplay(r.CollectionTime).ToOADate()).ToArray();
             var ys = ordered.Select(r => GetMetricValue(r, tag)).ToArray();
 
-            var scatter = HistoryChart.Plot.Add.Scatter(xs, ys);
+            var scatter = HistoryChart.Plot.Add.TimeSeries(xs, ys);
             scatter.Color = colors[colorIndex % colors.Length];
             ChartStyle.StyleScatter(scatter);
             var seriesLabel = planGroups.Count > 1 ? $"Plan {planGroup.Key}" : label;

@@ -222,7 +222,7 @@ public partial class ViewerServerTab
             var times = points.Select(d => ViewerTimeHelper.ForDisplay(d.CollectionTime).ToOADate()).ToArray();
             var durations = points.Select(d => (double)d.DurationMs!.Value).ToArray();
 
-            var scatter = CollectorDurationChart.Plot.Add.Scatter(times, durations);
+            var scatter = CollectorDurationChart.Plot.Add.TimeSeries(times, durations);
             scatter.LegendText = group.Key;
             scatter.Color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
             ChartStyle.StyleScatter(scatter);

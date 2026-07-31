@@ -304,6 +304,13 @@ public partial class ViewerServerTab
                     var seriesName = scatter.LegendText ?? $"Series{seriesIndex}";
                     foreach (var point in scatter.Data.GetScatterPoints())
                     {
+                        /* #1944's gap markers are fabricated mid-gap timestamps with NaN values -
+                           rendering artifacts, never collected data. Exports carry only real rows. */
+                        if (double.IsNaN(point.Y))
+                        {
+                            continue;
+                        }
+
                         sb.AppendLine(FormatChartCsvLine(DateTime.FromOADate(point.X), seriesName, point.Y, sep));
                     }
 

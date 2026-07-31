@@ -186,7 +186,7 @@ public partial class ServerTab : UserControl
                     ? trend.Select(t => t.AvgMsPerWait).ToArray()
                     : trend.Select(t => t.WaitTimeMsPerSecond).ToArray();
 
-                var plot = WaitStatsChart.Plot.Add.Scatter(times, values);
+                var plot = WaitStatsChart.Plot.Add.TimeSeries(times, values);
                 plot.LegendText = selected[i].DisplayName;
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
                 ChartStyle.StyleScatter(plot);
@@ -352,7 +352,7 @@ public partial class ServerTab : UserControl
                 var times = trend.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
                 var values = trend.Select(t => t.MemoryMb).ToArray();
 
-                var plot = MemoryClerksChart.Plot.Add.Scatter(times, values);
+                var plot = MemoryClerksChart.Plot.Add.TimeSeries(times, values);
                 plot.LegendText = selected[i].DisplayName;
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
                 ChartStyle.StyleScatter(plot);
@@ -566,7 +566,7 @@ public partial class ServerTab : UserControl
                 var times = trend.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
                 var values = trend.Select(t => (double)t.DeltaValue).ToArray();
 
-                var plot = PerfmonChart.Plot.Add.Scatter(times, values);
+                var plot = PerfmonChart.Plot.Add.TimeSeries(times, values);
                 plot.LegendText = selected[i].DisplayName;
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
                 ChartStyle.StyleScatter(plot);

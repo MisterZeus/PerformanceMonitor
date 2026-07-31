@@ -117,7 +117,7 @@ public partial class ProcedureHistoryWindow : Window
         var xs = _historyData.Select(r => r.CollectionTime.AddMinutes(Services.ServerTimeHelper.UtcOffsetMinutes).ToOADate()).ToArray();
         var ys = _historyData.Select(r => GetMetricValue(r, tag)).ToArray();
 
-        var scatter = HistoryChart.Plot.Add.Scatter(xs, ys);
+        var scatter = HistoryChart.Plot.Add.TimeSeries(xs, ys);
         scatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("MetricTrend"));
         ChartStyle.StyleScatter(scatter);
         scatter.LegendText = label;
