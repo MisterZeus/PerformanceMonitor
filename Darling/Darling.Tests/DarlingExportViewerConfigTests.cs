@@ -677,6 +677,109 @@ public sealed class DarlingExportViewerConfigTests
         }
     }
 
+    /// <summary>
+    /// The identity guard and the replace-safely write apply to ALL THREE exported files, not just the
+    /// secret-bearing one. The certificate and README land in the same operator-nameable directory, so each
+    /// path is equally a place to pre-create a file (keeping OWNERSHIP through any later ACL) or to plant a
+    /// symlink that redirects the write — problems of the PATH, not of the contents.
+    /// </summary>
+    [Theory]
+    [InlineData("server.crt", "this is not a certificate")]
+    [InlineData("README.txt", "my own notes about this folder")]
+    public async Task ExportViewerConfigAsync_ForeignCertificateOrReadme_RefusesJustLikeTheConfig(
+        string fileName, string foreignContent)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "DPAPI requires Windows.");
+
+        var root = Directory.CreateTempSubdirectory("darling-export-foreignfile-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            var configPath = Path.Combine(root.FullName, "darling.json");
+            await File.WriteAllTextAsync(configPath, ManagedConfigJson(dataDirectory));
+
+            var destination = Path.Combine(root.FullName, "handoff");
+            Directory.CreateDirectory(destination);
+            var foreignPath = Path.Combine(destination, fileName);
+            await File.WriteAllTextAsync(foreignPath, foreignContent);
+
+            var output = new StringWriter();
+            var error = new StringWriter();
+            var exit = await DarlingCliCommands.ExportViewerConfigAsync(
+                configPath, destination, output, error, CancellationToken.None);
+
+            Assert.Equal(1, exit);
+            Assert.Contains("not written by --export-viewer-config", error.ToString(), StringComparison.Ordinal);
+            Assert.Contains(fileName, error.ToString(), StringComparison.Ordinal);
+            Assert.Equal("", output.ToString());
+
+            /* Untouched — and nothing else was written into the folder either. */
+            Assert.Equal(foreignContent, await File.ReadAllTextAsync(foreignPath));
+            Assert.Single(Directory.GetFiles(destination));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// A SYMLINK at one of the export paths redirects the write to wherever it points, and it must be
+    /// refused by name. Pinned on server.crt specifically: it is one of the two files that had neither the
+    /// identity guard nor the replace-safely write. The link here dangles — its target does not exist yet,
+    /// the shape someone would plant ahead of an export — which is also the case that proves the check reads
+    /// the LINK's attributes rather than following it to a target that is not there.
+    /// </summary>
+    [Fact]
+    public async Task ExportViewerConfigAsync_SymlinkAtTheCertificatePath_RefusesWithoutWritingThrough()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "DPAPI requires Windows.");
+
+        var root = Directory.CreateTempSubdirectory("darling-export-symlink-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            var configPath = Path.Combine(root.FullName, "darling.json");
+            await File.WriteAllTextAsync(configPath, ManagedConfigJson(dataDirectory));
+
+            var destination = Path.Combine(root.FullName, "handoff");
+            Directory.CreateDirectory(destination);
+
+            /* The redirection target does NOT exist yet: the write would create it, through the link. */
+            var redirected = Path.Combine(root.FullName, "elsewhere.crt");
+            var linkPath = Path.Combine(destination, "server.crt");
+            try
+            {
+                File.CreateSymbolicLink(linkPath, redirected);
+            }
+            catch (Exception ex)
+            {
+                Assert.Skip($"cannot create a symlink on this machine ({ex.Message}) - needs Developer Mode or elevation");
+                return;
+            }
+
+            Assert.True(
+                File.GetAttributes(linkPath).HasFlag(FileAttributes.ReparsePoint),
+                "precondition: the planted path is a reparse point");
+
+            var output = new StringWriter();
+            var error = new StringWriter();
+            var exit = await DarlingCliCommands.ExportViewerConfigAsync(
+                configPath, destination, output, error, CancellationToken.None);
+
+            Assert.Equal(1, exit);
+            Assert.Contains("symbolic link", error.ToString(), StringComparison.Ordinal);
+            Assert.Equal("", output.ToString());
+
+            /* Nothing was written through the link. */
+            Assert.False(File.Exists(redirected));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
     /* ---- the strict argument parser (pure) ---- */
 
     [Fact]
@@ -710,6 +813,11 @@ public sealed class DarlingExportViewerConfigTests
     /// </summary>
     [Theory]
     [InlineData(new[] { "--config" }, "--config needs a path")]
+    /* A DANGLING --config as the last token, after a valid destination. A last-wins loop that only
+       recognizes --config when a token follows it would fall through to the positional branch here and
+       either take "--config" AS the destination or reject a perfectly good one — both from a typo. */
+    [InlineData(new[] { @"D:\handoff", "--config" }, "--config needs a path")]
+    [InlineData(new[] { "--config", @"C:\c.json", "--config" }, "--config needs a path")]
     [InlineData(new[] { "--force" }, "Unknown option")]
     [InlineData(new[] { "-o", "out" }, "Unknown option")]
     [InlineData(new[] { @"D:\one", @"D:\two" }, "takes ONE destination directory")]

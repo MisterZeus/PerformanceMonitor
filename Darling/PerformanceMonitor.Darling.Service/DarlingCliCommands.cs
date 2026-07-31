@@ -565,28 +565,23 @@ public static class DarlingCliCommands
             return 1;
         }
 
-        /* Overwrite only what THIS verb wrote. Re-exporting after a credential or certificate rotation is a
-           documented workflow, so an export of ours is replaced silently; anything else — an operator's own
-           file, or one an attacker pre-created to keep ownership of (a Windows owner retains WRITE_DAC no
-           matter what DACL the harden below applies) — stops the run. */
-        if (File.Exists(exportedConfigPath))
+        /* Overwrite only what THIS verb wrote — for ALL THREE files, not just the secret-bearing one. They
+           land in the same operator-nameable directory, so each is equally a place a local user can plant a
+           symlink to redirect the write, or pre-create a file to keep OWNERSHIP of (a Windows owner retains
+           WRITE_DAC no matter what DACL is applied afterwards). Re-exporting after a credential or
+           certificate rotation is a documented workflow, so an export of ours is replaced silently; anything
+           else stops the run. Checked here, before the config load and the credential decrypt, because these
+           are pure filesystem questions — and check-only: nothing is deleted until the write itself, so a run
+           that fails later has not thrown away the previous export. */
+        foreach (var (path, marker) in new[]
         {
-            string existing;
-            try
+            (exportedConfigPath, ViewerConfigMarker),
+            (Path.Combine(targetDirectory, ViewerClientCertificateFileName), CertificatePemMarker),
+            (Path.Combine(targetDirectory, ViewerReadmeFileName), ViewerReadmeMarker),
+        })
+        {
+            if (!TryCheckExportTarget(path, marker, error))
             {
-                existing = await File.ReadAllTextAsync(exportedConfigPath, cancellationToken);
-            }
-            catch (Exception ex)
-            {
-                error.WriteLine($"Could not read the existing {exportedConfigPath} to check whether it is ours: {ex.Message}");
-                return 1;
-            }
-
-            if (!existing.Contains(ViewerConfigMarker, StringComparison.Ordinal))
-            {
-                error.WriteLine(
-                    $"Refusing to overwrite {exportedConfigPath}: it was not written by --export-viewer-config. " +
-                    "Export to an empty directory, or move that file aside first.");
                 return 1;
             }
         }
@@ -660,21 +655,22 @@ public static class DarlingCliCommands
         {
             Directory.CreateDirectory(targetDirectory);
 
-            /* Delete rather than truncate: writing over an existing file keeps its OWNER, and on Windows an
-               owner keeps WRITE_DAC — so overwriting a file someone else created would hand them a DACL they
-               can undo after the harden below. Recreating makes this process the owner. */
-            File.Delete(configFile);
-            await File.WriteAllTextAsync(
+            await WriteExportFileAsync(
                 configFile,
                 BuildViewerConfigJson(
                     BuildViewerConnectionString(
                         handoff.Host, handoff.Port, handoff.Role, handoff.Password, ViewerClientCertificateFileName),
                     generatedUtc),
                 cancellationToken);
+
+            /* Only this file gets an ACL: it is the only one carrying a secret. The certificate is public by
+               construction and the README has nothing in it — but all three go through the same
+               replace-safely path above, because the ownership and symlink problems are about the PATH, not
+               about what the file contains. */
             secretProtected = TryHardenExportedSecret(configFile, error);
 
-            await File.WriteAllTextAsync(certificateFile, certificate + Environment.NewLine, cancellationToken);
-            await File.WriteAllTextAsync(
+            await WriteExportFileAsync(certificateFile, certificate + Environment.NewLine, cancellationToken);
+            await WriteExportFileAsync(
                 readmeFile,
                 BuildViewerConfigReadme(handoff.Host, handoff.Port, handoff.Role, generatedUtc),
                 cancellationToken);
@@ -742,6 +738,15 @@ public static class DarlingCliCommands
     /// own file is replaced silently; anything lacking this line stops the run.
     /// </summary>
     public const string ViewerConfigMarker = "PerformanceMonitor Darling - VIEWER configuration.";
+
+    /// <summary>The README's own first line — its half of the same identity check.</summary>
+    public const string ViewerReadmeMarker = "PerformanceMonitor Darling - remote Viewer setup";
+
+    /// <summary>What a <c>server.crt</c> at the destination must look like to be replaceable: a PEM
+    /// certificate block. The exported cert is a copy of the store's, so unlike the other two it carries no
+    /// marker of ours — but a file at that path that is not a certificate at all is still someone else's,
+    /// and replacing it silently is the behavior being prevented.</summary>
+    public const string CertificatePemMarker = "-----BEGIN CERTIFICATE-----";
 
     /// <summary>
     /// Parses <c>--export-viewer-config</c>'s arguments STRICTLY, in the spirit of #1581's classifier: never
@@ -935,6 +940,114 @@ public static class DarlingCliCommands
         "    on the service host and replace this folder." + Environment.NewLine +
         $"  - The service host must be reachable on port {port} (its firewall rule is scoped to the allowed CIDR)," + Environment.NewLine +
         "    and its postgres.network block must still name this network." + Environment.NewLine;
+
+    /// <summary>
+    /// Decides whether one export target can be written, WITHOUT touching it: refuses a symlink/junction at
+    /// the path (it redirects the write to wherever the link points, and creating one needs no privilege on
+    /// Windows), and refuses an existing file that is not recognizably a previous export's. Applied to all
+    /// three exported files — the ownership and redirection problems belong to the PATH, not to what the file
+    /// happens to contain, so the certificate and README get the same treatment as the secret.
+    /// <para>The link check reads the path's ATTRIBUTES, which describe the LINK; every other file API here
+    /// follows it to the target. Without this check a planted link is not merely written through — a link to
+    /// a target that does not exist yet still reports as existing on Windows, so the identity check below
+    /// would try to read it, fail, and refuse with a puzzling "could not read" instead of naming the link.</para>
+    /// </summary>
+    private static bool TryCheckExportTarget(string path, string ourMarker, TextWriter error)
+    {
+        FileAttributes attributes;
+        try
+        {
+            attributes = File.GetAttributes(path);
+        }
+        catch (FileNotFoundException)
+        {
+            return true;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            /* The destination folder does not exist yet — the normal first-export case. */
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Refusing to write {path}: could not inspect it ({ex.Message}).");
+            return false;
+        }
+
+        if (attributes.HasFlag(FileAttributes.ReparsePoint))
+        {
+            var target = TryDescribeLinkTarget(path);
+            error.WriteLine(
+                $"Refusing to write {path}: it is a symbolic link{target}, so the real destination is somewhere " +
+                "else. Export to a directory that does not contain one.");
+            return false;
+        }
+
+        if (!File.Exists(path))
+        {
+            return true;
+        }
+
+        string existing;
+        try
+        {
+            existing = File.ReadAllText(path);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not read the existing {path} to check whether it is ours: {ex.Message}");
+            return false;
+        }
+
+        if (!existing.Contains(ourMarker, StringComparison.Ordinal))
+        {
+            error.WriteLine(
+                $"Refusing to overwrite {path}: it was not written by --export-viewer-config. " +
+                "Export to an empty directory, or move that file aside first.");
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>Best-effort " (to X)" for the refusal message; naming the target is a convenience, so a
+    /// failure to resolve it must not change the refusal itself.</summary>
+    private static string TryDescribeLinkTarget(string path)
+    {
+        try
+        {
+            return File.ResolveLinkTarget(path, returnFinalTarget: false) is { } link
+                ? $" (to {link.FullName})"
+                : string.Empty;
+        }
+        catch (Exception)
+        {
+            return string.Empty;
+        }
+    }
+
+    /// <summary>
+    /// Writes one exported file so that THIS process owns it. Delete-then-<see cref="FileMode.CreateNew"/>
+    /// rather than a truncating overwrite: an overwrite keeps the existing file's OWNER, and a Windows owner
+    /// keeps <c>WRITE_DAC</c> — so writing over a file someone else created would leave them able to undo the
+    /// ACL applied afterwards. <c>CreateNew</c> also closes the gap between
+    /// <see cref="TryCheckExportTarget"/> and this write: anything that reappears at the path in between
+    /// makes the create FAIL rather than be written through.
+    /// </summary>
+    private static async Task WriteExportFileAsync(string path, string content, CancellationToken cancellationToken)
+    {
+        File.Delete(path);
+
+        var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        await using (stream.ConfigureAwait(false))
+        {
+            var writer = new StreamWriter(stream);
+            await using (writer.ConfigureAwait(false))
+            {
+                await writer.WriteAsync(content.AsMemory(), cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
 
     /// <summary>
     /// ACLs the exported darling.json down to SYSTEM + Administrators + this account + INTERACTIVE (the
