@@ -46,6 +46,18 @@ public sealed class QueryStoreSliceRepairTests : IClassFixture<SharedDuckDbFixtu
         _duckDb = fixture.DuckDb;
         _archivePath = Path.Combine(Path.GetTempPath(), $"pm-1912-{Guid.NewGuid():N}");
         Directory.CreateDirectory(_archivePath);
+
+        /* The repair marker is created on demand and is deliberately NOT part of the managed schema — it must
+           survive normal operation, which is the whole point of it. That also means the shared fixture's
+           ResetData does not know to clear it, so it would leak between tests in this class and make the
+           second one see a store that had "already been repaired". Dropped here rather than taught to
+           ResetData, because the production behavior being relied on is precisely that nothing routine
+           removes it. */
+        using var connection = _duckDb.CreateConnection();
+        connection.Open();
+        using var drop = connection.CreateCommand();
+        drop.CommandText = $"DROP TABLE IF EXISTS {QueryStoreSliceRepairService.MarkerTable}";
+        drop.ExecuteNonQuery();
     }
 
     public void Dispose()
@@ -236,6 +248,60 @@ public sealed class QueryStoreSliceRepairTests : IClassFixture<SharedDuckDbFixtu
         var rows = await QueryArchiveAsync(good, "SELECT query_id, execution_count FROM read_parquet('{0}') ORDER BY query_id");
         Assert.Equal(2, rows.Count);
         Assert.Equal([1L, 125L], rows[0]);
+    }
+
+    /// <summary>
+    /// The startup contract: repair once, record it, do not repeat — and on a PARTIAL repair withhold the
+    /// marker so the next launch retries.
+    ///
+    /// <para>The marker is a table of its own rather than a schema-version bump, and the retry requirement is
+    /// exactly why: <c>RunMigrationsAsync</c> drops and recreates tables per version step, so a data repair
+    /// cannot live there, and the schema version cannot be withheld to force a retry without also re-running
+    /// those drops.</para>
+    /// </summary>
+    [Fact]
+    public async Task StartupRepair_RunsOnce_RecordsAMarker_AndWithholdsItWhenAFileCouldNotBeRepaired()
+    {
+        var t = new DateTime(2026, 6, 13, 11, 0, 0, DateTimeKind.Unspecified);
+        await SeedAsync(t, queryId: 1, planId: 11, intervalId: 6001, executionCount: 100, avgDurationUs: 1778);
+        await SeedAsync(t, queryId: 1, planId: 11, intervalId: 6001, executionCount: 25, avgDurationUs: 2245);
+
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath);
+        Assert.False(await service.AlreadyRepairedAsync());
+
+        await service.RepairOnStartupAsync();
+
+        Assert.True(await service.AlreadyRepairedAsync());
+        Assert.Equal(125L, await ScalarAsync("SELECT execution_count FROM query_store_stats WHERE query_id = 1"));
+
+        /* A second startup is a no-op — it does not even survey, because the marker short-circuits it. */
+        await SeedAsync(t.AddMinutes(5), queryId: 3, planId: 33, intervalId: 6003, executionCount: 7, avgDurationUs: 100);
+        await SeedAsync(t.AddMinutes(5), queryId: 3, planId: 33, intervalId: 6003, executionCount: 3, avgDurationUs: 200);
+        await service.RepairOnStartupAsync();
+        Assert.Equal(2L, await ScalarAsync("SELECT COUNT(*) FROM query_store_stats WHERE query_id = 3"));
+    }
+
+    /// <summary>A partial repair must NOT record the marker, so the next launch tries the failed file again.</summary>
+    [Fact]
+    public async Task StartupRepair_WithAnUnrepairableFile_LeavesNoMarker_SoItRetries()
+    {
+        await WriteUncombinableArchiveAsync(Path.Combine(_archivePath, "202604_query_store_stats.parquet"));
+
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath);
+        await service.RepairOnStartupAsync();
+
+        Assert.False(await service.AlreadyRepairedAsync());
+    }
+
+    /// <summary>A store with nothing to repair records the marker anyway, so the survey stops running forever.</summary>
+    [Fact]
+    public async Task StartupRepair_OnACleanStore_RecordsTheMarkerSoItDoesNotSurveyEveryLaunch()
+    {
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath);
+
+        Assert.False(await service.AlreadyRepairedAsync());
+        await service.RepairOnStartupAsync();
+        Assert.True(await service.AlreadyRepairedAsync());
     }
 
     /* ─────────────────────────── helpers ─────────────────────────── */

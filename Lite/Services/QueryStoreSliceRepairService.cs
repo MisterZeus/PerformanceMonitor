@@ -165,6 +165,125 @@ public sealed class QueryStoreSliceRepairService
         public long RowsRemoved => SplitRows - Groups;
     }
 
+    /// <summary>
+    /// The completion marker. Deliberately its OWN table rather than a schema-version bump.
+    ///
+    /// <para>Two reasons, both load-bearing. <c>RunMigrationsAsync</c> DROPS AND RECREATES tables per version
+    /// step, so a data repair has no business living on that path — a future migration that drops
+    /// <c>query_store_stats</c> would destroy the rows this exists to fix. And the requirement is that a
+    /// partial repair RETRIES on the next launch, which means the marker must be withheld on failure; the
+    /// schema version cannot be withheld, because leaving it behind would re-run the table-dropping schema
+    /// migrations too.</para>
+    ///
+    /// <para>So the marker is written only on a FULLY successful pass. A store that could not repair one
+    /// archive file tries again next launch, which is safe because the pre-fix signature makes the whole
+    /// thing idempotent — the files that already succeeded present no work the second time.</para>
+    /// </summary>
+    internal const string MarkerTable = "query_store_slice_repair";
+
+    /// <summary>True when a completed repair has already been recorded for this store.</summary>
+    public async Task<bool> AlreadyRepairedAsync(CancellationToken cancellationToken = default)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(cancellationToken);
+
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            $"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'main' AND table_name = '{MarkerTable}'";
+        var exists = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken) ?? 0L, CultureInfo.InvariantCulture) > 0;
+        if (!exists)
+        {
+            return false;
+        }
+
+        using var rows = connection.CreateCommand();
+        rows.CommandText = $"SELECT COUNT(*) FROM {MarkerTable}";
+        return Convert.ToInt64(await rows.ExecuteScalarAsync(cancellationToken) ?? 0L, CultureInfo.InvariantCulture) > 0;
+    }
+
+    private async Task MarkRepairedAsync(DuckDBConnection connection, long rowsRemoved, CancellationToken cancellationToken)
+    {
+        using var create = connection.CreateCommand();
+        create.CommandText = $"CREATE TABLE IF NOT EXISTS {MarkerTable} (completed_at TIMESTAMP NOT NULL, rows_removed BIGINT NOT NULL)";
+        await create.ExecuteNonQueryAsync(cancellationToken);
+
+        using var insert = connection.CreateCommand();
+        insert.CommandText = $"INSERT INTO {MarkerTable} (completed_at, rows_removed) VALUES (CURRENT_TIMESTAMP, {rowsRemoved})";
+        await insert.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// The startup entry point: repair once, automatically, and record it — or leave it to be retried.
+    ///
+    /// <para><b>Automatic rather than operator-invoked, unlike Darling's verb, and that asymmetry is
+    /// deliberate.</b> Consistency between the two apps is the same SEMANTICS for the same defect — the same
+    /// collapse, the same weighted math, the same disclosure — not the same invocation surface. Each follows
+    /// its own precedent: Darling's is #1849's operator verb, Lite's is the automatic startup store migration
+    /// that v39 and #1832's data-root move already established. The decisive argument against a button is that
+    /// a repair gated behind UI discovery leaves the users least equipped to find it holding wrong numbers
+    /// permanently.</para>
+    ///
+    /// <para>Never throws. A store that cannot be repaired must still START — the app is a monitoring tool and
+    /// refusing to launch over historical Query Store numbers would be a far worse failure than the one being
+    /// fixed. Problems are logged and the marker is withheld so the next launch tries again.</para>
+    /// </summary>
+    public async Task RepairOnStartupAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (await AlreadyRepairedAsync(cancellationToken))
+            {
+                return;
+            }
+
+            var survey = await SurveyAsync(cancellationToken);
+            if (!survey.HasWork && survey.Unreadable.Count == 0)
+            {
+                /* Nothing to do — a fresh store, or one that only ever ran fixed builds. Record it so the
+                   survey does not run on every launch forever. */
+                using var readLock = _duckDb.AcquireReadLock();
+                using var connection = _duckDb.CreateConnection();
+                await connection.OpenAsync(cancellationToken);
+                await MarkRepairedAsync(connection, 0, cancellationToken);
+                return;
+            }
+
+            _logger?.LogInformation(
+                "#1912 one-time Query Store repair starting: {HotGroups} split interval(s) in the hot store, {ArchiveFiles} archive file(s) affected",
+                survey.HotGroups,
+                survey.Archive.Count(a => a.Groups > 0));
+
+            var result = await RepairAsync(
+                new Progress<string>(message => _logger?.LogInformation("#1912 {Message}", message)),
+                cancellationToken);
+
+            if (result.FullyRepaired)
+            {
+                using var readLock = _duckDb.AcquireReadLock();
+                using var connection = _duckDb.CreateConnection();
+                await connection.OpenAsync(cancellationToken);
+                await MarkRepairedAsync(connection, result.RowsRemoved, cancellationToken);
+
+                _logger?.LogInformation("#1912 one-time Query Store repair complete: {Rows} row(s) collapsed", result.RowsRemoved);
+            }
+            else
+            {
+                /* Marker deliberately NOT written: the next launch retries the files that failed. Until then
+                   the union_by_name view still reads them, with #1907's read-side tie-break resolving their
+                   split slices deterministically. */
+                _logger?.LogWarning(
+                    "#1912 Query Store repair finished with {Count} file(s) unrepaired; they will be retried on the next start. {Failures}",
+                    result.Failures.Count,
+                    string.Join(" | ", result.Failures));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogError(ex, "#1912 Query Store repair could not run; it will be retried on the next start");
+        }
+    }
+
     public async Task<Survey> SurveyAsync(CancellationToken cancellationToken = default)
     {
         using var readLock = _duckDb.AcquireReadLock();
