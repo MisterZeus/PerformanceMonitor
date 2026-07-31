@@ -103,20 +103,23 @@ ALTER ROLE [db_owner] ADD MEMBER [SQLServerPerfMon];
 
 /* Direct table grants, deliberately NOT SQLAgentReaderRole: that role gates the sp_help_job*
    procedures, which this product never calls, and grants NO SELECT on the tables the running
-   jobs collector actually reads - with only the role, those reads fail with error 229 (#1823). */
+   jobs collector actually reads - with only the role, those reads fail with error 229 (#1823).
+   These four are exactly what 51_collect_running_jobs.sql and 44_hung_job_monitor.sql read.
+   Lite and Darling need a wider set (syscategories, sysjobschedules, and EXECUTE on
+   agent_datetime) for collectors this edition does not have - see the main README. */
 USE [msdb];
 CREATE USER [SQLServerPerfMon] FOR LOGIN [SQLServerPerfMon];
 GRANT SELECT ON dbo.sysjobs        TO [SQLServerPerfMon];
 GRANT SELECT ON dbo.sysjobactivity TO [SQLServerPerfMon];
 GRANT SELECT ON dbo.sysjobhistory  TO [SQLServerPerfMon];
-GRANT EXECUTE ON dbo.agent_datetime TO [SQLServerPerfMon];
+GRANT SELECT ON dbo.syssessions    TO [SQLServerPerfMon];
 ```
 
 | Grant | Why |
 |---|---|
 | `VIEW SERVER STATE` | All DMV access (wait stats, query stats, memory, CPU, file I/O, etc.) |
 | `db_owner` on PerformanceMonitor | Collectors insert data, create/alter tables, execute procedures. Scoped to just this database — not sysadmin. |
-| msdb job-table `SELECT`s + `agent_datetime` `EXECUTE` | Read `sysjobs`, `sysjobactivity`, `sysjobhistory` for the running jobs collector. These are direct table reads — `SQLAgentReaderRole` alone leaves every one failing with error 229 |
+| `SELECT` on the four msdb job tables | Read `sysjobs`, `sysjobactivity`, `sysjobhistory`, `syssessions` for the running jobs collector and the hung-job monitor. These are direct table reads — `SQLAgentReaderRole` alone leaves every one failing with error 229 |
 
 **Optional** (gracefully skipped if missing):
 - `ALTER SETTINGS` — installer sets `blocked process threshold` via `sp_configure`. Skipped with a warning if unavailable.
