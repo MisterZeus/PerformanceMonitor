@@ -46,6 +46,15 @@ namespace Darling.Tests;
 /// raw-to-aggregate pairs are the only ones the arithmetic has to carry — which is exactly the split the two
 /// counts below pin.</para>
 ///
+/// <para><b>The configured interval is not the whole story (#1925).</b> <c>set_chunk_time_interval</c>, and a
+/// change to <see cref="TimescaleSupport.ChunkIntervalDays"/>, apply only to chunks cut AFTER them; existing
+/// chunks keep the width they were cut at. So a relation that has lived through a change carries a MIX, and the
+/// catalog's configured interval describes only the newest of them. Widening is harmless to read that way — the
+/// configured number is the wider, worse one — but NARROWING is not: the configuration returns to a small value
+/// while wide chunks sit underneath it, and a guard reading configuration alone judges a store it cannot see.
+/// Every judgement below therefore runs on the WIDEST width a relation carries, configured or on disk, because
+/// old chunks age toward the retention cutoff and every future chunk takes the configured width.</para>
+///
 /// <para><b>#1776 own-store</b> — mints its own scratch database rather than sharing the live fixture, so it is
 /// deliberately NOT in the <c>live-postgres</c> collection. It creates continuous aggregates and mutates a chunk
 /// interval, neither of which the shared fixture may inherit.</para>
@@ -62,18 +71,64 @@ public sealed class RetentionChunkGeometryLiveTests
     /// only, so there is never a second one, and pinning it keeps a future space partition from doubling rows.</para>
     /// </summary>
     private const string ChunkGeometrySql = @"
-SELECT d.hypertable_name AS relation, d.time_interval
-FROM timescaledb_information.dimensions AS d
-WHERE d.hypertable_schema = 'collect'
-AND   d.dimension_number = 1
-UNION ALL
-SELECT c.view_name AS relation, d.time_interval
-FROM timescaledb_information.continuous_aggregates AS c
-JOIN timescaledb_information.dimensions AS d
-  ON  d.hypertable_schema = c.materialization_hypertable_schema
-  AND d.hypertable_name = c.materialization_hypertable_name
-WHERE c.view_schema = 'collect'
-AND   d.dimension_number = 1";
+WITH partitioned AS (
+    SELECT d.hypertable_schema, d.hypertable_name, d.hypertable_name AS relation, d.time_interval
+    FROM timescaledb_information.dimensions AS d
+    WHERE d.hypertable_schema = 'collect'
+    AND   d.dimension_number = 1
+    UNION ALL
+    SELECT d.hypertable_schema, d.hypertable_name, c.view_name AS relation, d.time_interval
+    FROM timescaledb_information.continuous_aggregates AS c
+    JOIN timescaledb_information.dimensions AS d
+      ON  d.hypertable_schema = c.materialization_hypertable_schema
+      AND d.hypertable_name = c.materialization_hypertable_name
+    WHERE c.view_schema = 'collect'
+    AND   d.dimension_number = 1
+)
+SELECT p.relation, p.time_interval, ch.range_end - ch.range_start AS chunk_width
+FROM partitioned AS p
+LEFT JOIN timescaledb_information.chunks AS ch
+  ON  ch.hypertable_schema = p.hypertable_schema
+  AND ch.hypertable_name = p.hypertable_name";
+
+    /// <summary>
+    /// One relation's partitioning as it will actually behave: the CONFIGURED interval every future chunk will
+    /// be cut at, plus the widths of the chunks already on disk.
+    ///
+    /// <para><b>Both halves are needed, and that is #1925.</b> <c>set_chunk_time_interval</c> — and a change to
+    /// <see cref="TimescaleSupport.ChunkIntervalDays"/>, which is the same thing by another route — applies only
+    /// to chunks created AFTER it. Existing chunks keep the width they were cut at, measured directly: a table
+    /// created at 1 day and widened to 7 reports <c>7 days</c> as its interval while six 1-day chunks sit
+    /// underneath it. So neither number alone describes the store.</para>
+    /// </summary>
+    private sealed record RelationGeometry(TimeSpan Configured, IReadOnlyList<TimeSpan> OnDiskWidths)
+    {
+        /// <summary>
+        /// The widest chunk that could ever straddle this relation's retention cutoff, which is what bounds how
+        /// far past its horizon <c>drop_chunks</c> can leave data. Every width the relation has ever cut is a
+        /// candidate: the old ones age toward the cutoff and eventually sit on it, and every future chunk takes
+        /// the configured width. With no chunks yet this IS the configured interval, so a fresh store is judged
+        /// exactly as it was before #1925.
+        /// </summary>
+        public TimeSpan Effective => OnDiskWidths.Count == 0 ? Configured : Max(Configured, OnDiskWidths.Max());
+
+        /// <summary>
+        /// Every distinct width this relation carries. One value means a single grid, which is what the
+        /// identical-grid argument needs; more than one means the relation straddles grids and no superset
+        /// argument is available to it at all.
+        ///
+        /// <para><b>Conservative, and not currently reachable — said plainly rather than dressed up as
+        /// proven.</b> No mutation in this file turns the single-grid condition red, because in today's schema
+        /// a mixed-width relation is always a RAW table and its consumers are always aggregates on a different
+        /// interval, so the arithmetic refuses those pairs before this condition is consulted. It is kept
+        /// because dropping it would be unsound the moment those widths coincided: a relation on two grids
+        /// cannot support a superset argument, whatever its widest chunk happens to equal.</para>
+        /// </summary>
+        public IReadOnlyCollection<TimeSpan> DistinctWidths =>
+            OnDiskWidths.Append(Configured).Distinct().ToArray();
+
+        private static TimeSpan Max(TimeSpan a, TimeSpan b) => a > b ? a : b;
+    }
 
     /// <summary>
     /// For every (source, consumer) pair where BOTH carry a retention policy, the geometry must guarantee the
@@ -152,10 +207,79 @@ AND   d.dimension_number = 1";
         await SetChunkIntervalAsync(connection, victim, TimeSpan.FromDays(1), ct);
 
         var broken = await ReadChunkGeometryAsync(connection, ct);
-        Assert.Equal(TimeSpan.FromDays(1), broken[victim]);
+        Assert.Equal(TimeSpan.FromDays(1), broken[victim].Effective);
 
         JudgePairs(broken, out var nowUnsafe, out _);
         Assert.Contains(nowUnsafe, p => p.Contains(victim, StringComparison.Ordinal));
+
+        /* ── 3. AND IT SEES CHUNKS THE CONFIGURATION NO LONGER MENTIONS (#1925). The case above changes the
+               configured interval, which a configuration-only reading catches. This one does not: a relation
+               is WIDENED, given chunks at the wide width, then NARROWED back. The configuration ends up saying
+               exactly what it said at the start, while wide chunks sit underneath it — so a guard reading only
+               the configured interval judges a store it cannot see, and passes.
+
+               query_store_stats is the subject because its margin is the tight one: 4d of raw against the
+               interval layer's 7d leaves 3 days, so 1-day chunks are fine and 7-day chunks are not. That is
+               the whole false green in one pair. ── */
+        await SeedQueryStoreRowsAsync(connection, "2026-01-01", "2026-01-20", ct);
+        await SetChunkIntervalAsync(connection, "query_store_stats", TimeSpan.FromDays(7), ct);
+        await SeedQueryStoreRowsAsync(connection, "2026-03-01", "2026-04-10", ct);
+        await SetChunkIntervalAsync(connection, "query_store_stats", TimeSpan.FromDays(TimescaleSupport.ChunkIntervalDays), ct);
+
+        var mixed = await ReadChunkGeometryAsync(connection, ct);
+        var raw = mixed["query_store_stats"];
+
+        /* THE PROPERTY FIRST, so a regression lands on the judgement rather than on the scaffolding that
+           explains it. Read the configured interval alone and this passes — which is exactly what it did
+           before #1925, and exactly why the gap was invisible. */
+        JudgePairs(mixed, out var mixedUnsafe, out _);
+        Assert.Contains(mixedUnsafe, p =>
+            p.Contains("query_store_stats (", StringComparison.Ordinal) &&
+            p.Contains("on disk", StringComparison.Ordinal));
+
+        /* Then the diagnosis: the configuration really has gone back to where it started, and the wide chunks
+           really are still there, so the pair above was judged on evidence the configuration cannot supply. */
+        Assert.Equal(TimeSpan.FromDays(TimescaleSupport.ChunkIntervalDays), raw.Configured);
+        Assert.Equal(TimeSpan.FromDays(7), raw.Effective);
+
+        /* Genuinely MIXED, both widths present. Without the narrow chunks this scenario could not tell the
+           WIDEST chunk apart from the narrowest, and a guard that took the narrowest would look correct while
+           being exactly backwards — caught by mutation, which is why the narrow seed is here. */
+        Assert.Contains(TimeSpan.FromDays(1), raw.OnDiskWidths);
+        Assert.Contains(TimeSpan.FromDays(7), raw.OnDiskWidths);
+
+        /* ── 4. THE PREMISE UNDER THE IDENTICAL-GRID ARGUMENT, asserted rather than assumed. That argument says
+               two relations sharing a chunk interval share BOUNDARIES, which is only true because TimescaleDB
+               derives them deterministically from the epoch. Nothing above would notice if it stopped being
+               true — the widths would still match while the grids silently diverged — so check it against the
+               chunks this test just created, at both widths. ── */
+        Assert.True(await AllChunkStartsAreEpochAlignedAsync(connection, ct),
+            "a chunk start is not a whole number of its own width from the epoch, so relations that share an " +
+            "interval no longer share boundaries — the identical-grid regime's superset argument does not hold " +
+            "and every pair it carries would need the arithmetic instead.");
+    }
+
+    /// <summary>
+    /// Plants query_store_stats rows far enough apart to cut several chunks at whatever interval is configured
+    /// right now. Only the NOT NULL columns — this is about where chunk boundaries land, not about the payload.
+    /// </summary>
+    private static async Task SeedQueryStoreRowsAsync(
+        NpgsqlConnection connection, string fromDate, string toDate, CancellationToken ct)
+    {
+        await using var insert = new NpgsqlCommand(@"
+INSERT INTO collect.query_store_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_hash,
+     execution_count, avg_duration_us, avg_cpu_time_us)
+SELECT
+    extract(epoch FROM g)::bigint,
+    g,
+    -1925, 'SQL01', 'AdventureWorks', '0x1925',
+    1, 1, 1
+FROM generate_series($1::timestamp, $2::timestamp, INTERVAL '5 days') AS g", connection);
+
+        insert.Parameters.AddWithValue(DateTime.Parse(fromDate, CultureInfo.InvariantCulture));
+        insert.Parameters.AddWithValue(DateTime.Parse(toDate, CultureInfo.InvariantCulture));
+        await insert.ExecuteNonQueryAsync(ct);
     }
 
     /// <summary>
@@ -164,7 +288,7 @@ AND   d.dimension_number = 1";
     /// a deliberately broken geometry without touching the store again.
     /// </summary>
     private static (int IdenticalGrid, int Arithmetic) JudgePairs(
-        IReadOnlyDictionary<string, TimeSpan> geometry,
+        IReadOnlyDictionary<string, RelationGeometry> geometry,
         out List<string> unsafePairs,
         out List<string> missing)
     {
@@ -188,21 +312,28 @@ AND   d.dimension_number = 1";
                     continue;
                 }
 
-                if (!geometry.TryGetValue(source, out var sourceChunk))
+                if (!geometry.TryGetValue(source, out var sourceGeometry))
                 {
                     missing.Add(source);
                     continue;
                 }
 
-                if (!geometry.TryGetValue(consumer, out var consumerChunk))
+                if (!geometry.TryGetValue(consumer, out var consumerGeometry))
                 {
                     missing.Add(consumer);
                     continue;
                 }
 
                 var sourceHorizon = ParseInterval(dropAfter);
+                var sourceWidth = sourceGeometry.Effective;
 
-                if (sourceChunk == consumerChunk)
+                /* The identical-grid argument needs ONE grid on each side and the same one on both. A relation
+                   carrying more than one width does not sit on a single grid at all — that is precisely the
+                   mixed state #1925 exists for — so it never qualifies, and falls to the arithmetic below where
+                   its WIDEST chunk is paid for. */
+                if (sourceGeometry.DistinctWidths.Count == 1 &&
+                    consumerGeometry.DistinctWidths.Count == 1 &&
+                    sourceWidth == consumerGeometry.Effective)
                 {
                     /* Identical grids: the consumer's older cutoff keeps a superset of the source's chunks, so
                        ordering alone finishes the argument. Ordering is #1905's, but assert it here too rather
@@ -214,54 +345,108 @@ AND   d.dimension_number = 1";
                     }
 
                     unsafePairs.Add(
-                        $"  {source} ({sourceHorizon.TotalDays}d, {sourceChunk.TotalDays}d chunks) -> {consumer} " +
+                        $"  {source} ({sourceHorizon.TotalDays}d, {sourceWidth.TotalDays}d chunks) -> {consumer} " +
                         $"({consumerHorizon.TotalDays}d, same chunks): identical grids, but the consumer does not " +
                         "outlive the source, so it keeps no superset of anything");
                     continue;
                 }
 
-                if (consumerHorizon >= sourceHorizon + sourceChunk)
+                if (consumerHorizon >= sourceHorizon + sourceWidth)
                 {
                     arithmetic++;
                     continue;
                 }
 
                 unsafePairs.Add(
-                    $"  {source} ({sourceHorizon.TotalDays}d horizon, {sourceChunk.TotalDays}d chunks) -> " +
-                    $"{consumer} ({consumerHorizon.TotalDays}d horizon, {consumerChunk.TotalDays}d chunks): the " +
-                    $"grids differ, so the consumer must reach {(sourceHorizon + sourceChunk).TotalDays}d " +
-                    $"(the source's horizon plus one of its chunks) and reaches only {consumerHorizon.TotalDays}d");
+                    $"  {source} ({sourceHorizon.TotalDays}d horizon, {Describe(sourceGeometry)}) -> " +
+                    $"{consumer} ({consumerHorizon.TotalDays}d horizon, {Describe(consumerGeometry)}): the " +
+                    $"grids differ, so the consumer must reach {(sourceHorizon + sourceWidth).TotalDays}d " +
+                    $"(the source's horizon plus its WIDEST chunk) and reaches only {consumerHorizon.TotalDays}d");
             }
         }
 
         return (identicalGrid, arithmetic);
     }
 
-    private static async Task<IReadOnlyDictionary<string, TimeSpan>> ReadChunkGeometryAsync(
+    /// <summary>
+    /// Is every chunk's start a whole number of its OWN width from the epoch? That is what makes two relations
+    /// sharing an interval share boundaries, which is the entire basis of the identical-grid regime. Checked
+    /// per chunk against its own width rather than against one global interval, so a store carrying a mix is
+    /// judged honestly instead of being failed for having two grids that are each internally consistent.
+    /// </summary>
+    private static async Task<bool> AllChunkStartsAreEpochAlignedAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(@"
+SELECT bool_and(
+           extract(epoch FROM c.range_start)::bigint
+           % extract(epoch FROM (c.range_end - c.range_start))::bigint = 0)
+FROM timescaledb_information.chunks AS c
+WHERE c.hypertable_schema = 'collect'", connection);
+
+        var result = await command.ExecuteScalarAsync(ct);
+
+        /* NULL means no chunks matched, which would make this vacuous — treat it as a failure so the assertion
+           cannot pass by finding nothing to check. */
+        return result is bool aligned && aligned;
+    }
+
+    /// <summary>Renders a relation's partitioning for an operator: the configured interval, and the on-disk
+    /// widths when they say something the configured one does not.</summary>
+    private static string Describe(RelationGeometry geometry) =>
+        geometry.OnDiskWidths.Count == 0 || geometry.DistinctWidths.Count == 1
+            ? $"{geometry.Effective.TotalDays}d chunks"
+            : $"{geometry.Configured.TotalDays}d configured but {string.Join("/", geometry.OnDiskWidths.Distinct().OrderBy(w => w).Select(w => $"{w.TotalDays}d"))} on disk";
+
+    /// <summary>
+    /// One row per (relation, chunk), with a NULL width for a relation that has no chunks yet — so a fresh
+    /// store still reports every relation, carrying only its configured interval.
+    /// </summary>
+    private static async Task<IReadOnlyDictionary<string, RelationGeometry>> ReadChunkGeometryAsync(
         NpgsqlConnection connection, CancellationToken ct)
     {
-        var geometry = new Dictionary<string, TimeSpan>(StringComparer.Ordinal);
+        var configured = new Dictionary<string, TimeSpan>(StringComparer.Ordinal);
+        var onDisk = new Dictionary<string, List<TimeSpan>>(StringComparer.Ordinal);
 
-        await using var command = new NpgsqlCommand(ChunkGeometrySql, connection);
-        await using var reader = await command.ExecuteReaderAsync(ct);
-        while (await reader.ReadAsync(ct))
+        await using (var command = new NpgsqlCommand(ChunkGeometrySql, connection))
+        await using (var reader = await command.ExecuteReaderAsync(ct))
         {
-            if (!await reader.IsDBNullAsync(1, ct))
+            while (await reader.ReadAsync(ct))
             {
-                geometry[reader.GetString(0)] = reader.GetTimeSpan(1);
+                if (await reader.IsDBNullAsync(1, ct))
+                {
+                    continue;
+                }
+
+                var relation = reader.GetString(0);
+                configured[relation] = reader.GetTimeSpan(1);
+
+                if (!onDisk.TryGetValue(relation, out var widths))
+                {
+                    widths = new List<TimeSpan>();
+                    onDisk[relation] = widths;
+                }
+
+                if (!await reader.IsDBNullAsync(2, ct))
+                {
+                    widths.Add(reader.GetTimeSpan(2));
+                }
             }
         }
 
-        return geometry;
+        return configured.ToDictionary(
+            c => c.Key,
+            c => new RelationGeometry(c.Value, onDisk[c.Key]),
+            StringComparer.Ordinal);
     }
 
     /// <summary>
-    /// Re-chunks an aggregate by targeting its MATERIALIZATION hypertable, which is the relation that actually
-    /// holds chunks — passing the view name is rejected on some versions, and this resolves what the engine
-    /// itself considers the partitioned relation rather than guessing at an internal name.
+    /// Re-chunks a relation. For an aggregate this must target its MATERIALIZATION hypertable, which is the
+    /// relation that actually holds chunks — passing the view name is rejected on some versions — so the
+    /// mapping is resolved from the catalog rather than guessing at an internal name. A raw table IS its own
+    /// hypertable and is targeted directly, which is what lets the mixed-width leg re-chunk <c>query_store_stats</c>.
     /// </summary>
     private static async Task SetChunkIntervalAsync(
-        NpgsqlConnection connection, string view, TimeSpan interval, CancellationToken ct)
+        NpgsqlConnection connection, string relation, TimeSpan interval, CancellationToken ct)
     {
         string materialized;
         await using (var find = new NpgsqlCommand(@"
@@ -269,8 +454,8 @@ SELECT format('%I.%I', c.materialization_hypertable_schema, c.materialization_hy
 FROM timescaledb_information.continuous_aggregates AS c
 WHERE c.view_schema = 'collect' AND c.view_name = $1", connection))
         {
-            find.Parameters.AddWithValue(view);
-            materialized = (string)(await find.ExecuteScalarAsync(ct))!;
+            find.Parameters.AddWithValue(relation);
+            materialized = (string?)(await find.ExecuteScalarAsync(ct)) ?? $"collect.{relation}";
         }
 
         await using var set = new NpgsqlCommand(
