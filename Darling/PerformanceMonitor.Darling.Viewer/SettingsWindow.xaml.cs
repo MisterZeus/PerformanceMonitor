@@ -981,10 +981,15 @@ public partial class SettingsWindow : Window
             : r.GenericBodyTemplate;
         GenericWebhookProxyAddressBox.Text = r.GenericProxy;
 
+        PagerDutyWebhookEnabledCheckBox.IsChecked = !string.IsNullOrWhiteSpace(r.PagerDutyRoutingKey);
+        PagerDutyRoutingKeyBox.Text = r.PagerDutyRoutingKey;
+        PagerDutyEuRegionCheckBox.IsChecked = r.PagerDutyUseEuRegion;
+
         UpdateSmtpControlStates();
         UpdateTeamsControlStates();
         UpdateSlackControlStates();
         UpdateGenericControlStates();
+        UpdatePagerDutyControlStates();
     }
 
     /// <summary>Builds the <see cref="NotificationRow"/> from the SMTP + webhook controls. A DISABLED channel
@@ -1042,6 +1047,12 @@ public partial class SettingsWindow : Window
             {
                 errors.Add(configError);
             }
+        }
+
+        if (PagerDutyWebhookEnabledCheckBox.IsChecked == true)
+        {
+            row.PagerDutyRoutingKey = PagerDutyRoutingKeyBox.Text?.Trim() ?? "";
+            row.PagerDutyUseEuRegion = PagerDutyEuRegionCheckBox.IsChecked == true;
         }
 
         return row;
