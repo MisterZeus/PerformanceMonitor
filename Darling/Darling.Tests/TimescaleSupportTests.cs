@@ -1084,14 +1084,40 @@ AND   proc_name = 'policy_retention'", connection);
     /// </summary>
     private static async Task AddCompressionPolicyParkedAsync(NpgsqlConnection connection, string table, System.Threading.CancellationToken ct)
     {
-        await ExecAsync(connection, TimescaleSupport.AddCompressionPolicySql($"collect.{table}"), ct);
+        /* Create and park in ONE transaction (#1888), the same lever the product pulls for retention
+           policies (#1705, EnsureRetentionPoliciesAsync): "the only way to never expose an armed job is to
+           keep the bgw_job row invisible until it already reads scheduled = false — the scheduler is a
+           separate backend and cannot see an uncommitted row."
 
-        /* Same job-lookup predicate as RunPolicyAsync, including the 2.18+ columnstore rename. */
-        await ExecAsync(connection, $@"
+           As two autocommit statements this left a real window. add_compression_policy creates the job
+           SCHEDULED and TimescaleDB launches it within a second or two (#1788), so the scheduler could take
+           it between the create and the park — and parking a job that has ALREADY launched does not recall
+           the run in flight (#1874). The launched run then evaluates its body when it gets a worker, which
+           under full-suite load is late enough that the test's rows have landed, so it compresses chunks the
+           test is about to count and the deterministic run_job below is no longer the only thing that
+           compressed. That is why these tests passed alone and in their own class but failed in the full
+           suite once #1888 gave the scheduler enough workers to launch reliably: more parallel load widens
+           the launch-to-execute gap, and more slots make the launch itself certain. */
+        await using var tx = await connection.BeginTransactionAsync(ct);
+
+        using (var create = new NpgsqlCommand(TimescaleSupport.AddCompressionPolicySql($"collect.{table}"), connection, tx))
+        {
+            await create.ExecuteNonQueryAsync(ct);
+        }
+
+        /* Same job-lookup predicate as RunPolicyAsync, including the 2.18+ columnstore rename. The
+           uncommitted job row is visible to THIS session, so the park lands on it before anyone else can
+           see it armed. */
+        using (var park = new NpgsqlCommand($@"
 SELECT alter_job(job_id, scheduled => false, next_start => 'infinity'::timestamptz)
 FROM timescaledb_information.jobs
 WHERE hypertable_schema = 'collect' AND hypertable_name = '{table}'
-AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", ct);
+AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", connection, tx))
+        {
+            await park.ExecuteNonQueryAsync(ct);
+        }
+
+        await tx.CommitAsync(ct);
     }
 
     private static async Task RunPolicyAsync(NpgsqlConnection connection, string table, System.Threading.CancellationToken ct)

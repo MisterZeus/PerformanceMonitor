@@ -112,6 +112,13 @@ jobs:
               - 'upgrades/**/!(*.md)'
             darling:
               - 'Darling/**/!(*.md)'
+              # nightly.yml is not a build input, but Darling.Tests PARSES it: the #1888
+              # guard reads both workflows' throwaway-cluster settings and compares them
+              # against the product's worker-sizing formula. Without this, a nightly-only
+              # edit would change a file the guard asserts on while never running the
+              # guard — a guard that silently stops guarding, which is the exact failure
+              # mode the source-parsing tests here exist to prevent.
+              - '.github/workflows/nightly.yml'
             # The DOCUMENTATION allowlist: files that cannot affect a build under any
             # job in this workflow. Deliberately an allowlist of non-executable content,
             # not a "everything that isn't code" subtraction — a new file type defaults
@@ -566,6 +573,9 @@ jobs:
             darling:
               - 'Darling/**/!(*.md)'
               - '.github/workflows/build.yml'
+              # Same reason as the build job's darling filter: the #1888 cluster-sizing
+              # guard parses nightly.yml, so an edit to it has to reach the suite.
+              - '.github/workflows/nightly.yml'
 
       # This job's gate was already correct for documentation — a docs-only change leaves
       # 'darling' false and every step below no-ops. What it lacked was SAYING so: a job
@@ -631,7 +641,27 @@ jobs:
       # ephemeral CI runner, loopback-only, throwaway data (the product default is scram-sha-256 +
       # a generated credential). Superuser is "darling" (not "postgres") so CREATE SCHEMA ...
       # AUTHORIZATION darling in the V8 schema-split migration resolves. Settings mirror
-      # DarlingManagedPostgres.BuildConfAppend (timescaledb preload, port 5541, loopback bind).
+      # DarlingManagedPostgres.BuildConfAppend (timescaledb preload, port 5541, loopback bind)
+      # and BuildWorkerSizingConfAppend (the two worker settings below).
+      #
+      # #1888: the worker settings are NOT optional garnish. PostgreSQL's default
+      # max_worker_processes = 8 cannot launch TimescaleDB's per-hypertable compression,
+      # retention and continuous-aggregate policy jobs — the postmaster logs "failed to start a
+      # background worker" storms and most policy runs never happen. Without them this job tested a
+      # configuration NO customer runs (the product refuses to: BuildWorkerSizingConfAppend writes
+      # these on every managed start), and worse, made failures luck-of-the-slot rather than
+      # reproducible — which is exactly how #1862's compression flake failed twice on CI in two
+      # unrecognizably different ways and could not be reproduced locally at all.
+      #
+      # The values are the product's own derivation from the live hypertable count
+      # (TimescaleSupport.HypertableCount = the 38-collector catalog + collection_log = 39):
+      #   timescaledb.max_background_workers = HypertableCount + 2       = 41
+      #   max_worker_processes = 3 + (HypertableCount + 2) + 8           = 52
+      # Hard-coded here because a workflow cannot call into the product — so
+      # CiClusterWorkerSizingTests parses THIS FILE and fails the build if either number stops
+      # matching the formula as collectors are added, and CiClusterWorkerSizingLiveTests asserts
+      # the running cluster actually serves them (a conf line that never took effect is
+      # indistinguishable from one that did, by inspection).
       - name: Initialize and start throwaway PostgreSQL
         if: steps.filter.outputs.darling == 'true'
         shell: pwsh
@@ -644,6 +674,8 @@ jobs:
           Add-Content -Path "$dataDir\postgresql.conf" -Value "shared_preload_libraries = 'timescaledb'"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "port = 5541"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 41"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 52"
           & "$bin\pg_ctl.exe" -D $dataDir -l $logFile -w start
           if ($LASTEXITCODE -ne 0) { if (Test-Path $logFile) { Get-Content $logFile -Tail 50 }; throw "pg_ctl start failed ($LASTEXITCODE)" }
           & "$bin\createdb.exe" -h 127.0.0.1 -p 5541 -U darling darling
