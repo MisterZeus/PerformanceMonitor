@@ -24,10 +24,21 @@ namespace PerformanceMonitor.Collectors;
 /// both SKUs (portable Lite → DuckDB, Darling → Postgres) collect it from one definition.
 ///
 /// <para><b>Agentless-safe (must-handle):</b> <c>fn_trace_gettable</c> runs entirely server-side against
-/// the trace's own rollover files — no agent, no file share, no monitor-side artifact. The rollover-file
-/// path is normalized back to the trace's BASE path (strip the <c>_NN</c> rollover suffix, re-append the
-/// extension) and passed with <c>max_files</c> so the function reads across ALL rollover files, not just
-/// the current one (the proven Dashboard idiom).</para>
+/// the trace's own rollover files — no agent, no file share, no monitor-side artifact.</para>
+///
+/// <para><b>Reads the CURRENT file in steady state (#1962):</b> a rollover-set read has no predicate
+/// pushdown — <c>fn_trace_gettable</c> materializes every file it is handed and the <c>StartTime</c>
+/// watermark filters AFTERWARDS — so passing the BASE path with <c>max_files</c> re-read all 5 × 20 MB
+/// every cycle to return a handful of new events. Measured on the reporting fleet's apex box: 897 ms for
+/// the whole set against 178 ms for the current file alone, a 5.0x saving repeated by every server on
+/// every cycle. Steady-state cycles therefore pass the CURRENT file with <c>1</c>, and fall back to the
+/// base-path + <c>max_files</c> form (the proven Dashboard idiom, unchanged) whenever the trace file has
+/// MOVED since the last cycle — because post-watermark events then span the previous file and the current
+/// one. "Moved" is decided against <see cref="LastTraceFilePathStateKey"/>, the path this collector stored
+/// at the end of its previous cycle; no stored path (first run, a restarted host, an upgraded store, a
+/// cycle that failed) means the whole set is read, since a collector that cannot know what it missed must
+/// not assume it missed nothing. Both the comparison and the read use ONE captured value of
+/// <c>t.path</c>, so the path recorded for the next cycle is provably the file this cycle read.</para>
 ///
 /// <para><b>Read-only (never writes the target):</b> unlike the Dashboard collector this definition does
 /// NOT sp_configure/RECONFIGURE the trace on or attempt the disable/re-enable restart cycle — the shared
@@ -87,6 +98,16 @@ public sealed class DefaultTraceEventsCollector : CollectorDefinitionBase<Defaul
     /// </summary>
     private const int ArchivalEmptyFallbackHours = 24;
 
+    /// <summary>
+    /// The <see cref="CollectorContext.State"/> key holding the trace file path this collector read on
+    /// its previous cycle for this server (#1962) — the sibling of the <c>event_time</c> watermark for a
+    /// fact no MAX() over the collected rows can produce. It has to be host state and not a payload
+    /// column precisely because the cycles that most need it collect NOTHING: a server whose default
+    /// trace churns through 20 MB files while producing no CURATED events would, with a row-derived
+    /// path, never record a rollover and so never leave the expensive fallback.
+    /// </summary>
+    public const string LastTraceFilePathStateKey = "last_trace_file_path";
+
     public sealed class Row
     {
         public DateTime? EventTime { get; set; }
@@ -113,23 +134,54 @@ public sealed class DefaultTraceEventsCollector : CollectorDefinitionBase<Defaul
     }
 
     /* The curated, config-slice-free event set (see the class remarks). A {0} placeholder is spliced with
-       the per-server excluded-database clause on ft.DatabaseName; the rollover-file base-path normalization
-       (strip _NN + re-append the extension) reads every retained file. The strip only fires when the
-       LAST underscore sits in the FILENAME, i.e. after the last path separator (either family — the
-       collector runs against Windows and Linux targets): SQL Server on Linux names the initial trace
-       file without a rollover suffix (log.trc, not log_1.trc), so an unguarded strip mangles the path
-       (log.trc.trc — #1633), and a trace DIRECTORY containing an underscore would mangle it a second
-       way (/var/opt/my_sql/log/log.trc -> /var/opt/my.trc — #1636); fn_trace_gettable then errors on
-       the nonexistent file (Msg 19049) and no events are collected. Falling back to t.path in both
-       cases keeps the Windows behavior (which always has the _N suffix) unchanged. READ UNCOMMITTED
-       like every collector; OPTION(RECOMPILE) because the cutoff selectivity varies wildly between the
-       all-history first run and the tiny steady-state windows. */
+       the per-server excluded-database clause on ft.DatabaseName.
+
+       The trace's live path is captured into @current_trace_path FIRST and everything downstream reads
+       that ONE value — the arm decision, the file(s) handed to fn_trace_gettable, and the path handed
+       back for the next cycle. That is what makes "the path we stored" and "the file we read" the same
+       fact rather than two reads of sys.traces that a rollover can land between: whenever a rollover DOES
+       fall inside the batch, the stored path is the file that was read, so the next cycle sees the
+       inequality and takes the fallback. Deciding host-side instead would need a separate pre-read, and a
+       rollover between that read and this one would store a path nothing had read yet — silently skipping
+       the previous file's tail (#1962).
+
+       Steady state (@current_trace_path = @last_trace_path — the path stored by the previous cycle) reads
+       ONLY the current file. Any other case reads the whole rollover set via the base path + max_files:
+       a moved path (rollover), and — because a NULL @last_trace_path makes the comparison UNKNOWN rather
+       than true — no stored path at all (first run, restarted host, upgraded store, failed prior cycle).
+       The base-path normalization (strip _NN + re-append the extension) is the proven Dashboard idiom,
+       unchanged: the strip only fires when the LAST underscore sits in the FILENAME, i.e. after the last
+       path separator (either family — the collector runs against Windows and Linux targets): SQL Server on
+       Linux names the initial trace file without a rollover suffix (log.trc, not log_1.trc), so an
+       unguarded strip mangles the path (log.trc.trc — #1633), and a trace DIRECTORY containing an
+       underscore would mangle it a second way (/var/opt/my_sql/log/log.trc -> /var/opt/my.trc — #1636);
+       fn_trace_gettable then errors on the nonexistent file (Msg 19049) and no events are collected.
+       Falling back to the unmodified path in both cases keeps the Windows behavior (which always has the
+       _N suffix) unchanged.
+
+       The trailing SELECT returns the captured path (NULL when there is no running default trace, so
+       nothing is recorded and the next cycle stays on the fallback). It is a SECOND RESULT SET read by
+       ReadAsync — not a row on the payload, which a cycle collecting zero events would never carry.
+
+       sys.traces stays in the FROM: its is_default/status predicate is what keeps fn_trace_gettable from
+       being invoked at all on a server whose default trace is off, and max_files still comes from it.
+       READ UNCOMMITTED like every collector; OPTION(RECOMPILE) because the cutoff selectivity varies
+       wildly between the all-history first run and the tiny steady-state windows. */
     /* Parsed once — the template is re-formatted every collection cycle (CA1863). */
     private static readonly System.Text.CompositeFormat QueryTemplateFormat =
         System.Text.CompositeFormat.Parse(QueryTemplate);
 
     private const string QueryTemplate = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+DECLARE
+    @current_trace_path nvarchar(260);
+
+SELECT
+    @current_trace_path = t.path
+FROM sys.traces AS t
+WHERE t.is_default = 1
+AND   t.status = 1;
 
 SELECT
     event_time = ft.StartTime,
@@ -157,13 +209,21 @@ FROM sys.traces AS t
 CROSS APPLY sys.fn_trace_gettable
 (
     CASE
-        WHEN CHARINDEX(N'_', REVERSE(t.path)) > 0
-        AND (CHARINDEX(N'\', REVERSE(t.path)) = 0 OR CHARINDEX(N'_', REVERSE(t.path)) < CHARINDEX(N'\', REVERSE(t.path)))
-        AND (CHARINDEX(N'/', REVERSE(t.path)) = 0 OR CHARINDEX(N'_', REVERSE(t.path)) < CHARINDEX(N'/', REVERSE(t.path)))
-        THEN LEFT(t.path, LEN(t.path) - CHARINDEX(N'_', REVERSE(t.path))) + RIGHT(t.path, 4)
-        ELSE t.path
+        /*Steady state: the trace has not rolled since the previous cycle, so every post-watermark
+          event is in the file we are already pointed at*/
+        WHEN @current_trace_path = @last_trace_path
+        THEN @current_trace_path
+        WHEN CHARINDEX(N'_', REVERSE(@current_trace_path)) > 0
+        AND (CHARINDEX(N'\', REVERSE(@current_trace_path)) = 0 OR CHARINDEX(N'_', REVERSE(@current_trace_path)) < CHARINDEX(N'\', REVERSE(@current_trace_path)))
+        AND (CHARINDEX(N'/', REVERSE(@current_trace_path)) = 0 OR CHARINDEX(N'_', REVERSE(@current_trace_path)) < CHARINDEX(N'/', REVERSE(@current_trace_path)))
+        THEN LEFT(@current_trace_path, LEN(@current_trace_path) - CHARINDEX(N'_', REVERSE(@current_trace_path))) + RIGHT(@current_trace_path, 4)
+        ELSE @current_trace_path
     END,
-    t.max_files
+    CASE
+        WHEN @current_trace_path = @last_trace_path
+        THEN 1
+        ELSE t.max_files
+    END
 ) AS ft
 JOIN sys.trace_events AS te
   ON ft.EventClass = te.trace_event_id
@@ -205,7 +265,10 @@ AND
 )
 ORDER BY
     ft.StartTime DESC
-OPTION(RECOMPILE);";
+OPTION(RECOMPILE);
+
+SELECT
+    current_trace_path = @current_trace_path;";
 
     public override string Name => "default_trace_events";
 
@@ -220,6 +283,13 @@ OPTION(RECOMPILE);";
     /// collectors' event_time watermark). First run has no watermark → collect all on-disk history.
     /// </summary>
     public override string? WatermarkColumn => "event_time";
+
+    /// <summary>
+    /// The last-seen trace file path (see <see cref="LastTraceFilePathStateKey"/>): the host loads it
+    /// before the query is built and persists whatever this cycle observed once the cycle completes.
+    /// The only collector that declares state — every other one's dedup is derivable from its rows.
+    /// </summary>
+    public override IReadOnlyList<string> StateKeys { get; } = new[] { LastTraceFilePathStateKey };
 
     /// <summary>
     /// Collects on SQL Server, Azure SQL Managed Instance, and AWS RDS — everywhere the built-in default
@@ -250,9 +320,17 @@ OPTION(RECOMPILE);";
                 ? context.CollectionTime.AddHours(-ArchivalEmptyFallbackHours)
                 : FirstRunCutoff);
 
-        var parameters = new List<CollectorParameter>(exclusionParameters.Count + 2)
+        /* The path this collector read last cycle, or null when it has none — a first run, a host that
+           restarted before it could store one, a store upgraded onto this build, or a previous cycle that
+           failed. Null binds as DBNull, so the query's `@current_trace_path = @last_trace_path` is UNKNOWN
+           and the read takes the whole rollover set: not knowing what you missed is not the same as
+           knowing you missed nothing (#1962). */
+        context.State.TryGetValue(LastTraceFilePathStateKey, out var lastTracePath);
+
+        var parameters = new List<CollectorParameter>(exclusionParameters.Count + 3)
         {
             new("@cutoff_time", cutoffTime, CollectorParameterType.DateTime2),
+            new("@last_trace_path", lastTracePath, CollectorParameterType.NVarChar260),
             /* Operator toggle mirroring the Dashboard proc's @include_object_events: 1 keeps the Object DDL
                slice (today's behavior), 0 drops it so a create/drop-happy workload can't flood the tab. */
             new("@include_object_ddl", context.CollectSchemaChangeEvents ? 1 : 0, CollectorParameterType.Int32),
@@ -345,6 +423,18 @@ OPTION(RECOMPILE);";
                 DurationUs = reader.IsDBNull(19) ? null : Convert.ToInt64(reader.GetValue(19), CultureInfo.InvariantCulture),
                 EndTime = reader.IsDBNull(20) ? null : reader.GetDateTime(20),
             });
+        }
+
+        /* The batch's SECOND result set: the trace file path this read actually used, recorded for the
+           next cycle's rollover comparison (#1962). Read here, off the payload, because the cycles that
+           depend on it hardest are the ones that returned no rows at all — a quiet server still has to
+           notice its trace rolled. A missing/NULL path (no running default trace) records nothing, which
+           leaves the next cycle on the safe fallback. */
+        if (await reader.NextResultAsync(cancellationToken)
+            && await reader.ReadAsync(cancellationToken)
+            && !reader.IsDBNull(0))
+        {
+            context.PendingState[LastTraceFilePathStateKey] = reader.GetString(0);
         }
 
         return rows;
