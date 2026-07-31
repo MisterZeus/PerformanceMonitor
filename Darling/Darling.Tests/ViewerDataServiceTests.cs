@@ -74,7 +74,11 @@ public sealed class ViewerDataServiceTests
 /// DPAPI entropy) is pinned against the SERVICE's DarlingSecrets/DarlingManagedPostgres here,
 /// because the viewer deliberately duplicates those constants instead of referencing the
 /// service project.
+/// <para>In the <c>darling-config-env</c> collection because the resolution test sets the process-wide
+/// <c>DARLING_CONFIG</c> variable — see <see cref="DarlingConfigEnvironmentCollection"/> for why saving
+/// and restoring it in a <c>finally</c> is not enough on its own.</para>
 /// </summary>
+[Collection("darling-config-env")]
 public sealed class ViewerSettingsTests
 {
     [Fact]
@@ -103,6 +107,9 @@ public sealed class ViewerSettingsTests
                 """;
 
             var settings = ViewerSettings.Parse(json);
+            /* The flag the startup diagnostics report (#1954): the string was DERIVED, so
+               postgres.connectionString in the file is not consulted at all. */
+            Assert.True(settings.Managed);
             var parsed = new NpgsqlConnectionStringBuilder(settings.ConnectionString);
             /* 127.0.0.1, not "localhost" — the viewer half of the managed-Host parity pair with the
                service's DarlingManagedPostgres.BuildConnectionString (darling-network-endpoints). */
@@ -215,6 +222,9 @@ public sealed class ViewerSettingsTests
         var settings = ViewerSettings.Parse(json);
 
         Assert.Equal("Host=localhost;Database=darling", settings.ConnectionString);
+        /* Bring-your-own: the string came out of the file verbatim, which is what the startup
+           diagnostics report as postgres.managed = false (#1954). */
+        Assert.False(settings.Managed);
     }
 
     [Fact]

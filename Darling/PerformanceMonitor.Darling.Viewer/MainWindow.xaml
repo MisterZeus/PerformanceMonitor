@@ -1182,19 +1182,63 @@
             </Border>
         </Grid>
 
-        <!-- Full-window message state: missing config / unreachable store -->
+        <!-- Full-window message state: missing config / unreachable store. Carries the #1954 diagnostics
+             block (which darling.json was read, and the non-secret parse summary) so a field operator can
+             tell "wrong file" from "right file, wrong value" without going to find the log. -->
         <Border x:Name="MessageOverlay"
                 Grid.Row="0"
                 Background="{DynamicResource BackgroundLightBrush}"
                 Visibility="Collapsed">
-            <TextBlock x:Name="MessageText"
-                       HorizontalAlignment="Center"
-                       VerticalAlignment="Center"
-                       TextWrapping="Wrap"
-                       TextAlignment="Center"
-                       MaxWidth="640"
-                       FontSize="14"
-                       Foreground="{DynamicResource ForegroundBrush}"/>
+            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="760" Margin="24">
+                <TextBlock x:Name="MessageText"
+                           HorizontalAlignment="Center"
+                           TextWrapping="Wrap"
+                           TextAlignment="Center"
+                           FontSize="14"
+                           Foreground="{DynamicResource ForegroundBrush}"/>
+
+                <StackPanel x:Name="MessageDetailsPanel" Visibility="Collapsed" Margin="0,20,0,0">
+                    <TextBlock Text="Configuration this viewer used"
+                               FontSize="12"
+                               FontWeight="SemiBold"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"
+                               Margin="0,0,0,6"/>
+                    <Border Background="{DynamicResource BackgroundDarkBrush}"
+                            BorderBrush="{DynamicResource BorderBrush}"
+                            BorderThickness="1"
+                            CornerRadius="4"
+                            Padding="12,10">
+                        <ScrollViewer MaxHeight="280" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <!-- A read-only TextBox rather than a TextBlock: WPF text blocks are not
+                                 selectable, and the whole point is that the operator can lift these lines
+                                 into a bug report. Wrapped rather than side-scrolled, because the longest
+                                 lines are the resolved PATHS — the one thing that must be readable without
+                                 dragging a scrollbar. -->
+                            <TextBox x:Name="MessageDetailsText"
+                                     IsReadOnly="True"
+                                     BorderThickness="0"
+                                     Background="Transparent"
+                                     Foreground="{DynamicResource ForegroundBrush}"
+                                     FontFamily="Consolas"
+                                     FontSize="12"
+                                     TextWrapping="Wrap"/>
+                        </ScrollViewer>
+                    </Border>
+                    <!-- The overlay covers the sidebar, so its View Log button is unreachable exactly when
+                         it is most wanted; carry one here. The log holds what this block deliberately
+                         omits — the exception and its inner chain. -->
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
+                        <Button x:Name="CopyDiagnosticsButton"
+                                Content="Copy details"
+                                Style="{StaticResource DarkButton}"
+                                Click="OnCopyDiagnosticsClick"/>
+                        <Button Content="View Log"
+                                Style="{StaticResource DarkButton}"
+                                Margin="8,0,0,0"
+                                Click="ViewLogButton_Click"/>
+                    </StackPanel>
+                </StackPanel>
+            </StackPanel>
         </Border>
 
         <!-- Multi-field status bar (ported from Lite, adapted to what the viewer knows): general status,

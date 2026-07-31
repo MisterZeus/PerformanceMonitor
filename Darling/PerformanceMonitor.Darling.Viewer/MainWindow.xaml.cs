@@ -125,6 +125,14 @@ public partial class MainWindow : Window
     /// at the fleet bind site so tiles re-sort deterministically every refresh.</summary>
     private ServerOverviewSortMode _overviewSortMode;
 
+    /// <summary>
+    /// The non-secret configuration block shown on every connection/config failure (#1954): which
+    /// darling.json won and what was parsed from it. Built at startup before the load is attempted (so a
+    /// missing file still reports where the viewer looked) and extended with the parse summary once the file
+    /// loads. Never carries credentials — <see cref="ViewerConfigDiagnostics"/> builds it from an allowlist.
+    /// </summary>
+    private string _connectionDiagnostics = "";
+
     public MainWindow()
     {
         InitializeComponent();
@@ -166,22 +174,40 @@ public partial class MainWindow : Window
     {
         Loaded -= OnLoaded;
 
+        /* #1954: say WHERE the config came from before trying to read it, so a missing or unparseable
+           darling.json still names the file the viewer looked at and the rule that picked it. Resolving
+           here (rather than inside TryLoad) also means the path we report is provably the path we load —
+           the resolved path is what gets handed to TryLoad as its explicit path. */
+        var configLocation = ViewerSettings.ResolveConfigLocation(ExplicitConfigPathFromArgs());
+        LogDiagnostics(ViewerConfigDiagnostics.DescribeConfigLocation(configLocation));
+        _connectionDiagnostics = ViewerConfigDiagnostics.BuildDetails(configLocation, connectionString: null, managed: false);
+
         ViewerSettings? settings;
         try
         {
-            settings = await Task.Run(() => ViewerSettings.TryLoad(ExplicitConfigPathFromArgs()));
+            settings = await Task.Run(() => ViewerSettings.TryLoad(configLocation.Path));
         }
         catch (Exception ex)
         {
-            ShowMessage($"darling.json could not be read: {ex.Message}");
+            ViewerLogger.Error(ViewerConfigDiagnostics.LogSource, "darling.json could not be read", ex);
+            ShowConnectionFailure($"darling.json could not be read: {ex.Message}");
             return;
         }
 
         if (settings is null)
         {
-            ShowMessage("darling.json not found — copy darling.sample.json from the service and point DARLING_CONFIG at it.");
+            ShowConnectionFailure("darling.json not found — copy darling.sample.json from the service and point DARLING_CONFIG at it.");
             return;
         }
+
+        /* The non-secret parse summary (#1954): host, port, username, database, SSL mode, search path, the
+           resolved certificate path and whether it exists, and whether the string was derived or read
+           verbatim — everything but the credential. This is what separates "it read the wrong file" from
+           "it read the right file and the value in it is wrong". */
+        var connectionSummary = ViewerConfigDiagnostics.DescribeConnection(settings.ConnectionString, settings.Managed);
+        LogDiagnostics(connectionSummary);
+        _connectionDiagnostics = ViewerConfigDiagnostics.BuildDetails(
+            configLocation, settings.ConnectionString, settings.Managed);
 
         _dataService = new ViewerDataService(settings.ConnectionString, _connectionTimeoutSeconds);
 
@@ -200,7 +226,7 @@ public partial class MainWindow : Window
             var storeVersion = await _dataService.GetStoreSchemaVersionAsync();
             if (storeVersion is int version && version < ViewerDataService.RequiredStoreSchemaVersion)
             {
-                ShowMessage(
+                ShowConnectionFailure(
                     $"The Darling store is at schema v{version}, but this viewer needs v{ViewerDataService.RequiredStoreSchemaVersion}. " +
                     "Update or restart the Darling service so it migrates the store, then reopen the viewer.");
                 return;
@@ -215,7 +241,7 @@ public partial class MainWindow : Window
         catch (ViewerStoreUnreachableException ex)
         {
             ViewerLogger.Error("App", "Darling store unreachable", ex);
-            ShowMessage(ex.Message);
+            ShowConnectionFailure(ex.Message);
             return;
         }
         catch (Exception ex)
@@ -223,7 +249,7 @@ public partial class MainWindow : Window
             /* Reachable but the first connection failed for another reason (e.g. authentication, or the
                configured database does not exist) — show it rather than dead-ending on a blank window. */
             ViewerLogger.Error("App", "Darling store connection failed", ex);
-            ShowMessage($"Couldn't connect to the Darling store: {ex.Message}");
+            ShowConnectionFailure($"Couldn't connect to the Darling store: {ex.Message}");
             return;
         }
 
@@ -755,7 +781,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            ShowMessage($"Cannot read the Darling store: {ex.Message}");
+            ShowConnectionFailure($"Cannot read the Darling store: {ex.Message}");
         }
     }
 
@@ -1482,11 +1508,55 @@ public partial class MainWindow : Window
         Topmost = false;
     }
 
-    private void ShowMessage(string message)
+    /// <summary>
+    /// The full-window message state. <paramref name="details"/> is the non-secret configuration block
+    /// (#1954) rendered under the message; pass null only for a message that genuinely has no configuration
+    /// context. Every connection/config failure goes through <see cref="ShowConnectionFailure"/> instead —
+    /// pinned by <c>ViewerConfigDiagnosticsTests</c>, so a new failure branch cannot quietly ship without it.
+    /// </summary>
+    private void ShowMessage(string message, string? details)
     {
         MessageText.Text = message;
+        MessageDetailsText.Text = details ?? "";
+        MessageDetailsPanel.Visibility = string.IsNullOrWhiteSpace(details) ? Visibility.Collapsed : Visibility.Visible;
         MessageOverlay.Visibility = Visibility.Visible;
         StatusText.Text = "";
+    }
+
+    /// <summary>
+    /// A connection or configuration failure: the message, plus the diagnostics that say which darling.json
+    /// the viewer read and what it parsed out of it (#1954). The operator sees it in the window, so
+    /// diagnosing "wrong file" vs "right file, wrong value" needs no log hunt at all; the log gets it too,
+    /// flushed immediately because a stuck viewer is usually killed before the 5-second timer fires.
+    /// </summary>
+    private void ShowConnectionFailure(string message)
+    {
+        ViewerLogger.Error(ViewerConfigDiagnostics.LogSource, message);
+        ViewerLogger.Flush();
+        ShowMessage(message, _connectionDiagnostics);
+    }
+
+    /// <summary>Writes one diagnostic line per entry under the shared config tag, so an operator can grep one source.</summary>
+    private static void LogDiagnostics(IReadOnlyList<string> lines)
+    {
+        foreach (var line in lines)
+        {
+            ViewerLogger.Info(ViewerConfigDiagnostics.LogSource, line);
+        }
+    }
+
+    /// <summary>Copies the failure message plus the configuration block, so a bug report carries both.</summary>
+    private void OnCopyDiagnosticsClick(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            Clipboard.SetText(string.Join(Environment.NewLine + Environment.NewLine, MessageText.Text, MessageDetailsText.Text));
+        }
+        catch (Exception ex)
+        {
+            /* Another process can hold the clipboard open; a failed copy must not take the window down. */
+            ViewerLogger.Warn(ViewerConfigDiagnostics.LogSource, $"Copying the diagnostics failed: {ex.Message}");
+        }
     }
 
     private async void OnClosed(object? sender, EventArgs e)
