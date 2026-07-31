@@ -227,6 +227,91 @@ public class DataRootMigrationTests
     }
 
     /// <summary>
+    /// A mixed run: <c>monitor.duckdb</c> migrates normally while <c>config\</c> collides and is quarantined.
+    /// The marker file is the only record that survives the session, and someone reads it because they are
+    /// hunting for ONE artifact by name - so listing only what went live would tell the person looking for
+    /// their settings.json that it was never touched.
+    /// </summary>
+    [Fact]
+    public void Migrate_MarkerNamesTheQuarantinedArtifactsToo_NotJustTheOnesThatWentLive()
+    {
+        var parent = NewTempDir("markermix");
+        try
+        {
+            var legacy = Path.Combine(parent, "PerformanceMonitorLite");
+            var target = Path.Combine(parent, "PerformanceMonitorLite-Data");
+            PopulateLegacyRoot(legacy);
+            WriteFile(target, Path.Combine("config", "ignored_waits.json"), "[]");
+            var log = new List<string>();
+
+            var result = DataRootMigration.Migrate(legacy, target, log.Add);
+
+            Assert.Contains("monitor.duckdb", result.Moved);
+            Assert.Equal(new[] { "config" }, result.Rescued);
+
+            var marker = File.ReadAllText(Path.Combine(legacy, DataRootMigration.MarkerFileName));
+            Assert.Contains("monitor.duckdb", marker, StringComparison.Ordinal);
+            Assert.Contains("config", marker, StringComparison.Ordinal);
+            Assert.Contains(Path.Combine(target, DataRootMigration.RescuedDirName), marker, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(parent, true);
+        }
+    }
+
+    /// <summary>
+    /// Every rescue in the already-populated branch fails (the quarantine names are all taken by an earlier
+    /// partial run). The log must NOT claim a move that did not happen: this runs before the logger exists,
+    /// so it is the only channel out, and an operator told "moved it to the quarantine" who then finds an
+    /// empty folder stops looking - with their data still in the folder Setup.exe deletes.
+    /// </summary>
+    [Fact]
+    public void Migrate_EveryRescueFails_SaysSoInsteadOfClaimingAMove()
+    {
+        var parent = NewTempDir("rescuefail");
+        try
+        {
+            var legacy = Path.Combine(parent, "PerformanceMonitorLite");
+            var target = Path.Combine(parent, "PerformanceMonitorLite-Data");
+            PopulateLegacyRoot(legacy);
+            WriteFile(target, Path.Combine("config", "settings.json"), "{\"alerts_enabled\":false}");
+            WriteFile(target, "monitor.duckdb", "current-duckdb");
+
+            /* An earlier partial run already claimed every quarantine name, so no rescue can land. */
+            var rescueDir = Path.Combine(target, DataRootMigration.RescuedDirName);
+            foreach (var name in new[] { "config", "archive", "logs" })
+            {
+                Directory.CreateDirectory(Path.Combine(rescueDir, name));
+            }
+            foreach (var name in new[] { "monitor.duckdb", "monitor.duckdb.wal", "alert_state.json" })
+            {
+                WriteFile(rescueDir, name, "earlier-run");
+            }
+
+            var log = new List<string>();
+            var result = DataRootMigration.Migrate(legacy, target, log.Add);
+
+            Assert.Equal(DataRootMigrationStatus.AlreadyMigrated, result.Status);
+            Assert.Empty(result.Rescued);
+            Assert.NotEmpty(result.Kept);
+
+            /* Nothing moved, so nothing may claim it moved - and no marker may say the folder is done with. */
+            var joined = string.Join("\n", log);
+            Assert.DoesNotContain("Moved it to", joined, StringComparison.Ordinal);
+            Assert.Contains("could not be moved out of there", joined, StringComparison.Ordinal);
+            Assert.False(File.Exists(Path.Combine(legacy, DataRootMigration.MarkerFileName)));
+
+            /* And the data is exactly where it was, untouched. */
+            Assert.Equal("duckdb-bytes", File.ReadAllText(Path.Combine(legacy, "monitor.duckdb")));
+        }
+        finally
+        {
+            Directory.Delete(parent, true);
+        }
+    }
+
+    /// <summary>
     /// The failure the #1842 review found: <c>monitor.duckdb</c>'s move fails once, the app opens DuckDB at
     /// the new root and a fresh EMPTY database appears there, and from then on bare existence reads as
     /// "already migrated" — with the real multi-gigabyte store still in the folder Setup.exe deletes.

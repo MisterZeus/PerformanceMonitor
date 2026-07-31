@@ -167,21 +167,31 @@ internal static class DataRootMigration
                     else kept.Add(name);
                 }
 
-                log($"Data root '{newRoot}' is already populated and is the one in use, so the older copy in " +
-                    $"'{legacyRoot}' cannot go live. Moved it to '{Path.Combine(newRoot, RescuedDirName)}' so " +
-                    $"the next Setup.exe cannot delete it ({string.Join(", ", rescued)}). If the data you " +
-                    "expected to see is in there rather than in the live store, close Lite and swap it in by " +
-                    "hand; otherwise the folder is safe to delete.");
+                /* Each arm is gated on its own list. Claiming a move that did not happen is worse than
+                   saying nothing: this log is the ONLY channel this early, and an operator who reads
+                   "moved it to the quarantine" and finds an empty folder stops looking. */
+                if (rescued.Count > 0)
+                {
+                    log($"Data root '{newRoot}' is already populated and is the one in use, so the older copy in " +
+                        $"'{legacyRoot}' cannot go live. Moved it to '{Path.Combine(newRoot, RescuedDirName)}' so " +
+                        $"the next Setup.exe cannot delete it ({string.Join(", ", rescued)}). If the data you " +
+                        "expected to see is in there rather than in the live store, close Lite and swap it in by " +
+                        "hand; otherwise the folder is safe to delete.");
+                }
 
                 if (kept.Count > 0)
                 {
-                    log($"Could not move out of '{legacyRoot}': {string.Join(", ", kept)}. Copy these somewhere " +
-                        "safe by hand - re-running Setup.exe deletes that folder.");
+                    log($"Data root '{newRoot}' is already populated and is the one in use, so the older copy in " +
+                        $"'{legacyRoot}' cannot go live - and it could not be moved out of there either: " +
+                        $"{string.Join(", ", kept)}. Copy them somewhere safe by hand; re-running Setup.exe " +
+                        "deletes that folder.");
                 }
 
                 if (rescued.Count > 0 && kept.Count == 0)
                 {
-                    TryWriteMarker(legacyRoot, Path.Combine(newRoot, RescuedDirName), rescued, log);
+                    /* Nothing went live on this path — the new root was already complete — so every name
+                       belongs under the quarantine heading, not the moved one. */
+                    TryWriteMarker(legacyRoot, newRoot, new List<string>(), rescued, log);
                 }
 
                 return new DataRootMigrationResult
@@ -257,10 +267,13 @@ internal static class DataRootMigration
             }
 
             /* Only claim the move in the marker once nothing is still behind — a partial run retries next
-               launch and writes the marker then, and a `kept` artifact is still sitting in there. */
+               launch and writes the marker then, and a `kept` artifact is still sitting in there. Rescued
+               names go in too, under their own destination: they also left this folder, and a marker that
+               named only `moved` would tell someone hunting for their settings.json that it was never
+               touched. */
             if (failed.Count == 0 && kept.Count == 0)
             {
-                TryWriteMarker(legacyRoot, newRoot, moved, log);
+                TryWriteMarker(legacyRoot, newRoot, moved, rescued, log);
             }
 
             return new DataRootMigrationResult
@@ -361,8 +374,14 @@ internal static class DataRootMigration
     /// <summary>
     /// Drops a plain-text signpost in the legacy root. The old root is NOT deleted — it is the Velopack
     /// install directory and still holds Update.exe, current\ and packages\.
+    ///
+    /// <para>Lists <paramref name="moved"/> and <paramref name="rescued"/> under separate headings because
+    /// they went to different places, and someone reads this file precisely because they are hunting for one
+    /// artifact by name. A marker naming only the artifacts that went live would read, to the person whose
+    /// <c>settings.json</c> collided and got quarantined, as proof it was never touched at all.</para>
     /// </summary>
-    private static void TryWriteMarker(string legacyRoot, string newRoot, List<string> moved, Action<string> log)
+    private static void TryWriteMarker(
+        string legacyRoot, string newRoot, List<string> moved, List<string> rescued, Action<string> log)
     {
         try
         {
@@ -379,9 +398,32 @@ internal static class DataRootMigration
             text.AppendLine("    " + newRoot);
             text.AppendLine();
             text.Append("Moved on ").Append(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)).AppendLine(":");
-            foreach (var name in moved)
+
+            if (moved.Count > 0)
             {
-                text.Append("    ").AppendLine(name);
+                foreach (var name in moved)
+                {
+                    text.Append("    ").AppendLine(name);
+                }
+            }
+            else
+            {
+                text.AppendLine("    (nothing went live - see below)");
+            }
+
+            if (rescued.Count > 0)
+            {
+                text.AppendLine();
+                text.AppendLine("These already existed at the new location, so the copies from this folder did NOT");
+                text.AppendLine("go live. Nothing was overwritten - they were moved here instead, out of reach of");
+                text.AppendLine("the installer:");
+                text.AppendLine();
+                text.AppendLine("    " + Path.Combine(newRoot, RescuedDirName));
+                text.AppendLine();
+                foreach (var name in rescued)
+                {
+                    text.Append("    ").AppendLine(name);
+                }
             }
 
             text.AppendLine();
