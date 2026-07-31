@@ -175,7 +175,7 @@ When a second Windows user on the same machine launches Lite, they see the share
 
 ## Quick Start — Darling (headless)
 
-**Darling** is the always-on edition for teams that want 24/7 collection without a desktop app driving it: a Windows service collects from your servers around the clock into a central PostgreSQL store (TimescaleDB is detected and adopted automatically for compression and chunk-based retention), and a detached WPF viewer reads that store from any seat. It runs the same monitoring brain as Lite — collectors, alert engine, and analysis pipeline shared at the library level — with alerts over email and Teams/Slack webhooks and the same MCP tool surface available on request. An optional built-in read-only **web dashboard** (off by default, its own port 5153) serves the fleet overview, per-server drill-down, and alert history to any browser, so operators can watch the fleet without installing the viewer.
+**Darling** is the always-on edition for teams that want 24/7 collection without a desktop app driving it: a Windows service collects from your servers around the clock into a central PostgreSQL store (TimescaleDB is detected and adopted automatically for compression and chunk-based retention), and a detached WPF viewer reads that store from any seat. It runs the same monitoring brain as Lite — collectors, alert engine, and analysis pipeline shared at the library level — with alerts over email and webhooks (Teams, Slack, PagerDuty, and generic HTTP POST) and the same MCP tool surface available on request. An optional built-in read-only **web dashboard** (off by default, its own port 5153) serves the fleet overview, per-server drill-down, and alert history to any browser, so operators can watch the fleet without installing the viewer.
 
 1. Download **`PerformanceMonitorDarling-<version>.zip`** from the [latest release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest) — the signed service and viewer with the bundled PostgreSQL + TimescaleDB runtime beside the service exe, so a from-zero install needs no database provisioning.
 2. Copy `darling.sample.json` to `darling.json` and add your servers (and optional SMTP / webhook delivery). In managed mode the service unpacks and runs its own PostgreSQL — no external database to set up.
@@ -257,9 +257,24 @@ All thresholds are configurable in Settings.
 
 - **System tray** — balloon notifications with a configurable per-metric cooldown (default: 5 minutes)
 - **Email (SMTP)** — styled HTML emails with a configurable per-metric cooldown (default: 15 minutes), plus configurable SMTP settings (server, port, SSL, authentication, recipients)
-- **Webhook** — HTTP POST to a configurable endpoint for integration with external alerting systems (Slack, Teams, PagerDuty, etc.)
+- **Microsoft Teams** — styled card messages with color-coded severity indicators sent to Teams channels via incoming webhooks
+- **Slack** — styled messages with color-coded severity indicators sent to Slack channels via incoming webhooks
+- **PagerDuty** — native Events API v2 integration that triggers PagerDuty incidents with proper severity mapping (critical/error/warning/info) and automatic incident correlation via dedup_key. Supports both US and EU data centers
+- **Generic webhook** — HTTP POST to any configurable endpoint for integration with other alerting systems (Opsgenie, n8n, custom automation, etc.)
 
 All cooldown periods are independently configurable in Settings under the Performance Alerts section.
+
+#### PagerDuty Setup
+
+To receive alerts in PagerDuty:
+
+1. In PagerDuty, create a service and add an **Events API v2** integration
+2. Copy the 32-character **Integration Key** (routing key)
+3. In Performance Monitor Settings, enable PagerDuty notifications and paste the routing key
+4. Check **Use EU data center** if your PagerDuty account is in the EU region
+5. Click **Send Test Notification** to verify the integration
+
+PagerDuty alerts include the metric name, server, current value, threshold, and severity. Repeated alerts for the same incident automatically correlate into a single PagerDuty incident via the dedup_key, preventing alert fatigue.
 
 ### Email Alerts
 
