@@ -43,6 +43,8 @@ public sealed class QueryStatsCollectorDefinitionTests
         Assert.Contains("AND d.name NOT IN (@excl_db_0)", plan.Text, StringComparison.Ordinal);
         Assert.Contains("NOT LIKE N'%PerformanceMonitorLite%'", plan.Text, StringComparison.Ordinal);
         Assert.Equal("SO", Assert.Single(plan.Parameters).Value);
+
+        AssertAppliesRunAgainstSurvivorsOnly(plan.Text);
     }
 
     [Fact]
@@ -54,6 +56,8 @@ public sealed class QueryStatsCollectorDefinitionTests
         Assert.Contains("database_name = DB_NAME()", plan.Text, StringComparison.Ordinal);
         Assert.True(QueryStatsCollector.Instance.RunsPerDatabase(new CollectorTargetInfo { IsAzureSqlDb = true }));
         Assert.Empty(plan.Parameters);
+
+        AssertAppliesRunAgainstSurvivorsOnly(plan.Text);
     }
 
     [Fact]
@@ -104,6 +108,38 @@ public sealed class QueryStatsCollectorDefinitionTests
         Assert.Contains("sys.dm_exec_plan_attributes", plan.Text, StringComparison.Ordinal);
         Assert.Contains("TOP (200)", plan.Text, StringComparison.Ordinal);
         Assert.Contains("ORDER BY", plan.Text, StringComparison.Ordinal);
+
+        AssertAppliesRunAgainstSurvivorsOnly(plan.Text);
+    }
+
+    /// <summary>
+    /// #1959: the text apply and the (Darling-only) plan render must sit OUTSIDE the ranked derived
+    /// table - i.e., AFTER ") AS qs" closes it - so they run against at most the inner TOP's
+    /// survivors. A field plan showed the render below the TOP executing 2,434 times to keep 200
+    /// rows (81% of the sweep, 30-second timeout misses on big caches); this ordering IS the fix,
+    /// so it is pinned structurally, not hoped for.
+    /// </summary>
+    private static void AssertAppliesRunAgainstSurvivorsOnly(string sql)
+    {
+        var collapsed = Collapse(sql);
+        var derivedClose = collapsed.IndexOf(")ASqs", StringComparison.Ordinal);
+        Assert.True(derivedClose > 0, "the ranked derived table ') AS qs' is missing - the rank-first shape was removed");
+
+        Assert.True(
+            collapsed.IndexOf("dm_exec_sql_text", StringComparison.Ordinal) > derivedClose,
+            "dm_exec_sql_text moved back inside the ranked derived table - below the TOP");
+
+        var planRender = collapsed.IndexOf("dm_exec_text_query_plan", StringComparison.Ordinal);
+        if (planRender >= 0)
+        {
+            Assert.True(planRender > derivedClose,
+                "dm_exec_text_query_plan moved back inside the ranked derived table - below the TOP");
+        }
+
+        Assert.True(
+            collapsed.IndexOf("NOTLIKE", StringComparison.Ordinal) > derivedClose,
+            "the self-filter moved back inside the ranked derived table - the inner TOP's headroom exists because it runs post-ranking");
+        Assert.Contains("TOP(300)", collapsed, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -118,6 +154,8 @@ public sealed class QueryStatsCollectorDefinitionTests
         /* Azure SQL DB still skips plan_attributes (dbid=1 for all plans there). */
         Assert.DoesNotContain("dm_exec_plan_attributes", plan.Text, StringComparison.Ordinal);
         Assert.Contains("database_name = DB_NAME()", plan.Text, StringComparison.Ordinal);
+
+        AssertAppliesRunAgainstSurvivorsOnly(plan.Text);
     }
 
     [Fact]

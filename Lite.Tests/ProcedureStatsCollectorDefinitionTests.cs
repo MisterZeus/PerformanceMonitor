@@ -138,16 +138,27 @@ public sealed class ProcedureStatsCollectorDefinitionTests
     }
 
     [Fact]
-    public void BuildQuery_PlanCaptureOn_Standard_SplicesWholeModuleTextPlanIntoEveryBranch()
+    public void BuildQuery_PlanCaptureOn_Standard_SplicesWholeModuleTextPlanOnceAfterRank()
     {
-        /* The three module-level DMVs expose no statement offsets, so the whole-module plan is keyed
-           on literal 0, -1 (still the text DMV, so oversized plans return). One splice per UNION
-           branch — procedure, trigger, function — plus the trailing SELECT column. */
+        /* #1959: the render happens ONCE, OUTSIDE the ranked derived table, against at most 150
+           survivors - not once per branch below the TOP, which rendered module-grain plans for every
+           candidate the TOP then discarded (the field-measured 25-second overnight tails). The handle
+           round-trips from the varchar(130) the payload already carries, so no raw column threads
+           through the branches. Whole-module grain stays keyed on literal 0, -1. */
         var plan = ProcedureStatsCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas, capturePlanXml: true));
         var collapsed = Collapse(plan.Text);
 
-        Assert.Equal(3, Regex.Matches(collapsed, Regex.Escape("query_plan_xml=tqp.query_plan")).Count);
-        Assert.Equal(3, Regex.Matches(collapsed, Regex.Escape("sys.dm_exec_text_query_plan(s.plan_handle,0,-1)AStqp")).Count);
+        Assert.Equal(1, Regex.Matches(collapsed, Regex.Escape("query_plan_xml=tqp.query_plan")).Count);
+        Assert.Equal(1, Regex.Matches(collapsed, Regex.Escape("sys.dm_exec_text_query_plan(CONVERT(varbinary(64),ranked.plan_handle,1),0,-1)AStqp")).Count);
+        Assert.DoesNotContain("dm_exec_text_query_plan(s.plan_handle", collapsed, StringComparison.Ordinal);
+
+        /* The apply must sit AFTER the ranked derived table closes - rendering below the TOP is the
+           exact defect this shape exists to prevent. */
+        Assert.True(
+            collapsed.IndexOf("dm_exec_text_query_plan", StringComparison.Ordinal)
+                > collapsed.IndexOf(")ASranked", StringComparison.Ordinal),
+            "the plan render moved back inside the ranked derived table - below the TOP");
+
         /* Existing shape untouched: still three DMV branches and the dynamic-SQL body. */
         Assert.Contains("sys.dm_exec_trigger_stats", plan.Text, StringComparison.Ordinal);
         Assert.Contains("sys.dm_exec_function_stats", plan.Text, StringComparison.Ordinal);
@@ -160,7 +171,11 @@ public sealed class ProcedureStatsCollectorDefinitionTests
         var collapsed = Collapse(plan.Text);
 
         Assert.Contains("query_plan_xml=tqp.query_plan", collapsed, StringComparison.Ordinal);
-        Assert.Contains("sys.dm_exec_text_query_plan(s.plan_handle,0,-1)AStqp", collapsed, StringComparison.Ordinal);
+        Assert.Contains("sys.dm_exec_text_query_plan(CONVERT(varbinary(64),ranked.plan_handle,1),0,-1)AStqp", collapsed, StringComparison.Ordinal);
+        Assert.True(
+            collapsed.IndexOf("dm_exec_text_query_plan", StringComparison.Ordinal)
+                > collapsed.IndexOf(")ASranked", StringComparison.Ordinal),
+            "the plan render moved back inside the ranked derived table - below the TOP");
         Assert.Contains("WHERE s.database_id = DB_ID()", plan.Text, StringComparison.Ordinal);
         /* Azure keeps its single-proc shape — no trigger/function branches. */
         Assert.DoesNotContain("dm_exec_trigger_stats", plan.Text, StringComparison.Ordinal);

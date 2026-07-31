@@ -142,39 +142,67 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
     statement_start_offset = qs.statement_start_offset,
     statement_end_offset = qs.statement_end_offset";
 
+    /* #1959: rank on the CHEAP DMV columns inside the derived table FIRST, and run the text apply, the
+       NOT LIKE self-filter, and the (Darling-only) plan-XML render against the survivors ONLY. The optimizer
+       does not defer the applies past the TOP on its own - a field plan showed dm_exec_text_query_plan
+       executing 2,434 times to keep 200 rows, 81% of an entire sweep, with 30-second timeout MISSES on
+       big-cache boxes - so the deferral is made structural here rather than hoped for. The derived table is
+       deliberately aliased qs so SelectColumnsText and the plan fragments splice unchanged.
+
+       The inner TOP is 300, not 200: the self-filter runs post-ranking now, so the inner set needs headroom
+       for collector-self rows that ranking admits and the filter then removes. The expensive applies still
+       run at most ~200-300 times either way; measured 6.0x on the reporting fleet's apex box (median
+       7,736 ms -> 1,286 ms), 99.2% row-identity parity with the residual explained by cache churn. */
     private const string StandardQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT /* PerformanceMonitorLite */ TOP (200)
-    database_name = d.name," + SelectColumnsText + @"/*PLAN_SELECT*/
-FROM sys.dm_exec_query_stats AS qs
-OUTER APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st/*PLAN_APPLY*/
-CROSS APPLY
+    database_name = qs.database_name," + SelectColumnsText + @"/*PLAN_SELECT*/
+FROM
 (
-    SELECT
-        dbid = CONVERT(integer, pa.value)
-    FROM sys.dm_exec_plan_attributes(qs.plan_handle) AS pa
-    WHERE pa.attribute = N'dbid'
-) AS pa
-INNER JOIN sys.databases AS d
-  ON pa.dbid = d.database_id
-WHERE pa.dbid NOT IN (1, 2, 3, 4, 32761, 32767, ISNULL(DB_ID(N'PerformanceMonitor'), 0))
-AND   st.text NOT LIKE N'%PerformanceMonitorLite%'
-AND   qs.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
-/*EXCLUSION_FILTER*/
+    SELECT TOP (300)
+        database_name = d.name,
+        qs.*
+    FROM sys.dm_exec_query_stats AS qs
+    CROSS APPLY
+    (
+        SELECT
+            dbid = CONVERT(integer, pa.value)
+        FROM sys.dm_exec_plan_attributes(qs.plan_handle) AS pa
+        WHERE pa.attribute = N'dbid'
+    ) AS pa
+    INNER JOIN sys.databases AS d
+      ON pa.dbid = d.database_id
+    WHERE pa.dbid NOT IN (1, 2, 3, 4, 32761, 32767, ISNULL(DB_ID(N'PerformanceMonitor'), 0))
+    AND   qs.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
+    /*EXCLUSION_FILTER*/
+    ORDER BY
+        qs.total_elapsed_time DESC
+) AS qs
+OUTER APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st/*PLAN_APPLY*/
+WHERE st.text NOT LIKE N'%PerformanceMonitorLite%'
 ORDER BY
     qs.total_elapsed_time DESC
 OPTION(RECOMPILE);";
 
+    /* #1959: same rank-first shape as StandardQueryText, minus the dbid apply (Azure SQL DB scopes the
+       DMV to the connected database). See the standard variant's comment for the mechanism and numbers. */
     private const string AzureSqlDbQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT /* PerformanceMonitorLite */ TOP (200)
     database_name = DB_NAME()," + SelectColumnsText + @"/*PLAN_SELECT*/
-FROM sys.dm_exec_query_stats AS qs
+FROM
+(
+    SELECT TOP (300)
+        qs.*
+    FROM sys.dm_exec_query_stats AS qs
+    WHERE qs.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
+    ORDER BY
+        qs.total_elapsed_time DESC
+) AS qs
 OUTER APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st/*PLAN_APPLY*/
 WHERE st.text NOT LIKE N'%PerformanceMonitorLite%'
-AND   qs.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
 ORDER BY
     qs.total_elapsed_time DESC
 OPTION(RECOMPILE);";
