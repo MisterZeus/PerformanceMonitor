@@ -1288,32 +1288,6 @@ public sealed class PayloadDimensionLiveTests
         return names.ToArray();
     }
 
-    private static async Task TryExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
-    {
-        try
-        {
-            /* A PRIOR best-effort statement may have swallowed a failure that BROKE this connection
-               (proven on CI: a RestoreCaggs drop died, the swallow hid it, and the next helper threw
-               "Connection is not open" out of an otherwise-green test). Reopening the same
-               NpgsqlConnection object checks out a fresh pooled session, so one broken statement
-               cannot cascade into every cleanup statement after it. */
-            if (connection.State != System.Data.ConnectionState.Open)
-            {
-                await connection.OpenAsync(ct);
-            }
-
-            using var command = new NpgsqlCommand(sql, connection);
-            await command.ExecuteNonQueryAsync(ct);
-        }
-        catch (Exception ex)
-        {
-            /* Cleanup is best-effort: a restore step that throws must not mask the test's own failure.
-               But say WHAT was swallowed — xUnit captures console per test, so on the next mystery this
-               line is the diagnosis instead of a silent hole. */
-            Console.WriteLine($"[cleanup best-effort] {ex.GetType().Name} ({(ex as PostgresException)?.SqlState}): {ex.Message} — {sql}");
-        }
-    }
-
     /// <summary>
     /// <see cref="TimescaleSupport.EnsureContinuousAggregatesAsync"/> and then REMOVES every rollup's
     /// refresh policy. The ensure attaches policies whose jobs fire IMMEDIATELY (the #1788 finding), and
@@ -1339,10 +1313,13 @@ public sealed class PayloadDimensionLiveTests
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
+        /* VERIFIED removals (#1873). This step is the one that closes the standing race, so a removal that
+           quietly did not happen re-opens it for every aggregate the class goes on to create — and the
+           swallow this replaces made that indistinguishable from success. */
+        var batch = new LiveCleanupBatch(connection);
         foreach (var (view, _, _, _, _) in TimescaleSupport.RollupViews)
         {
-            await TryExecAsync(connection,
-                $"SELECT remove_continuous_aggregate_policy('collect.{view}', if_exists => true)", ct);
+            await batch.RemoveRefreshPolicyAsync(view, ct);
         }
     }
 
@@ -1389,17 +1366,31 @@ public sealed class PayloadDimensionLiveTests
         }
     }
 
+    /// <summary>
+    /// Puts the shared store's aggregate shape back, and CONFIRMS it (#1873).
+    ///
+    /// <para>Every removal here is retried until the catalog agrees it is gone, because the collision this
+    /// loses to is real and reproducible: a <c>DROP MATERIALIZED VIEW</c> racing a still-executing
+    /// <c>refresh_continuous_aggregate</c> fails and leaves the aggregate STANDING — as <c>40P01</c> when the
+    /// deadlock detector picks the drop as its victim, and as <c>XX000 tuple concurrently deleted</c> when the
+    /// refresh's catalog maintenance beats it to a row. Both were measured on PostgreSQL 18.4 +
+    /// TimescaleDB 2.28.1, and the retry won on the following attempt each time. What it does NOT do is
+    /// classify the SQLSTATE: <c>XX000</c> is <c>internal_error</c>, so any allow-list that looked reasonable
+    /// would have excluded the very failure it needed to survive.</para>
+    /// </summary>
     private static async Task RestoreCaggsAsync(NpgsqlConnection connection, string[] preexisting, CancellationToken ct)
     {
+        var batch = new LiveCleanupBatch(connection);
+
         foreach (var (relation, _, coverage) in TimescaleSupport.RawTierCoverage)
         {
-            await TryExecAsync(connection, $"SELECT remove_retention_policy('collect.{relation}', if_exists => true)", ct);
+            await batch.RemoveRetentionPolicyAsync(relation, ct);
             _ = coverage;
         }
 
         foreach (var cagg in (await ExistingCaggsAsync(connection, ct)).Except(preexisting, StringComparer.Ordinal))
         {
-            await TryExecAsync(connection, $"DROP MATERIALIZED VIEW IF EXISTS collect.{cagg} CASCADE", ct);
+            await batch.DropContinuousAggregateAsync(cagg, ct);
         }
     }
 
