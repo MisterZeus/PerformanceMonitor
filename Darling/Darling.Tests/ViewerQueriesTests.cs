@@ -1045,6 +1045,29 @@ public sealed class ViewerQueriesLivePostgresTests
             Assert.Equal(0d, trend[0].Value);
             Assert.Equal(10.0 / 3600.0, trend[1].Value, 9);
 
+            /* ── the slicer OVERLAY (#1921, Erik's option 1) ── the point sits at the hour the work RAN, the
+                  same h0 the bar above is drawn at, NOT at h1+10m where the collector observed it. That is
+                  the whole decision: the overlay is drawn over those bars, and #1841 moved the bars while
+                  leaving this series on collection_time, so a point sat up to one Query Store interval to the
+                  right of the bar describing the very same work.
+
+                  This is the BEHAVIORAL proof of the move, and it has to live here rather than on the older
+                  dedup test: that test's rows are pre-tier-2 legacy rows with no interval start, so
+                  COALESCE correctly falls back to collection_time there and the point does not move at all.
+                  Its assertion is unchanged and now pins the FALLBACK — both halves of the two-generation
+                  guarantee are covered, by the test whose data can actually show each.
+
+                  Values are interval 1's FINAL snapshot, matching the bar: 40 x 7,000us = 280 ms elapsed and
+                  40 x 300us = 12 ms CPU — the same 12.0 the h0 bar carries. */
+            var overlay = await viewer.GetQueryStoreItemTimelineAsync(
+                IntervalIdentityServerId, "IdentityDb", queryId: 1, planId: 11, start, end);
+            var overlayPoint = Assert.Single(overlay);
+            Assert.Equal(h0, overlayPoint.CollectionTime);
+            Assert.NotEqual(h1.AddMinutes(10), overlayPoint.CollectionTime);
+            Assert.Equal(280.0, overlayPoint.ElapsedMs, 3);
+            Assert.Equal(12.0, overlayPoint.CpuMs, 3);
+            Assert.Equal(buckets[0].TotalCpu, overlayPoint.CpuMs, 3);
+
             /* ── the mixed window ── add a LEGACY row (no identity) in hour 2 and nothing already counted
                   may move: the two identified bars keep their placement and values, and the legacy row
                   gets its own collection_time bar. The arms split on IS NULL / IS NOT NULL, so a row can
