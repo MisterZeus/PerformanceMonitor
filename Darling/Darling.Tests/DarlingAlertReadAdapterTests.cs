@@ -172,11 +172,12 @@ public sealed class DarlingAlertReadAdapterTests
         await PgMigrations.MigrateAsync(connection, ct);
 
         /* Clear leftovers from an earlier aborted run so the assertions below are deterministic. */
-        await DeleteTestRowsAsync(connection);
+        await DeleteTestRowsAsync(connection, ct);
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
         var adapter = new DarlingAlertReadAdapter(postgres);
 
+        var bodySucceeded = false;
         try
         {
             /* All timestamps Kind-Unspecified — naive-UTC storage, see PgCollectorRowWriter.
@@ -348,10 +349,13 @@ public sealed class DarlingAlertReadAdapterTests
             var slowProfile = await relaxed.GetAnomalousJobsAsync(TestServerKey, multiplier: 3, ct);
             Assert.True(slowProfile.SnapshotIsFresh);
             Assert.Single(slowProfile.Jobs);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteTestRowsAsync(connection);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteTestRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -365,7 +369,7 @@ public sealed class DarlingAlertReadAdapterTests
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 
-    private static async Task DeleteTestRowsAsync(NpgsqlConnection connection)
+    private static async Task DeleteTestRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM blocked_process_reports WHERE server_id = {TestServerId};" +
@@ -376,6 +380,6 @@ public sealed class DarlingAlertReadAdapterTests
             $"DELETE FROM database_size_stats WHERE server_id = {TestServerId};" +
             $"DELETE FROM tempdb_stats WHERE server_id = {TestServerId};" +
             $"DELETE FROM running_jobs WHERE server_id = {TestServerId};", connection);
-        await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 }
