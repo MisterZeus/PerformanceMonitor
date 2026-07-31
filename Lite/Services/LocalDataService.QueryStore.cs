@@ -49,6 +49,18 @@ WITH deduped AS
     -- NULL had no identity at all under tier 1 and collapsed with every other such interval of the same
     -- plan, which UNDER-counts. The id is per-DATABASE (each database has its own Query Store and its own
     -- interval sequence), which is why database_name must stay in the key.
+    --
+    -- The execution_count tie-break is the #1907 residual, and it is NOT decoration. collection_time alone
+    -- was not a total order on rows collected before that fix: Query Store hands back the flushed and the
+    -- still-in-memory slice of ONE interval as two ADDITIVE rows, the collector stored both, and they then
+    -- shared every partition column above AND collection_time. ROW_NUMBER kept whichever the engine emitted
+    -- first, so a grid could show an in-memory sliver of 8 where the interval's total was 94, and show a
+    -- different one on the next run. The collector now combines the slices before storing, so rows collected
+    -- after #1907 cannot tie at all and this clause never fires on them. It is here for the rows already in
+    -- the store, which cannot be rewritten: it deterministically picks the FLUSHED slice, the one holding the
+    -- bulk of the interval's work, instead of flapping. Closest-available, not correct — the correct value is
+    -- the SUM of the slices, which no read-side rule can express (#1912). This applies to EVERY dedup site in
+    -- both apps; a source-containment test pins all of them, so deleting one here fails loudly.
     SELECT
         collection_time,
         interval_start_time_utc,
@@ -62,7 +74,7 @@ WITH deduped AS
         ROW_NUMBER() OVER
         (
             PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
-            ORDER BY collection_time DESC
+            ORDER BY collection_time DESC, execution_count DESC
         ) AS rn
     FROM v_query_store_stats
     WHERE server_id = $1
@@ -145,7 +157,7 @@ WITH deduped AS (
         ROW_NUMBER() OVER
         (
             PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
-            ORDER BY collection_time DESC
+            ORDER BY collection_time DESC, execution_count DESC
         ) AS rn
     FROM v_query_store_stats
     WHERE server_id = $1
@@ -400,7 +412,7 @@ WITH deduped_current AS (
         ROW_NUMBER() OVER
         (
             PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
-            ORDER BY collection_time DESC
+            ORDER BY collection_time DESC, execution_count DESC
         ) AS rn
     FROM v_query_store_stats
     WHERE server_id = $1
@@ -418,7 +430,7 @@ deduped_baseline AS (
         ROW_NUMBER() OVER
         (
             PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
-            ORDER BY collection_time DESC
+            ORDER BY collection_time DESC, execution_count DESC
         ) AS rn
     FROM v_query_store_stats
     WHERE server_id = $1
@@ -769,7 +781,7 @@ WITH placed AS
             ROW_NUMBER() OVER
             (
                 PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
-                ORDER BY collection_time DESC
+                ORDER BY collection_time DESC, execution_count DESC
             ) AS rn
         FROM v_query_store_stats
         WHERE server_id = $1

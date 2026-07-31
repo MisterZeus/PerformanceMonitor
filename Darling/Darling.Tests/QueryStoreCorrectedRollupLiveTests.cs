@@ -458,7 +458,158 @@ public sealed class QueryStoreCorrectedRollupLiveTests
             "all three consumers now cover L1, so the held purge should have armed itself on this sweep.");
     }
 
+    /// <summary>
+    /// #1907 against the real TimescaleDB: what the corrected rollups compute when an interval arrives as ONE
+    /// row per collection (the post-fix collector) versus as the two tied slice rows every pre-fix build
+    /// stored, proving the defect reached the materialized rollup and that the fix resolves it exactly.
+    ///
+    /// <para>Query Store returns the flushed and the still-in-memory slice of one runtime_stats_interval_id as
+    /// two ADDITIVE rows. Stored as-is they share the L1 GROUP BY key AND <c>collection_time</c>, so
+    /// <c>last(execution_count, collection_time)</c> — the aggregate #1853 probed and chose because a CAGG
+    /// cannot contain a window function — is ordering by a value identical for both rows. It cannot sum them
+    /// and it cannot even choose between them. Whatever it returns is a SLICE, so the rollup understates the
+    /// interval no matter which row wins; on the live Azure store that was 8 reported against 94 true.</para>
+    ///
+    /// <para>Both halves are asserted in ONE test on purpose. The post-fix number alone would pass against a
+    /// build that never had the bug, and the pre-fix number alone says nothing about whether the fix works —
+    /// it is the pair, in one store on one refresh, that shows the rollup arithmetic actually changed.</para>
+    /// </summary>
+    [Fact]
+    public async Task CorrectedRollups_SeeTheWholeInterval_OnlyWhenTheSlicesAreCombinedAtCollection()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #1907 slice-aggregation rollup test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        var postFixHour = new DateTime(2026, 5, 6, 9, 0, 0, DateTimeKind.Unspecified);
+        var preFixHour = postFixHour.AddHours(1);
+
+        /* ── POST-FIX: the collector combines the slices, so each collection contributes exactly one row and
+              execution_count is the interval's running TOTAL. 40 -> 90 -> 125 is the live SQL 2022 repro's
+              arithmetic (100 flushed + 25 in memory = 125, cross-checked against dm_exec_procedure_stats)
+              arriving over three cycles. Honest answer for the interval: its last snapshot, 125. ── */
+        await SeedSnapshotsAsync(connection, intervalId: 7001, queryId: 61, planId: 91,
+            intervalStart: postFixHour, avgDurationUs: 100, avgCpuUs: 50,
+            snapshots:
+            [
+                (postFixHour.AddMinutes(5), 40L),
+                (postFixHour.AddMinutes(10), 90L),
+                (postFixHour.AddMinutes(15), 125L),
+            ], ct: ct);
+
+        /* A second interval in the same hour, so the hour total is a sum of two deduped intervals rather than
+           one value that could be right by accident. */
+        await SeedSnapshotsAsync(connection, intervalId: 7002, queryId: 62, planId: 92,
+            intervalStart: postFixHour.AddMinutes(30), avgDurationUs: 200, avgCpuUs: 80,
+            snapshots:
+            [
+                (postFixHour.AddMinutes(35), 10L),
+                (postFixHour.AddMinutes(40), 30L),
+            ], ct: ct);
+
+        /* ── PRE-FIX: the SAME interval and the SAME true total of 125, but stored the way it used to be —
+              the flushed slice (100) and the in-memory slice (25) as two rows at ONE collection_time. ── */
+        await SeedTiedSlicesAsync(connection, intervalId: 7003, queryId: 63, planId: 93,
+            intervalStart: preFixHour, collectionTime: preFixHour.AddMinutes(5),
+            sliceCounts: [100L, 25L], avgDurationUs: 100, avgCpuUs: 50, ct: ct);
+
+        await EnsureAggregatesWithoutRefreshPoliciesAsync(connection, ct);
+        await RefreshAllAsync(connection, ct);
+
+        /* ── 1. L1 collapses each interval to one row. Post-fix that row IS the interval's truth. ── */
+        var l1 = await ReadIntervalRowsAsync(connection, TimescaleSupport.QueryStoreStatsIntervalHourlyView, ct);
+
+        var combined = Assert.Single(l1, r => r.QueryId == 61);
+        Assert.Equal(125, combined.ExecutionCount);
+        Assert.Equal(7001L, combined.IntervalId);
+
+        var second = Assert.Single(l1, r => r.QueryId == 62);
+        Assert.Equal(30, second.ExecutionCount);
+
+        /* ── 2. THE HAND-COMPUTED HOUR. 125 + 30 = 155, and the weighted mean composes off the same two
+              deduped rows: (125 x 100 + 30 x 200) / 155. ── */
+        var correctedHour = await ReadCompositeAsync(connection, TimescaleSupport.QueryStoreStatsCorrectedHourlyView, postFixHour, ct);
+        Assert.Equal(155, correctedHour.ExecutionCountSum);
+        Assert.Equal(
+            ((125d * 100d) + (30d * 200d)) / 155d,
+            correctedHour.DurationWeightedSum / correctedHour.ExecutionCountSum,
+            6);
+
+        /* ── 3. THE SPLIT SLICES, same store, same refresh. L1 still produces ONE row — the two slices share
+              its whole grouping key — but the value it carries is one SLICE, never the 125 they add up to.
+              Which slice is not asserted, because last() has no tie-break and picking one is not something
+              the engine promises; that it cannot reach 125 is the point, and it is what makes this an
+              under-count rather than a coin flip with a correct face. ── */
+        var split = Assert.Single(l1, r => r.QueryId == 63);
+        Assert.Equal(7003L, split.IntervalId);
+        Assert.Contains(split.ExecutionCount, new long[] { 100L, 25L });
+        Assert.NotEqual(125, split.ExecutionCount);
+
+        var splitHour = await ReadCompositeAsync(connection, TimescaleSupport.QueryStoreStatsCorrectedHourlyView, preFixHour, ct);
+        Assert.Equal(split.ExecutionCount, splitHour.ExecutionCountSum);
+        Assert.True(splitHour.ExecutionCountSum < 125,
+            $"the split-slice hour must UNDER-report the interval's true 125, got {splitHour.ExecutionCountSum}");
+
+        /* ── 4. The daily tier inherits both, so the defect and its fix are visible where history is kept
+              indefinitely — which is exactly why the pre-fix residual needed its own issue (#1912) rather
+              than an assumption that retention would carry it away. ── */
+        var correctedDay = await ReadCompositeAsync(connection, TimescaleSupport.QueryStoreStatsCorrectedDailyView, postFixHour.Date, ct);
+        Assert.Equal(155 + split.ExecutionCount, correctedDay.ExecutionCountSum);
+    }
+
     /* ─────────────────────────── seeding + reading helpers ─────────────────────────── */
+
+    /// <summary>
+    /// Plants ONE Query Store interval as the pre-#1907 shape: several slice rows sharing a single
+    /// <c>collection_time</c> and the entire dedup key, differing only in <c>execution_count</c> — the flushed
+    /// slice and the still-in-memory slice as <c>sys.query_store_runtime_stats</c> hands them back and as
+    /// every build before #1907 stored them.
+    ///
+    /// <para>Separate from <see cref="SeedSnapshotsAsync"/> because that helper derives one collection_id per
+    /// collection_time, which is precisely what cannot be done here: these rows SHARE a collection time, so
+    /// the id has to come from the slice's position instead.</para>
+    /// </summary>
+    private static async Task SeedTiedSlicesAsync(
+        NpgsqlConnection connection, long intervalId, long queryId, long planId, DateTime intervalStart,
+        DateTime collectionTime, long[] sliceCounts, long avgDurationUs, long avgCpuUs, CancellationToken ct)
+    {
+        const string sql = @"
+INSERT INTO collect.query_store_stats
+    (collection_id, collection_time, server_id, server_name, database_name, module_name, query_hash,
+     query_id, plan_id, execution_type_desc, replica_role,
+     runtime_stats_interval_id, interval_start_time_utc, first_execution_time,
+     execution_count, avg_duration_us, avg_cpu_time_us, max_duration_us, max_cpu_time_us)
+VALUES
+    ((extract(epoch FROM $1)::bigint * 100000) + ($2 * 10) + $10, $1, $3, 'SQL01', 'AdventureWorks', 'dbo.GetOrders', '0xABCD',
+     $4, $5, 'Regular', 'PRIMARY', $2, $6, $6, $7, $8, $9, 900, 400)";
+
+        for (var slice = 0; slice < sliceCounts.Length; slice++)
+        {
+            await using var command = new NpgsqlCommand(sql, connection);
+            command.Parameters.AddWithValue(collectionTime);
+            command.Parameters.AddWithValue(intervalId);
+            command.Parameters.AddWithValue(TestServerId);
+            command.Parameters.AddWithValue(queryId);
+            command.Parameters.AddWithValue(planId);
+            command.Parameters.AddWithValue(intervalStart);
+            command.Parameters.AddWithValue(sliceCounts[slice]);
+            command.Parameters.AddWithValue(avgDurationUs);
+            command.Parameters.AddWithValue(avgCpuUs);
+            command.Parameters.AddWithValue(slice);
+            await command.ExecuteNonQueryAsync(ct);
+        }
+    }
 
     /// <summary>
     /// Plants one Query Store interval as <paramref name="snapshots"/> CUMULATIVE re-collections of the same

@@ -428,9 +428,18 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
            would let the un-deduped rows straight back into the numbers. */
         Assert.Equal(7, rankFilters);
 
-        /* Every dedup orders by collection_time — "latest" is never decided by execution_count, which can
-           sit still across a hundred re-collections of the same interval. */
-        Assert.Equal(partitions, Regex.Matches(source, @"ORDER BY collection_time DESC\s*\n\s*\) AS rn").Count);
+        /* Every dedup orders by collection_time FIRST — "latest" is never decided by execution_count, which
+           can sit still across a hundred re-collections of the same interval.
+
+           execution_count is the #1907 tie-break and must follow it at every site, never replace it. It only
+           decides rows that tie on collection_time, which after #1907 no newly collected row can do: Query
+           Store's flushed and in-memory slices of one interval used to be stored as two rows sharing this
+           whole partition AND collection_time, and the survivor was whichever the engine emitted first. The
+           collector now combines them, so this clause is inert on new rows and exists for the ones already
+           stored, which cannot be rewritten (#1912). Re-pinned from #1845/#1853, deliberately: the previous
+           form asserted the ORDER BY ended at collection_time. */
+        Assert.Equal(partitions, Regex.Matches(source, @"ORDER BY collection_time DESC, execution_count DESC\s*\n\s*\) AS rn").Count);
+        Assert.DoesNotContain("ORDER BY execution_count", source, StringComparison.Ordinal);
 
         /* No dedup may key on the tier-1 proxy ALONE any more: the real interval id has to be in every
            partition, or a row whose first_execution_time is NULL collapses with every other such interval
@@ -484,5 +493,55 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var row = Assert.Single(rows);
         Assert.Equal(2L, row.TotalExecutions);
         Assert.Equal(9.0, row.AvgDurationMs, precision: 6);
+    }
+
+    /// <summary>
+    /// #1907: two rows that tie on the ENTIRE dedup key AND collection_time — the flushed and the
+    /// still-in-memory slice of one Query Store interval, as every pre-#1907 build stored them — must
+    /// resolve to the same row every time, and to the FLUSHED one.
+    ///
+    /// <para>The collector now combines the slices before storing, so this shape cannot be collected any
+    /// more; it is pinned because the rows already in the store still carry it and cannot be rewritten.
+    /// Neither survivor is the interval's truth (125 here) — the truth is the SUM, which no read-side rule
+    /// can express (#1912) — so the contract this pins is DETERMINISM plus closest-available, not
+    /// correctness.</para>
+    ///
+    /// <para>Both insertion orders are seeded, as two independent queries, precisely so the test cannot
+    /// pass by accident. Without the tie-break the survivor is whatever the engine happens to emit first,
+    /// which for a heap scan tracks insertion order — so one of the two arms returns the sliver and the
+    /// test goes red. Asserting only one order would let an engine that happens to favour the earlier row
+    /// keep this green with the fix reverted.</para>
+    /// </summary>
+    [Fact]
+    public async Task TiedSlicesOfOneInterval_ResolveDeterministicallyToTheFlushedSlice()
+    {
+        var tied = BucketStart.AddMinutes(30);
+        const long IntervalIdTied = 9107;
+
+        /* Query 5: the SLIVER is inserted first, the flushed slice second. */
+        await SeedAsync(tied, queryId: 5, planId: 55, FirstExecA,
+            executionCount: 25, avgCpuUs: 200, avgDurationUs: 2_000, avgReads: 1, queryHash: "0xHASH_E",
+            intervalId: IntervalIdTied, intervalStart: BucketStart);
+        await SeedAsync(tied, queryId: 5, planId: 55, FirstExecA,
+            executionCount: 100, avgCpuUs: 800, avgDurationUs: 8_000, avgReads: 4, queryHash: "0xHASH_E",
+            intervalId: IntervalIdTied, intervalStart: BucketStart);
+
+        /* Query 6: the same pair, inserted the other way round. */
+        await SeedAsync(tied, queryId: 6, planId: 66, FirstExecA,
+            executionCount: 100, avgCpuUs: 800, avgDurationUs: 8_000, avgReads: 4, queryHash: "0xHASH_F",
+            intervalId: IntervalIdTied, intervalStart: BucketStart);
+        await SeedAsync(tied, queryId: 6, planId: 66, FirstExecA,
+            executionCount: 25, avgCpuUs: 200, avgDurationUs: 2_000, avgReads: 1, queryHash: "0xHASH_F",
+            intervalId: IntervalIdTied, intervalStart: BucketStart);
+
+        var rows = await new LocalDataService(_duckDb).GetQueryStoreTopQueriesAsync(ServerId, hoursBack: 24);
+
+        Assert.Equal(2, rows.Count);
+        foreach (var r in rows)
+        {
+            /* The flushed slice's numbers, both times, whichever order they were stored in. */
+            Assert.Equal(100L, r.TotalExecutions);
+            Assert.Equal(8.0, r.AvgDurationMs, precision: 6);
+        }
     }
 }

@@ -50,6 +50,21 @@ public sealed class QueryStoreCollectorDefinitionTests
             CapturePlanXml = capturePlanXml,
         };
 
+    /// <summary>
+    /// The emitted payload, with line endings normalized to LF. The template is a verbatim string literal,
+    /// so it carries this source file's CRLF, while the version-gated fragments spliced into it are ordinary
+    /// C# strings carrying LF — a mixture that predates #1907 (the replica join fragment has always been
+    /// built this way) and that SQL Server does not care about. Assertions spanning a line break normalize
+    /// rather than encode one convention and break on the other.
+    /// </summary>
+    private static string Lf(string sql) => sql.Replace("\r\n", "\n", StringComparison.Ordinal);
+
+    private static string PayloadSql(CollectorContext context)
+        => Lf(QueryStoreCollector.Instance.BuildPerItemQuery("SO", context).Text);
+
+    private static string AzurePayloadSql(CollectorContext context)
+        => Lf(QueryStoreCollector.Instance.BuildQuery(context).Text);
+
     [Fact]
     public void Identity_SecondNameTargetTableSplit_WithWatermark()
     {
@@ -174,7 +189,11 @@ public sealed class QueryStoreCollectorDefinitionTests
         Assert.Contains("query_id = qsq.query_id,", plan.Text, StringComparison.Ordinal);
         Assert.Contains("query_sql_text = qst.query_sql_text,", plan.Text, StringComparison.Ordinal);
         Assert.Contains("query_plan_hash = CONVERT(varchar(64), qsp.query_plan_hash, 1),", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("WHERE qsrs.last_execution_time > @cutoff_time", plan.Text, StringComparison.Ordinal);
+
+        /* Interval-grain incremental filter since #1907, on this path too — the Azure body IS the shared
+           body, so the WHERE→HAVING move lands here by construction rather than by a second edit. */
+        Assert.Contains("HAVING\n        MAX(qsrs.last_execution_time) > @cutoff_time", Lf(plan.Text), StringComparison.Ordinal);
+        Assert.DoesNotContain("WHERE qsrs.last_execution_time > @cutoff_time", plan.Text, StringComparison.Ordinal);
         Assert.Contains("ORDER BY qsrs.last_execution_time DESC", plan.Text, StringComparison.Ordinal);
         Assert.Contains("OPTION(RECOMPILE, LOOP JOIN);", plan.Text, StringComparison.Ordinal);
 
@@ -415,6 +434,171 @@ public sealed class QueryStoreCollectorDefinitionTests
         Assert.Contains("LEFT JOIN sys.query_store_replicas AS qsr", plan.Text, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #1907: the payload combines the flushed and the still-in-memory slice of one runtime-stats interval
+    /// before emitting, grouped on exactly the natural key of <c>sys.query_store_runtime_stats</c>.
+    ///
+    /// <para>Live on SQL 2022 (16.0.4255.1): 100 executions flushed plus 25 still in memory came back as
+    /// two rows of one <c>runtime_stats_interval_id</c>, and <c>sys.dm_exec_procedure_stats</c> — a wholly
+    /// separate source read at the same instant — said 125. Both slices used to be stored, where they
+    /// shared the entire read-side dedup key AND collection_time, so the survivor was whichever the engine
+    /// emitted first.</para>
+    /// </summary>
+    [Fact]
+    public void BuildPerItemQuery_CombinesTheSlicesOfOneInterval_OnTheViewsNaturalKey()
+    {
+        var text = PayloadSql(MakeContext(probeResult: 16));
+
+        /* The grouping key IS the view's natural key: plan, interval, execution type, replica group.
+           Anything coarser would merge work that is genuinely distinct; anything finer would leave the
+           slices split, which is the bug. */
+        Assert.Contains(
+            "GROUP BY\n        qsrs.plan_id,\n        qsrs.runtime_stats_interval_id,\n        qsrs.execution_type_desc,\n        qsrs.replica_group_id",
+            text,
+            StringComparison.Ordinal);
+
+        /* The additive counter is SUMmed, and the interval's span comes from its slices' extremes. */
+        Assert.Contains("count_executions = SUM(qsrs.count_executions)", text, StringComparison.Ordinal);
+        Assert.Contains("first_execution_time = MIN(qsrs.first_execution_time)", text, StringComparison.Ordinal);
+        Assert.Contains("last_execution_time = MAX(qsrs.last_execution_time)", text, StringComparison.Ordinal);
+
+        /* min_* / max_* keep the extreme, never an average of extremes. min_dop / max_dop are the pair
+           with no avg_ sibling, which is exactly the pair a mechanical edit is most likely to mishandle. */
+        Assert.Contains("min_duration = MIN(qsrs.min_duration)", text, StringComparison.Ordinal);
+        Assert.Contains("max_duration = MAX(qsrs.max_duration)", text, StringComparison.Ordinal);
+        Assert.Contains("min_dop = MIN(qsrs.min_dop)", text, StringComparison.Ordinal);
+        Assert.Contains("max_dop = MAX(qsrs.max_dop)", text, StringComparison.Ordinal);
+
+        /* The pre-filter is a prune, not a semantic: its interval list is a superset of what the HAVING
+           keeps, so it can never subtract a row. Without it the aggregate runs over the database's entire
+           retained Query Store every cycle — measured 1203ms against 375ms on a real 212k-row store. */
+        Assert.Contains("WHERE qsrs.runtime_stats_interval_id IN", text, StringComparison.Ordinal);
+        Assert.Contains("WHERE f.last_execution_time > @cutoff_time", text, StringComparison.Ordinal);
+
+        /* The row SHAPE must not move: 55 selected columns, and the TOP/ORDER BY stay OUTSIDE the
+           aggregate so the cap counts intervals and can never truncate one interval's slices into a
+           partial sum. */
+        Assert.Contains($"TOP ({QueryStoreCollector.MaxRowsPerDatabase})", text, StringComparison.Ordinal);
+        Assert.Contains(") AS qsrs\nJOIN sys.query_store_plan AS qsp", text, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY qsrs.last_execution_time DESC\nOPTION(RECOMPILE, LOOP JOIN);", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #1907: EVERY <c>avg_*</c> column the payload emits must be the count-weighted mean of the slices.
+    ///
+    /// <para>This is the pin that makes the rule enforceable rather than remembered. The wrong forms are
+    /// not compile errors and do not look wrong: a bare <c>AVG(qsrs.avg_duration)</c> reads perfectly
+    /// naturally and silently weights a 25-execution sliver the same as a 100-execution flush, and
+    /// <c>MAX</c> reads naturally too. Query Store exposes an average and a count but never a total, so
+    /// <c>avg * count</c> is the only way to recover a slice's total. Verified live on SQL 2022: slices of
+    /// (1778.42 over 100) and (2245.60 over 25) combined to 1871.856, which is
+    /// (1778.42*100 + 2245.60*25) / 125 and is not the 2012.01 a plain average of the two would give.</para>
+    ///
+    /// <para>Discovers the columns from the emitted SQL rather than listing them, so a newly added
+    /// <c>avg_</c> column is covered the moment it appears instead of when someone remembers to add it
+    /// here. Runs against the 2017+ shape, which is the one where all eleven exist.</para>
+    /// </summary>
+    [Fact]
+    public void Payload_EveryAverageColumn_IsTheCountWeightedMean()
+    {
+        var text = PayloadSql(MakeContext(probeResult: 16));
+
+        /* Only the aggregating derived table — the outer projection references the same names as plain
+           columns, which is correct there and must not be mistaken for an un-weighted aggregate. */
+        var open = text.IndexOf("FROM\n(", StringComparison.Ordinal);
+        var close = text.IndexOf(") AS qsrs", StringComparison.Ordinal);
+        Assert.True(open > 0 && close > open, "could not locate the slice-aggregating derived table");
+        var aggregate = text[open..close];
+
+        var averages = System.Text.RegularExpressions.Regex
+            .Matches(aggregate, @"^\s*(avg_[a-z0-9_]+) = ", System.Text.RegularExpressions.RegexOptions.Multiline)
+            .Select(m => m.Groups[1].Value)
+            .Distinct()
+            .ToList();
+
+        /* duration, cpu_time, logical_io_reads, logical_io_writes, physical_io_reads, clr_time,
+           query_max_used_memory, rowcount, num_physical_io_reads, log_bytes_used, tempdb_space_used. */
+        Assert.Equal(11, averages.Count);
+
+        foreach (var column in averages)
+        {
+            Assert.Contains(
+                $"{column} = SUM(qsrs.{column} * qsrs.count_executions) / NULLIF(SUM(qsrs.count_executions), 0)",
+                aggregate,
+                StringComparison.Ordinal);
+        }
+
+        /* The shapes that would pass a reading but corrupt the numbers. */
+        Assert.DoesNotContain("AVG(qsrs.avg_", aggregate, StringComparison.Ordinal);
+        Assert.DoesNotContain("MAX(qsrs.avg_", aggregate, StringComparison.Ordinal);
+        Assert.DoesNotContain("MIN(qsrs.avg_", aggregate, StringComparison.Ordinal);
+        Assert.DoesNotContain("SUM(qsrs.avg_duration)", aggregate, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #1907 bind safety: <c>replica_group_id</c> joins the GROUP BY on exactly the targets where the
+    /// column exists, and nowhere else.
+    ///
+    /// <para>It carries the same 2022+/Azure gate as the attribution column it feeds, for the same reason:
+    /// naming a column that does not exist in a GROUP BY fails the whole SELECT just as naming it in a
+    /// select list does, and on the Azure per-database path that would fail in EVERY database. It has to
+    /// be in the key where it does exist — two replicas' rows for one interval are DIFFERENT work, and
+    /// summing them would blend a secondary's executions into the primary's, which is the exact bug
+    /// replica attribution was added to prevent.</para>
+    /// </summary>
+    [Fact]
+    public void BuildPerItemQuery_ReplicaGroupIdEntersTheGroupingKey_OnlyWhereItBinds()
+    {
+        foreach (var probe in new object[] { 16, 17 })
+        {
+            var attributed = PayloadSql(MakeContext(probeResult: probe));
+            Assert.Contains("qsrs.execution_type_desc,\n        qsrs.replica_group_id", attributed, StringComparison.Ordinal);
+        }
+
+        var azure = AzurePayloadSql(MakeContext(isAzureSqlDb: true, probeResult: 12));
+        Assert.Contains("qsrs.execution_type_desc,\n        qsrs.replica_group_id", azure, StringComparison.Ordinal);
+
+        /* Pre-2022 box and Managed Instance: the column must not be named anywhere, GROUP BY included. */
+        foreach (var probe in new object?[] { 13, 14, 15, null })
+        {
+            var ungated = PayloadSql(MakeContext(probeResult: probe));
+            Assert.DoesNotContain("replica_group_id", ungated, StringComparison.Ordinal);
+            Assert.Contains("GROUP BY\n        qsrs.plan_id,\n        qsrs.runtime_stats_interval_id,\n        qsrs.execution_type_desc\n", ungated, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// #1907: the version-gated metric families must vanish from the AGGREGATE on a target that lacks
+    /// them while still emitting their typed NULL placeholder in the OUTER projection — the 55-column
+    /// reader contract cannot move, but an unbound column inside an aggregate fails just as hard as one
+    /// outside it. The comma handling is the fragile part: those three fragments carry a LEADING comma
+    /// and end the inner select list precisely because they can be empty.
+    /// </summary>
+    [Fact]
+    public void BuildPerItemQuery_PreSql2017_GatedFamiliesLeaveTheAggregate_ButKeepTheirOrdinals()
+    {
+        var old = PayloadSql(MakeContext(probeResult: 13));
+
+        /* Not aggregated, not referenced — the columns do not exist on SQL 2016. */
+        Assert.DoesNotContain("MIN(qsrs.min_num_physical_io_reads)", old, StringComparison.Ordinal);
+        Assert.DoesNotContain("MIN(qsrs.min_log_bytes_used)", old, StringComparison.Ordinal);
+        Assert.DoesNotContain("MIN(qsrs.min_tempdb_space_used)", old, StringComparison.Ordinal);
+        Assert.DoesNotContain("qsrs.avg_tempdb_space_used * qsrs.count_executions", old, StringComparison.Ordinal);
+
+        /* But the ordinals stay, as typed NULLs, so the reader still sees 55 columns in one order. */
+        Assert.Contains("avg_num_physical_io_reads = NULL, min_num_physical_io_reads = NULL, max_num_physical_io_reads = NULL,", old, StringComparison.Ordinal);
+        Assert.Contains("avg_log_bytes_used = NULL, min_log_bytes_used = NULL, max_log_bytes_used = NULL,", old, StringComparison.Ordinal);
+        Assert.Contains("avg_tempdb_space_used = NULL, min_tempdb_space_used = NULL, max_tempdb_space_used = NULL,", old, StringComparison.Ordinal);
+
+        /* The inner list must end cleanly on the last ungated column when all three are absent. */
+        Assert.Contains("max_rowcount = MAX(qsrs.max_rowcount)\n    FROM sys.query_store_runtime_stats AS qsrs", old, StringComparison.Ordinal);
+
+        /* On 2017+ they are present, aggregated, and the list ends with the last gated family instead. */
+        var newer = PayloadSql(MakeContext(probeResult: 14));
+        Assert.Contains("max_rowcount = MAX(qsrs.max_rowcount),\n", newer, StringComparison.Ordinal);
+        Assert.Contains("max_tempdb_space_used = MAX(qsrs.max_tempdb_space_used)\n    FROM sys.query_store_runtime_stats AS qsrs", newer, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void BuildPerItemQuery_AzureWithFailedProbe_StillNewColumns()
     {
@@ -463,7 +647,17 @@ public sealed class QueryStoreCollectorDefinitionTests
 
         /* Line-ending agnostic: pin the bracket escaping + the sp_executesql shape. */
         Assert.StartsWith("EXECUTE [we]]ird].sys.sp_executesql", plan.Text.TrimStart('\r', '\n'), StringComparison.Ordinal);
-        Assert.Contains("WHERE qsrs.last_execution_time > @cutoff_time", plan.Text, StringComparison.Ordinal);
+
+        /* The incremental cutoff is asked at INTERVAL grain since #1907, not per slice. Re-pinned
+           deliberately: the old form asserted "WHERE qsrs.last_execution_time > @cutoff_time", and keeping
+           that would have pinned the bug. A per-slice WHERE cannot survive slice aggregation — the flushed
+           slice is STATIC, so as soon as the growing in-memory slice pushes the watermark past it the
+           flushed slice stops qualifying and the SUM silently degrades to the sliver alone, which is the
+           original defect with an aggregate bolted on. HAVING MAX(...) asks whether the INTERVAL saw new
+           activity and then takes all of it. */
+        var normalized = plan.Text.Replace("\r\n", "\n", StringComparison.Ordinal);
+        Assert.Contains("HAVING\n        MAX(qsrs.last_execution_time) > @cutoff_time", normalized, StringComparison.Ordinal);
+        Assert.DoesNotContain("WHERE qsrs.last_execution_time > @cutoff_time", normalized, StringComparison.Ordinal);
         /* #1565: NO SQL-side self-exclusion — the old NOT LIKE was 75% of the read's elapsed time (full
            nvarchar(max) scan per row on a column no index can serve; field A/B: 4.3x without it), and no
            predicate shape fixes a residual text scan. The exclusion is client-side in ReadItemAsync,
