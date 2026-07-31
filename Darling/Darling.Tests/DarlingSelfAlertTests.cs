@@ -750,36 +750,60 @@ public sealed class DarlingSelfAlertTests
     public void IsDiskPressure_BelowThreshold_Pressure()
     {
         /* 5% free (< the 10% warn threshold) reads as pressure; the reason names the percentage. */
-        Assert.True(DarlingSelfAlertEvaluator.IsDiskPressure(5 * Gib, 100 * Gib, out var reason));
+        Assert.True(DarlingSelfAlertEvaluator.IsDiskPressure(5 * Gib, 100 * Gib, out var reason, out var percentFree));
         Assert.Contains("5", reason);
         Assert.Contains("%", reason);
+
+        /* #1881: the percentage is now HANDED BACK rather than only spelled into the prose, so the fire
+           site can store it as a real numeric instead of leaving the history store to re-find it by
+           scanning the sentence for digits. */
+        Assert.Equal(5.0, percentFree, precision: 6);
     }
 
     [Fact]
     public void IsDiskPressure_ExactlyAtThreshold_NotPressure()
     {
         /* Boundary: exactly 10% free is NOT pressure (strictly-less-than the threshold). */
-        Assert.False(DarlingSelfAlertEvaluator.IsDiskPressure(10 * Gib, 100 * Gib, out _));
+        Assert.False(DarlingSelfAlertEvaluator.IsDiskPressure(10 * Gib, 100 * Gib, out _, out var percentFree));
+
+        /* Measured whenever the total is usable, firing or not — see IsDiskPressure's remarks for why
+           this must not collapse to 0 on the not-pressure path. */
+        Assert.Equal(10.0, percentFree, precision: 6);
     }
 
     [Fact]
     public void IsDiskPressure_JustBelowThreshold_Pressure()
     {
         /* 9.9% free trips it — the threshold is a real edge, not a wide band. */
-        Assert.True(DarlingSelfAlertEvaluator.IsDiskPressure(99 * Gib, 1000 * Gib, out _));
+        Assert.True(DarlingSelfAlertEvaluator.IsDiskPressure(99 * Gib, 1000 * Gib, out _, out var percentFree));
+        Assert.Equal(9.9, percentFree, precision: 6);
     }
 
     [Fact]
     public void IsDiskPressure_PlentyFree_NotPressure()
     {
-        Assert.False(DarlingSelfAlertEvaluator.IsDiskPressure(50 * Gib, 100 * Gib, out _));
+        Assert.False(DarlingSelfAlertEvaluator.IsDiskPressure(50 * Gib, 100 * Gib, out _, out _));
     }
 
     [Fact]
     public void IsDiskPressure_NonPositiveTotal_NotPressure()
     {
         /* An undeterminable total ("can't tell") never reads as pressure. */
-        Assert.False(DarlingSelfAlertEvaluator.IsDiskPressure(0, 0, out _));
+        Assert.False(DarlingSelfAlertEvaluator.IsDiskPressure(0, 0, out _, out var percentFree));
+
+        /* Nothing was measured, so nothing is reported. The caller no-ops on this path before it can
+           reach a fire site, so the 0 is never stored. */
+        Assert.Equal(0.0, percentFree, precision: 6);
+    }
+
+    [Fact]
+    public void IsDiskPressure_FullVolume_ReportsZeroPercentFree()
+    {
+        /* #1881's reason for keeping "Store Disk Pressure" OUT of AlertMetricClassifier.IsStateOnly: a
+           genuine 0 here means a FULL volume, the one reading that must never be rendered as an em dash.
+           Pinned at the source so the invariant is visible where the number is produced. */
+        Assert.True(DarlingSelfAlertEvaluator.IsDiskPressure(0, 100 * Gib, out _, out var percentFree));
+        Assert.Equal(0.0, percentFree, precision: 6);
     }
 
     /* ---------------- store disk pressure edge ---------------- */

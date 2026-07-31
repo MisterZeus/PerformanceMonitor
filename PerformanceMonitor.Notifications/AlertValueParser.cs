@@ -34,11 +34,29 @@ namespace PerformanceMonitor.Notifications;
 public static class AlertValueParser
 {
     /// <summary>
-    /// The leading numeric token of <paramref name="text"/> (sign, digits, culture group separators,
-    /// culture decimal separator; a trailing <c>%</c> or label is ignored), or
-    /// <paramref name="fallback"/> when the text carries no number at all (state strings like
+    /// The first number appearing ANYWHERE in <paramref name="text"/> (sign, digits, culture group
+    /// separators, culture decimal separator; anything before or after it is ignored), or
+    /// <paramref name="fallback"/> when the text carries no digit at all (state strings like
     /// <c>"PRIMARY"</c> or <c>"Online"</c> — the history column is NOT NULL, so those still need a
     /// value).
+    ///
+    /// <para><b>ANYWHERE, not "leading" — read this before calling it (#1881).</b> This summary said
+    /// "leading numeric token" for its whole life, and the call sites were written against that
+    /// promise, but the scan below skips non-digits rather than bailing on them. The difference is
+    /// invisible for the case it was built for (<c>"87% (Total CPU)"</c>, where the number leads
+    /// anyway) and decisive for prose: the first digit in a sentence is whatever happened to be
+    /// there, so <c>"PostgreSQL 18"</c> yields 18 and an object name like <c>"Sales2024"</c> yields
+    /// 2024. Neither is a measurement of anything the alert is about.</para>
+    ///
+    /// <para>The scan is deliberately NOT tightened to require a leading number, because at least one
+    /// real producer depends on it: <c>Store Disk Pressure</c>'s text is
+    /// <c>"The monitor store's disk volume has only 7% free (…)"</c>, whose percent-free IS the right
+    /// value and does not lead. Tightening would silently zero it — and a stored 0 there means a FULL
+    /// volume, the one reading that must never be invented. The fix for #1881 is therefore on the
+    /// producer side instead: a metric whose value is a measurement passes it explicitly as
+    /// <c>AlertOutcome.NumericCurrentValue</c>, and a metric whose value is a STATE passes an explicit
+    /// 0 and joins <c>AlertMetricClassifier.IsStateOnly</c>. Both leave this scan un-consulted, which
+    /// is the point: nothing reaches it whose text a semantically-wrong number can be coined from.</para>
     /// </summary>
     public static double ParseOrDefault(string? text, double fallback = 0)
     {
@@ -111,6 +129,21 @@ public static class AlertValueParser
 
         return fallback;
     }
+
+    /// <summary>
+    /// What an alert-history store writes into its NOT NULL <c>current_value</c> /
+    /// <c>threshold_value</c> column: the producer's numeric when it supplied one, else the fallback
+    /// parse of the display text.
+    ///
+    /// <para>This one expression was written out twice — once in Lite's <c>DuckDbAlertHistoryStore</c>
+    /// and once in Darling's <c>PgAlertHistoryStore</c>, four call sites between them — which is the
+    /// shape that lets the two stores drift apart on the exact question #1881 is about (whether a row
+    /// stores a measurement or a coincidence). Both now call this, so a producer's stored value is
+    /// decided in ONE place and can be pinned without a live store: the resolve is the seam, and the
+    /// bug this whole issue describes lives in it rather than on either side.</para>
+    /// </summary>
+    public static double ResolveStoredValue(double? numericValue, string? displayText) =>
+        numericValue ?? ParseOrDefault(displayText);
 
     /// <summary>Digits per group. Every culture this ships to groups by three.</summary>
     private const int GroupSize = 3;

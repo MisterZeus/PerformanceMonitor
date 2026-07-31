@@ -46,14 +46,15 @@ public sealed class PgAlertHistoryStore : IAlertHistoryStore
             throw new ArgumentNullException(nameof(record));
         }
 
-        /* Resolve the current_value/threshold_value doubles from the optional numerics, falling
-           back to the display text through the shared leading-numeric parser — Lite's
-           DuckDbAlertHistoryStore fallback verbatim (#1830: the old TrimEnd('%') parse failed on
-           any decorated value and silently stored 0 for every High CPU row). */
-        var currentValue = record.NumericCurrentValue
-            ?? AlertValueParser.ParseOrDefault(record.CurrentValueText);
-        var thresholdValue = record.NumericThresholdValue
-            ?? AlertValueParser.ParseOrDefault(record.ThresholdValueText);
+        /* Resolve the current_value/threshold_value doubles from the optional numerics, falling back
+           to the display text (#1830: the old TrimEnd('%') parse failed on any decorated value and
+           silently stored 0 for every High CPU row). Shared with Lite's DuckDbAlertHistoryStore
+           rather than written out twice — see AlertValueParser.ResolveStoredValue for why that
+           duplication was the drift risk #1881 turned on. */
+        var currentValue = AlertValueParser.ResolveStoredValue(
+            record.NumericCurrentValue, record.CurrentValueText);
+        var thresholdValue = AlertValueParser.ResolveStoredValue(
+            record.NumericThresholdValue, record.ThresholdValueText);
         var serverId = int.TryParse(record.ServerId, out var sid) ? sid : 0;
 
         try

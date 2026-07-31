@@ -622,6 +622,36 @@ public static class FactRemediation
         row.TryGetProperty("rcsi_reader_writer_pct", out _);
 
     /// <summary>
+    /// The <c>replica_role</c> value that means "the replica a force-plan statement acts on by
+    /// default" — <c>sys.query_store_replicas.replica_name</c> for the primary. Compared
+    /// case-insensitively because the collector passes the server's own casing through verbatim
+    /// ("Primary"), while hand-built and seeded drill-downs use "PRIMARY".
+    /// </summary>
+    private const string PrimaryReplicaRole = "Primary";
+
+    /// <summary>
+    /// A defensive bound on how many <c>regressed_queries</c> rows are examined. The producers already
+    /// <c>LIMIT 5</c>, and the target cap is 5, but the replica preference below has to keep looking
+    /// after the cap is reached (a primary's row can arrive AFTER a secondary's and must still be able
+    /// to take the slot), so the loop no longer stops at the cap and needs its own ceiling.
+    /// </summary>
+    private const int MaxPlanRegressionRowsScanned = 50;
+
+    /// <summary>True when the row was attributed to the PRIMARY replica, or when the server did not
+    /// attribute replicas at all — which is every standalone server, every AG without Query Store for
+    /// secondary replicas, and everything below SQL Server 2022. An unattributed row IS the primary's:
+    /// the Query Store collector only ever reads from primaries.</summary>
+    private static bool IsPrimaryReplicaRow(string? replicaRole) =>
+        string.IsNullOrEmpty(replicaRole) ||
+        string.Equals(replicaRole, PrimaryReplicaRole, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>True when the row names a replica OTHER than the primary, i.e. the disclosure below
+    /// applies. Distinct from <c>!IsPrimaryReplicaRow</c> only in intent, but the two read very
+    /// differently at the call sites.</summary>
+    private static bool IsNonPrimaryReplicaRow(string? replicaRole) =>
+        !string.IsNullOrEmpty(replicaRole) && !IsPrimaryReplicaRow(replicaRole);
+
+    /// <summary>
     /// Extracts the typed force-plan targets from a PLAN_REGRESSION finding's
     /// drill-down. This is the single parse: the preview renderer
     /// (<see cref="GenerateForPlanRegression"/>) renders entirely from this list,
@@ -630,6 +660,47 @@ public static class FactRemediation
     /// &gt; 0 — and the same cap of 5 targets. Reads every value the preview
     /// renders (including the two cpu/exec numbers) so the renderer needs no
     /// second drill-down read.
+    ///
+    /// <para><b>Which replica's regression wins (#1882).</b> #1850 made the drill-down per-REPLICA: on
+    /// an AG with Query Store for secondary replicas enabled, one query can regress on the primary AND
+    /// on a secondary and arrive as two rows differing in <c>replica_role</c>, each with its own
+    /// <c>best_plan_id</c>. #1850 de-duped on (database, query_id) keeping the FIRST row — which, since
+    /// the SQL orders <c>regression_factor DESC</c>, is the worst regression on any replica — and
+    /// deliberately left the product question open. It is answered here: <b>the primary's row wins when
+    /// both exist</b>, and regression factor only breaks ties among rows of the same replica class.</para>
+    ///
+    /// <para>That is forced by what the emitted statement actually does, which turns out to be narrower
+    /// than "forcing is per query". Per
+    /// <see href="https://learn.microsoft.com/en-us/sql/relational-databases/system-stored-procedures/sp-query-store-force-plan-transact-sql">
+    /// sp_query_store_force_plan</see>, forcing IS scopeable per replica — there is a fourth
+    /// <c>@replica_group_id</c> argument, and the docs say "You can force plans on a secondary replica
+    /// when Query Store for readable secondaries is enabled. Execute sp_query_store_force_plan and
+    /// sp_query_store_unforce_plan on the primary replica. Using the @replica_group_id argument defaults
+    /// to the primary replica". Two consequences, and the second is the defect:</para>
+    /// <list type="number">
+    /// <item>Every force runs ON the primary regardless of which replica it targets, so a secondary's
+    /// regression does not need to be discarded — it is actionable.</item>
+    /// <item>The statement this class renders omits <c>@replica_group_id</c>, so <b>it forces on the
+    /// PRIMARY</b> by that documented default. Letting a secondary's regression win the de-dup therefore
+    /// did not produce a secondary-scoped recommendation; it produced a primary-scoped one justified by
+    /// evidence from a different replica's workload, with nothing on screen saying so. Preferring the
+    /// primary's row makes the evidence match the scope the statement already had.</item>
+    /// </list>
+    ///
+    /// <para>The omission stays deliberate rather than being filled in: <c>@replica_group_id</c> is a
+    /// replica SET NUMBER from
+    /// <see href="https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-query-store-replicas">
+    /// sys.query_store_replicas</see>, and the collector stores that view's <c>replica_name</c> (a ROLE
+    /// — "Primary", "Secondary", "Geo Secondary") rather than the id, so there is no correct number to
+    /// emit. The id would be the wrong thing to persist anyway: that catalog view accumulates one row per
+    /// (replica, role) across failovers, so a group id captured at analysis time can silently re-point
+    /// afterwards. A secondary-only regression is instead rendered WITH a disclosure that names the
+    /// replica and tells the operator how to scope it themselves — see
+    /// <see cref="GenerateForPlanRegression"/>.</para>
+    ///
+    /// <para>Zero effect on any server without replica attribution: <c>replica_role</c> is absent or
+    /// empty on every standalone server, every non-AG server and everything below SQL Server 2022, one
+    /// row per query arrives exactly as before, and the preference is a no-op.</para>
     /// </summary>
     public static IReadOnlyList<ForcePlanTarget> ExtractPlanRegressionTargets(AnalysisFinding finding)
     {
@@ -653,21 +724,17 @@ public static class FactRemediation
         if (element.ValueKind != JsonValueKind.Array)
             return targets;
 
-        /* #1850: the drill-down is now per-REPLICA — on an AG primary with Query Store for secondary
-           replicas enabled, one query can regress on the primary AND on a secondary and arrive as two
-           rows differing in replica_role, each with its own best_plan_id. Forcing a plan is per query,
-           not per replica, so emitting both would render two sp_query_store_force_plan calls naming the
-           SAME query with DIFFERENT plan ids — mutually exclusive instructions where whichever the
-           operator runs last silently wins. Keep the first occurrence per (database, query_id): the SQL
-           orders by regression_factor DESC, so that is the worst regression, consistent with the cap of
-           5 already taking the worst five. Which replica's regression SHOULD drive the recommendation
-           (and whether a read-only secondary's regression should recommend forcing on the primary at
-           all) is a product question, tracked as #1882 — this only stops the contradiction. */
-        var seen = new HashSet<(string Database, long QueryId)>();
+        /* Insertion order is kept separately from the winners so the emitted order stays what it always
+           was — worst regression first, since a query's FIRST row is its worst and the rows arrive
+           regression_factor DESC. Upgrading a query to its primary row changes WHICH plan is forced, never
+           where the query sits in the list. */
+        var order = new List<(string Database, long QueryId)>();
+        var winners = new Dictionary<(string Database, long QueryId), ForcePlanTarget>();
+        var scanned = 0;
 
         foreach (var row in element.EnumerateArray())
         {
-            if (targets.Count >= 5) break;
+            if (++scanned > MaxPlanRegressionRowsScanned) break;
             if (row.ValueKind != JsonValueKind.Object) continue;
 
             var database = GetString(row, "database");
@@ -676,10 +743,26 @@ public static class FactRemediation
             if (string.IsNullOrEmpty(database) || queryId <= 0 || bestPlanId <= 0)
                 continue;
 
-            if (!seen.Add((database, queryId)))
+            var key = (database, queryId);
+            var replicaRole = GetString(row, "replica_role");
+            var isIncumbent = winners.TryGetValue(key, out var incumbent);
+
+            /* A query already holding a slot only changes plan when the newcomer is the PRIMARY's row and
+               the incumbent is not — the whole preference, in one condition. Everything else (a second
+               secondary, a worse primary row, a repeat) leaves the incumbent alone, which preserves
+               #1850's "first wins" among rows of equal standing. */
+            if (isIncumbent && !(IsPrimaryReplicaRow(replicaRole) && !IsPrimaryReplicaRow(incumbent!.ReplicaRole)))
                 continue;
 
-            targets.Add(new ForcePlanTarget(
+            /* The cap counts DISTINCT queries, as it always has. Applied only to a query that does not
+               already hold a slot, so a late primary row can still upgrade one of the five. */
+            if (!isIncumbent && order.Count >= 5)
+                continue;
+
+            if (!isIncumbent)
+                order.Add(key);
+
+            winners[key] = new ForcePlanTarget(
                 Database: database,
                 QueryId: queryId,
                 PlanId: bestPlanId,
@@ -687,8 +770,12 @@ public static class FactRemediation
                 LatestPlanHash: GetString(row, "latest_plan_hash"),
                 LatestCpuPerExecUs: GetDouble(row, "latest_cpu_per_exec_us"),
                 BestCpuPerExecUs: GetDouble(row, "best_cpu_per_exec_us"),
-                RegressionFactor: GetDouble(row, "regression_factor")));
+                RegressionFactor: GetDouble(row, "regression_factor"),
+                ReplicaRole: string.IsNullOrEmpty(replicaRole) ? null : replicaRole);
         }
+
+        foreach (var key in order)
+            targets.Add(winners[key]);
 
         return targets;
     }
@@ -698,6 +785,12 @@ public static class FactRemediation
     /// is byte-for-byte the same preview the inline parse produced before the
     /// extract-once refactor (guarded by the render-stability golden test),
     /// including the two "(cpu/exec ... us)" comment lines.
+    ///
+    /// <para>#1882 adds the replica lines, and adds NOTHING when the target carries no
+    /// <c>replica_role</c> — which is every standalone server, every non-AG server, everything below
+    /// SQL Server 2022, and the deprecated Dashboard's drill-down, whose SQL has no replica column at
+    /// all. That is what keeps the byte-for-byte golden meaningful rather than merely re-baselined:
+    /// the no-replica rendering is still the one it pins.</para>
     /// </summary>
     private static string? GenerateForPlanRegression(AnalysisFinding finding)
     {
@@ -720,16 +813,84 @@ public static class FactRemediation
             if (!string.IsNullOrEmpty(target.BestPlanHash))
                 sb.AppendLine($"--   best plan hash:   {target.BestPlanHash}   (cpu/exec {target.BestCpuPerExecUs:F0} us)");
             sb.AppendLine($"--   regression factor: {target.RegressionFactor:F1}x");
+            if (!string.IsNullOrEmpty(target.ReplicaRole))
+                sb.AppendLine($"--   measured on replica: {target.ReplicaRole}");
+            AppendSecondaryReplicaDisclosure(sb, target);
             sb.AppendLine($"USE {QuoteName(target.Database)};");
             sb.AppendLine($"EXEC sys.sp_query_store_force_plan @query_id = {target.QueryId}, @plan_id = {target.PlanId};");
             sb.AppendLine();
             sb.AppendLine($"-- To back out:");
             sb.AppendLine($"-- EXEC sys.sp_query_store_unforce_plan @query_id = {target.QueryId}, @plan_id = {target.PlanId};");
+            AppendUnforceScopeNote(sb, target);
 
             emitted++;
         }
 
         return sb.ToString().TrimEnd();
+    }
+
+    /// <summary>
+    /// The #1882 disclosure, emitted only for a target whose regression was measured on a replica OTHER
+    /// than the primary. The rendered <c>sp_query_store_force_plan</c> call omits
+    /// <c>@replica_group_id</c>, which per
+    /// <see href="https://learn.microsoft.com/en-us/sql/relational-databases/system-stored-procedures/sp-query-store-force-plan-transact-sql">
+    /// the docs</see> "defaults to the primary replica" — so the statement is primary-scoped while its
+    /// evidence is not, and an operator has no way to see that from the numbers above it. Saying so is
+    /// the whole fix: the recommendation stays actionable (forcing is executed on the primary in every
+    /// case, so a secondary's regression is not something to discard), it just stops being silent about
+    /// what it is recommending.
+    ///
+    /// <para>The scoped form is described rather than spelled out as a paste-ready statement, and that
+    /// is deliberate. <c>@replica_group_id</c> is the FOURTH argument, behind
+    /// <c>@disable_optimized_plan_forcing</c>, and the same doc page warns that "Arguments for extended
+    /// stored procedures must be entered in the specific order as described in the Syntax section. If
+    /// the parameters are entered out of order, an error message occurs." Emitting a three-argument call
+    /// that skips the third would be guessing at whether that warning tolerates a named-argument skip,
+    /// and emitting a four-argument call would mean inventing a value for a parameter whose default the
+    /// docs do not state. A lookup query whose column names ARE documented, plus the URL, beats a
+    /// copy-paste line that might error on the box it was written for.</para>
+    /// </summary>
+    private static void AppendSecondaryReplicaDisclosure(StringBuilder sb, ForcePlanTarget target)
+    {
+        if (!IsNonPrimaryReplicaRow(target.ReplicaRole))
+            return;
+
+        sb.AppendLine("--");
+        sb.AppendLine($"-- HEADS UP: this regression was measured on the {target.ReplicaRole} replica's workload,");
+        sb.AppendLine("-- but the statement below forces on the PRIMARY. sp_query_store_force_plan is executed on");
+        sb.AppendLine("-- the primary in every case, and its @replica_group_id argument defaults to the primary");
+        sb.AppendLine("-- when omitted -- so running this as written changes the plan the primary's WRITE workload");
+        sb.AppendLine("-- gets, on the strength of what a read-only replica did. Decide that on purpose.");
+        sb.AppendLine("-- To scope the force to that replica instead, find its replica_group_id and pass it as the");
+        sb.AppendLine("-- fourth argument (they are extended stored procedure arguments, so the documented order");
+        sb.AppendLine("-- matters -- see the reference page):");
+        sb.AppendLine("--   SELECT replica_group_id, replica_name, role_type FROM sys.query_store_replicas;");
+        sb.AppendLine("--   https://learn.microsoft.com/en-us/sql/relational-databases/system-stored-procedures/sp-query-store-force-plan-transact-sql");
+        sb.AppendLine("--");
+    }
+
+    /// <summary>
+    /// The back-out counterpart of <see cref="AppendSecondaryReplicaDisclosure"/>, emitted for any target
+    /// the server attributed to a replica at all — including the primary's own rows, because the trap it
+    /// warns about is one an operator hits on a correctly-scoped primary force too.
+    ///
+    /// <para>The two procedures do NOT default the same way, and the asymmetry is easy to miss because
+    /// the argument has the same name on both.
+    /// <see href="https://learn.microsoft.com/en-us/sql/relational-databases/system-stored-procedures/sp-query-store-force-plan-transact-sql">
+    /// Force</see> says @replica_group_id "defaults to the primary replica";
+    /// <see href="https://learn.microsoft.com/en-us/sql/relational-databases/system-stored-procedures/sp-query-store-unforce-plan-transact-sql">
+    /// unforce</see> says it "defaults to the local replica where the command is being executed". So the
+    /// unforce line above, which reads like the exact inverse of the force line above it, silently is not
+    /// one when it is run anywhere but the primary — it would un-force a different replica's plan and
+    /// leave the forced plan in place. Nothing warns the operator; this does.</para>
+    /// </summary>
+    private static void AppendUnforceScopeNote(StringBuilder sb, ForcePlanTarget target)
+    {
+        if (string.IsNullOrEmpty(target.ReplicaRole))
+            return;
+
+        sb.AppendLine("-- Run the unforce ON THE PRIMARY: unlike force (which defaults @replica_group_id to the");
+        sb.AppendLine("-- primary), unforce defaults it to whichever replica you are connected to.");
     }
 
     /// <summary>
@@ -1101,13 +1262,30 @@ public static class FactRemediation
 
         // PLAN_REGRESSION (force-plan) — sp_query_store_force_plan is DATABASE-scoped, so each target
         // is a standalone USE + EXEC block (the copy-paste runs without an ambient database). Safe.
+        //
+        // #1882: a target measured on a NON-PRIMARY replica gets a two-line disclosure ahead of its
+        // block. This surface matters more than the preview's fuller version, not less — the preview is
+        // read, this is PASTED, and the omitted @replica_group_id makes the statement primary-scoped
+        // while its evidence is not. Kept to two lines because a paste target buried in prose stops
+        // being a paste target; the preview carries the lookup query and the doc link. Nothing is
+        // emitted when the target has no replica_role, so the byte-exact goldens over this renderer
+        // still pin the shape every non-AG server gets.
         if (action.Targets is { Count: > 0 } forceTargets)
         {
             var blocks = new List<string>(forceTargets.Count);
             foreach (var t in forceTargets)
+            {
+                var disclosure = IsNonPrimaryReplicaRow(t.ReplicaRole)
+                    ? $"-- Measured on the {t.ReplicaRole} replica; this forces on the PRIMARY (@replica_group_id" + nl +
+                      "-- defaults there when omitted). Scope it with @replica_group_id to target that replica." + nl
+                    : string.Empty;
+
                 blocks.Add(
+                    disclosure +
                     $"USE {QuoteName(t.Database)};" + nl +
                     $"EXEC sys.sp_query_store_force_plan @query_id = {t.QueryId}, @plan_id = {t.PlanId};");
+            }
+
             return blocks.Count == 0 ? null : string.Join(nl + nl, blocks);
         }
 

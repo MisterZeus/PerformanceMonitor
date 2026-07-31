@@ -466,7 +466,11 @@ internal sealed class DarlingSelfAlertEvaluator
                         "signal that a server's data has gone stale. Check the service log and the server's " +
                         "reachability, credentials, and collector permissions.",
                     severity: AlertSeverityLevel.Critical,
-                    shortMessage: reason, cancellationToken);
+                    shortMessage: reason,
+                    /* #1881: a prose diagnosis, not a measurement — and the two branches' sentences lead
+                       with different units (a run count, or minutes). See AlertMetricClassifier.IsStateOnly. */
+                    numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+                    cancellationToken);
             }
         }
         else if (_activeCollectionStopped.TryRemove(key, out var was) && was)
@@ -508,7 +512,10 @@ internal sealed class DarlingSelfAlertEvaluator
                         "collection log for the SESSION_MISSING detail (usually a permissions problem: " +
                         "ALTER ANY EVENT SESSION on-prem, CREATE ANY DATABASE EVENT SESSION on Azure SQL DB).",
                     severity: AlertSeverityLevel.Critical,
-                    shortMessage: $"{list} capture is not running — XE session missing", cancellationToken);
+                    shortMessage: $"{list} capture is not running — XE session missing",
+                    /* Which capture is missing ("Blocking and Deadlock") against "session running". */
+                    numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+                    cancellationToken);
             }
         }
         else if (_activeCaptureDown.TryRemove(key, out var was) && was)
@@ -581,7 +588,10 @@ internal sealed class DarlingSelfAlertEvaluator
                         "is restarted, and a headless service has no dashboard to warn you. Start the SQL Server " +
                         "Agent service and set its startup type to Automatic so it survives a host reboot.",
                     severity: AlertSeverityLevel.Critical,
-                    shortMessage: "SQL Server Agent service is stopped — scheduled jobs will not run", cancellationToken);
+                    shortMessage: "SQL Server Agent service is stopped — scheduled jobs will not run",
+                    /* "Stopped" against "Running". */
+                    numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+                    cancellationToken);
             }
         }
         else if (_activeAgentDown.TryRemove(key, out var was) && was)
@@ -664,7 +674,10 @@ internal sealed class DarlingSelfAlertEvaluator
                     key, serverName, "Server Restored", "Online", "Online",
                     detail: $"{serverName}: connection restored",
                     severity: null,
-                    shortMessage: "connection restored", cancellationToken);
+                    shortMessage: "connection restored",
+                    /* "Online" both sides. */
+                    numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+                    cancellationToken);
                 _lastConnectionDownAlertUtc.TryRemove(key, out _);
             }
             else if (decision is ConnectionAlertDecision.Lost
@@ -687,7 +700,12 @@ internal sealed class DarlingSelfAlertEvaluator
                     key, serverName, "Server Unreachable", reason, "Online",
                     detail: detail,
                     severity: AlertSeverityLevel.Critical,
-                    shortMessage: reason, cancellationToken);
+                    shortMessage: reason,
+                    /* #1881: the value is the DRIVER'S error message, whose numbers are error codes and
+                       timeouts ("Login timeout expired", "error 10060"). Whatever the parser found in one
+                       was never a measurement of this server's reachability. */
+                    numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+                    cancellationToken);
                 _lastConnectionDownAlertUtc[key] = _utcNow();
             }
             /* None → steady state or silent baseline. */
@@ -764,7 +782,10 @@ internal sealed class DarlingSelfAlertEvaluator
                             "verify that backups, index maintenance and integrity checks run against the new primary.",
                         severity: AlertSeverityLevel.Warning,
                         shortMessage: $"{replica.ReplicaServerName} in AG {replica.AgName} changed role from " +
-                            $"{previousRole} to {replica.RoleDesc}", cancellationToken);
+                            $"{previousRole} to {replica.RoleDesc}",
+                        /* Role descs both sides ("SECONDARY" -> "PRIMARY"). */
+                        numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+                        cancellationToken);
                 }
             }
 
@@ -802,6 +823,8 @@ internal sealed class DarlingSelfAlertEvaluator
                         shortMessage: stillDisconnected
                             ? $"{replica.ReplicaServerName} in AG {replica.AgName} is STILL disconnected from the primary"
                             : $"{replica.ReplicaServerName} in AG {replica.AgName} is disconnected from the primary",
+                        /* Connected-state descs both sides ("DISCONNECTED" against "CONNECTED"). */
+                        numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                         cancellationToken);
 
                     /* Stamped on DELIVERY, never on the decision: an alert suppressed by the master switch
@@ -818,7 +841,9 @@ internal sealed class DarlingSelfAlertEvaluator
                             "to the primary again. It is still behind by whatever accumulated while it was gone — watch the " +
                             "send and redo queues until they drain before you count it as a failover target again.",
                         severity: null,
-                        shortMessage: $"{replica.ReplicaServerName} in AG {replica.AgName} reconnected", cancellationToken);
+                        shortMessage: $"{replica.ReplicaServerName} in AG {replica.AgName} reconnected",
+                        numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+                        cancellationToken);
                     _lastAgDisconnectAlert.TryRemove(key, out _);
                 }
             }
@@ -892,7 +917,10 @@ internal sealed class DarlingSelfAlertEvaluator
                             $"[{database.DatabaseName}] SET HADR RESUME.",
                         severity: AlertSeverityLevel.Warning,
                         shortMessage: $"Data movement for {database.DatabaseName} in AG {database.AgName} is " +
-                            $"suspended ({suspendReason})", cancellationToken);
+                            $"suspended ({suspendReason})",
+                        /* suspend_reason_desc against "SYNCHRONIZING". */
+                        numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+                        cancellationToken);
                 }
                 else if (suspension == AgSuspensionDecision.Resumed)
                 {
@@ -930,7 +958,14 @@ internal sealed class DarlingSelfAlertEvaluator
                             "recently. While data movement is suspended the redo queue is frozen at its last reading, " +
                             "and log_send_queue_size — the actual backlog measure — reports nothing at all.",
                         severity: AlertSeverityLevel.Warning,
-                        shortMessage: behindReason, cancellationToken);
+                        shortMessage: behindReason,
+                        /* #1881: JudgeSync's reason is prose that breaches on EITHER lag seconds OR redo-queue
+                           KB, so the number the parser lifted out of it meant seconds on some rows and
+                           kilobytes on others — and on an AG or database whose name carries a digit
+                           ("Sales2024"), neither. #1846 already classified this metric state-only for exactly
+                           that reason; this is the write side finally agreeing with it. */
+                        numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+                        cancellationToken);
                 }
             }
         }
@@ -1016,16 +1051,23 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <see cref="DiskFreeWarnPercent"/> of the volume total. No I/O, so it pins directly. A non-positive
     /// total is treated as "can't tell" (false — the caller also guards this). The percentage scales across
     /// disk sizes; see the constant for why it is percent-only.
+    /// <para><paramref name="percentFree"/> is the measurement the alert is ABOUT, handed back so the fire
+    /// site can store it as a real numeric instead of leaving the history store to find it again by
+    /// scanning <paramref name="reason"/> for digits (#1881). It is computed whenever the total is usable,
+    /// including when the volume is comfortable and the answer is false — the caller only uses it on the
+    /// firing path, but returning a number that is 0 for "no pressure" and 0 for "a full volume" would put
+    /// the one dangerous ambiguity this metric must never have back into the signature.</para>
     /// </summary>
-    internal static bool IsDiskPressure(long freeBytes, long totalBytes, out string reason)
+    internal static bool IsDiskPressure(long freeBytes, long totalBytes, out string reason, out double percentFree)
     {
         if (totalBytes <= 0)
         {
             reason = "";
+            percentFree = 0;
             return false;
         }
 
-        double percentFree = (double)freeBytes / totalBytes * 100.0;
+        percentFree = (double)freeBytes / totalBytes * 100.0;
         if (percentFree < DiskFreeWarnPercent)
         {
             reason = $"The monitor store's disk volume has only {percentFree.ToString("0.#", CultureInfo.InvariantCulture)}% free ({FormatGb(freeBytes)} of {FormatGb(totalBytes)}).";
@@ -1088,7 +1130,7 @@ internal sealed class DarlingSelfAlertEvaluator
         }
 
         var now = _utcNow();
-        bool pressure = IsDiskPressure(free, total, out var reason);
+        bool pressure = IsDiskPressure(free, total, out var reason, out var percentFree);
 
         if (pressure)
         {
@@ -1105,7 +1147,16 @@ internal sealed class DarlingSelfAlertEvaluator
                         "store volume, shorten retention (config_collector_schedules), enable TimescaleDB compression, " +
                         "or move the store to a larger disk.",
                     severity: AlertSeverityLevel.Critical,
-                    shortMessage: reason, cancellationToken);
+                    shortMessage: reason,
+                    /* #1881: THE ONE SELF-ALERT WITH A REAL MEASUREMENT, and the one metric
+                       AlertMetricClassifier.IsStateOnly must never list — percent-free is genuinely what
+                       this alert is about, and a genuine 0 means a FULL volume. It stored the right number
+                       before only because its sentence happens to reach the percent first; passing it
+                       explicitly means an operator's volume path ("D2:\\") can no longer get there first,
+                       and the stored value stops depending on prose word order. The threshold is a real
+                       bound too, which is what separates this metric from every sibling above. */
+                    numericCurrentValue: percentFree, numericThresholdValue: DiskFreeWarnPercent,
+                    cancellationToken);
             }
         }
         else if (_activeDiskPressure.TryRemove(DiskKey, out var was) && was)
@@ -1201,6 +1252,12 @@ internal sealed class DarlingSelfAlertEvaluator
                     shortMessage: degraded
                         ? $"store upgraded to PostgreSQL {report.ToMajor}, but post-upgrade cleanup did NOT complete"
                         : $"store upgraded to PostgreSQL {report.ToMajor}",
+                    /* #1881: both sides are PostgreSQL MAJOR VERSIONS ("PostgreSQL 18" against "PostgreSQL
+                       17"), which the history store used to record as this alert's current value and
+                       threshold — a column of measurements in which some of the measurements were 18. A
+                       version is an identity, not a quantity, and an in-place store upgrade measures
+                       nothing; the versions stay in the text, where they read as versions. */
+                    numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
                 return;
             }
@@ -1213,7 +1270,10 @@ internal sealed class DarlingSelfAlertEvaluator
                     "The service will NOT retry this same package automatically, so the store stays on its current major until someone acts. " +
                     "Investigate before the next release: a store that cannot move forward accumulates the version drift this machinery exists to end.",
                 severity: AlertSeverityLevel.Critical,
-                shortMessage: $"store upgrade to PostgreSQL {report.ToMajor} FAILED at {report.FailedStep} — reverted, still running", cancellationToken);
+                shortMessage: $"store upgrade to PostgreSQL {report.ToMajor} FAILED at {report.FailedStep} — reverted, still running",
+                /* Versions again, on the failure path — see the success branch above. */
+                numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+                cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1308,7 +1368,13 @@ internal sealed class DarlingSelfAlertEvaluator
                             "fleet, and a headless service has no dashboard to warn you. If it re-hangs the service will " +
                             "escalate and stop auto-re-arming — investigate the TimescaleDB background-worker health.",
                         severity: AlertSeverityLevel.Critical,
-                        shortMessage: $"{label} was stuck — auto-re-armed", cancellationToken);
+                        shortMessage: $"{label} was stuck — auto-re-armed",
+                        /* #1881: job.Reason is elapsed minutes when a run HUNG and a scheduler state with no
+                           duration at all when next_start is -infinity, so the stored number meant minutes on
+                           some rows and nothing on others. The minutes stay in the reason text and the detail,
+                           where the unit is spelled out. Threshold is the phrase "running on schedule". */
+                        numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+                        cancellationToken);
                 }
                 else
                 {
@@ -1323,7 +1389,9 @@ internal sealed class DarlingSelfAlertEvaluator
                             "so the store will grow without bound until the disk fills. Re-arm it manually as the store owner " +
                             "(SELECT alter_job(<job_id>, next_start => now())), or grant ownership, then investigate why it hung.",
                         severity: AlertSeverityLevel.Critical,
-                        shortMessage: $"{label} stuck — auto-re-arm FAILED", cancellationToken);
+                        shortMessage: $"{label} stuck — auto-re-arm FAILED",
+                        numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+                        cancellationToken);
                 }
             }
             else if (state == CompressionJobHealth.ReArmed)
@@ -1340,7 +1408,9 @@ internal sealed class DarlingSelfAlertEvaluator
                         "background worker is failing to make progress. Investigate the PostgreSQL/TimescaleDB logs and the " +
                         "background-worker settings; compression stays halted until it is fixed.",
                     severity: AlertSeverityLevel.Critical,
-                    shortMessage: $"{label} re-hung after self-heal — escalated", cancellationToken);
+                    shortMessage: $"{label} re-hung after self-heal — escalated",
+                    numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+                    cancellationToken);
             }
             else
             {
@@ -1354,7 +1424,9 @@ internal sealed class DarlingSelfAlertEvaluator
                         detail: $"TimescaleDB {label} remains stuck ({job.Reason}) after escalation — still not compressing. " +
                             "Manual intervention is required; the service will not auto-re-arm it.",
                         severity: AlertSeverityLevel.Critical,
-                        shortMessage: $"{label} still stuck after escalation", cancellationToken);
+                        shortMessage: $"{label} still stuck after escalation",
+                        numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+                        cancellationToken);
                 }
             }
         }
@@ -1680,9 +1752,35 @@ ORDER BY ag_name, database_name, replica_server_name", connection);
         AlertSent: true, NotificationType: "tray", SendError: null,
         Muted: false, DetailText: resolution.Message, ContextJson: null);
 
+    /// <summary>
+    /// The explicit "this metric has no measurement" value for the history stores' NOT NULL
+    /// <c>current_value</c>/<c>threshold_value</c> columns — the write-side half of
+    /// <see cref="AlertMetricClassifier.IsStateOnly"/>'s contract (#1881).
+    ///
+    /// <para>Passing it beats leaving the numeric null and letting the text fallback land on 0. The
+    /// fallback (<c>AlertValueParser.ParseOrDefault</c>) scans to the first digit ANYWHERE in the display
+    /// text, so it returns 0 only for text that happens to carry no digit — which is not a property any
+    /// of these producers controls. "Server Unreachable" passes the driver's error message, "AG Sync Fell
+    /// Behind" passes prose with the lag seconds in it, and every AG alert embeds object names an
+    /// operator is free to call "SQL01" or "Sales2024". Stating the sentinel here makes the stored value
+    /// a decision rather than a coincidence, and it is what lets the read side treat a stored 0 on these
+    /// metrics as meaning "no value" instead of guessing.</para>
+    /// </summary>
+    private const double StateOnlyValue = 0;
+
+    /// <param name="numericCurrentValue">The measurement behind <paramref name="currentValue"/>'s display
+    /// text, or <see cref="StateOnlyValue"/> when the metric has none. DELIBERATELY REQUIRED rather than
+    /// defaulted to null: a default would let a new self-alert fall into the text-parsing fallback
+    /// silently, which is exactly how #1881's metrics came to store a PostgreSQL major version and a
+    /// digit lifted out of a server name. Making the compiler ask means every fire site answers
+    /// "is this a number?" on purpose. Only Store Disk Pressure answers yes.</param>
+    /// <param name="numericThresholdValue">The bound behind <paramref name="thresholdValue"/>, on the same
+    /// terms. Almost every self-alert's threshold is an English phrase ("collecting", "Online", "running
+    /// on schedule"), not a bound.</param>
     private async Task FireAsync(
         string serverKey, string serverName, string metricName, string currentValue, string thresholdValue,
-        string detail, AlertSeverityLevel? severity, string shortMessage, CancellationToken cancellationToken)
+        string detail, AlertSeverityLevel? severity, string shortMessage,
+        double? numericCurrentValue, double? numericThresholdValue, CancellationToken cancellationToken)
     {
         /* Same mute treatment as the engine: a muted self-alert is still recorded (flagged muted) but its
            channels are skipped — the deliverer honors AlertOutcome.Muted. */
@@ -1704,7 +1802,7 @@ ORDER BY ag_name, database_name, replica_server_name", connection);
         await _deliverer.DeliverAsync(new AlertOutcome(
             serverKey, serverName, metricName, currentValue, thresholdValue,
             Context: null, DetailText: detail,
-            NumericCurrentValue: null, NumericThresholdValue: null,
+            NumericCurrentValue: numericCurrentValue, NumericThresholdValue: numericThresholdValue,
             Muted: muted, Severity: severity, ShortMessage: shortMessage), cancellationToken);
     }
 
