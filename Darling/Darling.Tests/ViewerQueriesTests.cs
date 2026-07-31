@@ -906,7 +906,7 @@ public sealed class ViewerQueriesLivePostgresTests
         using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteRowsAsync(connection, "query_store_stats", WindowEdgeServerId);
+        await DeleteRowsAsync(connection, "query_store_stats", WindowEdgeServerId, TestContext.Current.CancellationToken);
 
         await using var viewer = new ViewerDataService(cs!);
 
@@ -968,15 +968,9 @@ public sealed class ViewerQueriesLivePostgresTests
         finally
         {
             /* #1902: cleanup gets its OWN connection, so a failure in the body cannot leave these rows
-               behind for the next run to trip over. The DELETE is inlined rather than routed through
-               DeleteRowsAsync because that helper runs on TestContext.Current.CancellationToken, which on
-               the path this exists for is already signalled — the cleanup token is the whole point. */
+               behind for the next run to trip over. */
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
-            {
-                using var delete = new NpgsqlCommand(
-                    $"DELETE FROM query_store_stats WHERE server_id = {WindowEdgeServerId};", cleanup);
-                await delete.ExecuteNonQueryAsync(cleanupCt);
-            });
+                await DeleteRowsAsync(cleanup, "query_store_stats", WindowEdgeServerId, cleanupCt));
         }
     }
 
