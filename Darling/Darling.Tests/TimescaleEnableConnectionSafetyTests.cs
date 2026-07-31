@@ -86,8 +86,9 @@ public sealed class TimescaleEnableConnectionSafetyTests
         Assert.True(offenders.Count == 0,
             "these call TimescaleSupport.TryEnableAsync on a connection they keep using, so an unpreloaded " +
             "TimescaleDB masks the real cause behind \"Connection is not open\" (#1922). Route them through " +
-            "LiveTimescaleProbe.TryEnableAsync, or assert the result immediately — either inline in " +
-            $"Assert.True(...) or captured and asserted within the next three lines: {string.Join(", ", offenders)}");
+            "LiveTimescaleProbe.TryEnableAsync, or check the result before anything else touches the " +
+            "connection — either inline in Assert.True(await ...), or captured and checked in the very NEXT " +
+            $"statement with Assert.True(x) / Assert.SkipWhen(!x): {string.Join(", ", offenders)}");
     }
 
     /// <summary>
@@ -144,8 +145,9 @@ public sealed class TimescaleEnableConnectionSafetyTests
     /// Assert.True(enabled, "the rig is expected to have TimescaleDB");
     /// </code>
     /// <para>and a guard that fires on a safe shape is worse than no guard — the next person routes around it
-    /// rather than reading it. The capture form is tied to its OWN variable rather than accepting any nearby
-    /// <c>Assert.True</c>, so an unrelated assertion two lines down cannot launder an unchecked call.</para>
+    /// rather than reading it. The capture form is tied to its OWN variable, and the check must be the very
+    /// NEXT statement: "checked somewhere nearby" is not the property that matters, since anything between
+    /// the capture and the check would itself be running on a possibly-dead connection.</para>
     /// </summary>
     private static bool IsCheckedOnTheSpot(string[] lines, int index)
     {
@@ -160,15 +162,32 @@ public sealed class TimescaleEnableConnectionSafetyTests
             return true;
         }
 
-        var captured = Regex.Match(window, @"var\s+(\w+)\s*=\s*await\s+TimescaleSupport\s*\.\s*TryEnableAsync\s*\(");
-        if (!captured.Success)
+        /* Split into STATEMENTS rather than scanning the window as one blob, because "the result is checked
+           somewhere nearby" is not the property that matters. This would otherwise pass:
+
+               var enabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+               await SomethingElse(connection, ct);   // runs on a possibly-dead connection, unchecked
+               Assert.True(enabled, "...");
+
+           The check has to come BEFORE anything else touches the connection, so the assertion must be the
+           very next statement — which is the discipline every call site already follows. */
+        var statements = window.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        for (var i = 0; i < statements.Length - 1; i++)
         {
-            return false;
+            var captured = Regex.Match(statements[i], @"var\s+(\w+)\s*=\s*await\s+TimescaleSupport\s*\.\s*TryEnableAsync\s*\(");
+            if (!captured.Success)
+            {
+                continue;
+            }
+
+            /* Tied to the CAPTURED variable, so an unrelated assertion cannot launder an unchecked call.
+               Assert.True or Assert.SkipWhen: both stop before the connection is used again, which is the
+               property, and a rig legitimately without TimescaleDB should skip rather than fail. */
+            var variable = Regex.Escape(captured.Groups[1].Value);
+            return Regex.IsMatch(statements[i + 1], $@"Assert\s*\.\s*(True\s*\(\s*{variable}\b|SkipWhen\s*\(\s*!\s*{variable}\b)");
         }
 
-        /* Tied to the CAPTURED variable, so an unrelated assertion nearby cannot launder an unchecked call. */
-        var variable = captured.Groups[1].Value;
-        return Regex.IsMatch(window, $@"Assert\s*\.\s*True\s*\(\s*{Regex.Escape(variable)}\b");
+        return false;
     }
 
     private static string? FindTestProjectDirectory()

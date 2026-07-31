@@ -238,8 +238,15 @@ public sealed class DarlingDeltaSeederTests
            one hand-built here. */
         /* #1922: on its OWN connection. This site discarded the result entirely and then kept using the same
            connection for the whole test, so an unpreloaded TimescaleDB left every statement below failing
-           with "Connection is not open" instead of the real cause. */
-        await LiveTimescaleProbe.TryEnableAsync(connectionString!, TestContext.Current.CancellationToken);
+           with "Connection is not open" instead of the real cause.
+
+           The result is CAPTURED and skipped on rather than discarded, which is the same point one layer up:
+           without TimescaleDB the conversion below fails per table into a swallowed warning, the table stays
+           plain, and the test lands on its own "no per-day chunks to exclude" skip several asserts later —
+           true, but arrived at by inference. Saying it here names the actual condition. */
+        var timescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(connectionString!, TestContext.Current.CancellationToken);
+        Assert.SkipWhen(!timescaleEnabled, "TimescaleDB is not enabled on DARLING_TEST_PG — there are no chunks to exclude.");
+
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, TestContext.Current.CancellationToken);
 
         var bodySucceeded = false;
