@@ -906,7 +906,7 @@ public class WebhookAlertService
                 _settings.PagerDutyRoutingKey, context: context, dedupKey: dedupKey);
 
             var endpoint = PagerDutyEndpoint(_settings.PagerDutyUseEuRegion);
-            var error = await PostWebhookAsync(endpoint, payload, proxyAddress: null);
+            var error = await PostWebhookAsync(endpoint, payload, _settings.PagerDutyProxyAddress);
 
             if (error != null)
             {
@@ -1090,7 +1090,7 @@ public class WebhookAlertService
     /// <summary>
     /// Sends a test notification to PagerDuty. Returns null on success, error message on failure.
     /// </summary>
-    public static async Task<string?> SendTestPagerDutyAsync(string routingKey, bool useEuRegion, AlertBranding branding)
+    public static async Task<string?> SendTestPagerDutyAsync(string routingKey, bool useEuRegion, AlertBranding branding, string? proxyAddress = null)
     {
         try
         {
@@ -1105,7 +1105,7 @@ public class WebhookAlertService
                 branding, routingKey, isTest: true, dedupKey: testDedupKey);
 
             var endpoint = PagerDutyEndpoint(useEuRegion);
-            return await PostWebhookAsync(endpoint, payload, proxyAddress: null);
+            return await PostWebhookAsync(endpoint, payload, proxyAddress);
         }
         catch (Exception ex)
         {

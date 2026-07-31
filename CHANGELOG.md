@@ -34,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The PagerDuty channel can route through a proxy** ([#1945]) - it was the only webhook channel that could not, and its endpoints are fixed public URLs, which makes a proxy MORE necessary in locked-down networks, not less. A pagerduty_proxy setting follows the sibling channels' exact shape in both apps (plain pref, not a secret), with a V43 store migration and a matching viewer probe sentinel on the Darling side.
+
 - **PagerDuty is a first-class alert channel in Lite and Darling** (contributed by @ianwalkeruk, [#1943]) - native Events API v2 integration alongside Teams, Slack, and the generic webhook: severity maps onto PagerDuty's four levels, repeated alerts for one ongoing incident correlate into a single PagerDuty alert via a dedup key derived from the same incident fingerprint the notification cooldown uses, and both US and EU data centers are supported. The routing key is stored as a bearer secret - Windows Credential Manager in Lite, the viewer-REVOKEd secret column tier in Darling's store (V42) - never in a plaintext settings file. Remediation T-SQL is never inlined in the page, matching every other webhook channel.
 
 - **Collection Health now says whether a collector that has come back empty all week had anything to collect** ([#1852]) - [#1837] shipped the qualifier that says HOW MUCH of the window an enumerated collector spent empty (`enumeration yielded 0 items ... (all 96 runs)`), and deliberately stopped there: it could not tell a server that legitimately has no user databases - which must stay quiet, and stays HEALTHY - from one that has databases and is enumerating none of them, which is the case worth a look. The three collectors that enumerate user databases (`query_store`, `index_object_stats`, `database_scoped_config`) now read that note as `... (all 96 runs, target has user databases)` when the store has seen user databases on the same server inside the same window. **No band changes and no new status** - the row still reads HEALTHY, because a filter that excluded everything or a feature nobody enabled are legitimate reasons to enumerate nothing, and a monitoring tool that reddens on them gets ignored. All four Collection Health surfaces inherit it from the one shared formatter (Lite's grid, the Darling Viewer's grid, both `get_collection_health` MCP tools, and the web dashboard's table behind them), and the MCP payload also carries the raw `target_has_user_databases` so a caller diagnosing an empty collector gets a boolean rather than having to read it out of a sentence.
@@ -2346,5 +2348,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#1943]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1943
 [#1937]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1937
 [#1939]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1939
+[#1945]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1945
+[#110]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/110
+[#111]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/111
+[#138]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/138
+[#145]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/145
+[#149]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/149
+[#346]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/346
+[#372]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/372
+[#1663]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1663
+[#1673]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1673
+[#1685]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1685
+[#1721]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1721
+[#1754]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1754
+[#1755]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1755
+[#1940]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1940
 [#1921]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1921
 [#1923]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1923

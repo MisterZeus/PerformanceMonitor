@@ -72,9 +72,10 @@ namespace PerformanceMonitorDashboard.Services
         public string GenericWebhookProxyAddress => "";
 
         /* PagerDuty is a Lite/Darling feature; the deprecated Dashboard gets stub-only members. */
-        public bool   PagerDutyEnabled     => false;
-        public string PagerDutyRoutingKey  => "";
-        public bool   PagerDutyUseEuRegion => false;
+        public bool   PagerDutyEnabled      => false;
+        public string PagerDutyRoutingKey   => "";
+        public bool   PagerDutyUseEuRegion  => false;
+        public string PagerDutyProxyAddress => "";
 
         public double AnalysisNotifySeverity        => Math.Clamp(Prefs.AnalysisNotifySeverity, 0.0, 2.0);
         public int    AnalysisNotifyCooldownMinutes => Math.Clamp(Prefs.AnalysisNotifyCooldownMinutes, 30, 10080);

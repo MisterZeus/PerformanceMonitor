@@ -37,13 +37,13 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 public sealed partial class ViewerDataService
 {
-    /* The 18 SmtpConfig + WebhooksConfig columns in the SAME order the service reads them
+    /* The 19 SmtpConfig + WebhooksConfig columns in the SAME order the service reads them
        (StoreConfigProvider.ReadNotificationAsync), so the parity test pins one list against both ends. */
     private const string NotificationColumns =
         "smtp_host, smtp_port, smtp_use_ssl, smtp_username, smtp_encrypted_password, smtp_from_address, " +
         "smtp_recipients, email_cooldown_minutes, teams_url, teams_proxy, slack_url, slack_proxy, " +
         "generic_url, generic_headers, generic_body_template, generic_proxy, " +
-        "pagerduty_routing_key, pagerduty_use_eu_region";
+        "pagerduty_routing_key, pagerduty_use_eu_region, pagerduty_proxy";
 
     /// <summary>The single global notification row (id=1), for the Settings window prefill + migrate-in check.</summary>
     public const string NotificationSelectSql =
@@ -58,7 +58,7 @@ public sealed partial class ViewerDataService
     private const string NotificationNonSecretColumns =
         "smtp_host, smtp_port, smtp_use_ssl, smtp_from_address, smtp_recipients, " +
         "email_cooldown_minutes, teams_proxy, slack_proxy, generic_body_template, generic_proxy, " +
-        "pagerduty_use_eu_region";
+        "pagerduty_use_eu_region, pagerduty_proxy";
 
     /// <summary>The secret-free notification projection a read-only <c>viewer</c> seat reads (D7 degradation):
     /// the four carved secret columns are omitted, so it never 42501s for a viewer. The secret fields come back
@@ -67,10 +67,10 @@ public sealed partial class ViewerDataService
         "SELECT " + NotificationNonSecretColumns + " FROM config_notification WHERE id = 1";
 
     /// <summary>Upserts the single global notification row (Settings window Save). ON CONFLICT rewrites every
-    /// column and bumps <c>config_version</c> via the V17 trigger. $1..$18 in <see cref="NotificationColumns"/> order.</summary>
+    /// column and bumps <c>config_version</c> via the V17 trigger. $1..$19 in <see cref="NotificationColumns"/> order.</summary>
     public const string NotificationUpsertSql = @"
 INSERT INTO config_notification (id, " + NotificationColumns + @", modified_at)
-VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, (now() AT TIME ZONE 'UTC'))
+VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     smtp_host = EXCLUDED.smtp_host,
     smtp_port = EXCLUDED.smtp_port,
@@ -90,6 +90,7 @@ ON CONFLICT (id) DO UPDATE SET
     generic_proxy = EXCLUDED.generic_proxy,
     pagerduty_routing_key = EXCLUDED.pagerduty_routing_key,
     pagerduty_use_eu_region = EXCLUDED.pagerduty_use_eu_region,
+    pagerduty_proxy = EXCLUDED.pagerduty_proxy,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>Reads the single global notification row, or null when the store has not seeded it yet. A
@@ -135,6 +136,7 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = row.GenericProxy });        // $16
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = row.PagerDutyRoutingKey }); // $17
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.PagerDutyUseEuRegion });  // $18
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = row.PagerDutyProxy ?? "" });  // $19
         await ExecuteWriteAsync(command, cancellationToken);
     }
 
@@ -158,6 +160,7 @@ ON CONFLICT (id) DO UPDATE SET
         GenericProxy = reader.GetString(15),
         PagerDutyRoutingKey = reader.GetString(16),
         PagerDutyUseEuRegion = reader.GetBoolean(17),
+        PagerDutyProxy = reader.GetString(18),
     };
 
     /// <summary>
@@ -189,6 +192,7 @@ ON CONFLICT (id) DO UPDATE SET
         GenericProxy = reader.GetString(9),
         PagerDutyRoutingKey = "",     /* carved — bearer secret like webhook URLs */
         PagerDutyUseEuRegion = reader.GetBoolean(10),
+        PagerDutyProxy = reader.GetString(11),
     };
 }
 
@@ -229,6 +233,7 @@ public sealed class NotificationRow
        viewer role alongside the webhook URLs. */
     public string PagerDutyRoutingKey { get; set; } = "";
     public bool PagerDutyUseEuRegion { get; set; }
+    public string PagerDutyProxy { get; set; } = "";
 
     /// <summary>A row equal to the V17 seed defaults — the migrate-in "is the service section still at defaults?" baseline.</summary>
     public static NotificationRow Defaults() => new();
@@ -255,6 +260,7 @@ public sealed class NotificationRow
             && string.Equals(GenericBodyTemplate, other.GenericBodyTemplate, StringComparison.Ordinal)
             && string.Equals(GenericProxy, other.GenericProxy, StringComparison.Ordinal)
             && string.Equals(PagerDutyRoutingKey, other.PagerDutyRoutingKey, StringComparison.Ordinal)
-            && PagerDutyUseEuRegion == other.PagerDutyUseEuRegion;
+            && PagerDutyUseEuRegion == other.PagerDutyUseEuRegion
+            && PagerDutyProxy == other.PagerDutyProxy;
     }
 }

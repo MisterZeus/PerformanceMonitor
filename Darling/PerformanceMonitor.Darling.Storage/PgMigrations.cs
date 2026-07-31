@@ -86,6 +86,7 @@ public static class PgMigrations
         new Migration(40, "blocking-wait-threshold", V40Sql),
         new Migration(41, "query-store-interval-identity", V41Sql),
         new Migration(42, "pagerduty-webhook", V42Sql),
+        new Migration(43, "pagerduty-proxy", V43Sql),
     };
 
     /// <summary>
@@ -694,6 +695,16 @@ CREATE OR REPLACE VIEW v_query_store_stats AS SELECT * FROM query_store_stats;";
 ALTER TABLE config.config_notification
     ADD COLUMN IF NOT EXISTS pagerduty_routing_key text NOT NULL DEFAULT '',
     ADD COLUMN IF NOT EXISTS pagerduty_use_eu_region boolean NOT NULL DEFAULT FALSE;";
+
+    /// <summary>
+    /// V43 - PagerDuty proxy (#1945). The channel was the only webhook that could not route through a
+    /// proxy, and its endpoints are fixed public URLs, so a locked-down network that proxies webhook
+    /// egress could not use it at all. Non-secret like the sibling proxy columns (teams_proxy et al.),
+    /// so it stays in the viewer role's SELECT grant.
+    /// </summary>
+    private const string V43Sql = @"
+ALTER TABLE config.config_notification
+    ADD COLUMN IF NOT EXISTS pagerduty_proxy text NOT NULL DEFAULT '';";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

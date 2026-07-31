@@ -918,6 +918,9 @@ public sealed class WebhooksConfig
 
     [JsonPropertyName("pagerDutyUseEuRegion")]
     public bool PagerDutyUseEuRegion { get; set; } = false;
+
+    [JsonPropertyName("pagerDutyProxy")]
+    public string PagerDutyProxy { get; set; } = "";
 }
 
 public sealed class MonitoredServer

@@ -984,6 +984,7 @@ public partial class SettingsWindow : Window
         PagerDutyWebhookEnabledCheckBox.IsChecked = !string.IsNullOrWhiteSpace(r.PagerDutyRoutingKey);
         PagerDutyRoutingKeyBox.Text = r.PagerDutyRoutingKey;
         PagerDutyEuRegionCheckBox.IsChecked = r.PagerDutyUseEuRegion;
+        PagerDutyProxyAddressBox.Text = r.PagerDutyProxy;
 
         UpdateSmtpControlStates();
         UpdateTeamsControlStates();
@@ -1053,6 +1054,7 @@ public partial class SettingsWindow : Window
         {
             row.PagerDutyRoutingKey = PagerDutyRoutingKeyBox.Text?.Trim() ?? "";
             row.PagerDutyUseEuRegion = PagerDutyEuRegionCheckBox.IsChecked == true;
+            row.PagerDutyProxy = PagerDutyProxyAddressBox.Text?.Trim() ?? "";
         }
 
         return row;
@@ -1181,6 +1183,7 @@ public partial class SettingsWindow : Window
         var enabled = PagerDutyWebhookEnabledCheckBox.IsChecked == true;
         PagerDutyRoutingKeyBox.IsEnabled = enabled;
         PagerDutyEuRegionCheckBox.IsEnabled = enabled;
+        PagerDutyProxyAddressBox.IsEnabled = enabled;
         TestPagerDutyButton.IsEnabled = enabled;
     }
 
@@ -1193,7 +1196,7 @@ public partial class SettingsWindow : Window
         {
             var routingKey = PagerDutyRoutingKeyBox.Text?.Trim() ?? "";
             var useEuRegion = PagerDutyEuRegionCheckBox.IsChecked == true;
-            var error = await WebhookAlertService.SendTestPagerDutyAsync(routingKey, useEuRegion, s_branding);
+            var error = await WebhookAlertService.SendTestPagerDutyAsync(routingKey, useEuRegion, s_branding, PagerDutyProxyAddressBox.Text?.Trim());
 
             if (error == null)
             {
@@ -1494,6 +1497,7 @@ public partial class SettingsWindow : Window
         public bool PagerDutyEnabled { get; private init; }
         public string PagerDutyRoutingKey { get; private init; } = "";
         public bool PagerDutyUseEuRegion { get; private init; }
+        public string PagerDutyProxyAddress { get; private init; } = "";
 
         public double AnalysisNotifySeverity { get; private init; }
         public int AnalysisNotifyCooldownMinutes { get; private init; }

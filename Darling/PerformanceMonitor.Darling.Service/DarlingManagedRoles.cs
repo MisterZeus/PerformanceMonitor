@@ -132,7 +132,7 @@ public static class DarlingManagedRoles
             {
                 "id", "smtp_host", "smtp_port", "smtp_use_ssl", "smtp_from_address", "smtp_recipients",
                 "email_cooldown_minutes", "teams_proxy", "slack_proxy", "modified_at",
-                "generic_body_template", "generic_proxy", "pagerduty_use_eu_region",
+                "generic_body_template", "generic_proxy", "pagerduty_use_eu_region", "pagerduty_proxy",
             },
             /* generic_headers carries the Authorization bearer token itself, and generic_url is a bearer
                secret like the sibling webhook URLs (#1506 / V26). pagerduty_routing_key is the Events API v2
