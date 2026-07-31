@@ -124,6 +124,13 @@ public static class ComposeCompiler
     /// visible step at that boundary. <c>--backfill-rollups</c> is what moves the boundary; retention aging
     /// out the old rows is what eventually removes it.</para>
     ///
+    /// <para><b>At the DAILY tier there is one more rung since #1869.</b> The corrected daily dedups each
+    /// interval within a collection HOUR, so an interval straddling an hour boundary lands in it about twice
+    /// (measured 1.97x); <c>query_store_stats_daygrain_daily</c> dedups across the whole DAY and counts it
+    /// once. It is a newer, shallower aggregate, so the router prefers it only where it has materialized the
+    /// window — three dailies, best-first, each rung the same comparative rule. The hourly tier has no such
+    /// rung because the residual is irreducible there.</para>
+    ///
     /// <para>The dedup partition below is the SAME key the corrected L1 groups on, and it has to stay that
     /// way — raw and rollup answering one panel with different notions of "an interval" is the class of
     /// defect #1784 records. L1 additionally groups <c>module_name</c>/<c>query_hash</c> because it projects
