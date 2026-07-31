@@ -2204,17 +2204,41 @@ public static class DarlingCliCommands
             return 0;
         }
 
-        long removed;
+        /* SLICED PER DAY, not one call over the whole span. CollapseSliceAsync runs each slice in ONE
+           transaction, and that transaction takes locks on the raw chunks it touches — which the compression
+           policy also wants. Handing it the entire survey span would make one long transaction sitting across
+           however much history the store keeps, which is exactly the lock-duration family that has bitten this
+           repo before (#1564/#1567). On a default 4-day raw tier this is a handful of slices; on a store with
+           a widened retention it is the protection the method's own doc promises.
+
+           The half-open upper bound includes the newest collapsed row — the survey reports that instant
+           itself, not a bound past it — hence the final slice's one-second nudge. */
+        long removed = 0;
+        var sliceStart = survey.OldestUtc!.Value.Date;
+        var collapseEnd = survey.NewestUtc!.Value.AddSeconds(1);
+
         try
         {
-            /* The half-open upper bound has to include the newest collapsed row, hence the one-second nudge:
-               the survey reports the newest collection_time itself, not a bound past it. */
-            removed = await QueryStoreSliceRepair.CollapseSliceAsync(
-                connection, survey.OldestUtc!.Value, survey.NewestUtc!.Value.AddSeconds(1), cancellationToken);
+            while (sliceStart < collapseEnd)
+            {
+                var sliceEnd = sliceStart.AddDays(1);
+                if (sliceEnd > collapseEnd)
+                {
+                    sliceEnd = collapseEnd;
+                }
+
+                removed += await QueryStoreSliceRepair.CollapseSliceAsync(
+                    connection, sliceStart, sliceEnd, cancellationToken);
+
+                sliceStart = sliceEnd;
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            error.WriteLine($"  The collapse failed and was rolled back: {ex.Message}");
+            /* Each slice is its own transaction, so earlier slices are already committed and are not lost —
+               and the collapse is idempotent, so re-running picks up where this stopped. */
+            error.WriteLine($"  The collapse failed after {removed:N0} row(s); the failing slice was rolled back: {ex.Message}");
+            error.WriteLine("  Slices already committed are safe. Re-run to continue — the repair is idempotent.");
             return 1;
         }
 

@@ -387,12 +387,18 @@ FROM (SELECT COUNT(*) AS c FROM read_parquet('{EscapePath(file)}') GROUP BY {str
         long removed = 0;
         var failures = new List<string>(survey.Unreadable);
 
-        using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync(cancellationToken);
-
         if (survey.HotGroups > 0)
         {
+            /* WRITE LOCK — the collapse MUTATES table data, and the CHECKPOINT that follows reorganizes the
+               database file. A reader mid-query when that happens gets "Reached the end of the file". The read
+               lock permits concurrent readers by design, and this service is fired un-awaited at startup
+               precisely so the UI stays interactive, so the UI genuinely can be reading while this runs. Same
+               idiom, and the same reasoning, as ArchiveService's purge. Held only around the mutation, not
+               around the survey or the archive rewrites. */
+            using var writeLock = _duckDb.AcquireWriteLock();
+            using var connection = _duckDb.CreateConnection();
+            await connection.OpenAsync(cancellationToken);
+
             var hotColumns = await ColumnsOfTableAsync(connection, Table, cancellationToken);
             var key = KeyColumnsFor(hotColumns);
             var projection = BuildProjection(hotColumns, key);
@@ -442,7 +448,7 @@ HAVING COUNT(*) > 1";
         {
             try
             {
-                removed += await RewriteArchiveFileAsync(connection, file, progress, cancellationToken);
+                removed += await RewriteArchiveFileAsync(file, progress, cancellationToken);
                 rewroteArchive = true;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -464,27 +470,49 @@ HAVING COUNT(*) > 1";
         return new RepairResult(removed, failures);
     }
 
+    /// <summary>
+    /// Rewrites one archive file and promotes it.
+    ///
+    /// <para><b>The two phases take DIFFERENT locks, per file.</b> Reading the original and writing the temp
+    /// sibling touches nothing any reader can see, so it runs under the READ lock and collection carries on.
+    /// Only the promotion — where the bytes behind a live path are replaced — needs exclusivity, and it takes
+    /// the WRITE lock for that instant alone. Per file rather than once around the whole run: a store with a
+    /// large archive would otherwise freeze the UI for the entire repair when only the swap instants require
+    /// it, and the swaps are the fast part.</para>
+    /// </summary>
     private async Task<long> RewriteArchiveFileAsync(
-        DuckDBConnection connection, ArchiveFileSurvey file, IProgress<string>? progress, CancellationToken cancellationToken)
+        ArchiveFileSurvey file, IProgress<string>? progress, CancellationToken cancellationToken)
     {
-        var columns = await ColumnsOfParquetAsync(connection, file.Path, cancellationToken);
-        var key = KeyColumnsFor(columns);
-        var projection = BuildProjection(columns, key);
-
         var temp = file.Path + ".repair-tmp";
         var beforeBytes = new FileInfo(file.Path).Length;
+        long rewrittenRows;
+        long rewrittenExecutions;
 
-        await ArchiveService.WithRaisedCopyMemoryLimit(connection, async () =>
+        /* READ LOCK: everything up to and including verification. The original is only read; the only thing
+           written is the temp sibling, which nothing else knows about yet. */
+        using (_duckDb.AcquireReadLock())
         {
-            using var command = connection.CreateCommand();
-            command.CommandText = $@"
+            using var connection = _duckDb.CreateConnection();
+            await connection.OpenAsync(cancellationToken);
+
+            var columns = await ColumnsOfParquetAsync(connection, file.Path, cancellationToken);
+            var key = KeyColumnsFor(columns);
+            var projection = BuildProjection(columns, key);
+
+            await ArchiveService.WithRaisedCopyMemoryLimit(connection, async () =>
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText = $@"
 COPY (
     SELECT {projection}
     FROM read_parquet('{EscapePath(file.Path)}')
     GROUP BY {string.Join(", ", key)}
 ) TO '{EscapePath(temp)}' (FORMAT PARQUET, COMPRESSION ZSTD)";
-            await command.ExecuteNonQueryAsync(cancellationToken);
-        });
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            });
+
+            (rewrittenRows, rewrittenExecutions) = await MeasureRewrittenAsync(connection, temp, cancellationToken);
+        }
 
         /* VERIFY BEFORE PROMOTING — this is the safety, since no backup copy is kept (the v39 migration kept
            none either). Two CONSERVATION invariants, not a smoke test, and they are the ones the collapse's own
@@ -502,18 +530,6 @@ COPY (
            next launch retries: the pre-fix signature makes the repair idempotent, and until it succeeds the
            union_by_name view keeps reading the un-rewritten file with the #1907 read-side tie-break still
            resolving it deterministically. A half-repaired archive is therefore a delay, never a corruption. */
-        long rewrittenRows;
-        long rewrittenExecutions;
-        using (var verify = connection.CreateCommand())
-        {
-            verify.CommandText =
-                $"SELECT COUNT(*), CAST(COALESCE(SUM(execution_count), 0) AS BIGINT) FROM read_parquet('{EscapePath(temp)}')";
-            using var reader = await verify.ExecuteReaderAsync(cancellationToken);
-            await reader.ReadAsync(cancellationToken);
-            rewrittenRows = Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture);
-            rewrittenExecutions = Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture);
-        }
-
         var expectedRows = file.Rows - file.RowsRemoved;
         var name = Path.GetFileName(file.Path);
 
@@ -526,7 +542,14 @@ COPY (
                 $"(expected {file.Executions:N0}). The original was left untouched and will be retried.");
         }
 
-        await PromoteRewrittenFileAsync(connection, file.Path, temp, cancellationToken);
+        /* WRITE LOCK, for the swap instant only — this is where a live path's bytes are replaced, and a reader
+           mid-read_parquet on it would otherwise fail. */
+        using (_duckDb.AcquireWriteLock())
+        {
+            using var connection = _duckDb.CreateConnection();
+            await connection.OpenAsync(cancellationToken);
+            await PromoteRewrittenFileAsync(connection, file.Path, temp, cancellationToken);
+        }
 
         var afterBytes = new FileInfo(file.Path).Length;
 
@@ -587,6 +610,20 @@ COPY (
 
         await FlushExternalFileCacheAsync(connection, cancellationToken);
         await _duckDb.CreateArchiveViewsAsync();
+    }
+
+    /// <summary>The rewritten file's row count and total execution count, for the conservation check.</summary>
+    private static async Task<(long Rows, long Executions)> MeasureRewrittenAsync(
+        DuckDBConnection connection, string path, CancellationToken cancellationToken)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            $"SELECT COUNT(*), CAST(COALESCE(SUM(execution_count), 0) AS BIGINT) FROM read_parquet('{EscapePath(path)}')";
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await reader.ReadAsync(cancellationToken);
+        return (
+            Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture),
+            Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture));
     }
 
     /// <summary>

@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitorLite.Database;
@@ -304,7 +305,66 @@ public sealed class QueryStoreSliceRepairTests : IClassFixture<SharedDuckDbFixtu
         Assert.True(await service.AlreadyRepairedAsync());
     }
 
+    /// <summary>
+    /// Source guard: every phase of the repair that MUTATES must sit inside a write-lock scope.
+    ///
+    /// <para>The read lock permits concurrent readers by design — that is what it is for — and this service is
+    /// fired un-awaited at startup precisely so the UI stays interactive, so a UI reader genuinely can be
+    /// mid-<c>read_parquet</c> while the repair runs. Mutating under the READ lock therefore races it: DuckDB
+    /// answers "Reached the end of the file" / "No magic bytes found at end of file" to a reader whose file
+    /// moved underneath it. <c>ArchiveService</c> already documents this exact hazard on its own purge, which
+    /// is the idiom mirrored here.</para>
+    ///
+    /// <para>A source guard rather than a behavioral test because the failure needs a reader racing a writer at
+    /// the wrong instant — reproducible in the field, miserable to force deterministically in a test. What CAN
+    /// be pinned is the structure: the hot-table collapse and the file promotion are inside
+    /// <c>AcquireWriteLock</c>, the rewrite-to-temp is not, and nobody has quietly wrapped the whole run in one
+    /// write lock (which would freeze the UI for a large archive repair when only the swap instants need it).</para>
+    /// </summary>
+    [Fact]
+    public void EveryMutatingPhase_SitsInsideAWriteLockScope()
+    {
+        var source = File.ReadAllText(SourcePath("Lite", "Services", "QueryStoreSliceRepairService.cs"));
+
+        /* Exactly two write-lock scopes: the hot-table collapse, and the per-file promotion. */
+        var writeLocks = Regex.Matches(source, @"_duckDb\.AcquireWriteLock\(\)").Count;
+        Assert.Equal(2, writeLocks);
+
+        /* The hot collapse's DELETE/INSERT must follow a write-lock acquisition, not a read-lock one. */
+        var hotLock = source.IndexOf("using var writeLock = _duckDb.AcquireWriteLock();", StringComparison.Ordinal);
+        var hotDelete = source.IndexOf($"DELETE FROM {{Table}} AS t WHERE EXISTS", StringComparison.Ordinal);
+        Assert.True(hotLock > 0, "the hot-table collapse must take the write lock");
+        Assert.True(hotDelete > hotLock, "the hot-table DELETE must sit inside the write-lock scope");
+
+        /* The promotion — the only place a live path's bytes are replaced — is called from inside a write
+           lock, and the swap itself never appears outside that helper. */
+        Assert.Contains("using (_duckDb.AcquireWriteLock())", source, StringComparison.Ordinal);
+        Assert.Single(Regex.Matches(source, @"await PromoteRewrittenFileAsync\("));
+        Assert.Single(Regex.Matches(source, @"File\.Move\("));
+
+        /* And the REWRITE stays under the read lock: writing a temp sibling nothing can see yet must not take
+           the UI's exclusivity for the whole of a large archive rewrite. */
+        Assert.Contains("using (_duckDb.AcquireReadLock())", source, StringComparison.Ordinal);
+        var readLock = source.IndexOf("using (_duckDb.AcquireReadLock())", StringComparison.Ordinal);
+        var copyToTemp = source.IndexOf("COMPRESSION ZSTD)\";", StringComparison.Ordinal);
+        Assert.True(copyToTemp > readLock, "the rewrite-to-temp belongs under the read lock, not the write lock");
+    }
+
     /* ─────────────────────────── helpers ─────────────────────────── */
+
+    /// <summary>Walks up from the test binary to the repo root so the pin works from any run directory.</summary>
+    private static string SourcePath(params string[] parts)
+    {
+        var dir = AppContext.BaseDirectory;
+        while (dir is not null && !File.Exists(Path.Combine(dir, "PerformanceMonitor.sln")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.True(dir is not null, "could not locate the repository root from " + AppContext.BaseDirectory);
+        return Path.Combine([dir!, .. parts]);
+    }
+
 
     private async Task<DuckDBConnection> SeedConnectionAsync()
     {
