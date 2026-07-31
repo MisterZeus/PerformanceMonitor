@@ -653,6 +653,18 @@ public static class FactRemediation
         if (element.ValueKind != JsonValueKind.Array)
             return targets;
 
+        /* #1850: the drill-down is now per-REPLICA — on an AG primary with Query Store for secondary
+           replicas enabled, one query can regress on the primary AND on a secondary and arrive as two
+           rows differing in replica_role, each with its own best_plan_id. Forcing a plan is per query,
+           not per replica, so emitting both would render two sp_query_store_force_plan calls naming the
+           SAME query with DIFFERENT plan ids — mutually exclusive instructions where whichever the
+           operator runs last silently wins. Keep the first occurrence per (database, query_id): the SQL
+           orders by regression_factor DESC, so that is the worst regression, consistent with the cap of
+           5 already taking the worst five. Which replica's regression SHOULD drive the recommendation
+           (and whether a read-only secondary's regression should recommend forcing on the primary at
+           all) is a product question, tracked as #1882 — this only stops the contradiction. */
+        var seen = new HashSet<(string Database, long QueryId)>();
+
         foreach (var row in element.EnumerateArray())
         {
             if (targets.Count >= 5) break;
@@ -662,6 +674,9 @@ public static class FactRemediation
             var queryId = GetInt64(row, "query_id");
             var bestPlanId = GetInt64(row, "best_plan_id");
             if (string.IsNullOrEmpty(database) || queryId <= 0 || bestPlanId <= 0)
+                continue;
+
+            if (!seen.Add((database, queryId)))
                 continue;
 
             targets.Add(new ForcePlanTarget(

@@ -488,6 +488,12 @@ public class AlertHistoryRow
         /* Count metrics — whole-number event counts. */
         "Blocking Detected" or "Deadlocks Detected" or "Failed Agent Job" => $"{value:F0}",
 
+        /* #1846: a state-only metric never had a number — its display value was a role, a connection
+           state or the literal "resolved", which the write side's digit-scanning parser turns into the
+           0 sentinel because the column is NOT NULL. Render the dash instead of inventing "0.00".
+           Gated on value == 0 so a future producer that starts passing a real numeric still shows it. */
+        _ when value == 0 && AlertMetricClassifier.IsStateOnly(metricName) => AlertMetricClassifier.StateOnlyDisplay,
+
         _ => $"{value:F2}"
     };
 }
