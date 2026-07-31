@@ -1224,12 +1224,19 @@
                                      TextWrapping="Wrap"/>
                         </ScrollViewer>
                     </Border>
-                    <Button x:Name="CopyDiagnosticsButton"
-                            Content="Copy details"
-                            Style="{StaticResource DarkButton}"
-                            HorizontalAlignment="Right"
-                            Margin="0,8,0,0"
-                            Click="OnCopyDiagnosticsClick"/>
+                    <!-- The overlay covers the sidebar, so its View Log button is unreachable exactly when
+                         it is most wanted; carry one here. The log holds what this block deliberately
+                         omits — the exception and its inner chain. -->
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
+                        <Button x:Name="CopyDiagnosticsButton"
+                                Content="Copy details"
+                                Style="{StaticResource DarkButton}"
+                                Click="OnCopyDiagnosticsClick"/>
+                        <Button Content="View Log"
+                                Style="{StaticResource DarkButton}"
+                                Margin="8,0,0,0"
+                                Click="ViewLogButton_Click"/>
+                    </StackPanel>
                 </StackPanel>
             </StackPanel>
         </Border>
