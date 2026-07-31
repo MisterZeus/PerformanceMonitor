@@ -840,15 +840,36 @@ public static class FactRemediation
     /// case, so a secondary's regression is not something to discard), it just stops being silent about
     /// what it is recommending.
     ///
-    /// <para>The scoped form is described rather than spelled out as a paste-ready statement, and that
-    /// is deliberate. <c>@replica_group_id</c> is the FOURTH argument, behind
-    /// <c>@disable_optimized_plan_forcing</c>, and the same doc page warns that "Arguments for extended
-    /// stored procedures must be entered in the specific order as described in the Syntax section. If
-    /// the parameters are entered out of order, an error message occurs." Emitting a three-argument call
-    /// that skips the third would be guessing at whether that warning tolerates a named-argument skip,
-    /// and emitting a four-argument call would mean inventing a value for a parameter whose default the
-    /// docs do not state. A lookup query whose column names ARE documented, plus the URL, beats a
-    /// copy-paste line that might error on the box it was written for.</para>
+    /// <para>The scoped form is described rather than spelled out as a paste-ready statement, and #1914
+    /// probed the reason live rather than leaving it as the doubt #1882 recorded. <c>sp_query_store_force_plan</c>
+    /// is an <c>EXTENDED_STORED_PROCEDURE</c>, so <c>sys.system_parameters</c> is EMPTY for it and its
+    /// argument surface can only be established by execution. Measured on SQL Server 2022 (16.0.4255.1)
+    /// and SQL Server 2025 (17.0.4045.5), each call form run from a freshly-unforced plan:</para>
+    /// <list type="bullet">
+    /// <item><b>The documented four-argument order does not work.</b>
+    /// <c>@query_id, @plan_id, @disable_optimized_plan_forcing = 0, @replica_group_id = 1</c> fails on
+    /// BOTH versions with error 12463, "Role id should be between (including) 1 and 4" — for a role id of
+    /// 1, which is in that range. The same call with <c>@disable_optimized_plan_forcing = 1</c> succeeds.
+    /// So the form the reference page's syntax block prescribes is the one that errors.</item>
+    /// <item><b>The three-argument named call, skipping the middle argument, is the form that works</b> —
+    /// on both versions. Named arguments are honored and may even be REVERSED
+    /// (<c>@plan_id</c> before <c>@query_id</c> succeeds), so the doc's ordering warning does not describe
+    /// named-argument behavior at all.</item>
+    /// <item><b>Nothing protects a typo.</b> A misspelled <c>@replica_groupid</c> still reached the
+    /// replica-group logic, and an entirely invented parameter name was accepted silently with no error.
+    /// An operator hand-writing this call gets no feedback that it did something other than it says.</item>
+    /// <item><b>SQL Server 2025 does not validate the group id.</b> <c>@replica_group_id = 99</c> — not a
+    /// role at all — SUCCEEDED, and wrote a row into <c>sys.query_store_plan_forcing_locations</c> naming
+    /// replica group 99 on a standalone server with one replica. SQL Server 2022 rejects the same call
+    /// (12463). So on the version where the feature is GA, a wrong id fails silently instead of loudly.</item>
+    /// </list>
+    ///
+    /// <para>That is why this text names the lookup and stops. Emitting a computed
+    /// <c>@replica_group_id</c> would mean shipping a statement whose documented form errors, whose
+    /// working form silently tolerates a wrong value on 2025, and whose correct value re-points across
+    /// failovers (<c>sys.query_store_replicas</c> accumulates a row per (replica, role) — the docs' own
+    /// remark). The operator reading the current group ids off the live server, at the moment they act,
+    /// is the only reliable version of this. #1914 closed on that evidence.</para>
     /// </summary>
     private static void AppendSecondaryReplicaDisclosure(StringBuilder sb, ForcePlanTarget target)
     {
@@ -861,11 +882,16 @@ public static class FactRemediation
         sb.AppendLine("-- the primary in every case, and its @replica_group_id argument defaults to the primary");
         sb.AppendLine("-- when omitted -- so running this as written changes the plan the primary's WRITE workload");
         sb.AppendLine("-- gets, on the strength of what a read-only replica did. Decide that on purpose.");
-        sb.AppendLine("-- To scope the force to that replica instead, find its replica_group_id and pass it as the");
-        sb.AppendLine("-- fourth argument (they are extended stored procedure arguments, so the documented order");
-        sb.AppendLine("-- matters -- see the reference page):");
+        sb.AppendLine("-- To scope the force to that replica instead, read the CURRENT group ids off this server");
+        sb.AppendLine("-- and add @replica_group_id as a THIRD named argument:");
         sb.AppendLine("--   SELECT replica_group_id, replica_name, role_type FROM sys.query_store_replicas;");
+        sb.AppendLine($"--   EXEC sys.sp_query_store_force_plan @query_id = {target.QueryId}, @plan_id = {target.PlanId}, @replica_group_id = <id>;");
+        sb.AppendLine("-- Check the id against that SELECT first. SQL Server 2025 accepts a group id that does");
+        sb.AppendLine("-- not exist WITHOUT error and records the forcing against it; 2022 rejects it. Do not add");
+        sb.AppendLine("-- @disable_optimized_plan_forcing to reach it -- the four-argument form the reference page");
+        sb.AppendLine("-- documents fails on both versions (error 12463) unless that argument is 1.");
         sb.AppendLine("--   https://learn.microsoft.com/en-us/sql/relational-databases/system-stored-procedures/sp-query-store-force-plan-transact-sql");
+        sb.AppendLine("--   https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-query-store-replicas");
         sb.AppendLine("--");
     }
 

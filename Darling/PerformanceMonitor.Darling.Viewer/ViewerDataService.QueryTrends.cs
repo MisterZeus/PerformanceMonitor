@@ -141,8 +141,16 @@ public sealed partial class ViewerDataService
                     ) AS rn
                 FROM query_store_stats
                 WHERE server_id = $1
-                AND   collection_time >= $2
-                AND   collection_time <= $3
+                /* Windowed on the column this arm PLACES its points at (#1892), which inside the IS NOT NULL
+                   guard below is what COALESCE(interval_start_time_utc, collection_time) resolves to anyway.
+                   Filtering on collection_time here put a point outside the range the caller asked for, and
+                   dropped the range's final interval because its closing fetch had not happened yet. */
+                AND   interval_start_time_utc >= $2
+                AND   interval_start_time_utc <= $3
+                /* Chunk-exclusion bounds only; see the slicer for why the floor is free and why the ceiling
+                   is a month rather than tight. */
+                AND   collection_time >= $2 - interval '1 day'
+                AND   collection_time <= $3 + interval '30 days'
                 AND   interval_start_time_utc IS NOT NULL
                 AND   ($4::text[] IS NULL OR database_name = ANY($4))
             ) AS identified
