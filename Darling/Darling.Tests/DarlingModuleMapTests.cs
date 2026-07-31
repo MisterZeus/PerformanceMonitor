@@ -83,6 +83,7 @@ public sealed class DarlingModuleMapTests
         /* module_map is RUNTIME setup, not a migration — EnsureTableAsync creates it (and is itself under test). */
         Assert.True(await DarlingModuleMap.EnsureTableAsync(connection, null, ct));
         await DeleteTestRowsAsync(connection, ct);
+        var bodySucceeded = false;
         try
         {
             var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
@@ -116,10 +117,13 @@ public sealed class DarlingModuleMapTests
             await InsertProcAsync(connection, utcNow.AddDays(-1), "0xMODMAP_A", "neword_stale", ct);
             await DarlingModuleMap.RefreshAsync(connection, null, ct);
             Assert.Equal("neword_v2", await ObjectNameForAsync(connection, "0xMODMAP_A", ct));
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteTestRowsAsync(connection, ct);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteTestRowsAsync(cleanup, cleanupCt));
         }
     }
 

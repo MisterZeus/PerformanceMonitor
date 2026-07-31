@@ -2076,13 +2076,14 @@ public sealed class ComposeQueryStoreLivePostgresTests
         using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-        await DeleteAsync(connection);
+        await DeleteAsync(connection, TestContext.Current.CancellationToken);
 
         var end = new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
         var bucket = end.AddHours(-2);
         var firstExecA = bucket.AddMinutes(1);
         var firstExecB = bucket.AddMinutes(2);
 
+        var bodySucceeded = false;
         try
         {
             /* Interval A re-collected three times with a FLAT count of 1, interval B twice while it grew
@@ -2127,18 +2128,21 @@ public sealed class ComposeQueryStoreLivePostgresTests
             }
 
             Assert.Equal(41.0, total, 3);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteAsync(connection);
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteAsync(cleanup, cleanupCt));
         }
     }
 
-    private static async Task DeleteAsync(NpgsqlConnection connection)
+    private static async Task DeleteAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var command = new NpgsqlCommand("DELETE FROM collect.query_store_stats WHERE server_id = $1", connection);
         command.Parameters.AddWithValue(ServerId);
-        await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        await command.ExecuteNonQueryAsync(ct);
     }
 
     private static async Task InsertAsync(
