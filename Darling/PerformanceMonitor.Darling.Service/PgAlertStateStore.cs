@@ -136,7 +136,13 @@ AND   watermark_time IS NOT NULL", connection);
             await using var connection = await _postgres.OpenConnectionAsync();
             /* watermark (the INTEGER count column) is unused for the time-based failed-job row;
                it is non-nullable, so write 0 — Lite's exact shape. The value is server-local;
-               only the Kind flag is normalized (Npgsql rejects Kind=Utc against `timestamp`). */
+               only the Kind flag is normalized. The Kind matters, but not the way this comment
+               used to claim: Npgsql does NOT reject Kind=Utc against `timestamp` on this version
+               — it infers timestamptz and PostgreSQL casts into the SERVER'S zone, silently
+               storing a value offset from every naive-UTC timestamp in the store (measured at
+               exactly the server's UTC offset during #1969's review). The false 'it throws'
+               claim here misled two reviewers in one night; the real failure mode is quiet
+               zone-shift, which only a read-back value assertion catches. */
             using var command = new NpgsqlCommand(@"
 INSERT INTO config_edge_trigger_watermarks (server_id, metric_name, watermark, watermark_time, updated_at)
 VALUES ($1, $2, 0, $3, $4)
