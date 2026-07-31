@@ -208,7 +208,7 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --test-connection   Validate darling.json and probe every configured server." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --encrypt-password  Encrypt a SQL-auth password for darling.json (reads stdin)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --print-viewer-connection   Print a remote-viewer connection string (managed store)." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --export-viewer-config [dir]  Write a ready-to-copy viewer folder (darling.json + server.crt + README.txt)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --export-viewer-config [dir] [--config <path>]  Write a ready-to-copy viewer folder (darling.json + server.crt + README.txt)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --configure-network Interactive LAN-exposure wizard." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --configure-firewall  Create/remove the scoped firewall rules to match darling.json (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-mcp        Enable the MCP endpoint in the store and open its firewall (run elevated)." + Environment.NewLine +
@@ -527,7 +527,7 @@ public static class DarlingCliCommands
            path questions and because the failure they prevent is unrecoverable. Nothing below has touched
            DPAPI yet, so a bad argument costs nothing. */
         if (File.Exists(targetDirectory)
-            || targetDirectory.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+            || Path.TrimEndingDirectorySeparator(targetDirectory).EndsWith(".json", StringComparison.OrdinalIgnoreCase))
         {
             /* This verb's positional argument is the DESTINATION, while every sibling verb's is a config path,
                so an operator with sibling muscle memory types darling.json here. */
@@ -690,13 +690,13 @@ public static class DarlingCliCommands
                 if (File.Exists(configFile))
                 {
                     File.Delete(configFile);
-                    error.WriteLine($"Removed the partially-written {configFile} (it would have held part of a live password).");
+                    error.WriteLine($"Removed {configFile} (it held a live password — the whole of one if the write that failed was a later file).");
                 }
             }
             catch (Exception cleanupFailure)
             {
                 error.WriteLine(
-                    $"WARNING: {configFile} was left behind and may hold part of a live password " +
+                    $"WARNING: {configFile} was left behind and holds a live password " +
                     $"({cleanupFailure.Message}). Delete it yourself.");
             }
 
@@ -712,8 +712,10 @@ public static class DarlingCliCommands
         }
 
         error.WriteLine();
-        error.WriteLine($"Copy the whole folder to the viewer machine, then point DARLING_CONFIG at its {ViewerConfigFileName}");
-        error.WriteLine($"(or drop the files beside the Viewer executable). {ViewerReadmeFileName} documents every field.");
+        error.WriteLine("Copy the whole folder to the viewer machine and put the three files NEXT TO the Viewer");
+        error.WriteLine("executable — that works unedited. To keep them elsewhere, point DARLING_CONFIG at the");
+        error.WriteLine($"{ViewerConfigFileName} and change its \"Root Certificate\" to the full path of the {ViewerClientCertificateFileName}");
+        error.WriteLine($"beside it (a bare name follows the Viewer's working directory). {ViewerReadmeFileName} explains every field.");
         error.WriteLine("Re-run this command after the store's certificate is regenerated (a changed bind IP rotates it).");
         error.WriteLine();
 
@@ -740,6 +742,58 @@ public static class DarlingCliCommands
     /// own file is replaced silently; anything lacking this line stops the run.
     /// </summary>
     public const string ViewerConfigMarker = "PerformanceMonitor Darling - VIEWER configuration.";
+
+    /// <summary>
+    /// Parses <c>--export-viewer-config</c>'s arguments STRICTLY, in the spirit of #1581's classifier: never
+    /// guess. A last-wins loop like the sibling <c>--dry-run</c> verbs' would take an unrecognized flag as the
+    /// DESTINATION — and a bare <c>--config</c> with no value would write a live cleartext password to a
+    /// folder literally named <c>--config</c>, under whatever the working directory is (for the elevated
+    /// prompt the docs prescribe, <c>C:\Windows\System32</c>). Returns false with a ready-to-print
+    /// <paramref name="errorMessage"/> on anything unrecognized. Pure — unit-testable, which is why it lives
+    /// here rather than inline in Program.
+    /// </summary>
+    /// <param name="rest">The arguments AFTER the verb itself.</param>
+    public static bool TryParseExportViewerConfigArgs(
+        string[] rest, out string? configPath, out string? outputDirectory, out string? errorMessage)
+    {
+        configPath = null;
+        outputDirectory = null;
+        errorMessage = null;
+
+        for (var i = 0; i < rest.Length; i++)
+        {
+            var arg = rest[i];
+            if (string.Equals(arg, "--config", StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 >= rest.Length)
+                {
+                    errorMessage = "--config needs a path: --export-viewer-config [directory] --config <path to darling.json>";
+                    return false;
+                }
+
+                configPath = rest[++i];
+                continue;
+            }
+
+            if (arg.StartsWith('-'))
+            {
+                errorMessage =
+                    $"Unknown option for --export-viewer-config: {arg}" + Environment.NewLine +
+                    "Usage: --export-viewer-config [destination directory] [--config <path to darling.json>]";
+                return false;
+            }
+
+            if (outputDirectory is not null)
+            {
+                errorMessage = $"--export-viewer-config takes ONE destination directory; got '{outputDirectory}' and '{arg}'.";
+                return false;
+            }
+
+            outputDirectory = arg;
+        }
+
+        return true;
+    }
 
     /// <summary>
     /// Where <see cref="ExportViewerConfigAsync"/> writes: the operator's directory when they named one,
@@ -776,11 +830,15 @@ public static class DarlingCliCommands
         "  //" + Environment.NewLine +
         "  // THIS FILE CONTAINS A LIVE DATABASE PASSWORD. Keep it ACL'd to the operator account." + Environment.NewLine +
         "  //" + Environment.NewLine +
-        "  // Where it goes on the viewer machine (first match wins):" + Environment.NewLine +
-        "  //   1. the path in the DARLING_CONFIG environment variable" + Environment.NewLine +
-        "  //   2. darling.json beside the Viewer executable" + Environment.NewLine +
-        "  //   3. darling.json one folder up (the release zip puts the Viewer in a viewer\\ subfolder)" + Environment.NewLine +
-        "  // Keep server.crt in the SAME folder you launch the Viewer from (see Root Certificate below)." + Environment.NewLine +
+        "  // WHERE TO PUT THESE FILES on the viewer machine:" + Environment.NewLine +
+        "  //   Copy all three next to the Viewer executable. That works with nothing edited, because" + Environment.NewLine +
+        "  //   the Viewer finds darling.json beside itself AND server.crt resolves from there too" + Environment.NewLine +
+        "  //   (see Root Certificate below - a bare name follows the Viewer's working directory)." + Environment.NewLine +
+        "  //" + Environment.NewLine +
+        "  //   To keep them somewhere else instead, point the DARLING_CONFIG environment variable at" + Environment.NewLine +
+        "  //   this file - but then ALSO change Root Certificate below to the FULL path of the" + Environment.NewLine +
+        "  //   server.crt beside it, or the Viewer will not find the certificate." + Environment.NewLine +
+        "  //   (The Viewer also looks one folder up from itself, for the release zip's viewer\\ layout.)" + Environment.NewLine +
         "  \"postgres\": {" + Environment.NewLine +
         "    // false = this machine does not RUN a store, it connects to one. The service host's own" + Environment.NewLine +
         "    // darling.json says true; that flag is about who OWNS the PostgreSQL, not who is connecting." + Environment.NewLine +
@@ -797,12 +855,13 @@ public static class DarlingCliCommands
         "    //                    downgrade it to Require: that keeps the encryption but stops verifying the" + Environment.NewLine +
         "    //                    certificate, so Root Certificate below would be ignored entirely." + Environment.NewLine +
         "    //   Root Certificate the server.crt exported beside this file. Valid values:" + Environment.NewLine +
-        "    //                      server.crt            a bare name, resolved against the Viewer's" + Environment.NewLine +
-        "    //                                            WORKING DIRECTORY - correct when the Viewer is" + Environment.NewLine +
-        "    //                                            launched from this folder, which a desktop" + Environment.NewLine +
-        "    //                                            shortcut may not do" + Environment.NewLine +
-        "    //                      C:\\Darling\\server.crt  an absolute path - always correct, and the fix if a" + Environment.NewLine +
-        "    //                                            connection fails on the certificate" + Environment.NewLine +
+        "    //                      server.crt              a bare name, resolved against the Viewer's" + Environment.NewLine +
+        "    //                                              WORKING DIRECTORY. Correct when the three" + Environment.NewLine +
+        "    //                                              files sit beside the Viewer executable." + Environment.NewLine +
+        "    //                      C:\\Darling\\server.crt   an absolute path - always correct, and what" + Environment.NewLine +
+        "    //                                              this must become if you keep the files" + Environment.NewLine +
+        "    //                                              anywhere else, or a connection fails on the" + Environment.NewLine +
+        "    //                                              certificate" + Environment.NewLine +
         "    //                    It must be the PEM the SERVICE generated (exported beside this file);" + Environment.NewLine +
         "    //                    VerifyFull rejects any other certificate, including a re-issued one." + Environment.NewLine +
         $"    \"connectionString\": {JsonSerializer.Serialize(connectionString)}" + Environment.NewLine +
@@ -822,8 +881,13 @@ public static class DarlingCliCommands
         $"Generated by --export-viewer-config at {generatedUtc.ToUniversalTime():yyyy-MM-dd HH:mm:ss}Z on the service host." + Environment.NewLine +
         Environment.NewLine +
         "TO USE IT" + Environment.NewLine +
-        "  Copy this folder to the viewer machine and set DARLING_CONFIG to the darling.json inside it" + Environment.NewLine +
-        $"  (or copy the files next to the Viewer executable). Then start the Viewer - nothing to edit." + Environment.NewLine +
+        "  Copy these three files next to the Viewer executable on the viewer machine, then start the" + Environment.NewLine +
+        "  Viewer. Nothing to edit." + Environment.NewLine +
+        Environment.NewLine +
+        "  To keep the folder somewhere else instead, set the DARLING_CONFIG environment variable to the" + Environment.NewLine +
+        "  darling.json inside it AND change Root Certificate in that file to the full path of the" + Environment.NewLine +
+        "  server.crt beside it - a bare file name follows the Viewer's working directory, not this" + Environment.NewLine +
+        "  folder, so that one edit is what makes an out-of-the-way folder work. See THE FIELDS below." + Environment.NewLine +
         Environment.NewLine +
         "WHAT IS IN HERE" + Environment.NewLine +
         $"  {ViewerConfigFileName}      the Viewer's configuration. CONTAINS A LIVE DATABASE PASSWORD - treat it as a secret," + Environment.NewLine +
@@ -845,7 +909,7 @@ public static class DarlingCliCommands
         "          the least-privilege store role: viewer = read-only, admin = read plus the" + Environment.NewLine +
         "          Viewer's config writes." + Environment.NewLine +
         "      Password=<that role's live password>" + Environment.NewLine +
-        "          filled in for you; it is in darling.json and nowhere else, this file included." + Environment.NewLine +
+        "          filled in for you. It is in darling.json and nowhere else, including this file." + Environment.NewLine +
         "      Database=darling" + Environment.NewLine +
         "          always." + Environment.NewLine +
         "      Search Path=collect,config,public" + Environment.NewLine +
@@ -857,11 +921,11 @@ public static class DarlingCliCommands
         $"      Root Certificate={ViewerClientCertificateFileName}" + Environment.NewLine +
         "          the certificate exported beside darling.json. Valid values:" + Environment.NewLine +
         "            server.crt              a bare name, resolved against the Viewer's" + Environment.NewLine +
-        "                                    WORKING DIRECTORY. Correct when the Viewer is" + Environment.NewLine +
-        "                                    launched from this folder; a desktop shortcut can" + Environment.NewLine +
-        "                                    set a different working directory." + Environment.NewLine +
-        "            C:\\Darling\\server.crt   an absolute path - always correct. Switch to this if" + Environment.NewLine +
-        "                                    a connection fails on the certificate." + Environment.NewLine +
+        "                                    WORKING DIRECTORY. Correct when these three files" + Environment.NewLine +
+        "                                    sit beside the Viewer executable." + Environment.NewLine +
+        "            C:\\Darling\\server.crt   an absolute path - always correct, and what this must" + Environment.NewLine +
+        "                                    become if you keep the files anywhere else, or a" + Environment.NewLine +
+        "                                    connection fails on the certificate." + Environment.NewLine +
         "          It must be the PEM the SERVICE generated; VerifyFull rejects any other" + Environment.NewLine +
         "          certificate, including a re-issued one." + Environment.NewLine +
         Environment.NewLine +
@@ -876,10 +940,10 @@ public static class DarlingCliCommands
     /// ACLs the exported darling.json down to SYSTEM + Administrators + this account + INTERACTIVE (the
     /// admin/viewer-credential posture — the Viewer reads it interactively), so it does not sit in a folder
     /// that inherited BUILTIN\Users read, then CONFIRMS the result. Returns whether the file is protected —
-    /// "we tried" is not the same claim as "the secret is not readable", which is why every sibling harden
-    /// site pairs the call with <see cref="DarlingFileSecurity.IsReadableByOrdinaryUsers"/> and why the
-    /// caller's exit code depends on this answer. Never throws: the export's value is the file, so a failure
-    /// is reported with the icacls that fixes it rather than throwing the folder away.
+    /// "we tried" is not the same claim as "the secret is not readable", which is why the credential-writing
+    /// harden sites pair the call with <see cref="DarlingFileSecurity.IsReadableByOrdinaryUsers"/> and why
+    /// the caller's exit code depends on this answer. Never throws: the export's value is the file, so a
+    /// failure is reported with the icacls that fixes it rather than throwing the folder away.
     /// </summary>
     [SupportedOSPlatform("windows")]
     private static bool TryHardenExportedSecret(string path, TextWriter error)

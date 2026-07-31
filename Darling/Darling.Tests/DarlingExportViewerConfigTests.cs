@@ -8,6 +8,7 @@
 
 using System;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -141,6 +142,46 @@ public sealed class DarlingExportViewerConfigTests
 
         /* And why VerifyFull must not be "helpfully" downgraded to Require (it silently voids the pin). */
         Assert.Contains("Require", json, StringComparison.Ordinal);
+
+        /* ASCII only, same as the README: this lands on a machine with an unknown console code page. */
+        Assert.All(json, c => Assert.True(c < 128, $"non-ASCII character '{c}' in the exported darling.json"));
+    }
+
+    /// <summary>
+    /// The instruction the export leads with has to be the one that WORKS unedited. A bare
+    /// <c>Root Certificate=server.crt</c> resolves against the Viewer's working directory, so
+    /// "copy the files beside the Viewer executable" works as-is while "put the folder anywhere and point
+    /// DARLING_CONFIG at it" needs the certificate path made absolute — the export must not promise the
+    /// second without that condition (#1970 is the viewer-side fix that would remove the condition).
+    /// </summary>
+    [Fact]
+    public void ExportedDocs_LeadWithTheInstructionThatWorksUnedited_AndQualifyTheOtherOne()
+    {
+        var json = DarlingCliCommands.BuildViewerConfigJson("Host=h;Database=darling", DateTimeOffset.UnixEpoch);
+        var readme = DarlingCliCommands.BuildViewerConfigReadme("h", 5641, "viewer", DateTimeOffset.UnixEpoch);
+
+        foreach (var text in new[] { json, readme })
+        {
+            /* The FIRST mention of either phrasing — both texts also repeat "beside the Viewer executable"
+               further down, in the Root Certificate reference, and it is the lead instruction being pinned. */
+            var besideTheExe = new[] { "beside the Viewer executable", "next to the Viewer executable" }
+                .Select(phrase => text.IndexOf(phrase, StringComparison.Ordinal))
+                .Where(at => at >= 0)
+                .DefaultIfEmpty(-1)
+                .Min();
+            var darlingConfig = text.IndexOf("DARLING_CONFIG", StringComparison.Ordinal);
+
+            Assert.True(besideTheExe >= 0, "the beside-the-executable placement is not documented");
+            Assert.True(darlingConfig >= 0, "the DARLING_CONFIG placement is not documented");
+            Assert.True(
+                besideTheExe < darlingConfig,
+                "DARLING_CONFIG is offered before the placement that works unedited");
+        }
+
+        /* And the DARLING_CONFIG route names its condition rather than implying "nothing to edit"
+           (case-insensitive — the JSON shouts FULL, the README does not; the condition is what matters). */
+        Assert.Contains("full path", json, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("full path", readme, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>The README is the same reference for an operator who never opens JSON — and it must NOT be a
@@ -377,13 +418,8 @@ public sealed class DarlingExportViewerConfigTests
         var root = Directory.CreateTempSubdirectory("darling-export-miscue-");
         try
         {
+            /* As above: the argument-shape guard precedes the config load, so no DPAPI material is needed. */
             var dataDirectory = Path.Combine(root.FullName, "pg");
-            var credentialPath = DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory);
-            File.WriteAllText(credentialPath, DarlingSecrets.Protect("viewer-secret-pw"));
-            File.WriteAllText(
-                Path.Combine(Path.GetDirectoryName(credentialPath)!, DarlingManagedPostgres.ServerCertFileName),
-                Pem);
-
             var configPath = Path.Combine(root.FullName, "darling.json");
             await File.WriteAllTextAsync(configPath, ManagedConfigJson(dataDirectory));
 
@@ -424,13 +460,10 @@ public sealed class DarlingExportViewerConfigTests
         var root = Directory.CreateTempSubdirectory("darling-export-selfdestruct-");
         try
         {
+            /* No credential or certificate is laid down: this guard runs BEFORE the config is even loaded,
+               which is the point — a destination that would destroy the service's config is refused without
+               decrypting anything. */
             var dataDirectory = Path.Combine(root.FullName, "pg");
-            var credentialPath = DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory);
-            File.WriteAllText(credentialPath, DarlingSecrets.Protect("viewer-secret-pw"));
-            File.WriteAllText(
-                Path.Combine(Path.GetDirectoryName(credentialPath)!, DarlingManagedPostgres.ServerCertFileName),
-                Pem);
-
             var configPath = Path.Combine(root.FullName, "darling.json");
             var original = ManagedConfigJson(dataDirectory);
             await File.WriteAllTextAsync(configPath, original);
@@ -468,13 +501,8 @@ public sealed class DarlingExportViewerConfigTests
         var root = Directory.CreateTempSubdirectory("darling-export-foreign-");
         try
         {
+            /* As above: refused before the config load, so no credential material is needed to reach it. */
             var dataDirectory = Path.Combine(root.FullName, "pg");
-            var credentialPath = DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory);
-            File.WriteAllText(credentialPath, DarlingSecrets.Protect("viewer-secret-pw"));
-            File.WriteAllText(
-                Path.Combine(Path.GetDirectoryName(credentialPath)!, DarlingManagedPostgres.ServerCertFileName),
-                Pem);
-
             var configPath = Path.Combine(root.FullName, "darling.json");
             await File.WriteAllTextAsync(configPath, ManagedConfigJson(dataDirectory));
 
@@ -491,9 +519,6 @@ public sealed class DarlingExportViewerConfigTests
             Assert.Equal(1, exit);
             Assert.Contains("not written by --export-viewer-config", error.ToString(), StringComparison.Ordinal);
             Assert.Equal(foreign, await File.ReadAllTextAsync(Path.Combine(destination, "darling.json")));
-
-            /* And no part of the credential leaked into the refusal. */
-            Assert.DoesNotContain("viewer-secret-pw", error.ToString(), StringComparison.Ordinal);
         }
         finally
         {
@@ -524,9 +549,13 @@ public sealed class DarlingExportViewerConfigTests
                 configPath, null, new StringWriter(), new StringWriter(), CancellationToken.None);
             Assert.Equal(0, first);
 
-            /* The certificate rotates, which is exactly when the docs say to re-run. */
+            /* BOTH rotate — the docs say to re-run after a credential OR certificate rotation, and rotating
+               both is what makes the re-export load-bearing: an implementation that saw its own marker and
+               SKIPPED the rewrite would still satisfy a marker-only assertion, because the marker is already
+               in the file it left alone. */
             const string rotated = "-----BEGIN CERTIFICATE-----\nMIIBROTATEDPEM\n-----END CERTIFICATE-----";
             File.WriteAllText(certPath, rotated);
+            File.WriteAllText(credentialPath, DarlingSecrets.Protect("rotated-pw"));
 
             var error = new StringWriter();
             var second = await DarlingCliCommands.ExportViewerConfigAsync(
@@ -537,10 +566,75 @@ public sealed class DarlingExportViewerConfigTests
 
             var exported = Path.Combine(root.FullName, "viewer-config");
             Assert.Contains(rotated, await File.ReadAllTextAsync(Path.Combine(exported, "server.crt")), StringComparison.Ordinal);
-            Assert.Contains(
-                DarlingCliCommands.ViewerConfigMarker,
-                await File.ReadAllTextAsync(Path.Combine(exported, "darling.json")),
-                StringComparison.Ordinal);
+
+            var rewritten = await File.ReadAllTextAsync(Path.Combine(exported, "darling.json"));
+            Assert.Contains("Password=rotated-pw", rewritten, StringComparison.Ordinal);
+            Assert.DoesNotContain("viewer-secret-pw", rewritten, StringComparison.Ordinal);
+            Assert.Contains(DarlingCliCommands.ViewerConfigMarker, rewritten, StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// A junction needs no privilege to create on Windows, which makes it the way an unprivileged local user
+    /// redirects the cleartext credential into a directory they control. Refused by inspecting the
+    /// destination's reparse-point attribute, so this pins the one destination guard whose failure mode is
+    /// silent — a wrong path or a short-circuit would simply export through the junction.
+    /// </summary>
+    [Fact]
+    public async Task ExportViewerConfigAsync_DestinationIsAJunction_Refuses()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Junctions are a Windows concept.");
+
+        var root = Directory.CreateTempSubdirectory("darling-export-junction-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            var credentialPath = DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory);
+            File.WriteAllText(credentialPath, DarlingSecrets.Protect("viewer-secret-pw"));
+            File.WriteAllText(
+                Path.Combine(Path.GetDirectoryName(credentialPath)!, DarlingManagedPostgres.ServerCertFileName),
+                Pem);
+
+            var configPath = Path.Combine(root.FullName, "darling.json");
+            await File.WriteAllTextAsync(configPath, ManagedConfigJson(dataDirectory));
+
+            /* The attacker-controlled real destination, and the junction pointing at it. */
+            var elsewhere = Path.Combine(root.FullName, "elsewhere");
+            Directory.CreateDirectory(elsewhere);
+            var junction = Path.Combine(root.FullName, "handoff");
+
+            using (var mklink = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                Arguments = $"/c mklink /J \"{junction}\" \"{elsewhere}\"",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            })!)
+            {
+                await mklink.WaitForExitAsync();
+                Assert.SkipUnless(mklink.ExitCode == 0, "could not create a junction on this machine");
+            }
+
+            var output = new StringWriter();
+            var error = new StringWriter();
+            var exit = await DarlingCliCommands.ExportViewerConfigAsync(
+                configPath, junction, output, error, CancellationToken.None);
+
+            Assert.Equal(1, exit);
+            Assert.Contains("junction or symbolic link", error.ToString(), StringComparison.Ordinal);
+            Assert.Equal("", output.ToString());
+
+            /* Nothing reached the real target the junction pointed at. */
+            Assert.Empty(Directory.GetFiles(elsewhere));
+
+            /* Remove the junction itself (a non-recursive delete unlinks it without touching the target)
+               before the recursive cleanup below, which cannot walk one. */
+            Directory.Delete(junction);
         }
         finally
         {
@@ -581,6 +675,53 @@ public sealed class DarlingExportViewerConfigTests
         {
             root.Delete(recursive: true);
         }
+    }
+
+    /* ---- the strict argument parser (pure) ---- */
+
+    [Fact]
+    public void TryParseExportViewerConfigArgs_NoArguments_TakesTheDefaults()
+    {
+        Assert.True(DarlingCliCommands.TryParseExportViewerConfigArgs([], out var config, out var directory, out var problem));
+        Assert.Null(config);
+        Assert.Null(directory);
+        Assert.Null(problem);
+    }
+
+    [Fact]
+    public void TryParseExportViewerConfigArgs_DestinationAndConfig_InEitherOrder()
+    {
+        Assert.True(DarlingCliCommands.TryParseExportViewerConfigArgs(
+            [@"D:\handoff", "--config", @"C:\Darling\darling.json"], out var config, out var directory, out _));
+        Assert.Equal(@"C:\Darling\darling.json", config);
+        Assert.Equal(@"D:\handoff", directory);
+
+        Assert.True(DarlingCliCommands.TryParseExportViewerConfigArgs(
+            ["--config", @"C:\Darling\darling.json", @"D:\handoff"], out config, out directory, out _));
+        Assert.Equal(@"C:\Darling\darling.json", config);
+        Assert.Equal(@"D:\handoff", directory);
+    }
+
+    /// <summary>
+    /// The reason this parser is strict rather than last-wins like its siblings: every one of these used to
+    /// be silently accepted as the DESTINATION, and a destination nobody chose is where a live cleartext
+    /// password would have landed — for a bare <c>--config</c>, a folder literally named "--config" under the
+    /// working directory, which for the elevated prompt the docs prescribe is C:\Windows\System32.
+    /// </summary>
+    [Theory]
+    [InlineData(new[] { "--config" }, "--config needs a path")]
+    [InlineData(new[] { "--force" }, "Unknown option")]
+    [InlineData(new[] { "-o", "out" }, "Unknown option")]
+    [InlineData(new[] { @"D:\one", @"D:\two" }, "takes ONE destination directory")]
+    [InlineData(new[] { @"D:\one", "--config", @"C:\c.json", @"D:\two" }, "takes ONE destination directory")]
+    public void TryParseExportViewerConfigArgs_Rejects_WithoutGuessingADestination(string[] rest, string expected)
+    {
+        Assert.False(DarlingCliCommands.TryParseExportViewerConfigArgs(rest, out var config, out var directory, out var problem));
+        Assert.Contains(expected, problem, StringComparison.Ordinal);
+
+        /* A rejected command must not hand the caller a half-parsed destination to write into. */
+        _ = config;
+        Assert.True(directory is null || rest.Contains(directory, StringComparer.Ordinal));
     }
 
     private static string ManagedConfigJson(string dataDirectory) =>
@@ -741,6 +882,23 @@ public sealed class DarlingPrintViewerConnectionOrderingTests
                     return;
                 }
 
+                /* A newline emits even on an empty buffer: WriteLine() with no argument is a real,
+                   order-carrying line, and swallowing it would hide a trailing STDERR write. */
+                Emit();
+            }
+
+            /// <summary>Emits whatever is buffered without waiting for a newline, so a trailing
+            /// <c>Write</c> with no line break still lands in the ordered log instead of vanishing.</summary>
+            public override void Flush()
+            {
+                if (_pending.Length > 0)
+                {
+                    Emit();
+                }
+            }
+
+            private void Emit()
+            {
                 log.Append(tag).Append(": ").Append(_pending.ToString().TrimEnd('\r')).Append('\n');
                 _pending.Clear();
             }
