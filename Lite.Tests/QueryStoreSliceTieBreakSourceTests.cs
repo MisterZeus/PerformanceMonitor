@@ -50,7 +50,7 @@ public sealed class QueryStoreSliceTieBreakSourceTests
     /// </summary>
     private static readonly (string Path, int Sites)[] DedupSites =
     [
-        (Path.Combine("Lite", "Services", "LocalDataService.QueryStore.cs"), 5),
+        (Path.Combine("Lite", "Services", "LocalDataService.QueryStore.cs"), 6),
         (Path.Combine("Lite", "Analysis", "DrillDownCollector.Queries.cs"), 1),
         (Path.Combine("Lite", "Analysis", "DuckDbFactCollector.QueryPerf.cs"), 1),
     ];
@@ -94,7 +94,7 @@ public sealed class QueryStoreSliceTieBreakSourceTests
 
         /* The count is asserted as a whole too: a file dropping to zero sites would otherwise be caught only
            by its own per-file assertion, and this states the total the fix actually swept. */
-        Assert.Equal(7, total);
+        Assert.Equal(8, total);
     }
 
     /// <summary>

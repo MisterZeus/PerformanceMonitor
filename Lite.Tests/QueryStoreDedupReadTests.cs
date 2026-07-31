@@ -486,6 +486,54 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     }
 
     /// <summary>
+    /// #1921 (Erik's option 1): the slicer OVERLAY places its points at the hour the work RAN, matching the
+    /// bars it is drawn over, not at the hour the collector observed it.
+    ///
+    /// <para>The seed makes the two clocks disagree on purpose — the interval STARTED in hour 0 and every one
+    /// of its collections landed in hour 1 — because that disagreement is the only thing that can show the
+    /// move. Before #1921 the overlay plotted at collection_time while #1841 had already moved the bars to
+    /// the interval start, so a point sat up to one Query Store interval to the RIGHT of the bar describing
+    /// the very same work, and the file's own stated invariant (the overlay agrees with the bars) had
+    /// silently stopped holding on its placement half.</para>
+    ///
+    /// <para>The assertion pins BOTH halves against the bar computed from the same rows: same x, same value.
+    /// The dedup half matters as much as the placement half here — the overlay used to plot every history row,
+    /// so this interval drew a rising staircase of restatements (3 then 5 executions) rather than one point at
+    /// its final 5.</para>
+    /// </summary>
+    [Fact]
+    public async Task Overlay_PlacesPointsWhereTheWorkRan_AgreeingWithTheBarsItIsDrawnOver()
+    {
+        var h0 = BucketStart;
+        var h1 = BucketStart.AddHours(1);
+
+        await SeedAsync(h1.AddMinutes(5), queryId: 1, planId: 11, FirstExecA,
+            executionCount: 3, avgCpuUs: 1_000, avgDurationUs: 2_000, avgReads: 6, queryHash: "0xOVL",
+            intervalId: 7301, intervalStart: h0);
+        await SeedAsync(h1.AddMinutes(10), queryId: 1, planId: 11, FirstExecA,
+            executionCount: 5, avgCpuUs: 1_000, avgDurationUs: 2_000, avgReads: 6, queryHash: "0xOVL",
+            intervalId: 7301, intervalStart: h0);
+
+        var service = new LocalDataService(_duckDb);
+        var timeline = await service.GetQueryStoreItemTimelineAsync(ServerId, Db, queryId: 1, planId: 11, hoursBack: 24);
+
+        var point = Assert.Single(timeline);
+        Assert.Equal(h0, point.PointTime);
+        Assert.NotEqual(h1.AddMinutes(10), point.PointTime);
+
+        /* The interval's FINAL snapshot, not a staircase: 5 x 1,000us CPU = 5 ms, 5 x 2,000us = 10 ms. */
+        Assert.Equal(5.0, point.CpuMs, precision: 6);
+        Assert.Equal(10.0, point.ElapsedMs, precision: 6);
+        Assert.Equal(30.0, point.Reads, precision: 6);
+
+        /* And it agrees with the bar drawn from the same rows — which is the invariant, stated as an
+           assertion rather than a comment. */
+        var bucket = Assert.Single(await service.GetQueryStoreSlicerDataAsync(ServerId, hoursBack: 24));
+        Assert.Equal(bucket.BucketTime, point.PointTime);
+        Assert.Equal(bucket.TotalCpu, point.CpuMs, precision: 6);
+    }
+
+    /// <summary>
     /// Source-containment guard, the Lite counterpart of the Darling Viewer's SQL-constant theory. Lite
     /// builds its Query Store SQL inline (no exposed constants to pin), so a FIFTH aggregate read added to
     /// this file could ship un-deduped and silently reintroduce #1841. Every read of v_query_store_stats in
@@ -497,19 +545,24 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     {
         var source = File.ReadAllText(SourcePath("Lite", "Services", "LocalDataService.QueryStore.cs"));
 
-        /* The five aggregate reads: slicer, top queries, the comparison's two windows, and — since
-           #1841 tier 2 — the duration trend's identified arm. Counting occurrences rather than matching
-           order keeps this from breaking on a harmless reshuffle. */
+        /* The six aggregate reads: slicer, top queries, the comparison's two windows, the duration trend's
+           identified arm (#1841 tier 2), and the slicer OVERLAY (#1921). Counting occurrences rather than
+           matching order keeps this from breaking on a harmless reshuffle.
+
+           The overlay is the newest and the reason this count moved: before #1921 it reused the history
+           grid's raw per-collection read, so it carried no dedup at all — which is exactly the "a read in
+           this file ships un-deduped" case this guard exists to catch, arriving from the direction of a read
+           being ADDED rather than one being edited. */
         var partitions = Regex.Matches(
             source,
             @"PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role").Count;
         var rankFilters = Regex.Matches(source, @"(?:WHERE|AND)\s+(?:qs\.)?rn = 1").Count;
 
-        Assert.Equal(5, partitions);
-        /* Seven, not five: the comparison's two deduped CTEs are each consumed TWICE — once to pick the
+        Assert.Equal(6, partitions);
+        /* Eight, not six: the comparison's two deduped CTEs are each consumed TWICE — once to pick the
            top 100 hashes and once by the value aggregate — and an rn filter missing from either consumer
            would let the un-deduped rows straight back into the numbers. */
-        Assert.Equal(7, rankFilters);
+        Assert.Equal(8, rankFilters);
 
         /* Every dedup orders by collection_time FIRST — "latest" is never decided by execution_count, which
            can sit still across a hundred re-collections of the same interval.

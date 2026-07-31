@@ -190,21 +190,27 @@ public partial class ServerTab : UserControl
         {
             var hoursBack = GetHoursBack();
             var (fromDate, toDate) = GetCurrentViewDates();
-            var allPlans = await Task.Run(() => _dataService.GetQueryStoreHistoryAsync(_serverId, row.DatabaseName, row.QueryId, hoursBack, fromDate, toDate));
-            // The overlay traces the SELECTED row's plan; the history query is query-scoped now.
-            var history = allPlans.Where(h => h.PlanId == row.PlanId).ToList();
+            /* #1921: a dedicated overlay read rather than the history grid's. The grid's read is a raw
+               per-collection projection windowed on collection_time, which is right for a list of collection
+               events and wrong for a series drawn over the slicer bars — those are keyed on the interval
+               start since #1841, so plotting at collection_time put each point up to one Query Store interval
+               to the RIGHT of the bar describing the same work. The overlay read places AND windows on the
+               interval start, and dedups per interval, so both halves of "the overlay agrees with the bars"
+               hold. Plan-scoped in SQL now, so no client-side filtering. */
+            var timeline = await Task.Run(() => _dataService.GetQueryStoreItemTimelineAsync(
+                _serverId, row.DatabaseName, row.QueryId, row.PlanId, hoursBack, fromDate, toDate));
 
             // Query Store values are already per-interval averages, not cumulative
-            Func<QueryStoreHistoryRow, double> selector = _queryStoreSlicerMetric switch
+            Func<LocalDataService.QueryStoreItemTimelinePoint, double> selector = _queryStoreSlicerMetric switch
             {
-                "TotalCpu" or "AvgCpu" => h => h.TotalCpuMs,
-                "TotalReads" or "AvgReads" => h => h.AvgLogicalReads * h.ExecutionCount,
-                _ => h => h.TotalDurationMs,
+                "TotalCpu" or "AvgCpu" => p => p.CpuMs,
+                "TotalReads" or "AvgReads" => p => p.Reads,
+                _ => p => p.ElapsedMs,
             };
 
-            var points = history
-                .Where(h => selector(h) > 0)
-                .Select(h => (h.CollectionTime, selector(h)))
+            var points = timeline
+                .Where(p => selector(p) > 0)
+                .Select(p => (p.PointTime, selector(p)))
                 .ToList();
 
             var qsLabel = !string.IsNullOrWhiteSpace(row.ModuleName)
