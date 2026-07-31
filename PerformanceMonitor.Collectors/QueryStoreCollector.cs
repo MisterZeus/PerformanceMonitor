@@ -42,6 +42,13 @@ namespace PerformanceMonitor.Collectors;
 /// SELECT is precisely the drift this collector cannot survive. (55 selected columns; the stored row
 /// is 56 — <c>database_name</c> is supplied client-side, from the enumerated item or the connected
 /// database.)</para>
+///
+/// <para>ONE ROW PER INTERVAL (#1907). <c>sys.query_store_runtime_stats</c> hands back the flushed and
+/// the still-in-memory slice of one <c>runtime_stats_interval_id</c> as separate, ADDITIVE rows, so the
+/// payload groups on the view's natural key and combines them before emitting. Without it both slices
+/// were stored, shared the whole read-side dedup key AND <c>collection_time</c>, and the survivor was
+/// whichever the engine emitted first — a grid could show an in-memory sliver in place of the interval's
+/// total. The emitted row SHAPE is untouched by that change; only the row COUNT per interval is.</para>
 /// </summary>
 public sealed class QueryStoreCollector : CollectorDefinitionBase<QueryStoreCollector.Row>
 {
@@ -294,6 +301,12 @@ END;
     /// TOP 200, procedure_stats TOP 150): those curate the "top N"; this only trims a pathological cycle.
     /// It bounds COUNT, not BYTES — <see cref="MaxTextBytesPerDatabase"/> is the primary memory bound —
     /// and is the same const the host warns on (<see cref="PerItemRowCountWarnThreshold"/>).
+    ///
+    /// <para>Since #1907 the <c>TOP</c> sits OUTSIDE the slice aggregation, so it caps INTERVALS rather
+    /// than the raw slices an interval decomposes into. That is the more useful unit — a cap that fell
+    /// mid-interval would have truncated one interval's slices and emitted a partial sum, which is worse
+    /// than not emitting the interval at all — and it is strictly more generous, since one interval is
+    /// one row where it used to be several.</para>
     /// </summary>
     public const int MaxRowsPerDatabase = 50_000;
 
@@ -508,7 +521,27 @@ END;
 
         /* Build version-conditional column fragments for the Query Store query.
            None of these contain a single quote, so they splice into the body identically whether the
-           body stays as written (Azure) or gets quote-doubled for sp_executesql nesting (on-prem). */
+           body stays as written (Azure) or gets quote-doubled for sp_executesql nesting (on-prem).
+
+           Each version-gated family now needs TWO fragments (#1907): one INSIDE the slice-aggregating
+           derived table, which must vanish entirely when the columns do not exist (referencing an
+           unbound column inside an aggregate fails the whole SELECT exactly as it would outside one),
+           and one in the OUTER projection, which keeps emitting the typed NULL placeholder at the same
+           ordinal so the 55-column reader contract never moves. The inner fragments carry a LEADING
+           comma and sit at the END of the inner select list precisely because they can be empty; the
+           outer ones keep their original trailing-comma form because they are never empty. */
+        string numPhysIoReadsAgg = isNew
+            ? $",\n        {WeightedAverage("avg_num_physical_io_reads")},\n        min_num_physical_io_reads = MIN(qsrs.min_num_physical_io_reads),\n        max_num_physical_io_reads = MAX(qsrs.max_num_physical_io_reads)"
+            : "";
+
+        string logBytesAgg = isNew
+            ? $",\n        {WeightedAverage("avg_log_bytes_used")},\n        min_log_bytes_used = MIN(qsrs.min_log_bytes_used),\n        max_log_bytes_used = MAX(qsrs.max_log_bytes_used)"
+            : "";
+
+        string tempdbAgg = isNew
+            ? $",\n        {WeightedAverage("avg_tempdb_space_used")},\n        min_tempdb_space_used = MIN(qsrs.min_tempdb_space_used),\n        max_tempdb_space_used = MAX(qsrs.max_tempdb_space_used)"
+            : "";
+
         string numPhysIoReadsCols = isNew
             ? "qsrs.avg_num_physical_io_reads, qsrs.min_num_physical_io_reads, qsrs.max_num_physical_io_reads,"
             : "avg_num_physical_io_reads = NULL, min_num_physical_io_reads = NULL, max_num_physical_io_reads = NULL,";
@@ -560,6 +593,20 @@ END;
             ? "LEFT JOIN sys.query_store_replicas AS qsr\n  ON qsr.replica_group_id = qsrs.replica_group_id"
             : "";
 
+        /* replica_group_id is part of sys.query_store_runtime_stats' natural key, so it belongs in the
+           slice-aggregation grouping (#1907) — two replicas' rows for one interval are DIFFERENT work,
+           not slices of the same work, and summing them together would blend a secondary's executions
+           into the primary's, re-creating by hand the exact bug replica attribution exists to prevent.
+           It carries the SAME 2022+/Azure gate as the attribution column above, and for the same
+           bind-safety reason: the column does not exist on older servers, and naming it in a GROUP BY
+           fails the whole SELECT just as naming it in a select list would. When the gate is off there is
+           only ever one replica group to begin with, so dropping it from the key changes no grouping.
+           Leading comma: it splices into both the inner select list and the GROUP BY, and is empty on
+           targets without the column. */
+        string replicaGroupKey = hasReplicaAttribution
+            ? ",\n        qsrs.replica_group_id"
+            : "";
+
         /* There is deliberately NO self-exclusion predicate in this query (#1565, actual-plan evidence
            from a 103k-row burst). The old form (query_sql_text NOT LIKE N'%marker%') was 75% of the
            query's total elapsed time — a per-row substring scan over full nvarchar(max) text (11.2s of
@@ -590,6 +637,65 @@ END;
            AT TIME ZONE is SQL Server 2016+, matching the floor above, and the expression contains no
            single quote... except the timezone literal, which quote-doubles cleanly for the sp_executesql
            nesting exactly like the rest of the body. */
+
+        /* Slice aggregation (#1907) — the derived table below, and the reason this query has one.
+
+           sys.query_store_runtime_stats returns the FLUSHED slice and the still-IN-MEMORY slice of one
+           runtime_stats_interval_id as SEPARATE ROWS, and they are ADDITIVE members of one interval, not
+           competing snapshots of it. Verified on box SQL Server 2022 (16.0.4255.1) as well as the Azure
+           SQL Database where it was found: 100 executions flushed + 25 executions in memory came back as
+           two rows, and sys.dm_exec_procedure_stats — an entirely separate source, same instant —
+           reported 125. SUM matches; the larger slice alone (100) does not. With a 900s default flush
+           against a 3600s default interval, ONE interval can hold several flushed slices, so the count
+           is not bounded at two.
+
+           Selecting them straight through stored both, and they then shared every column of the
+           read-side dedup key (#1841/#1845/#1853) AND collection_time, so the ROW_NUMBER survivor and the
+           CAGGs' last() were decided by whichever row the engine happened to emit first — a grid could
+           show the in-memory sliver (8) where the interval's truth was 94. The dedup itself is correct
+           and stays: it exists to collapse RE-COLLECTIONS of one interval across cycles. It just cannot
+           also be asked to ADD two slices within one cycle, and no read-side rule can express both.
+
+           So the slices are combined HERE, where the identity is unambiguous, keyed on exactly the
+           natural key of the view — (plan_id, runtime_stats_interval_id, execution_type, replica_group) —
+           and one interval now yields at most one row per cycle. The EMITTED ROW SHAPE is unchanged: the
+           same 55 columns in the same order, only fewer rows, so the positional writers and every
+           downstream reader are untouched.
+
+           How each column combines:
+             - count_executions      SUM — the additive counter itself.
+             - avg_*                 the count-WEIGHTED mean, SUM(avg * count) / SUM(count). Query Store
+                                     stores avg and count, never a total, so avg * count reconstructs
+                                     each slice's total exactly and the quotient is the interval's true
+                                     average. A plain AVG() of the slice averages would weight a 25-
+                                     execution sliver equally with a 100-execution flush. NULLIF guards
+                                     the divide-by-zero rather than letting a zero-execution row (which
+                                     should not exist, and would still not be worth failing a whole
+                                     database's collection over) raise 8134.
+             - min_* / max_*         MIN / MAX — extremes over a union of slices are the extremes of the
+                                     slice extremes. Includes min_dop / max_dop, which have no avg.
+             - first_execution_time  MIN, last_execution_time MAX — the interval's own span. Both slices
+                                     of a pair share first_execution_time in practice, which is exactly
+                                     why the tier-1 proxy key could not tell them apart either.
+
+           The incremental filter moves from WHERE to HAVING, and that is load-bearing rather than
+           cosmetic. A per-slice WHERE would break the SUM within one cycle of the fix: the flushed slice
+           is STATIC, so once the growing in-memory slice pushes the watermark past the flushed slice's
+           last_execution_time, the flushed slice stops qualifying and the "sum" becomes the sliver alone
+           — the original bug with extra steps. HAVING MAX(last_execution_time) > @cutoff_time asks the
+           question at interval grain: has this interval seen new activity, and if so give me ALL of it.
+           It is strictly more permissive than the old per-slice predicate, so nothing that used to be
+           collected stops being collected.
+
+           The IN (...) pre-filter is a performance prune, not a semantic one — the HAVING already gives
+           the exact answer, and the pre-filter's interval list is by construction a superset of the
+           intervals the HAVING can keep, so it can never subtract a row. It is here because without it
+           the aggregate has to run over the database's ENTIRE retained Query Store every cycle, which is
+           the one shape that made this materially slower. Measured on a real 212k-row Query Store
+           (SQL 2025), full 55-column payload, warm, three runs: pre-fix 453/485/516 ms for 510 rows;
+           post-fix 375/422/438 ms for 262 rows; post-fix WITHOUT the pre-filter 1203/1203/1235 ms. The
+           fixed query is FASTER than the one it replaces despite the added aggregate, because half the
+           rows means half the nvarchar(max) query text and plan XML to materialize and ship. */
         return $@"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase})
@@ -649,7 +755,56 @@ SELECT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase})
     {replicaRoleCol},
     runtime_stats_interval_id = qsrs.runtime_stats_interval_id,
     interval_start_time_utc = CONVERT(datetime2, qsrsi.start_time AT TIME ZONE 'UTC')
-FROM sys.query_store_runtime_stats AS qsrs
+FROM
+(
+    SELECT
+        qsrs.plan_id,
+        qsrs.runtime_stats_interval_id,
+        qsrs.execution_type_desc{replicaGroupKey},
+        first_execution_time = MIN(qsrs.first_execution_time),
+        last_execution_time = MAX(qsrs.last_execution_time),
+        count_executions = SUM(qsrs.count_executions),
+        {WeightedAverage("avg_duration")},
+        min_duration = MIN(qsrs.min_duration),
+        max_duration = MAX(qsrs.max_duration),
+        {WeightedAverage("avg_cpu_time")},
+        min_cpu_time = MIN(qsrs.min_cpu_time),
+        max_cpu_time = MAX(qsrs.max_cpu_time),
+        {WeightedAverage("avg_logical_io_reads")},
+        min_logical_io_reads = MIN(qsrs.min_logical_io_reads),
+        max_logical_io_reads = MAX(qsrs.max_logical_io_reads),
+        {WeightedAverage("avg_logical_io_writes")},
+        min_logical_io_writes = MIN(qsrs.min_logical_io_writes),
+        max_logical_io_writes = MAX(qsrs.max_logical_io_writes),
+        {WeightedAverage("avg_physical_io_reads")},
+        min_physical_io_reads = MIN(qsrs.min_physical_io_reads),
+        max_physical_io_reads = MAX(qsrs.max_physical_io_reads),
+        {WeightedAverage("avg_clr_time")},
+        min_clr_time = MIN(qsrs.min_clr_time),
+        max_clr_time = MAX(qsrs.max_clr_time),
+        min_dop = MIN(qsrs.min_dop),
+        max_dop = MAX(qsrs.max_dop),
+        {WeightedAverage("avg_query_max_used_memory")},
+        min_query_max_used_memory = MIN(qsrs.min_query_max_used_memory),
+        max_query_max_used_memory = MAX(qsrs.max_query_max_used_memory),
+        {WeightedAverage("avg_rowcount")},
+        min_rowcount = MIN(qsrs.min_rowcount),
+        max_rowcount = MAX(qsrs.max_rowcount){numPhysIoReadsAgg}{logBytesAgg}{tempdbAgg}
+    FROM sys.query_store_runtime_stats AS qsrs
+    WHERE qsrs.runtime_stats_interval_id IN
+    (
+        SELECT
+            f.runtime_stats_interval_id
+        FROM sys.query_store_runtime_stats AS f
+        WHERE f.last_execution_time > @cutoff_time
+    )
+    GROUP BY
+        qsrs.plan_id,
+        qsrs.runtime_stats_interval_id,
+        qsrs.execution_type_desc{replicaGroupKey}
+    HAVING
+        MAX(qsrs.last_execution_time) > @cutoff_time
+) AS qsrs
 JOIN sys.query_store_plan AS qsp
   ON qsp.plan_id = qsrs.plan_id
 JOIN sys.query_store_query AS qsq
@@ -659,10 +814,25 @@ JOIN sys.query_store_query_text AS qst
 LEFT JOIN sys.query_store_runtime_stats_interval AS qsrsi
   ON qsrsi.runtime_stats_interval_id = qsrs.runtime_stats_interval_id
 {replicaJoin}
-WHERE qsrs.last_execution_time > @cutoff_time
 ORDER BY qsrs.last_execution_time DESC
 OPTION(RECOMPILE, LOOP JOIN);";
     }
+
+    /// <summary>
+    /// One slice-combining <c>avg_*</c> column for the aggregation in <see cref="BuildPayloadBody"/>
+    /// (#1907): the count-WEIGHTED mean of the slices, aliased back to the column's own name so the
+    /// outer projection's reference does not change.
+    ///
+    /// <para>Every <c>avg_*</c> column in the payload goes through here rather than being written out
+    /// by hand, because the wrong form is not a compile error and not obviously wrong at a glance —
+    /// a bare <c>AVG(qsrs.avg_x)</c> reads fine and silently weights a 25-execution sliver the same as a
+    /// 100-execution flush. Query Store exposes an average and a count but never a total, so
+    /// <c>avg * count</c> is how a slice's total is recovered, and the quotient of the summed totals
+    /// over the summed counts is the interval's true average. Pinned by test: every <c>avg_</c> column
+    /// the payload emits must match this shape.</para>
+    /// </summary>
+    private static string WeightedAverage(string column) =>
+        $"{column} = SUM(qsrs.{column} * qsrs.count_executions) / NULLIF(SUM(qsrs.count_executions), 0)";
 
     /// <summary>
     /// The incremental cutoff both paths bind as <c>@cutoff_time</c>: only runtime_stats intervals

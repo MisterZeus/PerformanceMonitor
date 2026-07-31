@@ -229,7 +229,7 @@ WITH deduped AS
         ROW_NUMBER() OVER
         (
             PARTITION BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time
-            ORDER BY collection_time DESC
+            ORDER BY collection_time DESC, execution_count DESC
         ) AS rn
     FROM v_query_store_stats
     WHERE server_id = $1

@@ -114,7 +114,7 @@ public sealed partial class ViewerDataService
                 ROW_NUMBER() OVER
                 (
                     PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
-                    ORDER BY collection_time DESC
+                    ORDER BY collection_time DESC, execution_count DESC
                 ) AS rn
             FROM query_store_stats
             WHERE server_id = $1
@@ -135,7 +135,7 @@ public sealed partial class ViewerDataService
                 ROW_NUMBER() OVER
                 (
                     PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
-                    ORDER BY collection_time DESC
+                    ORDER BY collection_time DESC, execution_count DESC
                 ) AS rn
             FROM query_store_stats
             WHERE server_id = $1
