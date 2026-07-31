@@ -124,6 +124,20 @@ public static class ComposeCompiler
     /// visible step at that boundary. <c>--backfill-rollups</c> is what moves the boundary; retention aging
     /// out the old rows is what eventually removes it.</para>
     ///
+    /// <para><b>A SECOND, permanent understatement sits underneath all of that, from before #1907.</b> Query
+    /// Store returns the flushed and the still-in-memory slice of one interval as two ADDITIVE rows, and
+    /// builds before #1907 stored both; every rollup materialized from them therefore carries ONE SLICE of
+    /// each split interval rather than the sum. On the live evidence that was 8 executions where 94 was true.
+    /// <c>--collapse-legacy-slices</c> (#1912) repairs the stored rows and re-materializes what they fed, but
+    /// only as far back as RAW still reaches — a few days — because a rollup cannot be rebuilt from raw that
+    /// retention has already dropped, and re-materializing a range raw no longer covers DESTROYS the rollup
+    /// there rather than correcting it. So Query Store numbers older than the raw window at the moment that
+    /// verb was run are understated PERMANENTLY, and the daily tiers keep them indefinitely. That is a
+    /// disclosure, not a to-do: no ordering of these operations reaches it, which is why the release notes say
+    /// so plainly and why the verb is worth running promptly after upgrading, while raw still covers the
+    /// period the collector was getting wrong. Nothing about it is visible in a panel — the numbers are simply
+    /// low — which is precisely why it is written down here beside the boundary it shares.</para>
+    ///
     /// <para><b>At the DAILY tier there is one more rung since #1869.</b> The corrected daily dedups each
     /// interval within a collection HOUR, so an interval straddling an hour boundary lands in it about twice
     /// (measured 1.97x); <c>query_store_stats_daygrain_daily</c> dedups across the whole DAY and counts it

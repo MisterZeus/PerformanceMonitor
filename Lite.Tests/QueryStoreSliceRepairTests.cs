@@ -367,15 +367,6 @@ COPY (
     }
 
     /// <summary>
-    /// Reads the archive on a FRESH connection, deliberately.
-    ///
-    /// <para>DuckDB caches a parquet file's state per connection per path, so a connection that read a file
-    /// before the repair replaced it fails on it afterwards with "No magic bytes found at end of file" — while
-    /// a new connection reads the repaired file perfectly. Verified standalone. That is why the service rebuilds
-    /// the archive views after rewriting, and why this reader does not reuse the seeding connection: using the
-    /// stale one here would be testing DuckDB's cache rather than the repair.</para>
-    /// </summary>
-    /// <summary>
     /// An archive file the collapse cannot combine: <c>execution_count</c> is TEXT, so the weighted-mean
     /// expression fails on it. It still carries the split signature, so the run reaches the rewrite and
     /// throws there — which is the point, since a file that simply had no work would never be touched.
@@ -398,6 +389,16 @@ COPY (
         await cmd.ExecuteNonQueryAsync();
     }
 
+    /// <summary>
+    /// Reads the archive on a FRESH connection, deliberately.
+    ///
+    /// <para>DuckDB caches a parquet file's state against its PATH at INSTANCE scope, so once a file has been
+    /// read, replacing the bytes at that path makes later reads fail with "No magic bytes found at end of
+    /// file". A new connection from the SAME store does not escape it — that is the trap, and it is why the
+    /// service flushes <c>enable_external_file_cache</c> and rebuilds the archive views after rewriting. This
+    /// reader still avoids the seeding connection so a failure here points at the repair rather than at a
+    /// connection the test itself poisoned.</para>
+    /// </summary>
     private async Task<List<object[]>> QueryArchiveAsync(string file, string sqlTemplate)
     {
         using var readLock = _duckDb.AcquireReadLock();
