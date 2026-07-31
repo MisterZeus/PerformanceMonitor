@@ -742,7 +742,7 @@ WITH NO DATA";
     /// it is unconditionally true — so the gate skips exactly the tiered stores it exists for, and fires only
     /// on stores that do not need it. BaselineSupplyTests pins this direction.</para>
     ///
-    /// <para>This is the same predicate shape the retention arming uses (<c>IsSafeToArmRetentionAsync</c>) over
+    /// <para>This is the same predicate shape the retention arming uses (<c>MeasureRetentionCoverageAsync</c>) over
     /// the same pair of relations, deliberately: what we backfill and what unblocks arming cannot be allowed
     /// to drift apart.</para>
     /// </summary>
@@ -1666,7 +1666,8 @@ WITH NO DATA";
 
     /// <summary><see cref="TimeSpan"/> twin of <see cref="IntervalDailyRetentionInterval"/>; pinned equal, and
     /// pinned STRICTLY GREATER than <see cref="IntervalRetentionSpan"/>, by TimescaleSupportTests — a
-    /// consumer that expired before its source would hold its source's purge forever.</summary>
+    /// consumer that expired before its source would hold its source's purge forever, and since #1877 would
+    /// also STOP one that is already running, on a healthy store, without self-releasing.</summary>
     public static readonly TimeSpan IntervalDailyRetentionSpan = TimeSpan.FromDays(10);
 
     /// <summary><see cref="TimeSpan"/> twin of <see cref="HourlyRetentionInterval"/>; pinned equal by
@@ -1708,7 +1709,28 @@ WITH NO DATA";
     /// policy's first check IMMEDIATELY at creation, not on its next interval (#1680).
     /// </summary>
     public static string ArmRetentionPolicySql(string relation)
-        => $@"SELECT alter_job(j.job_id, scheduled => true)
+        => SetRetentionScheduleSql(relation, scheduled: true);
+
+    /// <summary>
+    /// Re-holds a retention policy that is ALREADY ARMED (#1877). The mirror of
+    /// <see cref="ArmRetentionPolicySql"/>, and the statement that closes the arm-only gap: a policy created
+    /// paused stays paused by itself, but <c>add_retention_policy(if_not_exists =&gt; true)</c> returns -1 for a
+    /// policy this store already has, so nothing ever paused one whose COVERAGE LIST GREW under it.
+    ///
+    /// <para>Reached ONLY from a positive coverage measurement — never from an indeterminate one. See
+    /// <c>RetentionCoverage</c> for why that distinction is the whole of #1877.</para>
+    /// </summary>
+    public static string HoldRetentionPolicySql(string relation)
+        => SetRetentionScheduleSql(relation, scheduled: false);
+
+    /// <summary>
+    /// The shared body of <see cref="ArmRetentionPolicySql"/> and <see cref="HoldRetentionPolicySql"/>: flip one
+    /// relation's retention job. Filtering by proc_name AND the hypertable is what keeps it from arming — or
+    /// stopping — some other policy, or every policy, by accident. Idempotent in both directions: setting a job
+    /// to the state it is already in is a no-op, which is what lets the sweep re-assert the verdict every start.
+    /// </summary>
+    private static string SetRetentionScheduleSql(string relation, bool scheduled)
+        => $@"SELECT alter_job(j.job_id, scheduled => {(scheduled ? "true" : "false")})
 FROM timescaledb_information.jobs AS j
 WHERE j.proc_name = 'policy_retention'
 AND   j.hypertable_schema = 'collect'
@@ -1726,7 +1748,7 @@ AND   j.hypertable_name = '{relation}'";
     /// <para><b>Plural since #1849, and the plurality is the point.</b> <c>query_store_stats</c> now feeds TWO
     /// rollup families — the original inflated pair and the corrected one — and a purge that satisfied only one
     /// of them would destroy raw history the other has never materialized. The verdict is therefore an AND over
-    /// all of them, evaluated in <see cref="IsSafeToArmRetentionAsync"/> rather than folded into SQL:
+    /// all of them, evaluated in <see cref="MeasureRetentionCoverageAsync"/> rather than folded into SQL:
     /// <c>GREATEST</c> would have expressed it in one column and is exactly wrong here, because it SKIPS NULLs.
     /// An empty new rollup would vanish from the comparison and the gate would pass on the old rollup alone —
     /// which is the whole failure this exists to prevent.</para>
@@ -1806,7 +1828,13 @@ AND   j.hypertable_name = '{relation}'";
         {
             if (string.Equals(tierRelation, relation, StringComparison.Ordinal))
             {
-                return await IsSafeToArmRetentionAsync(connection, tierRelation, timeColumn, coverage, cancellationToken);
+                var (verdict, _) = await MeasureRetentionCoverageAsync(connection, tierRelation, timeColumn, coverage, cancellationToken);
+
+                /* Only a POSITIVE all-clear permits a drop. Short and Unknown both answer "no", exactly as they
+                   did when this probe was a bool — the tristate exists for the ARMING side, which alone needs
+                   to tell a measured regression apart from a failed measurement (#1877). Collapsing it here
+                   keeps the #1793 property intact: both purge paths still judge the same drop identically. */
+                return verdict == RetentionCoverage.Covered;
             }
         }
 
@@ -1814,17 +1842,43 @@ AND   j.hypertable_name = '{relation}'";
     }
 
     /// <summary>
-    /// True when arming <paramref name="relation"/>'s retention policy cannot drop anything ANY tier below it has
-    /// not already captured (#1680): the source is empty, or EVERY relation in
-    /// <paramref name="coverageRelations"/> reaches at least as far back as the source does. Any failure to
-    /// determine this returns FALSE - an unknown coverage state must leave the policy paused, never armed on an
-    /// assumption.
+    /// What a coverage probe was able to CONCLUDE — the distinction #1877 turns on.
+    ///
+    /// <para>Arming needs only "safe or not", and this was a bool for that reason. Re-holding needs more: an
+    /// already-armed policy may be stopped on evidence that its coverage genuinely fell short, and must NEVER be
+    /// stopped because the evidence could not be gathered. Folding a failed probe in with a measured shortfall
+    /// is what made "unsafe implies disarm" unshippable — one bad probe on a busy store would have stopped
+    /// purging across every tier and grown disk until someone noticed, trading #1877's bounded depth cap for an
+    /// unbounded disk risk.</para>
+    /// </summary>
+    private enum RetentionCoverage
+    {
+        /// <summary>Every named consumer positively reaches at least as far back as the source — or the source
+        /// is empty, so there is no history to lose. The only verdict that permits arming or dropping.</summary>
+        Covered,
+
+        /// <summary>MEASURED short: the probe ran, the source holds rows, and a named consumer either holds none
+        /// or starts later than the source's oldest row. A fact about the store, not a failure to read it — and
+        /// the only verdict that may stop a policy this store already armed.</summary>
+        Short,
+
+        /// <summary>Nothing could be concluded: the probe threw, timed out, or came back empty. Refuses arming
+        /// exactly as before, and refuses to re-hold, because a probe error is not a coverage regression.</summary>
+        Unknown,
+    }
+
+    /// <summary>
+    /// How far <paramref name="relation"/>'s consumers reach relative to what it holds (#1680): <c>Covered</c>
+    /// when the source is empty or EVERY relation in <paramref name="coverageRelations"/> reaches at least as far
+    /// back as the source does, <c>Short</c> when one of them is measurably behind, <c>Unknown</c> when the
+    /// probe could not answer at all. Also returns the first consumer found short, so the operator warning can
+    /// name the tier to backfill rather than the whole list.
     ///
     /// <para>The verdict is an AND across consumers (#1849), and the loop below is short-circuiting in the SAFE
     /// direction only: one empty or shallow consumer holds the policy even if every other consumer is complete.
     /// A raw table with two rollup families is covered when the LEAST-covering of them covers it.</para>
     /// </summary>
-    private static async Task<bool> IsSafeToArmRetentionAsync(
+    private static async Task<(RetentionCoverage Verdict, string? ShortConsumer)> MeasureRetentionCoverageAsync(
         NpgsqlConnection connection, string relation, string sourceTimeColumn, IReadOnlyList<string> coverageRelations, CancellationToken cancellationToken)
     {
         try
@@ -1833,37 +1887,41 @@ AND   j.hypertable_name = '{relation}'";
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (!await reader.ReadAsync(cancellationToken))
             {
-                return false;
+                return (RetentionCoverage.Unknown, null);
             }
 
             /* Nothing in the source - a fresh store. No history to lose, so arm. */
             if (await reader.IsDBNullAsync(0, cancellationToken))
             {
-                return true;
+                return (RetentionCoverage.Covered, null);
             }
 
             var sourceOldest = reader.GetDateTime(0);
             for (var i = 0; i < coverageRelations.Count; i++)
             {
                 /* Source has data but THIS coverage tier is empty - arming would drop history it never
-                   materialized, whatever the other tiers hold. */
+                   materialized, whatever the other tiers hold. An empty consumer is a MEASUREMENT and not an
+                   unknown: the relation exists and answered with no rows, which is precisely the state a
+                   newly-added consumer is born in on an upgrading store (#1877). */
                 if (await reader.IsDBNullAsync(i + 1, cancellationToken))
                 {
-                    return false;
+                    return (RetentionCoverage.Short, coverageRelations[i]);
                 }
 
                 if (reader.GetDateTime(i + 1) > sourceOldest)
                 {
-                    return false;
+                    return (RetentionCoverage.Short, coverageRelations[i]);
                 }
             }
 
-            return true;
+            return (RetentionCoverage.Covered, null);
         }
         catch (Exception)
         {
-            /* Fail closed: if coverage cannot be established, the policy stays paused. */
-            return false;
+            /* Fail closed: if coverage cannot be established the policy is not armed — and, since #1877, not
+               re-held either. Both directions read the same way here: an unmeasurable store is left exactly as
+               it was, because nothing was learned about it. */
+            return (RetentionCoverage.Unknown, null);
         }
     }
 
@@ -1877,12 +1935,20 @@ AND   j.hypertable_name = '{relation}'";
     /// CAGGs the hourly policies target already exist. Returns the number of policies in place.
     ///
     /// COLD START ON AN EXISTING STORE (#1759): a store that already holds raw history older than its hourly
-    /// CAGG has materialized does NOT lose it. <see cref="IsSafeToArmRetentionAsync"/> is fail-closed, so that
-    /// store's raw policies are created and left PAUSED, and the per-policy WARN says which rollup is short and
-    /// by how much. This used to be documented as a caveat prescribing a manual backfill "BEFORE this policy's
+    /// CAGG has materialized does NOT lose it. <see cref="MeasureRetentionCoverageAsync"/> is fail-closed, so
+    /// that store's raw policies are created and left PAUSED, and the per-policy WARN says which rollup is
+    /// short. This used to be documented as a caveat prescribing a manual backfill "BEFORE this policy's
     /// first run" — a step no store ever received, and a defect rather than a caveat. The backfill is now a real
     /// operator verb (<c>--backfill-rollups</c>) with a disk preflight, and once it carries a rollup past the raw
     /// horizon this gate arms the held policy by itself on the next start, with no manual step.
+    ///
+    /// <para>A COVERAGE LIST THAT GROWS (#1877). Holding is not only for policies this sweep just created.
+    /// <c>add_retention_policy(if_not_exists =&gt; true)</c> returns -1 for a policy the store already has, so
+    /// nothing pauses it — which is right for a restart (it must not undo an operator's backfill) and was wrong
+    /// for a build that ADDS a consumer to a gate stores have already armed, as #1869 did. Such a policy kept
+    /// purging its source while the new consumer held nothing, capping how deep that consumer could ever be
+    /// backfilled. It is now re-held, but ONLY on a positive measurement: see the three-valued
+    /// <c>RetentionCoverage</c>, which is what keeps a probe failure from stopping retention fleet-wide.</para>
     /// </summary>
     public static async Task<int> EnsureRetentionPoliciesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
     {
@@ -1923,9 +1989,9 @@ AND   j.hypertable_name = '{relation}'";
                missing — and the third is the load-bearing one on a store taking this build, because that store
                has a fully-caught-up L1 and an empty interval_daily, which is precisely the state where a gate
                reading only the older two would drop the only copy of history the day-grain daily has never
-               seen. NOTE that this gate is arm-only: a store whose L1 policy was ALREADY armed under #1849
-               keeps purging while the new consumer catches up, which caps how deep the day-grain daily can
-               ever be backfilled rather than losing anything a read can reach — see #1877.
+               seen. That store's L1 policy was ALREADY ARMED under #1849, and until #1877 the gate could only
+               arm — so it kept purging while the new consumer held nothing, capping how deep the day-grain
+               daily could ever be backfilled. The sweep below now RE-HOLDS it on the measured shortfall.
 
                The corrected HOURLY is a leaf, so the leaf rule applies (#1757): its consumer is the composed
                READ, which routes past HourlyRouteMaxAge to the corrected DAILY — exactly the relationship the
@@ -1949,6 +2015,7 @@ AND   j.hypertable_name = '{relation}'";
         var applied = 0;
         var armed = 0;
         var held = 0;
+        var indeterminate = 0;
 
         foreach (var (relation, dropAfter, timeColumn, coverage) in policies)
         {
@@ -1986,18 +2053,45 @@ AND   j.hypertable_name = '{relation}'";
 
                 applied++;
 
-                if (await IsSafeToArmRetentionAsync(connection, relation, timeColumn, coverage, cancellationToken))
+                var (verdict, shortConsumer) = await MeasureRetentionCoverageAsync(connection, relation, timeColumn, coverage, cancellationToken);
+                if (verdict == RetentionCoverage.Covered)
                 {
                     using var arm = new NpgsqlCommand(ArmRetentionPolicySql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
                     await arm.ExecuteNonQueryAsync(cancellationToken);
                     armed++;
                 }
-                else
+                else if (verdict == RetentionCoverage.Short)
                 {
+                    /* HELD — and since #1877 that is an ACTION, not just the absence of arming. A policy this
+                       store created moments ago is already paused and this re-asserts it; a policy the store
+                       armed under an EARLIER build, whose coverage list has since GROWN a consumer, is stopped
+                       here. That second case is the whole issue: if_not_exists returned -1 for the existing
+                       policy so nothing paused it, and it kept purging its source while the new consumer held
+                       nothing — capping how deep that consumer could ever be backfilled.
+
+                       Safe to do unconditionally because the verdict is a MEASUREMENT. An indeterminate probe
+                       lands in the branch below and touches nothing, so no store can have its purge stopped by
+                       a timeout, a permission blip, or a relation that is mid-rebuild. And the release is the
+                       existing arming path, unchanged: the next sweep measures Covered and arms it, with no
+                       manual step, exactly as a first-time hold releases. */
+                    using var hold = new NpgsqlCommand(HoldRetentionPolicySql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
+                    await hold.ExecuteNonQueryAsync(cancellationToken);
                     held++;
                     logger?.LogWarning(
-                        "Retention policy for {Relation} created but HELD PAUSED - {Coverage} does not yet cover everything it holds, so arming could drop history no rollup has. Backfill past the {DropAfter} horizon and the policy arms itself on the next start.",
-                        relation, string.Join(" + ", coverage), dropAfter);
+                        "Retention policy for {Relation} HELD PAUSED - {ShortConsumer} does not yet cover everything it holds, so arming could drop history that rollup has never materialized. Backfill past the {DropAfter} horizon and the policy arms itself on the next start.",
+                        relation, shortConsumer, dropAfter);
+                }
+                else
+                {
+                    /* Coverage could not be MEASURED, which is not the same as measuring a shortfall. Leave the
+                       policy in whatever state it is already in: a new one is paused (fail-closed, as always),
+                       and one this store already armed keeps running. Disarming here instead would let a single
+                       bad probe stop purging across every tier at once and grow disk without bound — the
+                       failure mode that kept #1877 unfixed rather than fixed badly. */
+                    indeterminate++;
+                    logger?.LogWarning(
+                        "Retention policy for {Relation} left as-is - its coverage ({Coverage}) could not be established this start, and an unreadable store is not evidence of anything. Re-judged on the next start.",
+                        relation, string.Join(" + ", coverage));
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -2009,8 +2103,8 @@ AND   j.hypertable_name = '{relation}'";
         }
 
         logger?.LogInformation(
-            "TimescaleDB: {Applied}/{Total} retention policies in place, {Armed} armed, {Held} held paused pending backfill (raw {Raw}, hourly CAGGs {Hourly}; daily CAGGs kept indefinitely)",
-            applied, policies.Length, armed, held, RawRetentionInterval, HourlyRetentionInterval);
+            "TimescaleDB: {Applied}/{Total} retention policies in place, {Armed} armed, {Held} held paused pending backfill, {Indeterminate} left as-is (coverage unreadable) (raw {Raw}, hourly CAGGs {Hourly}; daily CAGGs kept indefinitely)",
+            applied, policies.Length, armed, held, indeterminate, RawRetentionInterval, HourlyRetentionInterval);
         return applied;
     }
 
