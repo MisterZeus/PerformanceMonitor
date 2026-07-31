@@ -1334,7 +1334,7 @@
                                Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="IndexAnalysisDatabaseInput" Width="180" Margin="0,0,8,0"
                              VerticalContentAlignment="Center"/>
-                    <CheckBox x:Name="IndexAnalysisAllDatabases" Content="All Databases"
+                    <CheckBox x:Name="IndexAnalysisAllDatabases" Content="All _Databases"
                               VerticalAlignment="Center" Margin="0,0,8,0"/>
                     <Button x:Name="RunIndexAnalysisButton" Content="Run Analysis" Click="RunIndexAnalysis_Click"
                             Padding="10,4" MinWidth="100"/>

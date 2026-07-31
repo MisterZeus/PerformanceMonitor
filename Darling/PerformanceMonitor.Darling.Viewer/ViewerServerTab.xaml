@@ -494,7 +494,7 @@
                 <Button x:Name="RefreshDataButton" Content="Refresh" Click="RefreshDataButton_Click"
                         Padding="12,4" Margin="0,0,8,4"/>
                 <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="8,2"/>
-                <CheckBox x:Name="AutoRefreshCheckBox" Content="Auto-refresh" VerticalAlignment="Center"
+                <CheckBox x:Name="AutoRefreshCheckBox" Content="_Auto-refresh" VerticalAlignment="Center"
                           Margin="0,0,4,4" Foreground="{DynamicResource ForegroundBrush}"
                           IsChecked="True" Checked="AutoRefreshCheckBox_Changed" Unchecked="AutoRefreshCheckBox_Changed"/>
                 <ComboBox x:Name="AutoRefreshIntervalCombo" SelectedIndex="1" Width="70" Margin="0,0,0,4"
