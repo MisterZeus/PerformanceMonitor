@@ -1163,6 +1163,7 @@ public partial class SettingsWindow : Window
         bool enabled = PagerDutyWebhookEnabledCheckBox.IsChecked == true;
         PagerDutyRoutingKeyBox.IsEnabled = enabled;
         PagerDutyEuRegionCheckBox.IsEnabled = enabled;
+        PagerDutyProxyAddressBox.IsEnabled = enabled;
         TestPagerDutyButton.IsEnabled = enabled;
     }
 
