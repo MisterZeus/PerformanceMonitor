@@ -456,7 +456,6 @@ public sealed class PvsStatsCollectorDefinitionTests
             begin, begin, begin, begin,
             10L, 20L, 30L, 40L, 50L, 60L);
 
-        var deltas = new RecordingCollectorDeltaCalculator();
         var writer = new RecordingCollectorRowWriter();
 
         PvsStatsCollector.Instance.WritePayload(row, writer, MakeContext());
@@ -475,8 +474,10 @@ public sealed class PvsStatsCollectorDefinitionTests
             },
             writer.Values.ToArray());
 
-        /* Pure snapshot: every column is current state, so nothing goes through the delta framework. */
-        Assert.Empty(deltas.Calls);
+        /* Pure snapshot: every column is current state, so nothing goes through the delta framework.
+           s_deltas is the calculator MakeContext binds, so this observes what WritePayload actually did -
+           a fresh local here would be vacuous. */
+        Assert.Empty(s_deltas.Calls);
     }
 
     private static int CountOccurrences(string haystack, string needle)

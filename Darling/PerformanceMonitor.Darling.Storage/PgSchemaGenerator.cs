@@ -175,7 +175,8 @@ public static class PgSchemaGenerator
 
     /// <summary>
     /// The collectors whose <c>v_*</c> passthrough views were added AFTER the V8 schema split
-    /// (V10 latch/spinlock, V11 cpu-scheduler/plan-cache, V12 session-summary, V13 system-health),
+    /// (V10 latch/spinlock, V11 cpu-scheduler/plan-cache, V12 session-summary, V13 system-health,
+    /// V45 pvs_stats),
     /// so their views are NOT in <see cref="CollectViews"/> (which lists only the V4–V6 views V8
     /// moves). Referenced as the SAME collector instances the V10–V13 generators emit, so the set
     /// tracks the collector definitions rather than a parallel name list.
@@ -188,6 +189,7 @@ public static class PgSchemaGenerator
         PlanCacheStatsCollector.Instance,
         SessionSummaryStatsCollector.Instance,
         SystemHealthEventsCollector.Instance,
+        PvsStatsCollector.Instance,
     };
 
     /// <summary>

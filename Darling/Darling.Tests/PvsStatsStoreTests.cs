@@ -52,11 +52,18 @@ public sealed class PvsStatsStoreTests
 
         /* The v_* passthrough is what lets Darling's FinOps read be byte-identical to Lite's, whose own
            v_pvs_stats UNIONs the hot table with the parquet archive. Drop it and the two front ends
-           diverge on their first line. */
+           diverge on their first line.
+
+           The statement is UNQUALIFIED on purpose (it resolves through the migrate session's search_path,
+           like V10-V13): DarlingObservabilityTests scans every migration for exactly this bare form, so a
+           collect.-qualified view would be invisible to the guard that exists to stop a collector view
+           being added without its V14 refresh. Registering the collector in PostV8ViewCollectors is the
+           other half — the guard asserts the two sets are equal. */
         Assert.Contains(
-            "CREATE OR REPLACE VIEW collect.v_pvs_stats AS SELECT * FROM collect.pvs_stats;",
+            "CREATE OR REPLACE VIEW v_pvs_stats AS SELECT * FROM pvs_stats;",
             v45.Sql,
             StringComparison.Ordinal);
+        Assert.Contains("v_pvs_stats", PgSchemaGenerator.AllPassthroughViews);
         Assert.Contains("FROM v_pvs_stats", ViewerDataService.PvsStatsLatestSql, StringComparison.Ordinal);
 
         /* The migration must carry EVERY payload column, or an upgraded store's binary COPY fails on the
@@ -207,10 +214,8 @@ VALUES
             Assert.Equal(97388L, row.OldestActiveTransactionId);
             Assert.Equal(1244L, row.OldestAbortedTransactionId);
 
-            /* aborted id (1244) is far below active (97388) with a non-zero count -> MS's documented
-               "an old aborted transaction is preventing PVS cleanup" shape. */
-            Assert.True(row.AbortedTransactionSuspected);
-            Assert.Equal("Likely", row.AbortedSuspectDisplay);
+            /* The gap MS's read is about, surfaced as a number rather than a verdict: 97388 - 1244. */
+            Assert.Equal(96144L, row.AbortedTransactionLag);
 
             /* VALUE assertions, not Kind: the whole point of this test. A silent zone shift on write
                would land here as an offset, and Kind would read Unspecified either way. */
@@ -218,7 +223,6 @@ VALUES
             Assert.Equal(cleanerEnd, row.OffrowCleanerEndTime);
             Assert.Equal(cleanerStart, row.AbortedCleanerStartTime);
             Assert.Equal(cleanerEnd, row.AbortedCleanerEndTime);
-            Assert.Equal(collectionTime, row.CollectionTime);
 
             /* Both cleaners have an end time -> idle, not stuck. */
             Assert.Equal("Idle", row.CleanupState);

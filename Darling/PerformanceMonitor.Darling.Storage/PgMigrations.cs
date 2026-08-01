@@ -755,6 +755,15 @@ CREATE TABLE IF NOT EXISTS collect.collector_state (
     /// <c>search_path = collect, config, public</c> (V8); the table is <c>collect</c>-qualified anyway,
     /// matching V44 and V34.</para>
     ///
+    /// <para>The view statement is deliberately UNQUALIFIED while the table is <c>collect.</c>-qualified,
+    /// which looks inconsistent and is not: it resolves through the migrate session's
+    /// <c>search_path = collect, config, public</c> exactly like V10-V13's view statements, and the
+    /// drift guard in DarlingObservabilityTests scans every migration for the bare
+    /// <c>CREATE OR REPLACE VIEW v_x AS SELECT * FROM x</c> form. A <c>collect.</c>-qualified view would
+    /// be INVISIBLE to that guard — the guard that exists so a collector view can never be added without
+    /// its V14 refresh — and would drop out of <c>PgSchemaGenerator.AllPassthroughViews</c>, which the MCP
+    /// reader consults to answer "does this table have a v_* view".</para>
+    ///
     /// <para>The <c>v_pvs_stats</c> passthrough view is what keeps the two viewers' SQL byte-identical.
     /// Lite's <c>v_*</c> views are load-bearing there — they UNION the hot DuckDB table with the parquet
     /// archive — and Darling's are the passthrough twin created for exactly that reason (V4/V5:
@@ -801,7 +810,7 @@ CREATE TABLE IF NOT EXISTS collect.pvs_stats (
 
 CREATE INDEX IF NOT EXISTS idx_pvs_stats_time ON collect.pvs_stats(server_id, collection_time);
 
-CREATE OR REPLACE VIEW collect.v_pvs_stats AS SELECT * FROM collect.pvs_stats;";
+CREATE OR REPLACE VIEW v_pvs_stats AS SELECT * FROM pvs_stats;";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

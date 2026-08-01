@@ -54,9 +54,15 @@ namespace PerformanceMonitor.Collectors;
 /// with a performance cost. What IS collected supports MS's documented diagnostic path without any
 /// join: <c>current_aborted_transaction_count</c>, <c>oldest_active_transaction_id</c> against
 /// <c>oldest_aborted_transaction_id</c> (same DMV, same ID space, and MS's own instruction is to compare
-/// them to each other), and the five <c>pvs_off_row_page_skipped_*</c> counters, which are how the
-/// troubleshooting guide attributes a stuck cleanup to a secondary replica, a long snapshot scan, or
-/// aborted transactions.</para>
+/// them to each other), and the six <c>pvs_off_row_page_skipped_*</c> counters. Three of those are how the
+/// troubleshooting guide attributes a stuck cleanup: <c>..._low_water_mark</c> to a long-running query on a
+/// secondary replica, <c>..._min_useful_xts</c> to a long snapshot scan, and <c>..._oldest_aborted_xdesid</c>
+/// to space still held by aborted transactions. <b>The snapshot counter really is
+/// <c>..._min_useful_xts</c></b> — MS: "shows the number of pages skipped during cleanup due to a long
+/// snapshot scan" — and NOT the similarly-named <c>..._oldest_snapshot</c>, which the troubleshooting flow
+/// never reads; the grids label the former "Skipped: Snapshot" for that reason, and it is not a mis-binding.
+/// The other three are collected but not surfaced, one of them because MS says
+/// <c>..._transaction_not_cleaned</c> "can be ignored when troubleshooting large PVS issues".</para>
 ///
 /// <para>UNITS, and the caveat that outranks them. The DMV reports KILOBYTES; the size columns here are
 /// converted to MB to match every other size in the FinOps surface (database_size_stats' total_size_mb /
@@ -94,8 +100,10 @@ namespace PerformanceMonitor.Collectors;
 /// hazard they carried with them (MS's snapshot join uses <c>OR</c> across two timestamps and returns two
 /// rows for a database matching both — harmless in a human's result set, corrupting in a collector, where a
 /// doubled row doubles every downstream aggregate). What remains is one <c>OUTER APPLY</c> for the size
-/// denominator, which is an aggregate over <c>sys.master_files</c> and therefore single-row by construction;
-/// OUTER rather than CROSS so a database with no online data files still reports its PVS.</para>
+/// denominator, which is a SCALAR aggregate over <c>sys.master_files</c> with no GROUP BY and therefore
+/// returns exactly one row — a NULL one when nothing matches. That means CROSS APPLY would behave
+/// identically here (measured, not assumed from the usual OUTER-vs-CROSS rule), so OUTER is the honest
+/// default rather than a load-bearing choice.</para>
 ///
 /// <para>NULL cleaner END times are SEMANTIC, not missing: MS documents "if start time has value but the end
 /// time doesn't, it means PVS cleanup is ongoing on this database." They are stored as read — nothing

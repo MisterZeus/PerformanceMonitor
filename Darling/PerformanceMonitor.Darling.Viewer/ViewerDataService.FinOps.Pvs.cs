@@ -37,8 +37,7 @@ SELECT
     offrow_version_cleaner_end_time,
     pvs_off_row_page_skipped_low_water_mark,
     pvs_off_row_page_skipped_min_useful_xts,
-    pvs_off_row_page_skipped_oldest_aborted_xdesid,
-    collection_time
+    pvs_off_row_page_skipped_oldest_aborted_xdesid
 FROM v_pvs_stats
 WHERE server_id = $1
 AND   collection_time = (
@@ -73,8 +72,7 @@ ORDER BY persistent_version_store_size_mb DESC NULLS LAST, database_name";
                 OffrowCleanerEndTime = reader.IsDBNull(11) ? null : reader.GetDateTime(11),
                 SkippedLowWaterMark = reader.IsDBNull(12) ? null : Convert.ToInt64(reader.GetValue(12)),
                 SkippedMinUsefulXts = reader.IsDBNull(13) ? null : Convert.ToInt64(reader.GetValue(13)),
-                SkippedOldestAborted = reader.IsDBNull(14) ? null : Convert.ToInt64(reader.GetValue(14)),
-                CollectionTime = reader.IsDBNull(15) ? DateTime.MinValue : reader.GetDateTime(15)
+                SkippedOldestAborted = reader.IsDBNull(14) ? null : Convert.ToInt64(reader.GetValue(14))
             });
         }
 
@@ -104,7 +102,6 @@ public sealed class PvsStatsRow
     public long? SkippedLowWaterMark { get; set; }
     public long? SkippedMinUsefulXts { get; set; }
     public long? SkippedOldestAborted { get; set; }
-    public DateTime CollectionTime { get; set; }
 
     public string AdrDisplay => IsAdrOn switch
     {
@@ -125,21 +122,26 @@ public sealed class PvsStatsRow
             : null;
 
     /// <summary>
-    /// MS's documented "an old aborted transaction is preventing PVS cleanup" read, stated as a flag rather
-    /// than making the operator eyeball two internal identifiers: "if the oldest_aborted_transaction_id is
-    /// much lower than oldest_active_transaction_id, and the current_abort_transaction_count value is large,
-    /// there's likely an old aborted transaction preventing PVS cleanup." Both ids come from the same DMV
-    /// row and the same ID space, so the comparison needs no join — which is exactly why it survived when
-    /// the joined columns did not. Zero means "none tracked" and is not a low value.
+    /// How far the oldest ABORTED transaction lags the oldest ACTIVE one, in the DMV's own internal
+    /// sequence numbers. This is the input to MS's documented read — "if the oldest_aborted_transaction_id
+    /// is much lower than oldest_active_transaction_id, and the current_abort_transaction_count value is
+    /// large, there's likely an old aborted transaction preventing PVS cleanup" — presented as the gap
+    /// itself rather than as a yes/no verdict.
+    ///
+    /// <para>Deliberately NOT a boolean. "Much lower" and "large" have no documented thresholds, these are
+    /// dense internal sequence numbers whose scale is instance- and workload-specific, and a flag reading
+    /// "Likely" off an id one lower than the active one would fire constantly on benign state. Inventing a
+    /// cutoff would be exactly the folklore this collector went out of its way to avoid when it dropped
+    /// Microsoft's two non-resolving joins. The operator sees the gap, the aborted count, and the
+    /// skipped-page counters, and makes the call MS asks them to make.</para>
+    ///
+    /// <para>Null unless BOTH ids are non-zero: zero is the DMV's "none tracked" sentinel, not a low value,
+    /// so subtracting through it would manufacture a huge fake gap on an idle database.</para>
     /// </summary>
-    public bool AbortedTransactionSuspected =>
-        AbortedTransactionCount > 0
-        && OldestAbortedTransactionId > 0
-        && OldestActiveTransactionId > 0
-        && OldestAbortedTransactionId < OldestActiveTransactionId;
-
-    /// <summary>Grid form of the flag above; the grid is all text columns, matching GrowthDisplay's idiom.</summary>
-    public string AbortedSuspectDisplay => AbortedTransactionSuspected ? "Likely" : "-";
+    public long? AbortedTransactionLag =>
+        OldestAbortedTransactionId > 0 && OldestActiveTransactionId > 0
+            ? OldestActiveTransactionId - OldestAbortedTransactionId
+            : null;
 
     /// <summary>
     /// Cleanup state, from the pair of cleaner timestamps. MS: "If start time has value but the end time
