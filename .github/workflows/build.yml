@@ -105,6 +105,12 @@ jobs:
             lite:
               - 'Lite/**/!(*.md)'
               - 'Lite.Tests/**/!(*.md)'
+              # Same silently-stops-guarding reason as the darling filter's Lite entries below:
+              # Lite.Tests/ThemeParityLiteDarlingTests.cs READS the Darling viewer's theme
+              # dictionaries to assert the two apps' shared brush keys still resolve to the same
+              # colors. A Darling-theme-only edit is exactly the drift that guard exists to catch,
+              # so it has to reach the suite.
+              - 'Darling/PerformanceMonitor.Darling.Viewer/Themes/*.xaml'
             installer:
               - 'deprecated/Installer/**/!(*.md)'
               - 'deprecated/Installer.Tests/**/!(*.md)'
@@ -119,6 +125,16 @@ jobs:
               # guard — a guard that silently stops guarding, which is the exact failure
               # mode the source-parsing tests here exist to prevent.
               - '.github/workflows/nightly.yml'
+              # Same reason, Lite side: the #1949 pin in Darling.Tests asserts every twinned
+              # query grid carries the SAME column sequence in both front ends, so it reads
+              # these six Lite files. A Lite-only XAML edit has to reach the suite or the
+              # parity half of that guard stops guarding.
+              - 'Lite/Controls/ServerTab.xaml'
+              - 'Lite/Controls/FinOpsTab.xaml'
+              - 'Lite/Windows/WaitDrillDownWindow.xaml'
+              - 'Lite/Windows/ProcedureHistoryWindow.xaml'
+              - 'Lite/Windows/QueryStatsHistoryWindow.xaml'
+              - 'Lite/Windows/QueryStoreHistoryWindow.xaml'
             # The DOCUMENTATION allowlist: files that cannot affect a build under any
             # job in this workflow. Deliberately an allowlist of non-executable content,
             # not a "everything that isn't code" subtraction — a new file type defaults
