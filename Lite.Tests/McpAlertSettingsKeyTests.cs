@@ -29,7 +29,15 @@ namespace Lite.Tests;
 /// <para>Runtime rather than source-parsing: the payload is an anonymous type serialized by
 /// <c>JsonSerializer</c> with a naming policy in <c>McpHelpers.JsonOptions</c>, so the C# identifier is not
 /// automatically the wire key. Only serializing it actually proves what a client receives.</para>
+///
+/// <para>#1965: because it is runtime, <see cref="Settings"/> reads whatever the App.Alert* statics hold at
+/// that instant, so this class shares the "app-alert-statics" collection with the classes that write them —
+/// <c>LiteAlertForwardingTests</c> (direct writes) and <c>AlertSettingsCredentialLoadTests</c> (via
+/// App.LoadAlertSettings). xUnit runs separate classes in parallel, and a foreign write of
+/// <c>CpuAlertMode.Total</c> landing between this class's set and its assert failed the SqlOnly case. The
+/// <c>finally</c> restore below could not help: the window is before the assert, not after it.</para>
 /// </summary>
+[Collection("app-alert-statics")]
 public sealed class McpAlertSettingsKeyTests
 {
     private static JsonElement Settings()
