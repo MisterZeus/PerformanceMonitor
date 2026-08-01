@@ -72,3 +72,8 @@ community/*.sql
 
 # Test-run artifacts (dotnet test --logger trx)
 TestResults/
+
+# Exported remote-viewer handoff folders (--export-viewer-config): the darling.json inside
+# holds a LIVE database password in cleartext.
+viewer-config/
+darling.json
