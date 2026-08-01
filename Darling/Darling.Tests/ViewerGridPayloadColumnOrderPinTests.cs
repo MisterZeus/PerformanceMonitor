@@ -80,6 +80,7 @@ public sealed class ViewerGridPayloadColumnOrderPinTests
         new(ViewerServerTab, "QueryStoreGrid", "First Execution", 5, ["Query Text"]),
         new(ViewerServerTab, "QueryStoreComparisonGrid", "Database", 1, ["Query Text"]),
         new(ViewerServerTab, "QueryStoreRegressionsGrid", "Last Execution", 0, ["Query Text"]),
+        new(ViewerServerTab, "PlanCorrectionGrid", "Collected", 0, ["Query Text"]),
         new(ViewerServerTab, "BlockedProcessReportGrid", "Event Time", 0, ["Blocked SQL", "Blocking SQL", "XML"]),
         new(ViewerServerTab, "DeadlockGrid", "Time", 0, ["SQL Text", "XML"]),
         new(ViewerServerTab, "SignificantWaitsGrid", "Event Time", 0, ["Query Text"]),
@@ -109,6 +110,7 @@ public sealed class ViewerGridPayloadColumnOrderPinTests
         (LiteServerTab, "ProcedureStatsGrid", ViewerServerTab, "ProcedureStatsGrid"),
         (LiteServerTab, "QueryStoreGrid", ViewerServerTab, "QueryStoreGrid"),
         (LiteServerTab, "QueryStoreComparisonGrid", ViewerServerTab, "QueryStoreComparisonGrid"),
+        (LiteServerTab, "PlanCorrectionGrid", ViewerServerTab, "PlanCorrectionGrid"),
         (LiteServerTab, "BlockedProcessReportGrid", ViewerServerTab, "BlockedProcessReportGrid"),
         (LiteServerTab, "DeadlockGrid", ViewerServerTab, "DeadlockGrid"),
         (LiteServerTab, "SignificantWaitsGrid", ViewerServerTab, "SignificantWaitsGrid"),
@@ -223,10 +225,12 @@ public sealed class ViewerGridPayloadColumnOrderPinTests
     public void ColumnScanIsNotVacuous()
     {
         // Self-check: the parser must actually walk the grids, not silently return empty lists. The #1949
-        // census counted 501 columns across these 18 viewer grids; the floor is deliberately below that so
-        // adding a column never fails this, but a broken scan does.
+        // census counted 501 columns across 18 viewer grids, and #1952's 27-column PlanCorrectionGrid brings
+        // that to 528 across 19; the floor is deliberately below that so adding a column never fails this,
+        // but a broken scan does. It moved 480 -> 507 with that grid — up by exactly the 27 columns it adds,
+        // which preserves the guard's existing slack rather than widening or narrowing it.
         var total = Pins.Sum(p => ColumnHeaders(ReadRepoFile(p.RelativePath), p.GridName).Count);
-        Assert.True(total >= 480, $"only {total} columns walked across {Pins.Length} grids — the scan is broken.");
+        Assert.True(total >= 507, $"only {total} columns walked across {Pins.Length} grids — the scan is broken.");
     }
 
     [Fact]
@@ -234,12 +238,13 @@ public sealed class ViewerGridPayloadColumnOrderPinTests
     {
         // The anti-deletion half of the ratchet: quietly deleting a row would make this suite green by
         // covering less, which is the one way a pin can rot without anything going red.
-        Assert.True(Pins.Length == 18,
-            $"the pin table holds {Pins.Length} grids, expected the 18 Viewer grids on the #1949 move list. " +
+        Assert.True(Pins.Length == 19,
+            $"the pin table holds {Pins.Length} grids, expected the 18 Viewer grids on the #1949 move list " +
+            "plus #1952's PlanCorrectionGrid. " +
             "Removing a grid needs a stated reason (the grid or its payload column is gone); adding one is " +
             "free, but bump this number in the same commit.");
-        Assert.True(Twins.Length == 16,
-            $"the twin table holds {Twins.Length} pairs, expected 16 (the 18 Viewer grids less the two " +
+        Assert.True(Twins.Length == 17,
+            $"the twin table holds {Twins.Length} pairs, expected 17 (the 19 Viewer grids less the two " +
             "Viewer-only ones, CurrentActiveQueriesGrid and QueryStoreRegressionsGrid).");
     }
 

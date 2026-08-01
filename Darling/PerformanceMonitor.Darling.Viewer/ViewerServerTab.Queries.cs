@@ -16,10 +16,10 @@ using PerformanceMonitor.Common;
 namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>
-/// The Queries inner tab's sub-tab dispatch — the six-sub-tab group matching Lite's
+/// The Queries inner tab's sub-tab dispatch — the seven-sub-tab group matching Lite's
 /// <c>QueriesSubTabControl</c> exactly: Performance Trends and Active Queries (W1f-2), the Top Queries /
-/// Top Procedures / Query Store grids (W1f-1), then Query Heatmap last (W1f-2). Copied from Lite's
-/// <c>ServerTab</c> (Refresh / Slicers / Grids partials) with reads rewired to the
+/// Top Procedures / Query Store grids (W1f-1), Plan Corrections (#1952), then Query Heatmap last (W1f-2).
+/// Copied from Lite's <c>ServerTab</c> (Refresh / Slicers / Grids partials) with reads rewired to the
 /// <see cref="ViewerDataService"/> Postgres reads. A sub-tab switch reloads through the shell's
 /// overlap-guarded <see cref="RefreshActiveInnerTabAsync"/> (the Queries tab is the active inner tab
 /// whenever its sub-tabs are visible), and <see cref="LoadQueriesAsync"/> loads only the newly-visible
@@ -38,9 +38,9 @@ public partial class ViewerServerTab
        Darling-only LIVE "Current Active Queries" tab inserted right after the stored "Active Queries" tab,
        and the Query Store Regressions grid (Dashboard parity) inserted right after Query Store — matching
        the Dashboard's Query Store → Query Store Regressions adjacency: Performance Trends, Active Queries,
-       Current Active Queries (live), the three grids, Query Store Regressions, Query Heatmap. Every
-       reference below uses the NAMED constant, so inserting a tab only shifts these values — no literal-index
-       caller needs touching. */
+       Current Active Queries (live), the three grids, Query Store Regressions, Plan Corrections, Query
+       Heatmap. Every reference below uses the NAMED constant, so inserting a tab only shifts these values —
+       no literal-index caller needs touching. */
     private const int PerformanceTrendsSubTabIndex = 0;
     private const int ActiveQueriesSubTabIndex = 1;
     private const int CurrentActiveQueriesSubTabIndex = 2;
@@ -48,7 +48,8 @@ public partial class ViewerServerTab
     private const int TopProceduresSubTabIndex = 4;
     private const int QueryStoreSubTabIndex = 5;
     private const int QueryStoreRegressionsSubTabIndex = 6;
-    private const int QueryHeatmapSubTabIndex = 7;
+    private const int PlanCorrectionsSubTabIndex = 7;
+    private const int QueryHeatmapSubTabIndex = 8;
 
     private string _queryStatsSlicerMetric = "TotalCpu";
     private List<TimeSliceBucket>? _queryStatsSlicerData;
@@ -145,6 +146,9 @@ public partial class ViewerServerTab
             case QueryStoreRegressionsSubTabIndex:
                 await LoadQueryStoreRegressionsAsync(startUtc, endUtc);
                 break;
+            case PlanCorrectionsSubTabIndex:
+                await LoadPlanCorrectionsAsync(startUtc, endUtc);
+                break;
             case QueryHeatmapSubTabIndex:
                 await LoadQueryHeatmapAsync(startUtc, endUtc);
                 break;
@@ -195,6 +199,20 @@ public partial class ViewerServerTab
         var rows = await _dataService.GetQueryStoreRegressionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _queryStoreRegressionsFilterMgr!.UpdateData(rows);
         SetDefaultSortIfNone(QueryStoreRegressionsGrid, "DurationRegressionPercent", ListSortDirection.Descending);
+    }
+
+    /// <summary>
+    /// Loads the Plan Corrections grid (#1952) — the engine's own automatic plan correction recommendations
+    /// over the toolbar's settable window. Like the regressions grid it has no slicer / comparison: the read
+    /// is the engine's finding, not a time series over one metric. The default sort is the engine's own
+    /// ranking (score descending) as a grid-view-only SortDescription, so the read's chronological ORDER BY
+    /// stands.
+    /// </summary>
+    private async Task LoadPlanCorrectionsAsync(DateTime startUtc, DateTime endUtc)
+    {
+        var rows = await _dataService.GetPlanCorrectionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        _planCorrectionFilterMgr!.UpdateData(rows);
+        SetDefaultSortIfNone(PlanCorrectionGrid, "Score", ListSortDirection.Descending);
     }
 
     // ── Slicers (Lite's ServerTab.Slicers.cs; the slicer sends UTC bounds, the viewer reads take naive UTC) ──

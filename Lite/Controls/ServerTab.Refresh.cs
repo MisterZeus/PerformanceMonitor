@@ -264,7 +264,12 @@ public partial class ServerTab : UserControl
                             await RefreshQueryStoreComparisonAsync(cStart, cEnd);
                         }
                         break;
-                    case 5: // Query Heatmap
+                    case 5: // Plan Corrections
+                        var planCorrections = await Task.Run(() => SafeQueryAsync(() => _dataService.GetPlanCorrectionsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter)));
+                        _planCorrectionFilterMgr!.UpdateData(planCorrections);
+                        SetDefaultSortIfNone(PlanCorrectionGrid, "Score", ListSortDirection.Descending);
+                        break;
+                    case 6: // Query Heatmap
                         var hmMetric = (HeatmapMetric)HeatmapMetricCombo.SelectedIndex;
                         var hmData = await Task.Run(() => _dataService.GetQueryHeatmapAsync(_serverId, hmMetric, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
                         AppLogger.Info("ServerTab", $"[{_server.DisplayName}] Heatmap: {hmData.TimeBuckets.Length} time buckets, {hmData.Intensities.GetLength(0)}x{hmData.Intensities.GetLength(1)} grid");
@@ -279,6 +284,7 @@ public partial class ServerTab : UserControl
             var queryStatsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryStats", () => Task.Run(() => _dataService.GetTopQueriesByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, UtcOffsetMinutes, SelectedDatabaseFilter)));
             var procStatsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.ProcStats", () => Task.Run(() => _dataService.GetTopProceduresByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, UtcOffsetMinutes, SelectedDatabaseFilter)));
             var queryStoreTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryStore", () => Task.Run(() => _dataService.GetQueryStoreTopQueriesAsync(_serverId, hoursBack, 50, fromDate, toDate, SelectedDatabaseFilter)));
+            var planCorrectionTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.PlanCorrections", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetPlanCorrectionsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
             var queryDurationTrendTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryDurationTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetQueryDurationTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
             var procDurationTrendTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.ProcDurationTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetProcedureDurationTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
             var queryStoreDurationTrendTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QsDurationTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetQueryStoreDurationTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
@@ -290,7 +296,7 @@ public partial class ServerTab : UserControl
             }));
 
             await System.Threading.Tasks.Task.WhenAll(
-                snapshotsTask, queryStatsTask, procStatsTask, queryStoreTask,
+                snapshotsTask, queryStatsTask, procStatsTask, queryStoreTask, planCorrectionTask,
                 queryDurationTrendTask, procDurationTrendTask, queryStoreDurationTrendTask, executionCountTrendTask,
                 heatmapTask);
 
@@ -323,6 +329,8 @@ public partial class ServerTab : UserControl
                 var cStart3 = fromDate ?? cEnd3.AddHours(-hoursBack);
                 await RefreshQueryStoreComparisonAsync(cStart3, cEnd3);
             }
+            _planCorrectionFilterMgr!.UpdateData(planCorrectionTask.Result);
+            SetDefaultSortIfNone(PlanCorrectionGrid, "Score", ListSortDirection.Descending);
 
             UpdateQueryDurationTrendChart(queryDurationTrendTask.Result, hoursBack, fromDate, toDate);
             UpdateProcDurationTrendChart(procDurationTrendTask.Result, hoursBack, fromDate, toDate);
@@ -687,13 +695,15 @@ public partial class ServerTab : UserControl
             var serverConfigTask = Helpers.MethodProfiler.TimeAsync("Config.ServerConfig", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetLatestServerConfigAsync(_serverId))));
             var databaseConfigTask = Helpers.MethodProfiler.TimeAsync("Config.DatabaseConfig", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetLatestDatabaseConfigAsync(_serverId, SelectedDatabaseFilter))));
             var databaseScopedConfigTask = Helpers.MethodProfiler.TimeAsync("Config.DatabaseScopedConfig", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetLatestDatabaseScopedConfigAsync(_serverId, SelectedDatabaseFilter))));
+            var automaticTuningTask = Helpers.MethodProfiler.TimeAsync("Config.AutomaticTuning", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetLatestAutomaticTuningAsync(_serverId, SelectedDatabaseFilter))));
             var traceFlagsTask = Helpers.MethodProfiler.TimeAsync("Config.TraceFlags", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetLatestTraceFlagsAsync(_serverId))));
 
-            await System.Threading.Tasks.Task.WhenAll(serverConfigTask, databaseConfigTask, databaseScopedConfigTask, traceFlagsTask);
+            await System.Threading.Tasks.Task.WhenAll(serverConfigTask, databaseConfigTask, databaseScopedConfigTask, automaticTuningTask, traceFlagsTask);
 
             _serverConfigFilterMgr!.UpdateData(serverConfigTask.Result);
             _databaseConfigFilterMgr!.UpdateData(databaseConfigTask.Result);
             _dbScopedConfigFilterMgr!.UpdateData(databaseScopedConfigTask.Result);
+            _automaticTuningFilterMgr!.UpdateData(automaticTuningTask.Result);
             _traceFlagsFilterMgr!.UpdateData(traceFlagsTask.Result);
         }
         catch (Exception ex)

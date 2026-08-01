@@ -28,6 +28,7 @@ public partial class ServerTab : UserControl
         _queryStatsFilterMgr = new DataGridFilterManager<QueryStatsRow>(QueryStatsGrid);
         _procStatsFilterMgr = new DataGridFilterManager<ProcedureStatsRow>(ProcedureStatsGrid);
         _queryStoreFilterMgr = new DataGridFilterManager<QueryStoreRow>(QueryStoreGrid);
+        _planCorrectionFilterMgr = new DataGridFilterManager<PlanCorrectionRow>(PlanCorrectionGrid);
         _blockedProcessFilterMgr = new DataGridFilterManager<BlockedProcessReportRow>(BlockedProcessReportGrid);
         _deadlockFilterMgr = new DataGridFilterManager<DeadlockProcessDetail>(DeadlockGrid);
         _runningJobsFilterMgr = new DataGridFilterManager<RunningJobRow>(RunningJobsGrid);
@@ -35,6 +36,7 @@ public partial class ServerTab : UserControl
         _serverConfigFilterMgr = new DataGridFilterManager<ServerConfigRow>(ServerConfigGrid);
         _databaseConfigFilterMgr = new DataGridFilterManager<DatabaseConfigRow>(DatabaseConfigGrid);
         _dbScopedConfigFilterMgr = new DataGridFilterManager<DatabaseScopedConfigRow>(DatabaseScopedConfigGrid);
+        _automaticTuningFilterMgr = new DataGridFilterManager<AutomaticTuningRow>(AutomaticTuningGrid);
         _traceFlagsFilterMgr = new DataGridFilterManager<TraceFlagRow>(TraceFlagsGrid);
         _collectionHealthFilterMgr = new DataGridFilterManager<CollectorHealthRow>(CollectionHealthGrid);
         _collectionLogFilterMgr = new DataGridFilterManager<CollectionLogRow>(CollectionLogGrid);
@@ -59,6 +61,7 @@ public partial class ServerTab : UserControl
         _filterManagers[QueryStatsGrid] = _queryStatsFilterMgr;
         _filterManagers[ProcedureStatsGrid] = _procStatsFilterMgr;
         _filterManagers[QueryStoreGrid] = _queryStoreFilterMgr;
+        _filterManagers[PlanCorrectionGrid] = _planCorrectionFilterMgr;
         _filterManagers[BlockedProcessReportGrid] = _blockedProcessFilterMgr;
         _filterManagers[DeadlockGrid] = _deadlockFilterMgr;
         _filterManagers[RunningJobsGrid] = _runningJobsFilterMgr;
@@ -66,6 +69,7 @@ public partial class ServerTab : UserControl
         _filterManagers[ServerConfigGrid] = _serverConfigFilterMgr;
         _filterManagers[DatabaseConfigGrid] = _databaseConfigFilterMgr;
         _filterManagers[DatabaseScopedConfigGrid] = _dbScopedConfigFilterMgr;
+        _filterManagers[AutomaticTuningGrid] = _automaticTuningFilterMgr;
         _filterManagers[TraceFlagsGrid] = _traceFlagsFilterMgr;
         _filterManagers[CollectionHealthGrid] = _collectionHealthFilterMgr;
         _filterManagers[CollectionLogGrid] = _collectionLogFilterMgr;

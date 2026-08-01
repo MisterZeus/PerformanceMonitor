@@ -100,6 +100,7 @@ public partial class ServerTab : UserControl
     private DataGridFilterManager<QueryStatsRow>? _queryStatsFilterMgr;
     private DataGridFilterManager<ProcedureStatsRow>? _procStatsFilterMgr;
     private DataGridFilterManager<QueryStoreRow>? _queryStoreFilterMgr;
+    private DataGridFilterManager<PlanCorrectionRow>? _planCorrectionFilterMgr;
     private DataGridFilterManager<BlockedProcessReportRow>? _blockedProcessFilterMgr;
     private DataGridFilterManager<DeadlockProcessDetail>? _deadlockFilterMgr;
     private DataGridFilterManager<RunningJobRow>? _runningJobsFilterMgr;
@@ -107,6 +108,7 @@ public partial class ServerTab : UserControl
     private DataGridFilterManager<ServerConfigRow>? _serverConfigFilterMgr;
     private DataGridFilterManager<DatabaseConfigRow>? _databaseConfigFilterMgr;
     private DataGridFilterManager<DatabaseScopedConfigRow>? _dbScopedConfigFilterMgr;
+    private DataGridFilterManager<AutomaticTuningRow>? _automaticTuningFilterMgr;
     private DataGridFilterManager<TraceFlagRow>? _traceFlagsFilterMgr;
     private DataGridFilterManager<CollectorHealthRow>? _collectionHealthFilterMgr;
     private DataGridFilterManager<CollectionLogRow>? _collectionLogFilterMgr;
@@ -224,8 +226,8 @@ public partial class ServerTab : UserControl
 
         /* Fix DataGrid copy — StackPanel headers copy as type name without this */
         foreach (var grid in new DataGrid[] { QuerySnapshotsGrid, QueryStatsGrid, ProcedureStatsGrid,
-            QueryStoreGrid, BlockedProcessReportGrid, DeadlockGrid, RunningJobsGrid,
-            ServerConfigGrid, DatabaseConfigGrid, DatabaseScopedConfigGrid, TraceFlagsGrid,
+            QueryStoreGrid, PlanCorrectionGrid, BlockedProcessReportGrid, DeadlockGrid, RunningJobsGrid,
+            ServerConfigGrid, DatabaseConfigGrid, DatabaseScopedConfigGrid, AutomaticTuningGrid, TraceFlagsGrid,
             CollectionHealthGrid, CollectionLogGrid, LatchStatsGrid, SpinlockStatsGrid,
             SchedulerIssuesGrid, SevereErrorsGrid, MemoryConditionsGrid,
             MemoryBrokerGrid, MemoryNodeOomGrid, SignificantWaitsGrid, CpuTasksGrid, IoIssuesGrid,
