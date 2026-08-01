@@ -1,4 +1,4 @@
-<UserControl x:Class="PerformanceMonitorLite.Controls.FinOpsTab"
+﻿<UserControl x:Class="PerformanceMonitorLite.Controls.FinOpsTab"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
@@ -2029,6 +2029,13 @@
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="140">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
+                                    <DataGridTemplateColumn Header="Query Preview" Width="400">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding QueryPreview}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2" ToolTip="{Binding FullQueryText}"/>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
                                     <DataGridTextColumn Binding="{Binding TotalCpuMs, StringFormat='{}{0:N0}'}" Width="110">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Total CPU ms" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
@@ -2053,13 +2060,6 @@
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MonthlyCostShare" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Est. Cost ($)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                                     </DataGridTextColumn>
-                                    <DataGridTemplateColumn Header="Query Preview" Width="400">
-                                        <DataGridTemplateColumn.CellTemplate>
-                                            <DataTemplate>
-                                                <TextBlock Text="{Binding QueryPreview}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2" ToolTip="{Binding FullQueryText}"/>
-                                            </DataTemplate>
-                                        </DataGridTemplateColumn.CellTemplate>
-                                    </DataGridTemplateColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
                             <TextBlock x:Name="ExpensiveQueriesNoDataMessage"
@@ -2216,6 +2216,19 @@
                                 </StackPanel>
                             </DataGridTextColumn.Header>
                         </DataGridTextColumn>
+                        <DataGridTemplateColumn Width="400">
+                            <DataGridTemplateColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SampleQueryText" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Query Preview" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTemplateColumn.Header>
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding SampleQueryText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2" ToolTip="{Binding FullQueryText}"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
                         <DataGridTextColumn Binding="{Binding TotalExecutions, StringFormat='{}{0:N0}'}" Width="100">
                             <DataGridTextColumn.Header>
                                 <StackPanel Orientation="Horizontal">
@@ -2315,19 +2328,6 @@
                                 <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
                             </DataGridTextColumn.ElementStyle>
                         </DataGridTextColumn>
-                        <DataGridTemplateColumn Width="400">
-                            <DataGridTemplateColumn.Header>
-                                <StackPanel Orientation="Horizontal">
-                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SampleQueryText" Click="FilterButton_Click" Margin="0,0,4,0"/>
-                                    <TextBlock Text="Query Preview" FontWeight="Bold" VerticalAlignment="Center"/>
-                                </StackPanel>
-                            </DataGridTemplateColumn.Header>
-                            <DataGridTemplateColumn.CellTemplate>
-                                <DataTemplate>
-                                    <TextBlock Text="{Binding SampleQueryText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2" ToolTip="{Binding FullQueryText}"/>
-                                </DataTemplate>
-                            </DataGridTemplateColumn.CellTemplate>
-                        </DataGridTemplateColumn>
                     </DataGrid.Columns>
                 </DataGrid>
             </Grid>

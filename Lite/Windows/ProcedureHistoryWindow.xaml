@@ -77,6 +77,15 @@
                 <DataGridTextColumn Header="Collection Time" Binding="{Binding CollectionTimeLocal}" Width="130"/>
                 <DataGridTextColumn Header="Last Execution" Binding="{Binding LastExecutionTimeLocal}" Width="130"/>
                 <DataGridTextColumn Header="Cached Time" Binding="{Binding CachedTimeLocal}" Width="130"/>
+                <DataGridTemplateColumn Header="Plan" Width="Auto" MinWidth="80">
+                    <DataGridTemplateColumn.CellTemplate>
+                        <DataTemplate>
+                            <Button Content="Download" Click="DownloadPlan_Click"
+                                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                                    Padding="6,2"/>
+                        </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
                 <DataGridTextColumn Header="Object Type" Binding="{Binding ObjectType}" Width="95"/>
                 <DataGridTextColumn Header="Exec Delta" Binding="{Binding DeltaExecutions, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
                 <DataGridTextColumn Header="Total Executions" Binding="{Binding TotalExecutions, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
@@ -113,15 +122,6 @@
                 <DataGridTextColumn Header="Interval (sec)" Binding="{Binding SampleIntervalSeconds}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
                 <DataGridTextColumn Header="SQL Handle" Binding="{Binding SqlHandle}" Width="140"/>
                 <DataGridTextColumn Header="Plan Handle" Binding="{Binding PlanHandle}" Width="140"/>
-                <DataGridTemplateColumn Header="Plan" Width="Auto" MinWidth="80">
-                    <DataGridTemplateColumn.CellTemplate>
-                        <DataTemplate>
-                            <Button Content="Download" Click="DownloadPlan_Click"
-                                    HorizontalAlignment="Center" VerticalAlignment="Center"
-                                    Padding="6,2"/>
-                        </DataTemplate>
-                    </DataGridTemplateColumn.CellTemplate>
-                </DataGridTemplateColumn>
             </DataGrid.Columns>
         </DataGrid>
 

@@ -217,6 +217,7 @@ const WAIT_COLUMNS = [
 
 const ACTIVE_COLUMNS = [
   { key: "collection_time", label: "Time", format: "time" },
+  { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
   { key: "session_id", label: "SPID", format: "int" },
   { key: "database_name", label: "Database" },
   { key: "status", label: "Status" },
@@ -224,7 +225,6 @@ const ACTIVE_COLUMNS = [
   { key: "elapsed_time_formatted", label: "Elapsed" },
   { key: "wait_type", label: "Wait" },
   { key: "blocking_session_id", label: "Blocked by", format: "int" },
-  { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
 ];
 
 const COLLECTOR_COLUMNS = [
