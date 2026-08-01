@@ -1698,6 +1698,120 @@
                             </DataGrid>
                         </Grid>
                     </TabItem>
+                    <!-- Plan Corrections (Lite ServerTab.xaml): the engine's own automatic plan correction
+                         recommendations (#1952), beside the Query Store surfaces because every recommendation
+                         names a Query Store query id. The per-database FORCE_LAST_GOOD_PLAN enablement half of
+                         the same collector is on the Configuration tab (Automatic Tuning). -->
+                    <TabItem Header="Plan Corrections">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Margin="8,4,0,4" FontSize="11"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}"
+                                       TextWrapping="Wrap"
+                                       Text="The engine's own automatic plan correction findings — sys.dm_db_tuning_recommendations, with the regressed query's text resolved through Query Store at collection time. The engine keeps recommendations only until it restarts, so a captured row can be the only surviving record that a regression happened. Per-database enablement state is on the Configuration tab's Automatic Tuning sub-tab."/>
+                            <DataGrid Grid.Row="1" x:Name="PlanCorrectionGrid" Style="{StaticResource DarkGrid}"
+                                      HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Binding="{Binding CollectionTimeLocal}" Width="150">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTemplateColumn Width="500" SortMemberPath="QueryText">
+                                        <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="QueryText" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Query Text" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding QueryText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2"
+                                                           ToolTip="{Binding QueryText}"/>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
+                                    <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding RecommendationState}" Width="100">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecommendationState" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="State" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding RecommendationStateReason}" Width="150">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecommendationStateReason" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="State Reason" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding RecommendationReason}" Width="150">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecommendationReason" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Reason" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding Score}" ElementStyle="{StaticResource NumericCell}" Width="70">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Score" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Score" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding EstimatedGainSeconds, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EstimatedGainSeconds" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Est. Gain (s)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding QueryId}" ElementStyle="{StaticResource NumericCell}" Width="80">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="QueryId" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Query ID" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding RegressedPlanId}" ElementStyle="{StaticResource NumericCell}" Width="110">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RegressedPlanId" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Regressed Plan" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding LastGoodPlanId}" ElementStyle="{StaticResource NumericCell}" Width="110">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastGoodPlanId" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Good Plan" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding LastGoodPlanForcingType}" Width="110">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastGoodPlanForcingType" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Forcing Type" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding ForcedDisplay}" Width="70">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ForcedDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Forced" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding LastGoodPlanForceFailureReason}" Width="150">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastGoodPlanForceFailureReason" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Force Failure" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding RegressedPlanExecutionCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="120">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RegressedPlanExecutionCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Regressed Execs" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding RegressedPlanCpuTimeAverageMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="140">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RegressedPlanCpuTimeAverageMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Regressed CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding LastGoodPlanExecutionCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="120">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastGoodPlanExecutionCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Good Execs" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding LastGoodPlanCpuTimeAverageMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="140">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastGoodPlanCpuTimeAverageMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Good CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding ValidSinceLocal}" Width="150">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ValidSinceLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Valid Since" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding LastRefreshLocal}" Width="150">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastRefreshLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Refresh" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding ExecutableDisplay}" Width="90">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ExecutableDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Executable" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding RevertableDisplay}" Width="90">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RevertableDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Revertable" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding ExecuteActionInitiatedBy}" Width="110">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ExecuteActionInitiatedBy" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Executed By" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding ExecuteActionInitiatedTimeLocal}" Width="150">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ExecuteActionInitiatedTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Executed At" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding RevertActionInitiatedBy}" Width="110">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RevertActionInitiatedBy" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Reverted By" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding RevertActionInitiatedTimeLocal}" Width="150">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RevertActionInitiatedTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Reverted At" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTemplateColumn Width="400" SortMemberPath="ImplementationScript">
+                                        <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ImplementationScript" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Script" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding ImplementationScript}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2"
+                                                           ToolTip="{Binding ImplementationScript}"/>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Grid>
+                    </TabItem>
                     <!-- Query Heatmap (Lite ServerTab.xaml:1160-1180): metric combo + heatmap of query
                          counts per (5-min bin x per-execution magnitude bucket). Right-click drills into
                          Active Queries for the clicked bin's window. -->
@@ -2638,6 +2752,33 @@
                                 </DataGridTextColumn>
                                 <DataGridTextColumn Binding="{Binding ValueForSecondary}" Width="200">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ValueForSecondary" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Value for Secondary" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </TabItem>
+                    <TabItem Header="Automatic Tuning">
+                        <DataGrid x:Name="AutomaticTuningGrid" Style="{StaticResource DarkGrid}">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Binding="{Binding DatabaseName}" Width="200">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Binding="{Binding DesiredState}" Width="150">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DesiredState" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Desired State" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Binding="{Binding ActualState}" Width="150">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ActualState" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Actual State" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Binding="{Binding Reason}" Width="200">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Reason" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Reason" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Binding="{Binding CreateIndexState}" Width="150">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CreateIndexState" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Create Index" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Binding="{Binding DropIndexState}" Width="150">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DropIndexState" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Drop Index" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Binding="{Binding CollectionTimeLocal}" Width="150">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                             </DataGrid.Columns>
                         </DataGrid>

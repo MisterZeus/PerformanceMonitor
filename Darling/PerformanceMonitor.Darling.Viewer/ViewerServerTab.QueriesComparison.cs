@@ -40,10 +40,11 @@ public partial class ViewerServerTab
     }
 
     /// <summary>
-    /// Comparison overlays only the three grid sub-tabs (Top Queries / Top Procedures / Query Store); the
-    /// Performance Trends / Active Queries / Query Heatmap sub-tabs (W1f-2) have no baseline overlay, so the
-    /// Compare combo is reset to None and disabled there (Lite's <c>UpdateCompareDropdownState</c>, Queries
-    /// slice). Called on every sub-tab change and once at init for the default (Performance Trends) state.
+    /// Comparison overlays only the three grid sub-tabs (Top Queries / Top Procedures / Query Store); every
+    /// other sub-tab (Performance Trends / Active Queries / Query Heatmap from W1f-2, plus the regressions
+    /// and plan-correction grids) has no baseline overlay, so the Compare combo is reset to None and
+    /// disabled there (Lite's <c>UpdateCompareDropdownState</c>, Queries slice). Called on every sub-tab
+    /// change and once at init for the default (Performance Trends) state.
     /// </summary>
     private void UpdateCompareDropdownState()
     {

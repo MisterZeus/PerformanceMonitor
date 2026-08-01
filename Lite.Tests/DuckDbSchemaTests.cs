@@ -154,8 +154,9 @@ public class DuckDbSchemaTests : IDisposable
            DMV/XE/Default-Trace collectors), job_history + agent_status (#1433 Job History tab),
            long_query_completions (#1496 long-query trace), ag_replica_states +
            ag_database_replica_states (#991 Availability Group health), and collector_state
-           (#1962 per-server state a collector's own rows cannot produce). */
-        Assert.Equal(46, tableCount);
+           (#1962 per-server state a collector's own rows cannot produce), and plan_correction
+           (#1952 automatic plan correction). */
+        Assert.Equal(47, tableCount);
     }
 
     [Fact]

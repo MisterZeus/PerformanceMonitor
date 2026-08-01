@@ -207,6 +207,11 @@ public static class DuckDbSchemaGenerator
             ["database_config.database_name"] = "NOT NULL",
             ["database_scoped_config.database_name"] = "NOT NULL",
             ["database_scoped_config.configuration_name"] = "NOT NULL",
+            /* Every plan_correction row is named by the database it was enumerated from — including the
+               enablement-only row a database with no recommendations produces. Nothing else on the row
+               is guaranteed non-null (a database that has never had a regression carries no
+               recommendation at all), so this is the only column that can carry the constraint. */
+            ["plan_correction.database_name"] = "NOT NULL",
             ["trace_flags.trace_flag"] = "NOT NULL",
             ["trace_flags.status"] = "NOT NULL",
             ["trace_flags.is_global"] = "NOT NULL",
