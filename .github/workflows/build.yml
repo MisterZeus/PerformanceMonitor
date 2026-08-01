@@ -105,6 +105,12 @@ jobs:
             lite:
               - 'Lite/**/!(*.md)'
               - 'Lite.Tests/**/!(*.md)'
+              # Same silently-stops-guarding reason as the darling filter's Lite entries below:
+              # Lite.Tests/ThemeParityLiteDarlingTests.cs READS the Darling viewer's theme
+              # dictionaries to assert the two apps' shared brush keys still resolve to the same
+              # colors. A Darling-theme-only edit is exactly the drift that guard exists to catch,
+              # so it has to reach the suite.
+              - 'Darling/PerformanceMonitor.Darling.Viewer/Themes/*.xaml'
             installer:
               - 'deprecated/Installer/**/!(*.md)'
               - 'deprecated/Installer.Tests/**/!(*.md)'
