@@ -434,7 +434,7 @@ For a fleet of servers sharing one identity — one managed identity or one serv
 
 ### Lite / Darling (On-Premises)
 
-Nothing is installed on the target server. The full least-privilege grant set (verified live against SQL Server 2025 with a scratch login, [#1823](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1823)):
+Nothing is installed on the target server. The full least-privilege grant set (verified live against SQL Server 2025 with a scratch login, [#1823](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1823)). **This block is the authoritative copy** — Lite and Darling need the identical grants, so the Darling operator guide points here rather than keeping a second list that can drift out of step:
 
 ```sql
 USE [master];
@@ -460,6 +460,12 @@ GRANT ALTER ANY EVENT SESSION TO [YourLogin];
    creating and altering traces, and implies SHOWPLAN in every database); withhold it and
    the collector records a PERMISSIONS skip instead. */
 GRANT ALTER TRACE TO [YourLogin];
+
+/* Optional: lets the app bootstrap 'blocked process threshold (s)' to 5 when it is still 0.
+   sp_configure + RECONFIGURE require ALTER SETTINGS; without it the bootstrap is logged and
+   skipped, blocked process reports stay empty, and you set the threshold yourself (or via an
+   RDS Parameter Group). Blocking stays visible either way through the DMV blocking snapshot. */
+GRANT ALTER SETTINGS TO [YourLogin];
 
 /* Optional: SQL Agent job monitoring + failed-job alerts. Direct table grants, deliberately
    NOT SQLAgentReaderRole: that role gates the sp_help_job* procedures, which this product
