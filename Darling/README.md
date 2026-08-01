@@ -469,6 +469,7 @@ The service migrates the store itself at startup — plain versioned SQL scripts
 | **V28** — Query Store replica role | `query_store_stats.replica_role` (SQL Server 2022+ AG secondary-replica attribution, #1546) and a refreshed `v_query_store_stats` |
 | **V29** — long-query completions collector | `collect.long_query_completions` + its index — the opt-in long-running-query completion trace's store table (#1496) |
 | **V30** — web dashboard config | `config_service.web_enabled` + `web_port` — the read-only web dashboard's live enable/port toggle, the twin of `mcp_enabled`/`mcp_port` (#1562) |
+| **V46** — automatic plan correction | `collect.plan_correction` + its index — the #1952 collector's store table (FORCE_LAST_GOOD_PLAN enablement plus the engine's live recommendation set). Additive and view-less, so a fresh store gets it from V1's generated schema and V46 is what an already-existing store gets |
 | **V47** — ADR persistent version store | `collect.pvs_stats` + its index + the `v_pvs_stats` passthrough view — the #1951 ADR version-store collector's store table. A fresh store gets the table from V1's generated schema; V47 is what an already-existing store gets, and the view is what keeps the Darling viewer's FinOps read byte-identical to Lite's |
 
 All timestamps in the store are **naive-UTC** `timestamp` columns — the product-wide cross-store contract (Lite's DuckDB does the same).

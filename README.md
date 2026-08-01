@@ -137,6 +137,7 @@ Data starts flowing within 1–5 minutes. That's it. No installation on your ser
 | memory_clerks | 5 min | `sys.dm_os_memory_clerks` |
 | memory_pressure_events | 5 min | `sys.dm_os_ring_buffers` RING_BUFFER_RESOURCE_MONITOR |
 | query_store | 5 min | Query Store DMVs (per database) |
+| plan_correction | 5 min | `sys.dm_db_tuning_recommendations` + `sys.database_automatic_tuning_options` (automatic plan correction: FORCE_LAST_GOOD_PLAN enablement plus the engine's live regression recommendations, with the regressed query's text resolved through Query Store) |
 | plan_cache_stats | 5 min | `sys.dm_exec_cached_plans` (single-use vs reused plan-cache bloat) |
 | system_health_events | 5 min | `system_health` XE ring buffer (not Azure SQL DB) |
 | default_trace_events | 5 min | default trace via `sys.fn_trace_gettable` |
