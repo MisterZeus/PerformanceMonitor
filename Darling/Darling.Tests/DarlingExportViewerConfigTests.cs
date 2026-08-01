@@ -13,6 +13,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Npgsql;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -133,10 +134,11 @@ public sealed class DarlingExportViewerConfigTests
             Assert.Contains(field, json, StringComparison.Ordinal);
         }
 
-        /* Both legal Root Certificate forms, and the trap: a bare name resolves against the WORKING directory.
-           Asserted as the whole phrase — a line wrap that splits it is a documentation defect, not a formatting
-           detail, because the reader scanning for the caveat is scanning for those two words together. */
-        Assert.Contains("WORKING DIRECTORY", json, StringComparison.Ordinal);
+        /* Every legal Root Certificate form, and the anchor a relative one is measured from (#1970): the
+           folder holding darling.json. Asserted as whole phrases — a line wrap that splits one is a
+           documentation defect, not a formatting detail, because the reader scanning for the rule is
+           scanning for those words together. */
+        Assert.Contains("the folder holding darling.json", json, StringComparison.Ordinal);
         Assert.Contains("an absolute path", json, StringComparison.Ordinal);
         Assert.Contains(@"C:\Darling\server.crt", json, StringComparison.Ordinal);
 
@@ -148,14 +150,18 @@ public sealed class DarlingExportViewerConfigTests
     }
 
     /// <summary>
-    /// The instruction the export leads with has to be the one that WORKS unedited. A bare
-    /// <c>Root Certificate=server.crt</c> resolves against the Viewer's working directory, so
-    /// "copy the files beside the Viewer executable" works as-is while "put the folder anywhere and point
-    /// DARLING_CONFIG at it" needs the certificate path made absolute — the export must not promise the
-    /// second without that condition (#1970 is the viewer-side fix that would remove the condition).
+    /// Both documented placements now work with nothing edited: #1970 anchors a relative
+    /// <c>Root Certificate</c> to the folder holding darling.json, so "copy the three files beside the Viewer
+    /// executable" and "put the folder anywhere and point DARLING_CONFIG at it" are both correct as exported.
+    ///
+    /// <para>This pins the docs BOTH ways. The obsolete caveat — that a bare name follows the Viewer's
+    /// working directory and must be hand-edited to a full path for an out-of-the-way folder — must be GONE,
+    /// because a documented workaround that is no longer true is worse than none: an operator who follows it
+    /// hardcodes a path that breaks the next time the folder moves. And the simplest placement still leads,
+    /// so the reader who stops after one paragraph has the right one.</para>
     /// </summary>
     [Fact]
-    public void ExportedDocs_LeadWithTheInstructionThatWorksUnedited_AndQualifyTheOtherOne()
+    public void ExportedDocs_LeadWithTheSimplestPlacement_AndNoLongerCarryTheWorkingDirectoryCaveat()
     {
         var json = DarlingCliCommands.BuildViewerConfigJson("Host=h;Database=darling", DateTimeOffset.UnixEpoch);
         var readme = DarlingCliCommands.BuildViewerConfigReadme("h", 5641, "viewer", DateTimeOffset.UnixEpoch);
@@ -175,13 +181,25 @@ public sealed class DarlingExportViewerConfigTests
             Assert.True(darlingConfig >= 0, "the DARLING_CONFIG placement is not documented");
             Assert.True(
                 besideTheExe < darlingConfig,
-                "DARLING_CONFIG is offered before the placement that works unedited");
+                "DARLING_CONFIG is offered before the simplest placement");
+
+            /* The retired caveat, in every spelling either text used for it. */
+            Assert.DoesNotContain("WORKING DIRECTORY", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("working directory", text, StringComparison.OrdinalIgnoreCase);
+
+            /* And the instruction it used to qualify no longer demands an edit. "full path" survives only in
+               the absolute-path option, which is still legal — what must be gone is telling the operator to
+               CHANGE the exported value. */
+            Assert.DoesNotContain("change Root Certificate", text, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("change its Root Certificate", text, StringComparison.OrdinalIgnoreCase);
         }
 
-        /* And the DARLING_CONFIG route names its condition rather than implying "nothing to edit"
-           (case-insensitive — the JSON shouts FULL, the README does not; the condition is what matters). */
-        Assert.Contains("full path", json, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("full path", readme, StringComparison.OrdinalIgnoreCase);
+        /* Positively: both texts state the anchor a relative certificate is measured from, so the reader
+           learns the rule rather than just being told it works. */
+        foreach (var text in new[] { json, readme })
+        {
+            Assert.Contains("the folder holding darling.json", text, StringComparison.Ordinal);
+        }
     }
 
     /// <summary>The README is the same reference for an operator who never opens JSON — and it must NOT be a
@@ -196,7 +214,7 @@ public sealed class DarlingExportViewerConfigTests
         Assert.Contains("Username=viewer", readme, StringComparison.Ordinal);
         Assert.Contains("managed = false", readme, StringComparison.Ordinal);
         Assert.Contains("Root Certificate=server.crt", readme, StringComparison.Ordinal);
-        Assert.Contains("WORKING DIRECTORY", readme, StringComparison.Ordinal);
+        Assert.Contains("the folder holding darling.json", readme, StringComparison.Ordinal);
         Assert.Contains("absolute path", readme, StringComparison.Ordinal);
 
         /* ASCII only: this file gets opened in Notepad on a machine with an unknown code page. */
@@ -347,6 +365,14 @@ public sealed class DarlingExportViewerConfigTests
 
             /* The cert travels byte-for-byte: VerifyFull pins THIS PEM. */
             Assert.Contains(Pem.Trim(), (await File.ReadAllTextAsync(exportedCert)).Trim(), StringComparison.Ordinal);
+
+            /* And the claim the exported docs now make, proven on the folder as written (#1970): loaded the
+               way the Viewer loads it, the bare Root Certificate resolves to the server.crt sitting beside
+               that darling.json — no edit, and no dependence on this test host's working directory, which is
+               nowhere near the temp folder. This is the whole "copy it anywhere and it works" story. */
+            var loaded = Assert.IsType<ViewerSettings>(ViewerSettings.TryLoad(exportedConfig));
+            Assert.Equal(exportedCert, new NpgsqlConnectionStringBuilder(loaded.ConnectionString).RootCertificate);
+            Assert.True(File.Exists(new NpgsqlConnectionStringBuilder(loaded.ConnectionString).RootCertificate));
 
             /* STDOUT is the machine-readable manifest; STDERR carries the loud secret warning, naming the file. */
             var stdout = output.ToString();

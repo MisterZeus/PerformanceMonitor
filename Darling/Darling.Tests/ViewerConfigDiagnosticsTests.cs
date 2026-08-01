@@ -11,7 +11,9 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using System.Text.RegularExpressions;
+using Npgsql;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
@@ -141,13 +143,14 @@ public sealed class ViewerConfigDiagnosticsTests
 
     /// <summary>
     /// The sharpest case in the whole feature: the documented bring-your-own string carries a BARE
-    /// <c>Root Certificate=server.crt</c>, which Npgsql resolves against the process working directory — not
-    /// the viewer's install directory and not darling.json's directory. So the same viewer launched from a
-    /// shortcut and from a shell looks for the certificate in different places, and verify-full fails in one
-    /// of them with nothing said about where it looked.
+    /// <c>Root Certificate=server.crt</c>. Npgsql resolves a relative path against the process working
+    /// directory, so the same viewer launched from a shortcut and from a shell used to look for the
+    /// certificate in different places. #1970 moved the anchor to darling.json's own directory, and this
+    /// pins that the block reports THAT anchor — the directory it names has to be the one the connection
+    /// string was rewritten against, or the block is confidently wrong.
     /// </summary>
     [Fact]
-    public void DescribeConnection_RelativeRootCertificate_ResolvesAgainstTheWorkingDirectory_AndReportsExistence()
+    public void DescribeConnection_RelativeRootCertificate_ResolvesAgainstTheConfigDirectory_AndReportsExistence()
     {
         var root = Directory.CreateTempSubdirectory("darling-viewer-cert-");
         try
@@ -155,14 +158,14 @@ public sealed class ViewerConfigDiagnosticsTests
             var expected = Path.Combine(root.FullName, "server.crt");
 
             var missing = ViewerConfigDiagnostics.DescribeConnection(
-                ByoConnectionString(), managed: false, workingDirectory: root.FullName);
+                ByoConnectionString(), managed: false, configDirectory: root.FullName);
             Assert.Equal(expected, ValueFor(missing, "resolves to"));
             Assert.Equal(root.FullName, ValueFor(missing, "relative to"));
             Assert.Equal("NO", ValueFor(missing, "exists"));
 
             File.WriteAllText(expected, "-----BEGIN CERTIFICATE-----");
             var present = ViewerConfigDiagnostics.DescribeConnection(
-                ByoConnectionString(), managed: false, workingDirectory: root.FullName);
+                ByoConnectionString(), managed: false, configDirectory: root.FullName);
             Assert.Equal("yes", ValueFor(present, "exists"));
         }
         finally
@@ -180,13 +183,23 @@ public sealed class ViewerConfigDiagnosticsTests
             var certificate = Path.Combine(root.FullName, "pinned.crt");
             File.WriteAllText(certificate, "-----BEGIN CERTIFICATE-----");
 
-            var lines = ViewerConfigDiagnostics.DescribeConnection(
-                ByoConnectionString(certificate), managed: false, workingDirectory: root.FullName);
+            /* A DIFFERENT config directory than the certificate's, so an anchor wrongly applied to an
+               absolute path would move it somewhere this assertion can see. */
+            var elsewhere = Directory.CreateTempSubdirectory("darling-viewer-abscert-config-");
+            try
+            {
+                var lines = ViewerConfigDiagnostics.DescribeConnection(
+                    ByoConnectionString(certificate), managed: false, configDirectory: elsewhere.FullName);
 
-            Assert.Equal(certificate, ValueFor(lines, "resolves to"));
-            Assert.Equal("yes", ValueFor(lines, "exists"));
-            /* An absolute path has no working-directory dependency, so claiming one would be noise. */
-            Assert.DoesNotContain(lines, l => l.TrimStart().StartsWith("relative to:", StringComparison.Ordinal));
+                Assert.Equal(certificate, ValueFor(lines, "resolves to"));
+                Assert.Equal("yes", ValueFor(lines, "exists"));
+                /* An absolute path has no anchor dependency, so claiming one would be noise. */
+                Assert.DoesNotContain(lines, l => l.TrimStart().StartsWith("relative to:", StringComparison.Ordinal));
+            }
+            finally
+            {
+                elsewhere.Delete(recursive: true);
+            }
         }
         finally
         {
@@ -378,6 +391,206 @@ public sealed class ViewerConfigDiagnosticsTests
             helperUses >= 6,
             $"Expected the diagnostics-carrying helper at the config-read, config-missing, schema-gate, " +
             $"store-unreachable, connect-failed and store-read failure surfaces (plus its definition); found {helperUses}.");
+    }
+
+    // ── The certificate anchor (#1970) ────────────────────────────────────────────────────
+
+    /// <summary>The <c>Root Certificate</c> value out of a connection string, as Npgsql reads it.</summary>
+    private static string? CertificateIn(string connectionString) =>
+        new NpgsqlConnectionStringBuilder(connectionString).RootCertificate;
+
+    [Fact]
+    public void Resolve_AbsolutePath_IsTheAnswerRegardlessOfTheAnchor()
+    {
+        Assert.Equal(
+            @"C:\Pinned\server.crt",
+            ViewerCertificateAnchor.Resolve(@"C:\Pinned\server.crt", @"C:\Darling"));
+    }
+
+    [Fact]
+    public void Resolve_BareNameAndRelativeSubpath_BothAnchorToTheConfigDirectory()
+    {
+        Assert.Equal(
+            @"C:\Darling\server.crt",
+            ViewerCertificateAnchor.Resolve("server.crt", @"C:\Darling"));
+        Assert.Equal(
+            @"C:\Darling\certs\server.crt",
+            ViewerCertificateAnchor.Resolve(@"certs\server.crt", @"C:\Darling"));
+    }
+
+    /// <summary>
+    /// No anchor means no darling.json directory to measure from, so the answer is the process working
+    /// directory — what Npgsql itself would do. The diagnostics need this branch to stay honest rather than
+    /// invent a path; nothing on the connection path takes it (a rewrite without an anchor is skipped).
+    /// </summary>
+    [Fact]
+    public void Resolve_WithoutAnAnchor_FallsBackToTheWorkingDirectory_AndNullValueYieldsNull()
+    {
+        Assert.Equal(Path.GetFullPath("server.crt"), ViewerCertificateAnchor.Resolve("server.crt", null));
+        Assert.Null(ViewerCertificateAnchor.Resolve(null, @"C:\Darling"));
+        Assert.Null(ViewerCertificateAnchor.Resolve("   ", @"C:\Darling"));
+    }
+
+    /// <summary>
+    /// The rewrite never ADDS <c>Root Certificate</c>: a connection that was not pinning must not be made to
+    /// pin by a path-handling fix. Managed loopback is the shipped default and carries no certificate at all.
+    /// </summary>
+    [Fact]
+    public void Anchor_NoRootCertificate_ReturnsTheStringUntouched()
+    {
+        const string managedLoopback = "Host=127.0.0.1;Port=5641;Username=admin;Database=darling";
+
+        var anchored = ViewerCertificateAnchor.Anchor(managedLoopback, @"C:\Darling");
+
+        Assert.Equal(managedLoopback, anchored);
+        Assert.True(string.IsNullOrEmpty(CertificateIn(anchored)));
+    }
+
+    [Fact]
+    public void Anchor_AbsoluteRootCertificate_ReturnsTheStringUntouched()
+    {
+        var absolute = ByoConnectionString(@"C:\Pinned\server.crt");
+
+        Assert.Equal(absolute, ViewerCertificateAnchor.Anchor(absolute, @"C:\Darling"));
+    }
+
+    /// <summary>
+    /// The rewrite itself, and the two things it must not disturb: the verify-full mode that makes the
+    /// certificate load-bearing at all, and the credential. Everything else in the string is the operator's.
+    /// </summary>
+    [Fact]
+    public void Anchor_RelativeRootCertificate_RewritesOnlyTheCertificate()
+    {
+        var anchored = ViewerCertificateAnchor.Anchor(ByoConnectionString(), @"C:\Darling");
+
+        Assert.Equal(@"C:\Darling\server.crt", CertificateIn(anchored));
+
+        var builder = new NpgsqlConnectionStringBuilder(anchored);
+        Assert.Equal(SslMode.VerifyFull, builder.SslMode);
+        Assert.Equal("store.example.com", builder.Host);
+        Assert.Equal(5641, builder.Port);
+        Assert.Equal("viewer", builder.Username);
+        Assert.Equal("darling", builder.Database);
+        Assert.Equal("collect,config,public", builder.SearchPath);
+        Assert.Equal(LivePassword, builder.Password);
+    }
+
+    [Fact]
+    public void Anchor_WithoutAnAnchor_OrOnAnUnparseableString_ReturnsItUntouched()
+    {
+        Assert.Equal(ByoConnectionString(), ViewerCertificateAnchor.Anchor(ByoConnectionString(), null));
+
+        /* Npgsql owns rejecting a malformed string, with its own message, at connect time — the anchor must
+           not turn that into a startup exception. */
+        const string malformed = "Host=store.example.com;Port=NOT-A-NUMBER";
+        Assert.Equal(malformed, ViewerCertificateAnchor.Anchor(malformed, @"C:\Darling"));
+    }
+
+    /// <summary>
+    /// The whole point, end to end: the certificate the viewer pins is the one beside the darling.json it
+    /// READ, not the one beside whatever directory the process happened to start in. Before #1970 the string
+    /// came back verbatim and Npgsql resolved <c>server.crt</c> against the test host's working directory —
+    /// so this assertion is exactly the behavior change.
+    /// </summary>
+    [Fact]
+    public void TryLoad_AnchorsARelativeCertificateToTheDirectoryOfTheFileItActuallyRead()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-viewer-tryload-anchor-");
+        try
+        {
+            var configPath = Path.Combine(root.FullName, "darling.json");
+            File.WriteAllText(
+                configPath,
+                $$"""{ "postgres": { "managed": false, "connectionString": {{JsonSerializer.Serialize(ByoConnectionString())}} } }""");
+
+            var settings = Assert.IsType<ViewerSettings>(ViewerSettings.TryLoad(configPath));
+
+            Assert.Equal(Path.Combine(root.FullName, "server.crt"), CertificateIn(settings.ConnectionString));
+            Assert.NotEqual(Path.GetFullPath("server.crt"), CertificateIn(settings.ConnectionString));
+
+            /* And the as-written value survives for the diagnostics to show alongside it. */
+            Assert.Equal("server.crt", CertificateIn(settings.ConfiguredConnectionString));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// The seam this refactor exists to close: the connection path and the diagnostics must never name
+    /// different certificate files. They are given the same two inputs and pinned to the same answer — a
+    /// functional pin, so it goes red for ANY divergence, not only for the ones a source scan would spot.
+    /// </summary>
+    [Fact]
+    public void TheDiagnosticsCertificateLine_IsThePathTheConnectionStringActuallyCarries()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-viewer-anchor-agree-");
+        try
+        {
+            foreach (var configured in new[] { "server.crt", @"certs\server.crt", @"C:\Pinned\server.crt" })
+            {
+                var settings = ViewerSettings.Parse(
+                    $$"""{ "postgres": { "connectionString": {{JsonSerializer.Serialize(ByoConnectionString(configured))}} } }""",
+                    root.FullName);
+
+                var reported = ValueFor(
+                    ViewerConfigDiagnostics.DescribeConnection(
+                        settings.ConfiguredConnectionString, settings.Managed, root.FullName),
+                    "resolves to");
+
+                Assert.Equal(CertificateIn(settings.ConnectionString), reported);
+            }
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// Structural half of the same guarantee: neither consumer may grow its own copy of the rule. The
+    /// diagnostics must ASK the resolver (and must not resolve a path itself), and the settings must route
+    /// the connection string through it. Source-parsed, like the shell pin above.
+    /// </summary>
+    [Fact]
+    public void BothConsumersOfTheCertificatePath_RouteThroughTheOneResolver()
+    {
+        var diagnostics = File.ReadAllText(Path.Combine(ViewerDirectory(), "ViewerConfigDiagnostics.cs"));
+        var settings = File.ReadAllText(Path.Combine(ViewerDirectory(), "ViewerSettings.cs"));
+
+        Assert.Contains("ViewerCertificateAnchor.Resolve(", diagnostics, StringComparison.Ordinal);
+        Assert.Contains("ViewerCertificateAnchor.Anchor(", settings, StringComparison.Ordinal);
+
+        Assert.DoesNotContain(
+            "Path.GetFullPath(",
+            diagnostics,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// And the shell has to HAND the diagnostics that anchor. A call that omits it silently falls back to the
+    /// process working directory — the block would then print a path the connection is no longer using, which
+    /// is the failure mode #1954 exists to prevent, reintroduced by an omitted argument. Scanned across the
+    /// MainWindow partial family by glob, like the shell pin above, so a new part file joins the day it exists.
+    /// </summary>
+    [Fact]
+    public void EveryDiagnosticsCallInTheShellCarriesTheConfigDirectoryAsItsAnchor()
+    {
+        var partFiles = Directory.GetFiles(ViewerDirectory(), "MainWindow*.cs");
+        Assert.True(partFiles.Length >= 5, $"expected the MainWindow partial family, found {partFiles.Length} file(s)");
+        var source = string.Concat(partFiles.Select(File.ReadAllText));
+
+        var diagnosticsCalls = Regex.Matches(
+            source, @"ViewerConfigDiagnostics\.(BuildDetails|DescribeConnection)\(").Count;
+        Assert.True(diagnosticsCalls >= 3, $"expected the pre-load, log and overlay diagnostics calls; found {diagnosticsCalls}");
+
+        var anchorArguments = Regex.Matches(source, @"configLocation\.Directory").Count;
+        Assert.True(
+            anchorArguments >= diagnosticsCalls,
+            $"the MainWindow partial family makes {diagnosticsCalls} diagnostics call(s) but passes the config " +
+            $"directory {anchorArguments} time(s). A call without it reports the certificate against the process " +
+            "working directory while the connection uses darling.json's folder (#1970).");
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────────────────

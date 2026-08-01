@@ -322,8 +322,8 @@ public static class DarlingCliCommands
         }
 
         /* The client-side Root Certificate placeholder: the operator saves the PEM below at this path on the
-           VIEWER machine (a bare filename resolves against the viewer's working directory; an absolute path
-           also works). Kept as a literal so the printed string is paste-ready. */
+           VIEWER machine (a bare filename resolves against the folder holding the viewer's darling.json —
+           #1970; an absolute path also works). Kept as a literal so the printed string is paste-ready. */
         const string clientCertificatePath = ViewerClientCertificateFileName;
         var connectionString = BuildViewerConnectionString(
             handoff.Host, handoff.Port, handoff.Role, handoff.Password, clientCertificatePath);
@@ -732,8 +732,8 @@ public static class DarlingCliCommands
         error.WriteLine();
         error.WriteLine("Copy the whole folder to the viewer machine and put the three files NEXT TO the Viewer");
         error.WriteLine("executable — that works unedited. To keep them elsewhere, point DARLING_CONFIG at the");
-        error.WriteLine($"{ViewerConfigFileName} and change its \"Root Certificate\" to the full path of the {ViewerClientCertificateFileName}");
-        error.WriteLine($"beside it (a bare name follows the Viewer's working directory). {ViewerReadmeFileName} explains every field.");
+        error.WriteLine($"{ViewerConfigFileName} — also unedited, because a bare \"Root Certificate\" resolves against the");
+        error.WriteLine($"folder holding {ViewerConfigFileName}, wherever that is. {ViewerReadmeFileName} explains every field.");
         error.WriteLine("Re-run this command after the store's certificate is regenerated (a changed bind IP rotates it).");
         error.WriteLine();
 
@@ -858,13 +858,13 @@ public static class DarlingCliCommands
         "  // THIS FILE CONTAINS A LIVE DATABASE PASSWORD. Keep it ACL'd to the operator account." + Environment.NewLine +
         "  //" + Environment.NewLine +
         "  // WHERE TO PUT THESE FILES on the viewer machine:" + Environment.NewLine +
-        "  //   Copy all three next to the Viewer executable. That works with nothing edited, because" + Environment.NewLine +
-        "  //   the Viewer finds darling.json beside itself AND server.crt resolves from there too" + Environment.NewLine +
-        "  //   (see Root Certificate below - a bare name follows the Viewer's working directory)." + Environment.NewLine +
+        "  //   Keep the three together, anywhere. Nothing here needs editing either way, because a" + Environment.NewLine +
+        "  //   bare Root Certificate name resolves against the folder holding darling.json - not" + Environment.NewLine +
+        "  //   against the folder the Viewer happens to be launched from." + Environment.NewLine +
         "  //" + Environment.NewLine +
-        "  //   To keep them somewhere else instead, point the DARLING_CONFIG environment variable at" + Environment.NewLine +
-        "  //   this file - but then ALSO change Root Certificate below to the FULL path of the" + Environment.NewLine +
-        "  //   server.crt beside it, or the Viewer will not find the certificate." + Environment.NewLine +
+        "  //   Copy all three next to the Viewer executable and it finds darling.json by itself." + Environment.NewLine +
+        "  //   To keep the folder somewhere else instead, point the DARLING_CONFIG environment" + Environment.NewLine +
+        "  //   variable at this file - the server.crt beside it still resolves, nothing to edit." + Environment.NewLine +
         "  //   (The Viewer also looks one folder up from itself, for the release zip's viewer\\ layout.)" + Environment.NewLine +
         "  \"postgres\": {" + Environment.NewLine +
         "    // false = this machine does not RUN a store, it connects to one. The service host's own" + Environment.NewLine +
@@ -881,14 +881,15 @@ public static class DarlingCliCommands
         "    //   SSL Mode         VerifyFull - encrypted AND the server certificate must match Host. Do not" + Environment.NewLine +
         "    //                    downgrade it to Require: that keeps the encryption but stops verifying the" + Environment.NewLine +
         "    //                    certificate, so Root Certificate below would be ignored entirely." + Environment.NewLine +
-        "    //   Root Certificate the server.crt exported beside this file. Valid values:" + Environment.NewLine +
-        "    //                      server.crt              a bare name, resolved against the Viewer's" + Environment.NewLine +
-        "    //                                              WORKING DIRECTORY. Correct when the three" + Environment.NewLine +
-        "    //                                              files sit beside the Viewer executable." + Environment.NewLine +
-        "    //                      C:\\Darling\\server.crt   an absolute path - always correct, and what" + Environment.NewLine +
-        "    //                                              this must become if you keep the files" + Environment.NewLine +
-        "    //                                              anywhere else, or a connection fails on the" + Environment.NewLine +
-        "    //                                              certificate" + Environment.NewLine +
+        "    //   Root Certificate the server.crt exported beside this file. A relative value resolves" + Environment.NewLine +
+        "    //                    against the folder holding darling.json, so the name below is correct" + Environment.NewLine +
+        "    //                    wherever you keep these files and however the Viewer is launched." + Environment.NewLine +
+        "    //                    Valid values:" + Environment.NewLine +
+        "    //                      server.crt              a bare name - the certificate exported" + Environment.NewLine +
+        "    //                                              beside this file" + Environment.NewLine +
+        "    //                      certs\\server.crt        a relative subpath - same anchor" + Environment.NewLine +
+        "    //                      C:\\Darling\\server.crt   an absolute path - used exactly as written," + Environment.NewLine +
+        "    //                                              for a certificate kept elsewhere" + Environment.NewLine +
         "    //                    It must be the PEM the SERVICE generated (exported beside this file);" + Environment.NewLine +
         "    //                    VerifyFull rejects any other certificate, including a re-issued one." + Environment.NewLine +
         $"    \"connectionString\": {JsonSerializer.Serialize(connectionString)}" + Environment.NewLine +
@@ -912,9 +913,9 @@ public static class DarlingCliCommands
         "  Viewer. Nothing to edit." + Environment.NewLine +
         Environment.NewLine +
         "  To keep the folder somewhere else instead, set the DARLING_CONFIG environment variable to the" + Environment.NewLine +
-        "  darling.json inside it AND change Root Certificate in that file to the full path of the" + Environment.NewLine +
-        "  server.crt beside it - a bare file name follows the Viewer's working directory, not this" + Environment.NewLine +
-        "  folder, so that one edit is what makes an out-of-the-way folder work. See THE FIELDS below." + Environment.NewLine +
+        "  darling.json inside it. Still nothing to edit: the Viewer resolves a bare Root Certificate" + Environment.NewLine +
+        "  name against the folder holding darling.json, so the server.crt beside it is found wherever" + Environment.NewLine +
+        "  you keep the folder. See THE FIELDS below." + Environment.NewLine +
         Environment.NewLine +
         "WHAT IS IN HERE" + Environment.NewLine +
         $"  {ViewerConfigFileName}      the Viewer's configuration. CONTAINS A LIVE DATABASE PASSWORD - treat it as a secret," + Environment.NewLine +
@@ -946,18 +947,20 @@ public static class DarlingCliCommands
         "          Require: the encryption stays, the verification stops, and Root Certificate is" + Environment.NewLine +
         "          then ignored entirely." + Environment.NewLine +
         $"      Root Certificate={ViewerClientCertificateFileName}" + Environment.NewLine +
-        "          the certificate exported beside darling.json. Valid values:" + Environment.NewLine +
-        "            server.crt              a bare name, resolved against the Viewer's" + Environment.NewLine +
-        "                                    WORKING DIRECTORY. Correct when these three files" + Environment.NewLine +
-        "                                    sit beside the Viewer executable." + Environment.NewLine +
-        "            C:\\Darling\\server.crt   an absolute path - always correct, and what this must" + Environment.NewLine +
-        "                                    become if you keep the files anywhere else, or a" + Environment.NewLine +
-        "                                    connection fails on the certificate." + Environment.NewLine +
+        "          the certificate exported beside darling.json. A relative value resolves against" + Environment.NewLine +
+        "          the folder holding darling.json, so this name is correct wherever you keep these" + Environment.NewLine +
+        "          three files and however the Viewer is launched. Valid values:" + Environment.NewLine +
+        "            server.crt              a bare name - the certificate exported beside this file." + Environment.NewLine +
+        "            certs\\server.crt        a relative subpath - same anchor." + Environment.NewLine +
+        "            C:\\Darling\\server.crt   an absolute path - used exactly as written, for a" + Environment.NewLine +
+        "                                    certificate kept elsewhere." + Environment.NewLine +
         "          It must be the PEM the SERVICE generated; VerifyFull rejects any other" + Environment.NewLine +
         "          certificate, including a re-issued one." + Environment.NewLine +
         Environment.NewLine +
         "IF IT DOES NOT CONNECT" + Environment.NewLine +
-        "  - Certificate errors: make Root Certificate an absolute path to the server.crt in this folder." + Environment.NewLine +
+        "  - Certificate errors: keep server.crt in the same folder as darling.json (that is what a bare" + Environment.NewLine +
+        "    Root Certificate name resolves to), or point Root Certificate at wherever you moved it." + Environment.NewLine +
+        "    The Viewer's startup log and its connection-failure window print the absolute path it opened." + Environment.NewLine +
         "  - The store's certificate is regenerated when its bind IP changes. Re-run --export-viewer-config" + Environment.NewLine +
         "    on the service host and replace this folder." + Environment.NewLine +
         $"  - The service host must be reachable on port {port} (its firewall rule is scoped to the allowed CIDR)," + Environment.NewLine +
