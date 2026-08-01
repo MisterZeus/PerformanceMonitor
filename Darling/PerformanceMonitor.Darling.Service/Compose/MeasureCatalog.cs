@@ -320,6 +320,8 @@ public static class MeasureCatalog
         new ComposeDimension("database_size_stats", "file_type_desc", "file_type_desc", Likeable: true),
         new ComposeDimension("database_size_stats", "recovery_model_desc", "recovery_model_desc", Likeable: true),
 
+        new ComposeDimension("pvs_stats", "database_name", "database_name", Likeable: true),
+
         new ComposeDimension("index_object_stats", "database_name", "database_name", Likeable: true),
         new ComposeDimension("index_object_stats", "schema_name", "schema_name", Likeable: true),
         new ComposeDimension("index_object_stats", "table_name", "table_name", Likeable: true),
@@ -460,6 +462,9 @@ public static class MeasureCatalog
     private static readonly string[] ClerkDims = { "clerk_type" };
     private static readonly string[] PlanCacheDims = { "cacheobjtype", "objtype" };
     private static readonly string[] DbSizeDims = { "database_name", "file_name", "file_type_desc", "recovery_model_desc" };
+
+    /* pvs_stats is per DATABASE, not per file, so it carries only the database dimension. */
+    private static readonly string[] PvsDims = { "database_name" };
     private static readonly string[] IndexDims = { "database_name", "schema_name", "table_name", "index_name", "index_type_desc" };
     private static readonly string[] SessionStatsDims = { "program_name" };
     private static readonly string[] WaitingTaskDims = { "wait_type", "database_name" };
@@ -817,6 +822,33 @@ public static class MeasureCatalog
             Archetype = MeasureArchetype.Gauge, Column = "vlf_count",
             NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
             DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = DbSizeDims,
+        },
+
+        /* ── pvs_stats (#1951 ADR persistent version store; Gauge, per database). Sizes are OFF-ROW
+             versions only — MS documents persistent_version_store_size_kb as excluding in-row versions —
+             so the display names say so rather than promising total version space. Max is the default time
+             aggregate for the sizes, matching database_size_stats: a pressure peak inside the bucket is the
+             thing worth seeing, and averaging it away is how a spike disappears at coarse grain. ── */
+        new ComposeMeasure
+        {
+            Key = "pvs_size_mb", DisplayName = "PVS off-row size", Category = CatDatabaseSize, SourceTable = "pvs_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "persistent_version_store_size_mb",
+            NativeUnit = "mb", DefaultUnit = "mb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PvsDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pvs_online_index_size_mb", DisplayName = "PVS online-index version store", Category = CatDatabaseSize, SourceTable = "pvs_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "online_index_version_store_size_mb",
+            NativeUnit = "mb", DefaultUnit = "mb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PvsDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pvs_aborted_transaction_count", DisplayName = "PVS aborted transactions", Category = CatDatabaseSize, SourceTable = "pvs_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "current_aborted_transaction_count",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PvsDims,
         },
 
         /* ── index_object_stats (daily; sizes + usage as a current-snapshot value — no delta column exists,
