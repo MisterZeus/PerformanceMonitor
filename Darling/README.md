@@ -109,7 +109,7 @@ The same executable serves interactive debugging and service installation; the W
 Darling\PerformanceMonitor.Darling.Service\bin\Release\net10.0\PerformanceMonitor.Darling.Service.exe
 ```
 
-Watch the log output: you should see the config load (`Loaded configuration from ...`), the store migrate (`Postgres store ready (schema v34, ...)`), the TimescaleDB detection result, per-server connects, and then per-collector run lines with row counts.
+Watch the log output: you should see the config load (`Loaded configuration from ...`), the store migrate (`Postgres store ready (schema v44, ...)` — the number is whatever the current migration count is), the TimescaleDB detection result, per-server connects, and then per-collector run lines with row counts.
 
 ### Install as a Windows Service
 
@@ -195,42 +195,11 @@ Every failure in steps 2–3 is tolerated and logged: the deadlock/blocked-proce
 
 ### Permissions on Monitored Servers
 
-The full least-privilege set, verified live against SQL Server 2025 with a scratch login carrying exactly these grants ([#1823](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1823)). For integrated auth, replace the first line with `CREATE LOGIN [DOMAIN\svc-account] FROM WINDOWS;` — the grants apply unchanged.
+Darling needs the **same target-server grants as Lite**, so the copy-paste block lives in one place for both: **[Permissions in the root README](../README.md#lite--darling-on-premises)** — `VIEW SERVER STATE`, `CONNECT ANY DATABASE`, `VIEW ANY DEFINITION`, `ALTER ANY EVENT SESSION`, and the optional `ALTER TRACE`, `ALTER SETTINGS`, and msdb job-table grants, verified live against SQL Server 2025 with a scratch login carrying exactly them ([#1823](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1823)). That block is authoritative; this section is the Darling-specific reading of it. Keeping one list instead of two is deliberate — a second copy is how the old one went stale.
 
-```sql
-USE [master];
-CREATE LOGIN [DarlingMonitor] WITH PASSWORD = N'YourStrongPassword';
+**The one Darling-specific line:** for `"auth": "integrated"` the grants go to the Windows account **the service runs as**, so use `CREATE LOGIN [DOMAIN\svc-account] FROM WINDOWS;` in place of the block's `CREATE LOGIN ... WITH PASSWORD`. Everything after it is unchanged. See [Run the service as a domain account or gMSA](#run-the-service-as-a-domain-account-or-gmsa) for which account that actually is — it is not the one you ran `--test-connection` as.
 
-/* Required core: server-scoped DMVs (also implies VIEW DATABASE STATE in every database). */
-GRANT VIEW SERVER STATE TO [DarlingMonitor];
-
-/* The deadlock / blocked-process XE sessions. */
-GRANT ALTER ANY EVENT SESSION TO [DarlingMonitor];
-
-/* Enter every current and future database, with no per-database users to maintain. */
-GRANT CONNECT ANY DATABASE TO [DarlingMonitor];
-
-/* Catalog visibility everywhere - see the table for what goes silently missing without it. */
-GRANT VIEW ANY DEFINITION TO [DarlingMonitor];
-
-/* Optional: the default-trace collector (sys.traces requires ALTER TRACE; VIEW SERVER STATE
-   does not cover it). NOT read-only - it also permits creating/altering traces and implies
-   SHOWPLAN - so withholding it is a legitimate choice; the collector degrades cleanly. */
-GRANT ALTER TRACE TO [DarlingMonitor];
-
-/* Optional: SQL Agent job monitoring + failed-job alerts. Direct table grants, deliberately
-   NOT SQLAgentReaderRole - that role gates the sp_help_job* procedures, which this product
-   never calls, and grants NO SELECT on the tables the collectors read. */
-USE [msdb];
-CREATE USER [DarlingMonitor] FOR LOGIN [DarlingMonitor];
-GRANT SELECT ON dbo.sysjobs         TO [DarlingMonitor];
-GRANT SELECT ON dbo.sysjobactivity  TO [DarlingMonitor];
-GRANT SELECT ON dbo.sysjobhistory   TO [DarlingMonitor];
-GRANT SELECT ON dbo.sysjobschedules TO [DarlingMonitor];
-GRANT SELECT ON dbo.syscategories   TO [DarlingMonitor];
-GRANT SELECT ON dbo.syssessions     TO [DarlingMonitor];
-GRANT EXECUTE ON dbo.agent_datetime TO [DarlingMonitor];
-```
+What each grant buys you, and what breaks without it:
 
 | Grant | Why | If missing |
 |---|---|---|
@@ -585,7 +554,7 @@ Warnings and errors also go to the **Windows Application event log** (source `Pe
 
 ### The Viewer
 
-`PerformanceMonitor.Darling.Viewer.exe` is a WPF app that talks **only to the PostgreSQL store** — it never connects to your monitored SQL Servers. It reads the same `darling.json` the service uses, but only the `postgres` section, resolved in the same order (explicit path, then `DARLING_CONFIG`, then `darling.json` next to the binary) plus one viewer-only fallback: the parent directory, so the release zip's layout — viewer in a `viewer\` subfolder, `darling.json` beside the service exe — works with no setup. A viewer seat on another machine needs only a minimal `darling.json` containing the `postgres.connectionString`. If the file is missing it shows a hint instead of crashing.
+`PerformanceMonitor.Darling.Viewer.exe` is a WPF app that talks **only to the PostgreSQL store** — it never connects to your monitored SQL Servers. It reads the same `darling.json` the service uses, but only the `postgres` section, resolved in the same order (explicit path, then `DARLING_CONFIG`, then `darling.json` next to the binary) plus one viewer-only fallback: the parent directory, so the release zip's layout — viewer in a `viewer\` subfolder, `darling.json` beside the service exe — works with no setup. A viewer seat on **another machine** is set up by exporting that config folder from the service host — see [Connect a Remote Viewer](#connect-a-remote-viewer). If the file is missing it shows a hint instead of crashing.
 
 At startup the viewer writes **which of those rules won**, the absolute path it produced, and whether that file exists to `%APPDATA%\PerformanceMonitorDarling\logs\darling-viewer_yyyyMMdd.log` — before it tries to read the file, so a missing or malformed one still says where it looked. Once the file loads it adds a non-secret summary of what it parsed (host, port, username, database, SSL mode, search path, whether the connection string was read verbatim or derived from `postgres.managed`, and the certificate — the value as written, the absolute path it resolves to, the folder a relative one was anchored to, and whether that file exists). Credentials are never written. The same block appears in the connection-failure window with a **Copy details** button — see [Troubleshooting](#troubleshooting).
 
@@ -636,6 +605,87 @@ A monitored server that is down is retried every 60 seconds forever; a collector
 
 ---
 
+## Connect a Remote Viewer
+
+For the person sitting at a machine with **nothing installed on it**, whose only goal is looking at a Darling service that already runs somewhere else. Three steps, nothing to hand-edit.
+
+**The one service-side prerequisite.** The store has to be reachable from your LAN — a `postgres.network` block on the service host, which the `--configure-network` wizard writes for you. A store still on its loopback default accepts no remote viewer at all, and no amount of viewer-side configuration changes that. See [Store endpoint (viewer over the LAN)](#store-endpoint-viewer-over-the-lan) for that side; everything below assumes it is done.
+
+### 1. Export the handoff folder (on the service host)
+
+```
+PerformanceMonitor.Darling.Service.exe --export-viewer-config
+```
+
+It writes the viewer machine's **whole configuration folder** — connection string resolved, certificate copied, every field documented in place:
+
+```
+viewer-config\darling.json    the complete viewer config: the resolved connection string and
+                              "managed": false already set, every field explained in comments
+                              IN the file
+viewer-config\server.crt      the store's TLS certificate, the file the connection pins
+viewer-config\README.txt      the same field reference in plain text, including the valid
+                              "Root Certificate=" values and the one-line install instruction
+```
+
+The folder lands beside the service's own `darling.json` by default. Pass a directory to put it elsewhere (`--export-viewer-config D:\handoff`), and `--config <path>` if `darling.json` is not where the service would resolve it.
+
+**The exported `darling.json` contains a live database password** — that is what the viewer authenticates with. The verb says so before it writes, ACLs the file to SYSTEM + Administrators + the account running it + INTERACTIVE (the Viewer reads it interactively, the same posture as the admin/viewer credentials), and confirms the ACL took: if the secret is still readable by ordinary users it says so and exits non-zero. Copy the folder over a channel you trust and keep it ACL'd on the viewer machine.
+
+The verb refuses rather than clobbers: it will not export into the **service's own config directory** (that would overwrite the service's `darling.json` with the viewer's, destroying its servers, encrypted passwords and tokens), will not overwrite a file it did not write, and will not follow a junction or symlink. A destination it cannot use is named in the refusal.
+
+### 2. Copy the folder to the viewer machine
+
+Put the three files **next to `PerformanceMonitor.Darling.Viewer.exe`** — that works with nothing edited. (The Viewer ships in the same release zip as the service, in its `viewer\` subfolder; from source it is `dotnet build Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release`.)
+
+To keep the folder somewhere else instead, point the `DARLING_CONFIG` environment variable at the exported `darling.json`. That works unedited too: a bare or relative `Root Certificate` resolves against **the folder holding `darling.json`**, so the `server.crt` beside it is found wherever you keep the folder ([#1970](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1970)). Keep the three files together and the folder can live anywhere.
+
+### 3. Start the Viewer
+
+That is the whole setup. Re-run the export after a credential or certificate rotation — the store's certificate regenerates when its bind IP changes — and copy the folder over again; it replaces its own previous output without ceremony.
+
+### If it does not connect
+
+The failure window carries a **Configuration this viewer used** block naming the `darling.json` it actually read, which rule picked it, and the host, port, username, database, SSL mode, search path and certificate path it parsed — with a **Copy details** button, and the same lines in `%APPDATA%\PerformanceMonitorDarling\logs\darling-viewer_yyyyMMdd.log`. Read it before changing anything: it separates *the viewer read a different file than you edited* from *it read your file and a value in it is wrong*. It never contains a password. See [Troubleshooting](#troubleshooting) for the individual failures.
+
+### Manual configuration (fallback)
+
+Only for the case where you want the connection string itself — to paste into a config that already exists, or to check what the viewer will dial. The export above is the supported path; this one is the same values, assembled by hand.
+
+```
+PerformanceMonitor.Darling.Service.exe --print-viewer-connection
+```
+
+It decrypts the `network.role` credential and prints a paste-ready connection string plus the server certificate PEM. Every warning is printed **before** the payload, but the payload is still a **live database password on STDOUT** — redirect it to an ACL'd file or pipe it to the clipboard (`... --print-viewer-connection | clip`); do not leave it in shell scrollback, CI logs, or a screenshare. The minimal viewer `darling.json` it targets is bring-your-own mode with the string pasted in verbatim (the string is consumed as-is), and the emitted PEM saved where `Root Certificate` points:
+
+```json
+{
+  "postgres": {
+    "managed": false,
+    "connectionString": "Host=192.168.1.205;Port=5641;Username=viewer;Password=...;Database=darling;Search Path=collect,config,public;SSL Mode=VerifyFull;Root Certificate=server.crt"
+  }
+}
+```
+
+`"managed": false` is not a typo next to the service's `"managed": true`: the flag says who **owns** the PostgreSQL, not who is connecting. A viewer left on `true` goes looking for a bundled local PostgreSQL that is not there. (The export sets it for you, which is the point.)
+
+**`Root Certificate=` — what the field accepts.** It is a path to the PEM the connection validates the store's certificate against, and under `SSL Mode=VerifyFull` it is what makes the check meaningful. A relative value anchors to **the folder holding the `darling.json` the viewer read**, never the process working directory, so how the Viewer was launched cannot change the answer:
+
+| Value | Resolves to |
+|---|---|
+| `server.crt` | that name in the folder holding `darling.json` — the exported layout, correct wherever the folder lives |
+| `certs\server.crt` | same anchor, one level down |
+| `C:\Darling\server.crt` | an absolute path, used exactly as written, for a certificate kept somewhere else |
+| omitted | nothing viewer-side to pin against: the store's certificate must already chain to a root the machine trusts. A managed store's certificate is **self-signed**, so it never does — omitting the field there fails `VerifyFull` |
+
+**Where the certificate comes from.** In managed mode the service generates `server.crt` / `server.key` **beside the data directory** (`%ProgramData%\PerformanceMonitorDarling\pg\` unless you set `postgres.dataDirectory`), with an IP SAN for the `network.listen` address and a DNS SAN for the machine hostname. It **auto-regenerates if the bind IP changes**, so verify-full keeps working after a `listen` change — and every viewer must then re-copy the new certificate, because an old copy stops matching. To rotate on demand, delete the pair beside the data directory; the service regenerates it on its next start.
+
+**Bring-your-own PostgreSQL.** Darling generates no certificate — your PostgreSQL's TLS is yours to configure — so `Root Certificate` points at the PEM that signed **your** server's certificate (the CA certificate, or the server's own certificate if it is self-signed), exactly the file you would hand `psql` as `sslrootcert`. The same relative-path anchoring applies, so keeping it beside `darling.json` is still the simplest layout.
+
+**Plaintext at rest on the viewer machine.** However you get there, the connection string holds the role password in cleartext in that machine's `darling.json` (there is no client-side secret store yet). That is acceptable for the read-only `viewer` credential on a single-operator, ACL'd profile; if you use `role: "admin"`, treat that file as a secret and NTFS-ACL it to your account. DPAPI-encrypting the viewer's BYO connection string is future hardening, out of scope today.
+
+---
+
 ## Troubleshooting
 
 **"Cannot load configuration"** (critical, service idles) — no `darling.json` was found at the resolved path. The message names the path it tried; copy `darling.sample.json` there or point `DARLING_CONFIG` at your file.
@@ -670,7 +720,7 @@ A monitored server that is down is retried every 60 seconds forever; a collector
 
 **The Viewer will not connect** — the failure window carries a **Configuration this viewer used** block naming the `darling.json` it read (and which rule picked it: an explicit command-line path, `DARLING_CONFIG`, beside the viewer, or the service root), plus the host, port, username, database, SSL mode, search path and certificate path it parsed. Read it before changing anything: the two faults it separates are *the viewer read a different file than you edited* and *it read your file and a value in it is wrong*. **Copy details** puts the whole block on the clipboard for a bug report, and the same lines are in `%APPDATA%\PerformanceMonitorDarling\logs\darling-viewer_yyyyMMdd.log`. It never contains a password.
 
-**"Root Certificate ... exists: NO"** — with `SSL Mode=VerifyFull`, a **relative** `Root Certificate` path resolves against **the folder holding the `darling.json` the viewer read** — not the working directory, so how the viewer was launched no longer changes the answer. The diagnostics block prints that folder and the absolute path it actually opened; either put `server.crt` beside the config or make the `Root Certificate` value an absolute path. Re-run `--print-viewer-connection` on the store host if you no longer have the certificate — it regenerates if the bind IP changes, so an old copy stops matching.
+**"Root Certificate ... exists: NO"** — with `SSL Mode=VerifyFull`, a **relative** `Root Certificate` path resolves against **the folder holding the `darling.json` the viewer read** — not the working directory, so how the viewer was launched no longer changes the answer. The diagnostics block prints that folder and the absolute path it actually opened; either put `server.crt` beside the config or make the `Root Certificate` value an absolute path. If you no longer have the certificate, re-run `--export-viewer-config` on the store host and copy the folder again (see [Connect a Remote Viewer](#connect-a-remote-viewer)) — it regenerates if the bind IP changes, so an old copy stops matching.
 
 ---
 
@@ -726,8 +776,8 @@ Table names are unchanged — only their schema moved — and the shared SQL kee
 | Role | Privileges | Used by |
 |---|---|---|
 | `darling` | superuser / owner | the service (collection, migration, provisioning) |
-| `admin` | SELECT on both schemas + INSERT/UPDATE/DELETE on `config` only | the Viewer, by default (`connectAs: "admin"`) |
-| `viewer` | SELECT on both schemas + INSERT/UPDATE/DELETE on `config.custom_views` only (the web composer's saved views) | a locked-down Viewer (`connectAs: "viewer"`) |
+| `admin` | SELECT on both schemas — **including** the secret columns, which the Settings window reads — plus INSERT/UPDATE/DELETE on `config` only. No statement timeout | the Viewer, by default (`connectAs: "admin"`) |
+| `viewer` | SELECT on all of `collect`, and on `config` **minus the secret columns** of `config_monitored_servers` / `config_command` / `config_notification` (carved fail-closed, below) + INSERT/UPDATE/DELETE on `config.custom_views` only (the web composer's saved views). Runs under `statement_timeout = 15s` | a locked-down Viewer (`connectAs: "viewer"`), and the web dashboard |
 | `mcp` | `viewer`'s exact read surface + INSERT on `collect.analysis_findings` / `config.analysis_muted` + INSERT/UPDATE/DELETE on `config.custom_views` (the custom-view tools) + the alert-tuning writes (INSERT/UPDATE/DELETE on `config.config_mute_rules`, UPDATE on `config.config_alert_settings`, and the `config_service` reload-beacon columns) + the server-onboarding writes (INSERT/UPDATE/DELETE on `config.config_monitored_servers` — the credential column stays SELECT-carved, so it can WRITE a password blob but never READ one back) | the store identity the opt-in MCP **network** endpoint connects as (managed only); dormant until MCP is exposed on the LAN |
 
 `admin` cannot `DROP`, alter schema, touch `collect` data, or create objects — it can only do what the Viewer's mute-rule / alert-dismiss surfaces need. The `mcp` role is narrower still: it reads exactly what `viewer` reads (the secret config columns are carved out identically) and its writes are a small, enumerated set — the two analysis-table INSERTs (`analyze_server` + `mute_analysis_finding`), the single-table `config.custom_views` CRUD (the custom-view tools), the alert-tuning writes (`config.config_mute_rules` CRUD + a single-row `config.config_alert_settings` UPDATE, plus the two `config_service` beacon columns so a settings write's self-bump trigger can fire), and the server-onboarding writes (`config.config_monitored_servers` CRUD for `add_servers` / `remove_server` — its `config_monitored_servers` write fires the SAME `config_service` beacon trigger, already covered by that column grant) — so a token-holder on the network MCP endpoint can never reach the `config`-table service-credential pivot, the secret columns, or a service flag like `paused`. Even on `config_monitored_servers`, which it may write, the `encrypted_password` column stays in the fail-closed secret carve, so `mcp` can WRITE a credential blob (onboarding) but can never READ one back. `ALTER DEFAULT PRIVILEGES` means new collector tables auto-inherit SELECT for `admin`/`viewer`, so the model never drifts as collectors are added (every `mcp` write is an explicit single-table/single-column grant, deliberately not schema-wide).
@@ -753,7 +803,7 @@ The principal model assumes the **single-operator VM** this edition targets: `IN
 psql -h <host> -U <owner> -d darling -f Darling/tools/provision-roles.sql
 ```
 
-Edit the two password placeholders (and the database/owner names if yours differ) first. Then point a read-only Viewer's `connectionString` at the `viewer` role. **`provision-roles.sql` creates two login roles — `admin` and `viewer`** — the two the Viewer connects as. Managed mode creates a third, `mcp`, but BYO deliberately does not: the MCP **network** endpoint (the only consumer of the `mcp` role) is managed-mode-only, and a BYO operator governs their own PostgreSQL's network exposure. If you expose MCP through your own reverse proxy against a BYO store, point it at whichever least-privilege role you choose (the `viewer` role covers the read tools; `analyze_server`'s finding persistence and `mute_analysis_finding` need INSERT on `collect.analysis_findings` / `config.analysis_muted`).
+Edit the two password placeholders (and the database/owner names if yours differ) first. Then point a read-only Viewer's `connectionString` at the `viewer` role. **That script is the authoritative grant list for a BYO store** — it is what actually runs, the table above is its summary, and an `ALTER DEFAULT PRIVILEGES` in it means a store gaining collectors later needs no re-grant. Re-run it after a schema upgrade to cover new tables. **It creates two login roles — `admin` and `viewer`** — the two the Viewer connects as. Managed mode creates a third, `mcp`, but BYO deliberately does not: the MCP **network** endpoint (the only consumer of the `mcp` role) is managed-mode-only, and a BYO operator governs their own PostgreSQL's network exposure. If you expose MCP through your own reverse proxy against a BYO store, point it at whichever least-privilege role you choose (the `viewer` role covers the read tools; `analyze_server`'s finding persistence and `mute_analysis_finding` need INSERT on `collect.analysis_findings` / `config.analysis_muted`).
 
 ## Opt-in Network Endpoints (LAN)
 
@@ -835,51 +885,7 @@ On every start the service reconciles this against the live cluster: it adds the
   New-NetFirewallRule -DisplayName "PerformanceMonitor Darling store (port 5641)" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5641 -RemoteAddress 192.168.1.0/24
   ```
 
-**Remote-viewer handoff.** On the **service host**, run:
-
-```
-PerformanceMonitor.Darling.Service.exe --export-viewer-config
-```
-
-It writes the viewer machine's **whole configuration folder** — nothing to hand-merge, nothing to look up:
-
-```
-viewer-config\darling.json    the complete viewer config: the resolved connection string, "managed": false
-                              already set, and every field documented in comments IN the file
-viewer-config\server.crt      the store's TLS certificate, the file the connection pins
-viewer-config\README.txt      the same field reference in plain text, including the valid
-                              "Root Certificate=" values and the one-line install instruction
-```
-
-Copy the three files to the viewer machine and put them **next to the Viewer executable** — that works with nothing edited. To keep them somewhere else instead, point `DARLING_CONFIG` at the exported `darling.json`; that works unedited too, because a bare `Root Certificate` name resolves against **the folder holding `darling.json`** rather than the Viewer's working directory ([issue #1970](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1970)). Keep the three files together and the folder can live anywhere.
-
-By default the folder lands beside the service's own `darling.json`; pass a directory to put it somewhere else (`--export-viewer-config D:\handoff`), and `--config <path>` if darling.json is not where the service would resolve it.
-
-The exported `darling.json` **contains a live database password** (that is what the viewer authenticates with), so the verb says so before it writes, ACLs the file to SYSTEM + Administrators + the account running it + INTERACTIVE (the Viewer reads it interactively, the same posture as the admin/viewer credentials), and confirms that ACL took — if the secret is still readable by ordinary users it says so and exits non-zero. Copy the folder over a channel you trust, and keep it ACL'd on the viewer machine. Re-run the export after a credential or certificate rotation; it replaces its own previous output without ceremony.
-
-It refuses rather than clobbers: it will not export into the **service's own config directory** (that would overwrite the service's `darling.json` with the viewer's, destroying its servers, encrypted passwords and tokens), will not overwrite a `darling.json` it did not write, and will not follow a junction or symlink. A destination it cannot use is named in the refusal.
-
-`--print-viewer-connection` remains for the case where you want the string itself — to paste into an existing config, or to check what the viewer will dial:
-
-```
-PerformanceMonitor.Darling.Service.exe --print-viewer-connection
-```
-
-It decrypts the `network.role` credential and prints a paste-ready connection string plus the server certificate PEM. Every warning is printed **before** the payload, but the payload is still a **live database password on STDOUT** — redirect it to an ACL'd file or pipe it to the clipboard (`... --print-viewer-connection | clip`); do not leave it in shell scrollback, CI logs, or a screenshare. The minimal viewer `darling.json` it targets is bring-your-own mode with the string pasted in verbatim (no viewer code path changes — the string is consumed as-is), and the emitted PEM saved where `Root Certificate` points:
-
-```json
-{
-  "postgres": {
-    "managed": false,
-    "connectionString": "Host=192.168.1.205;Port=5641;Username=viewer;Password=...;Database=darling;Search Path=collect,config,public;SSL Mode=VerifyFull;Root Certificate=server.crt"
-  }
-}
-```
-
-`"managed": false` is not a typo next to the service's `"managed": true`: the flag says who **owns** the PostgreSQL, not who is connecting. A viewer left on `true` goes looking for a bundled local PostgreSQL that is not there. (The export sets it for you, which is the point.)
-
-- **Certificate placement + rotation.** Save the emitted PEM at the `Root Certificate` path on the viewer machine. A bare `server.crt` resolves against **the folder holding that machine's `darling.json`**, so saving it beside the config is correct however the Viewer is launched; an **absolute path** is used exactly as written, for a certificate kept somewhere else. The cert **auto-regenerates if the bind IP changes** (so verify-full keeps working after a `listen` change) — when that happens, clients must re-run the export (or `--print-viewer-connection`) and replace their saved cert. To rotate on demand, **delete `server.crt` and `server.key`** beside the data directory; the service regenerates the pair on its next start.
-- **Plaintext at rest on the viewer machine.** The pasted connection string holds the role password in cleartext in the laptop's `darling.json` (there is no client-side secret store yet). That is acceptable for the read-only `viewer` credential on a single-operator, ACL'd profile; if you use `role: "admin"`, treat that file as a secret and NTFS-ACL it to your account. DPAPI-encrypting the viewer's BYO connection string is future hardening, out of scope today.
+**That is the service side. The viewer side is [Connect a Remote Viewer](#connect-a-remote-viewer)** — `--export-viewer-config` on this host writes the viewer machine's whole configuration folder (config, certificate, and a plain-text field reference), and that section covers copying it over, the certificate's placement and rotation, and the manual `--print-viewer-connection` fallback.
 
 ### MCP endpoint (assistant over the LAN)
 
