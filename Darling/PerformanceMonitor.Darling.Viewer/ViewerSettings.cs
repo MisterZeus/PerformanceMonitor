@@ -65,6 +65,9 @@ public sealed class ViewerConfigLocation
         {
             FullPath = path;
         }
+
+        var directory = System.IO.Path.GetDirectoryName(FullPath);
+        Directory = string.IsNullOrEmpty(directory) ? null : directory;
     }
 
     /// <summary>The path as the winning rule produced it (verbatim for an operator-supplied path).</summary>
@@ -72,6 +75,13 @@ public sealed class ViewerConfigLocation
 
     /// <summary>The absolute form of <see cref="Path"/> (falls back to <see cref="Path"/> if it cannot be expanded).</summary>
     public string FullPath { get; }
+
+    /// <summary>
+    /// The folder holding this darling.json — the anchor a relative <c>Root Certificate</c> resolves against
+    /// (#1970), defined here ONCE so the connection-string rewrite and the startup diagnostics measure from
+    /// the same directory rather than each deriving it. Null only for a path with no directory part.
+    /// </summary>
+    public string? Directory { get; }
 
     /// <summary>Which resolution rule produced <see cref="Path"/>.</summary>
     public ViewerConfigSource Source { get; }
@@ -98,6 +108,9 @@ public sealed class ViewerConfigLocation
 /// derivation constants (user/database name, credential path convention, DPAPI entropy) are
 /// the service's <c>DarlingManagedPostgres</c>/<c>DarlingSecrets</c> values, duplicated under
 /// the same sliver rule and pinned against the service by a Darling.Tests round-trip test.
+/// Bring-your-own mode (<c>postgres.connectionString</c>) is otherwise used VERBATIM, with one rewrite: a
+/// relative <c>Root Certificate</c> is anchored to this file's own directory rather than the process working
+/// directory (#1970, <see cref="ViewerCertificateAnchor"/>).
 /// </summary>
 public sealed class ViewerSettings
 {
@@ -124,7 +137,19 @@ public sealed class ViewerSettings
     private const string ViewerCredentialFileName = "pg-viewer-credential.dpapi";
     private const string ManagedSearchPath = "collect,config,public";
 
+    /// <summary>
+    /// The string handed to Npgsql: <see cref="ConfiguredConnectionString"/> with a relative
+    /// <c>Root Certificate</c> anchored to darling.json's directory (#1970).
+    /// </summary>
     public string ConnectionString { get; }
+
+    /// <summary>
+    /// The string exactly as the file carried it (or as the managed derivation built it), before the
+    /// certificate anchoring. What the startup diagnostics summarize, so the block can show the operator the
+    /// value they WROTE alongside the absolute path it resolves to — the pair that separates "the certificate
+    /// is not where you think" from "the certificate is not there at all".
+    /// </summary>
+    public string ConfiguredConnectionString { get; }
 
     /// <summary>
     /// True when the connection string was DERIVED by the viewer from <c>postgres.managed = true</c> rather
@@ -134,9 +159,16 @@ public sealed class ViewerSettings
     /// </summary>
     public bool Managed { get; }
 
-    private ViewerSettings(string connectionString, bool managed)
+    /// <param name="configDirectory">
+    /// The directory of the darling.json this was read from — the anchor for a relative
+    /// <c>Root Certificate</c> (#1970). Applied HERE, the one place every construction passes through, so no
+    /// parse branch can produce settings whose certificate still hangs off the process working directory.
+    /// Null (the string-only <see cref="Parse(string)"/> overload) leaves the string alone.
+    /// </param>
+    private ViewerSettings(string connectionString, bool managed, string? configDirectory)
     {
-        ConnectionString = connectionString;
+        ConfiguredConnectionString = connectionString;
+        ConnectionString = ViewerCertificateAnchor.Anchor(connectionString, configDirectory);
         Managed = managed;
     }
 
@@ -198,22 +230,35 @@ public sealed class ViewerSettings
     /// </summary>
     public static ViewerSettings? TryLoad(string? explicitPath = null)
     {
-        var path = ResolveConfigPath(explicitPath);
-        if (!File.Exists(path))
+        /* ResolveConfigLocation rather than ResolveConfigPath: the location carries the DIRECTORY a relative
+           Root Certificate anchors to (#1970), so the file we read and the folder we measure the certificate
+           from are the same resolution and cannot name different places. */
+        var location = ResolveConfigLocation(explicitPath);
+        if (!File.Exists(location.Path))
         {
             return null;
         }
 
-        return Parse(File.ReadAllText(path));
+        return Parse(File.ReadAllText(location.Path), location.Directory);
     }
 
-    public static ViewerSettings Parse(string json)
+    /// <summary>
+    /// Parses without an anchor — a relative <c>Root Certificate</c> is left as written (Npgsql will resolve
+    /// it against the process working directory). Only for callers with no file behind the JSON.
+    /// </summary>
+    public static ViewerSettings Parse(string json) => Parse(json, configDirectory: null);
+
+    /// <param name="configDirectory">
+    /// The directory of the darling.json <paramref name="json"/> came from; a relative
+    /// <c>Root Certificate</c> in a bring-your-own connection string is anchored to it (#1970).
+    /// </param>
+    public static ViewerSettings Parse(string json, string? configDirectory)
     {
         var config = JsonSerializer.Deserialize<ConfigDto>(json, s_jsonOptions);
 
         if (config?.Postgres?.Managed == true)
         {
-            return new ViewerSettings(DeriveManagedConnectionString(config.Postgres), managed: true);
+            return new ViewerSettings(DeriveManagedConnectionString(config.Postgres), managed: true, configDirectory);
         }
 
         var connectionString = config?.Postgres?.ConnectionString;
@@ -222,7 +267,7 @@ public sealed class ViewerSettings
             throw new InvalidDataException("darling.json has no postgres.connectionString (and postgres.managed is not true).");
         }
 
-        return new ViewerSettings(connectionString, managed: false);
+        return new ViewerSettings(connectionString, managed: false, configDirectory);
     }
 
     /// <summary>

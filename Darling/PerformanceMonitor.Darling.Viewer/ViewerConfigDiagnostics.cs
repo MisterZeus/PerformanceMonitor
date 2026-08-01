@@ -22,10 +22,12 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// log, because the viewer said neither which of its four candidate config paths it read nor what it got.
 /// Two very different faults — reading the WRONG file, and reading the RIGHT file with a wrong value —
 /// produced the identical generic failure. The certificate is the sharpest case: the documented
-/// bring-your-own connection string carries a bare <c>Root Certificate=server.crt</c>, which Npgsql resolves
-/// against the process WORKING DIRECTORY, not the viewer's install directory or the darling.json directory.
-/// A viewer launched from a shortcut and one launched from a shell therefore look for the cert in different
-/// places, and neither one used to say where.</para>
+/// bring-your-own connection string carries a bare <c>Root Certificate=server.crt</c>, and a viewer launched
+/// from a shortcut and one launched from a shell used to look for that cert in different places, with
+/// neither one saying where. #1970 removed the divergence — a relative certificate is anchored to
+/// darling.json's own directory — and this block reports the anchored result, through the SAME
+/// <see cref="ViewerCertificateAnchor"/> the connection string is rewritten by, so the path it names is the
+/// path Npgsql opens rather than a second opinion about it.</para>
 ///
 /// <para><b>Redaction is structural, not careful.</b> The summary is built from an ALLOWLIST of connection-string
 /// properties (host, port, username, database, SSL mode, search path, root certificate) read off a parsed
@@ -74,12 +76,12 @@ public static class ViewerConfigDiagnostics
     /// The non-secret parse summary: what the viewer will actually connect with. <paramref name="managed"/>
     /// comes from the config rather than the connection string (in managed mode the string is derived, so
     /// <c>postgres.connectionString</c> in the file is not consulted at all — worth saying out loud).
-    /// <paramref name="workingDirectory"/> is the directory a relative <c>Root Certificate</c> resolves
-    /// against; null means the process working directory, which is what Npgsql itself would use (tests pass
-    /// an explicit directory rather than mutating process state).
+    /// <paramref name="configDirectory"/> is darling.json's own directory — the anchor a relative
+    /// <c>Root Certificate</c> resolves against (#1970); null means the process working directory, the
+    /// unanchored fallback <see cref="ViewerCertificateAnchor.Resolve"/> and Npgsql both land on.
     /// </summary>
     public static IReadOnlyList<string> DescribeConnection(
-        string? connectionString, bool managed, string? workingDirectory = null)
+        string? connectionString, bool managed, string? configDirectory = null)
     {
         /* No connection string means the file was never loaded (missing, or it threw). Say only that —
            reporting a managed flag or a set of fields nothing was parsed from would be an invention. */
@@ -118,7 +120,7 @@ public static class ViewerConfigDiagnostics
         lines.Add(Line("Database", Present(builder.Database)));
         lines.Add(Line("SSL Mode", builder.SslMode.ToString()));
         lines.Add(Line("Search Path", Present(builder.SearchPath)));
-        lines.AddRange(DescribeRootCertificate(builder.RootCertificate, workingDirectory));
+        lines.AddRange(DescribeRootCertificate(builder.RootCertificate, configDirectory));
         return lines;
     }
 
@@ -128,10 +130,10 @@ public static class ViewerConfigDiagnostics
     /// location lines are the entire honest answer.
     /// </summary>
     public static string BuildDetails(
-        ViewerConfigLocation location, string? connectionString, bool managed, string? workingDirectory = null)
+        ViewerConfigLocation location, string? connectionString, bool managed, string? configDirectory = null)
     {
         var lines = new List<string>(DescribeConfigLocation(location));
-        lines.AddRange(DescribeConnection(connectionString, managed, workingDirectory));
+        lines.AddRange(DescribeConnection(connectionString, managed, configDirectory));
         return string.Join(Environment.NewLine, lines);
     }
 
@@ -140,7 +142,7 @@ public static class ViewerConfigDiagnostics
     /// that file is there. Verify-full against a cert that is not where the string says is one of the two
     /// failures this whole feature exists to name.
     /// </summary>
-    private static IReadOnlyList<string> DescribeRootCertificate(string? rootCertificate, string? workingDirectory)
+    private static IReadOnlyList<string> DescribeRootCertificate(string? rootCertificate, string? configDirectory)
     {
         if (string.IsNullOrWhiteSpace(rootCertificate))
         {
@@ -149,25 +151,20 @@ public static class ViewerConfigDiagnostics
 
         var lines = new List<string> { Line("Root Certificate", rootCertificate) };
 
-        string resolved;
-        try
+        /* Through the SHARED resolver, never a second copy of the rule: this line promises the absolute path
+           Npgsql will actually open, and the only way it can keep that promise is to ask the same code that
+           rewrites the connection string (#1970). */
+        var resolved = ViewerCertificateAnchor.Resolve(rootCertificate, configDirectory);
+        if (resolved is null)
         {
-            /* Npgsql hands the path to the file system as given, so a relative one resolves against the
-               process working directory — mirror that exactly rather than against the install directory. */
-            resolved = workingDirectory is null
-                ? Path.GetFullPath(rootCertificate)
-                : Path.GetFullPath(rootCertificate, workingDirectory);
-        }
-        catch (Exception ex)
-        {
-            lines.Add(Line("  resolves to", $"(not a usable path: {ex.GetType().Name})"));
+            lines.Add(Line("  resolves to", "(not a usable path)"));
             return lines;
         }
 
         lines.Add(Line("  resolves to", resolved));
-        if (!Path.IsPathRooted(rootCertificate))
+        if (!Path.IsPathFullyQualified(rootCertificate))
         {
-            lines.Add(Line("  relative to", workingDirectory ?? Environment.CurrentDirectory));
+            lines.Add(Line("  relative to", configDirectory ?? Environment.CurrentDirectory));
         }
 
         lines.Add(Line("  exists", File.Exists(resolved) ? "yes" : "NO"));

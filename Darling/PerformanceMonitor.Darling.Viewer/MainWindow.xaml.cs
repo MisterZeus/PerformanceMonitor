@@ -180,7 +180,8 @@ public partial class MainWindow : Window
            the resolved path is what gets handed to TryLoad as its explicit path. */
         var configLocation = ViewerSettings.ResolveConfigLocation(ExplicitConfigPathFromArgs());
         LogDiagnostics(ViewerConfigDiagnostics.DescribeConfigLocation(configLocation));
-        _connectionDiagnostics = ViewerConfigDiagnostics.BuildDetails(configLocation, connectionString: null, managed: false);
+        _connectionDiagnostics = ViewerConfigDiagnostics.BuildDetails(
+            configLocation, connectionString: null, managed: false, configLocation.Directory);
 
         ViewerSettings? settings;
         try
@@ -203,11 +204,16 @@ public partial class MainWindow : Window
         /* The non-secret parse summary (#1954): host, port, username, database, SSL mode, search path, the
            resolved certificate path and whether it exists, and whether the string was derived or read
            verbatim — everything but the credential. This is what separates "it read the wrong file" from
-           "it read the right file and the value in it is wrong". */
-        var connectionSummary = ViewerConfigDiagnostics.DescribeConnection(settings.ConnectionString, settings.Managed);
+           "it read the right file and the value in it is wrong".
+           Summarized from the CONFIGURED string plus darling.json's directory, so the certificate is reported
+           as the operator wrote it AND as the anchor resolves it (#1970) — the same two inputs
+           ViewerCertificateAnchor already used to rewrite settings.ConnectionString, so the "resolves to" line
+           is the path Npgsql opens by construction, not by agreement. */
+        var connectionSummary = ViewerConfigDiagnostics.DescribeConnection(
+            settings.ConfiguredConnectionString, settings.Managed, configLocation.Directory);
         LogDiagnostics(connectionSummary);
         _connectionDiagnostics = ViewerConfigDiagnostics.BuildDetails(
-            configLocation, settings.ConnectionString, settings.Managed);
+            configLocation, settings.ConfiguredConnectionString, settings.Managed, configLocation.Directory);
 
         _dataService = new ViewerDataService(settings.ConnectionString, _connectionTimeoutSeconds);
 
