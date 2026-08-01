@@ -543,7 +543,18 @@ public static class DarlingCliCommands
         /* The unrecoverable one: exporting INTO the service's own config directory would overwrite the
            service's darling.json with the viewer's, destroying every monitored server, every DPAPI
            encryptedPassword, and the MCP/web tokens — none of which exist anywhere else. One keystroke from
-           a legitimate command (the install directory is the obvious place to put a handoff folder). */
+           a legitimate command (the install directory is the obvious place to put a handoff folder).
+           #1973 — this compare is LEXICAL: Path.GetFullPath normalizes text and does not resolve links, so a
+           junction on an ANCESTOR of the destination (say C:\Data\handoff, where C:\Data links into the
+           service's own directory) reads as a different path here and slips past — as it does past the leaf
+           junction check below, whose attributes describe only the last component. Deliberately NOT chased
+           with a chain-resolving walk, because the destructive case is already refused one layer down: the
+           per-FILE TryCheckExportTarget goes through the OS's REAL path resolution (File.GetAttributes and
+           File.ReadAllText follow the whole junction chain to the actual file), and the service's own
+           darling.json carries no export marker, so such a run stops with "not written by
+           --export-viewer-config" before anything is deleted. What survives the gap is only "the files land
+           in a directory the junction-planter chose" — and planting a junction in the ancestor chain of the
+           operator's destination already means controlling that destination's fate. */
         if (string.Equals(
                 Path.GetFullPath(exportedConfigPath), Path.GetFullPath(servicePath), StringComparison.OrdinalIgnoreCase))
         {
@@ -555,7 +566,10 @@ public static class DarlingCliCommands
         }
 
         /* A destination that is a junction/symlink is refused: creating one needs no privilege on Windows, so
-           it is how an unprivileged local user redirects a cleartext credential into a directory they control. */
+           it is how an unprivileged local user redirects a cleartext credential into a directory they control.
+           #1973 — leaf-only, and knowingly so: DirectoryInfo.Attributes describes THIS directory, never the
+           ones above it, so this shares the ancestor-junction blind spot recorded on the guard above, and the
+           same per-file marker check in TryCheckExportTarget is the backstop that actually holds. */
         if (Directory.Exists(targetDirectory)
             && new DirectoryInfo(targetDirectory).Attributes.HasFlag(FileAttributes.ReparsePoint))
         {
@@ -680,21 +694,29 @@ public static class DarlingCliCommands
             error.WriteLine($"Could not write the viewer config to {targetDirectory}: {ex.Message}");
 
             /* A write that died part-way can leave a file holding the start of a live password. Remove it, and
-               say so either way — "the export failed" must not leave an unmentioned secret on disk. */
-            try
-            {
-                if (File.Exists(configFile))
-                {
-                    File.Delete(configFile);
-                    error.WriteLine($"Removed {configFile} (it held a live password — the whole of one if the write that failed was a later file).");
-                }
-            }
-            catch (Exception cleanupFailure)
-            {
-                error.WriteLine(
-                    $"WARNING: {configFile} was left behind and holds a live password " +
-                    $"({cleanupFailure.Message}). Delete it yourself.");
-            }
+               say so either way — "the export failed" must not leave an unmentioned secret on disk.
+               #1973 — and sweep the OTHER TWO as well, not just the secret-bearing one: each write DELETES the
+               previous export's copy before recreating it, so a failure part-way through leaves a mix of new
+               and stale files with no config to go with them — the half-finished handoff this verb exists to
+               refuse. The cert and the README are always safe to remove (neither carries a secret and neither
+               is usable without the config), so the folder is emptied of this verb's files rather than left
+               looking exportable. Every file still on disk is NAMED; each removal stands alone, so one that
+               fails masks neither the original error nor the other removals. */
+            TryRemovePartialExport(
+                configFile,
+                "it held a live password — the whole of one if the write that failed was a later file",
+                "it holds a live password",
+                error);
+            TryRemovePartialExport(
+                certificateFile,
+                "cleanup — no secret in it, but it belonged to an export that did not finish",
+                "it is a leftover of the failed export, not a secret",
+                error);
+            TryRemovePartialExport(
+                readmeFile,
+                "cleanup — no secret in it, but it belonged to an export that did not finish",
+                "it is a leftover of the failed export, not a secret",
+                error);
 
             return 1;
         }
@@ -1026,6 +1048,53 @@ public static class DarlingCliCommands
         catch (Exception)
         {
             return string.Empty;
+        }
+    }
+
+    /// <summary>
+    /// Best-effort removal of ONE file left by a failed export, naming the outcome either way (#1973). The
+    /// verb's premise is that it refuses to hand over a partial setup, so a failure that leaves anything on
+    /// disk has to say WHICH file — and a removal that itself fails must neither mask the original error nor
+    /// stop the other removals, which is why every path out of here is a message rather than a throw.
+    /// </summary>
+    /// <param name="path">The exported file to remove.</param>
+    /// <param name="whyRemoved">Parenthetical for the "Removed" line: for darling.json, that it held the secret.</param>
+    /// <param name="whatItIs">What a survivor is, for the "left behind" line — the operator has to decide what to do about it.</param>
+    private static void TryRemovePartialExport(string path, string whyRemoved, string whatItIs, TextWriter error)
+    {
+        try
+        {
+            /* File.GetAttributes rather than File.Exists, and for the same reason TryCheckExportTarget uses
+               it: Exists answers FALSE for a dangling symlink, which would leave a planted link unmentioned
+               by the one sweep whose whole job is to account for what is on disk. */
+            _ = File.GetAttributes(path);
+        }
+        catch (FileNotFoundException)
+        {
+            /* The run never got this far — nothing on disk, so nothing to name. */
+            return;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return;
+        }
+        catch (Exception inspectFailure)
+        {
+            error.WriteLine(
+                $"WARNING: could not check whether {path} was left behind ({inspectFailure.Message}) — " +
+                $"if it is there, {whatItIs}. Check it yourself.");
+            return;
+        }
+
+        try
+        {
+            File.Delete(path);
+            error.WriteLine($"Removed {path} ({whyRemoved}).");
+        }
+        catch (Exception cleanupFailure)
+        {
+            error.WriteLine(
+                $"WARNING: {path} was left behind ({cleanupFailure.Message}) — {whatItIs}. Delete it yourself.");
         }
     }
 

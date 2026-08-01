@@ -797,6 +797,87 @@ public sealed class DarlingExportViewerConfigTests
         }
     }
 
+    /// <summary>
+    /// #1973 — a failure PART-WAY through the export sweeps all three files, not only the secret-bearing one,
+    /// and names whatever it could not remove. The failure is forced where it actually bites: after
+    /// darling.json has been written and hardened, on the server.crt write, which is the shape that used to
+    /// leave a stale cert sitting beside a deleted config and say nothing about it — a folder that still
+    /// looks like a handoff.
+    /// <para>The lock is a real one rather than a stub, so it exercises the production write path: a handle
+    /// held with <c>FileShare.Read</c> lets the pre-flight identity check READ the file (the run has to get
+    /// PAST the guards for this test to reach the writes at all) while making the delete-then-recreate write
+    /// fail — the same IOException a live antivirus or an open editor produces.</para>
+    /// </summary>
+    [Fact]
+    public async Task ExportViewerConfigAsync_FailsPartWayThrough_SweepsAllThreeAndNamesWhatSurvived()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "DPAPI requires Windows.");
+
+        var root = Directory.CreateTempSubdirectory("darling-export-partial-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            var credentialPath = DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory);
+            File.WriteAllText(credentialPath, DarlingSecrets.Protect("viewer-secret-pw"));
+            File.WriteAllText(
+                Path.Combine(Path.GetDirectoryName(credentialPath)!, DarlingManagedPostgres.ServerCertFileName),
+                Pem);
+
+            var configPath = Path.Combine(root.FullName, "darling.json");
+            await File.WriteAllTextAsync(configPath, ManagedConfigJson(dataDirectory));
+
+            var destination = Path.Combine(root.FullName, "handoff");
+            Directory.CreateDirectory(destination);
+            var exportedConfig = Path.Combine(destination, "darling.json");
+            var exportedCert = Path.Combine(destination, "server.crt");
+            var exportedReadme = Path.Combine(destination, "README.txt");
+
+            /* A PREVIOUS export's cert: it carries the marker, so the pre-flight check passes it and the run
+               reaches the writes — and it is the STALE half of the mix a partial export leaves behind. */
+            const string stale = "-----BEGIN CERTIFICATE-----\nMIIBSTALEPEM\n-----END CERTIFICATE-----";
+            await File.WriteAllTextAsync(exportedCert, stale);
+
+            var output = new StringWriter();
+            var error = new StringWriter();
+            int exit;
+            using (new FileStream(exportedCert, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                exit = await DarlingCliCommands.ExportViewerConfigAsync(
+                    configPath, destination, output, error, CancellationToken.None);
+            }
+
+            Assert.Equal(1, exit);
+            var stderr = error.ToString();
+
+            /* The secret is gone, and is still named as the secret it was. */
+            Assert.False(File.Exists(exportedConfig));
+            Assert.Contains($"Removed {exportedConfig}", stderr, StringComparison.Ordinal);
+            Assert.Contains("live password", stderr, StringComparison.Ordinal);
+
+            /* The README write was never reached, so there is nothing on disk to name. */
+            Assert.False(File.Exists(exportedReadme));
+
+            /* The one file that DID survive is named, with the reason — not left as a silent half-folder. */
+            Assert.True(File.Exists(exportedCert));
+            Assert.Contains($"{exportedCert} was left behind", stderr, StringComparison.Ordinal);
+            Assert.Equal(stale, await File.ReadAllTextAsync(exportedCert));
+
+            /* The claim the whole sweep rests on: every file still in the folder is accounted for BY NAME. */
+            foreach (var survivor in Directory.GetFiles(destination))
+            {
+                Assert.Contains(survivor, stderr, StringComparison.Ordinal);
+            }
+
+            /* The failure path echoes the password no more than the success path does. */
+            Assert.DoesNotContain("viewer-secret-pw", stderr, StringComparison.Ordinal);
+            Assert.Equal("", output.ToString());
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
     /* ---- the strict argument parser (pure) ---- */
 
     [Fact]
