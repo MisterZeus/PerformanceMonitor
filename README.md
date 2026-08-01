@@ -434,7 +434,7 @@ For a fleet of servers sharing one identity — one managed identity or one serv
 
 ### Lite / Darling (On-Premises)
 
-Nothing is installed on the target server. The full least-privilege grant set (verified live against SQL Server 2025 with a scratch login, [#1823](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1823)). **This block is the authoritative copy** — Lite and Darling need the identical grants, so the Darling operator guide points here rather than keeping a second list that can drift out of step:
+Nothing is installed on the target server. Below is the full least-privilege grant set, verified live against SQL Server 2025 with a scratch login ([#1823](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1823)). **This block is the authoritative copy** — Lite and Darling need the identical grants, so the Darling operator guide points here rather than keeping a second list that can drift out of step:
 
 ```sql
 USE [master];
