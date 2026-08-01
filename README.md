@@ -316,6 +316,8 @@ Lite and Darling query `msdb` directly on each collection cycle; all editions ex
 
 Every edition includes an embedded [Model Context Protocol](https://modelcontextprotocol.io) server that exposes monitoring data to LLM clients like Claude Code and Cursor.
 
+The tools answer from the monitor's own collected store, and that is the boundary worth stating up front: **no MCP tool runs SQL an AI client wrote against your monitored servers.** The handful of write-capable tools (Darling's view authoring, alert tuning, and server onboarding) change the monitor's own configuration, and the only live contact with a monitored server — the analysis plan fetch and the onboarding connection probe — runs the product's own fixed, read-only queries under the same least-privilege monitoring login the collectors use.
+
 ### Setup
 
 1. Enable the MCP server in Settings (checkbox + port, default `5151`)
