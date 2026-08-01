@@ -23,9 +23,10 @@ namespace PerformanceMonitorLite.Tests;
 
 internal static class GoldenCollectorSchema
 {
-    /// <summary>Pre-change CREATE TABLE DDL, keyed by collector target table (38 entries — the original
-    /// 35 pre-generation tables plus the three collectors added at their own post-collapse migrations:
-    /// long_query_completions (#1496) and the two Availability Group tables (#991)).</summary>
+    /// <summary>Pre-change CREATE TABLE DDL, keyed by collector target table (39 entries — the original
+    /// 35 pre-generation tables plus the four collectors added at their own post-collapse migrations:
+    /// long_query_completions (#1496), the two Availability Group tables (#991), and plan_correction
+    /// (#1952, Lite schema v50)).</summary>
     public static readonly IReadOnlyDictionary<string, string> Tables = new Dictionary<string, string>
     {
         ["wait_stats"] = @"CREATE TABLE IF NOT EXISTS wait_stats (
@@ -899,6 +900,51 @@ internal static class GoldenCollectorSchema
     est_redo_completion_time_min DOUBLE,
     est_send_drain_time_min DOUBLE
 )",
+        ["plan_correction"] = @"CREATE TABLE IF NOT EXISTS plan_correction (
+    collection_id BIGINT PRIMARY KEY,
+    collection_time TIMESTAMP NOT NULL,
+    server_id INTEGER NOT NULL,
+    server_name VARCHAR NOT NULL,
+    database_name VARCHAR NOT NULL,
+    force_last_good_plan_desired_state VARCHAR,
+    force_last_good_plan_actual_state VARCHAR,
+    force_last_good_plan_reason VARCHAR,
+    create_index_actual_state VARCHAR,
+    drop_index_actual_state VARCHAR,
+    recommendation_name VARCHAR,
+    recommendation_type VARCHAR,
+    recommendation_state VARCHAR,
+    recommendation_state_reason VARCHAR,
+    recommendation_reason VARCHAR,
+    valid_since TIMESTAMP,
+    last_refresh TIMESTAMP,
+    score INTEGER,
+    query_id BIGINT,
+    query_text VARCHAR,
+    regressed_plan_id BIGINT,
+    last_good_plan_id BIGINT,
+    last_good_plan_forcing_type VARCHAR,
+    last_good_plan_is_forced BOOLEAN,
+    last_good_plan_force_failure_reason VARCHAR,
+    regressed_plan_execution_count BIGINT,
+    regressed_plan_cpu_time_average_ms DOUBLE,
+    regressed_plan_error_count BIGINT,
+    last_good_plan_execution_count BIGINT,
+    last_good_plan_cpu_time_average_ms DOUBLE,
+    last_good_plan_error_count BIGINT,
+    estimated_gain_seconds DOUBLE,
+    is_executable_action BOOLEAN,
+    is_revertable_action BOOLEAN,
+    execute_action_initiated_by VARCHAR,
+    execute_action_initiated_time TIMESTAMP,
+    execute_action_start_time TIMESTAMP,
+    execute_action_duration_seconds DOUBLE,
+    revert_action_initiated_by VARCHAR,
+    revert_action_initiated_time TIMESTAMP,
+    revert_action_start_time TIMESTAMP,
+    revert_action_duration_seconds DOUBLE,
+    implementation_script VARCHAR
+)",
         ["pvs_stats"] = @"CREATE TABLE IF NOT EXISTS pvs_stats (
     collection_id BIGINT PRIMARY KEY,
     collection_time TIMESTAMP NOT NULL,
@@ -969,6 +1015,7 @@ internal static class GoldenCollectorSchema
         ["agent_status"] = @"CREATE INDEX IF NOT EXISTS idx_agent_status_time ON agent_status(server_id, collection_time)",
         ["ag_replica_states"] = @"CREATE INDEX IF NOT EXISTS idx_ag_replica_states_time ON ag_replica_states(server_id, collection_time)",
         ["ag_database_replica_states"] = @"CREATE INDEX IF NOT EXISTS idx_ag_database_replica_states_time ON ag_database_replica_states(server_id, collection_time)",
+        ["plan_correction"] = @"CREATE INDEX IF NOT EXISTS idx_plan_correction_time ON plan_correction(server_id, collection_time)",
         ["pvs_stats"] = @"CREATE INDEX IF NOT EXISTS idx_pvs_stats_time ON pvs_stats(server_id, collection_time)",
     };
 }

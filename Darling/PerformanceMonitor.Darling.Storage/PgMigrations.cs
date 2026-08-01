@@ -88,7 +88,14 @@ public static class PgMigrations
         new Migration(42, "pagerduty-webhook", V42Sql),
         new Migration(43, "pagerduty-proxy", V43Sql),
         new Migration(44, "collector-state", V44Sql),
-        new Migration(45, "pvs-stats", V45Sql),
+        /* 45 is permanently absent. It was reserved for the #1951 lane while that lane was still
+           unmerged, but #1952 landed first and took 46, and the runner applies only versions ABOVE
+           the store's MAX(version) — so a store already stamped 46 would have skipped a late-arriving
+           45 forever, leaving upgraded stores without a table fresh stores get from V1. #1951 was
+           renumbered to 47 rather than shipped into that hole. Version numbers only have to be unique
+           and ascending: a gap costs nothing and a collision would cost a store. */
+        new Migration(46, "plan-correction-collector", V46Sql),
+        new Migration(47, "pvs-stats", V47Sql),
     };
 
     /// <summary>
@@ -318,6 +325,71 @@ CREATE OR REPLACE VIEW v_deadlocks AS SELECT * FROM deadlocks;";
     private const string V28Sql = @"
 ALTER TABLE query_store_stats ADD COLUMN IF NOT EXISTS replica_role text;
 CREATE OR REPLACE VIEW v_query_store_stats AS SELECT * FROM query_store_stats;";
+
+    /// <summary>
+    /// V46 — the <c>plan_correction</c> collector table (#1952): what the engine's own automatic plan
+    /// correction is doing per database — the FORCE_LAST_GOOD_PLAN enablement state from
+    /// <c>sys.database_automatic_tuning_options</c>, and the live recommendation set from
+    /// <c>sys.dm_db_tuning_recommendations</c> with its details JSON shredded into typed columns and
+    /// the regressed query's text resolved through Query Store at collection time. Added additively
+    /// exactly like V29/V34 — a fresh store already has it (V1's
+    /// <see cref="PgSchemaGenerator.GenerateFullSchema"/> walks the collector catalog), so
+    /// <c>CREATE TABLE IF NOT EXISTS</c> is a no-op on fresh and the real create on upgrade. Column
+    /// order/types are exactly <see cref="PgSchemaGenerator.CreateTable"/>'s output for the
+    /// <see cref="PlanCorrectionCollector"/> catalog entry (prefix NOT NULL, payload nullable), which
+    /// <c>DarlingPlanCorrectionMigrationTests</c> asserts rather than leaving to this comment — the one
+    /// thing a hand-written literal can get wrong that a generated body cannot. No <c>v_*</c>
+    /// passthrough view (a post-V14 collector); the viewer reads the base table directly. Hypertable /
+    /// compression / 30-day retention flow from the catalog at runtime.
+    /// </summary>
+    private const string V46Sql = @"
+CREATE TABLE IF NOT EXISTS collect.plan_correction (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    force_last_good_plan_desired_state text,
+    force_last_good_plan_actual_state text,
+    force_last_good_plan_reason text,
+    create_index_actual_state text,
+    drop_index_actual_state text,
+    recommendation_name text,
+    recommendation_type text,
+    recommendation_state text,
+    recommendation_state_reason text,
+    recommendation_reason text,
+    valid_since timestamp,
+    last_refresh timestamp,
+    score integer,
+    query_id bigint,
+    query_text text,
+    regressed_plan_id bigint,
+    last_good_plan_id bigint,
+    last_good_plan_forcing_type text,
+    last_good_plan_is_forced boolean,
+    last_good_plan_force_failure_reason text,
+    regressed_plan_execution_count bigint,
+    regressed_plan_cpu_time_average_ms double precision,
+    regressed_plan_error_count bigint,
+    last_good_plan_execution_count bigint,
+    last_good_plan_cpu_time_average_ms double precision,
+    last_good_plan_error_count bigint,
+    estimated_gain_seconds double precision,
+    is_executable_action boolean,
+    is_revertable_action boolean,
+    execute_action_initiated_by text,
+    execute_action_initiated_time timestamp,
+    execute_action_start_time timestamp,
+    execute_action_duration_seconds double precision,
+    revert_action_initiated_by text,
+    revert_action_initiated_time timestamp,
+    revert_action_start_time timestamp,
+    revert_action_duration_seconds double precision,
+    implementation_script text
+);
+
+CREATE INDEX IF NOT EXISTS idx_plan_correction_time ON collect.plan_correction(server_id, collection_time);";
 
     /// <summary>
     /// V29 — the <c>long_query_completions</c> collector table (#1496): long-running query completions
@@ -740,7 +812,7 @@ CREATE TABLE IF NOT EXISTS collect.collector_state (
 );";
 
     /// <summary>
-    /// V45 — the #1951 ADR persistent version store table for stores that already exist. A fresh store
+    /// V47 — the #1951 ADR persistent version store table for stores that already exist. A fresh store
     /// gets this table from V1's <see cref="PgSchemaGenerator.GenerateFullSchema"/> (catalog-driven, so
     /// registering <c>PvsStatsCollector</c> in <c>CollectorCatalog.All</c> is the whole fresh-install
     /// story); an UPGRADED store ran V1 before the collector existed and would otherwise never get the
@@ -777,7 +849,7 @@ CREATE TABLE IF NOT EXISTS collect.collector_state (
     /// <c>CollectorCatalog.All</c>, so a new collector table is converted on the next service start
     /// without a hand-written <c>create_hypertable</c> — the same path ag_replica_states took in V34.</para>
     /// </summary>
-    private const string V45Sql = @"
+    private const string V47Sql = @"
 CREATE TABLE IF NOT EXISTS collect.pvs_stats (
     collection_id bigint NOT NULL,
     collection_time timestamp NOT NULL,

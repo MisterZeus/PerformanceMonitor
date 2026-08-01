@@ -89,6 +89,16 @@ public static class CollectorScheduleDefaults
            in-memory AG metadata. On an AG-less server every cycle is a zero-row read. */
         ["ag_replica_states"] = new(1, 30),
         ["ag_database_replica_states"] = new(1, 30),
+        /* #1952 automatic plan correction. Deliberately NOT the FrequencyMinutes 0 (on-load) tier the
+           other per-database config snapshots use, even though half of what it reads is enablement
+           state: sys.dm_db_tuning_recommendations is documented as living only until the instance
+           restarts, and a restart mid-verification silently unforces the plan the engine had forced.
+           An on-load-only collector would capture that database once and then miss every Active and
+           Verifying recommendation the engine worked through afterwards - and those rows exist
+           nowhere else once the engine drops them. The 5-minute tier is where the other enumerating
+           per-database reader already sits (query_store); the read itself is a handful of rows per
+           database against in-memory recommendation state, not a Query Store scan. */
+        ["plan_correction"] = new(5, 30),
         /* #1951 ADR persistent version store. Cadence and retention deliberately MATCH
            database_size_stats (60/90) rather than the per-minute health tier: PVS size is the same
            kind of slow-moving disk-pressure telemetry, it is read beside database sizes, and pairing

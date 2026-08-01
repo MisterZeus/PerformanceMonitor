@@ -49,7 +49,10 @@ public class ScheduleManager
             ["blocked_process_report"] = 1, ["running_jobs"] = 2,
             ["session_summary_stats"] = 2, ["system_health_events"] = 2,
             ["default_trace_events"] = 2, ["job_history"] = 2, ["agent_status"] = 2,
-            ["ag_replica_states"] = 1, ["ag_database_replica_states"] = 1
+            ["ag_replica_states"] = 1, ["ag_database_replica_states"] = 1,
+            /* plan_correction tracks query_store across the presets: same per-database enumeration
+               shape, same default tier, so an operator backing one off wants the other to follow. */
+            ["plan_correction"] = 2
         },
         ["Balanced"] = new(StringComparer.OrdinalIgnoreCase)
         {
@@ -66,7 +69,8 @@ public class ScheduleManager
             ["blocked_process_report"] = 1, ["running_jobs"] = 5,
             ["session_summary_stats"] = 5, ["system_health_events"] = 5,
             ["default_trace_events"] = 5, ["job_history"] = 5, ["agent_status"] = 5,
-            ["ag_replica_states"] = 1, ["ag_database_replica_states"] = 1
+            ["ag_replica_states"] = 1, ["ag_database_replica_states"] = 1,
+            ["plan_correction"] = 5
         },
         ["Low-Impact"] = new(StringComparer.OrdinalIgnoreCase)
         {
@@ -82,7 +86,8 @@ public class ScheduleManager
             ["blocked_process_report"] = 5, ["running_jobs"] = 30,
             ["session_summary_stats"] = 15, ["system_health_events"] = 15,
             ["default_trace_events"] = 15, ["job_history"] = 15, ["agent_status"] = 15,
-            ["ag_replica_states"] = 5, ["ag_database_replica_states"] = 5
+            ["ag_replica_states"] = 5, ["ag_database_replica_states"] = 5,
+            ["plan_correction"] = 30
         }
     };
 
@@ -642,7 +647,8 @@ public class ScheduleManager
             new() { Name = "agent_status", Enabled = true, FrequencyMinutes = 5, RetentionDays = 7, Description = "SQL Agent service status (Running/Stopped from sys.dm_server_services) and next scheduled run from msdb; drives the Job History tab header (not collected on Azure SQL DB)" },
             new() { Name = "ag_replica_states", Enabled = true, FrequencyMinutes = 1, RetentionDays = 30, Description = "Availability Group replica health (role, operational/connected state, recovery and synchronization health) from sys.dm_hadr_availability_replica_states; zero rows on a server with no AGs (not collected on Azure SQL DB)" },
             new() { Name = "ag_database_replica_states", Enabled = true, FrequencyMinutes = 1, RetentionDays = 30, Description = "Availability Group per-database replica health (synchronization state, send/redo queue sizes and rates, secondary lag) from sys.dm_hadr_database_replica_states; zero rows on a server with no AGs (not collected on Azure SQL DB)" },
-            new() { Name = "pvs_stats", Enabled = true, FrequencyMinutes = 60, RetentionDays = 90, Description = "Accelerated Database Recovery persistent version store size and cleanup state per database from sys.dm_tran_persistent_version_store_stats, with the transaction or snapshot scan holding cleanup back; SQL Server 2019+ only, always collected on Azure SQL DB (ADR is always on there)" }
+            new() { Name = "plan_correction", Enabled = true, FrequencyMinutes = 5, RetentionDays = 30, Description = "Automatic plan correction: per-database FORCE_LAST_GOOD_PLAN enablement from sys.database_automatic_tuning_options plus the engine's live recommendation set from sys.dm_db_tuning_recommendations, with the regressed query's text resolved through Query Store (SQL Server 2017+ and Azure; Enterprise/Developer edition)" },
+            new() { Name = "pvs_stats", Enabled = true, FrequencyMinutes = 60, RetentionDays = 90, Description = "Accelerated Database Recovery persistent version store size and cleanup state per database from sys.dm_tran_persistent_version_store_stats, with the aborted-transaction count and the skipped-page counters that say why cleanup is not reclaiming; SQL Server 2019+ only, always collected on Azure SQL DB (ADR is always on there)" }
         };
     }
 

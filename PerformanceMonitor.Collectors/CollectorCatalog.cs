@@ -59,6 +59,7 @@ public static class CollectorCatalog
         AgentStatusCollector.Instance,
         AgReplicaStatesCollector.Instance,
         AgDatabaseReplicaStatesCollector.Instance,
+        PlanCorrectionCollector.Instance,
         PvsStatsCollector.Instance,
     };
 

@@ -68,6 +68,7 @@ public sealed class GridPayloadColumnOrderPinTests
         new(LiteServerTab, "ProcedureStatsGrid", "Cached Time", 4, ["Query Plan"]),
         new(LiteServerTab, "QueryStoreGrid", "First Execution", 5, ["Query Text"]),
         new(LiteServerTab, "QueryStoreComparisonGrid", "Database", 1, ["Query Text"]),
+        new(LiteServerTab, "PlanCorrectionGrid", "Collected", 0, ["Query Text"]),
         new(LiteServerTab, "BlockedProcessReportGrid", "Event Time", 0, ["Blocked SQL", "Blocking SQL", "XML"]),
         new(LiteServerTab, "DeadlockGrid", "Time", 0, ["SQL Text", "XML"]),
         new(LiteServerTab, "SignificantWaitsGrid", "Event Time", 0, ["Query Text"]),
@@ -136,10 +137,12 @@ public sealed class GridPayloadColumnOrderPinTests
     public void ColumnScanIsNotVacuous()
     {
         // Self-check: the parser must actually walk the grids, not silently return empty lists. The #1949
-        // census counted 457 columns across these 16 Lite grids; the floor is deliberately below that so
-        // adding a column never fails this, but a broken scan does.
+        // census counted 457 columns across 16 Lite grids, and #1952's 27-column PlanCorrectionGrid brings
+        // that to 484 across 17; the floor is deliberately below that so adding a column never fails this,
+        // but a broken scan does. It moved 440 -> 467 with that grid — up by exactly the 27 columns it adds,
+        // which preserves the guard's existing slack rather than widening or narrowing it.
         var total = Pins.Sum(p => ColumnHeaders(ReadRepoFile(p.RelativePath), p.GridName).Count);
-        Assert.True(total >= 440, $"only {total} columns walked across {Pins.Length} grids — the scan is broken.");
+        Assert.True(total >= 467, $"only {total} columns walked across {Pins.Length} grids — the scan is broken.");
     }
 
     [Fact]
@@ -147,8 +150,9 @@ public sealed class GridPayloadColumnOrderPinTests
     {
         // The anti-deletion half of the ratchet: quietly deleting a row would make this suite green by
         // covering less, which is the one way a pin can rot without anything going red.
-        Assert.True(Pins.Length == 16,
-            $"the pin table holds {Pins.Length} grids, expected the 16 Lite grids on the #1949 move list. " +
+        Assert.True(Pins.Length == 17,
+            $"the pin table holds {Pins.Length} grids, expected the 16 Lite grids on the #1949 move list " +
+            "plus #1952's PlanCorrectionGrid. " +
             "Removing a grid needs a stated reason (the grid or its payload column is gone); adding one is " +
             "free, but bump this number in the same commit.");
     }

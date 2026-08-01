@@ -28,10 +28,11 @@ public sealed class PgSchemaGeneratorTests
     public void Catalog_CoversAllCollectors_WithUniqueTablesAndNames()
     {
         /* 35 through agent_status + long_query_completions (#1496 long-query trace) = 36, plus the two
-           Availability Group collectors (#991) = 38, plus pvs_stats (#1951 ADR version store) = 39. */
-        Assert.Equal(39, CollectorCatalog.All.Count);
-        Assert.Equal(39, CollectorCatalog.All.Select(s => s.TargetTable).Distinct().Count());
-        Assert.Equal(39, CollectorCatalog.All.Select(s => s.Name).Distinct().Count());
+           Availability Group collectors (#991) = 38, plus plan_correction (#1952 automatic plan
+           correction) = 39, plus pvs_stats (#1951 ADR version store) = 40. */
+        Assert.Equal(40, CollectorCatalog.All.Count);
+        Assert.Equal(40, CollectorCatalog.All.Select(s => s.TargetTable).Distinct().Count());
+        Assert.Equal(40, CollectorCatalog.All.Select(s => s.Name).Distinct().Count());
     }
 
     [Fact]
@@ -421,13 +422,13 @@ public sealed class PgSchemaGeneratorTests
         Assert.Contains(CollectQualified(AgentStatusCollector.Instance), v25, StringComparison.Ordinal);
         Assert.Contains("CREATE INDEX IF NOT EXISTS idx_agent_status_time ON collect.agent_status(server_id, collection_time);", v25, StringComparison.Ordinal);
 
-        /* V45 (#1951) creates pvs_stats for an already-existing store; a fresh store gets it from V1's
+        /* V47 (#1951) creates pvs_stats for an already-existing store; a fresh store gets it from V1's
            GenerateFullSchema. Same contract as V24/V25 — and it is the ONLY thing standing between a
            hand-typed 26-column CREATE TABLE and a silent fresh-vs-upgraded shape fork. */
-        var v45 = Lf(PgMigrations.Scripts.Single(m => m.Version == 45).Sql);
+        var v47 = Lf(PgMigrations.Scripts.Single(m => m.Version == 47).Sql);
 
-        Assert.Contains(CollectQualified(PvsStatsCollector.Instance), v45, StringComparison.Ordinal);
-        Assert.Contains("CREATE INDEX IF NOT EXISTS idx_pvs_stats_time ON collect.pvs_stats(server_id, collection_time);", v45, StringComparison.Ordinal);
+        Assert.Contains(CollectQualified(PvsStatsCollector.Instance), v47, StringComparison.Ordinal);
+        Assert.Contains("CREATE INDEX IF NOT EXISTS idx_pvs_stats_time ON collect.pvs_stats(server_id, collection_time);", v47, StringComparison.Ordinal);
 
         /* V34 (#991) creates BOTH Availability Group tables in one migration body — same contract. The
            weaker `Assert.Contains(column.Name)` sweep this replaces would have passed a V34 with the
@@ -556,11 +557,11 @@ public sealed class PgSchemaGeneratorTests
         var script = PgSchemaGenerator.GenerateFullSchema();
 
         var tableCount = CollectorCatalog.All.Count(s => script.Contains($"CREATE TABLE IF NOT EXISTS {s.TargetTable} (", StringComparison.Ordinal));
-        Assert.Equal(39, tableCount);
+        Assert.Equal(40, tableCount);
 
-        /* 39 tables minus the two index-less config tables (server_config, database_config) = 37 indexes. */
+        /* 40 tables minus the two index-less config tables (server_config, database_config) = 38 indexes. */
         var indexCount = script.Split("CREATE INDEX IF NOT EXISTS").Length - 1;
-        Assert.Equal(37, indexCount);
+        Assert.Equal(38, indexCount);
 
         /* The precision guard can never regress silently. */
         Assert.DoesNotContain("numeric(0,0)", script, StringComparison.Ordinal);

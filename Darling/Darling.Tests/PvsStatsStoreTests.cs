@@ -18,7 +18,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// Pins the V45 <c>pvs_stats</c> store surface (#1951): the migration itself, the viewer schema gate that
+/// Pins the V47 <c>pvs_stats</c> store surface (#1951): the migration itself, the viewer schema gate that
 /// a StorageVersion bump obligates, and — against a real Postgres — that a row written through the
 /// generated schema comes back out of the viewer read with its VALUES intact.
 ///
@@ -35,19 +35,19 @@ public sealed class PvsStatsStoreTests
     private const int TestServerId = 991951;
 
     [Fact]
-    public void V45_IsTheNewestMigration_AndStorageVersionTracksIt()
+    public void V47_IsTheNewestMigration_AndStorageVersionTracksIt()
     {
-        var v45 = PgMigrations.Scripts.Single(m => m.Version == 45);
+        var v47 = PgMigrations.Scripts.Single(m => m.Version == 47);
 
-        Assert.Equal("pvs-stats", v45.Name);
-        Assert.Equal(45, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(45, StorageVersion.SchemaVersion);
+        Assert.Equal("pvs-stats", v47.Name);
+        Assert.Equal(47, PgMigrations.Scripts[^1].Version);
+        Assert.Equal(47, StorageVersion.SchemaVersion);
 
         /* collect.-qualified like V44 and V34, and idempotent so a re-run is a no-op. */
-        Assert.Contains("CREATE TABLE IF NOT EXISTS collect.pvs_stats (", v45.Sql, StringComparison.Ordinal);
+        Assert.Contains("CREATE TABLE IF NOT EXISTS collect.pvs_stats (", v47.Sql, StringComparison.Ordinal);
         Assert.Contains(
             "CREATE INDEX IF NOT EXISTS idx_pvs_stats_time ON collect.pvs_stats(server_id, collection_time);",
-            v45.Sql,
+            v47.Sql,
             StringComparison.Ordinal);
 
         /* The v_* passthrough is what lets Darling's FinOps read be byte-identical to Lite's, whose own
@@ -61,7 +61,7 @@ public sealed class PvsStatsStoreTests
            other half — the guard asserts the two sets are equal. */
         Assert.Contains(
             "CREATE OR REPLACE VIEW v_pvs_stats AS SELECT * FROM pvs_stats;",
-            v45.Sql,
+            v47.Sql,
             StringComparison.Ordinal);
         Assert.Contains("v_pvs_stats", PgSchemaGenerator.AllPassthroughViews);
         Assert.Contains("FROM v_pvs_stats", ViewerDataService.PvsStatsLatestSql, StringComparison.Ordinal);
@@ -70,21 +70,21 @@ public sealed class PvsStatsStoreTests
            first cycle with a column the generated fresh schema has and this one does not. */
         foreach (var column in PvsStatsCollector.Instance.PayloadColumns)
         {
-            Assert.Contains($"    {column.Name} ", v45.Sql, StringComparison.Ordinal);
+            Assert.Contains($"    {column.Name} ", v47.Sql, StringComparison.Ordinal);
         }
     }
 
     [Fact]
-    public void ViewerSchemaGate_KnowsV45_SoAFullyMigratedStoreIsNotRefused()
+    public void ViewerSchemaGate_KnowsV47_SoAFullyMigratedStoreIsNotRefused()
     {
         /* The trap a StorageVersion bump sets: the viewer's connect-time gate probes the store and
            compares the result against RequiredStoreSchemaVersion. A probe that cannot SEE the newest
            migration reports every healthy store as skewed and refuses to open it — permanently. */
-        Assert.Equal(45, ViewerDataService.RequiredStoreSchemaVersion);
+        Assert.Equal(47, ViewerDataService.RequiredStoreSchemaVersion);
         Assert.Contains("table_name = 'pvs_stats'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         /* Newest-first arm: pvs_stats present wins outright. */
-        Assert.Equal(45, ViewerDataService.MapProbedSchemaVersion(
+        Assert.Equal(47, ViewerDataService.MapProbedSchemaVersion(
             hasConfigControlPlane: true, hasAlertDeliveryOverride: true, hasAnalysisState: true,
             hasAlertTuningKnobs: true, hasDefaultTraceEvents: true, hasIndexObjectStatsLatestIndex: true,
             hasCollectionLogHypertableOrPlainPg: true, hasJobHistory: true, hasAgentStatus: true,
@@ -94,10 +94,10 @@ public sealed class PvsStatsStoreTests
             hasAgAlertKnobs: true, hasAgLatencyColumns: true, hasAgDisconnectRefire: true,
             hasPayloadDimensions: true, hasDimFloorIndexes: true, hasBlockingWaitThreshold: true,
             hasQueryStoreIntervalIdentity: true, hasPagerDutyWebhook: true, hasPagerDutyProxy: true,
-            hasCollectorState: true, hasPvsStats: true));
+            hasCollectorState: true, hasPlanCorrection: true, hasPvsStats: true));
 
-        /* A V44 store — everything but pvs_stats — must still map to 44, not 45. */
-        Assert.Equal(44, ViewerDataService.MapProbedSchemaVersion(
+        /* A V46 store — everything but pvs_stats — must still map to 46, not 47. */
+        Assert.Equal(46, ViewerDataService.MapProbedSchemaVersion(
             hasConfigControlPlane: true, hasAlertDeliveryOverride: true, hasAnalysisState: true,
             hasAlertTuningKnobs: true, hasDefaultTraceEvents: true, hasIndexObjectStatsLatestIndex: true,
             hasCollectionLogHypertableOrPlainPg: true, hasJobHistory: true, hasAgentStatus: true,
@@ -107,7 +107,7 @@ public sealed class PvsStatsStoreTests
             hasAgAlertKnobs: true, hasAgLatencyColumns: true, hasAgDisconnectRefire: true,
             hasPayloadDimensions: true, hasDimFloorIndexes: true, hasBlockingWaitThreshold: true,
             hasQueryStoreIntervalIdentity: true, hasPagerDutyWebhook: true, hasPagerDutyProxy: true,
-            hasCollectorState: true, hasPvsStats: false));
+            hasCollectorState: true, hasPlanCorrection: true, hasPvsStats: false));
     }
 
     [Fact]
@@ -125,7 +125,7 @@ public sealed class PvsStatsStoreTests
         {
             await connection.OpenAsync(TestContext.Current.CancellationToken);
 
-            /* Idempotent: brings an older store forward to V45, no-ops on a current one. */
+            /* Idempotent: brings an older store forward to V47, no-ops on a current one. */
             await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
             await DeleteTestRowsAsync(connection, TestContext.Current.CancellationToken);
 
