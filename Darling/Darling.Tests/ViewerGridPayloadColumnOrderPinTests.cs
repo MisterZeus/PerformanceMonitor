@@ -100,7 +100,9 @@ public sealed class ViewerGridPayloadColumnOrderPinTests
     private static readonly string LiteQueryStatsHistory = Path.Combine("Lite", "Windows", "QueryStatsHistoryWindow.xaml");
     private static readonly string LiteQueryStoreHistory = Path.Combine("Lite", "Windows", "QueryStoreHistoryWindow.xaml");
 
-    /* Every query grid that exists in BOTH apps. The FinOps pair differs by the Viewer's `FinOps` x:Name
+    /* Every query grid that exists in BOTH apps, plus the #1951 PVS pair — that grid carries no query text
+       (so it is not in the Pins table above), but it was ported to the Viewer as a copy of Lite's and the
+       symmetry is worth holding the same way. The FinOps pairs differ by the Viewer's `FinOps` x:Name
        prefix only. CurrentActiveQueriesGrid and QueryStoreRegressionsGrid are Viewer-only and have no row. */
     private static readonly (string LiteFile, string LiteGrid, string ViewerFile, string ViewerGrid)[] Twins =
     [
@@ -121,6 +123,7 @@ public sealed class ViewerGridPayloadColumnOrderPinTests
         (LiteQueryStoreHistory, "HistoryDataGrid", ViewerQueryStoreHistory, "HistoryDataGrid"),
         (LiteFinOpsTab, "ExpensiveQueriesDataGrid", ViewerFinOpsTab, "FinOpsExpensiveQueriesDataGrid"),
         (LiteFinOpsTab, "HighImpactDataGrid", ViewerFinOpsTab, "FinOpsHighImpactDataGrid"),
+        (LiteFinOpsTab, "PvsStatsDataGrid", ViewerFinOpsTab, "FinOpsPvsStatsDataGrid"),
     ];
 
     public static TheoryData<string, string> PinKeys()
@@ -243,9 +246,10 @@ public sealed class ViewerGridPayloadColumnOrderPinTests
             "plus #1952's PlanCorrectionGrid. " +
             "Removing a grid needs a stated reason (the grid or its payload column is gone); adding one is " +
             "free, but bump this number in the same commit.");
-        Assert.True(Twins.Length == 17,
-            $"the twin table holds {Twins.Length} pairs, expected 17 (the 19 Viewer grids less the two " +
-            "Viewer-only ones, CurrentActiveQueriesGrid and QueryStoreRegressionsGrid).");
+        Assert.True(Twins.Length == 18,
+            $"the twin table holds {Twins.Length} pairs, expected 18: the 19 Viewer grids less the two " +
+            "Viewer-only ones (CurrentActiveQueriesGrid and QueryStoreRegressionsGrid), plus the #1951 " +
+            "PVS pair, which carries no query text and so is twinned without being pinned.");
     }
 
     /* ---------------- JS column scan ---------------- */

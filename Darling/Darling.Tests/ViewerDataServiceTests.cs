@@ -497,11 +497,18 @@ public sealed class ViewerSchemaVersionGateTests
     /// <summary>V46 (#1952) rung: plan_correction absent means the store stops at the V44 rung. Unlike the
     /// V44 arm above, the viewer DOES read this table (the Plan Corrections and Automatic Tuning grids), so a
     /// store below V46 genuinely cannot serve those reads — the cap is a real gate here, not only a
-    /// don't-under-report guard. Note the deliberate V45 gap: 45 belongs to a sibling lane and is not a rung,
-    /// so a store carrying 45 but not 46 correctly reports 44.</summary>
+    /// don't-under-report guard. Note the permanent V45 gap: 45 is not a rung and never will be (#1951 was
+    /// renumbered to 47), so no store can carry one.</summary>
     [Fact]
     public void MapProbedSchemaVersion_PlanCorrectionAbsent_CapsAt44() =>
         Assert.Equal(44, ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+
+    /// <summary>V47 (#1951) rung: pvs_stats absent means the store stops at the V46 rung. The viewer READS
+    /// this table (the FinOps Version Store grid names it), so a store below V47 would fail 42P01 rather
+    /// than degrade — the cap is a real gate here too.</summary>
+    [Fact]
+    public void MapProbedSchemaVersion_PvsStatsAbsent_CapsAt46() =>
+        Assert.Equal(46, ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
 
     [Fact]
     public void RequiredStoreSchemaVersion_TracksTheBuildSchemaVersion_AndTheProbeCoversIt()
@@ -515,7 +522,7 @@ public sealed class ViewerSchemaVersionGateTests
            the connect-time gate refuse to open the viewer against a perfectly healthy store. */
          Assert.Equal(
              ViewerDataService.RequiredStoreSchemaVersion,
-             ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+             ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
     }
 }
 

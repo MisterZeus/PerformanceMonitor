@@ -60,6 +60,7 @@ public static class CollectorCatalog
         AgReplicaStatesCollector.Instance,
         AgDatabaseReplicaStatesCollector.Instance,
         PlanCorrectionCollector.Instance,
+        PvsStatsCollector.Instance,
     };
 
     /// <summary>Name → definition, for the by-name target-gate lookup. Built once from <see cref="All"/>.</summary>

@@ -88,10 +88,14 @@ public static class PgMigrations
         new Migration(42, "pagerduty-webhook", V42Sql),
         new Migration(43, "pagerduty-proxy", V43Sql),
         new Migration(44, "collector-state", V44Sql),
-        /* 45 is deliberately absent: a sibling lane holds it and this lane was assigned 46. Version
-           numbers only have to be unique and ascending — the runner applies whatever is above the
-           store's current version — so a gap costs nothing and a collision would cost a store. */
+        /* 45 is permanently absent. It was reserved for the #1951 lane while that lane was still
+           unmerged, but #1952 landed first and took 46, and the runner applies only versions ABOVE
+           the store's MAX(version) — so a store already stamped 46 would have skipped a late-arriving
+           45 forever, leaving upgraded stores without a table fresh stores get from V1. #1951 was
+           renumbered to 47 rather than shipped into that hole. Version numbers only have to be unique
+           and ascending: a gap costs nothing and a collision would cost a store. */
         new Migration(46, "plan-correction-collector", V46Sql),
+        new Migration(47, "pvs-stats", V47Sql),
     };
 
     /// <summary>
@@ -806,6 +810,79 @@ CREATE TABLE IF NOT EXISTS collect.collector_state (
     updated_at timestamp NOT NULL,
     PRIMARY KEY (server_id, collector_name, state_key)
 );";
+
+    /// <summary>
+    /// V47 — the #1951 ADR persistent version store table for stores that already exist. A fresh store
+    /// gets this table from V1's <see cref="PgSchemaGenerator.GenerateFullSchema"/> (catalog-driven, so
+    /// registering <c>PvsStatsCollector</c> in <c>CollectorCatalog.All</c> is the whole fresh-install
+    /// story); an UPGRADED store ran V1 before the collector existed and would otherwise never get the
+    /// table, so it is spelled out here column-for-column in the generator's emission order. The
+    /// fresh-vs-upgraded shape pin in PgSchemaGeneratorTests compares the two, which is what keeps this
+    /// block honest if the payload ever changes.
+    ///
+    /// <para>Column types are the generator's mapping of the definition's 23 <c>PayloadColumns</c>: Varchar →
+    /// <c>text</c>, Integer → <c>integer</c>, SmallInt → <c>smallint</c>, BigInt → <c>bigint</c>, Boolean →
+    /// <c>boolean</c>, Timestamp → <c>timestamp</c>, Decimal(19,2) → <c>numeric(19,2)</c>, behind the four
+    /// standard prefix columns. Bare names resolve through the migrate session's
+    /// <c>search_path = collect, config, public</c> (V8); the table is <c>collect</c>-qualified anyway,
+    /// matching V44 and V34.</para>
+    ///
+    /// <para>The view statement is deliberately UNQUALIFIED while the table is <c>collect.</c>-qualified,
+    /// which looks inconsistent and is not: it resolves through the migrate session's
+    /// <c>search_path = collect, config, public</c> exactly like V10-V13's view statements, and the
+    /// drift guard in DarlingObservabilityTests scans every migration for the bare
+    /// <c>CREATE OR REPLACE VIEW v_x AS SELECT * FROM x</c> form. A <c>collect.</c>-qualified view would
+    /// be INVISIBLE to that guard — the guard that exists so a collector view can never be added without
+    /// its V14 refresh — and would drop out of <c>PgSchemaGenerator.AllPassthroughViews</c>, which the MCP
+    /// reader consults to answer "does this table have a v_* view".</para>
+    ///
+    /// <para>The <c>v_pvs_stats</c> passthrough view is what keeps the two viewers' SQL byte-identical.
+    /// Lite's <c>v_*</c> views are load-bearing there — they UNION the hot DuckDB table with the parquet
+    /// archive — and Darling's are the passthrough twin created for exactly that reason (V4/V5:
+    /// "completing the v_* twin of Lite's DuckDB view layer so every ported viewer query stays
+    /// byte-identical to Lite's"). Without it the Darling FinOps read would have to name the base table
+    /// and the two front ends would diverge in their first line. The AG collectors read base tables
+    /// directly and are the exception, not the pattern to copy for a grid twinned with Lite's.</para>
+    ///
+    /// <para>Everything else is automatic and deliberately NOT written here: the hypertable conversion,
+    /// compression policy and retention come from <see cref="!:TimescaleSupport"/>, which enumerates
+    /// <c>CollectorCatalog.All</c>, so a new collector table is converted on the next service start
+    /// without a hand-written <c>create_hypertable</c> — the same path ag_replica_states took in V34.</para>
+    /// </summary>
+    private const string V47Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pvs_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    database_id integer,
+    is_accelerated_database_recovery_on boolean,
+    pvs_filegroup_id smallint,
+    persistent_version_store_size_mb numeric(19,2),
+    online_index_version_store_size_mb numeric(19,2),
+    database_data_size_mb numeric(19,2),
+    current_aborted_transaction_count bigint,
+    oldest_active_transaction_id bigint,
+    oldest_aborted_transaction_id bigint,
+    min_transaction_timestamp bigint,
+    online_index_min_transaction_timestamp bigint,
+    secondary_low_water_mark bigint,
+    offrow_version_cleaner_start_time timestamp,
+    offrow_version_cleaner_end_time timestamp,
+    aborted_version_cleaner_start_time timestamp,
+    aborted_version_cleaner_end_time timestamp,
+    pvs_off_row_page_skipped_low_water_mark bigint,
+    pvs_off_row_page_skipped_transaction_not_cleaned bigint,
+    pvs_off_row_page_skipped_oldest_active_xdesid bigint,
+    pvs_off_row_page_skipped_min_useful_xts bigint,
+    pvs_off_row_page_skipped_oldest_snapshot bigint,
+    pvs_off_row_page_skipped_oldest_aborted_xdesid bigint
+);
+
+CREATE INDEX IF NOT EXISTS idx_pvs_stats_time ON collect.pvs_stats(server_id, collection_time);
+
+CREATE OR REPLACE VIEW v_pvs_stats AS SELECT * FROM pvs_stats;";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

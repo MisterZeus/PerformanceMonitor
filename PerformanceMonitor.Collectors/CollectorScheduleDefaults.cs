@@ -99,5 +99,15 @@ public static class CollectorScheduleDefaults
            per-database reader already sits (query_store); the read itself is a handful of rows per
            database against in-memory recommendation state, not a Query Store scan. */
         ["plan_correction"] = new(5, 30),
+        /* #1951 ADR persistent version store. Cadence and retention deliberately MATCH
+           database_size_stats (60/90) rather than the per-minute health tier: PVS size is the same
+           kind of slow-moving disk-pressure telemetry, it is read beside database sizes, and pairing
+           the two cadences is what lets a chart put "the database grew" and "its version store grew"
+           on one time axis without resampling. The fast-moving leading indicators an operator would
+           want per-minute — the long-running transaction itself, the snapshot scan holding cleanup
+           back — are already collected per-minute by dmv_blocking_snapshot and waiting_tasks; what
+           this collector adds is the slow CONSEQUENCE, and 90 days is the window that shows a PVS
+           trend against the database-growth trend it explains. */
+        ["pvs_stats"] = new(60, 90),
     };
 }

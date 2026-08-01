@@ -79,7 +79,8 @@ public class DuckDbSchemaTests : IDisposable
             "job_history",
             "agent_status",
             "ag_replica_states",
-            "ag_database_replica_states"
+            "ag_database_replica_states",
+            "pvs_stats"
         };
 
         using var connection = new DuckDBConnection($"Data Source={_dbPath}");
@@ -147,16 +148,17 @@ public class DuckDbSchemaTests : IDisposable
         foreach (var _ in Schema.GetAllTableStatements())
             tableCount++;
 
-        /* 46 tables from Schema (schema_version is created separately by DuckDbInitializer).
+        /* 48 tables from Schema (schema_version is created separately by DuckDbInitializer).
            Includes config_edge_trigger_watermarks (#1145), dmv_blocking_snapshots (always-on
            blocking fallback), latch_stats/spinlock_stats, cpu_scheduler_stats/plan_cache_stats,
            session_summary_stats, system_health_events, default_trace_events (#1262 shared
            DMV/XE/Default-Trace collectors), job_history + agent_status (#1433 Job History tab),
            long_query_completions (#1496 long-query trace), ag_replica_states +
            ag_database_replica_states (#991 Availability Group health), and collector_state
-           (#1962 per-server state a collector's own rows cannot produce), and plan_correction
-           (#1952 automatic plan correction). */
-        Assert.Equal(47, tableCount);
+           (#1962 per-server state a collector's own rows cannot produce), plan_correction
+           (#1952 automatic plan correction), and pvs_stats (#1951 ADR persistent version
+           store). */
+        Assert.Equal(48, tableCount);
     }
 
     [Fact]

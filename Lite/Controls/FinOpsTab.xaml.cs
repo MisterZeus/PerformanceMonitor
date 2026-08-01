@@ -39,6 +39,7 @@ public partial class FinOpsTab : UserControl
     private DataGridFilterManager<DatabaseResourceUsageRow>? _dbResourcesFilterMgr;
     private DataGridFilterManager<StorageGrowthRow>? _storageGrowthFilterMgr;
     private DataGridFilterManager<DatabaseSizeRow>? _dbSizesFilterMgr;
+    private DataGridFilterManager<PvsStatsRow>? _pvsStatsFilterMgr;
     private DataGridFilterManager<IndexCleanupSummaryRow>? _indexSummaryFilterMgr;
     private DataGridFilterManager<IndexCleanupResultRow>? _indexDetailFilterMgr;
     private DataGridFilterManager<ApplicationConnectionRow>? _appConnectionsFilterMgr;
@@ -213,6 +214,7 @@ public partial class FinOpsTab : UserControl
             LoadDatabaseResourcesAsync(serverId),
             LoadApplicationConnectionsAsync(serverId),
             LoadDatabaseSizesAsync(serverId),
+            LoadPvsStatsAsync(serverId),
             LoadStorageGrowthAsync(serverId),
             LoadIndexLockingAsync(serverId),
             LoadIdleDatabasesAsync(serverId),
@@ -489,6 +491,25 @@ public partial class FinOpsTab : UserControl
         catch (Exception ex)
         {
             AppLogger.Error("FinOps", $"Failed to load database sizes: {ex.Message}");
+        }
+    }
+
+    private async System.Threading.Tasks.Task LoadPvsStatsAsync(int serverId)
+    {
+        if (_dataService == null) return;
+
+        try
+        {
+            var data = await Task.Run(() => _dataService.GetPvsStatsLatestAsync(serverId));
+
+            _pvsStatsFilterMgr!.UpdateData(data);
+
+            NoPvsStatsMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            PvsCountIndicator.Text = data.Count > 0 ? $"{data.Count} database(s)" : "";
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("FinOps", $"Failed to load PVS stats: {ex.Message}");
         }
     }
 
@@ -771,6 +792,12 @@ public partial class FinOpsTab : UserControl
         if (serverId != 0) await LoadDatabaseSizesAsync(serverId);
     }
 
+    private async void RefreshPvsStats_Click(object sender, RoutedEventArgs e)
+    {
+        var serverId = GetSelectedServerId();
+        if (serverId != 0) await LoadPvsStatsAsync(serverId);
+    }
+
     private async void RefreshServerInventory_Click(object sender, RoutedEventArgs e)
     {
         await LoadServerInventoryAsync(forceRefresh: true);
@@ -912,6 +939,7 @@ public partial class FinOpsTab : UserControl
         var prefix = grid?.Name switch
         {
             nameof(DatabaseSizesDataGrid) => "database_sizes",
+            nameof(PvsStatsDataGrid) => "pvs_stats",
             nameof(ServerInventoryDataGrid) => "server_inventory",
             nameof(DatabaseResourcesDataGrid) => "database_resources",
             nameof(ApplicationConnectionsDataGrid) => "application_connections",
@@ -929,6 +957,7 @@ public partial class FinOpsTab : UserControl
         _dbResourcesFilterMgr = new DataGridFilterManager<DatabaseResourceUsageRow>(DatabaseResourcesDataGrid);
         _storageGrowthFilterMgr = new DataGridFilterManager<StorageGrowthRow>(StorageGrowthDataGrid);
         _dbSizesFilterMgr = new DataGridFilterManager<DatabaseSizeRow>(DatabaseSizesDataGrid);
+        _pvsStatsFilterMgr = new DataGridFilterManager<PvsStatsRow>(PvsStatsDataGrid);
         _indexSummaryFilterMgr = new DataGridFilterManager<IndexCleanupSummaryRow>(IndexAnalysisSummaryGrid);
         _indexDetailFilterMgr = new DataGridFilterManager<IndexCleanupResultRow>(IndexAnalysisDetailGrid);
         _appConnectionsFilterMgr = new DataGridFilterManager<ApplicationConnectionRow>(ApplicationConnectionsDataGrid);
@@ -944,6 +973,7 @@ public partial class FinOpsTab : UserControl
         _filterManagers[DatabaseResourcesDataGrid] = _dbResourcesFilterMgr;
         _filterManagers[StorageGrowthDataGrid] = _storageGrowthFilterMgr;
         _filterManagers[DatabaseSizesDataGrid] = _dbSizesFilterMgr;
+        _filterManagers[PvsStatsDataGrid] = _pvsStatsFilterMgr;
         _filterManagers[IndexAnalysisSummaryGrid] = _indexSummaryFilterMgr;
         _filterManagers[IndexAnalysisDetailGrid] = _indexDetailFilterMgr;
         _filterManagers[ApplicationConnectionsDataGrid] = _appConnectionsFilterMgr;

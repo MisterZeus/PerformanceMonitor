@@ -98,7 +98,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 50;
+    internal const int CurrentSchemaVersion = 51;
 
     private readonly string _archivePath;
 
@@ -1170,6 +1170,16 @@ public class DuckDbInitializer
                     created by GetAllTableStatements() below; the v_ view comes from
                     CreateArchiveViewsAsync via ArchivableTables. */
             _logger?.LogInformation("Running migration to v50: adding plan_correction table");
+        }
+
+        if (fromVersion < 51)
+        {
+            /* v51: added pvs_stats (Accelerated Database Recovery persistent version store size and
+                    cleanup state per database from sys.dm_tran_persistent_version_store_stats, SQL
+                    Server 2019+; issue #1951). New table only — created by GetAllTableStatements()
+                    below; the v_pvs_stats view the FinOps grid reads comes from CreateArchiveViewsAsync
+                    via ArchivableTables, which is derived from CollectorCatalog. */
+            _logger?.LogInformation("Running migration to v51: adding pvs_stats table");
         }
     }
 

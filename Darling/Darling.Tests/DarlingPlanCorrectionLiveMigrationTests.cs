@@ -81,17 +81,22 @@ public sealed class DarlingPlanCorrectionLiveMigrationTests
         Assert.Equal(ExpectedColumns(), fromFreshSchema);
 
         /* --- Path 2: wind this ONE table back to its pre-V46 state and let the migration rebuild it. --- */
+        /* The stamp rows for 46 AND everything above it have to go, not just 46's: the applier reads
+           MAX(version) and skips anything at or below it, so leaving 47 stamped would make the rewind a
+           no-op that still asserted green. Only plan_correction is dropped — V47's own objects survive and
+           its re-run is a no-op, which is the point of every migration being idempotent. */
         await ExecuteAsync(connection, "DROP TABLE IF EXISTS collect.plan_correction", cancellationToken);
-        await ExecuteAsync(connection, "DELETE FROM collect.darling_schema_version WHERE version = 46", cancellationToken);
+        await ExecuteAsync(connection, "DELETE FROM collect.darling_schema_version WHERE version >= 46", cancellationToken);
 
         Assert.Empty(await ReadColumnsAsync(connection, cancellationToken));
         Assert.Equal(44, await CurrentVersionAsync(connection, cancellationToken));
 
         var applied = await PgMigrations.MigrateAsync(connection, cancellationToken);
 
-        /* Exactly one script ran — V46. If the applier had stumbled over the deliberate V45 gap it would
-           either re-run everything above 44 or nothing at all, and both show up right here. */
-        Assert.Equal(1, applied);
+        /* Exactly the two scripts above 44 ran — V46 and V47. If the applier had stumbled over the
+           permanent V45 gap it would either re-run everything above 1 or nothing at all, and both show up
+           right here. */
+        Assert.Equal(2, applied);
         Assert.Equal(StorageVersion.SchemaVersion, await CurrentVersionAsync(connection, cancellationToken));
 
         var fromMigration = await ReadColumnsAsync(connection, cancellationToken);

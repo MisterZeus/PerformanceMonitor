@@ -34,8 +34,9 @@ public sealed class DarlingPlanCorrectionMigrationTests
         var migration = PgMigrations.Scripts.Single(m => m.Version == 46);
 
         Assert.Equal("plan-correction-collector", migration.Name);
-        Assert.Equal(46, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(46, StorageVersion.SchemaVersion);
+        /* 46 is no longer the tail — #1951 landed 47 on top of it. What this test owns is that V46
+           itself is intact and registered; the newest-migration pin lives in PvsStatsStoreTests. */
+        Assert.Equal(46, migration.Version);
     }
 
     [Fact]
@@ -50,6 +51,10 @@ public sealed class DarlingPlanCorrectionMigrationTests
         Assert.Equal(versions.Distinct().Count(), versions.Length);
         Assert.Equal(versions.OrderBy(v => v).ToArray(), versions);
         Assert.DoesNotContain(45, versions);
+
+        /* 45 is permanently unused: #1951 was renumbered to 47 once #1952 took 46, because the runner
+           only applies versions ABOVE the store's MAX and a store stamped 46 would never have seen it. */
+        Assert.Contains(47, versions);
     }
 
     [Fact]
