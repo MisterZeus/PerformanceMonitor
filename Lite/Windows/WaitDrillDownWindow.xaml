@@ -1,4 +1,4 @@
-﻿<Window x:Class="PerformanceMonitorLite.Windows.WaitDrillDownWindow"
+<Window x:Class="PerformanceMonitorLite.Windows.WaitDrillDownWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Wait Drill-Down" Width="1400" Height="700"

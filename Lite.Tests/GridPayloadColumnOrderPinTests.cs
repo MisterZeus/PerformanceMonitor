@@ -21,7 +21,7 @@ namespace Lite.Tests;
 /// carries the mirror-image pin). On a query surface the text and plan columns are the payload, so they
 /// belong immediately right of the collection/execution time column that orients the row — not behind a
 /// dozen numeric columns. They drifted to the back over years precisely because nothing asserted display
-/// order: the ten existing <c>Pins*ColumnOrder</c> tests all assert the collector WRITE payload
+/// order: the eight existing <c>Pins*ColumnOrder</c> tests all assert the collector WRITE payload
 /// (<c>Definition.PayloadColumns</c>) into DuckDB, never a <c>DataGrid</c>. Worst case before the fix was
 /// <c>QueryStoreGrid</c>, where the query text was column 55 of 55.
 ///
@@ -36,12 +36,13 @@ namespace Lite.Tests;
 /// so it shifts every XAML index by +1 without disturbing this relative ordering.
 ///
 /// Text-scans SOURCE XAML located from this file's compile-time path — no WPF or assembly load, exactly
-/// like the other parity pins.
+/// like the other parity pins. Headers are read verbatim, so a header carrying an XML entity would have to
+/// be written into the table in its raw <c>&amp;#x0394;</c> form; no pinned header has one today.
 /// </summary>
 public sealed class GridPayloadColumnOrderPinTests
 {
     /// <summary>A grid whose payload columns are pinned: where the anchor sits, and what must follow it.</summary>
-    public sealed record GridPin(
+    private sealed record GridPin(
         string RelativePath,
         string GridName,
         string AnchorHeader,
@@ -59,7 +60,7 @@ public sealed class GridPayloadColumnOrderPinTests
        identity block the grid is ranked by (Database, or Score+Database on High Impact). QueryStoreHistory
        anchors after index 4 because its time columns are non-contiguous — Plan ID and Exec Type interleave —
        and the whole time block stays intact. */
-    public static readonly GridPin[] Pins =
+    private static readonly GridPin[] Pins =
     [
         new(LiteServerTab, "QuerySnapshotsGrid", "Collected", 1, ["Query Text", "Query Plan"]),
         new(LiteServerTab, "QueryStatsGrid", "Creation Time", 3, ["Query Text", "Query Plan"]),
@@ -139,13 +140,23 @@ public sealed class GridPayloadColumnOrderPinTests
         // adding a column never fails this, but a broken scan does.
         var total = Pins.Sum(p => ColumnHeaders(ReadRepoFile(p.RelativePath), p.GridName).Count);
         Assert.True(total >= 440, $"only {total} columns walked across {Pins.Length} grids — the scan is broken.");
-        Assert.Equal(16, Pins.Length);
+    }
+
+    [Fact]
+    public void NoGridDroppedOutOfTheTable()
+    {
+        // The anti-deletion half of the ratchet: quietly deleting a row would make this suite green by
+        // covering less, which is the one way a pin can rot without anything going red.
+        Assert.True(Pins.Length == 16,
+            $"the pin table holds {Pins.Length} grids, expected the 16 Lite grids on the #1949 move list. " +
+            "Removing a grid needs a stated reason (the grid or its payload column is gone); adding one is " +
+            "free, but bump this number in the same commit.");
     }
 
     /* ---------------- XAML column scan ---------------- */
 
     /// <summary>Headers of the named grid's columns, in declaration order (which is display order).</summary>
-    internal static List<string> ColumnHeaders(string xaml, string gridName)
+    private static List<string> ColumnHeaders(string xaml, string gridName)
     {
         var marker = $"x:Name=\"{gridName}\"";
         var at = xaml.IndexOf(marker, StringComparison.Ordinal);
@@ -266,8 +277,7 @@ public sealed class GridPayloadColumnOrderPinTests
         throw new InvalidOperationException("unterminated XAML tag");
     }
 
-    private static readonly Regex HeaderProperty =
-        new(@"<DataGrid\w*Column\.Header>(.*?)</DataGrid\w*Column\.Header>", RegexOptions.Singleline);
+    private static readonly Regex HeaderPropertyElement = new(@"^<DataGrid\w*Column\.Header[\s>]");
 
     private static readonly Regex BoldHeaderText = new(@"<TextBlock Text=""([^""]*)""\s+FontWeight=""Bold""");
 
@@ -275,14 +285,16 @@ public sealed class GridPayloadColumnOrderPinTests
 
     /// <summary>
     /// The header a column renders: the bold TextBlock inside its Header property element (the filter-button
-    /// header shape), else the Header attribute on the column's own opening tag.
+    /// header shape), else the Header attribute on the column's own opening tag. The Header property element
+    /// is looked up among the column's DIRECT children, so a Header nested inside a CellTemplate can never
+    /// stand in for the column's own — that is the one way this could return a plausible but wrong name.
     /// </summary>
     private static string HeaderOf(string element)
     {
-        var property = HeaderProperty.Match(element);
-        if (property.Success)
+        var header = DirectChildren(element).FirstOrDefault(c => HeaderPropertyElement.IsMatch(c));
+        if (header is not null)
         {
-            var text = BoldHeaderText.Match(property.Groups[1].Value);
+            var text = BoldHeaderText.Match(header);
             if (text.Success)
             {
                 return text.Groups[1].Value;
@@ -291,6 +303,21 @@ public sealed class GridPayloadColumnOrderPinTests
 
         var attribute = HeaderAttribute.Match(element[..(TagEnd(element, 0) + 1)]);
         return attribute.Success ? attribute.Groups[1].Value : "(no header)";
+    }
+
+    /// <summary>The element's immediate child elements. Empty for a self-closing element.</summary>
+    private static List<string> DirectChildren(string element)
+    {
+        var openEnd = TagEnd(element, 0);
+        if (element[openEnd - 1] == '/')
+        {
+            return [];
+        }
+
+        var closeStart = element.LastIndexOf("</", StringComparison.Ordinal);
+        return closeStart <= openEnd
+            ? []
+            : TopLevelElements(element[(openEnd + 1)..closeStart]);
     }
 
     /* Locate the repo from this file — the DarlingLockTimeoutYieldTests idiom; no build-output copying. */

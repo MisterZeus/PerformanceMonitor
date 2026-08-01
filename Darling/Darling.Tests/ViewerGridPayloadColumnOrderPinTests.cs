@@ -21,9 +21,9 @@ namespace Darling.Tests;
 /// carries the mirror-image pin). On a query surface the text and plan columns are the payload, so they
 /// belong immediately right of the collection/execution time column that orients the row — not behind a
 /// dozen numeric columns. They drifted to the back over years precisely because nothing asserted display
-/// order: the existing <c>Pins*ColumnOrder</c> tests all assert the collector WRITE payload into the store,
-/// never a <c>DataGrid</c>. Worst case before the fix was <c>QueryStoreGrid</c>, where the query text was
-/// column 55 of 55.
+/// order anywhere in either app: the eight <c>Pins*ColumnOrder</c> tests that do exist live in Lite.Tests
+/// and assert the collector WRITE payload into the store, never a <c>DataGrid</c>. Worst case before the
+/// fix was <c>QueryStoreGrid</c>, where the query text was column 55 of 55.
 ///
 /// The pin is the table below, transcribed from the #1949 census, plus the web server page's
 /// <c>ACTIVE_COLUMNS</c> array — the one web column list in the service that renders query text. For each
@@ -32,20 +32,23 @@ namespace Darling.Tests;
 ///
 /// Two grids here have no Lite twin: <c>CurrentActiveQueriesGrid</c> and <c>QueryStoreRegressionsGrid</c>.
 /// The FinOps grids differ from their Lite twins by a <c>FinOps</c> name prefix only. Everything else is
-/// byte-symmetric with Lite by column sequence, and must stay that way.
+/// byte-symmetric with Lite by column sequence, which <see cref="TwinGridsCarryIdenticalColumnSequences"/>
+/// enforces rather than leaving to a comment.
 ///
 /// XAML <c>Columns</c> order IS display order in both apps: there is no <c>DisplayIndex</c> assignment, no
 /// <c>Columns.Move</c>, and no index-based <c>Columns[i]</c> access anywhere. The one runtime column call is
-/// <c>WaitDrillDownWindow.InsertChainColumns</c>, which does <c>Columns.Insert(0, ...)</c> — it prepends,
-/// so it shifts every XAML index by +1 without disturbing this relative ordering.
+/// the <c>Columns.Insert(0, ...)</c> both apps' <c>WaitDrillDownWindow</c> does for blocking-chain
+/// drill-downs (Lite factors it into <c>InsertChainColumns</c>; the Viewer inlines it). It prepends, so it
+/// shifts every XAML index by +1 without disturbing this relative ordering.
 ///
 /// Text-scans SOURCE XAML and JS located from this file's compile-time path — no WPF or assembly load,
-/// exactly like the other parity pins.
+/// exactly like the other parity pins. Headers are read verbatim, so a header carrying an XML entity would
+/// have to be written into the table in its raw <c>&amp;#x0394;</c> form; no pinned header has one today.
 /// </summary>
 public sealed class ViewerGridPayloadColumnOrderPinTests
 {
     /// <summary>A grid whose payload columns are pinned: where the anchor sits, and what must follow it.</summary>
-    public sealed record GridPin(
+    private sealed record GridPin(
         string RelativePath,
         string GridName,
         string AnchorHeader,
@@ -67,7 +70,7 @@ public sealed class ViewerGridPayloadColumnOrderPinTests
        anchor is the identity block the grid is ranked by (Database, or Score+Database on High Impact).
        QueryStoreHistory anchors after index 4 because its time columns are non-contiguous — Plan ID and
        Exec Type interleave — and the whole time block stays intact. */
-    public static readonly GridPin[] Pins =
+    private static readonly GridPin[] Pins =
     [
         new(ViewerServerTab, "QuerySnapshotsGrid", "Collected", 1, ["Query Text", "Query Plan"]),
         new(ViewerServerTab, "CurrentActiveQueriesGrid", "Collected", 1, ["Query Text", "Query Plan"]),
@@ -87,6 +90,35 @@ public sealed class ViewerGridPayloadColumnOrderPinTests
         new(ViewerQueryStoreHistory, "HistoryDataGrid", "Last Execution", 4, ["Plan"]),
         new(ViewerFinOpsTab, "FinOpsExpensiveQueriesDataGrid", "Database", 0, ["Query Preview"]),
         new(ViewerFinOpsTab, "FinOpsHighImpactDataGrid", "Database", 1, ["Query Preview"]),
+    ];
+
+    private static readonly string LiteServerTab = Path.Combine("Lite", "Controls", "ServerTab.xaml");
+    private static readonly string LiteFinOpsTab = Path.Combine("Lite", "Controls", "FinOpsTab.xaml");
+    private static readonly string LiteWaitDrillDown = Path.Combine("Lite", "Windows", "WaitDrillDownWindow.xaml");
+    private static readonly string LiteProcedureHistory = Path.Combine("Lite", "Windows", "ProcedureHistoryWindow.xaml");
+    private static readonly string LiteQueryStatsHistory = Path.Combine("Lite", "Windows", "QueryStatsHistoryWindow.xaml");
+    private static readonly string LiteQueryStoreHistory = Path.Combine("Lite", "Windows", "QueryStoreHistoryWindow.xaml");
+
+    /* Every query grid that exists in BOTH apps. The FinOps pair differs by the Viewer's `FinOps` x:Name
+       prefix only. CurrentActiveQueriesGrid and QueryStoreRegressionsGrid are Viewer-only and have no row. */
+    private static readonly (string LiteFile, string LiteGrid, string ViewerFile, string ViewerGrid)[] Twins =
+    [
+        (LiteServerTab, "QuerySnapshotsGrid", ViewerServerTab, "QuerySnapshotsGrid"),
+        (LiteServerTab, "QueryStatsGrid", ViewerServerTab, "QueryStatsGrid"),
+        (LiteServerTab, "QueryStatsComparisonGrid", ViewerServerTab, "QueryStatsComparisonGrid"),
+        (LiteServerTab, "ProcedureStatsGrid", ViewerServerTab, "ProcedureStatsGrid"),
+        (LiteServerTab, "QueryStoreGrid", ViewerServerTab, "QueryStoreGrid"),
+        (LiteServerTab, "QueryStoreComparisonGrid", ViewerServerTab, "QueryStoreComparisonGrid"),
+        (LiteServerTab, "BlockedProcessReportGrid", ViewerServerTab, "BlockedProcessReportGrid"),
+        (LiteServerTab, "DeadlockGrid", ViewerServerTab, "DeadlockGrid"),
+        (LiteServerTab, "SignificantWaitsGrid", ViewerServerTab, "SignificantWaitsGrid"),
+        (LiteServerTab, "LongQueryCompletionsGrid", ViewerServerTab, "LongQueryCompletionsGrid"),
+        (LiteWaitDrillDown, "ResultsDataGrid", ViewerWaitDrillDown, "ResultsDataGrid"),
+        (LiteProcedureHistory, "HistoryDataGrid", ViewerProcedureHistory, "HistoryDataGrid"),
+        (LiteQueryStatsHistory, "HistoryDataGrid", ViewerQueryStatsHistory, "HistoryDataGrid"),
+        (LiteQueryStoreHistory, "HistoryDataGrid", ViewerQueryStoreHistory, "HistoryDataGrid"),
+        (LiteFinOpsTab, "ExpensiveQueriesDataGrid", ViewerFinOpsTab, "FinOpsExpensiveQueriesDataGrid"),
+        (LiteFinOpsTab, "HighImpactDataGrid", ViewerFinOpsTab, "FinOpsHighImpactDataGrid"),
     ];
 
     public static TheoryData<string, string> PinKeys()
@@ -129,11 +161,46 @@ public sealed class ViewerGridPayloadColumnOrderPinTests
     public void WebServerPageShowsQueryTextRightOfCollectionTime()
     {
         // The web twin of the Active Queries grid. ACTIVE_COLUMNS array order IS the rendered column order
-        // (server.js:53 hands the array straight to the table renderer); query_text was index 8 of 9.
+        // (the server page hands the array straight to the table renderer); query_text was index 8 of 9.
         var keys = JsColumnKeys(ReadRepoFile(ServerPageJs), "ACTIVE_COLUMNS");
         Assert.True(keys.Count >= 9, $"only {keys.Count} ACTIVE_COLUMNS keys parsed — the scan is broken.");
         Assert.Equal("collection_time", keys[0]);
         Assert.Equal("query_text", keys[1]);
+
+        // Without this, re-adding a second query_text at the BACK would leave the pin green — the same hole
+        // EveryPinnedPayloadColumnIsUniqueInItsGrid closes on the XAML side.
+        Assert.True(keys.Count(k => k == "query_text") == 1,
+            $"query_text appears {keys.Count(k => k == "query_text")} times in ACTIVE_COLUMNS; expected once.");
+    }
+
+    [Fact]
+    public void TwinGridsCarryIdenticalColumnSequences()
+    {
+        // Lite is the reference front end and the Viewer is a copy of it, so every twinned query grid must
+        // carry the SAME column sequence — the #1949 moves were made byte-symmetric on purpose. Without
+        // this, the two pin tables above would still pass while the apps drifted anywhere OUTSIDE the
+        // anchor/payload window, which is how the two front ends fork in the first place.
+        foreach (var (liteFile, liteGrid, viewerFile, viewerGrid) in Twins)
+        {
+            var lite = ColumnHeaders(ReadRepoFile(liteFile), liteGrid);
+            var viewer = ColumnHeaders(ReadRepoFile(viewerFile), viewerGrid);
+            if (lite.SequenceEqual(viewer))
+            {
+                continue;
+            }
+
+            var firstDrift = lite.Zip(viewer)
+                .Select((pair, index) => (pair, index))
+                .Where(x => x.pair.First != x.pair.Second)
+                .Select(x => $" First difference at index {x.index}: " +
+                             $"Lite '{x.pair.First}' vs Viewer '{x.pair.Second}'.")
+                .FirstOrDefault(string.Empty);
+
+            Assert.Fail(
+                $"{liteGrid} (Lite) and {viewerGrid} (Viewer) have drifted apart: " +
+                $"{lite.Count} vs {viewer.Count} columns.{firstDrift} " +
+                "Keep the two front ends symmetric; a change to one belongs in the other in the same PR.");
+        }
     }
 
     [Fact]
@@ -160,7 +227,20 @@ public sealed class ViewerGridPayloadColumnOrderPinTests
         // adding a column never fails this, but a broken scan does.
         var total = Pins.Sum(p => ColumnHeaders(ReadRepoFile(p.RelativePath), p.GridName).Count);
         Assert.True(total >= 480, $"only {total} columns walked across {Pins.Length} grids — the scan is broken.");
-        Assert.Equal(18, Pins.Length);
+    }
+
+    [Fact]
+    public void NoGridDroppedOutOfTheTable()
+    {
+        // The anti-deletion half of the ratchet: quietly deleting a row would make this suite green by
+        // covering less, which is the one way a pin can rot without anything going red.
+        Assert.True(Pins.Length == 18,
+            $"the pin table holds {Pins.Length} grids, expected the 18 Viewer grids on the #1949 move list. " +
+            "Removing a grid needs a stated reason (the grid or its payload column is gone); adding one is " +
+            "free, but bump this number in the same commit.");
+        Assert.True(Twins.Length == 16,
+            $"the twin table holds {Twins.Length} pairs, expected 16 (the 18 Viewer grids less the two " +
+            "Viewer-only ones, CurrentActiveQueriesGrid and QueryStoreRegressionsGrid).");
     }
 
     /* ---------------- JS column scan ---------------- */
@@ -168,7 +248,7 @@ public sealed class ViewerGridPayloadColumnOrderPinTests
     private static readonly Regex JsKey = new(@"\bkey:\s*""([^""]+)""");
 
     /// <summary>Keys of a <c>const NAME = [ ... ];</c> column array, in declaration order (= render order).</summary>
-    internal static List<string> JsColumnKeys(string js, string arrayName)
+    private static List<string> JsColumnKeys(string js, string arrayName)
     {
         var marker = $"const {arrayName} = [";
         var at = js.IndexOf(marker, StringComparison.Ordinal);
@@ -181,7 +261,7 @@ public sealed class ViewerGridPayloadColumnOrderPinTests
     /* ---------------- XAML column scan ---------------- */
 
     /// <summary>Headers of the named grid's columns, in declaration order (which is display order).</summary>
-    internal static List<string> ColumnHeaders(string xaml, string gridName)
+    private static List<string> ColumnHeaders(string xaml, string gridName)
     {
         var marker = $"x:Name=\"{gridName}\"";
         var at = xaml.IndexOf(marker, StringComparison.Ordinal);
@@ -302,8 +382,7 @@ public sealed class ViewerGridPayloadColumnOrderPinTests
         throw new InvalidOperationException("unterminated XAML tag");
     }
 
-    private static readonly Regex HeaderProperty =
-        new(@"<DataGrid\w*Column\.Header>(.*?)</DataGrid\w*Column\.Header>", RegexOptions.Singleline);
+    private static readonly Regex HeaderPropertyElement = new(@"^<DataGrid\w*Column\.Header[\s>]");
 
     private static readonly Regex BoldHeaderText = new(@"<TextBlock Text=""([^""]*)""\s+FontWeight=""Bold""");
 
@@ -311,14 +390,16 @@ public sealed class ViewerGridPayloadColumnOrderPinTests
 
     /// <summary>
     /// The header a column renders: the bold TextBlock inside its Header property element (the filter-button
-    /// header shape), else the Header attribute on the column's own opening tag.
+    /// header shape), else the Header attribute on the column's own opening tag. The Header property element
+    /// is looked up among the column's DIRECT children, so a Header nested inside a CellTemplate can never
+    /// stand in for the column's own — that is the one way this could return a plausible but wrong name.
     /// </summary>
     private static string HeaderOf(string element)
     {
-        var property = HeaderProperty.Match(element);
-        if (property.Success)
+        var header = DirectChildren(element).FirstOrDefault(c => HeaderPropertyElement.IsMatch(c));
+        if (header is not null)
         {
-            var text = BoldHeaderText.Match(property.Groups[1].Value);
+            var text = BoldHeaderText.Match(header);
             if (text.Success)
             {
                 return text.Groups[1].Value;
@@ -327,6 +408,21 @@ public sealed class ViewerGridPayloadColumnOrderPinTests
 
         var attribute = HeaderAttribute.Match(element[..(TagEnd(element, 0) + 1)]);
         return attribute.Success ? attribute.Groups[1].Value : "(no header)";
+    }
+
+    /// <summary>The element's immediate child elements. Empty for a self-closing element.</summary>
+    private static List<string> DirectChildren(string element)
+    {
+        var openEnd = TagEnd(element, 0);
+        if (element[openEnd - 1] == '/')
+        {
+            return [];
+        }
+
+        var closeStart = element.LastIndexOf("</", StringComparison.Ordinal);
+        return closeStart <= openEnd
+            ? []
+            : TopLevelElements(element[(openEnd + 1)..closeStart]);
     }
 
     /* Locate the repo from this file — the DarlingLockTimeoutYieldTests idiom; no build-output copying. */
