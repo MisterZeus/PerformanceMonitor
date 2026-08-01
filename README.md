@@ -128,7 +128,7 @@ Data starts flowing within 1–5 minutes. That's it. No installation on your ser
 | memory_grant_stats | 1 min | `sys.dm_exec_query_memory_grants` |
 | tempdb_stats | 1 min | `sys.dm_db_file_space_usage` |
 | perfmon_stats | 1 min | `sys.dm_os_performance_counters` (deltas) |
-| deadlocks | 1 min | dedicated `PerformanceMonitor_Deadlock` XE session (`xml_deadlock_report`; `database_xml_deadlock_report` on Azure SQL DB) |
+| deadlocks | 5 min | dedicated `PerformanceMonitor_Deadlock` XE session (`xml_deadlock_report`; `database_xml_deadlock_report` on Azure SQL DB) |
 | dmv_blocking_snapshot | 1 min | `sys.dm_os_waiting_tasks` + `sys.dm_exec_*` (always-on blocking fallback when the blocked-process-report XE is unavailable) |
 | ag_replica_states | 1 min | `sys.dm_hadr_availability_replica_states` + `sys.availability_replicas` (Availability Group replica health; zero rows without AGs, not Azure SQL DB) |
 | ag_database_replica_states | 1 min | `sys.dm_hadr_database_replica_states` (per-database send/redo queues, rates, secondary lag; zero rows without AGs, not Azure SQL DB) |

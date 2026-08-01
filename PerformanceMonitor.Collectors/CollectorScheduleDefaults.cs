@@ -50,7 +50,15 @@ public static class CollectorScheduleDefaults
         ["memory_pressure_events"] = new(5, 30),
         ["tempdb_stats"] = new(1, 30),
         ["perfmon_stats"] = new(1, 30),
-        ["deadlocks"] = new(1, 30),
+        /* #1963: the deadlocks read costs ~273ms of FIXED dm_xe_session_targets serialization no matter
+           how empty the ring buffer is (field-measured at 284 bytes of content), so cadence is the only
+           lever on its overhead. The buffer retains events between polls and the watermark catches up, so
+           a slower cadence keeps the same data - the trade is detection latency, and a deadlock is
+           forensic by the time anyone reads it (the victim already rolled back). Erik ruled 2026-08-01:
+           default to the 5-minute tier beside the other event-buffer readers (system_health_events,
+           default_trace_events). Loss bound: a storm big enough to cycle the buffer between polls drops
+           events a faster poll would have caught - the buffer's capacity bounds that either way. */
+        ["deadlocks"] = new(5, 30),
         ["server_config"] = new(0, 30),
         ["database_config"] = new(0, 30),
         ["memory_grant_stats"] = new(1, 30),
