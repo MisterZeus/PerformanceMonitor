@@ -171,6 +171,10 @@ SELECT
     last_good_plan_execution_count = pfd.last_good_plan_execution_count,
     last_good_plan_cpu_time_average_ms = pfd.last_good_plan_cpu_time_average / 1000.0,
     last_good_plan_error_count = pfd.last_good_plan_error_count,
+    /*Microsoft's own Estimated Gain (sec) formula from the MS Learn automatic-tuning shredding
+      examples: BOTH plans' execution counts are summed deliberately (total executions at the
+      regressed rate minus the same total at the good rate). Live-captured data reproduces the
+      engine's number exactly (64.84s on the repro).*/
     estimated_gain_seconds =
         (pfd.regressed_plan_execution_count + pfd.last_good_plan_execution_count)
         * (pfd.regressed_plan_cpu_time_average - pfd.last_good_plan_cpu_time_average)
