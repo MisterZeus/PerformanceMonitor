@@ -13,6 +13,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Npgsql;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -364,6 +365,14 @@ public sealed class DarlingExportViewerConfigTests
 
             /* The cert travels byte-for-byte: VerifyFull pins THIS PEM. */
             Assert.Contains(Pem.Trim(), (await File.ReadAllTextAsync(exportedCert)).Trim(), StringComparison.Ordinal);
+
+            /* And the claim the exported docs now make, proven on the folder as written (#1970): loaded the
+               way the Viewer loads it, the bare Root Certificate resolves to the server.crt sitting beside
+               that darling.json — no edit, and no dependence on this test host's working directory, which is
+               nowhere near the temp folder. This is the whole "copy it anywhere and it works" story. */
+            var loaded = Assert.IsType<ViewerSettings>(ViewerSettings.TryLoad(exportedConfig));
+            Assert.Equal(exportedCert, new NpgsqlConnectionStringBuilder(loaded.ConnectionString).RootCertificate);
+            Assert.True(File.Exists(new NpgsqlConnectionStringBuilder(loaded.ConnectionString).RootCertificate));
 
             /* STDOUT is the machine-readable manifest; STDERR carries the loud secret warning, naming the file. */
             var stdout = output.ToString();
