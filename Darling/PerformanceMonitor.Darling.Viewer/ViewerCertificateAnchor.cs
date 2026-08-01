@@ -119,7 +119,18 @@ public static class ViewerCertificateAnchor
             return connectionString;
         }
 
-        builder.RootCertificate = resolved;
-        return builder.ConnectionString;
+        try
+        {
+            builder.RootCertificate = resolved;
+            return builder.ConnectionString;
+        }
+        catch (Exception)
+        {
+            /* Same contract as the parse guard above — on any failure the operator's string reaches Npgsql
+               unchanged. The setter and the re-serialization are realistically non-throwing for a
+               GetFullPath-produced value, but the total-function claim is what both startup-path callers
+               lean on, so the code keeps it rather than the comment promising it. */
+            return connectionString;
+        }
     }
 }
