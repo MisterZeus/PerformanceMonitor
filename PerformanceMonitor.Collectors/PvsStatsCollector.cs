@@ -86,15 +86,23 @@ namespace PerformanceMonitor.Collectors;
 /// directly: "Don't use the syntax SELECT * FROM dynamic_management_view_name in production code because the
 /// number of columns returned might change and break your application."</para>
 ///
-/// <para>AZURE SQL DB is a SEPARATE query text, not a skip: ADR is ALWAYS ON there and cannot be disabled, which
-/// makes PVS pressure more relevant on Azure than on box, not less. Two things force the fork. The DMV is
-/// effectively database-scoped on SQL DB (MS's own Azure variant filters <c>database_id IN (DB_ID(), 2)</c>),
-/// and the on-prem size denominator <c>sys.master_files</c> is not readable there — MS ships two variants of the
-/// same diagnostic query for precisely this reason, so the Azure text uses <c>sys.database_files</c>. The Azure
-/// text scopes to <c>DB_ID()</c> only and deliberately drops MS's tempdb row: on SQL DB tempdb is not the
-/// customer's to size, and the host already runs this collector once per monitored database there. Managed
+/// <para>AZURE SQL DB is a SEPARATE query text, not a skip: MS documents ADR as ALWAYS ENABLED there, which
+/// makes PVS pressure more relevant on Azure than on box, not less. Three things force the fork. The DMV is
+/// effectively database-scoped on SQL DB (MS's own Azure variant filters <c>database_id IN (DB_ID(), 2)</c>);
+/// the on-prem size denominator <c>sys.master_files</c> is not documented for SQL DB — MS ships two variants of
+/// the same diagnostic query for precisely this reason, so the Azure text uses <c>sys.database_files</c>; and
+/// the ADR flag CANNOT be joined by id there. That last one is the sharp edge. MS documents that on Azure SQL
+/// Database <c>sys.databases.database_id</c> is unique within the LOGICAL SERVER while <c>DB_ID()</c> and the
+/// <c>database_id</c> of every other system view — including this DMV — are unique only within the database or
+/// elastic pool ("DB_ID may not return the same value as the database_id column in sys.databases"). An
+/// <c>ON d.database_id = pvss.database_id</c> inner join therefore drops the row on Azure and the collector
+/// silently writes NOTHING, per database, with no error — which is why MS's own Azure variant never joins
+/// <c>sys.databases</c> at all. The flag is read by NAME instead (<c>d.name = DB_NAME()</c>, deterministic
+/// because in a user database that view returns only the current database and master), and the join is gone.
+/// The Azure text scopes to <c>DB_ID()</c> only and deliberately drops MS's tempdb row: on SQL DB tempdb is not
+/// the customer's to size, and the host already runs this collector once per monitored database there. Managed
 /// Instance takes the on-prem path — it is a full instance with instance-wide <c>sys.databases</c> and
-/// <c>sys.master_files</c>.</para>
+/// <c>sys.master_files</c>, and the id-space split above is SQL DB only.</para>
 ///
 /// <para>ONE ROW PER DATABASE, guaranteed. Dropping the two unsound joins removes the row-multiplication
 /// hazard they carried with them (MS's snapshot join uses <c>OR</c> across two timestamps and returns two
@@ -131,8 +139,9 @@ namespace PerformanceMonitor.Collectors;
 /// was cleared. An inner join makes the row set deterministic — every database the catalog can name, always,
 /// exclusions or not.</para>
 ///
-/// <para>PERMISSIONS: <c>VIEW SERVER STATE</c> on 2019, which SQL Server 2022's granular
-/// <c>VIEW SERVER PERFORMANCE STATE</c> subsumes — the product already requires the former, so no new grant.
+/// <para>PERMISSIONS: <c>VIEW SERVER STATE</c> on 2019; 2022+ documents the granular
+/// <c>VIEW SERVER PERFORMANCE STATE</c>, which <c>VIEW SERVER STATE</c> IMPLIES (that direction, per GRANT
+/// Server Permissions) — the product already requires the latter, so no new grant either way.
 /// On Azure SQL DB's Basic/S0/S1 objectives and in elastic pools, membership in
 /// <c>##MS_ServerPerformanceStateReader##</c> is required rather than a plain grant.</para>
 /// </summary>
@@ -257,7 +266,12 @@ SELECT
     database_id =
         pvss.database_id,
     is_accelerated_database_recovery_on =
-        d.is_accelerated_database_recovery_on,
+        (
+            SELECT
+                d.is_accelerated_database_recovery_on
+            FROM sys.databases AS d
+            WHERE d.name = DB_NAME()
+        ),
     pvs_filegroup_id =
         pvss.pvs_filegroup_id,
     persistent_version_store_size_mb =
@@ -299,8 +313,6 @@ SELECT
     pvs_off_row_page_skipped_oldest_aborted_xdesid =
         /*SKIPPED_OLDEST_ABORTED*/
 FROM sys.dm_tran_persistent_version_store_stats AS pvss
-JOIN sys.databases AS d
-  ON d.database_id = pvss.database_id
 OUTER APPLY
 (
     SELECT

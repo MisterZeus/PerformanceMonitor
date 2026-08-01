@@ -216,11 +216,42 @@ public sealed class PvsStatsCollectorDefinitionTests
         Assert.DoesNotContain("database_transaction_begin_time", text, StringComparison.Ordinal);
         Assert.DoesNotContain("transaction_sequence_num", text, StringComparison.Ordinal);
 
-        /* What remains cannot multiply: one aggregate OUTER APPLY for the size denominator, and one
-           INNER JOIN to sys.databases, which is one row per database_id. */
+        /* What remains cannot multiply: one aggregate OUTER APPLY for the size denominator, and on the
+           on-prem path one INNER JOIN to sys.databases, which is one row per database_id. The Azure path
+           has no join at all (see AzureSqlDb_ReadsTheAdrFlagByName_NotByDatabaseId) and its scalar
+           subquery is one row by construction. */
         Assert.Equal(1, CountOccurrences(text, "OUTER APPLY"));
         Assert.Equal(0, CountOccurrences(text, "LEFT JOIN"));
-        Assert.Equal(1, CountOccurrences(text, "JOIN sys.databases"));
+        Assert.Equal(isAzureSqlDb ? 0 : 1, CountOccurrences(text, "JOIN sys.databases"));
+    }
+
+    [Fact]
+    public void AzureSqlDb_ReadsTheAdrFlagByName_NotByDatabaseId()
+    {
+        /* REGRESSION GUARD for a silent-zero-rows defect. On Azure SQL Database the two database_id
+           spaces are NOT the same one: MS documents that sys.databases.database_id is unique within the
+           LOGICAL SERVER, while DB_ID() and the database_id of every other system view -- this DMV
+           included -- are unique only within the database or elastic pool, and that "DB_ID may not return
+           the same value as the database_id column in sys.databases". So `JOIN sys.databases AS d ON
+           d.database_id = pvss.database_id` matches nothing on Azure and the INNER JOIN eats the row:
+           no exception, no log line, an empty result set every hour, forever. Worse, it would match on
+           some databases and not others, so a fleet fails intermittently.
+
+           MS's own Azure variant of this diagnostic never joins sys.databases for exactly this reason.
+           The flag is read by NAME instead, which is deterministic: in a user database sys.databases
+           returns only the current database and master, so d.name = DB_NAME() is exactly one row. The
+           on-prem/MI path keeps the id join -- there both ids are instance-scoped and it is correct. */
+        var text = PvsStatsCollector.Instance.BuildQuery(MakeContext(isAzureSqlDb: true)).Text;
+
+        Assert.DoesNotContain("d.database_id = pvss.database_id", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("JOIN sys.databases", text, StringComparison.Ordinal);
+        Assert.Contains("WHERE d.name = DB_NAME()", text, StringComparison.Ordinal);
+        Assert.Contains("d.is_accelerated_database_recovery_on", text, StringComparison.Ordinal);
+
+        /* The on-prem text is the one that DOES join by id, so the two paths cannot be collapsed. */
+        var onPrem = PvsStatsCollector.Instance.BuildQuery(MakeContext()).Text;
+        Assert.Contains("ON d.database_id = pvss.database_id", onPrem, StringComparison.Ordinal);
+        Assert.DoesNotContain("DB_NAME()", onPrem, StringComparison.Ordinal);
     }
 
     [Theory]
