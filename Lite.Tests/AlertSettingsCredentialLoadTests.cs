@@ -28,9 +28,11 @@ namespace PerformanceMonitorLite.Tests;
 /// settings.json and watches which credential keys get requested can see it.
 ///
 /// Shares a collection with <see cref="AppAlertSettingsTests"/> because both write the App webhook statics
-/// and xUnit runs separate classes in parallel.
+/// and xUnit runs separate classes in parallel. #1965 added the two alert-statics classes to the same
+/// collection (renaming it "app-alert-statics"): App.LoadAlertSettings rewrites the whole alert block, not
+/// just the webhook keys, so this class was a silent third party to that race.
 /// </summary>
-[Collection("app-webhook-statics")]
+[Collection("app-alert-statics")]
 public class AlertSettingsCredentialLoadTests
 {
     private static readonly string[] ExpectedKeys =

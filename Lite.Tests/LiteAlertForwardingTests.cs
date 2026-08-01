@@ -33,20 +33,31 @@ namespace PerformanceMonitorLite.Tests;
 /// same toast strings/icons, same history sends, same watermark persistence, same suppression
 /// and badge semantics.
 /// <para>
-/// This class is the ONLY test class that mutates the App.Alert* statics (xUnit runs methods
-/// within a class serially; no other class reads them — the same isolation argument
-/// <see cref="AppAlertSettingsTests"/> documents for the SMTP statics). The constructor resets
-/// every alert static to its App.xaml.cs default before each test.
+/// #1965: this class is NOT the only one that touches the App.Alert* statics, which is what the
+/// note here used to claim. <see cref="Lite.Tests.McpAlertSettingsKeyTests"/> sets and reads
+/// App.AlertCpuMode, and <see cref="AlertSettingsCredentialLoadTests"/> drives App.LoadAlertSettings,
+/// which rewrites the whole alert block (App.xaml.cs:611 for CpuMode alone). xUnit runs separate
+/// classes in PARALLEL, so a write from here landed between that class's set and its assert and
+/// failed it. All four classes therefore share the "app-alert-statics" collection — the same
+/// serialization idiom the SMTP/webhook pair already used, widened to the statics it actually covers.
+/// The constructor resets every alert static to its App.xaml.cs default before each test, and
+/// Dispose puts them back after each one so ordering cannot leak out of the class either.
 /// </para>
 /// </summary>
-public class LiteAlertForwardingTests
+[Collection("app-alert-statics")]
+public class LiteAlertForwardingTests : IDisposable
 {
     private const string Key = "101";
     private const string Name = "SRV-A";
 
-    public LiteAlertForwardingTests()
+    public LiteAlertForwardingTests() => ResetAlertStaticsToDefaults();
+
+    /// <summary>Leave the statics as the rest of the assembly expects to find them (#1965).</summary>
+    public void Dispose() => ResetAlertStaticsToDefaults();
+
+    private static void ResetAlertStaticsToDefaults()
     {
-        /* Reset the App.Alert* statics to their App.xaml.cs:90-125 defaults so every test starts
+        /* Reset the App.Alert* statics to their App.xaml.cs:94-160 defaults so every test starts
            from the shipped configuration (xunit news up the class per test method). */
         App.AlertsEnabled = true;
         App.AlertCpuEnabled = true;
@@ -54,6 +65,9 @@ public class LiteAlertForwardingTests
         App.AlertCpuMode = CpuAlertMode.Total;
         App.AlertBlockingEnabled = true;
         App.AlertBlockingThreshold = 1;
+        /* Default 0 = off (App.xaml.cs:134). Reset because EngineSettings_PassThroughEveryMember_Live
+           sets it to 745 and nothing else put it back. */
+        App.AlertBlockingWaitSecondsThreshold = 0;
         App.AlertDeadlockEnabled = true;
         App.AlertDeadlockThreshold = 1;
         App.AlertPoisonWaitEnabled = true;
