@@ -1,0 +1,175 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+using Npgsql;
+
+namespace PerformanceMonitor.Darling.Viewer;
+
+public sealed partial class ViewerDataService
+{
+    /// <summary>
+    /// Latest ADR persistent version store snapshot, one row per database (#1951). The Postgres twin of
+    /// Lite's <c>GetPvsStatsLatestAsync</c> — same columns, same order, same newest-collection pin, so the
+    /// two front ends cannot drift.
+    /// </summary>
+    public const string PvsStatsLatestSql = @"
+SELECT
+    database_name,
+    is_accelerated_database_recovery_on,
+    persistent_version_store_size_mb,
+    online_index_version_store_size_mb,
+    database_data_size_mb,
+    current_aborted_transaction_count,
+    oldest_active_transaction_id,
+    oldest_aborted_transaction_id,
+    aborted_version_cleaner_start_time,
+    aborted_version_cleaner_end_time,
+    offrow_version_cleaner_start_time,
+    offrow_version_cleaner_end_time,
+    pvs_off_row_page_skipped_low_water_mark,
+    pvs_off_row_page_skipped_min_useful_xts,
+    pvs_off_row_page_skipped_oldest_aborted_xdesid,
+    collection_time
+FROM v_pvs_stats
+WHERE server_id = $1
+AND   collection_time = (
+    SELECT MAX(collection_time)
+    FROM v_pvs_stats
+    WHERE server_id = $1
+)
+ORDER BY persistent_version_store_size_mb DESC NULLS LAST, database_name";
+
+    public async Task<List<PvsStatsRow>> GetPvsStatsLatestAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        await using var command = _dataSource.CreateCommand(PvsStatsLatestSql);
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+
+        var items = new List<PvsStatsRow>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            items.Add(new PvsStatsRow
+            {
+                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                IsAdrOn = reader.IsDBNull(1) ? null : reader.GetBoolean(1),
+                PvsSizeMb = reader.IsDBNull(2) ? null : Convert.ToDecimal(reader.GetValue(2)),
+                OnlineIndexVersionStoreMb = reader.IsDBNull(3) ? null : Convert.ToDecimal(reader.GetValue(3)),
+                DatabaseDataSizeMb = reader.IsDBNull(4) ? null : Convert.ToDecimal(reader.GetValue(4)),
+                AbortedTransactionCount = reader.IsDBNull(5) ? null : Convert.ToInt64(reader.GetValue(5)),
+                OldestActiveTransactionId = reader.IsDBNull(6) ? null : Convert.ToInt64(reader.GetValue(6)),
+                OldestAbortedTransactionId = reader.IsDBNull(7) ? null : Convert.ToInt64(reader.GetValue(7)),
+                AbortedCleanerStartTime = reader.IsDBNull(8) ? null : reader.GetDateTime(8),
+                AbortedCleanerEndTime = reader.IsDBNull(9) ? null : reader.GetDateTime(9),
+                OffrowCleanerStartTime = reader.IsDBNull(10) ? null : reader.GetDateTime(10),
+                OffrowCleanerEndTime = reader.IsDBNull(11) ? null : reader.GetDateTime(11),
+                SkippedLowWaterMark = reader.IsDBNull(12) ? null : Convert.ToInt64(reader.GetValue(12)),
+                SkippedMinUsefulXts = reader.IsDBNull(13) ? null : Convert.ToInt64(reader.GetValue(13)),
+                SkippedOldestAborted = reader.IsDBNull(14) ? null : Convert.ToInt64(reader.GetValue(14)),
+                CollectionTime = reader.IsDBNull(15) ? DateTime.MinValue : reader.GetDateTime(15)
+            });
+        }
+
+        return items;
+    }
+}
+
+/// <summary>
+/// One database's ADR persistent version store state (#1951) — the byte-for-byte twin of Lite's
+/// <c>PvsStatsRow</c>, including the derived members, because the two viewers' grids bind the same paths.
+/// Every size is MEGABYTES converted from the DMV's kilobytes, and every PVS size is OFF-ROW only.
+/// </summary>
+public sealed class PvsStatsRow
+{
+    public string DatabaseName { get; set; } = "";
+    public bool? IsAdrOn { get; set; }
+    public decimal? PvsSizeMb { get; set; }
+    public decimal? OnlineIndexVersionStoreMb { get; set; }
+    public decimal? DatabaseDataSizeMb { get; set; }
+    public long? AbortedTransactionCount { get; set; }
+    public long? OldestActiveTransactionId { get; set; }
+    public long? OldestAbortedTransactionId { get; set; }
+    public DateTime? AbortedCleanerStartTime { get; set; }
+    public DateTime? AbortedCleanerEndTime { get; set; }
+    public DateTime? OffrowCleanerStartTime { get; set; }
+    public DateTime? OffrowCleanerEndTime { get; set; }
+    public long? SkippedLowWaterMark { get; set; }
+    public long? SkippedMinUsefulXts { get; set; }
+    public long? SkippedOldestAborted { get; set; }
+    public DateTime CollectionTime { get; set; }
+
+    public string AdrDisplay => IsAdrOn switch
+    {
+        true => "On",
+        false => "Off",
+        null => "-"
+    };
+
+    /// <summary>
+    /// PVS as a share of the database's online data files — the ratio MS's troubleshooting guide reads
+    /// first ("PVS is considered large if it's significantly larger than the baseline or if it's close to
+    /// 50% of the database size"). Guarded rather than divided blindly: MS's own published query divides
+    /// by this denominator unguarded and would fail on a database with no online data files.
+    /// </summary>
+    public decimal? PvsPercentOfDatabase =>
+        PvsSizeMb.HasValue && DatabaseDataSizeMb > 0
+            ? Math.Round(PvsSizeMb.Value * 100m / DatabaseDataSizeMb.Value, 1)
+            : null;
+
+    /// <summary>
+    /// MS's documented "an old aborted transaction is preventing PVS cleanup" read, stated as a flag rather
+    /// than making the operator eyeball two internal identifiers: "if the oldest_aborted_transaction_id is
+    /// much lower than oldest_active_transaction_id, and the current_abort_transaction_count value is large,
+    /// there's likely an old aborted transaction preventing PVS cleanup." Both ids come from the same DMV
+    /// row and the same ID space, so the comparison needs no join — which is exactly why it survived when
+    /// the joined columns did not. Zero means "none tracked" and is not a low value.
+    /// </summary>
+    public bool AbortedTransactionSuspected =>
+        AbortedTransactionCount > 0
+        && OldestAbortedTransactionId > 0
+        && OldestActiveTransactionId > 0
+        && OldestAbortedTransactionId < OldestActiveTransactionId;
+
+    /// <summary>Grid form of the flag above; the grid is all text columns, matching GrowthDisplay's idiom.</summary>
+    public string AbortedSuspectDisplay => AbortedTransactionSuspected ? "Likely" : "-";
+
+    /// <summary>
+    /// Cleanup state, from the pair of cleaner timestamps. MS: "If start time has value but the end time
+    /// doesn't, it means PVS cleanup is ongoing on this database." Both cleaners are folded into one
+    /// column because an operator asks "is cleanup running or stuck", not "which of the two cleaners".
+    /// </summary>
+    public string CleanupState
+    {
+        get
+        {
+            bool abortedRunning = AbortedCleanerStartTime.HasValue && !AbortedCleanerEndTime.HasValue;
+            bool offrowRunning = OffrowCleanerStartTime.HasValue && !OffrowCleanerEndTime.HasValue;
+
+            if (abortedRunning || offrowRunning)
+            {
+                return "Running";
+            }
+
+            if (AbortedCleanerEndTime.HasValue || OffrowCleanerEndTime.HasValue)
+            {
+                return "Idle";
+            }
+
+            return "Never run";
+        }
+    }
+
+    /// <summary>Most recent completed cleanup across both cleaners; null until one has finished.</summary>
+    public DateTime? LastCleanupEnd =>
+        AbortedCleanerEndTime.HasValue && OffrowCleanerEndTime.HasValue
+            ? (AbortedCleanerEndTime.Value > OffrowCleanerEndTime.Value ? AbortedCleanerEndTime : OffrowCleanerEndTime)
+            : AbortedCleanerEndTime ?? OffrowCleanerEndTime;
+}

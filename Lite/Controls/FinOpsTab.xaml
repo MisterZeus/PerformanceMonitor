@@ -1320,6 +1320,227 @@
             </Grid>
         </TabItem>
 
+        <!-- Version Store (PVS) Sub-Tab — #1951, beside Database Sizes because ADR's version store
+             lives INSIDE the database and is a silent consumer of the space that tab reports. -->
+        <TabItem Header="Version Store (PVS)">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <!-- Header Controls -->
+                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
+                    <TextBlock Text="Accelerated Database Recovery — Persistent Version Store" VerticalAlignment="Center" Margin="0,0,10,0"
+                               FontWeight="Bold" FontSize="14"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <Button Content="Refresh" Click="RefreshPvsStats_Click"
+                            Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
+                    <TextBlock x:Name="PvsCountIndicator" Text="" Margin="12,0,0,0"
+                               VerticalAlignment="Center" FontStyle="Italic"
+                               Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                </StackPanel>
+
+                <TextBlock Grid.Row="1" Margin="10,0,10,8" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11"
+                           Text="PVS sizes count OFF-ROW versions only and do not include row versions stored in-row. A large PVS that will not shrink is usually held by the oldest open transaction or the oldest snapshot scan shown here; the skipped-page counters say which. Requires SQL Server 2019 or later; always on for Azure SQL Database."/>
+
+                <!-- DataGrid -->
+                <Grid Grid.Row="2" Margin="10,0,10,10">
+                    <DataGrid x:Name="PvsStatsDataGrid"
+                              AutoGenerateColumns="False"
+                              IsReadOnly="True"
+                              CanUserSortColumns="True"
+                              GridLinesVisibility="Horizontal"
+                              CanUserResizeColumns="True"
+                              HeadersVisibility="Column"
+                              SelectionMode="Extended"
+                              RowStyle="{StaticResource DefaultRowStyle}">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Binding="{Binding DatabaseName}" Width="160">
+                                <DataGridTextColumn.Header>
+                                    <StackPanel Orientation="Horizontal">
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                        <TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </DataGridTextColumn.Header>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Binding="{Binding AdrDisplay}" Width="60">
+                                <DataGridTextColumn.Header>
+                                    <StackPanel Orientation="Horizontal">
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AdrDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                        <TextBlock Text="ADR" FontWeight="Bold" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </DataGridTextColumn.Header>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Binding="{Binding PvsSizeMb, StringFormat='{}{0:N2}'}" Width="130">
+                                <DataGridTextColumn.Header>
+                                    <StackPanel Orientation="Horizontal">
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PvsSizeMb" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                        <TextBlock Text="PVS Off-Row MB" FontWeight="Bold" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </DataGridTextColumn.Header>
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Binding="{Binding PvsPercentOfDatabase, StringFormat='{}{0:N1}'}" Width="90">
+                                <DataGridTextColumn.Header>
+                                    <StackPanel Orientation="Horizontal">
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PvsPercentOfDatabase" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                        <TextBlock Text="% of DB" FontWeight="Bold" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </DataGridTextColumn.Header>
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Binding="{Binding DatabaseDataSizeMb, StringFormat='{}{0:N2}'}" Width="120">
+                                <DataGridTextColumn.Header>
+                                    <StackPanel Orientation="Horizontal">
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseDataSizeMb" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                        <TextBlock Text="Data Files MB" FontWeight="Bold" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </DataGridTextColumn.Header>
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Binding="{Binding OnlineIndexVersionStoreMb, StringFormat='{}{0:N2}'}" Width="130">
+                                <DataGridTextColumn.Header>
+                                    <StackPanel Orientation="Horizontal">
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="OnlineIndexVersionStoreMb" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                        <TextBlock Text="Online Index MB" FontWeight="Bold" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </DataGridTextColumn.Header>
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Binding="{Binding AbortedTransactionCount, StringFormat='{}{0:N0}'}" Width="100">
+                                <DataGridTextColumn.Header>
+                                    <StackPanel Orientation="Horizontal">
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AbortedTransactionCount" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                        <TextBlock Text="Aborted Txns" FontWeight="Bold" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </DataGridTextColumn.Header>
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Binding="{Binding OldestActiveTransactionId, StringFormat='{}{0:N0}'}" Width="130">
+                                <DataGridTextColumn.Header>
+                                    <StackPanel Orientation="Horizontal">
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="OldestActiveTransactionId" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                        <TextBlock Text="Oldest Active Txn" FontWeight="Bold" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </DataGridTextColumn.Header>
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Binding="{Binding OldestAbortedTransactionId, StringFormat='{}{0:N0}'}" Width="140">
+                                <DataGridTextColumn.Header>
+                                    <StackPanel Orientation="Horizontal">
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="OldestAbortedTransactionId" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                        <TextBlock Text="Oldest Aborted Txn" FontWeight="Bold" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </DataGridTextColumn.Header>
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Binding="{Binding AbortedSuspectDisplay}" Width="130">
+                                <DataGridTextColumn.Header>
+                                    <StackPanel Orientation="Horizontal">
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AbortedSuspectDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                        <TextBlock Text="Aborted Suspected" FontWeight="Bold" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </DataGridTextColumn.Header>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Binding="{Binding CleanupState}" Width="90">
+                                <DataGridTextColumn.Header>
+                                    <StackPanel Orientation="Horizontal">
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CleanupState" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                        <TextBlock Text="Cleanup" FontWeight="Bold" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </DataGridTextColumn.Header>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Binding="{Binding LastCleanupEnd, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                                <DataGridTextColumn.Header>
+                                    <StackPanel Orientation="Horizontal">
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastCleanupEnd" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                        <TextBlock Text="Last Cleanup End" FontWeight="Bold" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </DataGridTextColumn.Header>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Binding="{Binding SkippedLowWaterMark, StringFormat='{}{0:N0}'}" Width="140">
+                                <DataGridTextColumn.Header>
+                                    <StackPanel Orientation="Horizontal">
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SkippedLowWaterMark" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                        <TextBlock Text="Skipped: Secondary" FontWeight="Bold" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </DataGridTextColumn.Header>
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Binding="{Binding SkippedMinUsefulXts, StringFormat='{}{0:N0}'}" Width="140">
+                                <DataGridTextColumn.Header>
+                                    <StackPanel Orientation="Horizontal">
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SkippedMinUsefulXts" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                        <TextBlock Text="Skipped: Snapshot" FontWeight="Bold" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </DataGridTextColumn.Header>
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Binding="{Binding SkippedOldestAborted, StringFormat='{}{0:N0}'}" Width="140">
+                                <DataGridTextColumn.Header>
+                                    <StackPanel Orientation="Horizontal">
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SkippedOldestAborted" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                        <TextBlock Text="Skipped: Aborted" FontWeight="Bold" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </DataGridTextColumn.Header>
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <!-- Empty State -->
+                    <TextBlock x:Name="NoPvsStatsMessage"
+                               Text="No persistent version store data collected yet (SQL Server 2019+ only)"
+                               FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
+                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                               Visibility="Collapsed"/>
+                </Grid>
+            </Grid>
+        </TabItem>
+
         <!-- Index Analysis Sub-Tab -->
         <TabItem Header="Index Analysis">
             <Grid>

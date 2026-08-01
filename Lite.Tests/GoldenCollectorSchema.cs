@@ -899,6 +899,35 @@ internal static class GoldenCollectorSchema
     est_redo_completion_time_min DOUBLE,
     est_send_drain_time_min DOUBLE
 )",
+        ["pvs_stats"] = @"CREATE TABLE IF NOT EXISTS pvs_stats (
+    collection_id BIGINT PRIMARY KEY,
+    collection_time TIMESTAMP NOT NULL,
+    server_id INTEGER NOT NULL,
+    server_name VARCHAR NOT NULL,
+    database_name VARCHAR,
+    database_id INTEGER,
+    is_accelerated_database_recovery_on BOOLEAN,
+    pvs_filegroup_id SMALLINT,
+    persistent_version_store_size_mb DECIMAL(19,2),
+    online_index_version_store_size_mb DECIMAL(19,2),
+    database_data_size_mb DECIMAL(19,2),
+    current_aborted_transaction_count BIGINT,
+    oldest_active_transaction_id BIGINT,
+    oldest_aborted_transaction_id BIGINT,
+    min_transaction_timestamp BIGINT,
+    online_index_min_transaction_timestamp BIGINT,
+    secondary_low_water_mark BIGINT,
+    offrow_version_cleaner_start_time TIMESTAMP,
+    offrow_version_cleaner_end_time TIMESTAMP,
+    aborted_version_cleaner_start_time TIMESTAMP,
+    aborted_version_cleaner_end_time TIMESTAMP,
+    pvs_off_row_page_skipped_low_water_mark BIGINT,
+    pvs_off_row_page_skipped_transaction_not_cleaned BIGINT,
+    pvs_off_row_page_skipped_oldest_active_xdesid BIGINT,
+    pvs_off_row_page_skipped_min_useful_xts BIGINT,
+    pvs_off_row_page_skipped_oldest_snapshot BIGINT,
+    pvs_off_row_page_skipped_oldest_aborted_xdesid BIGINT
+)",
     };
 
     /// <summary>Pre-change CREATE INDEX DDL, keyed by collector target table (35 entries; server_config and database_config have no index).</summary>
@@ -940,5 +969,6 @@ internal static class GoldenCollectorSchema
         ["agent_status"] = @"CREATE INDEX IF NOT EXISTS idx_agent_status_time ON agent_status(server_id, collection_time)",
         ["ag_replica_states"] = @"CREATE INDEX IF NOT EXISTS idx_ag_replica_states_time ON ag_replica_states(server_id, collection_time)",
         ["ag_database_replica_states"] = @"CREATE INDEX IF NOT EXISTS idx_ag_database_replica_states_time ON ag_database_replica_states(server_id, collection_time)",
+        ["pvs_stats"] = @"CREATE INDEX IF NOT EXISTS idx_pvs_stats_time ON pvs_stats(server_id, collection_time)",
     };
 }

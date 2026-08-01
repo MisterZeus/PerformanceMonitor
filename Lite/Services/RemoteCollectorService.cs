@@ -579,6 +579,7 @@ public partial class RemoteCollectorService
                 "agent_status" => await CollectAgentStatusAsync(server, cancellationToken),
                 "ag_replica_states" => await CollectAgReplicaStatesAsync(server, cancellationToken),
                 "ag_database_replica_states" => await CollectAgDatabaseReplicaStatesAsync(server, cancellationToken),
+                "pvs_stats" => await CollectPvsStatsAsync(server, cancellationToken),
                 _ => throw new ArgumentException($"Unknown collector: {collectorName}")
             };
 

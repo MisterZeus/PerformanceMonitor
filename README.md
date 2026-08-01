@@ -144,6 +144,7 @@ Data starts flowing within 1–5 minutes. That's it. No installation on your ser
 | agent_status | 5 min | `sys.dm_server_services` + `msdb.dbo.sysjobschedules` (not Azure SQL DB / RDS) |
 | running_jobs | 5 min | `msdb` job history with duration vs avg/p95 |
 | database_size_stats | 1 hour | `sys.master_files` + `FILEPROPERTY` + `dm_os_volume_stats` |
+| pvs_stats | 1 hour | `sys.dm_tran_persistent_version_store_stats` + `sys.databases` (ADR persistent version store size and cleanup state per database; SQL Server 2019+ only, always collected on Azure SQL DB) |
 | server_properties | on connect | `SERVERPROPERTY()` hardware and licensing metadata |
 | index_object_stats | Daily | `sys.dm_db_partition_stats` + `sys.dm_db_index_usage_stats` + `sys.dm_db_index_operational_stats` |
 | server_config | On connect | `sys.configurations` |

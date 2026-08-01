@@ -469,6 +469,7 @@ The service migrates the store itself at startup — plain versioned SQL scripts
 | **V28** — Query Store replica role | `query_store_stats.replica_role` (SQL Server 2022+ AG secondary-replica attribution, #1546) and a refreshed `v_query_store_stats` |
 | **V29** — long-query completions collector | `collect.long_query_completions` + its index — the opt-in long-running-query completion trace's store table (#1496) |
 | **V30** — web dashboard config | `config_service.web_enabled` + `web_port` — the read-only web dashboard's live enable/port toggle, the twin of `mcp_enabled`/`mcp_port` (#1562) |
+| **V45** — ADR persistent version store | `collect.pvs_stats` + its index + the `v_pvs_stats` passthrough view — the #1951 ADR version-store collector's store table. A fresh store gets the table from V1's generated schema; V45 is what an already-existing store gets, and the view is what keeps the Darling viewer's FinOps read byte-identical to Lite's |
 
 All timestamps in the store are **naive-UTC** `timestamp` columns — the product-wide cross-store contract (Lite's DuckDB does the same).
 
@@ -525,7 +526,7 @@ A purge runs on the first sweep after startup and then daily, driven by the same
 |---|---|
 | 7 days | `query_snapshots`, `waiting_tasks`, `running_jobs` |
 | 30 days | Most collector tables (wait/query/procedure/Query Store stats, CPU, memory, file I/O, tempdb, perfmon, deadlocks, blocking, sessions, config snapshots), plus `collection_log` and `analysis_findings` |
-| 90 days | `database_size_stats`, `index_object_stats` |
+| 90 days | `database_size_stats`, `index_object_stats`, `pvs_stats` |
 | 365 days | `server_properties` |
 
 On plain PostgreSQL the purge is DELETE-based. With TimescaleDB it switches to `drop_chunks` — a metadata-only detach of whole expired chunks (rows inside a partially-expired chunk survive until the whole chunk ages out; up to ~1 day of grace at the 1-day chunk width), with a per-table DELETE fallback for any table that is not a hypertable. Failure-isolated per table: one stuck purge is logged and retried the next day without stopping the sweep.

@@ -48,16 +48,20 @@ public partial class FinOpsTab
     private const int FinOpsStorageGrowthSubTabIndex = 2;
     private const int FinOpsLockingSubTabIndex = 3;
     private const int FinOpsDatabaseSizesSubTabIndex = 4;
-    private const int FinOpsOptimizationSubTabIndex = 5;
-    private const int FinOpsHighImpactSubTabIndex = 6;
-    private const int FinOpsApplicationConnectionsSubTabIndex = 7;
-    private const int FinOpsServerInventorySubTabIndex = 8;
-    private const int FinOpsIndexAnalysisSubTabIndex = 9;
-    private const int FinOpsRecommendationsSubTabIndex = 10;
+    /* #1951 inserted Version Store (PVS) directly after Database Sizes, so every index below shifted by
+       one. These are POSITIONAL — they must track the TabItem order in FinOpsTab.xaml, not the load order. */
+    private const int FinOpsPvsStatsSubTabIndex = 5;
+    private const int FinOpsOptimizationSubTabIndex = 6;
+    private const int FinOpsHighImpactSubTabIndex = 7;
+    private const int FinOpsApplicationConnectionsSubTabIndex = 8;
+    private const int FinOpsServerInventorySubTabIndex = 9;
+    private const int FinOpsIndexAnalysisSubTabIndex = 10;
+    private const int FinOpsRecommendationsSubTabIndex = 11;
 
     private DataGridFilterManager<DatabaseResourceUsageRow>? _finopsDbResourcesFilterMgr;
     private DataGridFilterManager<StorageGrowthRow>? _finopsStorageGrowthFilterMgr;
     private DataGridFilterManager<DatabaseSizeRow>? _finopsDbSizesFilterMgr;
+    private DataGridFilterManager<PvsStatsRow>? _finopsPvsStatsFilterMgr;
     private DataGridFilterManager<ApplicationConnectionRow>? _finopsAppConnectionsFilterMgr;
     private DataGridFilterManager<ServerPropertyRow>? _finopsServerInventoryFilterMgr;
     private DataGridFilterManager<HighImpactQueryRow>? _finopsHighImpactFilterMgr;
@@ -81,6 +85,7 @@ public partial class FinOpsTab
         _finopsDbResourcesFilterMgr = new DataGridFilterManager<DatabaseResourceUsageRow>(FinOpsDatabaseResourcesDataGrid);
         _finopsStorageGrowthFilterMgr = new DataGridFilterManager<StorageGrowthRow>(FinOpsStorageGrowthDataGrid);
         _finopsDbSizesFilterMgr = new DataGridFilterManager<DatabaseSizeRow>(FinOpsDatabaseSizesDataGrid);
+        _finopsPvsStatsFilterMgr = new DataGridFilterManager<PvsStatsRow>(FinOpsPvsStatsDataGrid);
         _finopsAppConnectionsFilterMgr = new DataGridFilterManager<ApplicationConnectionRow>(FinOpsApplicationConnectionsDataGrid);
         _finopsServerInventoryFilterMgr = new DataGridFilterManager<ServerPropertyRow>(FinOpsServerInventoryDataGrid);
         _finopsHighImpactFilterMgr = new DataGridFilterManager<HighImpactQueryRow>(FinOpsHighImpactDataGrid);
@@ -97,6 +102,7 @@ public partial class FinOpsTab
         _filterManagers[FinOpsDatabaseResourcesDataGrid] = _finopsDbResourcesFilterMgr;
         _filterManagers[FinOpsStorageGrowthDataGrid] = _finopsStorageGrowthFilterMgr;
         _filterManagers[FinOpsDatabaseSizesDataGrid] = _finopsDbSizesFilterMgr;
+        _filterManagers[FinOpsPvsStatsDataGrid] = _finopsPvsStatsFilterMgr;
         _filterManagers[FinOpsApplicationConnectionsDataGrid] = _finopsAppConnectionsFilterMgr;
         _filterManagers[FinOpsServerInventoryDataGrid] = _finopsServerInventoryFilterMgr;
         _filterManagers[FinOpsHighImpactDataGrid] = _finopsHighImpactFilterMgr;
@@ -146,6 +152,9 @@ public partial class FinOpsTab
                 break;
             case FinOpsDatabaseSizesSubTabIndex:
                 await LoadFinOpsDatabaseSizesAsync();
+                break;
+            case FinOpsPvsStatsSubTabIndex:
+                await LoadFinOpsPvsStatsAsync();
                 break;
             case FinOpsOptimizationSubTabIndex:
                 await LoadFinOpsOptimizationAsync();
@@ -371,6 +380,17 @@ public partial class FinOpsTab
         FinOpsDbSizeCountIndicator.Text = data.Count > 0 ? $"{data.Count} file(s)" : "";
     }
 
+    // ── Version Store (PVS) ──
+
+    private async Task LoadFinOpsPvsStatsAsync()
+    {
+        var data = await _dataService.GetPvsStatsLatestAsync(_server.ServerId);
+
+        _finopsPvsStatsFilterMgr!.UpdateData(data);
+        FinOpsNoPvsStatsMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        FinOpsPvsCountIndicator.Text = data.Count > 0 ? $"{data.Count} database(s)" : "";
+    }
+
     // ── Application Connections ──
 
     private async Task LoadFinOpsApplicationConnectionsAsync()
@@ -516,6 +536,8 @@ public partial class FinOpsTab
     private async void FinOpsRefreshUtilization_Click(object sender, RoutedEventArgs e) => await RunFinOpsLoad(LoadFinOpsUtilizationAsync);
     private async void FinOpsRefreshDatabaseResources_Click(object sender, RoutedEventArgs e) => await RunFinOpsLoad(LoadFinOpsDatabaseResourcesAsync);
     private async void FinOpsRefreshDatabaseSizes_Click(object sender, RoutedEventArgs e) => await RunFinOpsLoad(LoadFinOpsDatabaseSizesAsync);
+
+    private async void FinOpsRefreshPvsStats_Click(object sender, RoutedEventArgs e) => await RunFinOpsLoad(LoadFinOpsPvsStatsAsync);
     private async void FinOpsRefreshApplicationConnections_Click(object sender, RoutedEventArgs e) => await RunFinOpsLoad(LoadFinOpsApplicationConnectionsAsync);
     private async void FinOpsRefreshHighImpact_Click(object sender, RoutedEventArgs e) => await RunFinOpsLoad(LoadFinOpsHighImpactAsync);
     private async void FinOpsRefreshServerInventory_Click(object sender, RoutedEventArgs e) => await RunFinOpsLoad(LoadFinOpsServerInventoryAsync);
