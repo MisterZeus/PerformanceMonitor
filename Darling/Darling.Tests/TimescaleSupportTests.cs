@@ -727,19 +727,30 @@ AND   schedule_interval = INTERVAL '1 hour'", connection);
                assertions below. */
             await AddCompressionPolicyParkedAsync(connection, Table, ct);
 
-            /* One chunk five days back (closed, well past the 1-day delay) and one from right now (still open,
-               and young either way). */
+            /* One chunk five days back (closed, well past the 1-day delay) and one from midday TODAY (still
+               open, and young either way).
+
+               MIDDAY, not now() (#1972). These seeds span 200 seconds, and the chunks are day-aligned
+               (ChunkIntervalDays), so a now()-relative span straddles a chunk boundary whenever the suite runs
+               within ~200 seconds of midnight: the one intended chunk becomes two and the counts below fail
+               deterministically. Both directions were real — a young seed run in 00:00:00-00:03:20 split into
+               yesterday's tail plus today's and failed the uncompressed count (caught live at 00:01:38 UTC),
+               and an old seed run in 23:56:40-23:59:59 split into two closed, both-eligible chunks and failed
+               the compressed count. Anchoring to midday puts 200 seconds of slack against 12 hours of margin
+               on either side, so chunk placement no longer depends on what time the suite runs. */
             await ExecAsync(connection,
-                $"INSERT INTO collect.{Table} SELECT now()::timestamp - INTERVAL '5 days' + (g || ' seconds')::interval, {TestServerId}, g FROM generate_series(1, 200) g", ct);
+                $"INSERT INTO collect.{Table} SELECT date_trunc('day', now()::timestamp) - INTERVAL '5 days' + INTERVAL '12 hours' + (g || ' seconds')::interval, {TestServerId}, g FROM generate_series(1, 200) g", ct);
             await ExecAsync(connection,
-                $"INSERT INTO collect.{Table} SELECT now()::timestamp - (g || ' seconds')::interval, {TestServerId}, g FROM generate_series(1, 200) g", ct);
+                $"INSERT INTO collect.{Table} SELECT date_trunc('day', now()::timestamp) + INTERVAL '12 hours' + (g || ' seconds')::interval, {TestServerId}, g FROM generate_series(1, 200) g", ct);
 
             await RunPolicyAsync(connection, Table, ct);
 
             Assert.Equal(1, await ChunkCountAsync(connection, Table, compressed: true, ct));
             Assert.Equal(1, await ChunkCountAsync(connection, Table, compressed: false, ct));
 
-            /* And the one left uncompressed is the YOUNG one, not an arbitrary survivor. */
+            /* And the one left uncompressed is the YOUNG one, not an arbitrary survivor. The midday anchor
+               keeps this true with room to spare: midday today sits in today's chunk, whose range_end is
+               tomorrow's midnight, so range_end > now() - CompressAfterDays holds at every hour of the day. */
             using var young = new NpgsqlCommand($@"
 SELECT COUNT(*)
 FROM timescaledb_information.chunks
@@ -791,11 +802,13 @@ AND   range_end > now() - INTERVAL '{TimescaleSupport.CompressAfterDays} days'",
                scheduler actually broke on CI, in both directions — see AddCompressionPolicyParkedAsync. */
             await AddCompressionPolicyParkedAsync(connection, Table, ct);
 
-            /* Three chunks, all eligible. */
+            /* Three chunks, all eligible. Midday-anchored, not now()-relative (#1972): run in the last ~200
+               seconds before midnight, a now()-relative seed crosses the day boundary N days back and lands
+               FOUR chunks here instead of three, failing the counts below. */
             foreach (var daysBack in new[] { 7, 5, 3 })
             {
                 await ExecAsync(connection,
-                    $"INSERT INTO collect.{Table} SELECT now()::timestamp - INTERVAL '{daysBack} days' + (g || ' seconds')::interval, {TestServerId}, g FROM generate_series(1, 200) g", ct);
+                    $"INSERT INTO collect.{Table} SELECT date_trunc('day', now()::timestamp) - INTERVAL '{daysBack} days' + INTERVAL '12 hours' + (g || ' seconds')::interval, {TestServerId}, g FROM generate_series(1, 200) g", ct);
             }
 
             string middleChunk;
@@ -982,8 +995,11 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
                run that got there first would report a settled zero and fail the test for being correct. */
             await AddCompressionPolicyParkedAsync(connection, Table, ct);
 
+            /* Midday-anchored, not now()-relative (#1972): in the last ~200 seconds before midnight a
+               now()-relative seed crosses the day boundary five days back and puts TWO eligible chunks in the
+               backlog, failing the count below. */
             await ExecAsync(connection,
-                $"INSERT INTO collect.{Table} SELECT now()::timestamp - INTERVAL '5 days' + (g || ' seconds')::interval, {TestServerId}, g FROM generate_series(1, 200) g", ct);
+                $"INSERT INTO collect.{Table} SELECT date_trunc('day', now()::timestamp) - INTERVAL '5 days' + INTERVAL '12 hours' + (g || ' seconds')::interval, {TestServerId}, g FROM generate_series(1, 200) g", ct);
 
             var before = await TimescaleSupport.ReadCompressionActivityAsync(connection, null, ct);
             var waiting = Assert.Single(before, a => string.Equals(a.HypertableName, Table, StringComparison.Ordinal));
