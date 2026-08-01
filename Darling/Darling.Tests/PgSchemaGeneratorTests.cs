@@ -29,10 +29,11 @@ public sealed class PgSchemaGeneratorTests
     {
         /* 35 through agent_status + long_query_completions (#1496 long-query trace) = 36, plus the two
            Availability Group collectors (#991) = 38, plus plan_correction (#1952 automatic plan
-           correction) = 39, plus pvs_stats (#1951 ADR version store) = 40. */
-        Assert.Equal(40, CollectorCatalog.All.Count);
-        Assert.Equal(40, CollectorCatalog.All.Select(s => s.TargetTable).Distinct().Count());
-        Assert.Equal(40, CollectorCatalog.All.Select(s => s.Name).Distinct().Count());
+           correction) = 39, plus pvs_stats (#1951 ADR version store) = 40, plus database_states
+           (baseline-deviation database-state alert) = 41. */
+        Assert.Equal(41, CollectorCatalog.All.Count);
+        Assert.Equal(41, CollectorCatalog.All.Select(s => s.TargetTable).Distinct().Count());
+        Assert.Equal(41, CollectorCatalog.All.Select(s => s.Name).Distinct().Count());
     }
 
     [Fact]
@@ -557,11 +558,12 @@ public sealed class PgSchemaGeneratorTests
         var script = PgSchemaGenerator.GenerateFullSchema();
 
         var tableCount = CollectorCatalog.All.Count(s => script.Contains($"CREATE TABLE IF NOT EXISTS {s.TargetTable} (", StringComparison.Ordinal));
-        Assert.Equal(40, tableCount);
+        Assert.Equal(41, tableCount);
 
-        /* 40 tables minus the two index-less config tables (server_config, database_config) = 38 indexes. */
+        /* 41 tables minus the two index-less config tables (server_config, database_config) = 39 indexes
+           (database_states is a time-series collector and gets the default retrieval index). */
         var indexCount = script.Split("CREATE INDEX IF NOT EXISTS").Length - 1;
-        Assert.Equal(38, indexCount);
+        Assert.Equal(39, indexCount);
 
         /* The precision guard can never regress silently. */
         Assert.DoesNotContain("numeric(0,0)", script, StringComparison.Ordinal);

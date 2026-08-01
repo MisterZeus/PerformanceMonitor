@@ -147,6 +147,11 @@ public class LiteAlertForwardingTests : IDisposable
             Task.FromResult(SnapshotIsStale
                 ? AnomalousJobsResult.Stale
                 : new AnomalousJobsResult(SnapshotIsFresh: true, new List<AnomalousJobInfo>(AnomalousJobs)));
+
+        public List<DatabaseStateInfo> DatabaseStates { get; } = new();
+
+        public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new List<DatabaseStateInfo>(DatabaseStates));
     }
 
     private sealed class InMemoryStateStore : IAlertStateStore

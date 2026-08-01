@@ -176,6 +176,19 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         return new AnomalousJobsResult(SnapshotIsFresh: true, jobs);
     }
 
+    /// <summary>
+    /// Databases deviating from their expected (baseline/override) state — delegates to
+    /// <see cref="LocalDataService.GetDatabaseStateDeviationsAsync"/>, which also auto-seeds the
+    /// first-observation baseline. Task.Run-wrapped like the other reads to keep DuckDB's synchronous
+    /// I/O off the WPF dispatcher (#1202).
+    /// </summary>
+    public async Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(
+        string serverKey, CancellationToken cancellationToken = default)
+    {
+        var serverId = ParseServerKey(serverKey);
+        return await Task.Run(() => _dataService.GetDatabaseStateDeviationsAsync(serverId), cancellationToken);
+    }
+
     private int ResolveRunningJobsCadence(int serverId) =>
         ResolveCadence(_runningJobsCadenceMinutes, serverId, "running_jobs");
 

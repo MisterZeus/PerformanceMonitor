@@ -47,6 +47,7 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public bool LongRunningJobEnabled => _config.Alerts.LongRunningJobEnabled;
     public bool FailedJobEnabled => _config.Alerts.FailedJobEnabled;
     public bool PvsEnabled => _config.Alerts.PvsEnabled;
+    public bool DatabaseStateEnabled => _config.Alerts.DatabaseStateEnabled;
 
     public int CpuThresholdPercent => _config.Alerts.CpuThresholdPercent;
     public int BlockingCountThreshold => _config.Alerts.BlockingCountThreshold;

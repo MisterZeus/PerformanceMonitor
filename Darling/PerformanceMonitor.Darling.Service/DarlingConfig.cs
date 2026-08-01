@@ -431,6 +431,12 @@ public sealed class AlertsConfig
     [JsonPropertyName("failedJobLookbackMinutes")]
     public int FailedJobLookbackMinutes { get; set; } = 60;
 
+    /// <summary>Master switch for the database-state alert (fire when a database's current state
+    /// deviates from its expected baseline/override state). Per-database expected states live in the
+    /// config.database_state_expected table, not here.</summary>
+    [JsonPropertyName("databaseStateEnabled")]
+    public bool DatabaseStateEnabled { get; set; } = true;
+
     /// <summary>Minimum minutes between repeated notifications for the same alert condition.</summary>
     [JsonPropertyName("cooldownMinutes")]
     public int CooldownMinutes { get; set; } = 5;

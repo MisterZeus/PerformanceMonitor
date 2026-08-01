@@ -130,7 +130,7 @@ public sealed class SharedCollectorDefaultsPinTests
             "perfmon_stats", "deadlocks", "memory_grant_stats", "waiting_tasks", "dmv_blocking_snapshot",
             "blocked_process_report", "running_jobs", "session_summary_stats", "system_health_events",
             "default_trace_events", "job_history", "agent_status",
-            "ag_replica_states", "ag_database_replica_states", "plan_correction"
+            "ag_replica_states", "ag_database_replica_states", "plan_correction", "database_states"
         };
 
         Assert.Equal(3, ScheduleManager.s_presets.Count);

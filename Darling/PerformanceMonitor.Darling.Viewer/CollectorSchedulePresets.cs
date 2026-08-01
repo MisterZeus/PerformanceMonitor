@@ -64,6 +64,7 @@ public static class CollectorSchedulePresets
                 /* plan_correction tracks query_store across the presets: same per-database enumeration
                    shape, same default tier, so an operator backing one off wants the other to follow. */
                 ["plan_correction"] = 2,
+                ["database_states"] = 1,
             },
             ["Balanced"] = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
             {
@@ -82,6 +83,7 @@ public static class CollectorSchedulePresets
                 ["default_trace_events"] = 5, ["job_history"] = 5, ["agent_status"] = 5,
                 ["ag_replica_states"] = 1, ["ag_database_replica_states"] = 1,
                 ["plan_correction"] = 5,
+                ["database_states"] = 1,
             },
             ["Low-Impact"] = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
             {
@@ -99,6 +101,7 @@ public static class CollectorSchedulePresets
                 ["default_trace_events"] = 15, ["job_history"] = 15, ["agent_status"] = 15,
                 ["ag_replica_states"] = 5, ["ag_database_replica_states"] = 5,
                 ["plan_correction"] = 30,
+                ["database_states"] = 5,
             },
         };
 

@@ -167,10 +167,10 @@ INSERT INTO config_alert_settings (
     notify_connection_down_at_startup, connection_refire_minutes,
     notify_ag_health, ag_lag_alert_seconds, ag_redo_queue_alert_kb,
     ag_disconnect_refire_minutes, blocking_wait_seconds_threshold, pvs_enabled, pvs_threshold_percent,
-    pvs_floor_gb, modified_at)
+    pvs_floor_gb, modified_at, database_state_enabled)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
         $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42,
-        $43, $44, $45, $46, $47)
+        $43, $44, $45, $46, $47, $48)
 ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(a.Enabled);
         command.Parameters.AddWithValue(a.CpuEnabled);
@@ -227,6 +227,8 @@ ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(a.PvsThresholdPercent);
         command.Parameters.AddWithValue(a.PvsFloorGb);
         command.Parameters.AddWithValue(now);
+        /* V49 database-state alert master switch (appended last, matching the ALTER's physical order). */
+        command.Parameters.AddWithValue(a.DatabaseStateEnabled);
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -372,7 +374,7 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        notify_connection_down_at_startup, connection_refire_minutes,
        notify_ag_health, ag_lag_alert_seconds, ag_redo_queue_alert_kb,
        ag_disconnect_refire_minutes, blocking_wait_seconds_threshold, pvs_enabled, pvs_threshold_percent,
-       pvs_floor_gb
+       pvs_floor_gb, database_state_enabled
 FROM config_alert_settings WHERE id = 1", connection);
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -442,6 +444,9 @@ FROM config_alert_settings WHERE id = 1", connection);
             PvsEnabled = reader.GetBoolean(43),
             PvsThresholdPercent = reader.GetInt32(44),
             PvsFloorGb = reader.GetInt32(45),
+            /* database-state alert master switch appended (V49) at ordinal 46; NOT NULL DEFAULT true so a
+               pre-V49 row can't reach here without the column present. */
+            DatabaseStateEnabled = reader.GetBoolean(46),
         };
         var analysis = new AnalysisConfig
         {

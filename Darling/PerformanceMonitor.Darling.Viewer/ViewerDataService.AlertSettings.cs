@@ -39,7 +39,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 public sealed partial class ViewerDataService
 {
-    /* The 46 AlertsConfig + AnalysisConfig columns in the SAME order the service reads them
+    /* The 47 AlertsConfig + AnalysisConfig columns in the SAME order the service reads them
        (StoreConfigProvider.ReadAlertSettingsAsync), so the parity test pins one list against both ends.
        delivery_mode/per_event_max (V18, #1141) then the six long-running-query read knobs + the connection-change
        notify toggle (V20) are appended so the existing ordinals stay pinned. */
@@ -57,7 +57,7 @@ public sealed partial class ViewerDataService
         "notify_connection_down_at_startup, connection_refire_minutes, " +
         "notify_ag_health, ag_lag_alert_seconds, ag_redo_queue_alert_kb, " +
         "ag_disconnect_refire_minutes, blocking_wait_seconds_threshold, " +
-        "pvs_enabled, pvs_threshold_percent, pvs_floor_gb";
+        "pvs_enabled, pvs_threshold_percent, pvs_floor_gb, database_state_enabled";
 
     /// <summary>The single global alert-settings row (id=1), for the Settings window prefill + the migrate-in
     /// defaults check. Column order matches <see cref="AlertSettingsColumns"/>.</summary>
@@ -66,12 +66,12 @@ public sealed partial class ViewerDataService
 
     /// <summary>Upserts the single global alert-settings row (Settings window Save). ON CONFLICT rewrites every
     /// column and bumps <c>modified_at</c> (and, via the V17 statement trigger, <c>config_version</c> — the
-    /// service reloads on its next sweep). $1..$46 bind the columns in <see cref="AlertSettingsColumns"/> order.</summary>
+    /// service reloads on its next sweep). $1..$47 bind the columns in <see cref="AlertSettingsColumns"/> order.</summary>
     public const string AlertSettingsUpsertSql = @"
 INSERT INTO config_alert_settings (id, " + AlertSettingsColumns + @", modified_at)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
         $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43,
-        $44, $45, $46,
+        $44, $45, $46, $47,
         (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     enabled = EXCLUDED.enabled,
@@ -120,6 +120,7 @@ ON CONFLICT (id) DO UPDATE SET
     pvs_enabled = EXCLUDED.pvs_enabled,
     pvs_threshold_percent = EXCLUDED.pvs_threshold_percent,
     pvs_floor_gb = EXCLUDED.pvs_floor_gb,
+    database_state_enabled = EXCLUDED.database_state_enabled,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>The two <c>cpu_mode</c> values the service honors (it compares case-insensitively against
@@ -195,6 +196,7 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.PvsEnabled });                     // $44 (#1984, V48)
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.PvsThresholdPercent });             // $45 (#1984, V48)
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.PvsFloorGb });                      // $46 (#1984, V48)
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.DatabaseStateEnabled });            // $47 (database-state alert, V49)
     }
 
     private static AlertSettingsRow ReadAlertSettingsRow(NpgsqlDataReader reader) => new()
@@ -250,6 +252,8 @@ ON CONFLICT (id) DO UPDATE SET
         PvsEnabled = reader.GetBoolean(43),
         PvsThresholdPercent = reader.GetInt32(44),
         PvsFloorGb = reader.GetInt32(45),
+        /* database-state alert master switch appended (V49) at ordinal 46. */
+        DatabaseStateEnabled = reader.GetBoolean(46),
     };
 
     /// <summary>Maps the Settings window's CPU-mode combo tag ("Total"/"SqlOnly") to the store value.</summary>
@@ -297,6 +301,9 @@ public sealed class AlertSettingsRow
 
     /// <summary>#1696 (V37): re-announce a still-disconnected AG replica every N minutes (0 = off).</summary>
     public int AgDisconnectRefireMinutes { get; set; }
+
+    /// <summary>Master switch for the baseline-deviation database-state alert (V40 DDL default true).</summary>
+    public bool DatabaseStateEnabled { get; set; } = true;
 
     public bool CpuEnabled { get; set; } = true;
     public int CpuThresholdPercent { get; set; } = 80;
@@ -386,6 +393,7 @@ public sealed class AlertSettingsRow
             && AgLagAlertSeconds == other.AgLagAlertSeconds
             && AgRedoQueueAlertKb == other.AgRedoQueueAlertKb
             && AgDisconnectRefireMinutes == other.AgDisconnectRefireMinutes
+            && DatabaseStateEnabled == other.DatabaseStateEnabled
             && CpuEnabled == other.CpuEnabled
             && CpuThresholdPercent == other.CpuThresholdPercent
             && string.Equals(CpuMode, other.CpuMode, StringComparison.OrdinalIgnoreCase)

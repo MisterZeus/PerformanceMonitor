@@ -52,7 +52,8 @@ public class ScheduleManager
             ["ag_replica_states"] = 1, ["ag_database_replica_states"] = 1,
             /* plan_correction tracks query_store across the presets: same per-database enumeration
                shape, same default tier, so an operator backing one off wants the other to follow. */
-            ["plan_correction"] = 2
+            ["plan_correction"] = 2,
+            ["database_states"] = 1
         },
         ["Balanced"] = new(StringComparer.OrdinalIgnoreCase)
         {
@@ -70,7 +71,8 @@ public class ScheduleManager
             ["session_summary_stats"] = 5, ["system_health_events"] = 5,
             ["default_trace_events"] = 5, ["job_history"] = 5, ["agent_status"] = 5,
             ["ag_replica_states"] = 1, ["ag_database_replica_states"] = 1,
-            ["plan_correction"] = 5
+            ["plan_correction"] = 5,
+            ["database_states"] = 1
         },
         ["Low-Impact"] = new(StringComparer.OrdinalIgnoreCase)
         {
@@ -87,7 +89,8 @@ public class ScheduleManager
             ["session_summary_stats"] = 15, ["system_health_events"] = 15,
             ["default_trace_events"] = 15, ["job_history"] = 15, ["agent_status"] = 15,
             ["ag_replica_states"] = 5, ["ag_database_replica_states"] = 5,
-            ["plan_correction"] = 30
+            ["plan_correction"] = 30,
+            ["database_states"] = 5
         }
     };
 
@@ -628,6 +631,7 @@ public class ScheduleManager
             new() { Name = "deadlocks", Enabled = true, FrequencyMinutes = 5, RetentionDays = 30, Description = "Deadlocks from a dedicated PerformanceMonitor_Deadlock XE session (xml_deadlock_report)" },
             new() { Name = "server_config", Enabled = true, FrequencyMinutes = 0, RetentionDays = 30, Description = "Server configuration (on-load only)" },
             new() { Name = "database_config", Enabled = true, FrequencyMinutes = 0, RetentionDays = 30, Description = "Database configuration (on-load only)" },
+            new() { Name = "database_states", Enabled = true, FrequencyMinutes = 1, RetentionDays = 30, Description = "Per-database state (sys.databases.state_desc) time series; feeds the baseline-deviation database-state alert (not collected on Azure SQL DB)" },
             new() { Name = "memory_grant_stats", Enabled = true, FrequencyMinutes = 1, RetentionDays = 30, Description = "Memory grant statistics from sys.dm_exec_query_memory_grants" },
             new() { Name = "waiting_tasks", Enabled = true, FrequencyMinutes = 1, RetentionDays = 7, Description = "Point-in-time waiting tasks from sys.dm_os_waiting_tasks" },
             new() { Name = "dmv_blocking_snapshot", Enabled = true, FrequencyMinutes = 1, RetentionDays = 30, Description = "Always-on point-in-time blocking snapshot from DMVs (BPR-independent fallback; works when blocked process threshold is unset, e.g. AWS RDS)" },

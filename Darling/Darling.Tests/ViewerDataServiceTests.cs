@@ -529,9 +529,9 @@ public sealed class ViewerSchemaVersionGateTests
            future migration bumps StorageVersion, this fails until a matching sentinel + map arm is added —
            the guard against the probe silently under-reporting a newer store as skewed, which would make
            the connect-time gate refuse to open the viewer against a perfectly healthy store. */
-         Assert.Equal(
-             ViewerDataService.RequiredStoreSchemaVersion,
-             ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+        Assert.Equal(
+            ViewerDataService.RequiredStoreSchemaVersion,
+            ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
     }
 }
 

@@ -45,10 +45,9 @@ public sealed class ViewerCollectorCoverageTests
     /// </summary>
     private static readonly HashSet<string> KnownStoreOnlyOrUnbuiltTables = new(StringComparer.OrdinalIgnoreCase)
     {
-        // Empty: every collector table now has a Darling viewer reader. The two AG tables were the last
-        // entries -- carried as tracked debt while #991 shipped collection-only, and removed when the
-        // Availability Groups tab landed. This ratchet only ever shrinks; adding an entry back means a
-        // collector shipped without a viewer surface.
+        // Empty: every collector table now has a Darling viewer reader. database_states is read by
+        // ViewerDataService.DatabaseStates.cs (the override editor's backing store), so it is covered
+        // by the reader-layer scan and needs no allow-list entry.
     };
 
     [Fact]
