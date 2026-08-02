@@ -139,7 +139,7 @@ LIMIT $2";
         int PvsFloorGb);
 
     /// <summary>The single global alert-settings row (id=1) — the viewer's <c>AlertSettingsSelectSql</c>. The
-    /// 43 columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>). This had
+    /// 46 columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>). This had
     /// stopped at 36, so <c>get_alert_settings</c> reported a store whose newest five knobs did not exist:
     /// an MCP client could not see the V33 connection opt-ins or the V35 Availability Group family at all.</summary>
     public const string AlertSettingsSelectSql = @"

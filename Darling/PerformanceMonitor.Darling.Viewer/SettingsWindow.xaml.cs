@@ -899,6 +899,8 @@ public partial class SettingsWindow : Window
             parts.Add($"tempdb > {AlertTempDbSpaceThresholdBox.Text}%");
         if (AlertLowDiskCheckBox.IsChecked == true)
             parts.Add($"disk free < {AlertLowDiskThresholdPercentBox.Text}% or {AlertLowDiskThresholdGbBox.Text}GB");
+        if (AlertPvsCheckBox.IsChecked == true)
+            parts.Add($"PVS >= {AlertPvsThresholdPercentBox.Text}% of database");
         if (AlertLongRunningJobCheckBox.IsChecked == true)
             parts.Add($"jobs > {AlertLongRunningJobMultiplierBox.Text}x avg");
         if (AlertFailedJobCheckBox.IsChecked == true)
