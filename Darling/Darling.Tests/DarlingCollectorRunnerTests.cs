@@ -10,6 +10,7 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
+using Microsoft.Data.SqlClient;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
@@ -146,6 +147,20 @@ public sealed class DarlingCollectorRunnerTests
         }
     }
 
+    /// <summary>
+    /// #1988: this test used to assert on whatever happened to be in the target's plan cache, and the
+    /// cache's state decided the verdict twice over. First, under <c>optimize for ad hoc workloads</c> a
+    /// query executed ONCE caches a Compiled Plan STUB — <c>dm_exec_query_stats</c> carries the row and
+    /// its text renders, but <c>dm_exec_text_query_plan</c> renders NULL — so a box whose recent
+    /// user-database activity was all once-executed ad-hoc text produced rows with no capturable plan,
+    /// deterministically. Second, the assertions read the inline <c>query_plan_xml</c> column, which
+    /// #1767's payload-dimension diversion writes NULL BY DESIGN (content goes to the digest-keyed
+    /// <c>query_plan_dim</c>; every product reader coalesces inline with the dim join) — so even a row
+    /// with a captured plan counted as "no plan stored". The test now seeds its own scratch database,
+    /// runs a marker query TWICE with byte-identical text (the second execution replaces the stub with a
+    /// full Compiled Plan), scopes the plan assertions to that marker row, and reads plans the way the
+    /// product does. Neither ambient cache state nor sp_configure state can decide either direction.
+    /// </summary>
     [Fact]
     public async Task EndToEnd_QueryStats_PlanCaptureFlag_TogglesStoredPlanXml()
     {
@@ -169,29 +184,59 @@ public sealed class DarlingCollectorRunnerTests
         var bodySucceeded = false;
         try
         {
-            /* Flag OFF (Lite parity): rows land, every query_plan_xml is NULL. */
+            await using (var seed = new SqlConnection(runtime.ConnectionString))
+            {
+                await seed.OpenAsync(ct);
+                await SeedScratchMarkerAsync(seed, ct);
+            }
+
+            /* Flag OFF (Lite parity): the seeded marker lands, and NO row carries a reachable plan —
+               inline or diverted. The marker makes this a hard assertion rather than the old
+               skip-when-idle: the test now guarantees its own collectable activity. */
             var offRunner = new DarlingCollectorRunner(dataSource, new CollectorDeltaCalculator(), null, capturePlans: () => false);
             var off = await offRunner.RunAsync(QueryStatsCollector.Instance, runtime, ct);
-            Assert.SkipWhen(off.Rows == 0, "No recent query_stats activity on the target to capture; skipping.");
-            Assert.Equal(0L, await CountNonEmptyAsync(dataSource, "query_stats", "query_plan_xml", runtime.ServerId, ct));
+            Assert.True(off.Rows > 0, "the seeded marker guarantees at least one collectable row");
+            Assert.True(await CountMarkerRowsAsync(dataSource, runtime.ServerId, ct) > 0,
+                "the flag-off cycle should collect the seeded marker row");
+            Assert.Equal(0L, await CountReachablePlansAsync(dataSource, runtime.ServerId, ct));
 
             /* Reset so the flag-on cycle re-collects the same plans (query_stats has no watermark,
                but row-hash dedup on the store side would otherwise skip unchanged rows). */
             await CleanServerRowsAsync(dataSource, "query_stats", runtime.ServerId, ct);
 
-            /* Flag ON (Darling): at least one captured row carries a query_plan_xml that parses. */
+            /* Flag ON (Darling): the MARKER row's plan — guaranteed a full Compiled Plan by the
+               double execution — is reachable through the dim join and parses. Other rows may
+               legitimately carry no plan (ambient stubs); they prove nothing either way. */
             var onRunner = new DarlingCollectorRunner(dataSource, new CollectorDeltaCalculator(), null, capturePlans: () => true);
             var on = await onRunner.RunAsync(QueryStatsCollector.Instance, runtime, ct);
             Assert.True(on.Rows > 0, "flag-on cycle should still land rows");
+            Assert.True(await CountMarkerRowsAsync(dataSource, runtime.ServerId, ct) > 0,
+                "the flag-on cycle should re-collect the seeded marker row");
 
-            var planXml = await FirstNonEmptyAsync(dataSource, "query_stats", "query_plan_xml", runtime.ServerId, ct);
-            Assert.False(string.IsNullOrEmpty(planXml), "flag-on capture should store at least one non-empty plan");
+            var planXml = await MarkerPlanXmlAsync(dataSource, runtime.ServerId, ct);
+            Assert.False(string.IsNullOrEmpty(planXml), "flag-on capture should store the seeded marker's plan");
             Assert.Equal("ShowPlanXML", XDocument.Parse(planXml!).Root!.Name.LocalName);
 
             bodySucceeded = true;
         }
         finally
         {
+            /* SQL-side teardown follows LiveStoreCleanup's rules: a FRESH connection (the body's
+               session may be the thing that died) and a token that survives a cancelled run (#1902).
+               A drop failure surfaces only when the body succeeded — otherwise the body's own
+               exception is the report that matters. A leftover scratch database self-heals anyway:
+               the seed phase recreates it. */
+            try
+            {
+                await using var sqlCleanup = new SqlConnection(runtime.ConnectionString);
+                await sqlCleanup.OpenAsync(CancellationToken.None);
+                using var drop = new SqlCommand(DropScratchDatabaseSql, sqlCleanup) { CommandTimeout = 60 };
+                await drop.ExecuteNonQueryAsync(CancellationToken.None);
+            }
+            catch when (!bodySucceeded)
+            {
+            }
+
             /* The data source was never the exposed half here: it hands out a FRESH connection per
                call, so this teardown could not inherit a session the body had closed. What it lacked is
                the masking rule, and a token that survives a cancelled run — it used the body's `ct`, which
@@ -325,6 +370,117 @@ VALUES ($1, $2, $3, $4, $5)", connection);
         command.Parameters.AddWithValue("NUM-WM-SRV");
         command.Parameters.AddWithValue(instanceId);
         await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// The scratch database the plan-capture E2E creates on the DARLING_TEST_SQL target. query_stats
+    /// only collects USER-database activity (its dbid filter excludes the system databases), so the
+    /// marker needs a user database to run in — and a fresh test box has none. Requires CREATE DATABASE
+    /// on the target, which the gated-live contract already implies: DARLING_TEST_SQL is a disposable
+    /// test server, never a production one.
+    /// </summary>
+    private const string ScratchDatabaseName = "darling_qs_e2e_scratch";
+
+    /// <summary>The token the plan-capture assertions key on, present only in the marker's text.</summary>
+    private const string MarkerToken = "darling_qs_e2e_marker";
+
+    /* ~2M-row serial scan: enough total_elapsed_time that ranking into the collector's cheap-columns
+       TOP is not decided by a rounding error, bounded enough to stay well under the command timeout. */
+    private const string MarkerQueryText =
+        "SELECT " + MarkerToken + " = COUNT_BIG(*) FROM (SELECT TOP (2000000) ac.column_id " +
+        "FROM sys.all_columns AS ac CROSS JOIN sys.all_columns AS ac2) AS q OPTION(MAXDOP 1);";
+
+    private static readonly string RecreateScratchDatabaseSql = $@"
+IF DB_ID(N'{ScratchDatabaseName}') IS NOT NULL
+BEGIN
+    ALTER DATABASE [{ScratchDatabaseName}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+    DROP DATABASE [{ScratchDatabaseName}];
+END;
+CREATE DATABASE [{ScratchDatabaseName}];";
+
+    private static readonly string DropScratchDatabaseSql = $@"
+IF DB_ID(N'{ScratchDatabaseName}') IS NOT NULL
+BEGIN
+    ALTER DATABASE [{ScratchDatabaseName}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+    DROP DATABASE [{ScratchDatabaseName}];
+END;";
+
+    /// <summary>
+    /// Recreates the scratch database (a crashed prior run may have left one behind) and runs the
+    /// marker TWICE with byte-identical text on the same session. Twice is the load-bearing part:
+    /// under <c>optimize for ad hoc workloads</c> the first execution caches only a Compiled Plan
+    /// Stub, whose plan renders NULL from <c>dm_exec_text_query_plan</c>; the identical second
+    /// execution replaces the stub with a full Compiled Plan. One execution is exactly the state
+    /// that made this test's verdict depend on the box's sp_configure settings (#1988).
+    /// </summary>
+    private static async Task SeedScratchMarkerAsync(SqlConnection connection, CancellationToken ct)
+    {
+        using (var recreate = new SqlCommand(RecreateScratchDatabaseSql, connection) { CommandTimeout = 60 })
+        {
+            await recreate.ExecuteNonQueryAsync(ct);
+        }
+
+        await connection.ChangeDatabaseAsync(ScratchDatabaseName, ct);
+        for (var execution = 0; execution < 2; execution++)
+        {
+            using var marker = new SqlCommand(MarkerQueryText, connection) { CommandTimeout = 60 };
+            await marker.ExecuteScalarAsync(ct);
+        }
+        await connection.ChangeDatabaseAsync("master", ct);
+    }
+
+    /// <summary>
+    /// Counts collected rows whose text is the seeded marker's. Reads through #1767's payload
+    /// diversion: new rows store text in <c>query_text_dim</c> keyed by <c>query_text_digest</c> and
+    /// leave the inline column NULL, and every reader coalesces the two — asserting on the inline
+    /// column alone is how this test failed deterministically after that change shipped (#1988).
+    /// </summary>
+    private static async Task<long> CountMarkerRowsAsync(NpgsqlDataSource dataSource, int serverId, CancellationToken ct)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(ct);
+        using var command = new NpgsqlCommand(@"
+SELECT COUNT(*)
+FROM query_stats AS qs
+LEFT JOIN query_text_dim AS td ON td.digest = qs.query_text_digest
+WHERE qs.server_id = $1
+AND COALESCE(qs.query_text, td.query_text) LIKE '%' || $2 || '%'", connection);
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(MarkerToken);
+        return (long)(await command.ExecuteScalarAsync(ct))!;
+    }
+
+    /// <summary>Counts rows with a plan reachable inline OR through the plan dim — see CountMarkerRowsAsync.</summary>
+    private static async Task<long> CountReachablePlansAsync(NpgsqlDataSource dataSource, int serverId, CancellationToken ct)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(ct);
+        using var command = new NpgsqlCommand(@"
+SELECT COUNT(*)
+FROM query_stats AS qs
+LEFT JOIN query_plan_dim AS pd ON pd.digest = qs.query_plan_digest
+WHERE qs.server_id = $1
+AND COALESCE(qs.query_plan_xml, pd.query_plan_xml) IS NOT NULL
+AND COALESCE(qs.query_plan_xml, pd.query_plan_xml) <> ''", connection);
+        command.Parameters.AddWithValue(serverId);
+        return (long)(await command.ExecuteScalarAsync(ct))!;
+    }
+
+    /// <summary>The seeded marker row's plan XML, reachable inline or through the plan dim — see CountMarkerRowsAsync.</summary>
+    private static async Task<string?> MarkerPlanXmlAsync(NpgsqlDataSource dataSource, int serverId, CancellationToken ct)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(ct);
+        using var command = new NpgsqlCommand(@"
+SELECT COALESCE(qs.query_plan_xml, pd.query_plan_xml)
+FROM query_stats AS qs
+LEFT JOIN query_text_dim AS td ON td.digest = qs.query_text_digest
+LEFT JOIN query_plan_dim AS pd ON pd.digest = qs.query_plan_digest
+WHERE qs.server_id = $1
+AND COALESCE(qs.query_text, td.query_text) LIKE '%' || $2 || '%'
+AND COALESCE(qs.query_plan_xml, pd.query_plan_xml) IS NOT NULL
+AND COALESCE(qs.query_plan_xml, pd.query_plan_xml) <> ''
+LIMIT 1", connection);
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(MarkerToken);
+        return await command.ExecuteScalarAsync(ct) as string;
     }
 
     private static MonitoredServer MakeLiveConfig(string name, string sqlHost)
