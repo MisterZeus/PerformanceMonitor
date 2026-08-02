@@ -44,6 +44,7 @@ public sealed class AlertEngineTests
         public bool LowDiskEnabled { get; set; }
         public bool LongRunningJobEnabled { get; set; }
         public bool FailedJobEnabled { get; set; }
+        public bool PvsEnabled { get; set; }
         public int CpuThresholdPercent { get; set; } = 80;
         public int BlockingCountThreshold { get; set; } = 1;
         /* #1839: 0 = off, the shipped default — a test must opt in for the wait gate to run at all. */
@@ -60,6 +61,9 @@ public sealed class AlertEngineTests
         public int TempDbSpaceThresholdPercent { get; set; } = 80;
         public int LowDiskThresholdPercent { get; set; } = 10;
         public int LowDiskThresholdGb { get; set; } = 5;
+        /* #1984: DarlingConfig defaults (40% / 1 GB); enable stays the class's opt-in OFF. */
+        public int PvsThresholdPercent { get; set; } = 40;
+        public int PvsFloorGb { get; set; } = 1;
         public int LongRunningJobMultiplier { get; set; } = 3;
         public int FailedJobLookbackMinutes { get; set; } = 60;
         public int CooldownMinutes { get; set; } = 5;
@@ -75,6 +79,7 @@ public sealed class AlertEngineTests
         public List<PoisonWaitDelta> PoisonWaits { get; } = new();
         public List<LongRunningQueryInfo> LongRunning { get; } = new();
         public List<VolumeFreeSpaceInfo> Volumes { get; } = new();
+        public List<PvsPressureInfo> PvsDatabases { get; } = new();
         public TempDbSpaceInfo? TempDb { get; set; }
         public List<AnomalousJobInfo> AnomalousJobs { get; } = new();
 
@@ -123,6 +128,9 @@ public sealed class AlertEngineTests
 
         public Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(TempDb);
+
+        public Task<List<PvsPressureInfo>> GetPvsPressureAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new List<PvsPressureInfo>(PvsDatabases));
 
         /* #1812: fakes report a FRESH snapshot by default so every pre-existing scenario keeps its
            meaning; the staleness tests flip SnapshotIsStale to model a dead collector. */
@@ -861,6 +869,102 @@ public sealed class AlertEngineTests
         Assert.Equal(3, h.Deliverer.Outcomes.Count);
     }
 
+    /* ---------------- persistent version store (#1984) ---------------- */
+
+    [Fact]
+    public async Task PvsPressure_FiresOnWorstDatabase_StandingBreachStaysQuiet_WorseningRefires()
+    {
+        var h = new Harness();
+        h.Settings.PvsEnabled = true;
+        var engine = h.Build();
+
+        /* Two ADR databases over the 40% trigger; the worst (highest %) names the alert. */
+        h.Adapter.PvsDatabases.Add(new PvsPressureInfo { DatabaseName = "shop", PvsSizeMb = 6144, DatabaseDataSizeMb = 10240 });
+        h.Adapter.PvsDatabases.Add(new PvsPressureInfo { DatabaseName = "ledger", PvsSizeMb = 2048, DatabaseDataSizeMb = 4096 });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Version Store (PVS)", fired.MetricName);
+        Assert.Equal("shop PVS 60% of database (6.0 GB)", fired.CurrentValue);
+        Assert.Equal("40% of database and ≥ 1 GB", fired.ThresholdValue);
+        Assert.Equal(60d, fired.NumericCurrentValue!.Value, precision: 3);
+        Assert.Equal(40d, fired.NumericThresholdValue);
+        /* No severity tier: MS documents no "critical" PVS level, and inventing one is the folklore
+           the collector deliberately avoided. */
+        Assert.Null(fired.Severity);
+        /* Both breaching databases ride in the context, worst first (the incident renderer appends
+           its own dedup items after them, so the pin is on the headings, not the count). */
+        Assert.StartsWith("shop", fired.Context!.Details[0].Heading, StringComparison.Ordinal);
+        Assert.Contains(fired.Context.Details, d => d.Heading.StartsWith("ledger", StringComparison.Ordinal));
+
+        /* The SAME standing level does not re-fire after the cooldown — a large PVS stays allocated
+           even after its cause clears (measured on a live rig), so without the PvsAlertGate a
+           recovered incident would re-notify every cooldown for hours. */
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Rising past the 5-point worsening margin re-fires. */
+        h.Adapter.PvsDatabases[0].PvsSizeMb = 7168; /* 70% */
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* Recovery announces and clears the worsening watermark... */
+        h.Adapter.PvsDatabases.Clear();
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        var resolution = Assert.Single(h.Resolutions);
+        Assert.Equal("Version Store (PVS) Resolved", resolution.Title);
+        Assert.Equal("SRV-A: All version stores back below threshold", resolution.Message);
+
+        /* ...so a fresh breach at the ORIGINAL level alerts again (fresh = always notifies). */
+        h.Adapter.PvsDatabases.Add(new PvsPressureInfo { DatabaseName = "shop", PvsSizeMb = 6144, DatabaseDataSizeMb = 10240 });
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task PvsPressure_FloorKeepsSmallDatabasesQuiet_AndZeroFloorRemovesIt()
+    {
+        /* 70% of a tiny database is megabytes, and nobody should be paged for megabytes: the GB
+           floor is an AND qualifier, unlike the low-disk pair's either-breach-fires OR. */
+        var h = new Harness();
+        h.Settings.PvsEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.PvsDatabases.Add(new PvsPressureInfo { DatabaseName = "tiny", PvsSizeMb = 512, DatabaseDataSizeMb = 732 });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Empty(h.Deliverer.Outcomes);
+        /* Never-active means no resolution chatter either. */
+        Assert.Empty(h.Resolutions);
+
+        /* 0 removes the floor: percent alone decides. */
+        h.Settings.PvsFloorGb = 0;
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("40% of database", fired.ThresholdValue);
+    }
+
+    [Fact]
+    public async Task PvsPressure_DisabledOrZeroPercent_DoesNotEvaluate()
+    {
+        var h = new Harness();
+        var engine = h.Build();
+        h.Adapter.PvsDatabases.Add(new PvsPressureInfo { DatabaseName = "shop", PvsSizeMb = 6144, DatabaseDataSizeMb = 10240 });
+
+        /* Disabled: the breaching row proves nothing was evaluated. */
+        h.Settings.PvsEnabled = false;
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* Percent 0 disables outright — it is the alert's ONLY trigger, so there is no second
+           dimension to fall back on (unlike low-disk). */
+        h.Settings.PvsEnabled = true;
+        h.Settings.PvsThresholdPercent = 0;
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
     /* ---------------- anomalous jobs ---------------- */
 
     [Fact]
@@ -1033,6 +1137,8 @@ public sealed class AlertEngineTests
         public Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
         public Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("store down");
+        public Task<List<PvsPressureInfo>> GetPvsPressureAsync(string serverKey, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
         public Task<AnomalousJobsResult> GetAnomalousJobsAsync(string serverKey, int multiplier, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");

@@ -505,6 +505,9 @@ public partial class SettingsWindow : Window
         AlertLowDiskCheckBox.IsChecked = App.AlertLowDiskEnabled;
         AlertLowDiskThresholdPercentBox.Text = App.AlertLowDiskThresholdPercent.ToString();
         AlertLowDiskThresholdGbBox.Text = App.AlertLowDiskThresholdGb.ToString();
+        AlertPvsCheckBox.IsChecked = App.AlertPvsEnabled;
+        AlertPvsThresholdPercentBox.Text = App.AlertPvsThresholdPercent.ToString();
+        AlertPvsFloorGbBox.Text = App.AlertPvsFloorGb.ToString();
         AlertLongRunningJobCheckBox.IsChecked = App.AlertLongRunningJobEnabled;
         AlertLongRunningJobMultiplierBox.Text = App.AlertLongRunningJobMultiplier.ToString();
         AlertFailedJobCheckBox.IsChecked = App.AlertFailedJobEnabled;
@@ -584,6 +587,11 @@ public partial class SettingsWindow : Window
             App.AlertLowDiskThresholdPercent = lowDiskPct;
         if (int.TryParse(AlertLowDiskThresholdGbBox.Text, out var lowDiskGb) && lowDiskGb >= 0)
             App.AlertLowDiskThresholdGb = lowDiskGb;
+        App.AlertPvsEnabled = AlertPvsCheckBox.IsChecked == true;
+        if (int.TryParse(AlertPvsThresholdPercentBox.Text, out var pvsPct) && pvsPct >= 0 && pvsPct <= 100)
+            App.AlertPvsThresholdPercent = pvsPct;
+        if (int.TryParse(AlertPvsFloorGbBox.Text, out var pvsFloor) && pvsFloor >= 0)
+            App.AlertPvsFloorGb = pvsFloor;
         App.AlertLongRunningJobEnabled = AlertLongRunningJobCheckBox.IsChecked == true;
         if (int.TryParse(AlertLongRunningJobMultiplierBox.Text, out var jobMult) && jobMult >= 2 && jobMult <= 20)
             App.AlertLongRunningJobMultiplier = jobMult;
@@ -666,6 +674,9 @@ public partial class SettingsWindow : Window
             root["alert_low_disk_enabled"] = App.AlertLowDiskEnabled;
             root["alert_low_disk_threshold_percent"] = App.AlertLowDiskThresholdPercent;
             root["alert_low_disk_threshold_gb"] = App.AlertLowDiskThresholdGb;
+            root["alert_pvs_enabled"] = App.AlertPvsEnabled;
+            root["alert_pvs_threshold_percent"] = App.AlertPvsThresholdPercent;
+            root["alert_pvs_floor_gb"] = App.AlertPvsFloorGb;
             root["alert_long_running_job_enabled"] = App.AlertLongRunningJobEnabled;
             root["alert_long_running_job_multiplier"] = App.AlertLongRunningJobMultiplier;
             root["alert_failed_job_enabled"] = App.AlertFailedJobEnabled;
@@ -719,6 +730,8 @@ public partial class SettingsWindow : Window
         AlertTempDbSpaceThresholdBox.Text = "80";
         AlertLowDiskThresholdPercentBox.Text = "10";
         AlertLowDiskThresholdGbBox.Text = "5";
+        AlertPvsThresholdPercentBox.Text = "40";
+        AlertPvsFloorGbBox.Text = "1";
         AlertLongRunningJobMultiplierBox.Text = "3";
         AlertFailedJobLookbackBox.Text = "60";
         AlertCooldownBox.Text = "5";
@@ -765,6 +778,8 @@ public partial class SettingsWindow : Window
             parts.Add($"tempdb > {AlertTempDbSpaceThresholdBox.Text}%");
         if (AlertLowDiskCheckBox.IsChecked == true)
             parts.Add($"disk free < {AlertLowDiskThresholdPercentBox.Text}% or {AlertLowDiskThresholdGbBox.Text}GB");
+        if (AlertPvsCheckBox.IsChecked == true)
+            parts.Add($"PVS >= {AlertPvsThresholdPercentBox.Text}% of database");
         if (AlertLongRunningJobCheckBox.IsChecked == true)
             parts.Add($"jobs > {AlertLongRunningJobMultiplierBox.Text}x avg");
         if (AlertFailedJobCheckBox.IsChecked == true)
@@ -797,6 +812,9 @@ public partial class SettingsWindow : Window
         AlertLowDiskCheckBox.IsEnabled = enabled;
         AlertLowDiskThresholdPercentBox.IsEnabled = enabled;
         AlertLowDiskThresholdGbBox.IsEnabled = enabled;
+        AlertPvsCheckBox.IsEnabled = enabled;
+        AlertPvsThresholdPercentBox.IsEnabled = enabled;
+        AlertPvsFloorGbBox.IsEnabled = enabled;
         AlertLongRunningJobCheckBox.IsEnabled = enabled;
         AlertLongRunningJobMultiplierBox.IsEnabled = enabled;
         AlertFailedJobCheckBox.IsEnabled = enabled;

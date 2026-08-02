@@ -10,11 +10,67 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Alerting;
 
 namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
 {
+    /// <summary>
+    /// The newest pvs_stats snapshot's ADR databases for the PVS-pressure alert (#1984) — the alert-read
+    /// twin of <see cref="GetPvsStatsLatestAsync"/>, narrowed the way the alert needs it: ADR-ON rows only
+    /// (a database that cannot have a PVS cannot breach), worst (highest PVS share) first, mapped to the
+    /// shared engine's <see cref="PvsPressureInfo"/>. Threshold evaluation stays engine-side.
+    /// </summary>
+    public async Task<List<PvsPressureInfo>> GetPvsPressureAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = @"
+SELECT
+    database_name,
+    persistent_version_store_size_mb,
+    database_data_size_mb,
+    current_aborted_transaction_count,
+    oldest_active_transaction_id,
+    oldest_aborted_transaction_id,
+    aborted_version_cleaner_start_time,
+    aborted_version_cleaner_end_time
+FROM v_pvs_stats
+WHERE server_id = $1
+AND   collection_time = (
+    SELECT MAX(collection_time)
+    FROM v_pvs_stats
+    WHERE server_id = $1
+)
+AND   is_accelerated_database_recovery_on
+ORDER BY
+    CASE WHEN database_data_size_mb > 0
+         THEN persistent_version_store_size_mb / database_data_size_mb
+         ELSE 0 END DESC";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+
+        var items = new List<PvsPressureInfo>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new PvsPressureInfo
+            {
+                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                PvsSizeMb = reader.IsDBNull(1) ? 0 : Convert.ToDouble(reader.GetValue(1)),
+                DatabaseDataSizeMb = reader.IsDBNull(2) ? 0 : Convert.ToDouble(reader.GetValue(2)),
+                CurrentAbortedTransactionCount = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                OldestActiveTransactionId = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
+                OldestAbortedTransactionId = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+                /* MS's documented shape for "cleanup is ongoing": a start time with no end time. */
+                AbortedCleanupOngoing = !reader.IsDBNull(6) && reader.IsDBNull(7)
+            });
+        }
+
+        return items;
+    }
+
     /// <summary>
     /// Latest ADR persistent version store snapshot, one row per database (#1951). Reads the archive view
     /// so a window that has aged into parquet still resolves, and pins to the newest collection_time the

@@ -510,6 +510,15 @@ public sealed class ViewerSchemaVersionGateTests
     public void MapProbedSchemaVersion_PvsStatsAbsent_CapsAt46() =>
         Assert.Equal(46, ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
 
+    /// <summary>V48 (#1984) rung: every sentinel through V47 present but pvs_enabled absent — the probe
+    /// must report 47, so the gate blocks a V48 viewer until the service migrates. Gating matters for the
+    /// same reason as the V40 rung: the Settings window names all three PVS-pressure columns in its
+    /// alert-settings SELECT and upsert, so against a V47 store the read would fail outright with 42703
+    /// rather than degrade.</summary>
+    [Fact]
+    public void MapProbedSchemaVersion_PvsPressureKnobsAbsent_CapsAt47() =>
+        Assert.Equal(47, ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+
     [Fact]
     public void RequiredStoreSchemaVersion_TracksTheBuildSchemaVersion_AndTheProbeCoversIt()
     {
@@ -522,7 +531,7 @@ public sealed class ViewerSchemaVersionGateTests
            the connect-time gate refuse to open the viewer against a perfectly healthy store. */
          Assert.Equal(
              ViewerDataService.RequiredStoreSchemaVersion,
-             ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+             ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
     }
 }
 

@@ -38,6 +38,7 @@ public static class AlertFingerprint
     public const string Query = "query";
     public const string Job = "job";
     public const string Disk = "disk";
+    public const string Database = "database";
 
     private static readonly Regex s_whitespace = new(@"\s+", RegexOptions.Compiled);
 

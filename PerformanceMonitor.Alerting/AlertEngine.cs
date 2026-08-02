@@ -116,6 +116,12 @@ public sealed class AlertEngine
        MainWindow.xaml.cs:88; gated by LowDiskAlertGate; removed on resolve. */
     private readonly ConcurrentDictionary<string, double> _lastAlertedLowDiskPercent = new();
 
+    /* #1984 — the PVS twins of the low-disk trio: cooldown watermark, standing-condition flag
+       for the resolved transition, and the PvsAlertGate worsening watermark. */
+    private readonly ConcurrentDictionary<string, DateTime> _lastPvsAlert = new();
+    private readonly ConcurrentDictionary<string, bool> _activePvsAlert = new();
+    private readonly ConcurrentDictionary<string, double> _lastAlertedPvsPercent = new();
+
     /* Rolling-count edge-trigger watermarks (#1091) — Lite's MainWindow.xaml.cs:103-104;
        persisted through IAlertStateStore on change (#1145). */
     private readonly ConcurrentDictionary<string, int> _lastAlertedBlockingCount = new();
@@ -218,6 +224,7 @@ public sealed class AlertEngine
         await CheckLongRunningQueriesAsync(key, serverName, now, alertCooldown, suppressed, ct);
         await CheckTempDbSpaceAsync(key, serverName, now, alertCooldown, suppressed, ct);
         bool lowDiskConditionPresent = await CheckLowDiskAsync(key, serverName, now, alertCooldown, suppressed, ct);
+        await CheckPvsPressureAsync(key, serverName, now, alertCooldown, suppressed, ct);
         await CheckAnomalousJobsAsync(key, serverName, now, alertCooldown, suppressed, ct);
         bool failedJobConditionPresent = await CheckFailedJobsAsync(snapshot, key, serverName, now, alertCooldown, suppressed, ct);
 
@@ -905,6 +912,83 @@ public sealed class AlertEngine
         }
 
         return conditionPresent;
+    }
+
+    /* ---------------- persistent version store (#1984) ---------------- */
+
+    /// <summary>
+    /// The ADR persistent-version-store twin of <see cref="CheckLowDiskAsync"/>: reads the newest
+    /// pvs_stats snapshot's ADR databases, breaches on PVS percent-of-database AND the GB floor
+    /// (<see cref="AlertContextBuilders.GetBreachedPvsDatabases"/>), names the worst database with
+    /// up to five breaching in the context, and re-fires only on a fresh or worsening breach
+    /// (<see cref="PvsAlertGate"/>) — a large PVS stays allocated even after its cause clears, so
+    /// without the gate a recovered incident would re-notify every cooldown for hours. No severity
+    /// tier: MS documents no "critical" PVS level, and inventing one is the folklore the collector
+    /// deliberately avoided. Level-triggered with a resolved transition when no database breaches.
+    /// </summary>
+    private async Task CheckPvsPressureAsync(
+        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+    {
+        if (!_settings.PvsEnabled || _settings.PvsThresholdPercent <= 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var databases = await _readAdapter.GetPvsPressureAsync(key, ct);
+            var breached = AlertContextBuilders.GetBreachedPvsDatabases(databases, _settings.PvsThresholdPercent, _settings.PvsFloorGb);
+
+            if (breached.Count > 0)
+            {
+                var worst = breached[0];
+                _activePvsAlert[key] = true;
+                double? lastPvsPercent =
+                    _lastAlertedPvsPercent.TryGetValue(key, out var pvsPct) ? pvsPct : (double?)null;
+                if (!suppressed
+                    && PvsAlertGate.ShouldAlert(worst.PvsPercent, lastPvsPercent)
+                    && CooldownElapsed(_lastPvsAlert, key, now, alertCooldown))
+                {
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Version Store (PVS)" };
+                    bool isMuted = _isAlertMuted(muteCtx);
+                    _lastPvsAlert[key] = now;
+                    _lastAlertedPvsPercent[key] = worst.PvsPercent;
+
+                    var pvsContext = AlertContextBuilders.BuildPvsPressureContext(serverName, breached);
+                    var detailText = AlertContextBuilders.ContextToDetailText(pvsContext);
+
+                    await FireAsync(new AlertOutcome(
+                        key, serverName, "Version Store (PVS)",
+                        $"{worst.DatabaseName} PVS {worst.PvsPercent:F0}% of database ({worst.PvsGb:F1} GB)",
+                        AlertContextBuilders.FormatPvsThreshold(_settings.PvsThresholdPercent, _settings.PvsFloorGb),
+                        pvsContext, detailText,
+                        NumericCurrentValue: worst.PvsPercent,
+                        NumericThresholdValue: _settings.PvsThresholdPercent,
+                        Muted: isMuted, Severity: null,
+                        ShortMessage: $"{worst.DatabaseName} PVS {worst.PvsPercent:F0}% of database ({worst.PvsGb:F1} GB)"), ct);
+                }
+            }
+            else if (_activePvsAlert.TryGetValue(key, out var wasPvs) && wasPvs)
+            {
+                _activePvsAlert[key] = false;
+                _lastAlertedPvsPercent.TryRemove(key, out _);
+                if (!suppressed)
+                {
+                    await NotifyResolutionAsync(new AlertResolution(
+                        key, serverName, "Version Store (PVS)",
+                        "Version Store (PVS) Resolved",
+                        $"{serverName}: All version stores back below threshold"), ct);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Failed to check PVS pressure for {Server}: {Message}", serverName, ex.Message);
+        }
     }
 
     /* ---------------- anomalous Agent jobs (Lite AlertEngine.cs:557-632) ---------------- */

@@ -96,6 +96,7 @@ public static class PgMigrations
            and ascending: a gap costs nothing and a collision would cost a store. */
         new Migration(46, "plan-correction-collector", V46Sql),
         new Migration(47, "pvs-stats", V47Sql),
+        new Migration(48, "pvs-pressure-alert", V48Sql),
     };
 
     /// <summary>
@@ -883,6 +884,24 @@ CREATE TABLE IF NOT EXISTS collect.pvs_stats (
 CREATE INDEX IF NOT EXISTS idx_pvs_stats_time ON collect.pvs_stats(server_id, collection_time);
 
 CREATE OR REPLACE VIEW v_pvs_stats AS SELECT * FROM pvs_stats;";
+
+    /// <summary>
+    /// V48 — the #1984 PVS-pressure alert knobs on the singleton config_alert_settings row: an enable,
+    /// the percent-of-database trigger, and the GB floor qualifier (AND semantics — see AlertsConfig).
+    /// <para>Defaults ON at 40% / 1 GB, matching darling.json's <c>AlertsConfig</c> defaults — the
+    /// #754 shipped-on precedent for a brand-new percent-based alert, NOT V40's default-off (that was a
+    /// second gate on an EXISTING alert, where a non-zero default would have changed behavior someone had
+    /// already tuned). 40 warns meaningfully before MS's "close to 50% of the database size" = large.
+    /// <c>ADD COLUMN IF NOT EXISTS</c> per the file's additive idiom; config.-qualified because the
+    /// migrate session runs under <c>search_path = collect, config, public</c>.</para>
+    /// </summary>
+    private const string V48Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS pvs_enabled boolean NOT NULL DEFAULT TRUE;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS pvs_threshold_percent integer NOT NULL DEFAULT 40;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS pvs_floor_gb integer NOT NULL DEFAULT 1;";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

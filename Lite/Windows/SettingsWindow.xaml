@@ -275,6 +275,16 @@
                                Foreground="{DynamicResource ForegroundBrush}"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <CheckBox x:Name="AlertPvsCheckBox" Content="Version store (PVS) over" VerticalAlignment="Center"
+                              Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertPvsThresholdPercentBox" Width="45" Text="40" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="% of database and at least" VerticalAlignment="Center" Margin="2,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertPvsFloorGbBox" Width="45" Text="1" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="GB (ADR databases only)" VerticalAlignment="Center" Margin="2,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <CheckBox x:Name="AlertLongRunningJobCheckBox" Content="Agent jobs running over" VerticalAlignment="Center"
                               Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="AlertLongRunningJobMultiplierBox" Width="35" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"/>

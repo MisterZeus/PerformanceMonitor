@@ -122,6 +122,17 @@ public interface IAlertReadAdapter
         string serverKey, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// The newest pvs_stats snapshot's per-database persistent version store state, for the
+    /// PVS-pressure alert (#1984) — ADR-ON databases only (a database that cannot have a PVS
+    /// cannot breach), worst (highest PVS %) first. Empty when the server has no ADR databases or
+    /// pvs_stats has not collected yet — the check treats both as nothing-to-evaluate, mirroring
+    /// the low-disk alert's empty-on-Azure convention. Threshold evaluation stays engine-side
+    /// (<see cref="AlertContextBuilders.GetBreachedPvsDatabases"/>).
+    /// </summary>
+    Task<List<PvsPressureInfo>> GetPvsPressureAsync(
+        string serverKey, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Currently-running Agent jobs whose duration is at least <paramref name="multiplier"/>x
     /// their historical average, worst (highest % of average) first, capped at 5, from the LATEST
     /// running_jobs snapshot only. Jobs averaging under 60 seconds are excluded (noise floor) —

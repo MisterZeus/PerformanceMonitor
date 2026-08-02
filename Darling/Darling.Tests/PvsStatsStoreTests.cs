@@ -35,13 +35,15 @@ public sealed class PvsStatsStoreTests
     private const int TestServerId = 991951;
 
     [Fact]
-    public void V47_IsTheNewestMigration_AndStorageVersionTracksIt()
+    public void V47_MigrationIdentity_AndStorageVersionTracksTheNewestRung()
     {
         var v47 = PgMigrations.Scripts.Single(m => m.Version == 47);
 
         Assert.Equal("pvs-stats", v47.Name);
-        Assert.Equal(47, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(47, StorageVersion.SchemaVersion);
+        /* V48 (#1984, the PVS-pressure alert knobs) followed this migration — the newest-rung pins
+           track it, the V47 identity pins below are unchanged. */
+        Assert.Equal(48, PgMigrations.Scripts[^1].Version);
+        Assert.Equal(48, StorageVersion.SchemaVersion);
 
         /* collect.-qualified like V44 and V34, and idempotent so a re-run is a no-op. */
         Assert.Contains("CREATE TABLE IF NOT EXISTS collect.pvs_stats (", v47.Sql, StringComparison.Ordinal);
@@ -79,11 +81,12 @@ public sealed class PvsStatsStoreTests
     {
         /* The trap a StorageVersion bump sets: the viewer's connect-time gate probes the store and
            compares the result against RequiredStoreSchemaVersion. A probe that cannot SEE the newest
-           migration reports every healthy store as skewed and refuses to open it — permanently. */
-        Assert.Equal(47, ViewerDataService.RequiredStoreSchemaVersion);
+           migration reports every healthy store as skewed and refuses to open it — permanently.
+           (48 since #1984's alert knobs; the full-sentinel pin lives in ViewerDataServiceTests.) */
+        Assert.Equal(48, ViewerDataService.RequiredStoreSchemaVersion);
         Assert.Contains("table_name = 'pvs_stats'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
-        /* Newest-first arm: pvs_stats present wins outright. */
+        /* The V47 arm: pvs_stats present (and nothing newer) maps to exactly 47. */
         Assert.Equal(47, ViewerDataService.MapProbedSchemaVersion(
             hasConfigControlPlane: true, hasAlertDeliveryOverride: true, hasAnalysisState: true,
             hasAlertTuningKnobs: true, hasDefaultTraceEvents: true, hasIndexObjectStatsLatestIndex: true,

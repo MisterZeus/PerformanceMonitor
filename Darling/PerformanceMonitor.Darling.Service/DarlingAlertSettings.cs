@@ -46,6 +46,7 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public bool LowDiskEnabled => _config.Alerts.LowDiskEnabled;
     public bool LongRunningJobEnabled => _config.Alerts.LongRunningJobEnabled;
     public bool FailedJobEnabled => _config.Alerts.FailedJobEnabled;
+    public bool PvsEnabled => _config.Alerts.PvsEnabled;
 
     public int CpuThresholdPercent => _config.Alerts.CpuThresholdPercent;
     public int BlockingCountThreshold => _config.Alerts.BlockingCountThreshold;
@@ -59,6 +60,11 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public int TempDbSpaceThresholdPercent => _config.Alerts.TempDbSpaceThresholdPercent;
     public int LowDiskThresholdPercent => Math.Clamp(_config.Alerts.LowDiskThresholdPercent, 0, 100);
     public int LowDiskThresholdGb => Math.Max(0, _config.Alerts.LowDiskThresholdGb);
+
+    /* #1984: percent clamped like low-disk's (0 = off); the GB floor merely floored at 0 — unlike
+       the percent it has no meaningful upper bound. */
+    public int PvsThresholdPercent => Math.Clamp(_config.Alerts.PvsThresholdPercent, 0, 100);
+    public int PvsFloorGb => Math.Max(0, _config.Alerts.PvsFloorGb);
     public int LongRunningJobMultiplier => _config.Alerts.LongRunningJobMultiplier;
     public int FailedJobLookbackMinutes => Math.Clamp(_config.Alerts.FailedJobLookbackMinutes, 1, 1440);
     public int CooldownMinutes => Math.Clamp(_config.Alerts.CooldownMinutes, 1, 120);
