@@ -407,6 +407,18 @@ public sealed class AlertsConfig
     [JsonPropertyName("lowDiskThresholdGb")]
     public int LowDiskThresholdGb { get; set; } = 5;
 
+    [JsonPropertyName("pvsEnabled")]
+    public bool PvsEnabled { get; set; } = true;
+
+    /// <summary>Alert when an ADR database's PVS reaches X% of its data files (0 disables the check) (#1984).</summary>
+    [JsonPropertyName("pvsThresholdPercent")]
+    public int PvsThresholdPercent { get; set; } = 40;
+
+    /// <summary>A PVS breach additionally requires at least X GB of PVS — an AND qualifier so small
+    /// databases at a high percent never page (0 removes the floor) (#1984).</summary>
+    [JsonPropertyName("pvsFloorGb")]
+    public int PvsFloorGb { get; set; } = 1;
+
     [JsonPropertyName("longRunningJobEnabled")]
     public bool LongRunningJobEnabled { get; set; } = true;
 

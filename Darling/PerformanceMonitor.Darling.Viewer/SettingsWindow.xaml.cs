@@ -692,6 +692,9 @@ public partial class SettingsWindow : Window
         AlertLowDiskCheckBox.IsChecked = r.LowDiskEnabled;
         AlertLowDiskThresholdPercentBox.Text = r.LowDiskThresholdPercent.ToString(CultureInfo.InvariantCulture);
         AlertLowDiskThresholdGbBox.Text = r.LowDiskThresholdGb.ToString(CultureInfo.InvariantCulture);
+        AlertPvsCheckBox.IsChecked = r.PvsEnabled;
+        AlertPvsThresholdPercentBox.Text = r.PvsThresholdPercent.ToString(CultureInfo.InvariantCulture);
+        AlertPvsFloorGbBox.Text = r.PvsFloorGb.ToString(CultureInfo.InvariantCulture);
         AlertLongRunningJobCheckBox.IsChecked = r.LongRunningJobEnabled;
         AlertLongRunningJobMultiplierBox.Text = r.LongRunningJobMultiplier.ToString(CultureInfo.InvariantCulture);
         AlertFailedJobCheckBox.IsChecked = r.FailedJobEnabled;
@@ -743,6 +746,7 @@ public partial class SettingsWindow : Window
             LongRunningQueryExcludeCdc = LrqExcludeCdcCheckBox.IsChecked == true,
             TempDbSpaceEnabled = AlertTempDbSpaceCheckBox.IsChecked == true,
             LowDiskEnabled = AlertLowDiskCheckBox.IsChecked == true,
+            PvsEnabled = AlertPvsCheckBox.IsChecked == true,
             LongRunningJobEnabled = AlertLongRunningJobCheckBox.IsChecked == true,
             FailedJobEnabled = AlertFailedJobCheckBox.IsChecked == true,
             AnalysisEnabled = AnalysisEnabledCheckBox.IsChecked == true,
@@ -777,6 +781,10 @@ public partial class SettingsWindow : Window
             row.LowDiskThresholdPercent = lowDiskPct;
         if (int.TryParse(AlertLowDiskThresholdGbBox.Text, out var lowDiskGb) && lowDiskGb >= 0)
             row.LowDiskThresholdGb = lowDiskGb;
+        if (int.TryParse(AlertPvsThresholdPercentBox.Text, out var pvsPct) && pvsPct is >= 0 and <= 100)
+            row.PvsThresholdPercent = pvsPct;
+        if (int.TryParse(AlertPvsFloorGbBox.Text, out var pvsFloor) && pvsFloor >= 0)
+            row.PvsFloorGb = pvsFloor;
         if (int.TryParse(AlertLongRunningJobMultiplierBox.Text, out var jobMult) && jobMult is >= 2 and <= 20)
             row.LongRunningJobMultiplier = jobMult;
         if (int.TryParse(AlertFailedJobLookbackBox.Text, out var failedJobLookback) && failedJobLookback is >= 1 and <= 1440)
@@ -839,6 +847,8 @@ public partial class SettingsWindow : Window
         AlertTempDbSpaceThresholdBox.Text = "80";
         AlertLowDiskThresholdPercentBox.Text = "10";
         AlertLowDiskThresholdGbBox.Text = "5";
+        AlertPvsThresholdPercentBox.Text = "40";
+        AlertPvsFloorGbBox.Text = "1";
         AlertLongRunningJobMultiplierBox.Text = "3";
         AlertFailedJobLookbackBox.Text = "60";
         AlertCooldownBox.Text = "5";

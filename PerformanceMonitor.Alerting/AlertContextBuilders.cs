@@ -313,6 +313,63 @@ public static class AlertContextBuilders
         return context;
     }
 
+    /* Returns the ADR databases whose PVS breaches BOTH gates (#1984) — percent of database at/over
+       the threshold AND size at/over the floor (a 0 floor removes that qualifier) — worst (highest
+       PVS %) first, so the alert names the most-consumed database. AND, not the volume pair's OR:
+       percent is the trigger and the floor only keeps small databases from paging anyone. A
+       thresholdPercent of 0 disables the check at the caller. */
+    public static List<PvsPressureInfo> GetBreachedPvsDatabases(List<PvsPressureInfo> databases, double thresholdPercent, double floorGb)
+    {
+        return databases
+            .Where(d => thresholdPercent > 0
+                && d.PvsPercent >= thresholdPercent
+                && (floorGb <= 0 || d.PvsGb >= floorGb))
+            .OrderByDescending(d => d.PvsPercent)
+            .ToList();
+    }
+
+    public static string FormatPvsThreshold(double thresholdPercent, double floorGb)
+    {
+        return floorGb > 0
+            ? $"{thresholdPercent}% of database and ≥ {floorGb} GB"
+            : $"{thresholdPercent}% of database";
+    }
+
+    public static AlertContext? BuildPvsPressureContext(string serverName, List<PvsPressureInfo> databases)
+    {
+        if (databases.Count == 0) return null;
+
+        var context = new AlertContext();
+        var shown = databases.GetRange(0, Math.Min(5, databases.Count));
+        foreach (var d in shown)
+        {
+            var fields = new List<(string, string)>
+            {
+                ("PVS Size (off-row)", $"{d.PvsGb:F1} GB"),
+                ("Database Data Size", $"{d.DatabaseDataSizeMb / 1024.0:F1} GB"),
+                ("Aborted Transactions", d.CurrentAbortedTransactionCount.ToString()),
+                /* MS's shape for "cleanup is ongoing": a cleaner start time with no end time. */
+                ("Aborted Cleanup", d.AbortedCleanupOngoing ? "Ongoing" : "Idle")
+            };
+            /* The input to MS's "old aborted transaction is preventing cleanup" read — shown as the
+               gap itself, never a verdict (the same reasoning as the FinOps grids). */
+            if (d.AbortedTransactionLag is long lag)
+            {
+                fields.Add(("Aborted/Active Lag", lag.ToString()));
+            }
+            context.Details.Add(new AlertDetailItem
+            {
+                Heading = $"{d.DatabaseName} — PVS {d.PvsPercent:F0}% of database",
+                Fields = fields
+            });
+        }
+
+        AlertIncidentRenderer.Apply(context, shown
+            .Select(d => AlertFingerprint.ForKey(serverName, AlertFingerprint.Database, d.DatabaseName, new[] { d.DatabaseName }))
+            .Where(i => i is not null).Select(i => i!).ToList());
+        return context;
+    }
+
     public static AlertContext? BuildTempDbSpaceContext(TempDbSpaceInfo tempDb)
     {
         var context = new AlertContext();

@@ -141,6 +141,13 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         return await Task.Run(() => _dataService.GetVolumeFreeSpaceAsync(serverId), cancellationToken);
     }
 
+    public async Task<List<PvsPressureInfo>> GetPvsPressureAsync(
+        string serverKey, CancellationToken cancellationToken = default)
+    {
+        var serverId = ParseServerKey(serverKey);
+        return await Task.Run(() => _dataService.GetPvsPressureAsync(serverId), cancellationToken);
+    }
+
     public async Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(
         string serverKey, CancellationToken cancellationToken = default)
     {

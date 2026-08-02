@@ -39,6 +39,7 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
     public bool LongRunningQueryEnabled => App.AlertLongRunningQueryEnabled;
     public bool TempDbSpaceEnabled => App.AlertTempDbSpaceEnabled;
     public bool LowDiskEnabled => App.AlertLowDiskEnabled;
+    public bool PvsEnabled => App.AlertPvsEnabled;
     public bool LongRunningJobEnabled => App.AlertLongRunningJobEnabled;
     public bool FailedJobEnabled => App.AlertFailedJobEnabled;
 
@@ -61,6 +62,8 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
     public int TempDbSpaceThresholdPercent => App.AlertTempDbSpaceThresholdPercent;
     public int LowDiskThresholdPercent => App.AlertLowDiskThresholdPercent;
     public int LowDiskThresholdGb => App.AlertLowDiskThresholdGb;
+    public int PvsThresholdPercent => App.AlertPvsThresholdPercent;
+    public int PvsFloorGb => App.AlertPvsFloorGb;
     public int LongRunningJobMultiplier => App.AlertLongRunningJobMultiplier;
     public int FailedJobLookbackMinutes => App.AlertFailedJobLookbackMinutes;
     public int CooldownMinutes => App.AlertCooldownMinutes;

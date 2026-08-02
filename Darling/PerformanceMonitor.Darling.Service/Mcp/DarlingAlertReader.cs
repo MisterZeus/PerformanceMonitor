@@ -133,7 +133,10 @@ LIMIT $2";
         int AgLagAlertSeconds,
         long AgRedoQueueAlertKb,
         int AgDisconnectRefireMinutes,
-        int BlockingWaitSecondsThreshold);
+        int BlockingWaitSecondsThreshold,
+        bool PvsEnabled,
+        int PvsThresholdPercent,
+        int PvsFloorGb);
 
     /// <summary>The single global alert-settings row (id=1) — the viewer's <c>AlertSettingsSelectSql</c>. The
     /// 43 columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>). This had
@@ -152,7 +155,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        long_running_query_exclude_misc_waits, long_running_query_exclude_cdc, notify_connection_changes,
        notify_connection_down_at_startup, connection_refire_minutes,
        notify_ag_health, ag_lag_alert_seconds, ag_redo_queue_alert_kb,
-       ag_disconnect_refire_minutes, blocking_wait_seconds_threshold
+       ag_disconnect_refire_minutes, blocking_wait_seconds_threshold, pvs_enabled, pvs_threshold_percent,
+       pvs_floor_gb
 FROM config_alert_settings
 WHERE id = 1";
 
@@ -179,10 +183,12 @@ WHERE id = 1";
             reader.GetString(27), reader.GetInt32(28), reader.GetInt32(29), reader.GetBoolean(30),
             reader.GetBoolean(31), reader.GetBoolean(32), reader.GetBoolean(33), reader.GetBoolean(34),
             reader.GetBoolean(35),
-            /* V33 (#1659) at 36-37, V35 (#991) at 38-40, V37 (#1696) at 41, V40 (#1839) at 42. */
+            /* V33 (#1659) at 36-37, V35 (#991) at 38-40, V37 (#1696) at 41, V40 (#1839) at 42,
+               V48 (#1984) at 43-45. */
             reader.GetBoolean(36), reader.GetInt32(37),
             reader.GetBoolean(38), reader.GetInt32(39), reader.GetInt64(40),
             reader.GetInt32(41),
-            reader.GetInt32(42));
+            reader.GetInt32(42),
+            reader.GetBoolean(43), reader.GetInt32(44), reader.GetInt32(45));
     }
 }

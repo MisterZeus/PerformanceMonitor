@@ -487,6 +487,66 @@ ORDER BY MIN(volume_free_mb) / MAX(volume_total_mb)";
         return items;
     }
 
+    /* ---------------- persistent version store (#1984) ---------------- */
+
+    /// <summary>
+    /// The newest pvs_stats snapshot's ADR databases, worst (highest PVS share) first — the
+    /// latest-collection convention <see cref="VolumeFreeSpaceSql"/> uses. ADR-OFF rows are
+    /// excluded here rather than engine-side: a database that cannot have a PVS cannot breach,
+    /// and every collected server carries system databases with ADR off.
+    /// </summary>
+    public const string PvsPressureSql = @"
+SELECT
+    database_name,
+    persistent_version_store_size_mb,
+    database_data_size_mb,
+    current_aborted_transaction_count,
+    oldest_active_transaction_id,
+    oldest_aborted_transaction_id,
+    aborted_version_cleaner_start_time,
+    aborted_version_cleaner_end_time
+FROM pvs_stats
+WHERE server_id = $1
+AND   collection_time = (
+    SELECT MAX(collection_time)
+    FROM pvs_stats
+    WHERE server_id = $1
+)
+AND   is_accelerated_database_recovery_on
+ORDER BY
+    CASE WHEN database_data_size_mb > 0
+         THEN persistent_version_store_size_mb / database_data_size_mb
+         ELSE 0 END DESC";
+
+    public async Task<List<PvsPressureInfo>> GetPvsPressureAsync(
+        string serverKey, CancellationToken cancellationToken = default)
+    {
+        var serverId = ParseServerKey(serverKey);
+
+        var items = new List<PvsPressureInfo>();
+        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        using var command = new NpgsqlCommand(PvsPressureSql, connection);
+        command.Parameters.AddWithValue(serverId);
+
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            items.Add(new PvsPressureInfo
+            {
+                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                PvsSizeMb = reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
+                DatabaseDataSizeMb = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
+                CurrentAbortedTransactionCount = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                OldestActiveTransactionId = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
+                OldestAbortedTransactionId = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+                /* MS's documented shape for "cleanup is ongoing": a start time with no end time. */
+                AbortedCleanupOngoing = !reader.IsDBNull(6) && reader.IsDBNull(7)
+            });
+        }
+
+        return items;
+    }
+
     /* ---------------- tempdb ---------------- */
 
     /// <summary>Lite's latest-tempdb-snapshot read verbatim (tempdb_stats table).</summary>

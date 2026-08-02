@@ -172,6 +172,7 @@ public sealed class DarlingMcpAlertTools
         },
         tempdb_space = new { enabled = s.TempDbSpaceEnabled, threshold_percent = s.TempDbSpaceThresholdPercent },
         low_disk = new { enabled = s.LowDiskEnabled, threshold_percent = s.LowDiskThresholdPercent, threshold_gb = s.LowDiskThresholdGb },
+        pvs = new { enabled = s.PvsEnabled, threshold_percent = s.PvsThresholdPercent, floor_gb = s.PvsFloorGb },
         long_running_job = new { enabled = s.LongRunningJobEnabled, multiplier = s.LongRunningJobMultiplier },
         failed_job = new { enabled = s.FailedJobEnabled, lookback_minutes = s.FailedJobLookbackMinutes },
         cooldown_minutes = s.CooldownMinutes,
@@ -616,6 +617,19 @@ public sealed class DarlingMcpAlertTools
                             case "threshold_percent": AddInt("low_disk_threshold_percent", n, "low_disk.threshold_percent", 0, 100); break;
                             case "threshold_gb": AddInt("low_disk_threshold_gb", n, "low_disk.threshold_gb", 0, int.MaxValue); break;
                             default: error = $"Unknown field 'low_disk.{k}'."; break;
+                        }
+                    });
+                    break;
+
+                case "pvs":
+                    Group(prop.Value, "pvs", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("pvs_enabled", n, "pvs.enabled"); break;
+                            case "threshold_percent": AddInt("pvs_threshold_percent", n, "pvs.threshold_percent", 0, 100); break;
+                            case "floor_gb": AddInt("pvs_floor_gb", n, "pvs.floor_gb", 0, int.MaxValue); break;
+                            default: error = $"Unknown field 'pvs.{k}'."; break;
                         }
                     });
                     break;

@@ -72,6 +72,7 @@ public interface IAlertEngineSettings
     bool LowDiskEnabled { get; }
     bool LongRunningJobEnabled { get; }
     bool FailedJobEnabled { get; }
+    bool PvsEnabled { get; }
 
     /* Thresholds. */
 
@@ -132,6 +133,24 @@ public interface IAlertEngineSettings
 
     /// <summary>Fire when a volume's free space is below this many GB (0 disables the GB dimension).</summary>
     int LowDiskThresholdGb { get; }
+
+    /// <summary>
+    /// Fire when an ADR database's persistent version store reaches this % of the database's data
+    /// files (#1984). Percent rather than absolute size because a shipped absolute guess is
+    /// workload-specific and would page half a fleet (the ag_redo_queue precedent) — this ratio is
+    /// the one MS's troubleshooting guide reads first ("close to 50% of the database size" =
+    /// large). 0 disables the check outright: percent is the alert's ONLY trigger, so unlike the
+    /// low-disk pair there is no second dimension to fall back on.
+    /// </summary>
+    int PvsThresholdPercent { get; }
+
+    /// <summary>
+    /// A breach additionally requires the PVS to be at least this many GB (#1984) — an AND
+    /// qualifier, NOT the low-disk pair's either-breach-fires OR: a 10 MB database at 60% is six
+    /// megabytes, and no one should be paged for six megabytes. 0 removes the floor (percent
+    /// alone decides).
+    /// </summary>
+    int PvsFloorGb { get; }
 
     /// <summary>Fire when a running job exceeds this multiple of its historical average duration.</summary>
     int LongRunningJobMultiplier { get; }

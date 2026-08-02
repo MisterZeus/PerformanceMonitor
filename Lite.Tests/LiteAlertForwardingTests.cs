@@ -86,6 +86,9 @@ public class LiteAlertForwardingTests : IDisposable
         App.AlertLowDiskEnabled = true;
         App.AlertLowDiskThresholdPercent = 10;
         App.AlertLowDiskThresholdGb = 5;
+        App.AlertPvsEnabled = true;
+        App.AlertPvsThresholdPercent = 40;
+        App.AlertPvsFloorGb = 1;
         App.AlertLongRunningJobEnabled = true;
         App.AlertLongRunningJobMultiplier = 3;
         App.AlertFailedJobEnabled = true;
@@ -133,6 +136,9 @@ public class LiteAlertForwardingTests : IDisposable
 
         public Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(TempDb);
+
+        public Task<List<PvsPressureInfo>> GetPvsPressureAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new List<PvsPressureInfo>());
 
         /* #1812: fresh by default so pre-existing scenarios keep their meaning. */
         public bool SnapshotIsStale { get; set; }
@@ -855,6 +861,7 @@ public class LiteAlertForwardingTests : IDisposable
         App.AlertLongRunningQueryEnabled = false; Assert.False(settings.LongRunningQueryEnabled);
         App.AlertTempDbSpaceEnabled = false; Assert.False(settings.TempDbSpaceEnabled);
         App.AlertLowDiskEnabled = false; Assert.False(settings.LowDiskEnabled);
+        App.AlertPvsEnabled = false; Assert.False(settings.PvsEnabled);
         App.AlertLongRunningJobEnabled = false; Assert.False(settings.LongRunningJobEnabled);
         App.AlertFailedJobEnabled = false; Assert.False(settings.FailedJobEnabled);
 
@@ -867,6 +874,8 @@ public class LiteAlertForwardingTests : IDisposable
         App.AlertTempDbSpaceThresholdPercent = 66; Assert.Equal(66, settings.TempDbSpaceThresholdPercent);
         App.AlertLowDiskThresholdPercent = 20; Assert.Equal(20, settings.LowDiskThresholdPercent);
         App.AlertLowDiskThresholdGb = 9; Assert.Equal(9, settings.LowDiskThresholdGb);
+        App.AlertPvsThresholdPercent = 55; Assert.Equal(55, settings.PvsThresholdPercent);
+        App.AlertPvsFloorGb = 3; Assert.Equal(3, settings.PvsFloorGb);
         App.AlertLongRunningJobMultiplier = 5; Assert.Equal(5, settings.LongRunningJobMultiplier);
         App.AlertFailedJobLookbackMinutes = 120; Assert.Equal(120, settings.FailedJobLookbackMinutes);
         App.AlertCooldownMinutes = 30; Assert.Equal(30, settings.CooldownMinutes);
