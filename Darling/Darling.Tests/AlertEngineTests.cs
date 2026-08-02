@@ -891,9 +891,10 @@ public sealed class AlertEngineTests
         /* No severity tier: MS documents no "critical" PVS level, and inventing one is the folklore
            the collector deliberately avoided. */
         Assert.Null(fired.Severity);
-        /* Both breaching databases ride in the context, worst first. */
-        Assert.Equal(2, fired.Context!.Details.Count);
-        Assert.StartsWith("shop", fired.Context.Details[0].Heading, StringComparison.Ordinal);
+        /* Both breaching databases ride in the context, worst first (the incident renderer appends
+           its own dedup items after them, so the pin is on the headings, not the count). */
+        Assert.StartsWith("shop", fired.Context!.Details[0].Heading, StringComparison.Ordinal);
+        Assert.Contains(fired.Context.Details, d => d.Heading.StartsWith("ledger", StringComparison.Ordinal));
 
         /* The SAME standing level does not re-fire after the cooldown — a large PVS stays allocated
            even after its cause clears (measured on a live rig), so without the PvsAlertGate a

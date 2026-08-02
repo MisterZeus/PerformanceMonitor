@@ -942,6 +942,9 @@ public partial class SettingsWindow : Window
         AlertTempDbSpaceThresholdBox.IsEnabled = enabled;
         AlertLowDiskCheckBox.IsEnabled = enabled;
         AlertLowDiskThresholdPercentBox.IsEnabled = enabled;
+        AlertPvsCheckBox.IsEnabled = enabled;
+        AlertPvsThresholdPercentBox.IsEnabled = enabled;
+        AlertPvsFloorGbBox.IsEnabled = enabled;
         AlertLowDiskThresholdGbBox.IsEnabled = enabled;
         AlertLongRunningJobCheckBox.IsEnabled = enabled;
         AlertLongRunningJobMultiplierBox.IsEnabled = enabled;
