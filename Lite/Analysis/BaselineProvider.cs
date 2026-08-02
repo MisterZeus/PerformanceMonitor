@@ -190,6 +190,11 @@ public class BaselineProvider
             var buckets = new Dictionary<(int, int), BaselineBucket>();
 
             using var reader = await cmd.ExecuteReaderAsync();
+            /* #1743: the robust-scaffold metrics return eight columns (…, median_val, mad_val)
+               and carry sentinel tier rows — every Lite arm except the two event-family ones,
+               which keep the six-column classical shape (detected by column count) and whose
+               buckets read Median=0/Mad=0, degrading the robust path to the classical one. */
+            var hasRobustColumns = reader.FieldCount >= 8;
             while (await reader.ReadAsync())
             {
                 var hour = Convert.ToInt32(reader.GetValue(0));
@@ -198,6 +203,8 @@ public class BaselineProvider
                 var stddev = reader.IsDBNull(3) ? 0.0 : Convert.ToDouble(reader.GetValue(3));
                 var count = reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4));
                 var distinctDays = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5));
+                var median = hasRobustColumns && !reader.IsDBNull(6) ? Convert.ToDouble(reader.GetValue(6)) : 0.0;
+                var mad = hasRobustColumns && !reader.IsDBNull(7) ? Convert.ToDouble(reader.GetValue(7)) : 0.0;
 
                 buckets[(hour, dow)] = new BaselineBucket
                 {
@@ -208,11 +215,16 @@ public class BaselineProvider
                     SampleCount = count,
                     DistinctDays = distinctDays,
                     AbsStdDevFloor = absStdDevFloor,
-                    // Every bucket here is a full (hour, day-of-week) bucket; the HourOnly/Flat
-                    // tiers are assigned only on the collapse/flat paths below. A sparse full
-                    // bucket is still Full, just low-sample. (Was a copy-paste of two identical
-                    // Full branches that mislabeled sparse buckets HourOnly in baseline_tier.)
-                    Tier = BaselineTier.Full
+                    Median = median,
+                    Mad = mad,
+                    /* Sentinel rows from the GROUPING SETS scaffold carry their tier in their key:
+                       (-1,-1) = the exact flat tier, (hour,-1) = the exact hour-only tier. A real
+                       (hour, dow) bucket is Full even when sparse — SelectBucket's thresholds
+                       decide whether it is USED, not what it IS. (Was a copy-paste of two identical
+                       Full branches that mislabeled sparse buckets HourOnly in baseline_tier.) */
+                    Tier = hour < 0 ? BaselineTier.Flat
+                         : dow < 0 ? BaselineTier.HourOnly
+                         : BaselineTier.Full
                 };
             }
 
@@ -224,6 +236,37 @@ public class BaselineProvider
             return null;
         }
     }
+
+    /// <summary>
+    /// #1743: the shared robust-tier scaffold appended to every metric's cleaned rowset. The arm
+    /// contributes a CTE chain ending in <c>clean(collection_time, v)</c> — its existing
+    /// window-bound/QUALIFY restart-exclusion semantics untouched — and this scaffold computes
+    /// mean, stddev, median, and MAD EXACTLY at all three tiers via GROUPING SETS: (hh,dw) = Full,
+    /// (hh) = the hour-only sentinel row (day_of_week -1), () = the flat sentinel row (-1,-1).
+    /// Medians cannot be pooled from per-bucket medians, which is why the tiers are computed in
+    /// SQL — see BaselineMath.SelectBucket's sentinel-key contract. DuckDB's native median()/mad()
+    /// make this single-pass (mad() is the RAW median absolute deviation, matching
+    /// BaselineBucket.Mad's unscaled contract — pinned by test against a hand-computed set);
+    /// Darling's Postgres twin spells the same tiers with percentile_cont and a second pass.
+    /// </summary>
+    private const string RobustTierScaffold = @"
+keyed AS (
+    SELECT v,
+           EXTRACT(HOUR FROM collection_time)::INT AS hh,
+           EXTRACT(DOW FROM collection_time)::INT AS dw,
+           collection_time::DATE AS d
+    FROM clean
+)
+SELECT COALESCE(hh, -1) AS hour_of_day,
+       COALESCE(dw, -1) AS day_of_week,
+       AVG(v) AS mean_val,
+       STDDEV_SAMP(v) AS stddev_val,
+       COUNT(*) AS sample_count,
+       COUNT(DISTINCT d) AS distinct_days,
+       median(v) AS median_val,
+       mad(v) AS mad_val
+FROM keyed
+GROUP BY GROUPING SETS ((hh, dw), (hh), ())";
 
     private static string? GetBaselineQuery(string metricName)
     {
@@ -237,36 +280,25 @@ public class BaselineProvider
         {
             // Point-in-time metric — no restart exclusion needed
             MetricNames.Cpu => @"
-SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
-       EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
-       AVG(sqlserver_cpu_utilization) AS mean_val,
-       STDDEV_SAMP(sqlserver_cpu_utilization) AS stddev_val,
-       COUNT(*) AS sample_count,
-       COUNT(DISTINCT collection_time::DATE) AS distinct_days
-FROM v_cpu_utilization_stats
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-GROUP BY hour_of_day, day_of_week",
+WITH clean AS (
+    SELECT collection_time, sqlserver_cpu_utilization AS v
+    FROM v_cpu_utilization_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+)," + RobustTierScaffold,
 
             // Cumulative counter — restart exclusion via subquery with QUALIFY.
             // Excludes samples where delta drops to 0 when prior sample was > 1000
             // (restart signature for cumulative counters).
             MetricNames.BatchRequests => @"
-SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
-       EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
-       AVG(delta_cntr_value) AS mean_val,
-       STDDEV_SAMP(delta_cntr_value) AS stddev_val,
-       COUNT(*) AS sample_count,
-       COUNT(DISTINCT collection_time::DATE) AS distinct_days
-FROM (
-    SELECT collection_time, delta_cntr_value
+WITH clean AS (
+    SELECT collection_time, delta_cntr_value AS v
     FROM v_perfmon_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   counter_name = 'Batch Requests/sec'
     AND   delta_cntr_value >= 0
     QUALIFY NOT (delta_cntr_value = 0
         AND COALESCE(LAG(delta_cntr_value) OVER (ORDER BY collection_time), 0) > 1000)
-)
-GROUP BY hour_of_day, day_of_week",
+)," + RobustTierScaffold,
 
             // Cumulative counter, multiple rows per collection (per wait type) —
             // aggregate to total wait ms per collection first, then QUALIFY for restart exclusion
@@ -280,15 +312,11 @@ WITH per_collection AS (
     GROUP BY collection_time
     QUALIFY NOT (total_wait_ms = 0
         AND COALESCE(LAG(total_wait_ms) OVER (ORDER BY collection_time), 0) > 10000)
-)
-SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
-       EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
-       AVG(total_wait_ms) AS mean_val,
-       STDDEV_SAMP(total_wait_ms) AS stddev_val,
-       COUNT(*) AS sample_count,
-       COUNT(DISTINCT collection_time::DATE) AS distinct_days
-FROM per_collection
-GROUP BY hour_of_day, day_of_week",
+),
+clean AS (
+    SELECT collection_time, total_wait_ms AS v
+    FROM per_collection
+)," + RobustTierScaffold,
 
             // Point-in-time, multiple rows per collection (per program_name) —
             // aggregate to total connections per collection first
@@ -299,15 +327,11 @@ WITH per_collection AS (
     FROM v_session_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     GROUP BY collection_time
-)
-SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
-       EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
-       AVG(total_connections) AS mean_val,
-       STDDEV_SAMP(total_connections) AS stddev_val,
-       COUNT(*) AS sample_count,
-       COUNT(DISTINCT collection_time::DATE) AS distinct_days
-FROM per_collection
-GROUP BY hour_of_day, day_of_week",
+),
+clean AS (
+    SELECT collection_time, total_connections AS v
+    FROM per_collection
+)," + RobustTierScaffold,
 
             // Cumulative (plan cache), multiple rows per collection (per query) —
             // use delta columns, aggregate total elapsed per collection, QUALIFY for restart exclusion
@@ -322,28 +346,23 @@ WITH per_collection AS (
     GROUP BY collection_time
     QUALIFY NOT (total_elapsed = 0
         AND COALESCE(LAG(total_elapsed) OVER (ORDER BY collection_time), 0) > 100000)
-)
-SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
-       EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
-       AVG(total_elapsed) AS mean_val,
-       STDDEV_SAMP(total_elapsed) AS stddev_val,
-       COUNT(*) AS sample_count,
-       COUNT(DISTINCT collection_time::DATE) AS distinct_days
-FROM per_collection
-GROUP BY hour_of_day, day_of_week",
+),
+clean AS (
+    SELECT collection_time, total_elapsed AS v
+    FROM per_collection
+)," + RobustTierScaffold,
 
             // Point-in-time metric — no restart exclusion needed
+            /* v stays NULLABLE here (a write-only row has no read latency): AVG/STDDEV always
+               ignored those rows and median()/mad() do the same, while COUNT(*) keeps counting
+               them — sample_count semantics unchanged from the pre-#1743 shape. */
             MetricNames.IoLatency => @"
-SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
-       EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
-       AVG(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS mean_val,
-       STDDEV_SAMP(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS stddev_val,
-       COUNT(*) AS sample_count,
-       COUNT(DISTINCT collection_time::DATE) AS distinct_days
-FROM v_file_io_stats
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-AND   (delta_reads > 0 OR delta_writes > 0)
-GROUP BY hour_of_day, day_of_week",
+WITH clean AS (
+    SELECT collection_time, delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0) AS v
+    FROM v_file_io_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   (delta_reads > 0 OR delta_writes > 0)
+)," + RobustTierScaffold,
 
             // Event-based — mean = events per day for this bucket, sample_count = distinct days observed.
             // No restart exclusion needed (event counts, not cumulative).
@@ -372,16 +391,13 @@ GROUP BY hour_of_day, day_of_week",
 
             // Point-in-time metric (memory pressure %) — no restart exclusion needed
             MetricNames.Memory => @"
-SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
-       EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
-       AVG(total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100) AS mean_val,
-       STDDEV_SAMP(total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100) AS stddev_val,
-       COUNT(*) AS sample_count,
-       COUNT(DISTINCT collection_time::DATE) AS distinct_days
-FROM v_memory_stats
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-AND   target_server_memory_mb > 0
-GROUP BY hour_of_day, day_of_week",
+WITH clean AS (
+    SELECT collection_time,
+           total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100 AS v
+    FROM v_memory_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   target_server_memory_mb > 0
+)," + RobustTierScaffold,
 
             // ── Chart-unit baselines (for UI bands — units match what the chart displays) ──
 
@@ -403,15 +419,11 @@ with_rate AS (
     WHERE interval_sec IS NOT NULL
     QUALIFY NOT (ms_per_sec = 0
         AND COALESCE(LAG(ms_per_sec) OVER (ORDER BY collection_time), 0) > 100)
-)
-SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
-       EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
-       AVG(ms_per_sec) AS mean_val,
-       STDDEV_SAMP(ms_per_sec) AS stddev_val,
-       COUNT(*) AS sample_count,
-       COUNT(DISTINCT collection_time::DATE) AS distinct_days
-FROM with_rate
-GROUP BY hour_of_day, day_of_week",
+),
+clean AS (
+    SELECT collection_time, ms_per_sec AS v
+    FROM with_rate
+)," + RobustTierScaffold,
 
             // Blocking events per minute (chart shows event bars bucketed by minute)
             MetricNames.BlockingPerMinute => @"
@@ -421,15 +433,11 @@ WITH per_minute AS (
     FROM v_blocked_process_reports
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     GROUP BY minute_bucket
-)
-SELECT EXTRACT(HOUR FROM minute_bucket)::INT AS hour_of_day,
-       EXTRACT(DOW FROM minute_bucket)::INT AS day_of_week,
-       AVG(event_count) AS mean_val,
-       STDDEV_SAMP(event_count) AS stddev_val,
-       COUNT(*) AS sample_count,
-       COUNT(DISTINCT minute_bucket::DATE) AS distinct_days
-FROM per_minute
-GROUP BY hour_of_day, day_of_week",
+),
+clean AS (
+    SELECT minute_bucket AS collection_time, event_count AS v
+    FROM per_minute
+)," + RobustTierScaffold,
 
             _ => null
         };

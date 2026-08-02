@@ -62,6 +62,12 @@ public class AnomalyDetector
         metadata["baseline_hour"] = baseline.HourOfDay;
         metadata["baseline_dow"] = baseline.DayOfWeek;
         metadata["baseline_tier"] = (double)baseline.Tier;
+        /* #1743: the robust frame the modified-z was judged in (zeros for an event-family metric
+           still on the classical path), and the honest confidence the FactScorer multiplies by —
+           derived from tier + sample density, no longer a hardcoded 1.0. */
+        metadata["baseline_median"] = baseline.Median;
+        metadata["baseline_mad"] = baseline.Mad;
+        metadata["confidence"] = baseline.Confidence;
     }
 
     /// <summary>
@@ -291,8 +297,8 @@ AND   collection_time >= $2 AND collection_time < $3";
             if (windowSamples == 0) return;
 
             var decision = AnomalyGate.EvaluateZScore(
-                baseline.Mean, effectiveStdDev, baseline.IsTrustworthy, peakCpu,
-                GetDeviationThreshold(MetricNames.Cpu), CpuFloorPct, CpuFallbackPct, SigmaDisplayCap);
+                baseline, peakCpu,
+                GetDeviationThreshold(MetricNames.Cpu), ModifiedZThresholdFor(MetricNames.Cpu), CpuFloorPct, CpuFallbackPct, SigmaDisplayCap);
             if (!decision.Fire) return;
 
             var metadata = new Dictionary<string, double>
@@ -306,7 +312,6 @@ AND   collection_time >= $2 AND collection_time < $3";
                 ["fallback_exceedance"] = decision.FallbackExceedance,
                 ["baseline_samples"] = baseline.SampleCount,
                 ["window_samples"] = windowSamples,
-                ["confidence"] = 1.0,
                 ["peak_time_ticks"] = peakTime?.Ticks ?? 0
             };
             AddBaselineContext(metadata, baseline);
@@ -381,22 +386,37 @@ FROM per_collection";
 
             if (collectionCount == 0) return; // no rated collection in the window
 
-            // Trustworthy baseline → honest per-second ratio; else fall back to the absolute peak-rate
-            // bar (NOT silence) so a genuinely heavy profile still surfaces on a young store (is_new).
+            /* #1743: the modified z-score replaces the ratio as the trusted-baseline trigger —
+               fleet-measured, it strictly CONTAINS the ratio's catches at every cutoff (nothing the
+               ratio fired on scored under it), and it sees the masked-surge class the ratio cannot:
+               a burst-scarred baseline's inflated mean pulled real sustained deviations under 4x
+               (worst prod server: stddev 67.9x its robust sigma). The magnitude floor stays AND-ed
+               exactly as the ratio path had it — the wait family is heavy-tailed by nature, and the
+               floor is what was measured WITH the 5.0 cutoff. The ratio still rides the metadata
+               for display and for scoring pre-#1743 facts; a bucket without robust stats keeps the
+               classical ratio trigger; an untrustworthy baseline keeps the absolute peak-rate bar
+               (NOT silence) so a genuinely heavy profile still surfaces on a young store (is_new). */
             bool isNew;
             double ratio;
-            if (baseline.IsTrustworthy && baseline.Mean > 0)
+            var modifiedZ = BaselineMath.ModifiedZScore(baseline, peakRate);
+            if (baseline.IsTrustworthy && baseline.EffectiveRobustSigma > 0)
+            {
+                isNew = false;
+                ratio = baseline.Mean > 0 ? peakRate / baseline.Mean : 0;
+                if (modifiedZ < HeavyTailModifiedZThreshold || peakRate < WaitProfileFallbackMsPerSec) return;
+            }
+            else if (baseline.IsTrustworthy && baseline.Mean > 0)
             {
                 isNew = false;
                 ratio = peakRate / baseline.Mean;
+                if (ratio < DefaultRatioThreshold) return;
             }
             else
             {
                 isNew = true;
                 ratio = peakRate >= WaitProfileFallbackMsPerSec ? NoBaselineRatio : 0;
+                if (ratio < DefaultRatioThreshold) return;
             }
-
-            if (ratio < DefaultRatioThreshold) return;
 
             var metadata = new Dictionary<string, double>
             {
@@ -404,6 +424,7 @@ FROM per_collection";
                 ["baseline_mean"] = baseline.Mean,
                 ["total_wait_ms"] = totalWaitMs,
                 ["ratio"] = ratio,
+                ["modified_z"] = modifiedZ,
                 ["is_new"] = isNew ? 1 : 0
             };
             AddBaselineContext(metadata, baseline);
@@ -600,8 +621,8 @@ AND   (delta_reads > 0 OR delta_writes > 0)";
 
             // Read latency anomaly
             var readDecision = AnomalyGate.EvaluateZScore(
-                baseline.Mean, effectiveStdDev, baseline.IsTrustworthy, currentReadLat,
-                ioThreshold, ReadLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap);
+                baseline, currentReadLat,
+                ioThreshold, ModifiedZThresholdFor(MetricNames.IoLatency), ReadLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap);
             if (readDecision.Fire)
             {
                 var metadata = new Dictionary<string, double>
@@ -628,8 +649,8 @@ AND   (delta_reads > 0 OR delta_writes > 0)";
 
             // Write latency anomaly
             var writeDecision = AnomalyGate.EvaluateZScore(
-                baseline.Mean, effectiveStdDev, baseline.IsTrustworthy, currentWriteLat,
-                ioThreshold, WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap);
+                baseline, currentWriteLat,
+                ioThreshold, ModifiedZThresholdFor(MetricNames.IoLatency), WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap);
             if (writeDecision.Fire)
             {
                 var metadata = new Dictionary<string, double>
@@ -701,8 +722,8 @@ AND   delta_cntr_value >= 0";
             if (windowSamples == 0) return;
 
             var decision = AnomalyGate.EvaluateZScore(
-                baseline.Mean, effectiveStdDev, baseline.IsTrustworthy, peakBatch,
-                GetDeviationThreshold(MetricNames.BatchRequests), BatchRequestFloor, BatchRequestFallback, SigmaDisplayCap);
+                baseline, peakBatch,
+                GetDeviationThreshold(MetricNames.BatchRequests), ModifiedZThresholdFor(MetricNames.BatchRequests), BatchRequestFloor, BatchRequestFallback, SigmaDisplayCap);
             if (!decision.Fire) return;
 
             var metadata = new Dictionary<string, double>
@@ -779,8 +800,8 @@ FROM per_collection";
             if (windowSamples == 0) return;
 
             var decision = AnomalyGate.EvaluateZScore(
-                baseline.Mean, effectiveStdDev, baseline.IsTrustworthy, peakConnections,
-                GetDeviationThreshold(MetricNames.SessionCount), SessionCountFloor, SessionCountFallback, SigmaDisplayCap);
+                baseline, peakConnections,
+                GetDeviationThreshold(MetricNames.SessionCount), ModifiedZThresholdFor(MetricNames.SessionCount), SessionCountFloor, SessionCountFallback, SigmaDisplayCap);
             if (!decision.Fire) return;
 
             var metadata = new Dictionary<string, double>
@@ -860,8 +881,8 @@ FROM per_collection";
             if (windowSamples == 0) return;
 
             var decision = AnomalyGate.EvaluateZScore(
-                baseline.Mean, effectiveStdDev, baseline.IsTrustworthy, peakElapsed,
-                GetDeviationThreshold(MetricNames.QueryDuration), QueryDurationFloorUs, QueryDurationFallbackUs, SigmaDisplayCap);
+                baseline, peakElapsed,
+                GetDeviationThreshold(MetricNames.QueryDuration), ModifiedZThresholdFor(MetricNames.QueryDuration), QueryDurationFloorUs, QueryDurationFallbackUs, SigmaDisplayCap);
             if (!decision.Fire) return;
 
             var metadata = new Dictionary<string, double>
@@ -935,8 +956,8 @@ AND   target_server_memory_mb > 0";
             if (windowSamples == 0) return;
 
             var decision = AnomalyGate.EvaluateZScore(
-                baseline.Mean, effectiveStdDev, baseline.IsTrustworthy, peakPressure,
-                GetDeviationThreshold(MetricNames.Memory), MemoryPressureFloorPct, MemoryPressureFallbackPct, SigmaDisplayCap);
+                baseline, peakPressure,
+                GetDeviationThreshold(MetricNames.Memory), ModifiedZThresholdFor(MetricNames.Memory), MemoryPressureFloorPct, MemoryPressureFallbackPct, SigmaDisplayCap);
             if (!decision.Fire) return;
 
             var metadata = new Dictionary<string, double>
