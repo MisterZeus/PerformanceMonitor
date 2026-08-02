@@ -44,6 +44,20 @@ public static class AnomalyThresholds
     public const double HeavyTailModifiedZThreshold = 5.0;
 
     /// <summary>
+    /// #1743: the modified-z cutoff for a metric — 5.0 for the heavy-tailed families whose medians
+    /// are small by nature (waits in both grains, query duration: fleet-measured skew up to 67.9x
+    /// stddev-vs-robust-sigma on waits, 3.13x mean-over-median on query duration), the standard 3.5
+    /// for everything else. Shared here so Lite and Darling cannot calibrate apart.
+    /// </summary>
+    public static double ModifiedZThresholdFor(string metricName) => metricName switch
+    {
+        MetricNames.WaitStats => HeavyTailModifiedZThreshold,
+        MetricNames.WaitMsPerSec => HeavyTailModifiedZThreshold,
+        MetricNames.QueryDuration => HeavyTailModifiedZThreshold,
+        _ => ModifiedZThreshold,
+    };
+
+    /// <summary>
     /// Default ratio threshold for the wait-profile detector (peak window all-types ms/sec ÷ baseline
     /// mean). On the HONEST per-second scale now, so far below the old 5.0 that assumed a ~240x-inflated
     /// input; matches the FactScorer WaitProfileRatioFloor. CALIBRATE ON THE SQL2025/HAMMERDB BOX.

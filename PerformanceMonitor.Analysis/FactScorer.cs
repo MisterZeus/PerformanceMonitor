@@ -650,6 +650,21 @@ public class FactScorer
         // CALIBRATE ON THE SQL2025/HAMMERDB BOX.
         if (fact.Key.StartsWith("ANOMALY_WAIT_PROFILE", StringComparison.OrdinalIgnoreCase))
         {
+            /* #1743: detectors with robust baselines fire this fact on the MODIFIED z-score, and
+               carry it as modified_z — grade off the same statistic, or the masked-surge class the
+               robust trigger exists to catch (real sustained deviations whose ratio sits under 4x
+               against a burst-inflated mean) would be zeroed right after being caught. Ramp mirrors
+               the ratio's shape: 0.5 at the 5.0 firing cutoff, saturating to 1.0 at 15σ. A fact
+               without modified_z (pre-#1743 detector, robust-less bucket, or the is_new fallback
+               whose sentinel ratio must keep scoring) keeps the ratio ramp unchanged. */
+            var modifiedZ = fact.Metadata.GetValueOrDefault("modified_z");
+            var isNewProfile = fact.Metadata.GetValueOrDefault("is_new") > 0;
+            if (modifiedZ > 0 && !isNewProfile)
+            {
+                if (modifiedZ < Baselines.AnomalyThresholds.HeavyTailModifiedZThreshold) return 0.0;
+                return 0.5 + 0.5 * Math.Min(
+                    (modifiedZ - Baselines.AnomalyThresholds.HeavyTailModifiedZThreshold) / 10.0, 1.0);
+            }
             var ratio = fact.Metadata.GetValueOrDefault("ratio");
             if (ratio < WaitProfileRatioFloor) return 0.0;
             return 0.5 + 0.5 * Math.Min((ratio - WaitProfileRatioFloor) / WaitProfileRatioSpan, 1.0);

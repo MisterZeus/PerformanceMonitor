@@ -7,6 +7,7 @@
  */
 
 using System;
+using PerformanceMonitor.Analysis.Baselines;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -76,6 +77,53 @@ public static class AnomalyGate
 
         // Untrustworthy baseline → absolute-threshold fallback (NOT silence). The exceedance (>= 1.0 on a
         // fire) is carried so the scorer can grade it off the absolute bar instead of the untrustworthy z.
+        return new ZDecision(
+            peak >= absoluteFallbackBar,
+            sigma,
+            LowQualityBaseline: true,
+            FallbackExceedance: absoluteFallbackBar > 0 ? peak / absoluteFallbackBar : 0.0);
+    }
+
+    /// <summary>
+    /// #1743: the robust-first gate. When the bucket carries robust statistics (a provider that
+    /// computes exact per-tier median/MAD), the deviation is the MODIFIED z-score against
+    /// median/EffectiveRobustSigma at <paramref name="modifiedZThreshold"/> — fleet-measured to
+    /// catch sustained deviations a burst-inflated stddev masks (a busy tenant's real 2-3x evening
+    /// surge read 1.4-2.0 classical sigmas and 3.5-4.7 robust ones), while the SAME magnitude
+    /// floors, trust gate, and absolute-fallback interplay apply unchanged — the floors are what
+    /// keep a MAD-collapsed quiet metric sane, and the trust/fallback complementarity must never
+    /// AND into blindness (see class remarks). A bucket WITHOUT robust statistics (the rollup-bound
+    /// metrics, a pre-#1743 cached map, the pooled-synthesis fallback tiers) reports
+    /// EffectiveRobustSigma 0 and degrades to the classical gate at
+    /// <paramref name="classicalDeviationThreshold"/> — never silence, never a misfire against
+    /// zeroed robust fields.
+    /// </summary>
+    public static ZDecision EvaluateZScore(
+        BaselineBucket baseline,
+        double peak,
+        double classicalDeviationThreshold,
+        double modifiedZThreshold,
+        double magnitudeFloor,
+        double absoluteFallbackBar,
+        double sigmaCap)
+    {
+        var robustSigma = baseline.EffectiveRobustSigma;
+        if (robustSigma <= 0)
+        {
+            return EvaluateZScore(
+                baseline.Mean, baseline.EffectiveStdDev, baseline.IsTrustworthy, peak,
+                classicalDeviationThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap);
+        }
+
+        var sigma = Math.Min((peak - baseline.Median) / robustSigma, sigmaCap);
+
+        if (baseline.IsTrustworthy)
+        {
+            var deviation = (peak - baseline.Median) / robustSigma;
+            var fire = deviation >= modifiedZThreshold && peak >= magnitudeFloor;
+            return new ZDecision(fire, sigma, LowQualityBaseline: false, FallbackExceedance: 0.0);
+        }
+
         return new ZDecision(
             peak >= absoluteFallbackBar,
             sigma,
