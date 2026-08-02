@@ -154,7 +154,7 @@ public sealed class DarlingCollectorRunnerTests
     /// its text renders, but <c>dm_exec_text_query_plan</c> renders NULL — so a box whose recent
     /// user-database activity was all once-executed ad-hoc text produced rows with no capturable plan,
     /// deterministically. Second, the assertions read the inline <c>query_plan_xml</c> column, which
-    /// [#1767]'s payload-dimension diversion writes NULL BY DESIGN (content goes to the digest-keyed
+    /// #1767's payload-dimension diversion writes NULL BY DESIGN (content goes to the digest-keyed
     /// <c>query_plan_dim</c>; every product reader coalesces inline with the dim join) — so even a row
     /// with a captured plan counted as "no plan stored". The test now seeds its own scratch database,
     /// runs a marker query TWICE with byte-identical text (the second execution replaces the stub with a
@@ -430,7 +430,7 @@ END;";
     }
 
     /// <summary>
-    /// Counts collected rows whose text is the seeded marker's. Reads through [#1767]'s payload
+    /// Counts collected rows whose text is the seeded marker's. Reads through #1767's payload
     /// diversion: new rows store text in <c>query_text_dim</c> keyed by <c>query_text_digest</c> and
     /// leave the inline column NULL, and every reader coalesces the two — asserting on the inline
     /// column alone is how this test failed deterministically after that change shipped (#1988).
