@@ -6,6 +6,9 @@ updates:
   # .NET packages across the solution (PerformanceMonitor.sln discovers all projects).
   - package-ecosystem: "nuget"
     directory: "/"
+    # All work lands on dev; the check-branches guard rejects any PR to main that is not
+    # dev itself, so Dependabot PRs against main (the previous default) could never merge.
+    target-branch: "dev"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -15,10 +18,19 @@ updates:
       nuget:
         patterns:
           - "*"
+    ignore:
+      # The MCP SDK 2.x major changes runtime behavior on both MCP hosts (stateless-by-default
+      # HTTP, discovery-first negotiation, deprecated Roots/Sampling/Logging APIs) and must move
+      # in every referencing project + lockfile at once — a grouped auto-bump half-applied it and
+      # poisoned the whole group (#1822). Majors are taken deliberately via #1990; minors/patches
+      # keep flowing. Remove this once #1990 lands.
+      - dependency-name: "ModelContextProtocol*"
+        update-types: ["version-update:semver-major"]
 
   # GitHub Actions used by the workflows in .github/workflows.
   - package-ecosystem: "github-actions"
     directory: "/"
+    target-branch: "dev"
     schedule:
       interval: "weekly"
       day: "monday"
