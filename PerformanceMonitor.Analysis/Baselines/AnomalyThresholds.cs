@@ -58,6 +58,17 @@ public static class AnomalyThresholds
     };
 
     /// <summary>
+    /// #1743: the modified-z cutoff SCALED by the operator's per-metric classical threshold, so the
+    /// SetDeviationThreshold knob keeps its meaning on the robust path — at the shipped 2.0 default
+    /// the factor is 1 and the calibrated cutoffs apply unchanged; an operator who cranks a
+    /// metric's threshold N-fold scales its robust cutoff N-fold too (and a lowered one lowers it,
+    /// the same proportional semantics the classical gate always had). Without this the knob went
+    /// silently dead the moment a metric gained robust statistics.
+    /// </summary>
+    public static double ModifiedZThresholdFor(string metricName, double configuredDeviationThreshold) =>
+        ModifiedZThresholdFor(metricName) * configuredDeviationThreshold / DefaultDeviationThreshold;
+
+    /// <summary>
     /// Default ratio threshold for the wait-profile detector (peak window all-types ms/sec ÷ baseline
     /// mean). On the HONEST per-second scale now, so far below the old 5.0 that assumed a ~240x-inflated
     /// input; matches the FactScorer WaitProfileRatioFloor. CALIBRATE ON THE SQL2025/HAMMERDB BOX.
