@@ -637,8 +637,15 @@ public class FactScorer
                 return Math.Max(0.5, (0.5 + 0.5 * Math.Min(over / LowQualityFallbackSpan, 1.0)) * confidence);
             }
 
-            if (deviation < 2.0) return 0.0;
-            var base_score = 0.5 + 0.5 * Math.Min((deviation - 2.0) / 2.0, 1.0);
+            /* #1743: the ramp anchors on the cutoff the fact actually FIRED at (carried by the
+               detector as fire_threshold), saturating at 2x the anchor — exactly the old 2σ→4σ
+               shape for classical fires and for pre-#1743 facts (default 2.0), and the same
+               proportional shape for robust fires at 3.5 or 5.0. Without the anchor, a family
+               firing at 5σ scores saturated-flat 1.0 forever against a ramp built for 2σ fires. */
+            var anchor = fact.Metadata.GetValueOrDefault("fire_threshold", 2.0);
+            if (anchor <= 0) anchor = 2.0;
+            if (deviation < anchor) return 0.0;
+            var base_score = 0.5 + 0.5 * Math.Min((deviation - anchor) / anchor, 1.0);
             return base_score * confidence;
         }
 

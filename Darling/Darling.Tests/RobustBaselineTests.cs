@@ -339,6 +339,45 @@ public sealed class RobustBaselineTests
         Assert.True(Score(isNew) > 0.5);
     }
 
+    [Fact]
+    public void GenericAnomalyScoring_AnchorsTheRampOnTheFiringThreshold()
+    {
+        /* Review-caught on this PR: the generic deviation ramp was still 2σ→4σ while robust fires
+           start at 3.5σ (or 5.0σ for query duration — past the old saturation point, so every fire
+           scored a flat 1.0 with zero differentiation). The ramp now anchors on fire_threshold and
+           saturates at 2x the anchor — byte-identical to the old shape for classical and pre-#1743
+           facts, proportional for robust fires. */
+        var atCutoff = new Fact
+        {
+            Source = "anomaly",
+            Key = "ANOMALY_QUERY_DURATION",
+            Value = 1,
+            Metadata = new Dictionary<string, double>
+                { ["deviation_sigma"] = 5.0, ["fire_threshold"] = 5.0, ["confidence"] = 1.0 },
+        };
+        Assert.Equal(0.5, Score(atCutoff), precision: 3);
+
+        var saturated = new Fact
+        {
+            Source = "anomaly",
+            Key = "ANOMALY_QUERY_DURATION",
+            Value = 1,
+            Metadata = new Dictionary<string, double>
+                { ["deviation_sigma"] = 10.0, ["fire_threshold"] = 5.0, ["confidence"] = 1.0 },
+        };
+        Assert.Equal(1.0, Score(saturated), precision: 3);
+
+        /* A pre-#1743 fact carries no fire_threshold: the old 2σ→4σ ramp verbatim. */
+        var legacy = new Fact
+        {
+            Source = "anomaly",
+            Key = "ANOMALY_CPU_SPIKE",
+            Value = 1,
+            Metadata = new Dictionary<string, double> { ["deviation_sigma"] = 3.0, ["confidence"] = 1.0 },
+        };
+        Assert.Equal(0.75, Score(legacy), precision: 3);
+    }
+
     /* ── the heavy-tail threshold routing ── */
 
     [Fact]

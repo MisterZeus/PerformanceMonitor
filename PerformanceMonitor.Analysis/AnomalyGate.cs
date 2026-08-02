@@ -41,7 +41,11 @@ public static class AnomalyGate
     /// path (0 otherwise). On that path the stored <c>Sigma</c> is the real (small) z, which the scorer's
     /// 2σ gate would zero out; the scorer grades the fire off THIS exceedance instead so the finding
     /// still surfaces. See <c>FactScorer.ScoreAnomalyFact</c>.</param>
-    public readonly record struct ZDecision(bool Fire, double Sigma, bool LowQualityBaseline, double FallbackExceedance);
+    /// <param name="ThresholdUsed">#1743: the firing cutoff this decision was judged against —
+    /// the (knob-scaled) classical threshold on the classical path, the (knob-scaled) modified-z
+    /// cutoff on the robust path. The scorer anchors its severity ramp here so a family that fires
+    /// at 5σ doesn't score saturated-flat against a ramp built for 2σ fires.</param>
+    public readonly record struct ZDecision(bool Fire, double Sigma, bool LowQualityBaseline, double FallbackExceedance, double ThresholdUsed = 0);
 
     /// <summary>
     /// Decides whether a z-score anomaly fires. Callers pass the baseline's <paramref name="mean"/>,
@@ -72,7 +76,7 @@ public static class AnomalyGate
             // effectiveStdDev > 0 is guaranteed when trustworthy (IsTrustworthy requires it).
             var deviation = (peak - mean) / effectiveStdDev;
             var fire = deviation >= deviationThreshold && peak >= magnitudeFloor;
-            return new ZDecision(fire, Math.Min(deviation, sigmaCap), LowQualityBaseline: false, FallbackExceedance: 0.0);
+            return new ZDecision(fire, Math.Min(deviation, sigmaCap), LowQualityBaseline: false, FallbackExceedance: 0.0, ThresholdUsed: deviationThreshold);
         }
 
         // Untrustworthy baseline → absolute-threshold fallback (NOT silence). The exceedance (>= 1.0 on a
@@ -81,7 +85,8 @@ public static class AnomalyGate
             peak >= absoluteFallbackBar,
             sigma,
             LowQualityBaseline: true,
-            FallbackExceedance: absoluteFallbackBar > 0 ? peak / absoluteFallbackBar : 0.0);
+            FallbackExceedance: absoluteFallbackBar > 0 ? peak / absoluteFallbackBar : 0.0,
+            ThresholdUsed: deviationThreshold);
     }
 
     /// <summary>
@@ -121,13 +126,14 @@ public static class AnomalyGate
         {
             var deviation = (peak - baseline.Median) / robustSigma;
             var fire = deviation >= modifiedZThreshold && peak >= magnitudeFloor;
-            return new ZDecision(fire, sigma, LowQualityBaseline: false, FallbackExceedance: 0.0);
+            return new ZDecision(fire, sigma, LowQualityBaseline: false, FallbackExceedance: 0.0, ThresholdUsed: modifiedZThreshold);
         }
 
         return new ZDecision(
             peak >= absoluteFallbackBar,
             sigma,
             LowQualityBaseline: true,
-            FallbackExceedance: absoluteFallbackBar > 0 ? peak / absoluteFallbackBar : 0.0);
+            FallbackExceedance: absoluteFallbackBar > 0 ? peak / absoluteFallbackBar : 0.0,
+            ThresholdUsed: modifiedZThreshold);
     }
 }
