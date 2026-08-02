@@ -112,13 +112,19 @@ public sealed class DarlingAnomalyBaselineTests
         Assert.Contains("delta_stall_read_ms::DOUBLE PRECISION", TimescaleSupport.CreateFileIoBaselineSql, StringComparison.Ordinal);
         Assert.DoesNotContain("delta_stall_read_ms * 1.0", TimescaleSupport.CreateFileIoBaselineSql, StringComparison.Ordinal);
 
+        /* #1743 follow-up moved the arm off the rollup and onto the raw hypertable (the rollup
+           cannot produce a median) — the cast pin moves WITH it: the ratio must still be computed
+           in float arithmetic at the source. The old SUM(row_count) pin's SEMANTIC survives as the
+           nullable-v design: the arm's WHERE keeps write-only rows (delta_reads > 0 OR
+           delta_writes > 0) and must NOT filter the NULL ratios out — the scaffold's COUNT(*)
+           counts them (the row_count behavior) while AVG/STDDEV/median/mad ignore them (the
+           ratio_count behavior), exactly the retired rollup's two-count distinction. */
         var sql = PgBaselineProvider.GetBaselineQuery(MetricNames.IoLatency)!;
-        Assert.Contains("file_io_baseline", sql, StringComparison.Ordinal);
-        Assert.Contains("SQRT(", sql, StringComparison.Ordinal);
-        /* sample_count must come from row_count, NOT ratio_count: the raw path counted rows whose ratio was
-           NULL (writes but no reads pass the filter and average to nothing), so counting only the non-null
-           ratios would silently under-report the sample size the baseline gate reads. */
-        Assert.Contains("SUM(row_count) AS sample_count", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM file_io_stats", sql, StringComparison.Ordinal);
+        Assert.Contains("delta_stall_read_ms::DOUBLE PRECISION / NULLIF(delta_reads, 0)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("delta_stall_read_ms * 1.0", sql, StringComparison.Ordinal);
+        Assert.Contains("(delta_reads > 0 OR delta_writes > 0)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("v IS NOT NULL", sql, StringComparison.Ordinal);
     }
 
     /* ---------------- ungated: method-surface pins vs Lite ---------------- */
