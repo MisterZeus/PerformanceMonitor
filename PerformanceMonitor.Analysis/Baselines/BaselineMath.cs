@@ -37,6 +37,14 @@ public static class BaselineMath
     /// Flat. Hysteresis keeps a Full bucket in the 10-14 sample band (RestoreThreshold vs
     /// CollapseThreshold) instead of flapping to hour-only. Pure over the precomputed bucket map,
     /// so it lives here rather than in either store provider.
+    /// <para>#1743: providers that compute exact per-tier robust statistics (GROUPING SETS) store
+    /// the hour-only tier under the sentinel key (hour, -1) and the flat tier under (-1, -1) in the
+    /// SAME map. When a sentinel entry exists it is AUTHORITATIVE over the pooled synthesis below —
+    /// medians cannot be pooled from per-bucket medians, so a synthesized tier would carry
+    /// zeroed robust fields and silently drop the robust path. The pooled fallback remains for
+    /// maps without sentinels (a provider not yet migrated, or a cached pre-#1743 map): its
+    /// buckets read Median=0/Mad=0, which EffectiveRobustSigma reports as zero-activity, and the
+    /// detector's robust path degrades to the classical one rather than misfiring.</para>
     /// </summary>
     public static BaselineBucket SelectBucket(
         IReadOnlyDictionary<(int HourOfDay, int DayOfWeek), BaselineBucket> baselines,
@@ -53,29 +61,64 @@ public static class BaselineMath
         if (fullBucket != null && fullBucket.SampleCount >= CollapseThreshold)
             return fullBucket;
 
-        // Collapse to hour-only: aggregate all days for this hour
-        var hourBuckets = baselines
-            .Where(kvp => kvp.Key.HourOfDay == hourOfDay)
-            .Select(kvp => kvp.Value)
-            .ToList();
-
-        if (hourBuckets.Count > 0)
+        // Hour-only tier: the provider's exact (GROUPING SETS) bucket when present, else pooled.
+        if (baselines.TryGetValue((hourOfDay, -1), out var exactHourOnly))
         {
-            var collapsed = CollapseToHourOnly(hourBuckets);
-            if (collapsed.SampleCount >= CollapseThreshold)
-                return collapsed;
+            if (exactHourOnly.SampleCount >= CollapseThreshold)
+                return exactHourOnly;
+        }
+        else
+        {
+            /* Pooled synthesis over the REAL full buckets only — sentinel entries must not
+               contribute or the tier would double-count itself. */
+            var hourBuckets = baselines
+                .Where(kvp => kvp.Key.HourOfDay == hourOfDay && kvp.Key.DayOfWeek >= 0)
+                .Select(kvp => kvp.Value)
+                .ToList();
+
+            if (hourBuckets.Count > 0)
+            {
+                var collapsed = CollapseToHourOnly(hourBuckets);
+                if (collapsed.SampleCount >= CollapseThreshold)
+                    return collapsed;
+            }
         }
 
-        // Collapse to flat: aggregate everything
-        var allBuckets = baselines.Values.ToList();
-        if (allBuckets.Count > 0)
+        // Flat tier: same rule.
+        if (baselines.TryGetValue((-1, -1), out var exactFlat))
         {
-            var flat = CollapseToFlat(allBuckets);
-            if (flat.SampleCount >= 3) // Minimum viable baseline
-                return flat;
+            if (exactFlat.SampleCount >= 3) // Minimum viable baseline
+                return exactFlat;
+        }
+        else
+        {
+            var allBuckets = baselines
+                .Where(kvp => kvp.Key.HourOfDay >= 0 && kvp.Key.DayOfWeek >= 0)
+                .Select(kvp => kvp.Value)
+                .ToList();
+            if (allBuckets.Count > 0)
+            {
+                var flat = CollapseToFlat(allBuckets);
+                if (flat.SampleCount >= 3) // Minimum viable baseline
+                    return flat;
+            }
         }
 
         return BaselineBucket.Empty;
+    }
+
+    /// <summary>
+    /// #1743: the modified z-score — 0.6745 * (value − median) / (MAD/0.6745-derived sigma), which
+    /// algebraically is (value − Median) / EffectiveRobustSigma with the consistency constant
+    /// already folded into EffectiveRobustSigma's scaling. Returns 0 when the bucket reports
+    /// zero-activity robust dispersion, so callers can gate on <c>&gt; 0</c> exactly as they gate
+    /// the classical z on EffectiveStdDev.
+    /// </summary>
+    public static double ModifiedZScore(BaselineBucket bucket, double value)
+    {
+        var sigma = bucket.EffectiveRobustSigma;
+        if (sigma <= 0) return 0;
+        return (value - bucket.Median) / sigma;
     }
 
     /// <summary>

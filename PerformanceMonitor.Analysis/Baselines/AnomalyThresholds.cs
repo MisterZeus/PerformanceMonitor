@@ -22,6 +22,53 @@ public static class AnomalyThresholds
     public const double DefaultDeviationThreshold = 2.0;
 
     /// <summary>
+    /// #1743: modified z-score cutoff for the robust (median/MAD) path — the standard 3.5
+    /// convention, and CALIBRATED, not copied: measured against 52 production replicas' 24h of
+    /// samples, modified-z at 3.5 traded +284 genuine catches for 7 misses against classical z at
+    /// the SAME cutoff, and caught a busy tenant's real sustained evening surge (17 samples) that
+    /// classical z missed at every threshold because the server's own history had inflated its
+    /// stddev. Do NOT pair the robust statistic with the classical 2.0 — that quadruples firing
+    /// volume; the statistic and its cutoff move together.
+    /// </summary>
+    public const double ModifiedZThreshold = 3.5;
+
+    /// <summary>
+    /// #1743: modified z-score cutoff for the HEAVY-TAILED families (waits, query duration) whose
+    /// medians are small by nature so ordinary bursts sit many robust-sigmas out. Measured on the
+    /// production fleet at 24h/42K samples with the honest ms-per-sec normalization and the
+    /// 250 ms/sec floor AND-gated: 3.5 → 1,465 fires, 5.0 → 1,088, 7.0 → 744, against the ratio
+    /// detector's 662 — and the ratio detector caught NOTHING modified-z missed at any of those
+    /// cutoffs (strict containment). 5.0 keeps the strict-superset property with a sane volume;
+    /// the existing floors stay AND-ed exactly as the ratio path had them.
+    /// </summary>
+    public const double HeavyTailModifiedZThreshold = 5.0;
+
+    /// <summary>
+    /// #1743: the modified-z cutoff for a metric — 5.0 for the heavy-tailed families whose medians
+    /// are small by nature (waits in both grains, query duration: fleet-measured skew up to 67.9x
+    /// stddev-vs-robust-sigma on waits, 3.13x mean-over-median on query duration), the standard 3.5
+    /// for everything else. Shared here so Lite and Darling cannot calibrate apart.
+    /// </summary>
+    public static double ModifiedZThresholdFor(string metricName) => metricName switch
+    {
+        MetricNames.WaitStats => HeavyTailModifiedZThreshold,
+        MetricNames.WaitMsPerSec => HeavyTailModifiedZThreshold,
+        MetricNames.QueryDuration => HeavyTailModifiedZThreshold,
+        _ => ModifiedZThreshold,
+    };
+
+    /// <summary>
+    /// #1743: the modified-z cutoff SCALED by the operator's per-metric classical threshold, so the
+    /// SetDeviationThreshold knob keeps its meaning on the robust path — at the shipped 2.0 default
+    /// the factor is 1 and the calibrated cutoffs apply unchanged; an operator who cranks a
+    /// metric's threshold N-fold scales its robust cutoff N-fold too (and a lowered one lowers it,
+    /// the same proportional semantics the classical gate always had). Without this the knob went
+    /// silently dead the moment a metric gained robust statistics.
+    /// </summary>
+    public static double ModifiedZThresholdFor(string metricName, double configuredDeviationThreshold) =>
+        ModifiedZThresholdFor(metricName) * configuredDeviationThreshold / DefaultDeviationThreshold;
+
+    /// <summary>
     /// Default ratio threshold for the wait-profile detector (peak window all-types ms/sec ÷ baseline
     /// mean). On the HONEST per-second scale now, so far below the old 5.0 that assumed a ~240x-inflated
     /// input; matches the FactScorer WaitProfileRatioFloor. CALIBRATE ON THE SQL2025/HAMMERDB BOX.

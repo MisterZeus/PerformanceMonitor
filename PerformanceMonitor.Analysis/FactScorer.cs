@@ -637,8 +637,15 @@ public class FactScorer
                 return Math.Max(0.5, (0.5 + 0.5 * Math.Min(over / LowQualityFallbackSpan, 1.0)) * confidence);
             }
 
-            if (deviation < 2.0) return 0.0;
-            var base_score = 0.5 + 0.5 * Math.Min((deviation - 2.0) / 2.0, 1.0);
+            /* #1743: the ramp anchors on the cutoff the fact actually FIRED at (carried by the
+               detector as fire_threshold), saturating at 2x the anchor — exactly the old 2σ→4σ
+               shape for classical fires and for pre-#1743 facts (default 2.0), and the same
+               proportional shape for robust fires at 3.5 or 5.0. Without the anchor, a family
+               firing at 5σ scores saturated-flat 1.0 forever against a ramp built for 2σ fires. */
+            var anchor = fact.Metadata.GetValueOrDefault("fire_threshold", 2.0);
+            if (anchor <= 0) anchor = 2.0;
+            if (deviation < anchor) return 0.0;
+            var base_score = 0.5 + 0.5 * Math.Min((deviation - anchor) / anchor, 1.0);
             return base_score * confidence;
         }
 
@@ -650,6 +657,21 @@ public class FactScorer
         // CALIBRATE ON THE SQL2025/HAMMERDB BOX.
         if (fact.Key.StartsWith("ANOMALY_WAIT_PROFILE", StringComparison.OrdinalIgnoreCase))
         {
+            /* #1743: detectors with robust baselines fire this fact on the MODIFIED z-score, and
+               carry it as modified_z — grade off the same statistic, or the masked-surge class the
+               robust trigger exists to catch (real sustained deviations whose ratio sits under 4x
+               against a burst-inflated mean) would be zeroed right after being caught. Ramp mirrors
+               the ratio's shape: 0.5 at the 5.0 firing cutoff, saturating to 1.0 at 15σ. A fact
+               without modified_z (pre-#1743 detector, robust-less bucket, or the is_new fallback
+               whose sentinel ratio must keep scoring) keeps the ratio ramp unchanged. */
+            var modifiedZ = fact.Metadata.GetValueOrDefault("modified_z");
+            var isNewProfile = fact.Metadata.GetValueOrDefault("is_new") > 0;
+            if (modifiedZ > 0 && !isNewProfile)
+            {
+                if (modifiedZ < Baselines.AnomalyThresholds.HeavyTailModifiedZThreshold) return 0.0;
+                return 0.5 + 0.5 * Math.Min(
+                    (modifiedZ - Baselines.AnomalyThresholds.HeavyTailModifiedZThreshold) / 10.0, 1.0);
+            }
             var ratio = fact.Metadata.GetValueOrDefault("ratio");
             if (ratio < WaitProfileRatioFloor) return 0.0;
             return 0.5 + 0.5 * Math.Min((ratio - WaitProfileRatioFloor) / WaitProfileRatioSpan, 1.0);
