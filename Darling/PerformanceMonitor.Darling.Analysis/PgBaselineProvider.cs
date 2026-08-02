@@ -144,6 +144,11 @@ public class PgBaselineProvider
             var buckets = new Dictionary<(int, int), BaselineBucket>();
 
             using var reader = await cmd.ExecuteReaderAsync();
+            /* #1743: the robust-scaffold metrics return eight columns (…, median_val, mad_val)
+               and carry sentinel tier rows; the two rollup-bound metrics (CPU, I/O) still return
+               the six-column classical shape — detected by column count, so their buckets read
+               Median=0/Mad=0 and the robust path degrades to the classical one for them. */
+            var hasRobustColumns = reader.FieldCount >= 8;
             while (await reader.ReadAsync())
             {
                 var hour = Convert.ToInt32(reader.GetValue(0));
@@ -152,6 +157,8 @@ public class PgBaselineProvider
                 var stddev = reader.IsDBNull(3) ? 0.0 : Convert.ToDouble(reader.GetValue(3));
                 var count = reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4));
                 var distinctDays = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5));
+                var median = hasRobustColumns && !reader.IsDBNull(6) ? Convert.ToDouble(reader.GetValue(6)) : 0.0;
+                var mad = hasRobustColumns && !reader.IsDBNull(7) ? Convert.ToDouble(reader.GetValue(7)) : 0.0;
 
                 buckets[(hour, dow)] = new BaselineBucket
                 {
@@ -162,10 +169,15 @@ public class PgBaselineProvider
                     SampleCount = count,
                     DistinctDays = distinctDays,
                     AbsStdDevFloor = absStdDevFloor,
-                    // Every bucket here is a full (hour, day-of-week) bucket; the HourOnly/Flat
-                    // tiers are assigned only on the collapse/flat paths below. A sparse full
-                    // bucket is still Full, just low-sample.
-                    Tier = BaselineTier.Full
+                    Median = median,
+                    Mad = mad,
+                    /* Sentinel rows from the GROUPING SETS scaffold carry their tier in their key:
+                       (-1,-1) = the exact flat tier, (hour,-1) = the exact hour-only tier. A real
+                       (hour, dow) bucket is Full even when sparse — SelectBucket's thresholds
+                       decide whether it is USED, not what it IS. */
+                    Tier = hour < 0 ? BaselineTier.Flat
+                         : dow < 0 ? BaselineTier.HourOnly
+                         : BaselineTier.Full
                 };
             }
 
@@ -179,9 +191,62 @@ public class PgBaselineProvider
     }
 
     /// <summary>
+    /// #1743: the shared robust-tier scaffold appended to every raw-grain metric's cleaned rowset.
+    /// The arm contributes a CTE chain ending in <c>clean(collection_time, v)</c> — its existing
+    /// window-bound/restart-exclusion semantics untouched — and this scaffold computes mean, stddev,
+    /// median, and MAD EXACTLY at all three tiers via GROUPING SETS: (hh,dw) = Full, (hh) = the
+    /// hour-only sentinel row (day_of_week -1), () = the flat sentinel row (-1,-1). Medians cannot
+    /// be pooled from per-bucket medians, which is why the tiers are computed in SQL rather than
+    /// synthesized in BaselineMath — see SelectBucket's sentinel-key contract. MAD is a second
+    /// percentile pass: every row joins each tier it belongs to (its full bucket, its hour, and the
+    /// flat tier), then median of |v − tier median| per tier. Sentinel tiers also fix the flat
+    /// tier's DistinctDays, which the pooled synthesis could only approximate with a MAX proxy.
+    /// </summary>
+    internal const string RobustTierScaffold = @"
+keyed AS (
+    SELECT v,
+           EXTRACT(HOUR FROM collection_time)::INT AS hh,
+           EXTRACT(DOW FROM collection_time)::INT AS dw,
+           collection_time::DATE AS d
+    FROM clean
+),
+tier_stats AS (
+    SELECT COALESCE(hh, -1) AS hour_of_day,
+           COALESCE(dw, -1) AS day_of_week,
+           AVG(v) AS mean_val,
+           STDDEV_SAMP(v) AS stddev_val,
+           percentile_cont(0.5) WITHIN GROUP (ORDER BY v) AS median_val,
+           COUNT(*) AS sample_count,
+           COUNT(DISTINCT d) AS distinct_days
+    FROM keyed
+    GROUP BY GROUPING SETS ((hh, dw), (hh), ())
+),
+tier_mads AS (
+    SELECT t.hour_of_day, t.day_of_week,
+           percentile_cont(0.5) WITHIN GROUP (ORDER BY ABS(k.v - t.median_val)) AS mad_val
+    FROM keyed AS k
+    JOIN tier_stats AS t
+      ON (t.hour_of_day = -1 OR t.hour_of_day = k.hh)
+     AND (t.day_of_week = -1 OR t.day_of_week = k.dw)
+    GROUP BY t.hour_of_day, t.day_of_week
+)
+SELECT t.hour_of_day, t.day_of_week, t.mean_val, t.stddev_val, t.sample_count, t.distinct_days,
+       t.median_val, m.mad_val
+FROM tier_stats AS t
+JOIN tier_mads AS m
+  ON m.hour_of_day = t.hour_of_day
+ AND m.day_of_week = t.day_of_week";
+
+    /// <summary>
     /// The eleven per-metric baseline queries — Lite's, verbatim, except the four QUALIFY
     /// sites rewritten for Postgres (no QUALIFY support). Internal (not private like Lite's)
     /// so Darling.Tests can pin every query's dialect and the rewrites' structure ungated.
+    /// <para>#1743: the seven raw-grain metrics route their cleaned rowsets through
+    /// <see cref="RobustTierScaffold"/> and return EIGHT columns (…, median_val, mad_val).
+    /// CPU and I/O latency read pre-aggregated sum/sumsq rollups that cannot produce a median —
+    /// they keep the six-column classical shape until their raw-window variants land, and the
+    /// reader detects the shape by column count. Blocking/deadlock are event-family (events/day,
+    /// stddev 0) evaluated on the event-ratio path, deliberately untouched.</para>
     /// </summary>
     internal static string? GetBaselineQuery(string metricName)
     {
@@ -240,16 +305,12 @@ WITH windowed AS (
            COALESCE(LAG(delta_cntr_value) OVER (ORDER BY collection_time), 0) AS prior_delta
     FROM perfmon_baseline
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-)
-SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
-       EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
-       AVG(delta_cntr_value) AS mean_val,
-       STDDEV_SAMP(delta_cntr_value) AS stddev_val,
-       COUNT(*) AS sample_count,
-       COUNT(DISTINCT collection_time::DATE) AS distinct_days
-FROM windowed
-WHERE NOT (delta_cntr_value = 0 AND prior_delta > 1000)
-GROUP BY hour_of_day, day_of_week",
+),
+clean AS (
+    SELECT collection_time, delta_cntr_value AS v
+    FROM windowed
+    WHERE NOT (delta_cntr_value = 0 AND prior_delta > 1000)
+)," + RobustTierScaffold,
 
             /* QUALIFY rewrite 2 of 4 — cumulative counter, multiple rows per collection (per
                wait type): aggregate to total wait ms per collection FIRST, then restart
@@ -284,33 +345,21 @@ with_lag AS (
     SELECT collection_time, total_wait_ms,
            COALESCE(LAG(total_wait_ms) OVER (ORDER BY collection_time), 0) AS prior_total_wait_ms
     FROM per_collection
-)
-SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
-       EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
-       AVG(total_wait_ms) AS mean_val,
-       STDDEV_SAMP(total_wait_ms) AS stddev_val,
-       COUNT(*) AS sample_count,
-       COUNT(DISTINCT collection_time::DATE) AS distinct_days
-FROM with_lag
-WHERE NOT (total_wait_ms = 0 AND prior_total_wait_ms > 10000)
-GROUP BY hour_of_day, day_of_week",
+),
+clean AS (
+    SELECT collection_time, total_wait_ms AS v
+    FROM with_lag
+    WHERE NOT (total_wait_ms = 0 AND prior_total_wait_ms > 10000)
+)," + RobustTierScaffold,
 
             // Point-in-time, multiple rows per collection (per program_name) —
             // aggregate to total connections per collection first
             MetricNames.SessionCount => @"
-WITH per_collection AS (
-    SELECT collection_time, total_connections
+WITH clean AS (
+    SELECT collection_time, total_connections AS v
     FROM session_stats_baseline
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-)
-SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
-       EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
-       AVG(total_connections) AS mean_val,
-       STDDEV_SAMP(total_connections) AS stddev_val,
-       COUNT(*) AS sample_count,
-       COUNT(DISTINCT collection_time::DATE) AS distinct_days
-FROM per_collection
-GROUP BY hour_of_day, day_of_week",
+)," + RobustTierScaffold,
 
             /* QUALIFY rewrite 3 of 4 — cumulative (plan cache), multiple rows per collection
                (per query): delta columns aggregated to total elapsed per collection, then
@@ -343,16 +392,12 @@ with_lag AS (
     SELECT collection_time, total_elapsed,
            COALESCE(LAG(total_elapsed) OVER (ORDER BY collection_time), 0) AS prior_total_elapsed
     FROM per_collection
-)
-SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
-       EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
-       AVG(total_elapsed) AS mean_val,
-       STDDEV_SAMP(total_elapsed) AS stddev_val,
-       COUNT(*) AS sample_count,
-       COUNT(DISTINCT collection_time::DATE) AS distinct_days
-FROM with_lag
-WHERE NOT (total_elapsed = 0 AND prior_total_elapsed > 100000)
-GROUP BY hour_of_day, day_of_week",
+),
+clean AS (
+    SELECT collection_time, total_elapsed AS v
+    FROM with_lag
+    WHERE NOT (total_elapsed = 0 AND prior_total_elapsed > 100000)
+)," + RobustTierScaffold,
 
             // Point-in-time metric — no restart exclusion needed. The stall/reads ratio is cast to
             // DOUBLE PRECISION (as the memory / wait-rate metrics are) so a spurious large delta can't
@@ -398,15 +443,11 @@ GROUP BY hour_of_day, day_of_week",
 
             // Point-in-time metric (memory pressure %) — no restart exclusion needed
             MetricNames.Memory => @"
-SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
-       EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
-       AVG(memory_pressure_pct) AS mean_val,
-       STDDEV_SAMP(memory_pressure_pct) AS stddev_val,
-       COUNT(*) AS sample_count,
-       COUNT(DISTINCT collection_time::DATE) AS distinct_days
-FROM memory_baseline
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-GROUP BY hour_of_day, day_of_week",
+WITH clean AS (
+    SELECT collection_time, memory_pressure_pct AS v
+    FROM memory_baseline
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+)," + RobustTierScaffold,
 
             // ── Chart-unit baselines (for UI bands — units match what the chart displays) ──
 
@@ -461,16 +502,12 @@ with_lag AS (
     SELECT collection_time, ms_per_sec,
            COALESCE(LAG(ms_per_sec) OVER (ORDER BY collection_time), 0) AS prior_ms_per_sec
     FROM with_rate
-)
-SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
-       EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
-       AVG(ms_per_sec) AS mean_val,
-       STDDEV_SAMP(ms_per_sec) AS stddev_val,
-       COUNT(*) AS sample_count,
-       COUNT(DISTINCT collection_time::DATE) AS distinct_days
-FROM with_lag
-WHERE NOT (ms_per_sec = 0 AND prior_ms_per_sec > 100)
-GROUP BY hour_of_day, day_of_week",
+),
+clean AS (
+    SELECT collection_time, ms_per_sec AS v
+    FROM with_lag
+    WHERE NOT (ms_per_sec = 0 AND prior_ms_per_sec > 100)
+)," + RobustTierScaffold,
 
             // Blocking events per minute (chart shows event bars bucketed by minute)
             MetricNames.BlockingPerMinute => @"
@@ -480,15 +517,11 @@ WITH per_minute AS (
     FROM blocked_process_baseline
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     GROUP BY minute_bucket
-)
-SELECT EXTRACT(HOUR FROM minute_bucket)::INT AS hour_of_day,
-       EXTRACT(DOW FROM minute_bucket)::INT AS day_of_week,
-       AVG(event_count) AS mean_val,
-       STDDEV_SAMP(event_count) AS stddev_val,
-       COUNT(*) AS sample_count,
-       COUNT(DISTINCT minute_bucket::DATE) AS distinct_days
-FROM per_minute
-GROUP BY hour_of_day, day_of_week",
+),
+clean AS (
+    SELECT minute_bucket AS collection_time, event_count AS v
+    FROM per_minute
+)," + RobustTierScaffold,
 
             _ => null
         };
