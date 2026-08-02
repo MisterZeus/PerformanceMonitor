@@ -145,9 +145,9 @@ public class PgBaselineProvider
 
             using var reader = await cmd.ExecuteReaderAsync();
             /* #1743: the robust-scaffold metrics return eight columns (…, median_val, mad_val)
-               and carry sentinel tier rows; the two rollup-bound metrics (CPU, I/O) still return
-               the six-column classical shape — detected by column count, so their buckets read
-               Median=0/Mad=0 and the robust path degrades to the classical one for them. */
+               and carry sentinel tier rows; the two event-family metrics (blocking, deadlock)
+               keep the six-column classical shape — detected by column count, so their buckets
+               read Median=0/Mad=0 and the robust path degrades for them. */
             var hasRobustColumns = reader.FieldCount >= 8;
             while (await reader.ReadAsync())
             {
@@ -241,12 +241,13 @@ JOIN tier_mads AS m
     /// The eleven per-metric baseline queries — Lite's, verbatim, except the four QUALIFY
     /// sites rewritten for Postgres (no QUALIFY support). Internal (not private like Lite's)
     /// so Darling.Tests can pin every query's dialect and the rewrites' structure ungated.
-    /// <para>#1743: the seven raw-grain metrics route their cleaned rowsets through
-    /// <see cref="RobustTierScaffold"/> and return EIGHT columns (…, median_val, mad_val).
-    /// CPU and I/O latency read pre-aggregated sum/sumsq rollups that cannot produce a median —
-    /// they keep the six-column classical shape until their raw-window variants land, and the
-    /// reader detects the shape by column count. Blocking/deadlock are event-family (events/day,
-    /// stddev 0) evaluated on the event-ratio path, deliberately untouched.</para>
+    /// <para>#1743: the nine non-event metrics route their cleaned rowsets through
+    /// <see cref="RobustTierScaffold"/> and return EIGHT columns (…, median_val, mad_val) — CPU
+    /// and I/O latency included, reading their RAW hypertables at Lite's grain (their retired
+    /// sum/sumsq rollups could not produce a median; both tables carry their own 30-day
+    /// service-side retention, so this does not reopen #1757 — see the arms' notes).
+    /// Blocking/deadlock are event-family (events/day, stddev 0) evaluated on the event-ratio
+    /// path, deliberately untouched; the reader detects their six-column shape by count.</para>
     /// </summary>
     internal static string? GetBaselineQuery(string metricName)
     {
@@ -258,19 +259,22 @@ JOIN tier_mads AS m
         // collection_time first, then bucket by hour+dow.
         return metricName switch
         {
-            // Point-in-time metric — no restart exclusion needed
+            /* #1743 follow-up: CPU reads the RAW hypertable, at Lite's exact per-sample grain, so
+               the robust scaffold applies — the old sum/sumsq rollup could reconstruct mean/stddev
+               but structurally cannot produce a median. Reading raw here does NOT reopen #1757:
+               that finding was 4 days of supply under a 30-day window, and cpu_utilization carries
+               its own 30-DAY service-side retention (CollectorScheduleDefaults: 1-minute cadence,
+               30-day retention; verified on a production store — no TimescaleDB retention policy
+               on the table, service-side purge at 30d, compressed after 1 day). The mean/stddev
+               this computes are the SAME per-sample statistics the rollup reconstruction produced.
+               The now-unused cpu_utilization_baseline aggregate remains registered for upgrade
+               compatibility; retiring it is separate cleanup. */
             MetricNames.Cpu => @"
-SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
-       EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
-       SUM(cpu_sum) / NULLIF(SUM(cpu_count), 0) AS mean_val,
-       SQRT(GREATEST(
-           (SUM(cpu_sumsq) - POWER(SUM(cpu_sum), 2) / NULLIF(SUM(cpu_count), 0))
-           / NULLIF(SUM(cpu_count) - 1, 0), 0)) AS stddev_val,
-       SUM(cpu_count) AS sample_count,
-       COUNT(DISTINCT collection_time::DATE) AS distinct_days
-FROM cpu_utilization_baseline
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-GROUP BY hour_of_day, day_of_week",
+WITH clean AS (
+    SELECT collection_time, sqlserver_cpu_utilization::DOUBLE PRECISION AS v
+    FROM cpu_utilization_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+)," + RobustTierScaffold,
 
             /* QUALIFY rewrite 1 of 4 — cumulative counter, restart exclusion.
                Excludes samples where the delta drops to 0 when the prior sample was > 1000
@@ -399,22 +403,21 @@ clean AS (
     WHERE NOT (total_elapsed = 0 AND prior_total_elapsed > 100000)
 )," + RobustTierScaffold,
 
-            // Point-in-time metric — no restart exclusion needed. The stall/reads ratio is cast to
-            // DOUBLE PRECISION (as the memory / wait-rate metrics are) so a spurious large delta can't
-            // make STDDEV_SAMP produce a numeric that overflows System.Decimal when Npgsql materializes
-            // the aggregate (it does with `* 1.0`, which yields numeric, not float8).
+            /* #1743 follow-up: same move as CPU — raw hypertable at Lite's per-file-row grain so
+               the robust scaffold applies (file_io_stats also carries its own 30-day service-side
+               retention; see the CPU arm's note). The stall/reads ratio keeps its DOUBLE PRECISION
+               cast so a spurious large delta can't make STDDEV_SAMP produce a numeric that
+               overflows System.Decimal when Npgsql materializes the aggregate. v stays NULLABLE
+               (a write-only file row has no read latency): AVG/STDDEV/median/mad all ignore those
+               rows while COUNT(*) keeps counting them — exactly the row_count-vs-ratio_count
+               distinction the retired rollup documented, preserved at the raw grain. */
             MetricNames.IoLatency => @"
-SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
-       EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
-       SUM(ratio_sum) / NULLIF(SUM(ratio_count), 0) AS mean_val,
-       SQRT(GREATEST(
-           (SUM(ratio_sumsq) - POWER(SUM(ratio_sum), 2) / NULLIF(SUM(ratio_count), 0))
-           / NULLIF(SUM(ratio_count) - 1, 0), 0)) AS stddev_val,
-       SUM(row_count) AS sample_count,
-       COUNT(DISTINCT collection_time::DATE) AS distinct_days
-FROM file_io_baseline
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-GROUP BY hour_of_day, day_of_week",
+WITH clean AS (
+    SELECT collection_time, delta_stall_read_ms::DOUBLE PRECISION / NULLIF(delta_reads, 0) AS v
+    FROM file_io_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   (delta_reads > 0 OR delta_writes > 0)
+)," + RobustTierScaffold,
 
             // Event-based — mean = events per day for this bucket, sample_count = distinct days observed.
             // No restart exclusion needed (event counts, not cumulative).
