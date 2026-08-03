@@ -187,6 +187,20 @@ public partial class ServerTab : UserControl
             PlanEmptyState.Visibility = Visibility.Visible;
     }
 
+    /// <summary>
+    /// #1980: the Query Store grid's inline "View" button — the capability its two sibling grids
+    /// always had. Lite's QS rows already carry the stored plan text, so this opens it directly in
+    /// the Plan Viewer via <see cref="OpenPlanTab"/> (the history window's own path); the button is
+    /// gated on <c>HasQueryPlan</c> in XAML, so an empty row is never clickable.
+    /// </summary>
+    private void ViewQueryStorePlanInline_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button btn || btn.DataContext is not QueryStoreRow row) return;
+        if (string.IsNullOrEmpty(row.QueryPlanText)) return;
+
+        OpenPlanTab(row.QueryPlanText, $"QS Plan - Q{row.QueryId}/P{row.PlanId}", row.QueryText);
+    }
+
     private async void OpenPlanTab(string planXml, string label, string? queryText = null)
     {
         HidePlanLoading();

@@ -36,6 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The Query Store grid gains the inline plan button its sibling grids always had** ([#1980], from the [#1949] census) - Query Stats and Procedure Stats both surface stored plans inline; Query Store required the context menu or a double-click into the history window. Both apps' Query Store grids now carry a **View** button per row that opens the STORED plan in the Plan Viewer through the exact path the history window's View Plan uses - Lite's rows already carry the plan text (button gated on its presence); the Darling viewer fetches by the row's database/query_id/plan_id from the store. No live-server hit on either app, and a row whose plan was never captured gets the same "Plan Not Found" treatment the sibling buttons show.
+
 - **A PVS trend chart on the FinOps Version Store tab, in both apps** ([#1984] part 2, completing the issue) - the PVS grid answers "what is my version store doing right now"; it never answered "when did it start growing", which is the actual story in the silent-disk-eater case. Above the grid, both apps now chart the last 7 days of hourly \`pvs_stats\` points for the **top-5 databases by current PVS size** - one line per database, with each legend label carrying that database's latest %-of-database (computed per point from the same data-file denominator the grid uses, so the two surfaces cannot disagree). The chart hides entirely on servers with no PVS history rather than rendering a dead axis, and the top-5 cap is what keeps a 90-day-retention series readable on a many-database instance - the grid below still lists every database. The [#1951]-deferred alert half shipped earlier as the PVS pressure alert; this closes the visibility half.
 
 
@@ -2482,6 +2484,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#1972]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1972
 [#1973]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1973
 [#1955]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1955
+[#1980]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1980
 [#1949]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1949
 [#1952]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1952
 [#1951]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1951

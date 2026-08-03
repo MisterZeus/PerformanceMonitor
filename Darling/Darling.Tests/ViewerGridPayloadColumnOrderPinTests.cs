@@ -77,7 +77,7 @@ public sealed class ViewerGridPayloadColumnOrderPinTests
         new(ViewerServerTab, "QueryStatsGrid", "Creation Time", 3, ["Query Text", "Query Plan"]),
         new(ViewerServerTab, "QueryStatsComparisonGrid", "Database", 1, ["Query Text"]),
         new(ViewerServerTab, "ProcedureStatsGrid", "Cached Time", 4, ["Query Plan"]),
-        new(ViewerServerTab, "QueryStoreGrid", "First Execution", 5, ["Query Text"]),
+        new(ViewerServerTab, "QueryStoreGrid", "First Execution", 5, ["Query Text", "Query Plan"]),
         new(ViewerServerTab, "QueryStoreComparisonGrid", "Database", 1, ["Query Text"]),
         new(ViewerServerTab, "QueryStoreRegressionsGrid", "Last Execution", 0, ["Query Text"]),
         new(ViewerServerTab, "PlanCorrectionGrid", "Collected", 0, ["Query Text"]),

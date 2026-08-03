@@ -1027,6 +1027,19 @@
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>
+                                    <!-- #1980: the inline plan affordance the sibling grids always had — opens the
+                                         STORED Query Store plan (already on the row) in the Plan Viewer, the same
+                                         path the history window's View Plan uses. Gated on HasQueryPlan. Lives in
+                                         the payload region right of the #1949 anchor, next to the text it belongs to. -->
+                                    <DataGridTemplateColumn Header="Query Plan" Width="Auto" MinWidth="70">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <Button Content="View" Click="ViewQueryStorePlanInline_Click"
+                                                        IsEnabled="{Binding HasQueryPlan}"
+                                                        Style="{StaticResource DarkButton}" Padding="8,1" Margin="2"/>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
                                     <DataGridTextColumn Binding="{Binding TotalExecutions, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalExecutions" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Executions" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
