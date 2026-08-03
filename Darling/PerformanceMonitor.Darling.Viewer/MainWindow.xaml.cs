@@ -1092,6 +1092,47 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>Attaches each server's tags as coloured pills to its Overview summary, joining the loaded tag
+    /// list (<c>_tags</c> / <c>_serverTagIds</c>) — the summary carries no tag query of its own. Pills are
+    /// ordered by tag name so a card is stable. No tags anywhere → every card keeps its empty default.</summary>
+    private void StampTagPills(IReadOnlyList<ServerSummaryItem> summaries)
+    {
+        if (_tags.Count == 0 || _serverTagIds.Count == 0)
+        {
+            return;
+        }
+
+        var tagById = _tags.ToDictionary(t => t.Id);
+        foreach (var summary in summaries)
+        {
+            if (!_serverTagIds.TryGetValue(summary.ServerId, out var tagIds) || tagIds.Count == 0)
+            {
+                summary.TagPills = System.Array.Empty<ServerTagPill>();
+                continue;
+            }
+
+            summary.TagPills = tagIds
+                .Select(id => tagById.TryGetValue(id, out var tag) ? tag : null)
+                .Where(t => t is not null)
+                .OrderBy(t => t!.Name, StringComparer.OrdinalIgnoreCase)
+                .Select(t => new ServerTagPill(t!.Name, t!.Colour))
+                .ToList();
+        }
+    }
+
+    /// <summary>Re-stamps tag pills onto the cards the Overview is currently showing (after a tag colour /
+    /// assignment change), reassigning ItemsSource so the change renders without a full per-server reload.
+    /// A no-op unless the Overview is populated.</summary>
+    private void RestampOverviewTagPills()
+    {
+        if (OverviewItemsControl.ItemsSource is IEnumerable<ServerSummaryItem> items)
+        {
+            var list = items.ToList();
+            StampTagPills(list);
+            OverviewItemsControl.ItemsSource = list;
+        }
+    }
+
     /// <summary>
     /// Loads a summary card for every registered server (Lite's RefreshOverviewAsync), reading each
     /// server's latest metrics concurrently over the pooled data source. Status is derived from
@@ -1139,8 +1180,11 @@ public partial class MainWindow : Window
             }
         }));
 
+        var built = summaries.OfType<ServerSummaryItem>().ToList();
+        StampTagPills(built);
+
         var cards = ServerOverviewSort.Order(
-            summaries.OfType<ServerSummaryItem>().ToList(),
+            built,
             _overviewSortMode,
             s => s.CpuPercentForAlert, s => s.DisplayName, s => s.ServerId);
         OverviewItemsControl.ItemsSource = cards;

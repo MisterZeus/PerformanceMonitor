@@ -29,12 +29,15 @@
             <DockPanel Grid.Column="0">
                 <TextBlock DockPanel.Dock="Top" Text="Tags" FontWeight="Bold" Margin="0,0,0,6"
                            Foreground="{DynamicResource ForegroundBrush}"/>
-                <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="0,8,0,0">
-                    <Button x:Name="NewRootButton" Content="_New Tag" Width="78" Margin="0,0,6,0" Click="NewRoot_Click"/>
-                    <Button x:Name="NewChildButton" Content="New C_hild" Width="78" Margin="0,0,6,0" Click="NewChild_Click"/>
-                    <Button x:Name="RenameButton" Content="_Rename" Width="72" Margin="0,0,6,0" Click="Rename_Click"/>
-                    <Button x:Name="DeleteButton" Content="_Delete" Width="66" Click="Delete_Click"/>
-                </StackPanel>
+                <!-- WrapPanel (not a single row): the fifth button pushes the toolbar past the 300px column,
+                     so let them flow to a second row rather than clip. -->
+                <WrapPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
+                    <Button x:Name="NewRootButton" Content="_New Tag" Width="78" Margin="0,0,6,6" Click="NewRoot_Click"/>
+                    <Button x:Name="NewChildButton" Content="New C_hild" Width="78" Margin="0,0,6,6" Click="NewChild_Click"/>
+                    <Button x:Name="RenameButton" Content="_Rename" Width="72" Margin="0,0,6,6" Click="Rename_Click"/>
+                    <Button x:Name="ColourButton" Content="_Colour…" Width="72" Margin="0,0,6,6" Click="Colour_Click"/>
+                    <Button x:Name="DeleteButton" Content="_Delete" Width="66" Margin="0,0,6,6" Click="Delete_Click"/>
+                </WrapPanel>
                 <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
                     <TreeView x:Name="TagTree"
                               Background="{DynamicResource BackgroundBrush}"
@@ -42,7 +45,13 @@
                               SelectedItemChanged="TagTree_SelectedItemChanged">
                         <TreeView.ItemTemplate>
                             <HierarchicalDataTemplate ItemsSource="{Binding Children}">
-                                <TextBlock Text="{Binding Name}" Foreground="{DynamicResource ForegroundBrush}"/>
+                                <StackPanel Orientation="Horizontal">
+                                    <Border Width="11" Height="11" CornerRadius="2" Margin="0,0,6,0"
+                                            VerticalAlignment="Center"
+                                            Background="{Binding SwatchBrush}"
+                                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"/>
+                                    <TextBlock Text="{Binding Name}" Foreground="{DynamicResource ForegroundBrush}"/>
+                                </StackPanel>
                             </HierarchicalDataTemplate>
                         </TreeView.ItemTemplate>
                         <TreeView.ItemContainerStyle>

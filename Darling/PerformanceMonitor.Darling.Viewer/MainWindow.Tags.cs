@@ -95,6 +95,10 @@ public partial class MainWindow
             {
                 _suppressSidebarSelection = false;
             }
+
+            /* Tag names/colours/assignments may have changed — refresh the Overview pills if it's showing
+               cards, so a colour edit or (un)assignment reflects there without waiting for a full reload. */
+            RestampOverviewTagPills();
         }
         catch (Exception ex)
         {

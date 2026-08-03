@@ -519,6 +519,13 @@ public sealed class ViewerSchemaVersionGateTests
     public void MapProbedSchemaVersion_PvsPressureKnobsAbsent_CapsAt47() =>
         Assert.Equal(47, ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
 
+    /// <summary>V50 (#2008 2a) rung: every sentinel through V49 present but the server_tags.colour column
+    /// absent — the probe must report 49, so a store one migration behind maps to 49 not 50. The viewer names
+    /// the colour column in its tag SELECT, so the cap is a real gate: a V49 store would fail 42703.</summary>
+    [Fact]
+    public void MapProbedSchemaVersion_ServerTagColourAbsent_CapsAt49() =>
+        Assert.Equal(49, ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+
     [Fact]
     public void RequiredStoreSchemaVersion_TracksTheBuildSchemaVersion_AndTheProbeCoversIt()
     {
@@ -531,7 +538,7 @@ public sealed class ViewerSchemaVersionGateTests
            the connect-time gate refuse to open the viewer against a perfectly healthy store. */
         Assert.Equal(
             ViewerDataService.RequiredStoreSchemaVersion,
-            ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+            ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
     }
 }
 
