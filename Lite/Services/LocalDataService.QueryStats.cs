@@ -1007,7 +1007,8 @@ current_period AS (
            SUM(ps.delta_execution_count) AS exec_count,
            SUM(ps.delta_elapsed_time)::DOUBLE PRECISION / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_duration_ms,
            SUM(ps.delta_worker_time)::DOUBLE PRECISION / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_cpu_ms,
-           SUM(ps.delta_physical_reads)::DOUBLE PRECISION / NULLIF(SUM(ps.delta_execution_count), 0) AS avg_reads
+           SUM(ps.delta_physical_reads)::DOUBLE PRECISION / NULLIF(SUM(ps.delta_execution_count), 0) AS avg_reads,
+           MAX(ps.sql_handle) AS sql_handle
     FROM top_procs tp
     INNER JOIN v_procedure_stats ps
       ON  ps.database_name IS NOT DISTINCT FROM tp.database_name
@@ -1023,7 +1024,8 @@ baseline_period AS (
            SUM(ps.delta_execution_count) AS exec_count,
            SUM(ps.delta_elapsed_time)::DOUBLE PRECISION / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_duration_ms,
            SUM(ps.delta_worker_time)::DOUBLE PRECISION / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_cpu_ms,
-           SUM(ps.delta_physical_reads)::DOUBLE PRECISION / NULLIF(SUM(ps.delta_execution_count), 0) AS avg_reads
+           SUM(ps.delta_physical_reads)::DOUBLE PRECISION / NULLIF(SUM(ps.delta_execution_count), 0) AS avg_reads,
+           MAX(ps.sql_handle) AS sql_handle
     FROM top_procs tp
     INNER JOIN v_procedure_stats ps
       ON  ps.database_name IS NOT DISTINCT FROM tp.database_name
@@ -1041,12 +1043,27 @@ SELECT COALESCE(c.database_name, b.database_name) AS database_name,
        b.exec_count AS baseline_exec_count,
        b.avg_duration_ms AS baseline_avg_duration_ms,
        b.avg_cpu_ms AS baseline_avg_cpu_ms,
-       b.avg_reads AS baseline_avg_reads
+       b.avg_reads AS baseline_avg_reads,
+       t.query_text
 FROM current_period c
 FULL OUTER JOIN baseline_period b
   ON  c.database_name IS NOT DISTINCT FROM b.database_name
   AND c.schema_name IS NOT DISTINCT FROM b.schema_name
-  AND c.object_name IS NOT DISTINCT FROM b.object_name;";
+  AND c.object_name IS NOT DISTINCT FROM b.object_name
+/* #1981: a REPRESENTATIVE statement of the procedure, resolved through the same normalized
+   sql_handle join the #1568 module attribution relies on (both stores persist the identical
+   CONVERT(varchar(130), ..., 1) text). procedure_stats captures no text of its own, so this is
+   the latest captured statement from inside the module - parity with the other two comparison
+   grids' text columns, labeled a statement rather than the definition. */
+LEFT JOIN LATERAL (
+    SELECT qs.query_text
+    FROM v_query_stats qs
+    WHERE qs.server_id = $1
+    AND   qs.sql_handle = COALESCE(c.sql_handle, b.sql_handle)
+    AND   qs.query_text IS NOT NULL
+    ORDER BY qs.collection_time DESC
+    LIMIT 1
+) t ON TRUE;";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = currentStart });
@@ -1073,6 +1090,7 @@ FULL OUTER JOIN baseline_period b
                 BaselineAvgDurationMs = reader.IsDBNull(8) ? 0 : ToDouble(reader.GetValue(8)),
                 BaselineAvgCpuMs = reader.IsDBNull(9) ? 0 : ToDouble(reader.GetValue(9)),
                 BaselineAvgReads = reader.IsDBNull(10) ? 0 : ToDouble(reader.GetValue(10)),
+                QueryText = reader.IsDBNull(11) ? "" : reader.GetString(11),
             });
         }
 

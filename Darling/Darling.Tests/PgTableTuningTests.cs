@@ -30,13 +30,16 @@ public sealed class PgTableTuningTests
         Assert.Contains("idx_query_stats_query_hash ON collect.query_stats (query_hash, collection_time) INCLUDE (database_name, delta_worker_time, delta_elapsed_time, delta_execution_count)", sql, StringComparison.Ordinal);
         Assert.Contains("idx_query_store_stats_query_hash ON collect.query_store_stats (query_hash, collection_time) INCLUDE (database_name, module_name, execution_count, avg_duration_us, max_duration_us, avg_cpu_time_us, max_cpu_time_us)", sql, StringComparison.Ordinal);
 
-        /* Three single-row analyze_*_plan lookup indexes (no INCLUDE — one heap fetch is cheap). */
+        /* Three single-row analyze_*_plan lookup indexes (no INCLUDE — one heap fetch is cheap),
+           plus the #1981 query_stats handle twin the ProcStats comparison's representative-statement
+           LATERAL probes (server_id, sql_handle, newest-first — bounded by raw retention's 4 days). */
         Assert.Contains("idx_procedure_stats_server_handle_time ON collect.procedure_stats (server_id, sql_handle, collection_time DESC)", sql, StringComparison.Ordinal);
+        Assert.Contains("idx_query_stats_server_handle_time ON collect.query_stats (server_id, sql_handle, collection_time DESC)", sql, StringComparison.Ordinal);
         Assert.Contains("idx_query_stats_server_hash_time ON collect.query_stats (server_id, query_hash, collection_time DESC)", sql, StringComparison.Ordinal);
         Assert.Contains("idx_query_store_stats_server_db_query_plan_time ON collect.query_store_stats (server_id, database_name, query_id, plan_id, collection_time DESC)", sql, StringComparison.Ordinal);
 
         /* Every index is idempotent (no-op where a field box already hand-applied it, or a prior start made it). */
-        Assert.Equal(6, CountOccurrences(sql, "CREATE INDEX IF NOT EXISTS"));
+        Assert.Equal(7, CountOccurrences(sql, "CREATE INDEX IF NOT EXISTS"));   /* +1: the #1981 handle index */
         Assert.DoesNotContain("CREATE INDEX ON", sql, StringComparison.Ordinal);
 
         /* Per-table autovacuum-insert override on exactly the three growing tables (NOT a global GUC change). */
@@ -44,7 +47,7 @@ public sealed class PgTableTuningTests
         Assert.Contains("ALTER TABLE collect.query_stats SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)", sql, StringComparison.Ordinal);
         Assert.Contains("ALTER TABLE collect.query_store_stats SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)", sql, StringComparison.Ordinal);
 
-        Assert.Equal(9, PgTableTuning.Statements.Count);
+        Assert.Equal(10, PgTableTuning.Statements.Count);   /* +1: the #1981 query_stats handle index */
     }
 
     private static int CountOccurrences(string haystack, string needle)
