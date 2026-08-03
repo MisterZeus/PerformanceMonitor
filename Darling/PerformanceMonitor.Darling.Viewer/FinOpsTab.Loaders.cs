@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 
 using PerformanceMonitor.Darling.Storage;
@@ -389,6 +390,52 @@ public partial class FinOpsTab
         _finopsPvsStatsFilterMgr!.UpdateData(data);
         FinOpsNoPvsStatsMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         FinOpsPvsCountIndicator.Text = data.Count > 0 ? $"{data.Count} database(s)" : "";
+
+        /* #1984 stage 2: the trend beside the grid — "when did it start growing" on the same axis
+           family as Storage Growth. Top-5 databases by current PVS size, 7 days of hourly points. */
+        var trend = await _dataService.GetPvsTrendAsync(_server.ServerId, DateTime.UtcNow.AddDays(-7));
+        RenderPvsTrendChart(trend);
+    }
+
+    /// <summary>
+    /// One line per database, legend labels carrying each database's LATEST %-of-database (the two
+    /// numbers the proposal asked for on one chart rather than two stacked plots). Hidden entirely
+    /// when there are no points — an ADR-less server gets no dead chart. Series colours rotate the
+    /// shared chart palette by series index so a redraw is stable.
+    /// </summary>
+    private void RenderPvsTrendChart(List<PvsTrendPoint> trend)
+    {
+        if (trend.Count == 0)
+        {
+            FinOpsPvsTrendChart.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        FinOpsPvsTrendChart.Visibility = Visibility.Visible;
+        FinOpsPvsTrendChart.Plot.Clear();
+
+        var seriesIndex = 0;
+        foreach (var series in trend.GroupBy(t => t.DatabaseName).OrderByDescending(g => g.Max(t => t.PvsSizeMb)))
+        {
+            var points = series.OrderBy(t => t.CollectionTime).ToList();
+            var times = points.Select(t => ViewerTimeHelper.ForDisplay(t.CollectionTime).ToOADate()).ToArray();
+            var values = points.Select(t => t.PvsSizeMb).ToArray();
+
+            var line = FinOpsPvsTrendChart.Plot.Add.TimeSeries(times, values);
+            line.Color = ScottPlot.Color.FromHex(ChartPalette.CyclingColor(seriesIndex++));
+            ChartStyle.StyleScatter(line);
+            var latestPct = points[^1].PctOfDatabase;
+            line.LegendText = latestPct is double pct
+                ? $"{series.Key} ({pct:0.0}% of DB)"
+                : series.Key;
+        }
+
+        FinOpsPvsTrendChart.Plot.Legend.IsVisible = true;
+        FinOpsPvsTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        FinOpsPvsTrendChart.Plot.Axes.AutoScale();
+        FinOpsPvsTrendChart.Plot.YLabel("PVS Off-Row MB");
+        ChartStyle.ApplyThemeToChart(FinOpsPvsTrendChart);
+        FinOpsPvsTrendChart.Refresh();
     }
 
     // ── Application Connections ──
