@@ -9,7 +9,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpQueryTools
 {
-    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle. distinct_texts counts the statement texts merged into each hash group (query_hash normalizes INSERT...EXEC callees and ad-hoc literals together; >1 means query_text is one representative). Supports database and parallelism filtering.")]
+    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle. distinct_texts counts the statement texts merged into each hash group (query_hash normalizes INSERT...EXEC callees and ad-hoc literals together; >1 means query_text is one representative, 0 means no stored text for the group). Supports database and parallelism filtering.")]
     public static async Task<string> GetTopQueriesByCpu(
         LocalDataService dataService,
         ServerManager serverManager,
