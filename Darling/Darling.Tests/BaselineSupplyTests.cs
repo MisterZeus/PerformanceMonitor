@@ -209,15 +209,15 @@ public class BaselineSupplyTests
     [Fact]
     public void RefreshSql_BindsAndCastsItsBounds_BecauseTheParametersArePolymorphic()
     {
-        var plain = TimescaleSupport.RefreshContinuousAggregateSql(TimescaleSupport.CpuBaselineView);
+        var plain = TimescaleSupport.RefreshContinuousAggregateSql(TimescaleSupport.PerfmonBaselineView);
         Assert.Contains("$1::timestamp", plain, StringComparison.Ordinal);
         Assert.Contains("NULL::timestamp", plain, StringComparison.Ordinal);
-        Assert.Contains("'collect.cpu_utilization_baseline'::regclass", plain, StringComparison.Ordinal);
+        Assert.Contains("'collect.perfmon_baseline'::regclass", plain, StringComparison.Ordinal);
         Assert.DoesNotContain("buckets_per_batch", plain, StringComparison.Ordinal);
 
         /* force is the 4th positional argument, and only ever set deliberately. */
         Assert.EndsWith("NULL::timestamp)", plain, StringComparison.Ordinal);
-        var forced = TimescaleSupport.RefreshContinuousAggregateSql(TimescaleSupport.CpuBaselineView, force: true);
+        var forced = TimescaleSupport.RefreshContinuousAggregateSql(TimescaleSupport.PerfmonBaselineView, force: true);
         Assert.EndsWith("NULL::timestamp, true)", forced, StringComparison.Ordinal);
     }
 
@@ -352,7 +352,7 @@ public class BaselineSupplyTests
 
         /* The probe is what makes running it everywhere safe: a continuous aggregate is also a relkind='v'
            view, so an unconditional CREATE OR REPLACE VIEW by these names would destroy a materialization. */
-        Assert.Contains("to_regclass", TimescaleSupport.BaselineRelationExistsSql(TimescaleSupport.CpuBaselineView), StringComparison.Ordinal);
+        Assert.Contains("to_regclass", TimescaleSupport.BaselineRelationExistsSql(TimescaleSupport.PerfmonBaselineView), StringComparison.Ordinal);
     }
 
     private static string ReadWorkerSource([CallerFilePath] string thisFile = "")

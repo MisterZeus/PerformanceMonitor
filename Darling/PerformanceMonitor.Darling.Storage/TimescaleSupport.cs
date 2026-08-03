@@ -333,34 +333,31 @@ public static class TimescaleSupport
     /// <summary><see cref="TimeSpan"/> twin of <see cref="BaselineRetentionInterval"/>, pinned equal by test.</summary>
     public static readonly TimeSpan BaselineRetentionSpan = TimeSpan.FromDays(35);
 
-    public const string CpuBaselineView = "cpu_utilization_baseline";
     public const string PerfmonBaselineView = "perfmon_baseline";
     public const string WaitStatsBaselineView = "wait_stats_baseline";
     public const string SessionStatsBaselineView = "session_stats_baseline";
     public const string QueryStatsBaselineView = "query_stats_baseline";
-    public const string FileIoBaselineView = "file_io_baseline";
     public const string BlockedProcessBaselineView = "blocked_process_baseline";
     public const string DeadlockBaselineView = "deadlock_baseline";
     public const string MemoryBaselineView = "memory_baseline";
 
-    /// <summary>Cpu baseline supply. NOT one row per collection, despite how a point-in-time metric reads:
-    /// CpuUtilizationCollector issues SELECT TOP (60) over RING_BUFFER_SCHEDULER_MONITOR and appends every
-    /// row, so the first collection after a start or a gap writes up to 60 samples under a SINGLE
-    /// collection_time. Averaging those to one value per collection would change the statistic (mean of
-    /// per-collection means, not mean of samples) and silently redefine sample_count from samples to
-    /// collections. Stores the sufficient statistics instead, exactly as file_io does.</summary>
-    public const string CreateCpuBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.cpu_utilization_baseline
-WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
-SELECT
-    server_id,
-    time_bucket('1 hour', collection_time) AS bucket,
-    collection_time,
-    sum(sqlserver_cpu_utilization) AS cpu_sum,
-    sum(power(sqlserver_cpu_utilization, 2)) AS cpu_sumsq,
-    count(sqlserver_cpu_utilization) AS cpu_count
-FROM collect.cpu_utilization_stats
-GROUP BY server_id, bucket, collection_time
-WITH NO DATA";
+    /// <summary>
+    /// Baseline relations RETIRED by #2007: the CPU and IO anomaly arms read the RAW hypertables
+    /// (cpu_utilization_stats / file_io_stats, 30-day service-side retention floored by
+    /// DarlingRetention.BaselineServingRawCollectors) since the #1743/#1995 robust-statistics work
+    /// — medians cannot be computed from these aggregates' sufficient statistics, so nothing reads
+    /// them anymore, yet they kept materializing on schedule and holding storage on every store.
+    /// Named here so <see cref="DropRetiredBaselineAggregatesAsync"/> can remove BOTH historical
+    /// implementations (the continuous aggregate on TimescaleDB stores, the plain fallback view on
+    /// plain-PostgreSQL stores) on the next service start, and so a future aggregate can never
+    /// silently reuse these names against a store that still carries the old objects.
+    /// </summary>
+    public static readonly string[] RetiredBaselineRelations =
+    {
+        "cpu_utilization_baseline",
+        "file_io_baseline",
+    };
+
 
     /// <summary>BatchRequests baseline supply -- the counter_name and non-negative filters bake in. Unlike
     /// cpu, one row per collection here is a property of the DMV (Batch Requests/sec is a single instance)
@@ -423,26 +420,6 @@ AND   delta_elapsed_time >= 0
 GROUP BY server_id, bucket, collection_time
 WITH NO DATA";
 
-    /// <summary>IoLatency baseline supply. THE ONE FAMILY WHOSE UNIT IS NOT THE COLLECTION: it averages a
-    /// per-FILE stall/reads ratio across file rows, so a per-collection total would be a different statistic.
-    /// Stores that ratio's sufficient statistics instead, from which the provider reconstructs AVG and
-    /// STDDEV_SAMP exactly (var_samp = (sumsq - sum*sum/n) / (n-1)). row_count is kept SEPARATELY from
-    /// ratio_count because the raw path's sample_count is COUNT(*), which counts rows whose ratio is NULL --
-    /// a file with writes but no reads passes the filter and contributes to the count but not the average.</summary>
-    public const string CreateFileIoBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.file_io_baseline
-WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
-SELECT
-    server_id,
-    time_bucket('1 hour', collection_time) AS bucket,
-    collection_time,
-    sum(delta_stall_read_ms::DOUBLE PRECISION / NULLIF(delta_reads, 0)) AS ratio_sum,
-    sum(power(delta_stall_read_ms::DOUBLE PRECISION / NULLIF(delta_reads, 0), 2)) AS ratio_sumsq,
-    count(delta_stall_read_ms::DOUBLE PRECISION / NULLIF(delta_reads, 0)) AS ratio_count,
-    count(*) AS row_count
-FROM collect.file_io_stats
-WHERE delta_reads > 0 OR delta_writes > 0
-GROUP BY server_id, bucket, collection_time
-WITH NO DATA";
 
     /// <summary>Blocking AND BlockingPerMinute baseline supply -- both families share this source and both
     /// have NO row-level filter, so one aggregate serves both. Event counts per collection re-aggregate to
@@ -806,31 +783,118 @@ BEGIN
 END
 $do$";
 
+    /// <summary>
+    /// Drops one RETIRED baseline relation (#2007) in whichever implementation this store carries:
+    /// <c>DROP MATERIALIZED VIEW ... CASCADE</c> when it is a continuous aggregate (TimescaleDB
+    /// removes its refresh/retention policies with it), <c>DROP VIEW</c> when it is the plain
+    /// fallback a TimescaleDB-less store created under the same name, and a no-op when neither
+    /// exists. The same relkind + continuous_aggregates discrimination
+    /// <see cref="DropBaselineFallbackViewSql"/> uses, because a CAGG is also a
+    /// <c>relkind='v'</c> view and the two need different DROP verbs.
+    /// </summary>
+    public static string DropRetiredBaselineRelationSql(string view)
+        => $@"DO $do$
+DECLARE
+    is_continuous_aggregate boolean := false;
+BEGIN
+    IF to_regclass('collect.{view}') IS NULL
+    THEN
+        RETURN;
+    END IF;
+
+    /* timescaledb_information only exists once the extension has been created; to_regclass probes
+       it without raising, and no extension means nothing can be a continuous aggregate. */
+    IF to_regclass('timescaledb_information.continuous_aggregates') IS NOT NULL
+    THEN
+        EXECUTE 'SELECT EXISTS (SELECT 1 FROM timescaledb_information.continuous_aggregates WHERE view_schema = ''collect'' AND view_name = ''{view}'')'
+        INTO is_continuous_aggregate;
+    END IF;
+
+    IF is_continuous_aggregate
+    THEN
+        EXECUTE 'DROP MATERIALIZED VIEW collect.{view} CASCADE';
+    ELSE
+        EXECUTE 'DROP VIEW IF EXISTS collect.{view} CASCADE';
+    END IF;
+END
+$do$";
+
+    /// <summary>
+    /// Removes the <see cref="RetiredBaselineRelations"/> (#2007) from this store — the CPU/IO
+    /// baseline aggregates nothing has read since the anomaly arms moved to the raw hypertables,
+    /// which otherwise keep materializing on schedule and holding storage forever. Runs from the
+    /// worker's UNGATED fallback block (its own connection, every store shape): on TimescaleDB
+    /// stores it drops the aggregates and their policies, on plain-PostgreSQL stores the fallback
+    /// views, and on fresh stores it no-ops. Failure-isolated per relation, like every other
+    /// startup sweep — a failed drop is retried on the next start and never kills the service.
+    /// Returns how many relations were actually dropped.
+    /// </summary>
+    public static async Task<int> DropRetiredBaselineAggregatesAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var dropped = 0;
+        foreach (var view in RetiredBaselineRelations)
+        {
+            try
+            {
+                bool existed;
+                using (var probe = new NpgsqlCommand(BaselineRelationExistsSql(view), connection) { CommandTimeout = SetupTimeoutSeconds })
+                {
+                    existed = await probe.ExecuteScalarAsync(cancellationToken) is true;
+                }
+
+                if (!existed)
+                {
+                    continue;
+                }
+
+                using (var drop = new NpgsqlCommand(DropRetiredBaselineRelationSql(view), connection) { CommandTimeout = SetupTimeoutSeconds })
+                {
+                    await drop.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                dropped++;
+                logger?.LogInformation(
+                    "Dropped retired baseline relation {View} (#2007) — the CPU/IO anomaly arms read the raw hypertables, so nothing consumed it.",
+                    view);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Could not drop retired baseline relation {View} — it lingers (harmlessly, but materializing) until the next restart retries: {Message}",
+                    view, ex.Message);
+            }
+        }
+
+        return dropped;
+    }
+
     /// <summary>The raw table each baseline aggregate is sourced from, for the backfill's coverage probe.</summary>
     public static string SourceTableFor(string view) => view switch
     {
-        CpuBaselineView => "cpu_utilization_stats",
         PerfmonBaselineView => "perfmon_stats",
         WaitStatsBaselineView => "wait_stats",
         SessionStatsBaselineView => "session_stats",
         QueryStatsBaselineView => "query_stats",
-        FileIoBaselineView => "file_io_stats",
         BlockedProcessBaselineView => "blocked_process_reports",
         DeadlockBaselineView => "deadlocks",
         MemoryBaselineView => "memory_stats",
         _ => throw new ArgumentOutOfRangeException(nameof(view), view, "not a baseline aggregate"),
     };
 
-    /// <summary>The nine baseline-tier aggregates in creation order. Named ONCE so the ensure sweep, the
+    /// <summary>The seven baseline-tier aggregates in creation order (nine until #2007 retired the unread CPU/IO pair). Named ONCE so the ensure sweep, the
     /// retention list and the tests read one list rather than three hand-kept copies.</summary>
     public static readonly (string CreateSql, string View)[] BaselineAggregates =
     {
-        (CreateCpuBaselineSql,            CpuBaselineView),
         (CreatePerfmonBaselineSql,        PerfmonBaselineView),
         (CreateWaitStatsBaselineSql,      WaitStatsBaselineView),
         (CreateSessionStatsBaselineSql,   SessionStatsBaselineView),
         (CreateQueryStatsBaselineSql,     QueryStatsBaselineView),
-        (CreateFileIoBaselineSql,         FileIoBaselineView),
         (CreateBlockedProcessBaselineSql, BlockedProcessBaselineView),
         (CreateDeadlockBaselineSql,       DeadlockBaselineView),
         (CreateMemoryBaselineSql,         MemoryBaselineView),
@@ -1548,7 +1612,7 @@ WITH NO DATA";
             (CreateSql: CreateQueryStoreStatsIntervalDailySql, View: QueryStoreStatsIntervalDailyView, PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsIntervalDailyView, "1 day", "1 day")),
             (CreateSql: CreateQueryStoreStatsDayGrainDailySql, View: QueryStoreStatsDayGrainDailyView, PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsDayGrainDailyView, "1 day", "1 day")),
         }
-        /* The nine baseline-tier aggregates (#1757) take the helper's hourly defaults: they are sourced from
+        /* The seven baseline-tier aggregates (#1757; nine until #2007) take the helper's hourly defaults: they are sourced from
            raw like the hourly tier, not hierarchically from another CAGG, so they carry no ordering
            requirement against the daily tier. Appended from the single BaselineAggregates list so this sweep
            and the retention list cannot drift apart. */
@@ -1918,7 +1982,7 @@ AND   j.hypertable_name = '{relation}'";
             (Relation: QueryStoreStatsCorrectedHourlyView, DropAfter: HourlyRetentionInterval,        TimeColumn: "bucket", Coverage: new[] { QueryStoreStatsCorrectedDailyView }),
             (Relation: QueryStoreStatsIntervalDailyView,   DropAfter: IntervalDailyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { QueryStoreStatsDayGrainDailyView }),
         })
-        /* The nine baseline-tier policies (#1757). Coverage is the tier ITSELF: see the leaf rule in the
+        /* The seven baseline-tier policies (#1757; nine until #2007). Coverage is the tier ITSELF: see the leaf rule in the
            summary above -- their consumer is the baseline computation, whose capture requirement is the
            30-day window, and BaselineRetentionSpan (35d) exceeds it by construction. */
         .Concat(BaselineAggregates.Select(a =>
@@ -2216,7 +2280,7 @@ AND   j.hypertable_name = '{relation}'";
            sitting in timescaledb_information.jobs — the very table the docs send an operator to when they want
            to check it. The interval-dedup L1 is deliberately SHORTER than the hourly tier (it is internal
            plumbing gated on outliving raw, not history); its daily twin carries a horizon at all, despite the
-           line promising dailies are kept forever; and the nine baseline aggregates have a horizon of their own
+           line promising dailies are kept forever; and the seven baseline aggregates have a horizon of their own
            that went unmentioned. A field operator cross-checking found the first one immediately and had to
            work out whether they had hit a bug (#1958). A summary line is only worth printing if it survives
            being checked. */

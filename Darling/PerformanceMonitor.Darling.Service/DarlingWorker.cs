@@ -802,7 +802,7 @@ public sealed class DarlingWorker : BackgroundService
             _logger.LogWarning("TimescaleDB setup failed — continuing in plain-PostgreSQL mode: {Message}", ex.Message);
         }
 
-        /* #1757: the provider reads the nine baseline relations BY NAME — a missing one throws,
+        /* #1757: the provider reads the seven baseline relations BY NAME — a missing one throws,
            ComputeBaselinesAsync swallows it, and that family silently returns an empty baseline. So every
            relation is guaranteed to EXIST here, with a plain view over the same select filling any gap.
 
@@ -811,10 +811,17 @@ public sealed class DarlingWorker : BackgroundService
            and EnsureContinuousAggregatesAsync's per-aggregate failure isolation left one aggregate unbuilt.
            That last one is the easiest to miss and would take exactly one family down on an otherwise healthy
            store. The call is per-view and probes for an existing relation first, so it never touches a real
-           aggregate. Its own connection — the block's is already disposed by here. */
+           aggregate. Its own connection — the block's is already disposed by here.
+
+           The retirement drop (#2007) rides the same ungated block for the same reason: the retired CPU/IO
+           baseline relations exist as CAGGs on TimescaleDB stores and as plain fallback views on
+           plain-PostgreSQL stores, and both shapes must go. BEFORE the ensure call, though order is not
+           load-bearing — the retired names left BaselineAggregates, so the ensure sweep can never recreate
+           them. */
         try
         {
             await using var fallbackConnection = await postgres.OpenConnectionAsync(stoppingToken);
+            await TimescaleSupport.DropRetiredBaselineAggregatesAsync(fallbackConnection, _logger, stoppingToken);
             await TimescaleSupport.EnsureBaselineFallbackViewsAsync(fallbackConnection, _logger, stoppingToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

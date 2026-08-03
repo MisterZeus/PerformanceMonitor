@@ -1453,7 +1453,7 @@ AND   j.hypertable_name = '" + relation + "'", connection);
 
     /// <summary>
     /// The relations EnsureRetentionPoliciesAsync attaches policies to, for teardown: the three raw tables,
-    /// the four hourly CAGGs, and the nine baseline aggregates (#1757). The last group is DERIVED from the
+    /// the four hourly CAGGs, and the seven baseline aggregates (#1757; nine until #2007). The last group is DERIVED from the
     /// product's own list rather than restated, so adding a baseline aggregate cannot leave an armed retention
     /// policy behind on this shared fixture.
     /// </summary>
