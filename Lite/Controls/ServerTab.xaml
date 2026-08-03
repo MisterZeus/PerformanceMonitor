@@ -923,6 +923,18 @@
                                     <DataGridTextColumn Binding="{Binding FullName}" Width="200">
                                         <DataGridTextColumn.Header><TextBlock Text="Procedure" FontWeight="Bold"/></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
+                                    <!-- #1981: parity with the other two comparison grids' text columns. This is a
+                                         REPRESENTATIVE statement captured from inside the procedure (latest text
+                                         sharing the module's sql_handle), not the definition. -->
+                                    <DataGridTemplateColumn Width="500">
+                                        <DataGridTemplateColumn.Header><TextBlock Text="Statement (representative)" FontWeight="Bold"/></DataGridTemplateColumn.Header>
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding QueryText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2"
+                                                           ToolTip="{Binding QueryText}"/>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
                                     <DataGridTextColumn Binding="{Binding ExecutionCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
                                         <DataGridTextColumn.Header><TextBlock Text="Executions" FontWeight="Bold"/></DataGridTextColumn.Header>
                                     </DataGridTextColumn>

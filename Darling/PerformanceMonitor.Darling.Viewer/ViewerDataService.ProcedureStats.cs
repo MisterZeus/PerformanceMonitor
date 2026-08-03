@@ -227,7 +227,8 @@ public sealed partial class ViewerDataService
                    SUM(ps.delta_execution_count) AS exec_count,
                    SUM(ps.delta_elapsed_time)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_duration_ms,
                    SUM(ps.delta_worker_time)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_cpu_ms,
-                   SUM(ps.delta_physical_reads)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) AS avg_reads
+                   SUM(ps.delta_physical_reads)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) AS avg_reads,
+                   MAX(ps.sql_handle) AS sql_handle
             FROM top_procs tp
             INNER JOIN procedure_stats ps
               ON  ps.database_name IS NOT DISTINCT FROM tp.database_name
@@ -243,7 +244,8 @@ public sealed partial class ViewerDataService
                    SUM(ps.delta_execution_count) AS exec_count,
                    SUM(ps.delta_elapsed_time)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_duration_ms,
                    SUM(ps.delta_worker_time)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_cpu_ms,
-                   SUM(ps.delta_physical_reads)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) AS avg_reads
+                   SUM(ps.delta_physical_reads)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) AS avg_reads,
+                   MAX(ps.sql_handle) AS sql_handle
             FROM top_procs tp
             INNER JOIN procedure_stats ps
               ON  ps.database_name IS NOT DISTINCT FROM tp.database_name
@@ -261,12 +263,28 @@ public sealed partial class ViewerDataService
                b.exec_count AS baseline_exec_count,
                b.avg_duration_ms AS baseline_avg_duration_ms,
                b.avg_cpu_ms AS baseline_avg_cpu_ms,
-               b.avg_reads AS baseline_avg_reads
+               b.avg_reads AS baseline_avg_reads,
+               t.query_text
         FROM current_period c
         FULL OUTER JOIN baseline_period b
           ON  COALESCE(c.database_name, '') = COALESCE(b.database_name, '')
           AND COALESCE(c.schema_name, '') = COALESCE(b.schema_name, '')
           AND COALESCE(c.object_name, '') = COALESCE(b.object_name, '')
+        /* #1981: a REPRESENTATIVE statement of the procedure via the same normalized sql_handle
+           join #1568's module attribution relies on (both stores persist the identical
+           CONVERT(varchar(130), ..., 1) text). procedure_stats captures no text of its own, so
+           this is the latest captured statement from inside the module — parity with the other
+           two comparison grids, labeled a statement rather than the definition. v_query_stats
+           resolves the #1767 payload dimension. */
+        LEFT JOIN LATERAL (
+            SELECT qs.query_text
+            FROM v_query_stats qs
+            WHERE qs.server_id = $1
+            AND   qs.sql_handle = COALESCE(c.sql_handle, b.sql_handle)
+            AND   qs.query_text IS NOT NULL
+            ORDER BY qs.collection_time DESC
+            LIMIT 1
+        ) t ON TRUE
         """;
 
     /// <summary>Top-Procedures current-vs-baseline comparison rows (shared .Ui item; delta % + NEW/GONE badges).</summary>
@@ -298,6 +316,7 @@ public sealed partial class ViewerDataService
                 BaselineAvgDurationMs = reader.IsDBNull(8) ? 0 : Convert.ToDouble(reader.GetValue(8)),
                 BaselineAvgCpuMs = reader.IsDBNull(9) ? 0 : Convert.ToDouble(reader.GetValue(9)),
                 BaselineAvgReads = reader.IsDBNull(10) ? 0 : Convert.ToDouble(reader.GetValue(10)),
+                QueryText = reader.IsDBNull(11) ? "" : reader.GetString(11),
             });
         }
 
