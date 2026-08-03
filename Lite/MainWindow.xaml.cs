@@ -688,12 +688,12 @@ public partial class MainWindow : Window
                 }
             }
 
-            var sorted = ServerOverviewSort.Order(
-                summaries, App.OverviewSortMode,
-                s => s.CpuPercentForAlert, s => s.DisplayName, s => s.ServerId);
-            OverviewItemsControl.ItemsSource = sorted;
+            _overviewSummaries = summaries;
+            ApplyOverviewView();
 
-            foreach (var summary in sorted)
+            /* Alerts run over the WHOLE fleet, never the filtered view — a search box narrowing what's on
+               screen must not silence alerts for the servers it hides. */
+            foreach (var summary in summaries)
             {
                 CheckPerformanceAlerts(summary);
             }
@@ -757,10 +757,30 @@ public partial class MainWindow : Window
             App.OverviewSortMode = mode;
             App.WriteSetting("overview sort",
                 root => root["overview_sort_mode"] = ServerOverviewSort.ToToken(mode));
-            if (OverviewItemsControl.ItemsSource is IEnumerable<ServerSummaryItem> items)
-                OverviewItemsControl.ItemsSource = ServerOverviewSort.Order(
-                    items, mode, s => s.CpuPercentForAlert, s => s.DisplayName, s => s.ServerId);
+            ApplyOverviewView();
         }
+    }
+
+    /// <summary>The unfiltered Overview summaries, held so the sort and search controls can recompose the
+    /// view off the full fleet without a store round-trip (<see cref="RefreshOverviewAsync"/> refills it).</summary>
+    private List<ServerSummaryItem> _overviewSummaries = new();
+
+    /// <summary>Live name filter over the Overview cards. Re-composes the view; the search itself is a cheap
+    /// in-memory pass, so running it per keystroke is fine.</summary>
+    private void OverviewSearchBox_TextChanged(object sender, TextChangedEventArgs e) => ApplyOverviewView();
+
+    /// <summary>Projects <see cref="_overviewSummaries"/> to the cards: filter by the search box (name), then
+    /// sort by the current mode. The single place both controls funnel through, so filter and sort always
+    /// compose the same way regardless of which the user touched last.</summary>
+    private void ApplyOverviewView()
+    {
+        var filtered = _overviewSummaries
+            .Where(s => ServerOverviewFilter.Matches(OverviewSearchBox?.Text, s.DisplayName, s.ServerName))
+            .ToList();
+
+        OverviewItemsControl.ItemsSource = ServerOverviewSort.Order(
+            filtered, App.OverviewSortMode,
+            s => s.CpuPercentForAlert, s => s.DisplayName, s => s.ServerId);
     }
 
     private async void ConnectToServer(ServerConnection server)

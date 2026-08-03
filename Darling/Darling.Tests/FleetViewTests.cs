@@ -371,4 +371,101 @@ public sealed class FleetViewTests
     {
         Assert.False(FleetGroupKey.TryParse(stored, out _));
     }
+
+    // ── Server search: the reserved Rebuild seam (name + tag filter) ──────────────────────────────────
+
+    [Fact]
+    public void Search_FlatList_FiltersByNameCaseInsensitiveSubstring()
+    {
+        var fleet = FleetOf(Server(1, "sql-prod-01"), Server(2, "sql-dev-02"), Server(3, "app-prod-03"));
+
+        fleet.SetSearch("PROD");
+
+        Assert.Equal(new[] { "sql-prod-01", "app-prod-03" }, ServerRows(fleet).Select(r => r.Server.ServerName));
+        Assert.True(fleet.IsSearching);
+        Assert.Equal(2, fleet.VisibleServerCount);
+        Assert.Equal(3, fleet.TotalCount);   // a filter narrows what shows, never the fleet itself
+    }
+
+    [Fact]
+    public void Search_EmptyOrWhitespace_RestoresTheWholeList()
+    {
+        var fleet = FleetOf(Server(1, "alpha"), Server(2, "beta"));
+
+        fleet.SetSearch("alpha");
+        Assert.Single(ServerRows(fleet));
+
+        fleet.SetSearch("   ");
+        Assert.False(fleet.IsSearching);
+        Assert.Equal(2, ServerRows(fleet).Count());
+    }
+
+    [Fact]
+    public void Search_MatchesByTagName_EvenWhenTheServerNameDoesNot()
+    {
+        var fleet = FleetOf(Server(1, "sql-01"), Server(2, "sql-02"));
+        fleet.SetTags(new[] { Tag(10, "Production") }, new[] { Assign(1, 10) });
+
+        fleet.SetSearch("production");
+
+        /* sql-01 matches via its "Production" tag; sql-02 (untagged, no name match) drops out entirely. */
+        Assert.Equal(new[] { "sql-01" }, ServerRows(fleet).Select(r => r.Server.ServerName).Distinct());
+        Assert.Contains(Headers(fleet), h => h.Title == "Production");
+        Assert.DoesNotContain(Headers(fleet), h => h.Title == "Untagged");
+    }
+
+    [Fact]
+    public void Search_DropsTagGroupsWithNoMatchAnywhereInTheirSubtree()
+    {
+        var fleet = FleetOf(Server(1, "web-01"), Server(2, "db-01"));
+        fleet.SetTags(
+            new[] { Tag(10, "Web"), Tag(20, "Database") },
+            new[] { Assign(1, 10), Assign(2, 20) });
+
+        fleet.SetSearch("web");
+
+        Assert.Contains(Headers(fleet), h => h.Title == "Web");
+        Assert.DoesNotContain(Headers(fleet), h => h.Title == "Database");
+        Assert.Equal(new[] { "web-01" }, ServerRows(fleet).Select(r => r.Server.ServerName));
+    }
+
+    [Fact]
+    public void Search_NestedMatch_KeepsTheAncestorGroupThatHasNoDirectMatch()
+    {
+        /* A parent tag with no directly-assigned matching server must still show when a descendant matches,
+           or the match would be unreachable. */
+        var fleet = FleetOf(Server(1, "sql-01"));
+        fleet.SetTags(
+            new[] { Tag(10, "Environments"), Tag(20, "Production", parentId: 10) },
+            new[] { Assign(1, 20) });
+
+        fleet.SetSearch("sql-01");
+
+        Assert.Contains(Headers(fleet), h => h.Title == "Environments");
+        Assert.Contains(Headers(fleet), h => h.Title == "Production");
+        Assert.Equal(new[] { "sql-01" }, ServerRows(fleet).Select(r => r.Server.ServerName));
+    }
+
+    [Fact]
+    public void Search_RevealsAMatchInACollapsedGroup_ThenRestoresCollapseOnClear()
+    {
+        var fleet = FleetOf(Server(1, "sql-prod"), Server(2, "sql-dev"));
+        fleet.SetTags(new[] { Tag(10, "Prod"), Tag(20, "Dev") },
+            new[] { Assign(1, 10), Assign(2, 20) });
+
+        /* Collapse the Prod group — its server is hidden. */
+        var prodHeader = Headers(fleet).First(h => h.Title == "Prod");
+        fleet.ToggleExpanded(prodHeader);
+        Assert.DoesNotContain(ServerRows(fleet), r => r.Server.ServerName == "sql-prod");
+
+        /* A search matching the collapsed server reveals it — every group renders expanded while searching. */
+        fleet.SetSearch("sql-prod");
+        Assert.Contains(ServerRows(fleet), r => r.Server.ServerName == "sql-prod");
+
+        /* Clearing the search restores the persisted collapse: Prod is collapsed again, hiding its server,
+           but the header itself is back. */
+        fleet.SetSearch(null);
+        Assert.DoesNotContain(ServerRows(fleet), r => r.Server.ServerName == "sql-prod");
+        Assert.Contains(Headers(fleet), h => h.Title == "Prod");
+    }
 }

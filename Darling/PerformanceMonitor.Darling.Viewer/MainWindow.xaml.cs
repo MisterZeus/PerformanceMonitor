@@ -726,6 +726,26 @@ public partial class MainWindow : Window
         await UpdateCollectorHealthTextAsync();
     }
 
+    /// <summary>
+    /// Live server-search box (sidebar). Pushes the term into the fleet projection — the one reserved
+    /// <see cref="FleetView.SetSearch"/> seam, which matches server name AND tag names — then rebinds the
+    /// list and updates the count. Grouping, favourites, and selection all follow the projection, so nothing
+    /// else needs touching. Filtering is a cheap in-memory pass, so running it per keystroke is fine.
+    /// </summary>
+    private void ServerSearchBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+    {
+        _fleet.SetSearch(ServerSearchBox.Text);
+        ServerList.ItemsSource = _fleet.Visible;
+        UpdateServerCountText();
+    }
+
+    /// <summary>The sidebar "Servers: N" label — "N of total" while a search narrows the fleet, plain total
+    /// otherwise. Centralised so the load path and the search path can't drift.</summary>
+    private void UpdateServerCountText() =>
+        ServerCountText.Text = _fleet.IsSearching
+            ? $"Servers: {_fleet.VisibleServerCount} of {_fleet.TotalCount}"
+            : $"Servers: {_fleet.TotalCount}";
+
     private async Task LoadServersAsync(bool preserveSelection = false)
     {
         if (_dataService is null)
@@ -743,7 +763,7 @@ public partial class MainWindow : Window
             var servers = ApplyFavoritesAndSort(await _dataService.GetManagedServersAsync());
             _fleet.SetAll(servers);
             ServerList.ItemsSource = _fleet.Visible;
-            ServerCountText.Text = $"Servers: {_fleet.TotalCount}";
+            UpdateServerCountText();
 
             /* The Recommendations tab has its OWN server selector, synced to the sidebar selection on a
                single-click (SyncAggregateServerSelectors) yet independently changeable while the tab is open.
