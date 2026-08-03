@@ -17,6 +17,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitor.Ui;
 
@@ -133,6 +134,13 @@ public partial class MainWindow : Window
     /// </summary>
     private string _connectionDiagnostics = "";
 
+    /// <summary>
+    /// The EFFECTIVE store connection string (post-#1970 certificate anchoring — what Npgsql
+    /// actually opens), kept for the failure overlay's "Run self-test" (#1954 bullet 3). Null until
+    /// config resolves; the button reports that instead of probing nothing.
+    /// </summary>
+    private string? _storeConnectionString;
+
     public MainWindow()
     {
         InitializeComponent();
@@ -215,6 +223,7 @@ public partial class MainWindow : Window
         _connectionDiagnostics = ViewerConfigDiagnostics.BuildDetails(
             configLocation, settings.ConfiguredConnectionString, settings.Managed, configLocation.Directory);
 
+        _storeConnectionString = settings.ConnectionString;
         _dataService = new ViewerDataService(settings.ConnectionString, _connectionTimeoutSeconds);
 
         try
@@ -1548,6 +1557,61 @@ public partial class MainWindow : Window
         foreach (var line in lines)
         {
             ViewerLogger.Info(ViewerConfigDiagnostics.LogSource, line);
+        }
+    }
+
+    /// <summary>
+    /// The layered store-connection self-test (#1954 bullet 3): DNS → TCP → TLS → auth → schema
+    /// gate, against the SAME effective connection string the failed connect used, so the operator
+    /// learns WHICH layer failed instead of re-reading one collapsed Npgsql message. The report
+    /// appends under the configuration block (a re-run replaces the previous report rather than
+    /// stacking) and goes to the log, flushed — the same treatment the failure itself gets. The
+    /// probe core is shared and never throws; the catch here is a UI-thread belt-and-braces.
+    /// </summary>
+    private async void OnRunSelfTestClick(object sender, RoutedEventArgs e)
+    {
+        if (string.IsNullOrWhiteSpace(_storeConnectionString))
+        {
+            /* No connection string means config never resolved (e.g. darling.json missing) — there
+               is nothing to probe, and the overlay message already says what to fix. */
+            ViewerLogger.Warn(ViewerConfigDiagnostics.LogSource,
+                "Self-test requested, but no store connection string resolved — fix the configuration first.");
+            return;
+        }
+
+        RunSelfTestButton.IsEnabled = false;
+        var originalContent = RunSelfTestButton.Content;
+        RunSelfTestButton.Content = "Testing…";
+        try
+        {
+            var results = await StoreConnectionSelfTest.RunAsync(_storeConnectionString);
+            var report = StoreConnectionSelfTest.FormatReport(results);
+
+            foreach (var line in report.Split('\n'))
+            {
+                ViewerLogger.Info(ViewerConfigDiagnostics.LogSource, line.TrimEnd());
+            }
+
+            ViewerLogger.Flush();
+
+            /* Splice over a previous run's report (the header is the core's public seam), keep
+               whatever configuration block was already showing above it. */
+            var current = MessageDetailsText.Text ?? "";
+            var previousReport = current.IndexOf(StoreConnectionSelfTest.ReportHeader, StringComparison.Ordinal);
+            var baseText = (previousReport >= 0 ? current[..previousReport] : current).TrimEnd();
+            MessageDetailsText.Text = baseText.Length == 0
+                ? report
+                : baseText + Environment.NewLine + Environment.NewLine + report;
+            MessageDetailsPanel.Visibility = Visibility.Visible;
+        }
+        catch (Exception ex)
+        {
+            ViewerLogger.Error(ViewerConfigDiagnostics.LogSource, "Connection self-test failed to run", ex);
+        }
+        finally
+        {
+            RunSelfTestButton.Content = originalContent;
+            RunSelfTestButton.IsEnabled = true;
         }
     }
 

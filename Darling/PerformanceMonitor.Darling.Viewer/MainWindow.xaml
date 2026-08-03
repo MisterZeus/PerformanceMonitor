@@ -1228,9 +1228,17 @@
                          it is most wanted; carry one here. The log holds what this block deliberately
                          omits — the exception and its inner chain. -->
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
+                        <!-- #1954 bullet 3: the layered self-test (DNS → TCP → TLS → auth → schema),
+                             run against the SAME connection string the failed connect used; results
+                             append to the details block above and go to the log. -->
+                        <Button x:Name="RunSelfTestButton"
+                                Content="Run self-test"
+                                Style="{StaticResource DarkButton}"
+                                Click="OnRunSelfTestClick"/>
                         <Button x:Name="CopyDiagnosticsButton"
                                 Content="Copy details"
                                 Style="{StaticResource DarkButton}"
+                                Margin="8,0,0,0"
                                 Click="OnCopyDiagnosticsClick"/>
                         <Button Content="View Log"
                                 Style="{StaticResource DarkButton}"
