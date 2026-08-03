@@ -314,15 +314,19 @@ public sealed class DarlingMcpToolsTests
                 var root = doc.RootElement;
                 Assert.Equal(TestServerName, root.GetProperty("server").GetString());
                 Assert.Equal(1, root.GetProperty("finding_count").GetInt32());
+                /* #2000: finding_count is DEDUPED groups; total_occurrences is raw rows. */
+                Assert.Equal(1, root.GetProperty("total_occurrences").GetInt32());
 
                 var finding = Assert.Single(root.GetProperty("findings").EnumerateArray());
 
-                /* Every field of Lite's per-finding envelope is present under the same name. */
+                /* Every field of Lite's per-finding envelope is present under the same name,
+                   including the #2000 occurrence stats. */
                 foreach (var field in new[]
                 {
                     "finding_id", "analysis_time", "severity", "confidence", "category",
                     "root_fact", "leaf_fact", "story_path", "story_path_hash", "fact_count",
-                    "incident_id", "co_fired", "time_range", "advice", "remediation_command"
+                    "incident_id", "occurrences", "first_seen", "last_seen", "peak_severity",
+                    "co_fired", "time_range", "advice", "remediation_command"
                 })
                 {
                     Assert.True(finding.TryGetProperty(field, out _), $"envelope field '{field}' missing");
@@ -377,14 +381,67 @@ public sealed class DarlingMcpToolsTests
                 new List<AnalysisFinding> { remediable },
                 new AnalysisContext { ServerId = TestServerId, ServerName = TestServerName });
 
+            /* ---- #2000 dedup: a SECOND occurrence of the planted chain — same story hash, same
+                    incident — from a later engine cycle at a LOWER severity. The read must collapse
+                    the pair to one entry that IS the latest occurrence (severity 1.8), carry
+                    peak_severity 2.5 from the first, and count both. */
+            var laterOccurrence = new AnalysisFinding
+            {
+                FindingId = CollectionIdGenerator.Next(),
+                AnalysisTime = analysisTime.AddMinutes(30),
+                ServerId = TestServerId,
+                ServerName = TestServerName,
+                TimeRangeStart = analysisTime.AddHours(-3.5),
+                TimeRangeEnd = analysisTime.AddMinutes(30),
+                Severity = 1.8,
+                Confidence = 0.9,
+                Category = "cpu",
+                StoryPath = "SOS_SCHEDULER_YIELD → CPU_SQL_PERCENT",
+                StoryPathHash = TestStoryHash,
+                StoryText = "AN4 e2e planted finding, second cycle",
+                RootFactKey = "SOS_SCHEDULER_YIELD",
+                RootFactValue = 0.40,
+                LeafFactKey = "CPU_SQL_PERCENT",
+                LeafFactValue = 81,
+                FactCount = 2,
+                IncidentId = "an4-incident-1"
+            };
+            await store.InsertFindingsAsync(
+                new List<AnalysisFinding> { laterOccurrence },
+                new AnalysisContext { ServerId = TestServerId, ServerName = TestServerName });
+
             var withCommandJson = await DarlingMcpTools.GetAnalysisFindings(
                 analysisService, postgres, TestServerName, 24);
 
             using (var doc = JsonDocument.Parse(withCommandJson))
             {
+                /* Three persisted rows collapse to two chains. */
+                Assert.Equal(2, doc.RootElement.GetProperty("finding_count").GetInt32());
+                Assert.Equal(3, doc.RootElement.GetProperty("total_occurrences").GetInt32());
+
                 var all = doc.RootElement.GetProperty("findings").EnumerateArray().ToList();
                 Assert.Equal(2, all.Count);
                 Assert.All(all, f => Assert.True(f.TryGetProperty("remediation_command", out _)));
+
+                /* Still-firing chains order first: the duplicated chain's last_seen is 30 minutes
+                   after the remediable chain's only run. */
+                Assert.Equal(TestStoryHash, all[0].GetProperty("story_path_hash").GetString());
+
+                /* The collapsed chain: latest occurrence as representative, stats spanning both. */
+                var collapsed = all[0];
+                Assert.Equal(2, collapsed.GetProperty("occurrences").GetInt32());
+                Assert.Equal(1.8, collapsed.GetProperty("severity").GetDouble());
+                Assert.Equal(2.5, collapsed.GetProperty("peak_severity").GetDouble());
+                Assert.True(
+                    DateTime.Parse(collapsed.GetProperty("first_seen").GetString()!) <
+                    DateTime.Parse(collapsed.GetProperty("last_seen").GetString()!),
+                    "first_seen must precede last_seen on a two-occurrence group");
+                Assert.Equal(81, collapsed.GetProperty("leaf_fact").GetProperty("value").GetDouble());
+
+                /* The single-occurrence chain keeps trivial stats. */
+                var single = all.Single(f => f.GetProperty("story_path_hash").GetString() == RemediableStoryHash);
+                Assert.Equal(1, single.GetProperty("occurrences").GetInt32());
+                Assert.Equal(3.0, single.GetProperty("peak_severity").GetDouble());
 
                 var withAction = all.Single(f => f.GetProperty("story_path_hash").GetString() == RemediableStoryHash);
                 var command = withAction.GetProperty("remediation_command").GetString();

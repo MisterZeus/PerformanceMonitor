@@ -525,7 +525,7 @@ public sealed class DarlingMcpTools
         }
     }
 
-    [McpServerTool(Name = "get_analysis_findings"), Description("Gets persisted findings from previous analysis runs without running a new analysis. Use this to review historical findings or check if anything has changed since the last analysis. A remediable finding carries remediation_command: the full copy-paste T-SQL remediation (identical to the viewer card), rendered from the finding's persisted action and including a two-sided risk-disclosure comment header on destructive changes; it is advisory only and never executed.")]
+    [McpServerTool(Name = "get_analysis_findings"), Description("Gets persisted findings from previous analysis runs without running a new analysis, deduplicated to one entry per diagnostic chain (story_path_hash + incident_id) - the engine re-persists the same stories every cycle, so each entry is the chain's LATEST occurrence plus occurrence stats (occurrences, first_seen, last_seen, peak_severity) spanning the window. Use this to review historical findings or check if anything has changed since the last analysis. A remediable finding carries remediation_command: the full copy-paste T-SQL remediation (identical to the viewer card), rendered from the finding's persisted action and including a two-sided risk-disclosure comment header on destructive changes; it is advisory only and never executed.")]
     public static async Task<string> GetAnalysisFindings(
         DarlingAnalysisService analysisService,
         NpgsqlDataSource postgres,
@@ -540,8 +540,10 @@ public sealed class DarlingMcpTools
 
         try
         {
+            /* #2000: the window-covering limit, not the store default 100 — occurrence stats
+               computed over a silently-truncated read would lie about first_seen/occurrences. */
             var findings = await analysisService.GetRecentFindingsAsync(
-                resolved.ServerId, hours_back);
+                resolved.ServerId, hours_back, FindingOccurrences.WindowCoveringLimit);
 
             if (findings.Count == 0)
             {
@@ -560,12 +562,20 @@ public sealed class DarlingMcpTools
                 list.Add((FactAdvice.GetComposedForFinding(wf)?.Headline ?? wf.RootFactKey, wf.Severity));
             }
 
+            /* #2000: collapse to one entry per (story_path_hash, incident_id). Measured 27.9x
+               duplication fleet-wide on a 24h read (39x worst server) with every occurrence
+               re-carrying the same advice prose; severity movement survives via the occurrence
+               stats. The store keeps every row — this shapes the read only. */
+            var groups = FindingOccurrences.Collapse(findings);
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
-                finding_count = findings.Count,
-                findings = findings.Select(f =>
+                finding_count = groups.Count,
+                total_occurrences = findings.Count,
+                findings = groups.Select(g =>
                 {
+                    var f = g.Latest;
                     // Persisted findings carry no drill-down (it is ephemeral —
                     // see AnalysisModels.cs), so generate advice prose only.
                     // The prose IS value-stated: GetComposedForFinding reads the
@@ -593,11 +603,18 @@ public sealed class DarlingMcpTools
                         story_path_hash = f.StoryPathHash,
                         fact_count = f.FactCount,
                         incident_id = f.IncidentId,
+                        // #2000 occurrence stats: the collapsed timeline. severity above is the
+                        // LATEST occurrence's; peak_severity is the highest any occurrence reached.
+                        occurrences = g.Occurrences,
+                        first_seen = g.FirstSeen.ToString("o"),
+                        last_seen = g.LastSeen.ToString("o"),
+                        peak_severity = Math.Round(g.PeakSeverity, 2),
                         co_fired = CoFiredSummary.OtherTitles(advice?.Headline ?? f.RootFactKey, coFiredByRun[f.AnalysisTime]),
+                        // Spans the whole group: earliest analyzed-window start to latest end.
                         time_range = new
                         {
-                            start = f.TimeRangeStart?.ToString("o"),
-                            end = f.TimeRangeEnd?.ToString("o")
+                            start = g.TimeRangeStart?.ToString("o"),
+                            end = g.TimeRangeEnd?.ToString("o")
                         },
                         advice = advice is null ? null : new
                         {
