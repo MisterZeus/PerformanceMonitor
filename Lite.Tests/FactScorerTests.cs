@@ -201,10 +201,12 @@ public class FactScorerTests : IClassFixture<SharedDuckDbFixture>
         Assert.Equal(expected, fact.BaseSeverity, precision: 4);
     }
 
-    // The finding's exact regression: memory 96% on a thin baseline (95% fallback bar) used to score 0
-    // (small z → 2σ gate → 0 → InferenceEngine drops it → NO finding). It must now clear the 0.5 entry.
+    // The finding's exact regression: an over-bar memory reading on a thin baseline used to score 0
+    // (small z → 2σ gate → 0 → InferenceEngine drops it → NO finding). It must clear the 0.5 entry.
+    // (#1996 moved the memory fallback bar from 95 to 101 — total=target=100 is the healthy state,
+    // so the bar now means genuine over-target pressure; the scorer contract here is unchanged.)
     [Fact]
-    public void Score_Memory96PercentOnThinBaseline_ClearsInferenceEntryPoint()
+    public void Score_OverBarMemoryOnThinBaseline_ClearsInferenceEntryPoint()
     {
         var fact = new Fact
         {
@@ -214,7 +216,7 @@ public class FactScorerTests : IClassFixture<SharedDuckDbFixture>
             {
                 ["deviation_sigma"] = 0.4,
                 ["baseline_low_quality"] = 1.0,
-                ["fallback_exceedance"] = 96.0 / 95.0,
+                ["fallback_exceedance"] = 103.0 / 101.0,
                 ["confidence"] = 1.0
             }
         };
