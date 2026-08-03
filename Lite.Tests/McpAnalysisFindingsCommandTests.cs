@@ -135,6 +135,88 @@ public sealed class McpAnalysisFindingsCommandTests : IClassFixture<SharedDuckDb
         Assert.Equal(JsonValueKind.Null, none.GetProperty("remediation_command").ValueKind);
     }
 
+    /// <summary>
+    /// Pins the #2000 collapse through Lite's OWN tool method and serializer — the Darling twin's
+    /// equivalent assertions live in a DARLING_TEST_PG-gated e2e, and the tool bodies are twin
+    /// COPIES (only <see cref="FindingOccurrences.Collapse"/> is shared), so without this fact
+    /// Lite's JSON wiring for the new fields would run in no default CI lane. Three rows — a
+    /// chain occurring twice (the LATER occurrence at a LOWER severity, so representative and
+    /// peak provably differ) plus a distinct chain — must collapse to two entries with honest
+    /// occurrence stats, the still-firing chain first.
+    /// </summary>
+    [Fact]
+    public async Task GetAnalysisFindings_CollapsesRepeatedChains_LatestRepresentative_WithOccurrenceStats()
+    {
+        var store = new FindingStore(_duckDb);
+        var analysisTime = DateTime.UtcNow;
+        var context = new AnalysisContext
+        {
+            ServerId = _serverId,
+            ServerName = "TestServer",
+            TimeRangeStart = analysisTime.AddHours(-4),
+            TimeRangeEnd = analysisTime
+        };
+
+        var firstOccurrence = MakeFinding(
+            findingId: 910001, analysisTime, severity: 1.0,
+            rootFactKey: "SOS_SCHEDULER_YIELD", storyPathHash: "dedup_chain_hash", remediation: null);
+        var laterLowerOccurrence = MakeFinding(
+            findingId: 910002, analysisTime.AddMinutes(30), severity: 0.5,
+            rootFactKey: "SOS_SCHEDULER_YIELD", storyPathHash: "dedup_chain_hash", remediation: null);
+        var otherChain = MakeFinding(
+            findingId: 910003, analysisTime, severity: 2.5,
+            rootFactKey: "WRITELOG", storyPathHash: "dedup_other_hash", remediation: null);
+
+        await store.InsertFindingsAsync(
+            new List<AnalysisFinding> { firstOccurrence, laterLowerOccurrence, otherChain }, context);
+
+        var json = await McpAnalysisTools.GetAnalysisFindings(
+            new AnalysisService(_duckDb), _serverManager, "TestServer", 24);
+
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        /* finding_count is DEDUPED chains; total_occurrences is raw rows. A read nowhere near
+           the window-covering cap carries a present-but-null truncation_note. */
+        Assert.Equal(2, root.GetProperty("finding_count").GetInt32());
+        Assert.Equal(3, root.GetProperty("total_occurrences").GetInt32());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
+
+        var findings = root.GetProperty("findings").EnumerateArray().ToList();
+        Assert.Equal(2, findings.Count);
+
+        /* Still-firing chains order first: the duplicated chain's last_seen is 30 minutes later. */
+        Assert.Equal("dedup_chain_hash", findings[0].GetProperty("story_path_hash").GetString());
+
+        /* The collapsed chain: the LATEST occurrence represents it (severity 0.5, finding_id
+           910002), while peak_severity keeps the first occurrence's 1.0 — latest and peak differ. */
+        var collapsed = findings[0];
+        Assert.Equal(910002, collapsed.GetProperty("finding_id").GetInt64());
+        Assert.Equal(2, collapsed.GetProperty("occurrences").GetInt32());
+        Assert.Equal(0.5, collapsed.GetProperty("severity").GetDouble());
+        Assert.Equal(1.0, collapsed.GetProperty("peak_severity").GetDouble());
+        Assert.True(
+            DateTime.Parse(collapsed.GetProperty("first_seen").GetString()!) <
+            DateTime.Parse(collapsed.GetProperty("last_seen").GetString()!),
+            "first_seen must precede last_seen on a two-occurrence chain");
+
+        /* The group time range spans both occurrences: earliest window start, latest end. */
+        var timeRange = collapsed.GetProperty("time_range");
+        Assert.True(
+            DateTime.Parse(timeRange.GetProperty("start").GetString()!) <
+            DateTime.Parse(timeRange.GetProperty("end").GetString()!),
+            "the collapsed time_range must span the group");
+
+        /* The single-occurrence chain keeps trivial stats: latest IS peak IS only. */
+        var single = findings.Single(f => f.GetProperty("story_path_hash").GetString() == "dedup_other_hash");
+        Assert.Equal(1, single.GetProperty("occurrences").GetInt32());
+        Assert.Equal(2.5, single.GetProperty("severity").GetDouble());
+        Assert.Equal(2.5, single.GetProperty("peak_severity").GetDouble());
+        Assert.Equal(
+            single.GetProperty("first_seen").GetString(),
+            single.GetProperty("last_seen").GetString());
+    }
+
     private AnalysisFinding MakeFinding(
         long findingId, DateTime analysisTime, double severity,
         string rootFactKey, string storyPathHash, RemediationAction? remediation) =>

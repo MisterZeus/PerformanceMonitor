@@ -193,7 +193,7 @@ internal static class McpInstructions
         | `get_analysis_facts` | Exposes raw scored facts from the collect+score pipeline — every observation the engine sees with base severity, amplifiers, and metadata | `server_name`, `hours_back` (default 4), `source` (filter), `min_severity` |
         | `compare_analysis` | Compares two time periods (e.g., peak vs off-peak, before vs after a change) showing severity deltas for each fact | `server_name`, `hours_back` (default 4), `baseline_hours_back` (default 28) |
         | `audit_config` | Edition-aware configuration audit: evaluates CTFP, MAXDOP, max memory, and max worker threads against best practices | `server_name` |
-        | `get_analysis_findings` | Retrieves persisted findings from previous analysis runs; each remediable finding carries `remediation_command` — the full copy-paste T-SQL remediation (identical to the viewer card), rendered from the persisted action, advisory only and never executed | `server_name`, `hours_back` (default 24) |
+        | `get_analysis_findings` | Retrieves persisted findings from previous analysis runs, deduplicated to one entry per diagnostic chain (`story_path_hash` + `incident_id`): the latest occurrence plus `occurrences`/`first_seen`/`last_seen`/`peak_severity` spanning the window; each remediable finding carries `remediation_command` — the full copy-paste T-SQL remediation (identical to the viewer card), rendered from the persisted action, advisory only and never executed | `server_name`, `hours_back` (default 24) |
         | `mute_analysis_finding` | Mutes a finding pattern by story_path_hash so it won't appear in future runs | `story_path_hash` (required), `server_name`, `reason` |
 
         ## Recommended Workflow

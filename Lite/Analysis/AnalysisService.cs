@@ -305,11 +305,13 @@ public class AnalysisService
     }
 
     /// <summary>
-    /// Gets recent findings for a server within the given time range.
+    /// Gets recent findings for a server within the given time range. The MCP findings read
+    /// passes <see cref="FindingOccurrences.WindowCoveringLimit"/> so its occurrence stats cover
+    /// the whole window; the store's default 100 stays for everyone else.
     /// </summary>
-    public async Task<List<AnalysisFinding>> GetRecentFindingsAsync(int serverId, int hoursBack = 24)
+    public async Task<List<AnalysisFinding>> GetRecentFindingsAsync(int serverId, int hoursBack = 24, int limit = 100)
     {
-        return await _findingStore.GetRecentFindingsAsync(serverId, hoursBack);
+        return await _findingStore.GetRecentFindingsAsync(serverId, hoursBack, limit);
     }
 
     /// <summary>
