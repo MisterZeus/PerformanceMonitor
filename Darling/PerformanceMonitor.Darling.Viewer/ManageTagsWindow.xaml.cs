@@ -104,6 +104,22 @@ public partial class ManageTagsWindow : Window
         _servers = servers;
         ServerCheckList.ItemsSource = _serverItems;
 
+        /* Defense-in-depth for the #2008 read-only gate: every CURRENT entry point checks
+           CanEditTags before opening this window, but this window is all writes — a future entry
+           point that forgets the gate must land on inert controls with the reason in the title,
+           not on working-looking buttons whose writes die as 42501. Generic on purpose (whole
+           content tree), so it cannot drift as buttons are added. */
+        if (dataService.IsReadOnly)
+        {
+            Title += " — read-only seat (tag editing needs the admin connection)";
+            if (Content is FrameworkElement root)
+            {
+                root.IsEnabled = false;
+            }
+
+            return;
+        }
+
         Loaded += async (_, _) => await ReloadTagsAsync();
     }
 
