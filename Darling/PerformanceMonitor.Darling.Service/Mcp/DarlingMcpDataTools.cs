@@ -430,7 +430,7 @@ public sealed class DarlingMcpDataTools
 
     /* ═══════════════════════════ query performance ═══════════════════════════ */
 
-    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle. Supports database and parallelism filtering.")]
+    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle. distinct_texts counts the statement texts merged into each hash group (query_hash normalizes INSERT...EXEC callees and ad-hoc literals together; >1 means query_text is one representative, 0 means only rows predating the text dimension). Supports database and parallelism filtering.")]
     public static async Task<string> GetTopQueriesByCpu(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -484,7 +484,15 @@ public sealed class DarlingMcpDataTools
                 total_rows = r.TotalRows,
                 total_spills = r.TotalSpills,
                 avg_reads = r.TotalExecutions > 0 ? (double)r.TotalLogicalReads / r.TotalExecutions : 0,
-                query_text = McpHelpers.Truncate(r.QueryText, 2000)
+                query_text = McpHelpers.Truncate(r.QueryText, 2000),
+                // #2012: query_hash is a SHAPE hash — INSERT...EXEC statements naming DIFFERENT
+                // callee procs share one (reproduced live; it mislabeled production triage), and
+                // ad-hoc literal variants collapse too. distinct_texts says how many statement
+                // texts this group merged; the note fires only when the label is a representative.
+                distinct_texts = r.DistinctTexts,
+                text_note = r.DistinctTexts > 1
+                    ? $"this hash groups {r.DistinctTexts} distinct statement texts (ad-hoc literal variants, or INSERT...EXEC callers naming different procedures); query_text is one representative — attribute per-caller work via sql_handle/OBJECT_DEFINITION before naming a caller"
+                    : null
             });
 
             return JsonSerializer.Serialize(new
