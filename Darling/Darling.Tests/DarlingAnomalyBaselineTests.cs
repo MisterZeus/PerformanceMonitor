@@ -105,12 +105,9 @@ public sealed class DarlingAnomalyBaselineTests
         /* The stall/reads ratio must be DOUBLE PRECISION, not numeric (`* 1.0`): STDDEV_SAMP of a
            spurious-large ratio yields a numeric that overflows System.Decimal when Npgsql materializes
            the aggregate, silently failing the io_latency baseline (found live via the error monitor).
-
-           #1757 moved the ratio into the baseline aggregate, so the cast is pinned where it now lives —
-           and the provider half is pinned too, because the reconstruction must stay in float arithmetic
-           all the way out or the same overflow returns by a different route. */
-        Assert.Contains("delta_stall_read_ms::DOUBLE PRECISION", TimescaleSupport.CreateFileIoBaselineSql, StringComparison.Ordinal);
-        Assert.DoesNotContain("delta_stall_read_ms * 1.0", TimescaleSupport.CreateFileIoBaselineSql, StringComparison.Ordinal);
+           #1757 first pinned the cast inside the file_io_baseline aggregate; #2007 retired that
+           aggregate outright (nothing read it after the raw move), so the raw-arm pins below are
+           the surviving — and only — guarantee. */
 
         /* #1743 follow-up moved the arm off the rollup and onto the raw hypertable (the rollup
            cannot produce a median) — the cast pin moves WITH it: the ratio must still be computed
