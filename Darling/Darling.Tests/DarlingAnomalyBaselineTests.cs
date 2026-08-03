@@ -502,6 +502,79 @@ public sealed class DarlingAnomalyBaselineTests
         }
     }
 
+    /// <summary>
+    /// #1995 review follow-through: the IO arm's NULL-ratio semantics, proven against a LIVE
+    /// Postgres instead of claimed in comments. The arm's WHERE keeps write-only file rows
+    /// (delta_reads = 0, delta_writes &gt; 0), whose stall/reads ratio is NULL through NULLIF — and
+    /// the scaffold must COUNT those rows (the retired rollup's row_count behavior) while
+    /// AVG/STDDEV/median/mad ignore them (the ratio_count behavior). If percentile_cont ever
+    /// counted NULLs the median here would shift off 2.5; if the WHERE dropped write-only rows the
+    /// sample count would read 4. Grain note, measured on the production fleet: file_io_stats is
+    /// ~216K rows/server/30d (13x CPU's grain) and the full composed arm ran in 1.15 s on the
+    /// busiest tenant — fine behind the provider's 1-hour cache.
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_IoLatencyArm_CountsWriteOnlyRows_StatsIgnoreThem_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live IO-arm test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int ioServerId = TestServerId + 1; // own id — this test cleans its own rows
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await using (var cleanup = new NpgsqlCommand($"DELETE FROM file_io_stats WHERE server_id = {ioServerId};", connection))
+        {
+            await cleanup.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var day = DateTime.UtcNow.Date.AddDays(-8);
+            while (day.DayOfWeek != DayOfWeek.Monday) day = day.AddDays(-1);
+            var historyStart = DateTime.SpecifyKind(day.AddHours(10), DateTimeKind.Unspecified);
+
+            /* Four read-bearing rows with hand-checkable ratios 1, 2, 3, 4 ms; one WRITE-ONLY row
+               (NULL ratio, must be counted but not averaged); one no-activity row (must be
+               filtered by the WHERE entirely). Expected flat tier: 5 samples, median 2.5, MAD 1.0. */
+            var rows = new (long Reads, long Writes, long StallReadMs)[]
+                { (10, 0, 10), (10, 0, 20), (10, 0, 30), (10, 0, 40), (0, 25, 0), (0, 0, 0) };
+            for (var i = 0; i < rows.Length; i++)
+            {
+                await InsertAsync(connection,
+                    "INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, delta_reads, delta_writes, delta_stall_read_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    (long)(100 + i), historyStart.AddMinutes(5 * i), ioServerId, "IO-NULL-SEMANTICS",
+                    rows[i].Reads, rows[i].Writes, rows[i].StallReadMs);
+            }
+
+            var provider = new PgBaselineProvider(postgres);
+            var bucket = await provider.GetBaselineAsync(ioServerId, MetricNames.IoLatency, historyStart.AddDays(7));
+
+            /* One sparse bucket collapses to the exact flat sentinel — robust fields intact. */
+            Assert.Equal(BaselineTier.Flat, bucket.Tier);
+            Assert.Equal(5, bucket.SampleCount);          // write-only row COUNTED, no-activity row filtered
+            Assert.Equal(2.5, bucket.Median, precision: 6); // NULL ratio ignored by the median
+            Assert.Equal(1.0, bucket.Mad, precision: 6);
+            Assert.Equal(2.5, bucket.Mean, precision: 6);   // and by the mean — both counts' semantics hold
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                using var command = new NpgsqlCommand($"DELETE FROM file_io_stats WHERE server_id = {ioServerId};", cleanup);
+                await command.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
     private static async Task InsertAsync(NpgsqlConnection connection, string sql, params object[] values)
     {
         using var command = new NpgsqlCommand(sql, connection);
