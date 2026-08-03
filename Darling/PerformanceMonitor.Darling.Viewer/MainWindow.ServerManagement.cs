@@ -682,6 +682,7 @@ public partial class MainWindow
         {
             SidebarColumn.Width = new GridLength(40);
             SidebarHeaderText.Visibility = Visibility.Collapsed;
+            ServerSearchRow.Visibility = Visibility.Collapsed;
             ServerList.Visibility = Visibility.Collapsed;
             SidebarFooter.Visibility = Visibility.Collapsed;
             ServersHintText.Visibility = Visibility.Collapsed;
@@ -691,6 +692,7 @@ public partial class MainWindow
         {
             SidebarColumn.Width = new GridLength(280);
             SidebarHeaderText.Visibility = Visibility.Visible;
+            ServerSearchRow.Visibility = Visibility.Visible;
             ServerList.Visibility = Visibility.Visible;
             SidebarFooter.Visibility = Visibility.Visible;
             ServersHintText.Visibility = ServerList.Items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;

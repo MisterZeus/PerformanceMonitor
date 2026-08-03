@@ -251,6 +251,28 @@
                                 <ComboBoxItem Content="CPU %" Tag="Cpu"/>
                                 <ComboBoxItem Content="Name" Tag="Name"/>
                             </ComboBox>
+                            <!-- Live name filter over the Overview cards; composes with the sort above. The
+                                 hit-test-invisible watermark shows the placeholder while the box is empty. -->
+                            <TextBlock Text="Search:" VerticalAlignment="Center"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0,8,0"/>
+                            <Grid Width="180" VerticalAlignment="Center">
+                                <TextBox x:Name="OverviewSearchBox" TextChanged="OverviewSearchBox_TextChanged"
+                                         ToolTip="Filter the Overview by server name"/>
+                                <TextBlock Text="server name…" IsHitTestVisible="False"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"
+                                           VerticalAlignment="Center" HorizontalAlignment="Left" Margin="6,0,0,0">
+                                    <TextBlock.Style>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding Text, ElementName=OverviewSearchBox}" Value="">
+                                                    <Setter Property="Visibility" Value="Visible"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                </TextBlock>
+                            </Grid>
                         </StackPanel>
                         <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="8">
                             <ItemsControl x:Name="OverviewItemsControl">

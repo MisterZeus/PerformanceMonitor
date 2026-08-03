@@ -273,6 +273,31 @@
                             Width="24" Height="24" Padding="0" FontSize="14"/>
                 </Grid>
 
+                <!-- Server search: filters the list/tree below by name or tag, live. Slots into
+                     FleetView.Rebuild (the reserved seam) so grouping and selection follow automatically.
+                     A hit-test-invisible watermark shows the placeholder while the box is empty. -->
+                <Grid x:Name="ServerSearchRow" DockPanel.Dock="Top" Margin="0,0,0,8">
+                    <TextBox x:Name="ServerSearchBox"
+                             TextChanged="ServerSearchBox_TextChanged"
+                             ToolTip="Filter the list by server name or tag"/>
+                    <TextBlock Text="Search servers or tags…"
+                               IsHitTestVisible="False"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"
+                               VerticalAlignment="Center" HorizontalAlignment="Left"
+                               Margin="8,0,0,0">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding Text, ElementName=ServerSearchBox}" Value="">
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                </Grid>
+
                 <!-- Sidebar footer: the button stack pinned to the bottom of the server list, ported to
                      parity with Lite. Server management (Add Server / Manage Servers) writes the viewer's
                      own registry; the service honoring it is separate wiring (see the PR). Import Data

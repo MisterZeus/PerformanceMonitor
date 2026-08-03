@@ -27,11 +27,23 @@ const SORTS = {
     a.display_name.localeCompare(b.display_name),
 };
 
-/* The sort choice persists across the 60s refresh (a full re-render): the header <select> re-reads it, and the
-   grid re-sorts in place without a refetch when it changes. */
+/* The sort choice AND the search term persist across the 60s refresh (a full re-render): the header controls
+   re-read them, and the grid re-filters + re-sorts in place without a refetch when either changes. */
 let fleetSort = "severity";
+let fleetFilter = "";
 let lastCards = [];
 let gridNode = null;
+
+/* Name filter, matching the desktop apps' ServerOverviewFilter rule: an empty term matches everything,
+   otherwise a case-insensitive substring of the display name or the instance name. */
+function cardMatches(c, q) {
+  const needle = (q || "").trim().toLowerCase();
+  if (!needle) return true;
+  return (
+    (c.display_name || "").toLowerCase().includes(needle) ||
+    (c.server_name || "").toLowerCase().includes(needle)
+  );
+}
 
 export async function renderFleet(main) {
   mount(main, [pageHead(null), loadingStrip("Loading fleet…")]);
@@ -87,20 +99,43 @@ export async function renderFleet(main) {
   mount(main, nodes);
 }
 
-/** Re-sort the cached cards by the current sort choice and (re)fill the grid — no refetch. */
+/** Filter the cached cards by the search term, sort by the current choice, and (re)fill the grid — no refetch. */
 function redrawCards() {
   if (!gridNode) return;
-  const sorted = [...lastCards].sort(SORTS[fleetSort] || SORTS.severity);
-  mount(gridNode, sorted.map(serverCard));
+  const matched = lastCards.filter((c) => cardMatches(c, fleetFilter)).sort(SORTS[fleetSort] || SORTS.severity);
+  mount(
+    gridNode,
+    matched.length
+      ? matched.map(serverCard)
+      : [el("div", { class: "muted", style: "padding:0.5rem", text: "No servers match “" + fleetFilter.trim() + "”." })]
+  );
 }
 
 function pageHead(d) {
   return el("div", { class: "page-head" }, [
     el("h2", { text: "Fleet Overview" }),
     el("div", { class: "spacer" }),
+    d && d.total_servers ? searchControl() : null,
     d && d.total_servers ? sortControl() : null,
     d ? el("div", { class: "meta", text: "Updated " + localTime(d.generated_at) }) : null,
   ]);
+}
+
+/** Client-side name filter on the fleet header: narrows the cards live as you type. The term persists across
+    the 60s re-render because the input re-reads the module-level fleetFilter, exactly like the sort control. */
+function searchControl() {
+  const input = el("input", {
+    class: "search-input",
+    type: "search",
+    placeholder: "server name",
+    "aria-label": "Filter servers by name",
+  });
+  input.value = fleetFilter;
+  input.addEventListener("input", () => {
+    fleetFilter = input.value;
+    redrawCards();
+  });
+  return el("label", { class: "search-control" }, [el("span", { text: "Search" }), input]);
 }
 
 /** Client-side card-sort control on the fleet header (M8): severity (default) / name / CPU. */
