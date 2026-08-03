@@ -72,6 +72,59 @@ ORDER BY
     }
 
     /// <summary>
+    /// #1984 stage 2: the PVS trend behind the FinOps chart — every stored point over the window for
+    /// the TOP-5 databases by PVS size at the newest collection. Percent-of-database is computed per
+    /// POINT from the same row's data-file denominator, the exact ratio the grid shows, so the two
+    /// surfaces cannot disagree. Mirrored by the Darling viewer's <c>GetPvsTrendAsync</c> — same
+    /// columns, same top-N pin, same ordering — so the twins cannot drift.
+    /// </summary>
+    public async Task<List<PvsTrendPoint>> GetPvsTrendAsync(int serverId, DateTime sinceUtc)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = @"
+WITH top_dbs AS (
+    SELECT database_name
+    FROM v_pvs_stats
+    WHERE server_id = $1
+    AND   collection_time = (
+        SELECT MAX(collection_time)
+        FROM v_pvs_stats
+        WHERE server_id = $1
+    )
+    ORDER BY persistent_version_store_size_mb DESC NULLS LAST, database_name
+    LIMIT 5
+)
+SELECT
+    p.database_name,
+    p.collection_time,
+    p.persistent_version_store_size_mb,
+    CASE WHEN p.database_data_size_mb > 0
+         THEN p.persistent_version_store_size_mb / p.database_data_size_mb * 100.0
+    END AS pct_of_database
+FROM v_pvs_stats p
+JOIN top_dbs t ON t.database_name = p.database_name
+WHERE p.server_id = $1
+AND   p.collection_time >= $2
+ORDER BY p.database_name, p.collection_time";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified) });
+
+        var items = new List<PvsTrendPoint>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new PvsTrendPoint(
+                reader.IsDBNull(0) ? "" : reader.GetString(0),
+                reader.GetDateTime(1),
+                reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
+                reader.IsDBNull(3) ? null : ToDouble(reader.GetValue(3))));
+        }
+
+        return items;
+    }
+
+    /// <summary>
     /// Latest ADR persistent version store snapshot, one row per database (#1951). Reads the archive view
     /// so a window that has aged into parquet still resolves, and pins to the newest collection_time the
     /// way the sibling database-size read does — this grid answers "what is my version store doing right
@@ -233,3 +286,7 @@ public class PvsStatsRow
             ? (AbortedCleanerEndTime.Value > OffrowCleanerEndTime.Value ? AbortedCleanerEndTime : OffrowCleanerEndTime)
             : AbortedCleanerEndTime ?? OffrowCleanerEndTime;
 }
+
+/// <summary>One PVS trend point (#1984 stage 2): a database's off-row PVS size at one collection,
+/// with the same %-of-database ratio the grid computes (null when the denominator was zero).</summary>
+public sealed record PvsTrendPoint(string DatabaseName, DateTime CollectionTime, double PvsSizeMb, double? PctOfDatabase);

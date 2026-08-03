@@ -680,7 +680,7 @@
                      Column sequence is byte-identical to Lite's PvsStatsDataGrid (twin-pinned). -->
                 <TabItem Header="Version Store (PVS)">
                     <Grid>
-                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
                         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
                             <TextBlock Text="Accelerated Database Recovery — Persistent Version Store" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="Bold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                             <Button Content="Refresh" Click="FinOpsRefreshPvsStats_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
@@ -688,7 +688,12 @@
                         </StackPanel>
                         <TextBlock Grid.Row="1" Margin="10,0,10,8" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11"
                                    Text="PVS sizes count OFF-ROW versions only and do not include row versions stored in-row. When a large PVS will not shrink, the skipped-page counters attribute it: Secondary means a query on a secondary replica, Snapshot means a long-running snapshot scan, Aborted means space still held by aborted transactions. Requires SQL Server 2019 or later; always on for Azure SQL Database."/>
-                        <Grid Grid.Row="2" Margin="10,0,10,10">
+                        <!-- #1984 stage 2: the PVS trend — "when did it start growing" beside the grid's
+                             "what is it now". One line per top-5 database by current PVS size, 7 days,
+                             legend labels carry each database's latest %-of-database. Collapsed until the
+                             loader has points, so an ADR-less server shows no dead chart. -->
+                        <scottplot:WpfPlot Grid.Row="2" x:Name="FinOpsPvsTrendChart" Height="220" Margin="10,0,10,8" Visibility="Collapsed"/>
+                        <Grid Grid.Row="3" Margin="10,0,10,10">
                             <DataGrid x:Name="FinOpsPvsStatsDataGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" HorizontalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="160"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>

@@ -1380,17 +1380,6 @@
                                     <DataGridTextColumn Binding="{Binding PlanId}" ElementStyle="{StaticResource NumericCell}" Width="70">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PlanId" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Plan ID" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <!-- #1980: the inline plan affordance the sibling grids always had — opens the
-                                         STORED Query Store plan in the Plan Viewer via the same path the history
-                                         window's View Plan uses. -->
-                                    <DataGridTemplateColumn Header="Query Plan" Width="Auto" MinWidth="70">
-                                        <DataGridTemplateColumn.CellTemplate>
-                                            <DataTemplate>
-                                                <Button Content="View" Click="ViewQueryStorePlanInline_Click"
-                                                        Style="{StaticResource DarkButton}" Padding="8,1" Margin="2"/>
-                                            </DataTemplate>
-                                        </DataGridTemplateColumn.CellTemplate>
-                                    </DataGridTemplateColumn>
                                     <DataGridTextColumn Binding="{Binding ReplicaRole}" Width="80">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ReplicaRole" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Replica" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
@@ -1406,6 +1395,18 @@
                                             <DataTemplate>
                                                 <TextBlock Text="{Binding QueryText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2"
                                                            ToolTip="{Binding QueryText}"/>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
+                                    <!-- #1980: the inline plan affordance the sibling grids always had — opens the
+                                         STORED Query Store plan in the Plan Viewer via the same path the history
+                                         window's View Plan uses. Lives in the payload region right of the #1949
+                                         anchor, next to the text it belongs to. -->
+                                    <DataGridTemplateColumn Header="Query Plan" Width="Auto" MinWidth="70">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <Button Content="View" Click="ViewQueryStorePlanInline_Click"
+                                                        Style="{StaticResource DarkButton}" Padding="8,1" Margin="2"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>

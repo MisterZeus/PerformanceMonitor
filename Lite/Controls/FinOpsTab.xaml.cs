@@ -20,6 +20,7 @@ using Microsoft.Win32;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 using static PerformanceMonitor.Ui.DataGridHelpers;
 using PerformanceMonitor.PlanAnalysis;
@@ -506,11 +507,57 @@ public partial class FinOpsTab : UserControl
 
             NoPvsStatsMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             PvsCountIndicator.Text = data.Count > 0 ? $"{data.Count} database(s)" : "";
+
+            /* #1984 stage 2: the trend beside the grid — "when did it start growing" on the same
+               time axis family as Storage Growth. Top-5 databases by current PVS size, 7 days. */
+            var trend = await Task.Run(() => _dataService.GetPvsTrendAsync(serverId, DateTime.UtcNow.AddDays(-7)));
+            RenderPvsTrendChart(trend);
         }
         catch (Exception ex)
         {
             AppLogger.Error("FinOps", $"Failed to load PVS stats: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// One line per database, legend labels carrying each database's LATEST %-of-database (the two
+    /// numbers #1984 asked for, on one chart rather than two stacked plots). Hidden entirely when
+    /// there are no points — an ADR-less server gets no dead chart. Twin of the Darling viewer's
+    /// RenderPvsTrendChart; series colours rotate the shared palette by index so redraws are stable.
+    /// </summary>
+    private void RenderPvsTrendChart(System.Collections.Generic.List<PvsTrendPoint> trend)
+    {
+        if (trend.Count == 0)
+        {
+            PvsTrendChart.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        PvsTrendChart.Visibility = Visibility.Visible;
+        PvsTrendChart.Plot.Clear();
+
+        var seriesIndex = 0;
+        foreach (var series in trend.GroupBy(t => t.DatabaseName).OrderByDescending(g => g.Max(t => t.PvsSizeMb)))
+        {
+            var points = series.OrderBy(t => t.CollectionTime).ToList();
+            var times = points.Select(t => ServerTimeHelper.ToServerTime(t.CollectionTime).ToOADate()).ToArray();
+            var values = points.Select(t => t.PvsSizeMb).ToArray();
+
+            var line = PvsTrendChart.Plot.Add.TimeSeries(times, values);
+            line.Color = ScottPlot.Color.FromHex(ChartPalette.CyclingColor(seriesIndex++));
+            ChartStyle.StyleScatter(line);
+            var latestPct = points[^1].PctOfDatabase;
+            line.LegendText = latestPct is double pct
+                ? $"{series.Key} ({pct:0.0}% of DB)"
+                : series.Key;
+        }
+
+        PvsTrendChart.Plot.Legend.IsVisible = true;
+        PvsTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        PvsTrendChart.Plot.Axes.AutoScale();
+        PvsTrendChart.Plot.YLabel("PVS Off-Row MB");
+        ChartStyle.ApplyThemeToChart(PvsTrendChart);
+        PvsTrendChart.Refresh();
     }
 
     private async System.Threading.Tasks.Task LoadServerInventoryAsync(bool forceRefresh = false)

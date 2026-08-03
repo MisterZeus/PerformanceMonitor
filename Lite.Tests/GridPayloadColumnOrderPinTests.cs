@@ -66,7 +66,7 @@ public sealed class GridPayloadColumnOrderPinTests
         new(LiteServerTab, "QueryStatsGrid", "Creation Time", 3, ["Query Text", "Query Plan"]),
         new(LiteServerTab, "QueryStatsComparisonGrid", "Database", 1, ["Query Text"]),
         new(LiteServerTab, "ProcedureStatsGrid", "Cached Time", 4, ["Query Plan"]),
-        new(LiteServerTab, "QueryStoreGrid", "First Execution", 5, ["Query Text"]),
+        new(LiteServerTab, "QueryStoreGrid", "First Execution", 5, ["Query Text", "Query Plan"]),
         new(LiteServerTab, "QueryStoreComparisonGrid", "Database", 1, ["Query Text"]),
         new(LiteServerTab, "PlanCorrectionGrid", "Collected", 0, ["Query Text"]),
         new(LiteServerTab, "BlockedProcessReportGrid", "Event Time", 0, ["Blocked SQL", "Blocking SQL", "XML"]),
