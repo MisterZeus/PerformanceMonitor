@@ -269,19 +269,23 @@ public sealed class DarlingCollectorRunner
                         storageMs += storageSlice.ElapsedMilliseconds;
                     }
 
-                    /* Same per-database truncation WARNING the enumeration path emits from
+                    /* Same per-database bounded-cycle WARNING the enumeration path emits from
                        onItemComplete, mirroring Lite. Reachable here since #1836 put query_store — the
                        only collector that declares either bound — on this branch for Azure SQL DB;
-                       without it a database whose oldest rows were dropped this cycle would look like
-                       a clean collection. Read after the flush, as on the other path: the context
-                       signal stays this database's until the next read resets it. */
+                       without it a database whose cycle was cut at the bound would look like a clean
+                       collection. Since #1960 a bound DEFERS the backlog to the next cycle's resume
+                       from the shipped boundary rather than dropping it — this log is how a long
+                       catch-up stays observable. Read after the flush, as on the other path: the
+                       context signal stays this database's until the next read resets it. */
                     var capHit = definition.PerItemRowCountWarnThreshold is int cap && batch.Count >= cap;
                     if (capHit || context.PerItemTextBudgetExceeded)
                     {
                         _logger?.LogWarning(
-                            "{Collector} on '{Server}' database [{Database}] hit its per-database collection bound ({Reason}) — oldest rows dropped this cycle.",
+                            "{Collector} on '{Server}' database [{Database}] hit its per-database collection bound ({Reason}) — shipped {ShippedMB:F1}MB up to {Boundary}; the backlog resumes from that boundary next cycle.",
                             definition.Name, server.Config.DisplayName, databaseName,
-                            capHit ? $"row cap {definition.PerItemRowCountWarnThreshold}" : "256MB text budget");
+                            capHit ? $"row cap {definition.PerItemRowCountWarnThreshold}" : "text byte budget",
+                            context.PerItemTextBytesShipped / (1024.0 * 1024.0),
+                            context.PerItemShippedBoundary?.ToString("o") ?? "n/a");
                     }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)
@@ -427,9 +431,11 @@ public sealed class DarlingCollectorRunner
                         if (capHit || context.PerItemTextBudgetExceeded)
                         {
                             _logger?.LogWarning(
-                                "{Collector} on '{Server}' database [{Database}] hit its per-database collection bound ({Reason}) — oldest rows dropped this cycle.",
+                                "{Collector} on '{Server}' database [{Database}] hit its per-database collection bound ({Reason}) — shipped {ShippedMB:F1}MB up to {Boundary}; the backlog resumes from that boundary next cycle.",
                                 definition.Name, server.Config.DisplayName, item,
-                                capHit ? $"row cap {definition.PerItemRowCountWarnThreshold}" : "256MB text budget");
+                                capHit ? $"row cap {definition.PerItemRowCountWarnThreshold}" : "text byte budget",
+                                context.PerItemTextBytesShipped / (1024.0 * 1024.0),
+                                context.PerItemShippedBoundary?.ToString("o") ?? "n/a");
                         }
                     },
                     onItemError: (item, ex) =>

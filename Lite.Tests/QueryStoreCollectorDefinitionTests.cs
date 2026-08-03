@@ -185,7 +185,7 @@ public sealed class QueryStoreCollectorDefinitionTests
 
         /* Payload columns are present and unchanged in shape — the reader contract is the same 55
            ordinals on both paths. */
-        Assert.Contains("SELECT /* PerformanceMonitorLite */ TOP (50000)", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("SELECT /* PerformanceMonitorLite */ TOP (50000) WITH TIES", plan.Text, StringComparison.Ordinal);
         Assert.Contains("query_id = qsq.query_id,", plan.Text, StringComparison.Ordinal);
         Assert.Contains("query_sql_text = qst.query_sql_text,", plan.Text, StringComparison.Ordinal);
         Assert.Contains("query_plan_hash = CONVERT(varchar(64), qsp.query_plan_hash, 1),", plan.Text, StringComparison.Ordinal);
@@ -194,7 +194,7 @@ public sealed class QueryStoreCollectorDefinitionTests
            body, so the WHERE→HAVING move lands here by construction rather than by a second edit. */
         Assert.Contains("HAVING\n        MAX(qsrs.last_execution_time) > @cutoff_time", Lf(plan.Text), StringComparison.Ordinal);
         Assert.DoesNotContain("WHERE qsrs.last_execution_time > @cutoff_time", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY qsrs.last_execution_time DESC", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY qsrs.last_execution_time ASC", plan.Text, StringComparison.Ordinal);
         Assert.Contains("OPTION(RECOMPILE, LOOP JOIN);", plan.Text, StringComparison.Ordinal);
 
         var parameter = Assert.Single(plan.Parameters);
@@ -488,10 +488,13 @@ public sealed class QueryStoreCollectorDefinitionTests
 
         /* The row SHAPE must not move: 55 selected columns, and the TOP/ORDER BY stay OUTSIDE the
            aggregate so the cap counts intervals and can never truncate one interval's slices into a
-           partial sum. */
-        Assert.Contains($"TOP ({QueryStoreCollector.MaxRowsPerDatabase})", text, StringComparison.Ordinal);
+           partial sum. WITH TIES + ASC are the #1960 never-a-hole pair: oldest-first shipping keeps
+           the derived watermark at the shipped boundary, and WITH TIES stops a bare TOP from splitting
+           a group of rows tied at that boundary — the strict `> @cutoff_time` would strand the
+           unshipped half forever. */
+        Assert.Contains($"TOP ({QueryStoreCollector.MaxRowsPerDatabase}) WITH TIES", text, StringComparison.Ordinal);
         Assert.Contains(") AS qsrs\nJOIN sys.query_store_plan AS qsp", text, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY qsrs.last_execution_time DESC\nOPTION(RECOMPILE, LOOP JOIN);", text, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY qsrs.last_execution_time ASC\nOPTION(RECOMPILE, LOOP JOIN);", text, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -803,20 +806,23 @@ public sealed class QueryStoreCollectorDefinitionTests
     }
 
     [Fact]
-    public void BuildPerItemQuery_RowCapAndOrderByDesc_BoundBothCaptureModes()
+    public void BuildPerItemQuery_RowCapWithTiesAndOrderByAsc_BoundBothCaptureModes()
     {
-        /* #1556: a per-database server-side backstop — TOP (50000) keeps only the newest rows and
-           ORDER BY last_execution_time DESC makes "newest" deterministic. Present in BOTH capture modes:
-           the ORDER BY is load-bearing for the client byte budget's early-stop too (it keeps the newest
-           rows when the reader is cut short). */
+        /* #1556 gave the read a per-database server-side backstop; #1960 made it hole-free: rows ship
+           OLDEST-first (ORDER BY last_execution_time ASC), so the derived watermark — MAX over stored
+           rows — sits exactly at the shipped boundary when a cycle is bounded, and WITH TIES stops the
+           TOP from splitting a group of rows tied at that boundary (the strict `> @cutoff_time` would
+           strand the unshipped half forever). Present in BOTH capture modes: the ORDER BY is
+           load-bearing for the client byte budget's early-stop too (its boundary-group completion
+           relies on tied rows being adjacent). */
         foreach (var plan in new[]
         {
             QueryStoreCollector.Instance.BuildPerItemQuery("SO", MakeContext()),
             QueryStoreCollector.Instance.BuildPerItemQuery("SO", MakeContext(capturePlanXml: true)),
         })
         {
-            Assert.Contains($"TOP ({QueryStoreCollector.MaxRowsPerDatabase})", plan.Text, StringComparison.Ordinal);
-            Assert.Contains("ORDER BY qsrs.last_execution_time DESC", plan.Text, StringComparison.Ordinal);
+            Assert.Contains($"TOP ({QueryStoreCollector.MaxRowsPerDatabase}) WITH TIES", plan.Text, StringComparison.Ordinal);
+            Assert.Contains("ORDER BY qsrs.last_execution_time ASC", plan.Text, StringComparison.Ordinal);
             /* The row-bounding ORDER BY sits before the existing query hint, which the OPTION pin still checks. */
             Assert.Contains("OPTION(RECOMPILE, LOOP JOIN);", plan.Text, StringComparison.Ordinal);
         }
@@ -829,24 +835,27 @@ public sealed class QueryStoreCollectorDefinitionTests
     {
         /* #1556: query_store now flushes per database, so its watermark is per-database (keyed on
            database_name — the deadlocks/BPR precedent), and it advertises both the row-cap warn threshold
-           and the 256MB client byte budget so the host can surface the WARNING and the definition can
-           enforce the early-stop. */
+           and the client byte budget so the host can surface the WARNING and the definition can
+           enforce the early-stop. 64 MB since #1960: a bounded cycle resumes from the shipped boundary
+           instead of dropping the remainder, so the smaller budget costs catch-up latency, never data. */
         Assert.Equal("database_name", QueryStoreCollector.Instance.PerDatabaseWatermarkColumn);
         Assert.Equal(QueryStoreCollector.MaxRowsPerDatabase, QueryStoreCollector.Instance.PerItemRowCountWarnThreshold);
         Assert.Equal(QueryStoreCollector.MaxTextBytesPerDatabase, QueryStoreCollector.Instance.PerItemTextByteBudget);
-        Assert.Equal(256 * 1024 * 1024, QueryStoreCollector.MaxTextBytesPerDatabase);
+        Assert.Equal(64 * 1024 * 1024, QueryStoreCollector.MaxTextBytesPerDatabase);
     }
 
     [Fact]
-    public async Task ReadItemAsync_ResetsTextBudgetSignal_AndNormalRowsDoNotTripIt()
+    public async Task ReadItemAsync_ResetsPerItemSignals_AndNormalRowsDoNotTripTheBudget()
     {
-        /* #1556: ReadItemAsync resets the per-item truncation signal at entry (pre-set here to prove it),
-           and a normal, small row never trips the 256MB budget — the signal stays false, so the host emits
-           no spurious WARNING and every row is read. The 256MB early-stop itself is a `>= budget` break
-           that cannot be sanely driven to a real quarter-gig in a unit test; its threshold is pinned above
-           and its WARNING wiring is exercised by the shared-driver tests. */
+        /* #1556/#1960: ReadItemAsync resets ALL the per-item signals at entry (pre-set here to prove
+           it), and a normal, small row never trips the 64MB budget — the truncation signal stays false,
+           so the host emits no spurious WARNING and every row is read. The shipped-boundary and
+           bytes-shipped signals are written on EVERY read (they only get logged on a bounded cycle),
+           so even this un-bounded read reports what it shipped. */
         var context = MakeContext();
         context.PerItemTextBudgetExceeded = true;
+        context.PerItemTextBytesShipped = long.MaxValue;
+        context.PerItemShippedBoundary = new DateTime(1999, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
         var row = new object[55];
         row[0] = 101L;
@@ -877,6 +886,65 @@ public sealed class QueryStoreCollectorDefinitionTests
 
         Assert.False(context.PerItemTextBudgetExceeded);
         Assert.Single(rows);
+
+        /* The boundary signal is the kept row's last_execution_time (11:00Z, normalized to UTC
+           DateTime) and the byte count is the row's text at chars × 2 — "SELECT 1" (8) with no plan. */
+        Assert.Equal(new DateTime(2026, 7, 2, 11, 0, 0), context.PerItemShippedBoundary);
+        Assert.Equal(16L, context.PerItemTextBytesShipped);
+    }
+
+    [Fact]
+    public async Task ReadItemAsync_BudgetCut_CompletesTheBoundaryTieGroup_ThenStops()
+    {
+        /* The #1960 never-a-hole invariant, from the client side. Rows arrive OLDEST-first; the budget
+           trips mid-read; the read must still keep every remaining row TIED at the trip row's
+           last_execution_time (the derived watermark lands on that value, and next cycle's strict
+           `> @cutoff_time` would strand an unshipped tie forever) and stop at the first row past the
+           tie. Two ~34MB texts drive the real 64MB threshold — no test seam, the production constant. */
+        var bigText = new string('x', 17 * 1024 * 1024);
+        var t1 = new DateTimeOffset(2026, 7, 2, 10, 0, 0, TimeSpan.Zero);
+        var t2 = new DateTimeOffset(2026, 7, 2, 11, 0, 0, TimeSpan.Zero);
+        var t3 = new DateTimeOffset(2026, 7, 2, 12, 0, 0, TimeSpan.Zero);
+
+        var context = MakeContext();
+        using var reader = new FakeCollectorDataReader(
+            MakeReaderRow(1, bigText, t1),
+            MakeReaderRow(2, bigText, t2),   /* cumulative 68MB ≥ 64MB — the budget trips HERE */
+            MakeReaderRow(3, "tied at the boundary", t2),
+            MakeReaderRow(4, "past the boundary — next cycle's row", t3));
+        var rows = new System.Collections.Generic.List<QueryStoreCollector.Row>();
+        await QueryStoreCollector.Instance.ReadItemAsync("SO", reader, rows, context, CancellationToken.None);
+
+        Assert.Equal(new[] { 1L, 2L, 3L }, System.Linq.Enumerable.Select(rows, r => r.QueryId));
+        Assert.True(context.PerItemTextBudgetExceeded);
+        Assert.Equal(t2.UtcDateTime, context.PerItemShippedBoundary);
+
+        /* Bytes account every KEPT row, including the tie shipped past the trip. */
+        var expectedBytes = (bigText.Length * 2L * 2) + ("tied at the boundary".Length * 2L);
+        Assert.Equal(expectedBytes, context.PerItemTextBytesShipped);
+
+        /* The invariant itself: nothing kept sits past the boundary, so MAX(last_execution_time) over
+           what was stored IS the resume point. */
+        Assert.All(rows, r => Assert.True(r.LastExecutionTime <= t2.UtcDateTime));
+    }
+
+    [Fact]
+    public async Task ReadItemAsync_BudgetCutOnNullBoundaryRow_StopsAtTheNextRow()
+    {
+        /* Defensive: a NULL last_execution_time can never reach the client (the strict cutoff filters
+           it server-side), but if one ever tripped the budget there is no tie to complete — the read
+           must stop at the very next row rather than treating "null == null" as a tie and running on. */
+        var hugeText = new string('x', 34 * 1024 * 1024);   /* 68MB — trips on the FIRST row */
+        var context = MakeContext();
+        using var reader = new FakeCollectorDataReader(
+            MakeReaderRow(1, hugeText, lastExecRaw: DBNull.Value),
+            MakeReaderRow(2, "never shipped this cycle"));
+        var rows = new System.Collections.Generic.List<QueryStoreCollector.Row>();
+        await QueryStoreCollector.Instance.ReadItemAsync("SO", reader, rows, context, CancellationToken.None);
+
+        Assert.Equal(new[] { 1L }, System.Linq.Enumerable.Select(rows, r => r.QueryId));
+        Assert.True(context.PerItemTextBudgetExceeded);
+        Assert.Null(context.PerItemShippedBoundary);
     }
 
     [Fact]
@@ -966,14 +1034,19 @@ public sealed class QueryStoreCollectorDefinitionTests
     }
 
     /// <summary>One reader row shaped to the 55-ordinal payload contract both paths select.</summary>
-    private static object[] MakeReaderRow(long queryId, string sqlText)
+    /// <summary>
+    /// One 55-ordinal reader row. <paramref name="lastExecRaw"/> overrides last_execution_time
+    /// (ordinal 4) for the #1960 boundary tests — pass a <see cref="DateTimeOffset"/> or
+    /// <see cref="DBNull.Value"/>; null keeps the standard 11:00Z.
+    /// </summary>
+    private static object[] MakeReaderRow(long queryId, string sqlText, object? lastExecRaw = null)
     {
         var row = new object[55];
         row[0] = queryId;
         row[1] = 202L;
         row[2] = "Regular";
         row[3] = new DateTimeOffset(2026, 7, 2, 10, 0, 0, TimeSpan.Zero);
-        row[4] = new DateTimeOffset(2026, 7, 2, 11, 0, 0, TimeSpan.Zero);
+        row[4] = lastExecRaw ?? new DateTimeOffset(2026, 7, 2, 11, 0, 0, TimeSpan.Zero);
         row[5] = "dbo.Proc";
         row[6] = sqlText;
         row[7] = "0xQH";

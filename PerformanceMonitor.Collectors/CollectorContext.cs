@@ -101,7 +101,9 @@ public sealed class CollectorContext
     /// completes — so a cycle that collected zero rows still records what it observed. Nothing is written
     /// for a cycle that threw: the next run then re-reads the older state and takes its conservative
     /// path, which is the safe direction. One of the context members the definition writes back to the
-    /// host (the others are <see cref="PerItemTextBudgetExceeded"/> and <see cref="CatchupClampApplied"/>).
+    /// host (the others are <see cref="PerItemTextBudgetExceeded"/> with its
+    /// <see cref="PerItemTextBytesShipped"/>/<see cref="PerItemShippedBoundary"/> companions, and
+    /// <see cref="CatchupClampApplied"/>).
     /// </summary>
     public Dictionary<string, string> PendingState { get; } = new(StringComparer.Ordinal);
 
@@ -164,6 +166,23 @@ public sealed class CollectorContext
     /// from <c>ReadAsync</c> (#1836). False in the common case — only budgeted collectors touch it.
     /// </summary>
     public bool PerItemTextBudgetExceeded { get; set; }
+
+    /// <summary>
+    /// Cumulative text bytes the budgeted read actually materialized for the item just read (#1960),
+    /// reset and written alongside <see cref="PerItemTextBudgetExceeded"/>. Read by the host purely
+    /// for the bounded-cycle WARNING, so a long catch-up reports how much each cycle shipped rather
+    /// than just that it was cut.
+    /// </summary>
+    public long PerItemTextBytesShipped { get; set; }
+
+    /// <summary>
+    /// The watermark-column value of the LAST row the budgeted read kept for the item just read
+    /// (#1960) — under oldest-first shipping, the exact boundary the next cycle resumes from. Reset
+    /// and written alongside <see cref="PerItemTextBudgetExceeded"/>; null when the read kept no
+    /// rows or the boundary row carried no watermark value. Read by the host for the bounded-cycle
+    /// WARNING.
+    /// </summary>
+    public DateTime? PerItemShippedBoundary { get; set; }
 
     /// <summary>
     /// Catch-up signal (#1836): set by a definition whose cutoff computation floored a stale watermark

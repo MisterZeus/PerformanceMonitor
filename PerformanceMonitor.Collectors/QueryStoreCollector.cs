@@ -296,9 +296,11 @@ END;
 
     /// <summary>
     /// Server-side per-database row backstop (#1556): a coarse ceiling — ~10× a healthy per-cycle
-    /// volume — spliced as <c>TOP</c> so the SQL engine bounds its own work and the wire transfer before
-    /// the client byte budget ever engages. Deliberately NOT the siblings' curation caps (query_stats
-    /// TOP 200, procedure_stats TOP 150): those curate the "top N"; this only trims a pathological cycle.
+    /// volume — spliced as <c>TOP ... WITH TIES</c> so the SQL engine bounds its own work and the wire
+    /// transfer before the client byte budget ever engages. Deliberately NOT the siblings' curation caps
+    /// (query_stats TOP 200, procedure_stats TOP 150): those curate the "top N"; this only bounds a
+    /// pathological cycle, and since #1960 (oldest-first shipping) the overflow DEFERS to the next
+    /// cycle's resume from the shipped boundary rather than being dropped.
     /// It bounds COUNT, not BYTES — <see cref="MaxTextBytesPerDatabase"/> is the primary memory bound —
     /// and is the same const the host warns on (<see cref="PerItemRowCountWarnThreshold"/>).
     ///
@@ -312,12 +314,17 @@ END;
 
     /// <summary>
     /// The PRIMARY memory bound (#1556): the cumulative per-database TEXT byte budget the client stops
-    /// reading at, enforced in the shared read loop both paths use. 256 MB per database composes with the #1553
-    /// 4-wide sweep to a bounded peak of ≈ 4 × 256 MB ≈ 1 GB transient — the field incident (0→13GB) was
-    /// exactly this un-bounded: 50k rows × ~40KB plan XML is ~2GB for ONE database, ×4 = 8GB, with the
+    /// reading at, enforced in the shared read loop both paths use — the field incident (0→13GB) was
+    /// exactly this un-bounded: 50k rows × ~40KB plan XML is ~2GB for ONE database, with the
     /// row cap firing no defense (it caps rows, not bytes). Kept alongside the SQL <c>TOP</c> backstop.
+    ///
+    /// <para>64 MB rather than the original 256 MB (#1960): now that rows ship oldest-first and a
+    /// budget cut RESUMES from the shipped boundary next cycle instead of abandoning the remainder,
+    /// a smaller budget costs catch-up latency, never data — the July field catalog (~1.33 GB fresh)
+    /// converges in ~21 bounded cycles instead of one unbounded pull. Composes with the #1553 4-wide
+    /// sweep to a bounded peak of ≈ 4 × 64 MB ≈ 256 MB transient.</para>
     /// </summary>
-    public const int MaxTextBytesPerDatabase = 256 * 1024 * 1024;
+    public const int MaxTextBytesPerDatabase = 64 * 1024 * 1024;
 
     /// <summary>
     /// The self-identification marker every collector query carries in its leading comment. Self rows
@@ -600,13 +607,16 @@ END;
            single quotes, so it splices straight into the sp_executesql body.
 
            #1556 plan-text dedupe (ON branch only): a plan is landed ONCE per plan_id per cycle — on its
-           newest runtime-stats interval (rn = 1) — and NULL on the older intervals, instead of repeating
-           the full plan XML on every interval row of the same plan. Composes with the TOP backstop below
-           because both sort by last_execution_time DESC: a plan that survives TOP always keeps its rn = 1
-           row (its newest interval is among the newest overall). The consumers tolerate the per-row NULL —
-           Lite selects NULL for the grid and fetches plans live, and Darling's stored-plan readers all
-           guard `query_plan_text IS NOT NULL`. Not mirrored into the Dashboard proc: its "Download Plan"
-           reads by exact collection_id, where per-row NULLs would break a real reader. */
+           newest runtime-stats interval in the window (rn = 1) — and NULL on the older intervals, instead
+           of repeating the full plan XML on every interval row of the same plan. The partition ORDER BY
+           stays DESC even though the outer sort is now ASC (#1960): under oldest-first shipping a plan's
+           rn = 1 row sorts LAST among its rows, so a bounded cycle can cut before it and ship that plan's
+           intervals without XML — harmless, because rn is recomputed over the NEXT cycle's window, whose
+           newest-in-window row carries the XML then; steady-state cycles see one interval per plan and are
+           unaffected. The consumers tolerate the per-row NULL — Lite selects NULL for the grid and fetches
+           plans live, and Darling's stored-plan readers all guard `query_plan_text IS NOT NULL`. Not
+           mirrored into the Dashboard proc: its "Download Plan" reads by exact collection_id, where
+           per-row NULLs would break a real reader. */
         string planTextCol = context.CapturePlanXml
             ? "query_plan_text = CASE WHEN ROW_NUMBER() OVER (PARTITION BY qsp.plan_id ORDER BY qsrs.last_execution_time DESC) = 1 THEN CONVERT(nvarchar(max), qsp.query_plan) ELSE CONVERT(nvarchar(max), NULL) END,"
             : "query_plan_text = CONVERT(nvarchar(1), NULL),";
@@ -727,9 +737,16 @@ END;
            post-fix 375/422/438 ms for 262 rows; post-fix WITHOUT the pre-filter 1203/1203/1235 ms. The
            fixed query is FASTER than the one it replaces despite the added aggregate, because half the
            rows means half the nvarchar(max) query text and plan XML to materialize and ship. */
+        /* Oldest-first + WITH TIES (#1960): rows ship FORWARD from the watermark, so a bounded cycle
+           (byte budget or this TOP) leaves the derived watermark — MAX(last_execution_time) over the
+           rows actually stored — sitting exactly at the shipped boundary, and the next cycle's strict
+           `> @cutoff_time` resumes there with no hole. WITH TIES is load-bearing for that invariant:
+           a bare TOP could split a group of rows sharing the boundary last_execution_time, stranding
+           the unshipped half behind the strict comparison forever. The client byte budget completes
+           boundary groups the same way (see ReadRowsAsync). */
         return $@"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase})
+SELECT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase}) WITH TIES
     query_id = qsq.query_id,
     plan_id = qsp.plan_id,
     execution_type_desc = qsrs.execution_type_desc,
@@ -845,7 +862,7 @@ JOIN sys.query_store_query_text AS qst
 LEFT JOIN sys.query_store_runtime_stats_interval AS qsrsi
   ON qsrsi.runtime_stats_interval_id = qsrs.runtime_stats_interval_id
 {replicaJoin}
-ORDER BY qsrs.last_execution_time DESC
+ORDER BY qsrs.last_execution_time ASC
 OPTION(RECOMPILE, LOOP JOIN);";
     }
 
@@ -959,8 +976,10 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
 
     private static async Task ReadRowsAsync(string databaseName, DbDataReader reader, List<Row> rows, CollectorContext context, CancellationToken cancellationToken)
     {
-        /* Reset the per-item truncation signal — the host reads it immediately after this returns. */
+        /* Reset the per-item signals — the host reads them immediately after this returns. */
         context.PerItemTextBudgetExceeded = false;
+        context.PerItemTextBytesShipped = 0;
+        context.PerItemShippedBoundary = null;
 
         /* Client-side cumulative BYTE budget (#1556) — the PRIMARY memory bound. The server-side TOP caps
            the ROW COUNT, but a row carries two nvarchar(max) fields (query text + plan XML), so 50k rows
@@ -968,6 +987,15 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
            disposing the reader early, so one database can never balloon the process. */
         var budget = Instance.PerItemTextByteBudget ?? int.MaxValue;
         long textBytes = 0;
+
+        /* #1960 boundary-group completion: once the budget trips, rows TIED at the trip row's
+           last_execution_time still ship (they are adjacent under the query's ASC order), and the first
+           row past the tie ends the cycle. The derived watermark — MAX(last_execution_time) over stored
+           rows — then sits exactly at the shipped boundary, and next cycle's strict `> @cutoff_time`
+           resumes with no hole; a split tie group would strand its unshipped half behind that comparison
+           forever. Mirrors the SQL's TOP ... WITH TIES, which guarantees the same at the row cap. */
+        var budgetSpent = false;
+        DateTime? cutBoundary = null;
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -1045,21 +1073,34 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
                 continue;
             }
 
+            /* Budget already spent: only the remainder of the boundary tie group still ships. A null
+               boundary cannot tie (and a null-watermark row could never have reached the client past
+               the strict cutoff anyway), so the first row after a null-boundary trip also ends here. */
+            if (budgetSpent && (cutBoundary is null || row.LastExecutionTime != cutBoundary))
+            {
+                break;
+            }
+
             rows.Add(row);
 
             /* char count × 2 for UTF-16. The plan XML is deduped server-side (NULL on all but the newest
-               interval per plan_id), but the query text repeats on every interval row, so this budget is
-               what bounds that repetition too. At the budget, signal truncation and stop — the host
-               surfaces the WARNING. Rows are read newest-first and the per-database watermark advances to
-               the newest KEPT row, so the older unread intervals are deliberately ABANDONED behind it
-               (bounded per cycle, by design) — not retried next cycle. */
+               interval per plan_id within the window), but the query text repeats on every interval row,
+               so this budget is what bounds that repetition too. At the budget, signal the bounded cycle
+               and finish the boundary tie group — the host surfaces the WARNING. Rows are read
+               OLDEST-first (#1960) and the per-database watermark derives from the newest STORED row, so
+               everything past the cut stays ahead of the watermark and next cycle resumes exactly there:
+               a bounded cycle costs latency, never data. */
             textBytes += ((long)(row.QueryText?.Length ?? 0) + (row.QueryPlanText?.Length ?? 0)) * 2L;
-            if (textBytes >= budget)
+            if (!budgetSpent && textBytes >= budget)
             {
+                budgetSpent = true;
+                cutBoundary = row.LastExecutionTime;
                 context.PerItemTextBudgetExceeded = true;
-                break;
             }
         }
+
+        context.PerItemTextBytesShipped = textBytes;
+        context.PerItemShippedBoundary = rows.Count > 0 ? rows[^1].LastExecutionTime : null;
     }
 
     /// <summary>
