@@ -143,8 +143,11 @@ WITH ranked AS (
         MAX(CAST(delta_worker_time AS DOUBLE PRECISION) / NULLIF(sample_interval_seconds, 0) / 1000.0) AS worker_time_per_second,
         /* #2012: distinct statement texts merged into this hash group. query_hash is a SHAPE hash -
            INSERT...EXEC statements naming DIFFERENT callee procs share one, and ad-hoc literal
-           variants collapse too - so > 1 means the representative text below labels a blend. */
-        COUNT(DISTINCT query_text) AS distinct_texts
+           variants collapse too - so > 1 means the representative text below labels a blend.
+           DuckDB's 64-bit hash() stands in for Darling's #1767 content digest: comparing fixed-size
+           hashes instead of arbitrarily long batch texts (a review note on the twin's asymmetry);
+           a same-group 64-bit collision is negligible for a display count. */
+        COUNT(DISTINCT hash(query_text)) AS distinct_texts
     FROM v_query_stats
     WHERE server_id = $1
     AND   collection_time >= $2
