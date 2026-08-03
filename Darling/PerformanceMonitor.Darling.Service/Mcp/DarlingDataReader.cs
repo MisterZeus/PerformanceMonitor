@@ -86,7 +86,10 @@ internal static class DarlingDataReader
         string DatabaseName, string QueryHash, string QueryPlanHash, string SqlHandle, string PlanHandle,
         long TotalExecutions, long TotalCpuUs, long TotalElapsedUs, long TotalLogicalReads, long TotalLogicalWrites,
         long TotalPhysicalReads, long TotalRows, long TotalSpills, int MinDop, int MaxDop,
-        long MinCpuUs, long MaxCpuUs, long MinElapsedUs, long MaxElapsedUs, string QueryText);
+        long MinCpuUs, long MaxCpuUs, long MinElapsedUs, long MaxElapsedUs, string QueryText,
+        /* #2012: distinct statement texts merged into this hash group; > 1 = QueryText is one
+           representative of a blend (INSERT...EXEC callees or ad-hoc literal variants). */
+        long DistinctTexts);
 
     /// <summary>One (database, schema, object) group's summed procedure-stats deltas over the window.</summary>
     public sealed record TopProcedureRow(
@@ -531,7 +534,15 @@ internal static class DarlingDataReader
                 MAX(max_elapsed_time) AS max_elapsed_time,
                 MAX(query_plan_hash) AS query_plan_hash,
                 MAX(sql_handle) AS sql_handle,
-                MAX(plan_handle) AS plan_handle
+                MAX(plan_handle) AS plan_handle,
+                /* #2012: how many DISTINCT statement texts this hash group merged. query_hash is a
+                   SHAPE hash — INSERT...EXEC statements naming DIFFERENT callee procs share one
+                   (reproduced live), and ad-hoc literal variants collapse too — so a group with
+                   distinct_texts > 1 is a BLEND whose representative text below is one member, not
+                   the statement. Counted over the #1767 content digest already on every row (~free);
+                   COUNT(DISTINCT) skips NULLs, so 0 means only pre-dimension legacy rows, which age
+                   out with raw retention. */
+                COUNT(DISTINCT query_text_digest) AS distinct_texts
             FROM query_stats
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -562,7 +573,8 @@ internal static class DarlingDataReader
             r.max_worker_time,
             r.min_elapsed_time,
             r.max_elapsed_time,
-            t.query_text
+            t.query_text,
+            r.distinct_texts
         FROM ranked AS r
         LEFT JOIN LATERAL (
             SELECT query_text
@@ -610,7 +622,8 @@ internal static class DarlingDataReader
                 reader.IsDBNull(16) ? 0 : reader.GetInt64(16),
                 reader.IsDBNull(17) ? 0 : reader.GetInt64(17),
                 reader.IsDBNull(18) ? 0 : reader.GetInt64(18),
-                reader.IsDBNull(19) ? "" : reader.GetString(19)));
+                reader.IsDBNull(19) ? "" : reader.GetString(19),
+                reader.IsDBNull(20) ? 0 : reader.GetInt64(20)));
         }
 
         return rows;

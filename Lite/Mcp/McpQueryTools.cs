@@ -9,7 +9,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpQueryTools
 {
-    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle. Supports database and parallelism filtering.")]
+    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle. distinct_texts counts the statement texts merged into each hash group (query_hash normalizes INSERT...EXEC callees and ad-hoc literals together; >1 means query_text is one representative). Supports database and parallelism filtering.")]
     public static async Task<string> GetTopQueriesByCpu(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -66,7 +66,13 @@ public sealed class McpQueryTools
                 total_rows = r.TotalRows,
                 total_spills = r.TotalSpills,
                 avg_reads = r.AvgReads,
-                query_text = McpHelpers.Truncate(r.QueryText, 2000)
+                query_text = McpHelpers.Truncate(r.QueryText, 2000),
+                // #2012: same annotation as Darling's twin — > 1 distinct texts means query_text
+                // labels a blend (INSERT...EXEC callees share a query_hash; ad-hoc literals collapse).
+                distinct_texts = r.DistinctTexts,
+                text_note = r.DistinctTexts > 1
+                    ? $"this hash groups {r.DistinctTexts} distinct statement texts (ad-hoc literal variants, or INSERT...EXEC callers naming different procedures); query_text is one representative — attribute per-caller work via sql_handle/OBJECT_DEFINITION before naming a caller"
+                    : null
             });
 
             return JsonSerializer.Serialize(new

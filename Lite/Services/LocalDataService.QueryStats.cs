@@ -140,7 +140,11 @@ WITH ranked AS (
         MAX(max_used_threads) AS max_used_threads,
         MAX(total_clr_time) AS total_clr_time,
         MAX(plan_generation_num) AS plan_generation_num,
-        MAX(CAST(delta_worker_time AS DOUBLE PRECISION) / NULLIF(sample_interval_seconds, 0) / 1000.0) AS worker_time_per_second
+        MAX(CAST(delta_worker_time AS DOUBLE PRECISION) / NULLIF(sample_interval_seconds, 0) / 1000.0) AS worker_time_per_second,
+        /* #2012: distinct statement texts merged into this hash group. query_hash is a SHAPE hash -
+           INSERT...EXEC statements naming DIFFERENT callee procs share one, and ad-hoc literal
+           variants collapse too - so > 1 means the representative text below labels a blend. */
+        COUNT(DISTINCT query_text) AS distinct_texts
     FROM v_query_stats
     WHERE server_id = $1
     AND   collection_time >= $2
@@ -253,11 +257,12 @@ LIMIT $4";
                 TotalClrUs = reader.IsDBNull(37) ? 0 : reader.GetInt64(37),
                 PlanGenerationNum = reader.IsDBNull(38) ? 0 : reader.GetInt64(38),
                 WorkerTimePerSecond = reader.IsDBNull(39) ? 0 : ToDouble(reader.GetValue(39)),
-                QueryText = reader.IsDBNull(40) ? "" : reader.GetString(40),
-                QueryPlan = reader.IsDBNull(41) ? null : reader.GetString(41),
-                ModuleObjectName = reader.IsDBNull(42) ? "" : reader.GetString(42),
-                ModuleSchemaName = reader.IsDBNull(43) ? "" : reader.GetString(43),
-                ModuleDatabaseName = reader.IsDBNull(44) ? "" : reader.GetString(44)
+                DistinctTexts = reader.IsDBNull(40) ? 0 : reader.GetInt64(40),
+                QueryText = reader.IsDBNull(41) ? "" : reader.GetString(41),
+                QueryPlan = reader.IsDBNull(42) ? null : reader.GetString(42),
+                ModuleObjectName = reader.IsDBNull(43) ? "" : reader.GetString(43),
+                ModuleSchemaName = reader.IsDBNull(44) ? "" : reader.GetString(44),
+                ModuleDatabaseName = reader.IsDBNull(45) ? "" : reader.GetString(45)
             });
         }
 
@@ -1419,6 +1424,11 @@ public class QueryStatsRow
     public string SqlHandle { get; set; } = "";
     public string PlanHandle { get; set; } = "";
     public string QueryText { get; set; } = "";
+
+    /// <summary>#2012: distinct statement texts merged into this hash group; > 1 means
+    /// <see cref="QueryText"/> is one representative of a blend (INSERT...EXEC callees sharing a
+    /// query_hash, or ad-hoc literal variants).</summary>
+    public long DistinctTexts { get; set; }
     public string? QueryPlan { get; set; }
     public bool HasQueryPlan => !string.IsNullOrEmpty(QueryPlan);
 
