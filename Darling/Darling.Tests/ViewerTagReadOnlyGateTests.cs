@@ -48,6 +48,19 @@ public sealed class ViewerTagReadOnlyGateTests
         Assert.Contains("ToolTipService.SetShowOnDisabled", source, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void ManageTagsWindow_CarriesItsOwnGate_ForEntryPointsTheMenusMiss()
+    {
+        /* Review catch on #2011: the window is all writes and trusted its call sites. The
+           defense-in-depth gate must live in the window itself, generic over the whole content
+           tree, so a future ungated entry point lands on inert controls with the reason. */
+        var source = ReadSource(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Viewer", "ManageTagsWindow.xaml.cs"));
+
+        Assert.Contains("dataService.IsReadOnly", source, StringComparison.Ordinal);
+        Assert.Contains("read-only seat", source, StringComparison.Ordinal);
+    }
+
     /// <summary>The member starting at <paramref name="memberSignature"/> must reference the gate
     /// before the next member begins (crude but stable: members here are short).</summary>
     private static void AssertGatedWithin(string source, string memberSignature)
@@ -62,8 +75,10 @@ public sealed class ViewerTagReadOnlyGateTests
     }
 
     private static string ReadTagSource([CallerFilePath] string thisFile = "")
+        => ReadSource(Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "MainWindow.Tags.cs"), thisFile);
+
+    private static string ReadSource(string relative, [CallerFilePath] string thisFile = "")
     {
-        var relative = Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "MainWindow.Tags.cs");
         var dir = Path.GetDirectoryName(thisFile)!;
         while (dir is not null && !File.Exists(Path.Combine(dir, relative)))
         {
