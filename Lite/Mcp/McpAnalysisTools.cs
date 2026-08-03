@@ -527,27 +527,40 @@ public sealed class McpAnalysisTools
                     "No findings in the requested time range. Run analyze_server to generate new findings.");
             }
 
-            // Correlate-and-focus slice 1 (review §1d): "what else fired", scoped per analysis run
-            // (this read can span multiple runs, unlike analyze_server's single run).
-            var coFiredByRun = new Dictionary<DateTime, List<(string, double)>>();
-            foreach (var wf in findings)
-            {
-                if (!coFiredByRun.TryGetValue(wf.AnalysisTime, out var list))
-                    coFiredByRun[wf.AnalysisTime] = list = new List<(string, double)>();
-                list.Add((FactAdvice.GetComposedForFinding(wf)?.Headline ?? wf.RootFactKey, wf.Severity));
-            }
-
             /* #2000: collapse to one entry per (story_path_hash, incident_id). Measured 27.9x
                duplication fleet-wide on a 24h read (39x worst server) with every occurrence
                re-carrying the same advice prose; severity movement survives via the occurrence
                stats. The store keeps every row — this shapes the read only. */
             var groups = FindingOccurrences.Collapse(findings);
 
+            // Correlate-and-focus slice 1 (review §1d): "what else fired", scoped per analysis run
+            // (this read can span multiple runs, unlike analyze_server's single run). Only runs
+            // that produced a group REPRESENTATIVE are ever looked up below — in steady state just
+            // the most recent run — and GetComposedForFinding deserializes story JSON per call, so
+            // composing titles for all window-covering-limit rows would be ~100x wasted work
+            // (review catch on #2001).
+            var representativeRuns = groups.Select(g => g.Latest.AnalysisTime).ToHashSet();
+            var coFiredByRun = new Dictionary<DateTime, List<(string, double)>>();
+            foreach (var wf in findings)
+            {
+                if (!representativeRuns.Contains(wf.AnalysisTime))
+                    continue;
+                if (!coFiredByRun.TryGetValue(wf.AnalysisTime, out var list))
+                    coFiredByRun[wf.AnalysisTime] = list = new List<(string, double)>();
+                list.Add((FactAdvice.GetComposedForFinding(wf)?.Headline ?? wf.RootFactKey, wf.Severity));
+            }
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 finding_count = groups.Count,
                 total_occurrences = findings.Count,
+                // No silent caps: a read that fills the window-covering limit has had its OLDEST
+                // rows dropped by the store's newest-first LIMIT, so occurrence stats may
+                // under-report — say so instead of letting first_seen quietly lie.
+                truncation_note = findings.Count >= FindingOccurrences.WindowCoveringLimit
+                    ? $"Read hit the {FindingOccurrences.WindowCoveringLimit}-row cap; the oldest occurrences in the window were dropped, so occurrences/first_seen may under-report. Use a smaller hours_back for exact stats."
+                    : null,
                 findings = groups.Select(g =>
                 {
                     var f = g.Latest;

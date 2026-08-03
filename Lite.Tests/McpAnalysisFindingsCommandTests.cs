@@ -176,9 +176,11 @@ public sealed class McpAnalysisFindingsCommandTests : IClassFixture<SharedDuckDb
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        /* finding_count is DEDUPED chains; total_occurrences is raw rows. */
+        /* finding_count is DEDUPED chains; total_occurrences is raw rows. A read nowhere near
+           the window-covering cap carries a present-but-null truncation_note. */
         Assert.Equal(2, root.GetProperty("finding_count").GetInt32());
         Assert.Equal(3, root.GetProperty("total_occurrences").GetInt32());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
 
         var findings = root.GetProperty("findings").EnumerateArray().ToList();
         Assert.Equal(2, findings.Count);

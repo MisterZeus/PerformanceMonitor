@@ -33,7 +33,10 @@ public static class FindingOccurrences
     /// which covered only the ~5 most recent engine runs of a 24h read and silently dropped the
     /// older ones — so occurrence stats computed under it would lie. Sized for the deepest legal
     /// read: 7 days (McpHelpers.MaxHoursBack) at the busiest measured cadence (~23 rows/hour on
-    /// the production fleet) is ~3,900 rows; 10,000 leaves comfortable headroom.
+    /// the production fleet) is ~3,900 rows; 10,000 leaves comfortable headroom. A cap is still a
+    /// cap: a read that FILLS it has had its oldest rows dropped by the stores' newest-first
+    /// LIMIT, so both tools disclose that in the response (truncation_note) rather than letting
+    /// first_seen quietly under-report.
     /// </summary>
     public const int WindowCoveringLimit = 10_000;
 

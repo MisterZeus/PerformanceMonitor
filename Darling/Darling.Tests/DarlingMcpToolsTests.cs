@@ -314,8 +314,10 @@ public sealed class DarlingMcpToolsTests
                 var root = doc.RootElement;
                 Assert.Equal(TestServerName, root.GetProperty("server").GetString());
                 Assert.Equal(1, root.GetProperty("finding_count").GetInt32());
-                /* #2000: finding_count is DEDUPED groups; total_occurrences is raw rows. */
+                /* #2000: finding_count is DEDUPED groups; total_occurrences is raw rows; a read
+                   nowhere near the window-covering cap carries a present-but-null truncation_note. */
                 Assert.Equal(1, root.GetProperty("total_occurrences").GetInt32());
+                Assert.Equal(JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
 
                 var finding = Assert.Single(root.GetProperty("findings").EnumerateArray());
 
