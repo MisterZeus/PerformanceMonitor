@@ -61,6 +61,8 @@ public static class DarlingRetention
     /// rows have aged out — a 30-day metric row and its failure log would otherwise expire together, erasing
     /// the evidence. Effectively 60 days.
     /// </summary>
+    internal const int CollectionLogRetentionDays = DataRetentionBaseDays * 2;
+
     /// <summary>
     /// #1743 follow-up: the raw collectors whose hypertables serve baselines DIRECTLY (their
     /// retired sum/sumsq rollups could not produce a median). Their effective purge horizon is
@@ -70,8 +72,6 @@ public static class DarlingRetention
     /// </summary>
     internal static readonly IReadOnlySet<string> BaselineServingRawCollectors =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "cpu_utilization", "file_io_stats" };
-
-    internal const int CollectionLogRetentionDays = DataRetentionBaseDays * 2;
 
     /// <summary>
     /// config_alert_log (the fired-alert history: what alerted + delivery status, read by the viewer Alert
