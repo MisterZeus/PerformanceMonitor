@@ -77,8 +77,11 @@ public static class StoreConnectionSelfTest
     }
 
     /// <summary>
-    /// Runs the full ladder against <paramref name="connectionString"/>. Never throws (a malformed
-    /// string is the config layer's failure); always returns all six layers in probe order.
+    /// Runs the full ladder against <paramref name="connectionString"/>. Never converts a failure
+    /// into a throw (a malformed string is the config layer's failure); always returns all six
+    /// layers in probe order. The one exception is GENUINE caller cancellation, which propagates
+    /// as <see cref="OperationCanceledException"/> instead of being fabricated into a layer
+    /// verdict like "refused/unreachable" — cancelling the probe is not a network finding.
     /// </summary>
     public static async Task<IReadOnlyList<LayerResult>> RunAsync(
         string connectionString, CancellationToken cancellationToken = default)
@@ -141,6 +144,10 @@ public static class StoreConnectionSelfTest
                 results.Add(new LayerResult(DnsLayer, LayerOutcome.Passed,
                     $"'{host}' → {string.Join(", ", addresses.Select(a => a.ToString()))}", stopwatch.Elapsed));
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
                 results.Add(new LayerResult(DnsLayer, LayerOutcome.Failed,
@@ -168,7 +175,11 @@ public static class StoreConnectionSelfTest
                 connected = true;
                 break;
             }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (OperationCanceledException)
             {
                 tcpFailure = $"timed out after {NetworkProbeTimeout.TotalSeconds:0}s reaching {address}:{port.ToString(CultureInfo.InvariantCulture)} (DNS passed — a filtered port or firewall is the usual cause)";
             }
@@ -198,6 +209,15 @@ public static class StoreConnectionSelfTest
             results.Add(TlsPassResult(builder, sslDisabled, stopwatch.Elapsed));
             results.Add(new LayerResult(AuthLayer, LayerOutcome.Passed,
                 $"authenticated as '{builder.Username}' to database '{builder.Database}'", stopwatch.Elapsed));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            if (connection is not null)
+            {
+                await connection.DisposeAsync();
+            }
+
+            throw;
         }
         catch (Exception ex)
         {
@@ -245,6 +265,10 @@ public static class StoreConnectionSelfTest
                 var (outcome, detail) = EvaluateSchemaGate(storeVersion, StorageVersion.SchemaVersion);
                 results.Add(new LayerResult(SchemaLayer, outcome, detail, stopwatch.Elapsed));
             }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (PostgresException pg) when (pg.SqlState is PostgresErrorCodes.UndefinedTable
                                                         or PostgresErrorCodes.InsufficientPrivilege)
@@ -307,6 +331,10 @@ public static class StoreConnectionSelfTest
                 : new LayerResult(SchemaLayer, LayerOutcome.Failed,
                     "collection_log exists but darling_schema_version does not — a partially created store; start the service against it so migrations can finish",
                     stopwatch.Elapsed);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {

@@ -187,6 +187,21 @@ public sealed class StoreConnectionSelfTestTests
         Assert.Equal(StoreConnectionSelfTest.LayerOutcome.Failed, results[0].Outcome);
         Assert.Contains("no Host", results[0].Detail, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task RunAsync_CallerCancellation_Propagates_InsteadOfFabricatingAVerdict()
+    {
+        /* Review catch on #2006: a genuinely cancelled probe must throw, not report the layer it
+           happened to be standing on as "refused/unreachable". An ALREADY-cancelled token makes
+           this deterministic with no network dependence: config parses, dns is skipped (IP
+           literal), and the TCP probe observes the token before dialing — environments differ on
+           whether an unroutable address hangs or rejects, so a timer-based version would race. */
+        var cancelled = new System.Threading.CancellationToken(canceled: true);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            StoreConnectionSelfTest.RunAsync(
+                "Host=192.0.2.1;Port=5432;Username=x;Password=x;Database=x", cancelled));
+    }
 }
 
 /// <summary>
