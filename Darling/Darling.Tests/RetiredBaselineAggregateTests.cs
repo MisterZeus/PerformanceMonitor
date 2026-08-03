@@ -58,7 +58,7 @@ public sealed class RetiredBaselineAggregateTests
         /* Both verbs present, chosen by the continuous_aggregates membership check — and the
            timescaledb_information reference is itself to_regclass-guarded so the block runs on
            stores that never had the extension. */
-        Assert.Contains("DROP MATERIALIZED VIEW collect.cpu_utilization_baseline CASCADE", sql, StringComparison.Ordinal);
+        Assert.Contains("DROP MATERIALIZED VIEW IF EXISTS collect.cpu_utilization_baseline CASCADE", sql, StringComparison.Ordinal);
         Assert.Contains("DROP VIEW IF EXISTS collect.cpu_utilization_baseline CASCADE", sql, StringComparison.Ordinal);
         Assert.Contains("timescaledb_information.continuous_aggregates", sql, StringComparison.Ordinal);
         Assert.Contains("to_regclass('timescaledb_information.continuous_aggregates')", sql, StringComparison.Ordinal);
