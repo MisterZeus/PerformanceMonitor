@@ -13,6 +13,7 @@ using System.Runtime.CompilerServices;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -181,6 +182,21 @@ public class BaselineSupplyTests
         Assert.True(
             CollectorScheduleDefaults.All["file_io_stats"].RetentionDays >= BaselineMath.BaselineWindowDays,
             "file_io_stats retention no longer covers the baseline window");
+    }
+
+    /// <summary>
+    /// The RUNTIME half of the same invariant (review-caught on the follow-up PR): retention for
+    /// these collectors is user-editable, so a defaults pin alone leaves a deployed store able to
+    /// silently shorten the CPU/I-O baseline supply. DarlingRetention floors the purge horizon for
+    /// exactly the raw-reading baseline families at the baseline window — this pins the set's
+    /// membership to the provider's raw-reading arms so neither side can drift alone.
+    /// </summary>
+    [Fact]
+    public void BaselineServingRawCollectors_MatchTheRawReadingArms()
+    {
+        Assert.Equal(2, DarlingRetention.BaselineServingRawCollectors.Count);
+        Assert.Contains("cpu_utilization", DarlingRetention.BaselineServingRawCollectors);
+        Assert.Contains("file_io_stats", DarlingRetention.BaselineServingRawCollectors);
     }
 
     /// <summary>
