@@ -15,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 
@@ -60,6 +61,16 @@ public static class DarlingRetention
     /// rows have aged out — a 30-day metric row and its failure log would otherwise expire together, erasing
     /// the evidence. Effectively 60 days.
     /// </summary>
+    /// <summary>
+    /// #1743 follow-up: the raw collectors whose hypertables serve baselines DIRECTLY (their
+    /// retired sum/sumsq rollups could not produce a median). Their effective purge horizon is
+    /// floored at <see cref="BaselineMath.BaselineWindowDays"/> regardless of the user-editable
+    /// schedule — the product-controlled insulation the rollups' fixed retention used to provide.
+    /// BaselineSupplyTests pins membership against the provider's raw-reading arms.
+    /// </summary>
+    internal static readonly IReadOnlySet<string> BaselineServingRawCollectors =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "cpu_utilization", "file_io_stats" };
+
     internal const int CollectionLogRetentionDays = DataRetentionBaseDays * 2;
 
     /// <summary>
@@ -158,6 +169,18 @@ public static class DarlingRetention
                    retention of 0/negative would flip the cutoff into the present/future and drop_chunks /
                    DELETE the entire table. Never purge with a horizon under 1 day. */
                 var retentionDays = Math.Max(1, retentionDaysFor?.Invoke(definition.Name) ?? schedule.RetentionDays);
+
+                /* #1743 follow-up: the two raw hypertables that SERVE BASELINES directly (their retired
+                   sum/sumsq rollups could not produce a median) get a product-controlled floor at the
+                   baseline window — restoring, at the purge itself, the insulation the rollups' own
+                   fixed retention used to provide by construction. Without this, lowering either
+                   collector's user-editable retention below 30 days would silently shorten the CPU or
+                   I/O baseline supply (#1757's shape); with it, the operator's shorter setting still
+                   applies to nothing (these two families' floors ARE the product's baseline contract). */
+                if (BaselineServingRawCollectors.Contains(definition.Name))
+                {
+                    retentionDays = Math.Max(retentionDays, BaselineMath.BaselineWindowDays);
+                }
 
                 /* #1784: this sweep and the tiered retention POLICY drop the same chunks, but only the policy
                    was coverage-gated. On a store where the #1680 gate is deliberately holding that policy —

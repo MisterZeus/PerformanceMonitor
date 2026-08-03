@@ -184,6 +184,21 @@ public class BaselineSupplyTests
     }
 
     /// <summary>
+    /// The RUNTIME half of the same invariant (review-caught on the follow-up PR): retention for
+    /// these collectors is user-editable, so a defaults pin alone leaves a deployed store able to
+    /// silently shorten the CPU/I-O baseline supply. DarlingRetention floors the purge horizon for
+    /// exactly the raw-reading baseline families at the baseline window — this pins the set's
+    /// membership to the provider's raw-reading arms so neither side can drift alone.
+    /// </summary>
+    [Fact]
+    public void BaselineServingRawCollectors_MatchTheRawReadingArms()
+    {
+        Assert.Equal(2, DarlingRetention.BaselineServingRawCollectors.Count);
+        Assert.Contains("cpu_utilization", DarlingRetention.BaselineServingRawCollectors);
+        Assert.Contains("file_io_stats", DarlingRetention.BaselineServingRawCollectors);
+    }
+
+    /// <summary>
     /// <c>refresh_continuous_aggregate</c>'s window bounds are declared <c>"any"</c>. An untyped literal or an
     /// uncast parameter leaves PostgreSQL with no type to resolve the polymorphic argument against, so the
     /// casts are load-bearing rather than decoration — and the bound parameter keeps a timestamp out of string
