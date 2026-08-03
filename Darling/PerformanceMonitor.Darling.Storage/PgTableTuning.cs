@@ -58,6 +58,10 @@ public static class PgTableTuning
     {
         "CREATE INDEX IF NOT EXISTS idx_procedure_stats_object_name ON collect.procedure_stats (object_name, collection_time) INCLUDE (database_name, delta_worker_time, delta_elapsed_time, delta_execution_count)",
         "CREATE INDEX IF NOT EXISTS idx_procedure_stats_server_handle_time ON collect.procedure_stats (server_id, sql_handle, collection_time DESC)",
+        /* #1981: the ProcStats comparison's representative-statement LATERAL probes query_stats by
+           (server_id, sql_handle) newest-first — the exact twin of the procedure_stats handle index
+           above. Bounded by raw retention (4 days of chunks), so the build is cheap on any store. */
+        "CREATE INDEX IF NOT EXISTS idx_query_stats_server_handle_time ON collect.query_stats (server_id, sql_handle, collection_time DESC)",
         "CREATE INDEX IF NOT EXISTS idx_query_stats_query_hash ON collect.query_stats (query_hash, collection_time) INCLUDE (database_name, delta_worker_time, delta_elapsed_time, delta_execution_count)",
         "CREATE INDEX IF NOT EXISTS idx_query_stats_server_hash_time ON collect.query_stats (server_id, query_hash, collection_time DESC)",
         "CREATE INDEX IF NOT EXISTS idx_query_store_stats_query_hash ON collect.query_store_stats (query_hash, collection_time) INCLUDE (database_name, module_name, execution_count, avg_duration_us, max_duration_us, avg_cpu_time_us, max_cpu_time_us)",

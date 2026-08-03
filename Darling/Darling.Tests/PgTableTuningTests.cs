@@ -44,7 +44,7 @@ public sealed class PgTableTuningTests
         Assert.Contains("ALTER TABLE collect.query_stats SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)", sql, StringComparison.Ordinal);
         Assert.Contains("ALTER TABLE collect.query_store_stats SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)", sql, StringComparison.Ordinal);
 
-        Assert.Equal(9, PgTableTuning.Statements.Count);
+        Assert.Equal(10, PgTableTuning.Statements.Count);   /* +1: the #1981 query_stats handle index */
     }
 
     private static int CountOccurrences(string haystack, string needle)
