@@ -866,6 +866,34 @@
                                                 </DockPanel>
                                                 <TextBlock Text="{Binding StatusDisplay}" Foreground="{Binding StatusBrush}"
                                                            FontSize="11" Margin="0,0,0,10"/>
+                                                <!-- Tag pills (#2008 2a): each server's tags as coloured chips.
+                                                     Collapsed when the server carries no tags so untagged cards
+                                                     are unchanged. -->
+                                                <ItemsControl ItemsSource="{Binding TagPills}" Margin="0,0,0,10">
+                                                    <ItemsControl.Style>
+                                                        <Style TargetType="ItemsControl">
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding TagPills.Count}" Value="0">
+                                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </ItemsControl.Style>
+                                                    <ItemsControl.ItemsPanel>
+                                                        <ItemsPanelTemplate>
+                                                            <WrapPanel/>
+                                                        </ItemsPanelTemplate>
+                                                    </ItemsControl.ItemsPanel>
+                                                    <ItemsControl.ItemTemplate>
+                                                        <DataTemplate>
+                                                            <Border Background="{Binding Fill}" CornerRadius="3"
+                                                                    Padding="6,1" Margin="0,0,4,4">
+                                                                <TextBlock Text="{Binding Name}" FontSize="10"
+                                                                           Foreground="{Binding TextBrush}"/>
+                                                            </Border>
+                                                        </DataTemplate>
+                                                    </ItemsControl.ItemTemplate>
+                                                </ItemsControl>
                                                 <!-- Metric rows: [severity dot] [label] [value] [detail],
                                                      mirroring the Dashboard's ServerHealthCard. Each dot +
                                                      value is coloured by the metric's band (ServerSummaryItem

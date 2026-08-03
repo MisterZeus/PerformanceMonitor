@@ -98,6 +98,7 @@ public static class PgMigrations
         new Migration(47, "pvs-stats", V47Sql),
         new Migration(48, "pvs-pressure-alert", V48Sql),
         new Migration(49, "database-state-alert", V49Sql),
+        new Migration(50, "server-tag-colour", V50Sql),
     };
 
     /// <summary>
@@ -948,6 +949,22 @@ CREATE TABLE IF NOT EXISTS config.database_state_expected (
 
 ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS database_state_enabled boolean NOT NULL DEFAULT true;";
+
+    /// <summary>
+    /// V50 — a nullable colour for each server tag (#2008 stage 2a). Additive exactly like V33/V48: one
+    /// <c>ADD COLUMN IF NOT EXISTS</c> on <c>config.server_tags</c> (created back in V32), so it is a no-op
+    /// on a store already carrying it and the real add on an upgrade. There is no config-schema generator
+    /// for server_tags — the table exists only because V32 created it — so a fresh store reaches this column
+    /// by running V32 then V50 in order, the same path an upgraded store takes; nothing else needs editing.
+    /// <para>Deliberately nullable with NO backfill: existing tags stay NULL and render as a neutral pill
+    /// until a user picks a colour, while newly-created tags get a palette colour assigned at creation time
+    /// (rotated by tag id, in the viewer). Stored as <c>#RRGGBB</c> text — the viewer's only concern, the
+    /// service never reads server_tags — so no CHECK constraint is imposed here; the viewer writes only
+    /// palette values or a user pick.</para>
+    /// </summary>
+    private const string V50Sql = @"
+ALTER TABLE config.server_tags
+    ADD COLUMN IF NOT EXISTS colour text;";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

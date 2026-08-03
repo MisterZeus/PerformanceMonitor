@@ -10,11 +10,14 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
-/// <summary>One tag row. <c>ParentId</c> null = a root tag.</summary>
-public sealed record DarlingTag(int Id, string Name, int? ParentId, int SortOrder);
+/// <summary>One tag row. <c>ParentId</c> null = a root tag. <c>Colour</c> null = no colour (a neutral pill);
+/// otherwise a <c>#RRGGBB</c> string, auto-assigned from <see cref="TagColorPalette"/> at creation and
+/// user-overridable.</summary>
+public sealed record DarlingTag(int Id, string Name, int? ParentId, int SortOrder, string? Colour = null);
 
 /// <summary>One server-to-tag assignment. Many-to-many: a server carries any number of tags.</summary>
 public sealed record DarlingTagAssignment(int ServerId, int TagId);
@@ -45,7 +48,7 @@ public sealed partial class ViewerDataService
     /// <summary>Every tag, flat. The caller builds the tree. Ordered by name so sibling order is stable
     /// without a reordering UI.</summary>
     public const string ServerTagsSelectSql =
-        "SELECT id, name, parent_id, sort_order FROM server_tags ORDER BY name";
+        "SELECT id, name, parent_id, sort_order, colour FROM server_tags ORDER BY name";
 
     /// <summary>Every server-to-tag assignment, flat.</summary>
     public const string ServerTagMapSelectSql =
@@ -59,6 +62,10 @@ public sealed partial class ViewerDataService
     /// <summary>Renames a tag. $1 id, $2 name.</summary>
     public const string ServerTagRenameSql =
         "UPDATE server_tags SET name = $2 WHERE id = $1";
+
+    /// <summary>Sets (or clears, with NULL) a tag's colour. $1 id, $2 colour (<c>#RRGGBB</c> or NULL).</summary>
+    public const string ServerTagSetColourSql =
+        "UPDATE server_tags SET colour = $2 WHERE id = $1";
 
     /// <summary>Reparents a tag. $1 id, $2 new parent_id (NULL = promote to root). The caller must have
     /// already rejected cycles and depth-cap violations against its in-memory tree.</summary>
@@ -104,7 +111,8 @@ public sealed partial class ViewerDataService
                 reader.GetInt32(0),
                 reader.GetString(1),
                 reader.IsDBNull(2) ? null : reader.GetInt32(2),
-                reader.GetInt32(3)));
+                reader.GetInt32(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4)));
         }
 
         return tags;
@@ -124,23 +132,32 @@ public sealed partial class ViewerDataService
         return assignments;
     }
 
-    /// <summary>Creates a tag and returns its id.</summary>
+    /// <summary>Creates a tag and returns its id, assigning it a palette colour derived from that id.</summary>
     public async Task<int> CreateServerTagAsync(string name, int? parentId, CancellationToken cancellationToken = default)
     {
-        await using var command = _dataSource.CreateCommand(ServerTagInsertSql);
-        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = name });
-        command.Parameters.Add(parentId is int parent
-            ? new NpgsqlParameter<int> { TypedValue = parent }
-            : new NpgsqlParameter { Value = System.DBNull.Value });
+        int id;
+        await using (var command = _dataSource.CreateCommand(ServerTagInsertSql))
+        {
+            command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = name });
+            command.Parameters.Add(parentId is int parent
+                ? new NpgsqlParameter<int> { TypedValue = parent }
+                : new NpgsqlParameter { Value = System.DBNull.Value });
 
-        try
-        {
-            return (int)(await command.ExecuteScalarAsync(cancellationToken))!;
+            try
+            {
+                id = (int)(await command.ExecuteScalarAsync(cancellationToken))!;
+            }
+            catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
+            {
+                throw new ViewerReadOnlyException(ex);
+            }
         }
-        catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
-        {
-            throw new ViewerReadOnlyException(ex);
-        }
+
+        /* Stamp the id-derived palette colour now that the id exists (#2008 2a), so a new tag has a stable,
+           reproducible colour the user can later override. The insert already proved the seat can write, so
+           this second statement runs only on a writable seat. */
+        await SetServerTagColorAsync(id, TagColorPalette.ForTagId(id), cancellationToken);
+        return id;
     }
 
     /// <summary>Renames a tag.</summary>
@@ -149,6 +166,19 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(ServerTagRenameSql);
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = tagId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = name });
+        await ExecuteWriteAsync(command, cancellationToken);
+    }
+
+    /// <summary>Sets a tag's colour, or clears it to neutral when <paramref name="colour"/> is null. Goes
+    /// through <see cref="ExecuteWriteAsync"/>, so a read-only seat degrades to
+    /// <see cref="ViewerReadOnlyException"/>.</summary>
+    public async Task SetServerTagColorAsync(int tagId, string? colour, CancellationToken cancellationToken = default)
+    {
+        await using var command = _dataSource.CreateCommand(ServerTagSetColourSql);
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = tagId });
+        command.Parameters.Add(colour is null
+            ? new NpgsqlParameter { Value = System.DBNull.Value }
+            : new NpgsqlParameter<string> { TypedValue = colour });
         await ExecuteWriteAsync(command, cancellationToken);
     }
 

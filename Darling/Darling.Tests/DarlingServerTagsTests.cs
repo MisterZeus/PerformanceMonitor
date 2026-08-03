@@ -136,11 +136,36 @@ public sealed class DarlingServerTagsTests
                      ViewerDataService.ServerTagMapSelectSql,
                      ViewerDataService.ServerTagInsertSql,
                      ViewerDataService.ServerTagRenameSql,
+                     ViewerDataService.ServerTagSetColourSql,
                      ViewerDataService.ServerTagReparentSql,
                      ViewerDataService.ServerTagDeleteSql,
                  })
         {
             Assert.DoesNotContain("config.server_tag", sql, StringComparison.Ordinal);
         }
+    }
+
+    [Fact]
+    public void V50_AddsANullableColourColumn_ToServerTags()
+    {
+        var v50 = PgMigrations.Scripts.Single(s => s.Version == 50);
+        Assert.Equal("server-tag-colour", v50.Name);
+
+        /* Additive, config.-qualified, idempotent — and NULLABLE (no NOT NULL / DEFAULT), so existing tags
+           stay NULL (a neutral pill) until coloured and no backfill runs. */
+        Assert.Contains("ALTER TABLE config.server_tags", v50.Sql, StringComparison.Ordinal);
+        Assert.Contains("ADD COLUMN IF NOT EXISTS colour text", v50.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("NOT NULL", v50.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TagColourSql_ReadsAndWritesTheColumn()
+    {
+        /* The read must SELECT colour (the sidebar swatch + the Overview pills need it); the write targets it. */
+        Assert.Contains("colour", ViewerDataService.ServerTagsSelectSql, StringComparison.Ordinal);
+        Assert.Contains(
+            "UPDATE server_tags SET colour = $2 WHERE id = $1",
+            ViewerDataService.ServerTagSetColourSql,
+            StringComparison.Ordinal);
     }
 }

@@ -372,6 +372,12 @@ public sealed class ServerSummaryItem
     public int ServerId { get; set; }
     public bool? IsOnline { get; set; }
 
+    /// <summary>The server's tags as coloured pills, empty when it has none. Stamped by the Overview loader
+    /// from the loaded tag list (the summary carries no tag query of its own), so it survives a re-sort —
+    /// which reuses these item instances rather than rebuilding them.</summary>
+    public System.Collections.Generic.IReadOnlyList<ServerTagPill> TagPills { get; set; } =
+        System.Array.Empty<ServerTagPill>();
+
     /// <summary>Warning (amber) state — in the viewer this means the collection has gone stale.</summary>
     public bool HasCollectorErrors { get; set; }
 
@@ -703,4 +709,22 @@ public sealed class ServerSummaryItem
         brush.Freeze();
         return brush;
     }
+}
+
+/// <summary>One tag pill on an Overview card (#2008 stage 2a): the tag name plus the brushes to render it,
+/// resolved once from the stored colour via <see cref="TagColorBrushes"/> (neutral when the tag has no
+/// colour). The label brush is a constant readable light, so a pill looks the same in either theme.</summary>
+public sealed class ServerTagPill
+{
+    public ServerTagPill(string name, string? colour)
+    {
+        Name = name;
+        Fill = TagColorBrushes.Fill(colour);
+    }
+
+    public string Name { get; }
+
+    public System.Windows.Media.Brush Fill { get; }
+
+    public System.Windows.Media.Brush TextBrush => TagColorBrushes.PillText;
 }
