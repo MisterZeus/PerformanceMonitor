@@ -62,7 +62,9 @@ public class BaselineSupplyTests
     [Fact]
     public void EveryBaselineAggregate_PreservesCollectionGrain_NotJustTheHourlyBucket()
     {
-        Assert.Equal(9, TimescaleSupport.BaselineAggregates.Length);
+        /* Seven since #2007 retired the unread CPU/IO pair (their arms read the raw hypertables);
+           RetiredBaselineAggregateTests pins the retirement half of that count. */
+        Assert.Equal(7, TimescaleSupport.BaselineAggregates.Length);
 
         foreach (var (createSql, view) in TimescaleSupport.BaselineAggregates)
         {
