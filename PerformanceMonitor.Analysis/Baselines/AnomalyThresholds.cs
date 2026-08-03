@@ -97,7 +97,16 @@ public static class AnomalyThresholds
     // Each is deliberately HIGHER than the matching #1486 magnitude floor above (the interaction
     // trap: a young store fires only on the higher bar, never on both-AND-ed into blindness).
     public const double CpuFallbackPct = 90.0;                 // %
-    public const double MemoryPressureFallbackPct = 95.0;      // total/target %
+    /* #1996: 101, not 95, because memory pressure's HEALTHY steady state is ~100 — a warmed-up
+       SQL Server holds total ≈ target by design, and the production fleet's median is exactly
+       100.0 on every server. A bar at or below 100 therefore fires on NORMAL behavior whenever a
+       baseline bucket is untrustworthy: measured on the 52-replica monitor, 403 of 406 firing
+       (server, hour, dow) buckets sat at exactly 2 distinct days (under the Full-tier day floor of
+       3, with ~82 samples each), and every one of 1,279 findings across two eras read "spiked to
+       100% — 0σ above its 100% baseline". Above 100 means total EXCEEDS target — genuine
+       over-target pressure, the only absolute condition worth waking someone for on this metric.
+       Still strictly above the 90 magnitude floor, per the interaction-trap rule below. */
+    public const double MemoryPressureFallbackPct = 101.0;     // total/target %
     public const double BatchRequestFallback = 5000.0;        // requests/sec
     public const double SessionCountFallback = 500.0;         // connections
     public const double QueryDurationFallbackUs = 5_000_000;  // total elapsed us = 5 seconds

@@ -189,6 +189,40 @@ public sealed class RobustBaselineTests
     }
 
     [Fact]
+    public void MemoryFallbackBar_DoesNotFireOnHealthyTotalEqualsTarget()
+    {
+        /* #1996, found dogfooding on the production fleet: memory's healthy steady state is
+           total ≈ target = 100%, and its fallback bar sat at 95 — so every untrustworthy bucket
+           (403 of 406 firing buckets had exactly 2 distinct days, one under the Full-tier floor)
+           fired on NORMAL behavior, rendered to operators as "spiked to 100% — 0σ above its 100%
+           baseline". The bar now sits above 100: healthy stays silent on thin baselines, genuine
+           over-target pressure still fires. */
+        var thinBucket = new BaselineBucket
+        {
+            Tier = BaselineTier.Full, HourOfDay = 3, DayOfWeek = 0,
+            Mean = 100.0, StdDev = 0.05, Median = 100.0, Mad = 0.02,
+            SampleCount = 82, DistinctDays = 2, // plenty of samples, under the day floor
+            AbsStdDevFloor = 4.0,
+        };
+        Assert.False(thinBucket.IsTrustworthy);
+
+        var healthy = AnomalyGate.EvaluateZScore(
+            thinBucket, 100.1,
+            AnomalyThresholds.DefaultDeviationThreshold, AnomalyThresholds.ModifiedZThreshold,
+            AnomalyThresholds.MemoryPressureFloorPct, AnomalyThresholds.MemoryPressureFallbackPct,
+            AnomalyThresholds.SigmaDisplayCap);
+        Assert.False(healthy.Fire, "total = target is the goal state, not pressure");
+
+        var overTarget = AnomalyGate.EvaluateZScore(
+            thinBucket, 103.0,
+            AnomalyThresholds.DefaultDeviationThreshold, AnomalyThresholds.ModifiedZThreshold,
+            AnomalyThresholds.MemoryPressureFloorPct, AnomalyThresholds.MemoryPressureFallbackPct,
+            AnomalyThresholds.SigmaDisplayCap);
+        Assert.True(overTarget.Fire, "total exceeding target is genuine pressure and must still fire");
+        Assert.True(overTarget.LowQualityBaseline);
+    }
+
+    [Fact]
     public void UntrustworthyBaseline_RobustPath_FiresOnlyOnTheAbsoluteBar()
     {
         /* The trust/fallback complementarity is unchanged by the robust statistic: a thin baseline
