@@ -17,7 +17,7 @@
   <ItemGroup>
     <!-- MCP SDK: required by Mcp/McpSchemaCompat.cs (Gemini-compatible tool registration, issue #1074).
          Brings ModelContextProtocol.Core + Microsoft.Extensions.AI.Abstractions transitively. -->
-    <PackageReference Include="ModelContextProtocol" Version="1.4.1" />
+    <PackageReference Include="ModelContextProtocol" Version="2.0.0" />
     <!-- Windows Credential Manager (DPAPI) for the shared CredentialStore; version matches Dashboard/Lite. -->
     <PackageReference Include="CredentialManagement" Version="1.0.2" />
     <!-- ILogger abstraction used by CredentialStore; version matches the apps' logging stack. -->
