@@ -131,7 +131,24 @@ public partial class MainWindow
         return target?.DataContext as FleetHeaderRow;
     }
 
-    /// <summary>Disables the tag-only actions on the Favorites / Untagged pseudo-groups, which have no tag.</summary>
+    /// <summary>
+    /// True when this seat may EDIT tags. Tags are shared fleet configuration, so editing follows
+    /// the same rule as every other write surface: gate on <see cref="ViewerDataService.IsReadOnly"/>
+    /// (#2008 — the tag menus shipped without the gate, so a least-privilege viewer-role seat showed
+    /// working-looking editors whose writes then died as 42501 behind a status-bar line; the role
+    /// model is deliberate — the viewer role's ONLY write is config.custom_views — so the fix is the
+    /// missing gate, not a broader grant).
+    /// </summary>
+    private bool CanEditTags => _dataService?.IsReadOnly == false;
+
+    /// <summary>Tooltip shown on disabled tag editors, so the read-only seat is TOLD why (#2008's
+    /// complaint was the silence, and greying-out without a reason is only half an answer).</summary>
+    private const string ReadOnlyTagToolTip =
+        "This seat is connected with the read-only viewer role — tag editing needs the admin connection.";
+
+    /// <summary>Disables the tag-only actions on the Favorites / Untagged pseudo-groups, which have no
+    /// tag — and EVERY action here when the seat is read-only (all five entries mutate the tag tree or
+    /// open the bulk editor, which is write-only).</summary>
     private void TagHeader_ContextMenuOpening(object sender, ContextMenuEventArgs e)
     {
         if (sender is not FrameworkElement fe || fe.DataContext is not FleetHeaderRow header || fe.ContextMenu is null)
@@ -140,14 +157,15 @@ public partial class MainWindow
         }
 
         var isRealTag = header.Kind == FleetGroupKind.Tag;
+        var canEdit = CanEditTags;
         foreach (var item in fe.ContextMenu.Items.OfType<MenuItem>())
         {
             /* Matched on Tag, not on the header text: the headers carry Alt mnemonics now, and a
                display string is the wrong key for behavior to hang on. */
-            if ((item.Tag as string) == "TagOnly")
-            {
-                item.IsEnabled = isRealTag;
-            }
+            var tagOnly = (item.Tag as string) == "TagOnly";
+            item.IsEnabled = canEdit && (!tagOnly || isRealTag);
+            item.ToolTip = canEdit ? null : ReadOnlyTagToolTip;
+            ToolTipService.SetShowOnDisabled(item, true);
         }
     }
 
@@ -247,6 +265,14 @@ public partial class MainWindow
             return;
         }
 
+        /* Backstop for any entry point the menu gates miss: the bulk editor is write-only, so a
+           read-only seat gets the reason instead of a window full of dead buttons (#2008). */
+        if (!CanEditTags)
+        {
+            StatusText.Text = ReadOnlyTagToolTip;
+            return;
+        }
+
         var dialog = new ManageTagsWindow(_dataService, _fleet.All) { Owner = this };
         dialog.ShowDialog();
         if (dialog.ChangedAny)
@@ -320,6 +346,19 @@ public partial class MainWindow
             return;
         }
 
+        /* Read-only seat: assignment is a config.server_tag_map write, gated like every other write
+           surface (#2008). Disabled-with-reason instead of built-then-failing. */
+        if (!CanEditTags)
+        {
+            assignItem.Items.Clear();
+            assignItem.IsEnabled = false;
+            assignItem.ToolTip = ReadOnlyTagToolTip;
+            ToolTipService.SetShowOnDisabled(assignItem, true);
+            return;
+        }
+
+        assignItem.IsEnabled = true;
+        assignItem.ToolTip = null;
         assignItem.Items.Clear();
 
         if (_tags.Count == 0)
