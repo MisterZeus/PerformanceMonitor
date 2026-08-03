@@ -102,6 +102,13 @@ public sealed class DistinctTextsLiveTests
         NpgsqlConnection connection, CancellationToken ct, DateTime at,
         string queryHash, string queryText, byte[]? digest, long weight)
     {
+        /* DISTINCT per caller, mirroring reality: different INSERT...EXEC callers have different
+           sql_handles even when their statement texts are the same length — the remediation note's
+           whole premise ("attribute per-caller work via sql_handle") depends on it, and the first
+           cut of this fixture accidentally collided them (review catch). */
+        var sqlHandle = "0xSQLH" + Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(queryText)))[..12];
+
         await DarlingMcpTestData.ExecAsync(connection, ct,
             @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name,
                                        query_hash, query_plan_hash, sql_handle, plan_handle, query_text,
@@ -109,7 +116,7 @@ public sealed class DistinctTextsLiveTests
                                        delta_elapsed_time, delta_logical_reads, min_dop, max_dop)
               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)",
             CollectionIdGenerator.Next(), at, ServerId, ServerName, Db,
-            queryHash, "0xPLANHASH", "0xSQLH" + queryText.Length, "0xPLANH", queryText,
+            queryHash, "0xPLANHASH", sqlHandle, "0xPLANH", queryText,
             (object?)digest ?? DBNull.Value, weight, weight * 1000L, weight * 2000L, weight * 10L, 1, 1);
     }
 
