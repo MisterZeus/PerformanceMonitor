@@ -358,7 +358,6 @@ public static class TimescaleSupport
         "file_io_baseline",
     };
 
-
     /// <summary>BatchRequests baseline supply -- the counter_name and non-negative filters bake in. Unlike
     /// cpu, one row per collection here is a property of the DMV (Batch Requests/sec is a single instance)
     /// rather than something the collector guarantees -- it applies no object_name/instance_name predicate.
@@ -812,7 +811,7 @@ BEGIN
 
     IF is_continuous_aggregate
     THEN
-        EXECUTE 'DROP MATERIALIZED VIEW collect.{view} CASCADE';
+        EXECUTE 'DROP MATERIALIZED VIEW IF EXISTS collect.{view} CASCADE';
     ELSE
         EXECUTE 'DROP VIEW IF EXISTS collect.{view} CASCADE';
     END IF;
