@@ -73,6 +73,7 @@ public interface IAlertEngineSettings
     bool LongRunningJobEnabled { get; }
     bool FailedJobEnabled { get; }
     bool PvsEnabled { get; }
+    bool DatabaseStateEnabled { get; }
 
     /* Thresholds. */
 

@@ -662,6 +662,122 @@ LIMIT 5";
         return new AnomalousJobsResult(SnapshotIsFresh: true, items);
     }
 
+    /* ---------------- database state (baseline deviation) ---------------- */
+
+    /// <summary>
+    /// Seeds a first-observation baseline for any database in the latest snapshot that has none
+    /// (insert-if-absent; never overwrites an existing baseline or user override). A CRITICAL first
+    /// observation (SUSPECT / RECOVERY_PENDING / EMERGENCY) is deliberately NOT baselined: onboarding a
+    /// server mid-outage must not learn the bad state as expected — such a database stays pending (no
+    /// row) and the deviation read alerts on it until it recovers or an operator sets an expected state.
+    /// config schema qualified explicitly; database_states resolves to collect through the search_path.
+    /// $1 server_id.
+    /// </summary>
+    public const string SeedDatabaseStateExpectedSql = @"
+INSERT INTO config.database_state_expected (server_id, database_name, expected_state, is_user_override, updated_at)
+SELECT $1, ds.database_name, CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END, false, (now() AT TIME ZONE 'UTC')
+FROM database_states ds
+WHERE ds.server_id = $1
+AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
+AND   ds.state_desc IS NOT NULL
+AND   (CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END) NOT IN ('SUSPECT', 'RECOVERY_PENDING', 'EMERGENCY')
+ON CONFLICT (server_id, database_name) DO NOTHING";
+
+    /// <summary>
+    /// Tidies auto-baselines for databases no longer in the newest snapshot (dropped/renamed); user
+    /// overrides are kept. $1 server_id.
+    /// </summary>
+    public const string PruneDatabaseStateExpectedSql = @"
+DELETE FROM config.database_state_expected e
+WHERE e.server_id = $1
+AND   e.is_user_override = false
+AND   NOT EXISTS (
+    SELECT 1 FROM database_states ds
+    WHERE ds.server_id = $1
+    AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
+    AND   ds.database_name = e.database_name
+)";
+
+    /// <summary>
+    /// The databases whose state deviates from their expected state in BOTH of the two most recent
+    /// collections (a two-sample rule that absorbs restart transients — RECOVERY_PENDING / RECOVERING — and
+    /// a standby secondary's per-restore RESTORING flicker), plus databases with no baseline yet whose
+    /// effective state is critical in both samples (a pending critical first observation). Uses the
+    /// effective state (STANDBY for a log-shipping secondary, else state_desc). Skips the "(ignore)"
+    /// sentinel; each row carries current + expected (expected is empty for a pending row). Lite's DuckDB
+    /// read ported to Postgres. $1 server_id.
+    /// </summary>
+    public const string DatabaseStateDeviationsSql = @"
+WITH newest AS (
+    SELECT MAX(collection_time) AS t FROM database_states WHERE server_id = $1
+),
+prev AS (
+    SELECT MAX(collection_time) AS t FROM database_states
+    WHERE server_id = $1 AND collection_time < (SELECT t FROM newest)
+),
+latest AS (
+    SELECT ds.database_name, CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END AS eff
+    FROM database_states ds
+    WHERE ds.server_id = $1 AND ds.collection_time = (SELECT t FROM newest)
+),
+previous AS (
+    SELECT ds.database_name, CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END AS eff
+    FROM database_states ds
+    WHERE ds.server_id = $1 AND ds.collection_time = (SELECT t FROM prev)
+)
+SELECT l.database_name, l.eff, COALESCE(e.expected_state, '')
+FROM latest l
+JOIN previous p
+  ON p.database_name = l.database_name
+LEFT JOIN config.database_state_expected e
+  ON  e.server_id = $1
+  AND e.database_name = l.database_name
+WHERE (e.expected_state IS NULL
+        AND l.eff IN ('SUSPECT', 'RECOVERY_PENDING', 'EMERGENCY')
+        AND p.eff IN ('SUSPECT', 'RECOVERY_PENDING', 'EMERGENCY'))
+   OR (e.expected_state IS NOT NULL AND e.expected_state <> '(ignore)'
+        AND l.eff IS DISTINCT FROM e.expected_state
+        AND p.eff IS DISTINCT FROM e.expected_state)
+ORDER BY l.database_name";
+
+    public async Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(
+        string serverKey, CancellationToken cancellationToken = default)
+    {
+        var serverId = ParseServerKey(serverKey);
+
+        var items = new List<DatabaseStateInfo>();
+        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+
+        using (var seed = new NpgsqlCommand(SeedDatabaseStateExpectedSql, connection))
+        {
+            seed.Parameters.AddWithValue(serverId);
+            await seed.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        using (var prune = new NpgsqlCommand(PruneDatabaseStateExpectedSql, connection))
+        {
+            prune.Parameters.AddWithValue(serverId);
+            await prune.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        using (var command = new NpgsqlCommand(DatabaseStateDeviationsSql, connection))
+        {
+            command.Parameters.AddWithValue(serverId);
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                items.Add(new DatabaseStateInfo
+                {
+                    DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                    StateDesc = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                    ExpectedState = reader.IsDBNull(2) ? "" : reader.GetString(2)
+                });
+            }
+        }
+
+        return items;
+    }
+
     private int ResolveRunningJobsCadence(int serverId) =>
         ResolveCadence(_runningJobsCadenceMinutes, serverId, "running_jobs");
 

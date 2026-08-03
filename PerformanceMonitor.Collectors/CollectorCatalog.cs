@@ -36,6 +36,7 @@ public static class CollectorCatalog
         ServerPropertiesCollector.Instance,
         ServerConfigCollector.Instance,
         DatabaseConfigCollector.Instance,
+        DatabaseStateCollector.Instance,
         TraceFlagsCollector.Instance,
         DatabaseScopedConfigCollector.Instance,
         SessionStatsCollector.Instance,

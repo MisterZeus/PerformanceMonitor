@@ -157,6 +157,10 @@ public partial class App : Application
     public static int AlertLongRunningJobMultiplier { get; set; } = 3;
     public static bool AlertFailedJobEnabled { get; set; } = true;
     public static int AlertFailedJobLookbackMinutes { get; set; } = 60;  // Look back this many minutes for failed Agent job runs
+    /* Database-state alert: fire when a database's current state deviates from its expected
+       (auto-seeded baseline or per-database override) state. Per-database expected states live in the
+       config_database_state_expected table, not here — this is only the master enable. */
+    public static bool AlertDatabaseStateEnabled { get; set; } = true;
     public static int AlertCooldownMinutes { get; set; } = 5;  // Tray notification cooldown between repeated alerts
     public static int EmailCooldownMinutes { get; set; } = 15; // Email cooldown between repeated alerts
     /* #1141: deadlock/blocking notification delivery — Summary (one batched card per cycle, the default)
@@ -648,6 +652,7 @@ public partial class App : Application
             if (root.TryGetProperty("alert_long_running_job_multiplier", out v)) AlertLongRunningJobMultiplier = v.GetInt32();
             if (root.TryGetProperty("alert_failed_job_enabled", out v)) AlertFailedJobEnabled = v.GetBoolean();
             if (root.TryGetProperty("alert_failed_job_lookback_minutes", out v)) AlertFailedJobLookbackMinutes = (int)Math.Clamp(v.GetInt64(), 1, 1440);
+            if (root.TryGetProperty("alert_database_state_enabled", out v)) AlertDatabaseStateEnabled = v.GetBoolean();
             if (root.TryGetProperty("alert_cooldown_minutes", out v)) AlertCooldownMinutes = (int)Math.Clamp(v.GetInt64(), 1, 120);
             if (root.TryGetProperty("email_cooldown_minutes", out v)) EmailCooldownMinutes = (int)Math.Clamp(v.GetInt64(), 1, 120);
             if (root.TryGetProperty("alert_delivery_mode", out v) && Enum.TryParse<AlertNotificationMode>(v.GetString(), out var deliveryMode))

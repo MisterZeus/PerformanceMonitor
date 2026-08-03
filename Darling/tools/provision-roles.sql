@@ -124,6 +124,14 @@ GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin;
 --     so re-run this script AFTER the service has migrated your store to V31 (else this line errors: no table).
 GRANT INSERT, UPDATE, DELETE ON config.custom_views TO viewer;
 
+-- 3c. Database-state expected states (#1986): the viewer's per-database override editor writes this one
+--     config table (non-secret; the expected/(ignore) state per database). SELECT is already covered by
+--     the blanket config grant in step 3; this is the write floor for the editor, gated server-side by the
+--     same token+CIDR auth as the custom-view composer. EXPLICIT single-table statement (no ALTER DEFAULT
+--     PRIVILEGES, which would broaden viewer to ALL of config). config.database_state_expected is created by
+--     the V49 migration, so re-run this script AFTER the service has migrated your store to V49.
+GRANT INSERT, UPDATE, DELETE ON config.database_state_expected TO viewer;
+
 -- 4. Default privileges so NEW tables/views (future collectors, created bare into collect via
 --    search_path) auto-inherit SELECT. FOR ROLE <owner> must name the role that creates them.
 ALTER DEFAULT PRIVILEGES FOR ROLE darling IN SCHEMA collect

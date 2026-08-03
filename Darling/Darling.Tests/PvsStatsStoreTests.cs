@@ -40,10 +40,10 @@ public sealed class PvsStatsStoreTests
         var v47 = PgMigrations.Scripts.Single(m => m.Version == 47);
 
         Assert.Equal("pvs-stats", v47.Name);
-        /* V48 (#1984, the PVS-pressure alert knobs) followed this migration — the newest-rung pins
-           track it, the V47 identity pins below are unchanged. */
-        Assert.Equal(48, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(48, StorageVersion.SchemaVersion);
+        /* V48 (#1984, the PVS-pressure alert knobs) then V49 (#1986, the database-state alert) followed
+           this migration — the newest-rung pins track the newest, the V47 identity pins below are unchanged. */
+        Assert.Equal(49, PgMigrations.Scripts[^1].Version);
+        Assert.Equal(49, StorageVersion.SchemaVersion);
 
         /* collect.-qualified like V44 and V34, and idempotent so a re-run is a no-op. */
         Assert.Contains("CREATE TABLE IF NOT EXISTS collect.pvs_stats (", v47.Sql, StringComparison.Ordinal);
@@ -82,8 +82,8 @@ public sealed class PvsStatsStoreTests
         /* The trap a StorageVersion bump sets: the viewer's connect-time gate probes the store and
            compares the result against RequiredStoreSchemaVersion. A probe that cannot SEE the newest
            migration reports every healthy store as skewed and refuses to open it — permanently.
-           (48 since #1984's alert knobs; the full-sentinel pin lives in ViewerDataServiceTests.) */
-        Assert.Equal(48, ViewerDataService.RequiredStoreSchemaVersion);
+           (49 since #1986's database-state alert; the full-sentinel pin lives in ViewerDataServiceTests.) */
+        Assert.Equal(49, ViewerDataService.RequiredStoreSchemaVersion);
         Assert.Contains("table_name = 'pvs_stats'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         /* The V47 arm: pvs_stats present (and nothing newer) maps to exactly 47. */

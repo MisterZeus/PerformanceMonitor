@@ -59,6 +59,11 @@ internal static class AlertSeverity
             "Long-Running Job" => ("#D97706", "WARNING", "\U0001F7E0"),
             // Emailed/webhooked and fired as a Warning toast — was falling through to INFO-blue.
             "Failed Agent Job" => ("#D97706", "WARNING", "\U0001F7E0"),
+            // Database state deviated from its baseline/expected state. Always fired with an explicit
+            // severity override (WARNING, or CRITICAL for SUSPECT/RECOVERY_PENDING/EMERGENCY — see
+            // DatabaseStateTokens.SeverityFor), so this arm only styles the override-less alert-history
+            // replay; default it to WARNING-amber rather than the INFO-blue fall-through (#1136 gap).
+            "Database State" => ("#D97706", "WARNING", "\U0001F7E0"),
             "Volume Free Space" => ("#D97706", "WARNING", "\U0001F7E0"),
             "Server Unreachable" => ("#DC2626", "CRITICAL", "\U0001F534"),
             "Server Restored" => ("#16A34A", "RESOLVED", "\U0001F7E2"),

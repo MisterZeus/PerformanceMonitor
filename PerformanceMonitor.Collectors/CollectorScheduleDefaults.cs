@@ -61,6 +61,12 @@ public static class CollectorScheduleDefaults
         ["deadlocks"] = new(5, 30),
         ["server_config"] = new(0, 30),
         ["database_config"] = new(0, 30),
+        /* Per-database state as a time series (#db-offline-alert): unlike the load-time
+           database_config snapshot (frequency 0), this feeds the "database offline / unhealthy
+           state" alert, so it must run on a cadence to catch a database going OFFLINE / SUSPECT /
+           RESTORING after load. A few-row read against in-memory catalog metadata, so per-minute is
+           cheap — matching the other health time series (wait_stats, cpu_utilization). */
+        ["database_states"] = new(1, 30),
         ["memory_grant_stats"] = new(1, 30),
         ["waiting_tasks"] = new(1, 7),
         ["dmv_blocking_snapshot"] = new(1, 30),

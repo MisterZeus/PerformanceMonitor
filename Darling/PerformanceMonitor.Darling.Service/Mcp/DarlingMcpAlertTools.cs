@@ -123,7 +123,7 @@ public sealed class DarlingMcpAlertTools
         }
     }
 
-    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, failed jobs), the cooldown, excluded databases, the deadlock/blocking delivery mode, and the scheduled-analysis cadence. This is the single global settings row the service hot-swaps in. SMTP/webhook delivery credentials are managed separately and are not reported here.")]
+    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, failed jobs, database state), the cooldown, excluded databases, the deadlock/blocking delivery mode, and the scheduled-analysis cadence. This is the single global settings row the service hot-swaps in. SMTP/webhook delivery credentials are managed separately and are not reported here.")]
     public static async Task<string> GetAlertSettings(
         NpgsqlDataSource postgres)
     {
@@ -175,6 +175,7 @@ public sealed class DarlingMcpAlertTools
         pvs = new { enabled = s.PvsEnabled, threshold_percent = s.PvsThresholdPercent, floor_gb = s.PvsFloorGb },
         long_running_job = new { enabled = s.LongRunningJobEnabled, multiplier = s.LongRunningJobMultiplier },
         failed_job = new { enabled = s.FailedJobEnabled, lookback_minutes = s.FailedJobLookbackMinutes },
+        database_state = new { enabled = s.DatabaseStateEnabled },
         cooldown_minutes = s.CooldownMinutes,
         excluded_databases = s.ExcludedDatabases,
         delivery = new { mode = s.DeliveryMode, per_event_max = s.PerEventMax },
@@ -654,6 +655,17 @@ public sealed class DarlingMcpAlertTools
                             case "enabled": AddBool("failed_job_enabled", n, "failed_job.enabled"); break;
                             case "lookback_minutes": AddInt("failed_job_lookback_minutes", n, "failed_job.lookback_minutes", 1, 1440); break;
                             default: error = $"Unknown field 'failed_job.{k}'."; break;
+                        }
+                    });
+                    break;
+
+                case "database_state":
+                    Group(prop.Value, "database_state", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("database_state_enabled", n, "database_state.enabled"); break;
+                            default: error = $"Unknown field 'database_state.{k}'."; break;
                         }
                     });
                     break;

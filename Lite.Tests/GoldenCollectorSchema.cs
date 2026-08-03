@@ -974,6 +974,16 @@ internal static class GoldenCollectorSchema
     pvs_off_row_page_skipped_oldest_snapshot BIGINT,
     pvs_off_row_page_skipped_oldest_aborted_xdesid BIGINT
 )",
+        ["database_states"] = @"CREATE TABLE IF NOT EXISTS database_states (
+    collection_id BIGINT PRIMARY KEY,
+    collection_time TIMESTAMP NOT NULL,
+    server_id INTEGER NOT NULL,
+    server_name VARCHAR NOT NULL,
+    database_name VARCHAR,
+    database_id INTEGER,
+    state_desc VARCHAR,
+    is_in_standby BOOLEAN
+)",
     };
 
     /// <summary>Pre-change CREATE INDEX DDL, keyed by collector target table (35 entries; server_config and database_config have no index).</summary>
@@ -1017,5 +1027,6 @@ internal static class GoldenCollectorSchema
         ["ag_database_replica_states"] = @"CREATE INDEX IF NOT EXISTS idx_ag_database_replica_states_time ON ag_database_replica_states(server_id, collection_time)",
         ["plan_correction"] = @"CREATE INDEX IF NOT EXISTS idx_plan_correction_time ON plan_correction(server_id, collection_time)",
         ["pvs_stats"] = @"CREATE INDEX IF NOT EXISTS idx_pvs_stats_time ON pvs_stats(server_id, collection_time)",
+        ["database_states"] = @"CREATE INDEX IF NOT EXISTS idx_database_states_time ON database_states(server_id, collection_time)",
     };
 }

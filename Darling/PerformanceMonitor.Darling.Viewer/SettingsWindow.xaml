@@ -389,6 +389,12 @@
                     <TextBlock Text="minutes" VerticalAlignment="Center" Margin="2,0,0,0"
                                Foreground="{DynamicResource ForegroundBrush}"/>
                 </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <CheckBox x:Name="AlertDatabaseStateCheckBox" Content="Database state changed from its expected (baseline) state"
+                              VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
+                    <Button x:Name="ConfigureDatabaseStatesButton" Content="Configure…" Margin="8,0,0,0" Padding="8,2"
+                            VerticalAlignment="Center" Click="ConfigureDatabaseStatesButton_Click"/>
+                </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,10,0,0">
                     <TextBlock Text="Tray notification cooldown:" VerticalAlignment="Center" Margin="0,0,8,0"
                                Foreground="{DynamicResource ForegroundBrush}"/>

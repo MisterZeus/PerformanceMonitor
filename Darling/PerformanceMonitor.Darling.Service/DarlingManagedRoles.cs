@@ -445,6 +445,9 @@ GRANT CONNECT ON DATABASE {database} TO {mcp};
 --    no sequence USAGE grant.
 GRANT INSERT, UPDATE, DELETE ON {config}.custom_views TO {viewer};
 GRANT INSERT, UPDATE, DELETE ON {config}.custom_views TO {mcp};
+-- The Viewer's per-database database-state override editor (#1986) writes config.database_state_expected:
+-- the same narrow single-table floor as custom_views. Created by V49, so provisioning runs after migration.
+GRANT INSERT, UPDATE, DELETE ON {config}.database_state_expected TO {viewer};
 
 -- 8. Alert tuning (the MCP alert-tuning write tools): the mcp role's alert-config writes, mirroring section 7's
 --    custom_views grant model (EXPLICIT single-table statements, NO ALTER DEFAULT PRIVILEGES). update_alert_settings

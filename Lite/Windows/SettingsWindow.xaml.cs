@@ -512,6 +512,7 @@ public partial class SettingsWindow : Window
         AlertLongRunningJobMultiplierBox.Text = App.AlertLongRunningJobMultiplier.ToString();
         AlertFailedJobCheckBox.IsChecked = App.AlertFailedJobEnabled;
         AlertFailedJobLookbackBox.Text = App.AlertFailedJobLookbackMinutes.ToString();
+        AlertDatabaseStateCheckBox.IsChecked = App.AlertDatabaseStateEnabled;
         AlertCooldownBox.Text = App.AlertCooldownMinutes.ToString();
         EmailCooldownBox.Text = App.EmailCooldownMinutes.ToString();
         AlertDeliveryModeBox.SelectedIndex = App.AlertDeliveryMode == AlertNotificationMode.PerEvent ? 1 : 0;
@@ -598,6 +599,7 @@ public partial class SettingsWindow : Window
         App.AlertFailedJobEnabled = AlertFailedJobCheckBox.IsChecked == true;
         if (int.TryParse(AlertFailedJobLookbackBox.Text, out var failedJobLookback) && failedJobLookback >= 1 && failedJobLookback <= 1440)
             App.AlertFailedJobLookbackMinutes = failedJobLookback;
+        App.AlertDatabaseStateEnabled = AlertDatabaseStateCheckBox.IsChecked == true;
         var validationErrors = new List<string>();
         if (int.TryParse(AlertCooldownBox.Text, out var alertCooldown) && alertCooldown >= 1 && alertCooldown <= 120)
             App.AlertCooldownMinutes = alertCooldown;
@@ -656,6 +658,7 @@ public partial class SettingsWindow : Window
             root["alert_blocking_wait_seconds_threshold"] = App.AlertBlockingWaitSecondsThreshold;
             root["alert_deadlock_enabled"] = App.AlertDeadlockEnabled;
             root["alert_deadlock_threshold"] = App.AlertDeadlockThreshold;
+            root["alert_database_state_enabled"] = App.AlertDatabaseStateEnabled;
             root["alert_poison_wait_enabled"] = App.AlertPoisonWaitEnabled;
             root["alert_poison_wait_threshold_ms"] = App.AlertPoisonWaitThresholdMs;
             root["alert_long_running_query_enabled"] = App.AlertLongRunningQueryEnabled;
@@ -749,6 +752,12 @@ public partial class SettingsWindow : Window
     {
         if (_muteRuleService == null) return;
         var window = new ManageMuteRulesWindow(_muteRuleService) { Owner = this };
+        window.ShowDialog();
+    }
+
+    private void ConfigureDatabaseStatesButton_Click(object sender, RoutedEventArgs e)
+    {
+        var window = new DatabaseStateOverridesWindow(_serverManager) { Owner = this };
         window.ShowDialog();
     }
 

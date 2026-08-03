@@ -97,6 +97,7 @@ public static class PgMigrations
         new Migration(46, "plan-correction-collector", V46Sql),
         new Migration(47, "pvs-stats", V47Sql),
         new Migration(48, "pvs-pressure-alert", V48Sql),
+        new Migration(49, "database-state-alert", V49Sql),
     };
 
     /// <summary>
@@ -902,6 +903,51 @@ ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS pvs_threshold_percent integer NOT NULL DEFAULT 40;
 ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS pvs_floor_gb integer NOT NULL DEFAULT 1;";
+
+    /// <summary>
+    /// V49 — the database-state alert. Two tables plus a settings column:
+    /// <para><c>collect.database_states</c> — the periodic per-database <c>state_desc</c> time series
+    /// the alert compares against. Added additively exactly like V34/V44: a fresh store already has it
+    /// (V1's <see cref="PgSchemaGenerator.GenerateFullSchema"/> walks the collector catalog, which now
+    /// includes <see cref="PerformanceMonitor.Collectors.DatabaseStateCollector"/>), so
+    /// <c>CREATE TABLE IF NOT EXISTS</c> is a no-op on fresh and the real create on upgrade. Column
+    /// order/types are exactly <see cref="PgSchemaGenerator.CreateTable"/>'s output for that catalog
+    /// entry (prefix NOT NULL, payload nullable) so the fresh-vs-upgraded shape pin holds. It gets the
+    /// default retrieval index. No <c>v_*</c> passthrough view (post-V14 collectors read the base table).</para>
+    /// <para><c>config.database_state_expected</c> — the per-(server, database) expected state the
+    /// baseline-deviation alert compares the current state against: auto-seeded from first observation
+    /// (non-critical states only — a critical first observation stays pending and alerts) and
+    /// user-editable (the override), with the <c>(ignore)</c> sentinel opting a database out. Lives in the
+    /// config control plane; the viewer role's SELECT grant is added in
+    /// <c>Darling/tools/provision-roles.sql</c> / <c>DarlingManagedRoles</c>.</para>
+    /// <para><c>config.config_alert_settings.database_state_enabled</c> — the master toggle, NOT NULL
+    /// DEFAULT true so an upgraded store enables it without a data migration.</para>
+    /// </summary>
+    private const string V49Sql = @"
+CREATE TABLE IF NOT EXISTS collect.database_states (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    database_id integer,
+    state_desc text,
+    is_in_standby boolean
+);
+
+CREATE INDEX IF NOT EXISTS idx_database_states_time ON collect.database_states(server_id, collection_time);
+
+CREATE TABLE IF NOT EXISTS config.database_state_expected (
+    server_id integer NOT NULL,
+    database_name text NOT NULL,
+    expected_state text NOT NULL,
+    is_user_override boolean NOT NULL DEFAULT false,
+    updated_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
+    PRIMARY KEY (server_id, database_name)
+);
+
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS database_state_enabled boolean NOT NULL DEFAULT true;";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

@@ -143,6 +143,21 @@ CREATE TABLE IF NOT EXISTS dismissed_archive_alerts (
 CREATE INDEX IF NOT EXISTS idx_dismissed_archive_alerts
 ON dismissed_archive_alerts (alert_time, server_id, metric_name)";
 
+    /* The per-(server, database) expected state the baseline-deviation database-state alert compares
+       the current collected state against. Auto-seeded from first observation (is_user_override =
+       false) and user-editable via the override editor (is_user_override = true); the "(ignore)"
+       sentinel in expected_state opts a database out of the alert entirely. Keyed (server_id,
+       database_name); the Darling twin is config.database_state_expected (PgMigrations V40). */
+    public const string CreateDatabaseStateExpectedTable = @"
+CREATE TABLE IF NOT EXISTS config_database_state_expected (
+    server_id INTEGER NOT NULL,
+    database_name VARCHAR NOT NULL,
+    expected_state VARCHAR NOT NULL,
+    is_user_override BOOLEAN NOT NULL DEFAULT false,
+    updated_at TIMESTAMP NOT NULL DEFAULT current_timestamp,
+    PRIMARY KEY (server_id, database_name)
+)";
+
     /// <summary>
     /// All table creation statements: the hand-written non-collector tables, then the 36 collector
     /// tables generated from <see cref="PerformanceMonitor.Collectors.CollectorCatalog"/> by
@@ -159,6 +174,7 @@ ON dismissed_archive_alerts (alert_time, server_id, metric_name)";
         yield return CreateCollectorStateTable;
         yield return CreateMuteRulesTable;
         yield return CreateDismissedArchiveAlertsTable;
+        yield return CreateDatabaseStateExpectedTable;
 
         foreach (var statement in DuckDbSchemaGenerator.CreateTableStatements())
         {

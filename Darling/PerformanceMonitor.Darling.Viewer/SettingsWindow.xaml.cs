@@ -496,6 +496,17 @@ public partial class SettingsWindow : Window
         editor.ShowDialog();
     }
 
+    private void ConfigureDatabaseStatesButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_dataService is null)
+        {
+            return;
+        }
+
+        var editor = new DatabaseStateOverridesWindow(_dataService, _servers) { Owner = this };
+        editor.ShowDialog();
+    }
+
     // ── Viewer defaults (connection timeout, CSV separator, timestamp display) — viewer-local ──
 
     private void LoadConnectionTimeout() =>
@@ -699,6 +710,7 @@ public partial class SettingsWindow : Window
         AlertLongRunningJobMultiplierBox.Text = r.LongRunningJobMultiplier.ToString(CultureInfo.InvariantCulture);
         AlertFailedJobCheckBox.IsChecked = r.FailedJobEnabled;
         AlertFailedJobLookbackBox.Text = r.FailedJobLookbackMinutes.ToString(CultureInfo.InvariantCulture);
+        AlertDatabaseStateCheckBox.IsChecked = r.DatabaseStateEnabled;
         AlertCooldownBox.Text = r.CooldownMinutes.ToString(CultureInfo.InvariantCulture);
         AnalysisEnabledCheckBox.IsChecked = r.AnalysisEnabled;
         AnalysisIntervalBox.Text = r.AnalysisIntervalMinutes.ToString(CultureInfo.InvariantCulture);
@@ -749,6 +761,7 @@ public partial class SettingsWindow : Window
             PvsEnabled = AlertPvsCheckBox.IsChecked == true,
             LongRunningJobEnabled = AlertLongRunningJobCheckBox.IsChecked == true,
             FailedJobEnabled = AlertFailedJobCheckBox.IsChecked == true,
+            DatabaseStateEnabled = AlertDatabaseStateCheckBox.IsChecked == true,
             AnalysisEnabled = AnalysisEnabledCheckBox.IsChecked == true,
             AnalysisNotificationsEnabled = AnalysisNotificationsCheckBox.IsChecked == true,
             ExcludedDatabases = AlertExcludedDatabasesBox.Text

@@ -559,6 +559,7 @@ public partial class RemoteCollectorService
                 "deadlocks" => await CollectDeadlocksAsync(server, cancellationToken),
                 "server_config" => await CollectServerConfigAsync(server, cancellationToken),
                 "database_config" => await CollectDatabaseConfigAsync(server, cancellationToken),
+                "database_states" => await CollectDatabaseStatesAsync(server, cancellationToken),
                 "query_store" => await CollectQueryStoreAsync(server, cancellationToken),
                 "memory_grant_stats" => await CollectMemoryGrantStatsAsync(server, cancellationToken),
                 "waiting_tasks" => await CollectWaitingTasksAsync(server, cancellationToken),

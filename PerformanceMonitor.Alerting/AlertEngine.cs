@@ -131,6 +131,14 @@ public sealed class AlertEngine
        persisted through IAlertStateStore on change (#1145 parity). */
     private readonly ConcurrentDictionary<string, DateTime> _lastAlertedFailedJobTime = new();
 
+    /* Database-state alert (offline/unhealthy) — a PER-DATABASE standing condition. The active set is
+       the databases currently alerting on this server (outer keyed serverKey; the inner set is only
+       ever touched under this server's evaluation gate, so a plain HashSet is safe). The cooldown dict
+       is keyed per database (serverKey + "|" + dbName) so each database throttles independently, and
+       an entry is removed when its database recovers. In-memory only, like the other family state. */
+    private readonly ConcurrentDictionary<string, HashSet<string>> _activeDatabaseStateAlerts = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastDatabaseStateAlert = new();
+
     /// <param name="settings">Live threshold surface — read every sweep, never cached.</param>
     /// <param name="readAdapter">The collected alert feeds (slice B seam).</param>
     /// <param name="stateStore">Restart-surviving watermark persistence (#1145).</param>
@@ -227,6 +235,7 @@ public sealed class AlertEngine
         await CheckPvsPressureAsync(key, serverName, now, alertCooldown, suppressed, ct);
         await CheckAnomalousJobsAsync(key, serverName, now, alertCooldown, suppressed, ct);
         bool failedJobConditionPresent = await CheckFailedJobsAsync(snapshot, key, serverName, now, alertCooldown, suppressed, ct);
+        await CheckDatabaseStateAsync(key, serverName, now, alertCooldown, suppressed, ct);
 
         return new AlertSweepResult(true, lowDiskConditionPresent, failedJobConditionPresent);
     }
@@ -1157,6 +1166,145 @@ public sealed class AlertEngine
 
         return conditionPresent;
     }
+
+    /* ---------------- database state (offline / unhealthy) ---------------- */
+
+    /// <summary>
+    /// Fires when a monitored database's current state DEVIATES from its expected state — the
+    /// expected state being the auto-seeded first-observation baseline or the operator's per-database
+    /// override (a log-shipping secondary baselines at STANDBY and so never alerts; an "ignore"
+    /// override opts a database out entirely). The store computes the deviating set (a two-sample rule)
+    /// and does the baseline/ignore comparison (see <see cref="IAlertReadAdapter.GetDatabaseStatesAsync"/>); this
+    /// method owns the per-database fire/cooldown/resolution and mute gating. PER-DATABASE: each
+    /// deviating database fires and cools down independently, and emits a "recovered" resolution when
+    /// its state returns to expected. Severity is graded at the fire site
+    /// (<see cref="DatabaseStateTokens.SeverityFor"/>): CRITICAL for the integrity-failure states,
+    /// WARNING otherwise. The shared <see cref="IAlertEngineSettings.ExcludedDatabases"/> list is
+    /// honoured (parity with the other database-scoped alerts). The read is not freshness-gated (a
+    /// standing condition).
+    /// </summary>
+    private async Task CheckDatabaseStateAsync(
+        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+    {
+        if (!_settings.DatabaseStateEnabled)
+        {
+            return;
+        }
+
+        List<DatabaseStateInfo> deviations;
+        try
+        {
+            deviations = await _readAdapter.GetDatabaseStatesAsync(key, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* Log-and-skip, like the other collected reads: never resolve an active database on a
+               failed fetch (that would fabricate a recovery), and never fire on absent evidence. */
+            _logger?.LogError("Failed to check database state for {Server}: {Message}", serverName, ex.Message);
+            return;
+        }
+
+        var excluded = _settings.ExcludedDatabases;
+
+        /* The store already filtered to deviations (current != expected, not ignored); here we only
+           drop databases on the shared excluded list, for parity with the other database-scoped alerts.
+           Per-database keys (this dict and the active set below) are ORDINAL — case-sensitive — to match
+           the stores' case-sensitive expected-state joins, so a database can't key differently here than
+           it does in the baseline table. The excluded-databases list stays case-insensitive, matching the
+           other alerts' treatment of that user-facing list. */
+        var current = new Dictionary<string, DatabaseStateInfo>(StringComparer.Ordinal);
+        foreach (var db in deviations)
+        {
+            if (string.IsNullOrWhiteSpace(db.StateDesc) || string.IsNullOrWhiteSpace(db.DatabaseName))
+            {
+                continue;
+            }
+
+            if (excluded.Count > 0 && excluded.Any(e => string.Equals(e, db.DatabaseName, StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
+            current[db.DatabaseName] = db;
+        }
+
+        /* Inner set is only touched under this server's evaluation gate (see class remarks), so a
+           plain HashSet is safe; the outer dictionary is concurrent across servers. */
+        var active = _activeDatabaseStateAlerts.GetOrAdd(key, _ => new HashSet<string>(StringComparer.Ordinal));
+
+        foreach (var (dbName, db) in current)
+        {
+            active.Add(dbName);
+            var cooldownKey = DatabaseStateCooldownKey(key, dbName);
+            if (!suppressed && CooldownElapsed(_lastDatabaseStateAlert, cooldownKey, now, alertCooldown))
+            {
+                var severity = DatabaseStateTokens.SeverityFor(db.StateDesc);
+                var stateText = DatabaseStateTokens.Humanize(db.StateDesc);
+                /* An empty expected state means this database was first observed in a critical state and
+                   has no accepted baseline yet (see IAlertReadAdapter.GetDatabaseStatesAsync) — surface it
+                   as a first-observation alert rather than "expected UNKNOWN". */
+                bool pending = string.IsNullOrEmpty(db.ExpectedState);
+                var expectedText = pending ? "(no baseline yet)" : DatabaseStateTokens.Humanize(db.ExpectedState);
+                var muteCtx = new AlertMuteContext
+                {
+                    ServerName = serverName,
+                    MetricName = DatabaseStateTokens.MetricName,
+                    DatabaseName = dbName
+                };
+                bool isMuted = _isAlertMuted(muteCtx);
+                _lastDatabaseStateAlert[cooldownKey] = now; /* stamped even when muted, like the others */
+
+                var detailText = pending
+                    ? $"  Database: {dbName}\n  Current: {stateText}\n  First observed in a critical state — no baseline established yet."
+                    : $"  Database: {dbName}\n  Expected: {expectedText}\n  Current: {stateText}";
+                var shortMessage = pending
+                    ? $"{dbName} first observed {stateText} (no baseline yet)"
+                    : $"{dbName} changed to {stateText} (expected {expectedText})";
+
+                await FireAsync(new AlertOutcome(
+                    key, serverName, DatabaseStateTokens.MetricName,
+                    $"{dbName}: {stateText}",
+                    expectedText,
+                    Context: null, DetailText: detailText,
+                    NumericCurrentValue: null, NumericThresholdValue: null,
+                    Muted: isMuted, Severity: severity,
+                    ShortMessage: shortMessage), ct);
+            }
+        }
+
+        /* Databases that were alerting but no longer deviate (state returned to expected, or the
+           operator re-baselined / set the override to match) — announce a per-database recovery and
+           drop their cooldown. Guarded by the master enable (we're past the early return), matching
+           the other families' "only announce recovery while still enabled". */
+        if (active.Count > 0)
+        {
+            var recovered = active.Where(d => !current.ContainsKey(d)).ToList();
+            foreach (var dbName in recovered)
+            {
+                active.Remove(dbName);
+                _lastDatabaseStateAlert.TryRemove(DatabaseStateCooldownKey(key, dbName), out _);
+                if (!suppressed)
+                {
+                    await NotifyResolutionAsync(new AlertResolution(
+                        key, serverName, DatabaseStateTokens.MetricName,
+                        "Database State Resolved",
+                        $"{serverName}: {dbName} back to expected state"), ct);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Per-database cooldown key. The serverKey is always a digit-only int (see the adapters'
+    /// ParseServerKey), so the first '|' unambiguously ends it regardless of what the database name
+    /// contains — no collision between e.g. (server 1, db "23") and (server 12, db "3").
+    /// </summary>
+    private static string DatabaseStateCooldownKey(string serverKey, string dbName) =>
+        serverKey + "|" + dbName;
 
     /* ---------------- helpers ---------------- */
 

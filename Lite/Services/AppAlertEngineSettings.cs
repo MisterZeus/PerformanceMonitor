@@ -42,6 +42,7 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
     public bool PvsEnabled => App.AlertPvsEnabled;
     public bool LongRunningJobEnabled => App.AlertLongRunningJobEnabled;
     public bool FailedJobEnabled => App.AlertFailedJobEnabled;
+    public bool DatabaseStateEnabled => App.AlertDatabaseStateEnabled;
 
     public int CpuThresholdPercent => App.AlertCpuThreshold;
     public int BlockingCountThreshold => App.AlertBlockingThreshold;

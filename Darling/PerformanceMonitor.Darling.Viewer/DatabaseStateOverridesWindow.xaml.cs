@@ -1,0 +1,173 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Windows;
+using System.Windows.Controls;
+using PerformanceMonitor.Alerting;
+
+namespace PerformanceMonitor.Darling.Viewer;
+
+/// <summary>
+/// Per-database expected-state editor for the baseline-deviation database-state alert (the Viewer twin
+/// of Lite's window). Lists every database in the selected server's latest snapshot with its current
+/// state and its expected state (auto-seeded baseline or user override), lets the operator change the
+/// expected state — including the <c>(ignore)</c> opt-out — and re-baseline a database to its current
+/// state. Writes flow through <see cref="ViewerDataService"/> so a read-only seat surfaces a message
+/// rather than a raw 42501.
+/// </summary>
+public partial class DatabaseStateOverridesWindow : Window
+{
+    private readonly ViewerDataService _dataService;
+
+    private sealed class ServerPick
+    {
+        public string DisplayName { get; set; } = "";
+        public int ServerId { get; set; }
+    }
+
+    private sealed class EditRow
+    {
+        public string DatabaseName { get; set; } = "";
+        public string CurrentState { get; set; } = "";
+        public string ExpectedState { get; set; } = "";
+        public string OriginalExpected { get; set; } = "";
+        public bool IsUserOverride { get; set; }
+
+        public string SourceLabel =>
+            string.IsNullOrEmpty(ExpectedState) ? "Pending"
+            : string.Equals(ExpectedState, DatabaseStateTokens.Ignore, StringComparison.Ordinal) ? "Ignored"
+            : IsUserOverride ? "Override"
+            : "Baseline";
+    }
+
+    private List<EditRow> _rows = new();
+
+    public DatabaseStateOverridesWindow(ViewerDataService dataService, IReadOnlyList<DarlingServer> servers)
+    {
+        InitializeComponent();
+        _dataService = dataService;
+
+        var picks = servers
+            .Select(s => new ServerPick { DisplayName = s.DisplayName, ServerId = s.ServerId })
+            .OrderBy(p => p.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        ServerCombo.ItemsSource = picks;
+        if (picks.Count > 0)
+        {
+            ServerCombo.SelectedIndex = 0; // triggers the initial load
+        }
+        else
+        {
+            StatusText.Text = "No servers are configured.";
+        }
+    }
+
+    private int? SelectedServerId => (ServerCombo.SelectedItem as ServerPick)?.ServerId;
+
+    private async void ServerCombo_SelectionChanged(object sender, SelectionChangedEventArgs e) => await LoadAsync();
+
+    private async void RefreshButton_Click(object sender, RoutedEventArgs e) => await LoadAsync();
+
+    private async System.Threading.Tasks.Task LoadAsync()
+    {
+        if (SelectedServerId is not int serverId)
+        {
+            return;
+        }
+
+        try
+        {
+            var rows = await _dataService.GetDatabaseStateExpectationsAsync(serverId);
+            _rows = rows.Select(r => new EditRow
+            {
+                DatabaseName = r.DatabaseName,
+                CurrentState = r.CurrentState,
+                ExpectedState = string.IsNullOrEmpty(r.ExpectedState) ? r.CurrentState : r.ExpectedState,
+                OriginalExpected = string.IsNullOrEmpty(r.ExpectedState) ? r.CurrentState : r.ExpectedState,
+                IsUserOverride = r.IsUserOverride
+            }).ToList();
+
+            /* The dropdown offers the standard state tokens plus (ignore), unioned with any state value
+               actually present (a baseline or current state the token list doesn't enumerate, e.g. COPYING). */
+            var options = new List<string>
+            {
+                DatabaseStateTokens.Online, DatabaseStateTokens.Offline, DatabaseStateTokens.Restoring,
+                DatabaseStateTokens.Recovering, DatabaseStateTokens.RecoveryPending, DatabaseStateTokens.Suspect,
+                DatabaseStateTokens.Emergency, DatabaseStateTokens.Standby, DatabaseStateTokens.Ignore
+            };
+            foreach (var extra in _rows.SelectMany(r => new[] { r.ExpectedState, r.CurrentState })
+                         .Where(s => !string.IsNullOrEmpty(s) && !options.Contains(s)))
+            {
+                options.Add(extra);
+            }
+            ExpectedColumn.ItemsSource = options;
+
+            StatesGrid.ItemsSource = _rows;
+            var deviating = _rows.Count(r => !string.Equals(r.ExpectedState, DatabaseStateTokens.Ignore, StringComparison.Ordinal)
+                && !string.Equals(r.CurrentState, r.ExpectedState, StringComparison.Ordinal));
+            StatusText.Text = $"{_rows.Count} database(s); {deviating} currently deviating from expected."
+                + (_dataService.IsReadOnly ? "  (read-only seat — changes cannot be saved)" : "");
+        }
+        catch (Exception ex)
+        {
+            StatesGrid.ItemsSource = null;
+            StatusText.Text = $"Could not load database states: {ex.Message}";
+        }
+    }
+
+    private async void ResetSelected_Click(object sender, RoutedEventArgs e)
+    {
+        if (SelectedServerId is not int serverId || StatesGrid.SelectedItem is not EditRow row)
+        {
+            return;
+        }
+
+        try
+        {
+            await _dataService.ResetDatabaseStateExpectedToCurrentAsync(serverId, row.DatabaseName);
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            StatusText.Text = $"Could not reset {row.DatabaseName}: {ex.Message}";
+        }
+    }
+
+    private async void Save_Click(object sender, RoutedEventArgs e)
+    {
+        StatesGrid.CommitEdit(DataGridEditingUnit.Cell, true);
+        StatesGrid.CommitEdit(DataGridEditingUnit.Row, true);
+
+        if (SelectedServerId is not int serverId)
+        {
+            DialogResult = true;
+            return;
+        }
+
+        try
+        {
+            var changed = _rows.Where(r => !string.Equals(r.ExpectedState, r.OriginalExpected, StringComparison.Ordinal)).ToList();
+            foreach (var row in changed)
+            {
+                await _dataService.SetDatabaseStateExpectedAsync(serverId, row.DatabaseName, row.ExpectedState);
+            }
+
+            DialogResult = true;
+        }
+        catch (Exception ex)
+        {
+            StatusText.Text = $"Could not save: {ex.Message}";
+        }
+    }
+
+    private void Cancel_Click(object sender, RoutedEventArgs e) => DialogResult = false;
+}

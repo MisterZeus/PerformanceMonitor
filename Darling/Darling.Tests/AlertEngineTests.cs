@@ -45,6 +45,7 @@ public sealed class AlertEngineTests
         public bool LongRunningJobEnabled { get; set; }
         public bool FailedJobEnabled { get; set; }
         public bool PvsEnabled { get; set; }
+        public bool DatabaseStateEnabled { get; set; }
         public int CpuThresholdPercent { get; set; } = 80;
         public int BlockingCountThreshold { get; set; } = 1;
         /* #1839: 0 = off, the shipped default — a test must opt in for the wait gate to run at all. */
@@ -140,6 +141,17 @@ public sealed class AlertEngineTests
             Task.FromResult(SnapshotIsStale
                 ? AnomalousJobsResult.Stale
                 : new AnomalousJobsResult(SnapshotIsFresh: true, new List<AnomalousJobInfo>(AnomalousJobs)));
+
+        /* Database-state deviations the engine should fire on — the store's baseline/ignore comparison
+           is already applied, so tests set the deviating rows directly. */
+        public List<DatabaseStateInfo> DatabaseStates { get; } = new();
+        public int DatabaseStateFetches { get; private set; }
+
+        public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default)
+        {
+            DatabaseStateFetches++;
+            return Task.FromResult(new List<DatabaseStateInfo>(DatabaseStates));
+        }
     }
 
     private sealed class FakeStateStore : IAlertStateStore
@@ -1142,6 +1154,8 @@ public sealed class AlertEngineTests
             throw new InvalidOperationException("store down");
         public Task<AnomalousJobsResult> GetAnomalousJobsAsync(string serverKey, int multiplier, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
+        public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("store down");
     }
 
     [Fact]
@@ -1158,5 +1172,81 @@ public sealed class AlertEngineTests
 
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
         Assert.Equal(new[] { "101", "202" }, h.Deliverer.Outcomes.Select(o => o.ServerKey).ToArray());
+    }
+
+    /* ---------------- database state (baseline deviation) ---------------- */
+
+    [Fact]
+    public async Task DatabaseState_Disabled_DoesNotFetch()
+    {
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = false;
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "X", StateDesc = "OFFLINE", ExpectedState = "ONLINE" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(0, h.Adapter.DatabaseStateFetches);
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task DatabaseState_FiresPerDatabase_GradingSeverityByCurrentState()
+    {
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Payments", StateDesc = "SUSPECT", ExpectedState = "ONLINE" });
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Archive", StateDesc = "OFFLINE", ExpectedState = "ONLINE" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.All(h.Deliverer.Outcomes, o => Assert.Equal("Database State", o.MetricName));
+
+        var suspect = h.Deliverer.Outcomes.Single(o => o.CurrentValue.StartsWith("Payments"));
+        Assert.Equal(PerformanceMonitor.Notifications.AlertSeverityLevel.Critical, suspect.Severity);
+        var offline = h.Deliverer.Outcomes.Single(o => o.CurrentValue.StartsWith("Archive"));
+        Assert.Equal(PerformanceMonitor.Notifications.AlertSeverityLevel.Warning, offline.Severity);
+    }
+
+    [Fact]
+    public async Task DatabaseState_CooldownSuppressesSecondFire_ThenResolvesWhenBackToExpected()
+    {
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Payments", StateDesc = "OFFLINE", ExpectedState = "ONLINE" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Same deviation next sweep, inside the cooldown window — no second fire. */
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Database returns to its expected state — deviation clears, resolution announced. */
+        h.Adapter.DatabaseStates.Clear();
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains(h.Resolutions, r => r.MetricName == "Database State" && r.Message.Contains("Payments"));
+    }
+
+    [Fact]
+    public async Task DatabaseState_PendingCriticalFirstObservation_FiresCriticalWithNoBaselineMessage()
+    {
+        /* A critical first observation has no baseline (empty expected) — the store returns it as pending;
+           the engine must fire CRITICAL and word it as a first observation, not "expected UNKNOWN". */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Payments", StateDesc = "SUSPECT", ExpectedState = "" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var o = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Database State", o.MetricName);
+        Assert.Equal(PerformanceMonitor.Notifications.AlertSeverityLevel.Critical, o.Severity);
+        Assert.Contains("no baseline", o.ShortMessage);
     }
 }
