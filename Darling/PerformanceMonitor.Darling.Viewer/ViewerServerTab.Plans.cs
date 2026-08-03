@@ -251,6 +251,44 @@ public partial class ViewerServerTab
     }
 
     /// <summary>
+    /// #1980: the Query Store grid's inline "View" button — the capability its two sibling grids
+    /// always had. Wired to the SAME stored-plan path the history window's View Plan uses
+    /// (<c>GetQueryStorePlanTextAsync</c> by the row's database/query_id/plan_id), opened in the
+    /// Plan Viewer host via <see cref="OpenPlanTab"/>. No live-server hit; a row whose plan was
+    /// never captured gets the same "Plan Not Found" message the sibling buttons show.
+    /// </summary>
+    private async void ViewQueryStorePlanInline_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button btn || btn.DataContext is not ViewerQueryStoreRow row) return;
+        if (row.QueryId <= 0) return;
+
+        btn.Content = "...";
+        try
+        {
+            var plan = await _dataService.GetQueryStorePlanTextAsync(_server.ServerId, row.DatabaseName, row.QueryId, row.PlanId);
+            if (string.IsNullOrEmpty(plan))
+            {
+                MessageBox.Show(
+                    "No execution plan was captured for this Query Store plan.",
+                    "Plan Not Found",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                return;
+            }
+
+            OpenPlanTab(plan, $"QS Plan - Q{row.QueryId}/P{row.PlanId}", row.QueryText);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            btn.Content = "View";
+        }
+    }
+
+    /// <summary>
     /// The Top Procedures grid's "Query Plan" Download button (mirrors <see cref="DownloadQueryStatsPlan_Click"/>
     /// and Lite's <c>DownloadProcedurePlan_Click</c>): reads the stored procedure_stats.query_plan_xml for the
     /// row's object identity and saves it as a .sqlplan file. Gated on
