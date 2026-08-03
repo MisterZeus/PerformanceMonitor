@@ -72,12 +72,6 @@ ORDER BY
     }
 
     /// <summary>
-    /// Latest ADR persistent version store snapshot, one row per database (#1951). Reads the archive view
-    /// so a window that has aged into parquet still resolves, and pins to the newest collection_time the
-    /// way the sibling database-size read does — this grid answers "what is my version store doing right
-    /// now", not "how did it get here".
-    /// </summary>
-    /// <summary>
     /// #1984 stage 2: the PVS trend behind the FinOps chart — every stored point over the window for
     /// the TOP-5 databases by PVS size at the newest collection. Percent-of-database is computed per
     /// POINT from the same row's data-file denominator, the exact ratio the grid shows, so the two
@@ -130,6 +124,12 @@ ORDER BY p.database_name, p.collection_time";
         return items;
     }
 
+    /// <summary>
+    /// Latest ADR persistent version store snapshot, one row per database (#1951). Reads the archive view
+    /// so a window that has aged into parquet still resolves, and pins to the newest collection_time the
+    /// way the sibling database-size read does — this grid answers "what is my version store doing right
+    /// now", not "how did it get here".
+    /// </summary>
     public async Task<List<PvsStatsRow>> GetPvsStatsLatestAsync(int serverId)
     {
         using var connection = await OpenConnectionAsync();
