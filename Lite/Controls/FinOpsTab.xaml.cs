@@ -540,7 +540,7 @@ public partial class FinOpsTab : UserControl
         foreach (var series in trend.GroupBy(t => t.DatabaseName).OrderByDescending(g => g.Max(t => t.PvsSizeMb)))
         {
             var points = series.OrderBy(t => t.CollectionTime).ToList();
-            var times = points.Select(t => t.CollectionTime.ToOADate()).ToArray();
+            var times = points.Select(t => ServerTimeHelper.ToServerTime(t.CollectionTime).ToOADate()).ToArray();
             var values = points.Select(t => t.PvsSizeMb).ToArray();
 
             var line = PvsTrendChart.Plot.Add.TimeSeries(times, values);

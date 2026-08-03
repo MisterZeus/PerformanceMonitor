@@ -140,10 +140,6 @@ ORDER BY p.database_name, p.collection_time";
 /// <c>PvsStatsRow</c>, including the derived members, because the two viewers' grids bind the same paths.
 /// Every size is MEGABYTES converted from the DMV's kilobytes, and every PVS size is OFF-ROW only.
 /// </summary>
-/// <summary>One PVS trend point (#1984 stage 2): a database's off-row PVS size at one collection,
-/// with the same %-of-database ratio the grid computes (null when the denominator was zero).</summary>
-public sealed record PvsTrendPoint(string DatabaseName, DateTime CollectionTime, double PvsSizeMb, double? PctOfDatabase);
-
 public sealed class PvsStatsRow
 {
     public string DatabaseName { get; set; } = "";
@@ -234,3 +230,7 @@ public sealed class PvsStatsRow
             ? (AbortedCleanerEndTime.Value > OffrowCleanerEndTime.Value ? AbortedCleanerEndTime : OffrowCleanerEndTime)
             : AbortedCleanerEndTime ?? OffrowCleanerEndTime;
 }
+
+/// <summary>One PVS trend point (#1984 stage 2): a database's off-row PVS size at one collection,
+/// with the same %-of-database ratio the grid computes (null when the denominator was zero).</summary>
+public sealed record PvsTrendPoint(string DatabaseName, DateTime CollectionTime, double PvsSizeMb, double? PctOfDatabase);

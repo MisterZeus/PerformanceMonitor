@@ -196,10 +196,6 @@ ORDER BY persistent_version_store_size_mb DESC NULLS LAST, database_name";
 /// <c>persistent_version_store_size_kb</c> as excluding versions stored in-row, so a database can read a
 /// small PVS and still carry version overhead. The grid header says so.
 /// </summary>
-/// <summary>One PVS trend point (#1984 stage 2): a database's off-row PVS size at one collection,
-/// with the same %-of-database ratio the grid computes (null when the denominator was zero).</summary>
-public sealed record PvsTrendPoint(string DatabaseName, DateTime CollectionTime, double PvsSizeMb, double? PctOfDatabase);
-
 public class PvsStatsRow
 {
     public string DatabaseName { get; set; } = "";
@@ -290,3 +286,7 @@ public class PvsStatsRow
             ? (AbortedCleanerEndTime.Value > OffrowCleanerEndTime.Value ? AbortedCleanerEndTime : OffrowCleanerEndTime)
             : AbortedCleanerEndTime ?? OffrowCleanerEndTime;
 }
+
+/// <summary>One PVS trend point (#1984 stage 2): a database's off-row PVS size at one collection,
+/// with the same %-of-database ratio the grid computes (null when the denominator was zero).</summary>
+public sealed record PvsTrendPoint(string DatabaseName, DateTime CollectionTime, double PvsSizeMb, double? PctOfDatabase);
