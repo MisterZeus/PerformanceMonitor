@@ -1327,6 +1327,7 @@
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
 
@@ -1347,7 +1348,12 @@
                            Text="PVS sizes count OFF-ROW versions only and do not include row versions stored in-row. When a large PVS will not shrink, the skipped-page counters attribute it: Secondary means a query on a secondary replica, Snapshot means a long-running snapshot scan, Aborted means space still held by aborted transactions. Requires SQL Server 2019 or later; always on for Azure SQL Database."/>
 
                 <!-- DataGrid -->
-                <Grid Grid.Row="2" Margin="10,0,10,10">
+                <!-- #1984 stage 2: the PVS trend — "when did it start growing" beside the grid's
+                     "what is it now". One line per top-5 database by current PVS size, 7 days; legend
+                     labels carry each database's latest %-of-database. Collapsed until the loader has
+                     points, so an ADR-less server shows no dead chart. -->
+                <ScottPlot:WpfPlot Grid.Row="2" x:Name="PvsTrendChart" Height="220" Margin="10,0,10,8" Visibility="Collapsed"/>
+                <Grid Grid.Row="3" Margin="10,0,10,10">
                     <DataGrid x:Name="PvsStatsDataGrid"
                               AutoGenerateColumns="False"
                               IsReadOnly="True"
