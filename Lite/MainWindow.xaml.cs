@@ -529,7 +529,12 @@ public partial class MainWindow : Window
                 && server.IsOnline == true
                 && _collectorService.GetHealthSummary(server).ErroringCollectors > 0;
         }
-        ServerListView.ItemsSource = servers;
+        /* #2020 2b-i-b: the sidebar now binds the FleetView projection (group headers + servers), not the
+           flat ServerConnection list. SetAll takes the whole fleet (favourites-first from ServerManager);
+           ApplyFleetTagsAndRebind folds in the last-loaded tags, binds Visible, and restores selection. */
+        var previousServerId = (ServerListView.SelectedItem as FleetServerRow)?.Server.ServerId;
+        _fleet.SetAll(servers.Select(ToFleetServer).ToList());
+        ApplyFleetTagsAndRebind(previousServerId);
 
         // Update UI based on server count
         if (servers.Count == 0 && _openServerTabs.Count == 0)
@@ -664,6 +669,9 @@ public partial class MainWindow : Window
         if (servers.Count == 0) return;
 
         await LoadServerTagsAsync();
+        /* #2020 2b-i-b: fold the freshly-loaded tags into the sidebar tree — the flat SetAll in
+           RefreshServerList runs before tags are known on the very first load. */
+        ApplyFleetTagsAndRebind((ServerListView.SelectedItem as FleetServerRow)?.Server.ServerId);
 
         try
         {
@@ -709,7 +717,9 @@ public partial class MainWindow : Window
 
     private void ServerListView_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (ServerListView.SelectedItem is ServerConnection server)
+        /* Only a server row connects; a header row's double-click is a no-op (a single click already
+           toggles its expand/collapse via SelectionChanged). */
+        if (ServerListView.SelectedItem is FleetServerRow row && row.Server.Connection is { } server)
         {
             ConnectToServer(server);
         }
@@ -1600,7 +1610,8 @@ public partial class MainWindow : Window
         if (sender is not MenuItem menuItem) return null;
         var contextMenu = menuItem.Parent as ContextMenu;
         var border = contextMenu?.PlacementTarget as FrameworkElement;
-        return border?.DataContext as ServerConnection;
+        /* #2020 2b-i-b: the sidebar row's DataContext is now a FleetServerRow, not a ServerConnection. */
+        return (border?.DataContext as FleetServerRow)?.Server.Connection;
     }
 
     private void ServerContextMenu_Connect_Click(object sender, RoutedEventArgs e)
