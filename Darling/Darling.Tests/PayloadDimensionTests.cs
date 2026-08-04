@@ -654,7 +654,11 @@ public sealed class PayloadDimensionTests
             .ToArray();
 
         Assert.NotEmpty(definers);
-        Assert.Equal(38, definers[^1].Version);
+        /* V51 (#2012 stage 2) re-defines the view after appending host_object_name — and it caught
+           exactly this tripwire's regression in review: its first cut was a SELECT * passthrough.
+           The shipped V51 DROPs the view (the new column lands mid-list, which CREATE OR REPLACE
+           refuses) and re-emits the generator's resolving definition. */
+        Assert.Equal(51, definers[^1].Version);
         Assert.Contains(
             "COALESCE(f.query_text, qtd.query_text) AS query_text",
             definers[^1].Sql,
@@ -663,6 +667,12 @@ public sealed class PayloadDimensionTests
             "VIEW v_query_stats AS SELECT * FROM query_stats",
             definers[^1].Sql,
             StringComparison.Ordinal);
+        /* Every definer must be the resolving one, not just the last — a passthrough re-expansion
+           anywhere after V38 would briefly exist mid-ladder. */
+        foreach (var definer in definers.Where(d => d.Version >= 38))
+        {
+            Assert.Contains("COALESCE(f.query_text, qtd.query_text) AS query_text", definer.Sql, StringComparison.Ordinal);
+        }
     }
 
     [Fact]

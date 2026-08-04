@@ -243,7 +243,10 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
 
         Assert.Contains("SUM(delta_worker_time)", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(delta_elapsed_time)", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY database_name, query_hash", sql, StringComparison.Ordinal);
+        /* #2012 stage 2: host_object_name joins the key (INSERT...EXEC callers split; NULL ad-hoc
+           hosts still collapse) and pins the LATERAL to the group's own rows. */
+        Assert.Contains("GROUP BY database_name, query_hash, host_object_name", sql, StringComparison.Ordinal);
+        Assert.Contains("host_object_name IS NOT DISTINCT FROM r.host_object_name", sql, StringComparison.Ordinal);
         Assert.Contains("$5::text IS NULL OR database_name = $5", sql, StringComparison.Ordinal); /* optional db filter */
         Assert.Contains("NOT LIKE 'WAITFOR%'", sql, StringComparison.Ordinal);          /* over-fetch + trim */
         Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);

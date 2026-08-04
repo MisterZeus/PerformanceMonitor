@@ -544,6 +544,20 @@ public static class PgSchemaGenerator
               .Append(" ADD COLUMN IF NOT EXISTS ").Append(dimension.DigestColumn).Append(" bytea;\n");
         }
 
+        /* The resolving view below is generated from the CURRENT collector definition, so it references
+           every payload column the collector has TODAY — including ones whose ALTER migration sits LATER
+           in the ladder (host_object_name lands at V51). A store upgrading from <38 runs this body against
+           its old table, and the view would fail on the first such column. Pre-adding every payload column
+           here (no-op on any store that already has them, same TypeFor the table generator uses) keeps V38
+           self-sufficient from any starting version — permanently, for every future payload column too. */
+        var querySchema = QueryStatsCollector.Instance;
+        foreach (var column in querySchema.PayloadColumns)
+        {
+            sb.Append("ALTER TABLE ").Append(querySchema.TargetTable)
+              .Append(" ADD COLUMN IF NOT EXISTS ").Append(column.Name)
+              .Append(' ').Append(TypeFor(column)).Append(";\n");
+        }
+
         sb.Append('\n').Append(GenerateQueryStatsResolvingView());
         return sb.ToString();
     }
