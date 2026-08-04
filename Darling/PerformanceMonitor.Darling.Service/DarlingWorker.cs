@@ -232,10 +232,14 @@ public sealed class DarlingWorker : BackgroundService
                     "postgres.network.* is set but postgres.managed is false — it is IGNORED in bring-your-own mode; your own PostgreSQL governs its network exposure (pg_hba / listen_addresses / TLS).");
             }
 
-            if (config.Mcp.Network?.IsConfigured == true)
+            /* #1804: in a container the mcp/web network blocks ARE honored (the bind ladder's container
+               gate), so this notice would be a lie there — the smoke test caught it warning IGNORED in
+               the same breath as 'Starting MCP server on 0.0.0.0'. The postgres.network notice above
+               stays: the bundled store never runs in BYO mode, container or not. */
+            if (config.Mcp.Network?.IsConfigured == true && !Hosting.DarlingHostBinding.IsRunningInContainer)
             {
                 warnings.Add(
-                    "mcp.network.* is set but postgres.managed is false — the MCP network endpoint is managed-mode only, so it is IGNORED; the MCP server stays loopback-only.");
+                    "mcp.network.* is set but postgres.managed is false — the MCP network endpoint is managed-mode (or container, #1804) only, so it is IGNORED; the MCP server stays loopback-only.");
             }
 
             return warnings;

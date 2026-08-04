@@ -1,0 +1,12 @@
+# Keep the Darling image build context lean (#1804): the Dockerfile copies source and publishes
+# inside the build stage, so nothing prebuilt, versioned-binary, or platform-foreign belongs in it.
+.git
+.github
+**/bin
+**/obj
+**/publish
+releases
+Darling/artifacts
+deprecated
+docs
+*.md
