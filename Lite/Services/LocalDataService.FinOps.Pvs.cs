@@ -150,7 +150,8 @@ SELECT
     offrow_version_cleaner_end_time,
     pvs_off_row_page_skipped_low_water_mark,
     pvs_off_row_page_skipped_min_useful_xts,
-    pvs_off_row_page_skipped_oldest_aborted_xdesid
+    pvs_off_row_page_skipped_oldest_aborted_xdesid,
+    collection_time
 FROM v_pvs_stats
 WHERE server_id = $1
 AND   collection_time = (
@@ -182,7 +183,8 @@ ORDER BY persistent_version_store_size_mb DESC NULLS LAST, database_name";
                 OffrowCleanerEndTime = reader.IsDBNull(11) ? null : reader.GetDateTime(11),
                 SkippedLowWaterMark = reader.IsDBNull(12) ? null : Convert.ToInt64(reader.GetValue(12)),
                 SkippedMinUsefulXts = reader.IsDBNull(13) ? null : Convert.ToInt64(reader.GetValue(13)),
-                SkippedOldestAborted = reader.IsDBNull(14) ? null : Convert.ToInt64(reader.GetValue(14))
+                SkippedOldestAborted = reader.IsDBNull(14) ? null : Convert.ToInt64(reader.GetValue(14)),
+                CollectionTime = reader.GetDateTime(15)
             });
         }
 
@@ -213,6 +215,7 @@ public class PvsStatsRow
     public long? SkippedLowWaterMark { get; set; }
     public long? SkippedMinUsefulXts { get; set; }
     public long? SkippedOldestAborted { get; set; }
+    public DateTime CollectionTime { get; set; }
 
     public string AdrDisplay => IsAdrOn switch
     {
