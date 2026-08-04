@@ -149,6 +149,11 @@ public class ServerSummaryItem
     public int ServerId { get; set; }
     public bool? IsOnline { get; set; }
 
+    /// <summary>True when a whole-server alert silence is active for this server (#2031) — drives the card's
+    /// muted-bell, mirroring the sidebar row. Stamped by the Overview loader and the silence-indicator
+    /// refresh; the card rebinds on a real flip.</summary>
+    public bool IsSilenced { get; set; }
+
     /// <summary>The server's tags as coloured pills, empty when it has none. Stamped by the Overview loader
     /// from the loaded tag list, so it survives a re-sort (which reuses these item instances).</summary>
     public System.Collections.Generic.IReadOnlyList<ServerTagPill> TagPills { get; set; } =

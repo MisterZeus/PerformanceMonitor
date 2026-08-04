@@ -529,6 +529,10 @@ public partial class MainWindow : Window
                 && server.IsOnline == true
                 && _collectorService.GetHealthSummary(server).ErroringCollectors > 0;
         }
+        /* #2031: stamp the muted-bell state on each connection before the sidebar binds, so a silenced
+           server shows the bell on first render, not only after the first poll tick. */
+        RefreshSilencedIndicators();
+
         /* #2020 2b-i-b: the sidebar now binds the FleetView projection (group headers + servers), not the
            flat ServerConnection list. SetAll takes the whole fleet (favourites-first from ServerManager);
            ApplyFleetTagsAndRebind folds in the last-loaded tags, binds Visible, and restores selection. */
@@ -685,6 +689,7 @@ public partial class MainWindow : Window
                     if (summary != null)
                     {
                         summary.ServerName = server.ServerName;
+                        summary.IsSilenced = _alertStateService.IsServerSilenced(server.Id);
                         var connStatus = _serverManager.GetConnectionStatus(server.Id);
                         summary.IsOnline = connStatus.IsOnline;
                         if (_collectorService != null && connStatus.IsOnline == true)
@@ -1219,6 +1224,9 @@ public partial class MainWindow : Window
 
             /* Hide the badge for this server (same loop as the acknowledge path). */
             HideServerBadge(serverId);
+
+            /* #2031: flip the sidebar's muted-bell immediately — the poll would catch up anyway. */
+            RefreshSilencedIndicators();
         }
     }
 
@@ -1229,6 +1237,9 @@ public partial class MainWindow : Window
             _alertStateService.UnsilenceServer(serverId);
 
             /* The next refresh cycle will show the badge if there are alerts */
+
+            /* #2031: clear the sidebar's muted-bell immediately. */
+            RefreshSilencedIndicators();
         }
     }
 
@@ -1741,10 +1752,42 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>Flips each server's muted-bell (#2031) from the persisted whole-server silence set, so a
+    /// silenced server shows the bell right of its status dot instead of looking healthy-quiet. In-memory
+    /// lookup (no store read); rides the 30-second status poll and every list refresh, and is nudged directly
+    /// by the Silence/Unsilence handlers so the bell flips instantly. The Lite twin of the Viewer's
+    /// UpdateServerSilencedAsync, keyed on the ServerConnection GUID (what AlertStateService stores).</summary>
+    private void RefreshSilencedIndicators()
+    {
+        var overviewChanged = false;
+        foreach (var server in _serverManager.GetAllServers())
+        {
+            var silenced = _alertStateService.IsServerSilenced(server.Id);
+            server.SetSilenced(silenced);
+
+            /* Keep the Overview card's bell in step (matched by server name). Only a real flip triggers a
+               rebind, so a quiet 30-second poll never churns the Overview or resets its scroll position. */
+            foreach (var summary in _overviewSummaries)
+            {
+                if (summary.ServerName == server.ServerName && summary.IsSilenced != silenced)
+                {
+                    summary.IsSilenced = silenced;
+                    overviewChanged = true;
+                }
+            }
+        }
+
+        if (overviewChanged)
+        {
+            ApplyOverviewView();
+        }
+    }
+
     private void CheckConnectionsAndNotify()
     {
         try
         {
+            RefreshSilencedIndicators();
             var servers = _serverManager.GetAllServers();
             bool needsRefresh = false;
             foreach (var server in servers)

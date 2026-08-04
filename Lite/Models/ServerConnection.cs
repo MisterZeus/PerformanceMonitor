@@ -233,6 +233,25 @@ public class ServerConnection : INotifyPropertyChanged
         }
     }
 
+    private bool _isSilenced;
+
+    /// <summary>
+    /// True when a whole-server alert silence is active for this server (#2031). Runtime-only (not persisted);
+    /// drives the sidebar row's muted-bell glyph so a silenced server does not look healthy-quiet. Set by the
+    /// status poll from <c>AlertStateService</c> and flipped immediately by the Silence/Unsilence handlers.
+    /// </summary>
+    [JsonIgnore]
+    public bool IsSilenced => _isSilenced;
+
+    /// <summary>Updates the silenced indicator in place; raises change notification only on a real flip
+    /// (the Lite twin of the Darling Viewer's <c>DarlingServer.SetSilenced</c>).</summary>
+    public void SetSilenced(bool silenced)
+    {
+        if (_isSilenced == silenced) return;
+        _isSilenced = silenced;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsSilenced)));
+    }
+
     public event PropertyChangedEventHandler? PropertyChanged;
 
     /// <summary>
