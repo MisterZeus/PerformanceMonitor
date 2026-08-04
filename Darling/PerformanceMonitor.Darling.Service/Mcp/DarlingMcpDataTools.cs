@@ -430,7 +430,7 @@ public sealed class DarlingMcpDataTools
 
     /* ═══════════════════════════ query performance ═══════════════════════════ */
 
-    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle. distinct_texts counts the statement texts merged into each hash group (query_hash normalizes INSERT...EXEC callees and ad-hoc literals together; >1 means query_text is one representative, 0 means only rows predating the text dimension). Supports database and parallelism filtering.")]
+    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means only rows predating the text dimension). Supports database and parallelism filtering.")]
     public static async Task<string> GetTopQueriesByCpu(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -484,14 +484,18 @@ public sealed class DarlingMcpDataTools
                 total_rows = r.TotalRows,
                 total_spills = r.TotalSpills,
                 avg_reads = r.TotalExecutions > 0 ? (double)r.TotalLogicalReads / r.TotalExecutions : 0,
+                // #2012 stage 2: the statement's host object joins the GROUPING key, so proc-hosted
+                // INSERT...EXEC callers sharing a hash now land in separate, correctly-labeled rows;
+                // null = ad-hoc/prepared text (literal-collapse behavior unchanged). History rows
+                // predating the column read as null and age out with raw retention.
+                host_object = r.HostObjectName,
                 query_text = McpHelpers.Truncate(r.QueryText, 2000),
-                // #2012: query_hash is a SHAPE hash — INSERT...EXEC statements naming DIFFERENT
-                // callee procs share one (reproduced live; it mislabeled production triage), and
-                // ad-hoc literal variants collapse too. distinct_texts says how many statement
-                // texts this group merged; the note fires only when the label is a representative.
+                // #2012 stage 1's disclosure, now the residual: with proc-hosted callers split by
+                // host_object, distinct_texts > 1 marks ad-hoc literal blends (or pre-stage-2
+                // history where the split can't apply yet).
                 distinct_texts = r.DistinctTexts,
                 text_note = r.DistinctTexts > 1
-                    ? $"this hash groups {r.DistinctTexts} distinct statement texts (ad-hoc literal variants, or INSERT...EXEC callers naming different procedures); query_text is one representative — attribute per-caller work via sql_handle/OBJECT_DEFINITION before naming a caller"
+                    ? $"this group blends {r.DistinctTexts} distinct statement texts (ad-hoc literal variants; or history predating the host-object split for INSERT...EXEC callers); query_text is one representative"
                     : null
             });
 

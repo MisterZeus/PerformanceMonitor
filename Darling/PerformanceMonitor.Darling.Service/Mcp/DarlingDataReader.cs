@@ -83,12 +83,17 @@ internal static class DarlingDataReader
     /// <summary>One (database, query_hash) group's summed query-stats deltas over the window. Time
     /// metrics are in microseconds (converted to ms by the tool, matching Lite).</summary>
     public sealed record TopQueryRow(
-        string DatabaseName, string QueryHash, string QueryPlanHash, string SqlHandle, string PlanHandle,
+        string DatabaseName, string QueryHash,
+        /* #2012 stage 2: the statement's host object (schema.name), part of the GROUPING key — proc-hosted
+           INSERT...EXEC callers sharing a hash now land in separate rows; null = ad-hoc/prepared, whose
+           literal-collapse grouping is unchanged. */
+        string? HostObjectName,
+        string QueryPlanHash, string SqlHandle, string PlanHandle,
         long TotalExecutions, long TotalCpuUs, long TotalElapsedUs, long TotalLogicalReads, long TotalLogicalWrites,
         long TotalPhysicalReads, long TotalRows, long TotalSpills, int MinDop, int MaxDop,
         long MinCpuUs, long MaxCpuUs, long MinElapsedUs, long MaxElapsedUs, string QueryText,
-        /* #2012: distinct statement texts merged into this hash group; > 1 = QueryText is one
-           representative of a blend (INSERT...EXEC callees or ad-hoc literal variants). */
+        /* #2012: distinct statement texts merged into this group; with stage 2's host-object split this
+           flags the remaining ad-hoc literal blends (proc-hosted groups converge to 1). */
         long DistinctTexts);
 
     /// <summary>One (database, schema, object) group's summed procedure-stats deltas over the window.</summary>
@@ -518,6 +523,7 @@ internal static class DarlingDataReader
             SELECT
                 database_name,
                 query_hash,
+                host_object_name,
                 CAST(SUM(delta_execution_count) AS bigint) AS total_executions,
                 CAST(SUM(delta_worker_time) AS bigint) AS total_cpu_us,
                 CAST(SUM(delta_elapsed_time) AS bigint) AS total_elapsed_us,
@@ -548,7 +554,10 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text IS NULL OR database_name = $5)
-            GROUP BY database_name, query_hash
+            /* #2012 stage 2: host_object_name splits INSERT...EXEC callers that share a query_hash
+               (each proc-hosted statement groups under its own host object), while ad-hoc rows carry
+               NULL and keep collapsing into one group per hash exactly as before. */
+            GROUP BY database_name, query_hash, host_object_name
             HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
             ORDER BY SUM(delta_elapsed_time) DESC
             LIMIT $4 + 5
@@ -556,6 +565,7 @@ internal static class DarlingDataReader
         SELECT
             r.database_name,
             r.query_hash,
+            r.host_object_name,
             r.query_plan_hash,
             r.sql_handle,
             r.plan_handle,
@@ -582,6 +592,10 @@ internal static class DarlingDataReader
             WHERE server_id = $1
             AND   query_hash = r.query_hash
             AND   database_name = r.database_name
+            /* #2012 stage 2: the representative text must come from THIS group's own rows — before
+               this, the lookup could serve one caller's text for another caller's stats, which is
+               the exact mis-attribution the issue documents from live triage. */
+            AND   host_object_name IS NOT DISTINCT FROM r.host_object_name
             AND   query_text IS NOT NULL
             ORDER BY collection_time DESC
             LIMIT 1
@@ -605,10 +619,10 @@ internal static class DarlingDataReader
             rows.Add(new TopQueryRow(
                 reader.IsDBNull(0) ? "" : reader.GetString(0),
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
-                reader.IsDBNull(2) ? "" : reader.GetString(2),
+                reader.IsDBNull(2) ? null : reader.GetString(2),   /* host_object_name (#2012 stage 2) */
                 reader.IsDBNull(3) ? "" : reader.GetString(3),
                 reader.IsDBNull(4) ? "" : reader.GetString(4),
-                reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+                reader.IsDBNull(5) ? "" : reader.GetString(5),
                 reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
                 reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
                 reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
@@ -616,14 +630,15 @@ internal static class DarlingDataReader
                 reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
                 reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
                 reader.IsDBNull(12) ? 0 : reader.GetInt64(12),
-                reader.IsDBNull(13) ? 0 : Convert.ToInt32(reader.GetValue(13)),
+                reader.IsDBNull(13) ? 0 : reader.GetInt64(13),
                 reader.IsDBNull(14) ? 0 : Convert.ToInt32(reader.GetValue(14)),
-                reader.IsDBNull(15) ? 0 : reader.GetInt64(15),
+                reader.IsDBNull(15) ? 0 : Convert.ToInt32(reader.GetValue(15)),
                 reader.IsDBNull(16) ? 0 : reader.GetInt64(16),
                 reader.IsDBNull(17) ? 0 : reader.GetInt64(17),
                 reader.IsDBNull(18) ? 0 : reader.GetInt64(18),
-                reader.IsDBNull(19) ? "" : reader.GetString(19),
-                reader.IsDBNull(20) ? 0 : reader.GetInt64(20)));
+                reader.IsDBNull(19) ? 0 : reader.GetInt64(19),
+                reader.IsDBNull(20) ? "" : reader.GetString(20),
+                reader.IsDBNull(21) ? 0 : reader.GetInt64(21)));
         }
 
         return rows;

@@ -99,6 +99,7 @@ public static class PgMigrations
         new Migration(48, "pvs-pressure-alert", V48Sql),
         new Migration(49, "database-state-alert", V49Sql),
         new Migration(50, "server-tag-colour", V50Sql),
+        new Migration(51, "query-stats-host-object", V51Sql),
     };
 
     /// <summary>
@@ -965,6 +966,23 @@ ALTER TABLE config.config_alert_settings
     private const string V50Sql = @"
 ALTER TABLE config.server_tags
     ADD COLUMN IF NOT EXISTS colour text;";
+
+    /// <summary>
+    /// V51 — the statement's HOST OBJECT on query_stats (#2012 stage 2): <c>sys.dm_exec_sql_text.objectid</c>
+    /// resolved to schema.name at collection, NULL for ad-hoc/prepared text. This is what lets the
+    /// hash-grouped readers split <c>INSERT...EXEC</c> callers that share a <c>query_hash</c> (the hash
+    /// normalizes the callee away — reproduced and mis-attributed in live triage) while leaving the ad-hoc
+    /// literal-collapse behavior untouched (NULLs group as one). Appended LAST to match the collector's
+    /// append-only payload; nullable, no backfill — history rows stay NULL and read as "unknown host",
+    /// aging out with raw retention. TimescaleDB accepts a nullable ADD COLUMN on a compressed hypertable.
+    /// <para>The <c>v_query_stats</c> passthrough is re-created because a <c>SELECT *</c> view snapshots
+    /// its column list at creation — Postgres permits CREATE OR REPLACE to APPEND columns, which is the
+    /// other reason the column must land at the end.</para>
+    /// </summary>
+    private const string V51Sql = @"
+ALTER TABLE query_stats
+    ADD COLUMN IF NOT EXISTS host_object_name text;
+CREATE OR REPLACE VIEW v_query_stats AS SELECT * FROM query_stats;";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:
