@@ -42,7 +42,13 @@ public partial class App : Application
            StartupUri from ever creating MainWindow (the second-instance pattern below). */
         if (HeadlessSelfTest.IsRequested(e.Args))
         {
-            var exitCode = HeadlessSelfTest.RunAsync(HeadlessSelfTest.ExplicitConfigPath(e.Args))
+            /* Task.Run is LOAD-BEARING, found the hard way on the first live SSM run: OnStartup executes on
+               the STA UI thread, which already carries WPF's DispatcherSynchronizationContext — so awaiting
+               RunAsync directly posts its continuations to a dispatcher this GetResult() is blocking, the
+               classic WPF sync-over-async deadlock (the process hung forever with exit code never written).
+               Task.Run hops the whole ladder onto the thread pool, where continuations resume freely. */
+            var exitCode = System.Threading.Tasks.Task.Run(
+                    () => HeadlessSelfTest.RunAsync(HeadlessSelfTest.ExplicitConfigPath(e.Args)))
                 .GetAwaiter().GetResult();
             Shutdown(exitCode);
             return;
