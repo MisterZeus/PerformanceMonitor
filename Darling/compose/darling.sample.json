@@ -1,0 +1,35 @@
+{
+  "// quickstart": "cp to darling.json, edit servers + alerting; every secret is a file:/env: reference (#1804) so nothing sensitive lives in this file.",
+  "postgres": {
+    "managed": false,
+    "connectionString": "file:/run/secrets/store_connection"
+  },
+  "servers": [
+    {
+      "host": "your-sql-server.example.com,1433",
+      "displayName": "prod-sql-01",
+      "auth": "sql",
+      "username": "DarlingMonitor",
+      "password": "file:/run/secrets/sql_password",
+      "trustServerCertificate": true
+    }
+  ],
+  "web": {
+    "enabled": true,
+    "port": 5153,
+    "network": {
+      "listen": "0.0.0.0",
+      "allowFrom": "0.0.0.0/0",
+      "token": "file:/run/secrets/web_token"
+    }
+  },
+  "mcp": {
+    "enabled": false,
+    "port": 5152,
+    "network": {
+      "listen": "0.0.0.0",
+      "allowFrom": "0.0.0.0/0",
+      "token": "file:/run/secrets/mcp_token"
+    }
+  }
+}
