@@ -156,7 +156,22 @@ public sealed class DarlingConfig
     public static DarlingConfig Parse(string json)
     {
         var config = JsonSerializer.Deserialize<DarlingConfig>(json, s_jsonOptions);
-        return config ?? throw new InvalidDataException("Configuration file parsed to null.");
+        if (config is null)
+        {
+            throw new InvalidDataException("Configuration file parsed to null.");
+        }
+
+        /* #1804: postgres.connectionString also takes an env:/file: reference — for the WHOLE string,
+           since the password lives inside it and per-field indirection can't reach it. Resolved ONCE
+           here at the parse seam so every consumer (worker, MCP/web hosts, CLI verbs) sees the real
+           string; the compose distribution's darling.json stays secret-free. A literal passes through
+           untouched, so every existing config is byte-for-byte unaffected. */
+        if (config.Postgres?.ConnectionString is { } connectionString && DarlingSecretSource.IsReference(connectionString))
+        {
+            config.Postgres.ConnectionString = DarlingSecretSource.Resolve(connectionString, "postgres.connectionString");
+        }
+
+        return config;
     }
 
     /// <summary>

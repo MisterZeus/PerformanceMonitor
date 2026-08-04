@@ -1,0 +1,73 @@
+# Darling on Linux (#1804): the whole stack as one deployment — the collector service paired with the
+# official TimescaleDB image. The bundled zero-admin store never runs here (it is Windows-only by design);
+# postgres.managed stays false and this file's `store` service takes its place.
+#
+# Quickstart (from this directory):
+#   1. cp darling.sample.json darling.json           # then edit: servers, tokens, alerting
+#   2. echo 'YourSqlPassword' > secrets/sql_password.txt   # one file per secret; see `secrets:` below
+#   3. docker compose up -d
+#   4. web dashboard: http://<host>:5153  ·  MCP: http://<host>:5152 (bearer token)
+#
+# Secrets never land in darling.json: the config references them (env:NAME / file:/path — #1804 stage 1),
+# and compose delivers them as env vars or mounted secret files. The web/MCP network blocks are honored
+# inside the container (the bind ladder's container gate, stage 2) — the port mappings below are the
+# exposure boundary, and both surfaces still REQUIRE their bearer token.
+
+name: performancemonitor-darling
+
+services:
+  store:
+    image: timescale/timescaledb:latest-pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: darling
+      POSTGRES_DB: darling
+      POSTGRES_PASSWORD_FILE: /run/secrets/store_password
+    secrets:
+      - store_password
+    volumes:
+      # Named volume: the store survives `docker compose down` (without -v). Start FRESH for a new
+      # deployment — the control plane is store-authoritative, so a reused store's enable toggles
+      # override darling.json after the first seed.
+      - darling-store:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U darling -d darling"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  darling:
+    # The published image; substitute a version tag for something pinned, or build from a checkout:
+    #   build: { context: ../.., dockerfile: Darling/Dockerfile }
+    image: ghcr.io/erikdarlingdata/performancemonitor-darling:nightly
+    restart: unless-stopped
+    depends_on:
+      store:
+        condition: service_healthy
+    volumes:
+      - ./darling.json:/config/darling.json:ro
+    secrets:
+      # One file per secret; darling.json references them as file:/run/secrets/<name> (#1804) —
+      # including the whole store connection string, since its password lives inside it.
+      - store_connection
+      - sql_password
+      - web_token
+      - mcp_token
+    ports:
+      - "5153:5153"   # web dashboard (token → cookie gate)
+      - "5152:5152"   # MCP (bearer token)
+
+volumes:
+  darling-store:
+
+secrets:
+  store_password:
+    file: ./secrets/store_password.txt
+  store_connection:
+    file: ./secrets/store_connection
+  sql_password:
+    file: ./secrets/sql_password.txt
+  web_token:
+    file: ./secrets/web_token.txt
+  mcp_token:
+    file: ./secrets/mcp_token.txt

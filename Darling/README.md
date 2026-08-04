@@ -111,6 +111,44 @@ Darling\PerformanceMonitor.Darling.Service\bin\Release\net10.0\PerformanceMonito
 
 Watch the log output: you should see the config load (`Loaded configuration from ...`), the store migrate (`Postgres store ready (schema v44, ...)` — the number is whatever the current migration count is), the TimescaleDB detection result, per-server connects, and then per-collector run lines with row counts.
 
+### Run on Linux (Docker Compose or systemd) {#1804}
+
+The service is cross-platform .NET; only the **bundled zero-admin store** and DPAPI are Windows-specific. On Linux you pair the service with the official TimescaleDB image (compose, the recommended shape) or point it at PostgreSQL you already run (systemd), keeping `postgres.managed = false` either way. The Viewer stays a Windows desktop app — Linux hosts read the **web dashboard**, which the container exposes.
+
+**Compose (the whole stack as one deployment)** — everything lives in [`Darling/compose/`](compose/):
+
+```bash
+cd Darling/compose
+cp darling.sample.json darling.json        # edit: servers, alerting, tokens
+#   one secret per file — see secrets/README.md for the exact list
+docker compose up -d
+```
+
+Web dashboard on `http://<host>:5153` behind its token, MCP (if enabled) on `:5152` behind its bearer token. The port mappings are the exposure boundary: the container-aware bind gate honors `web.network`/`mcp.network` under `managed = false` **inside a container only**, and the tokens are still mandatory. Three rules worth knowing before they bite:
+
+- **Nothing secret goes in darling.json.** Every secret slot — the whole `postgres.connectionString`, server `password`s, `smtp.password`, the tokens — takes an `env:NAME` or `file:/run/secrets/<name>` reference. The compose file mounts each secret from `secrets/`.
+- **Start with a fresh store volume per deployment.** The control plane is store-authoritative after the first seed, so a reused volume's enable toggles override darling.json — by design.
+- **File permissions are yours on Linux.** The Windows build locks config/credentials down with ACLs; here the container boundary is the isolation, and the `secrets/` directory should be `chmod 700` with `600` files (the systemd shape should do the same for `darling.json` itself).
+
+**systemd + bring-your-own PostgreSQL** — download `PerformanceMonitorDarling-linux-x64-*.tar.gz` from the release, extract to `/opt/darling`, point `DARLING_CONFIG` at your config (connection string to your own PostgreSQL 15+ with TimescaleDB; the service degrades gracefully without TimescaleDB), and run `dotnet PerformanceMonitor.Darling.Service.dll` under a unit like:
+
+```ini
+[Unit]
+Description=PerformanceMonitor Darling
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll
+Environment=DARLING_CONFIG=/etc/darling/darling.json
+User=darling
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Use the same `env:`/`file:` secret references (systemd `LoadCredential=` pairs naturally with `file:`), and note `Microsoft.Data.SqlClient` needs `libgssapi-krb5-2` installed (`apt-get install libgssapi-krb5-2`) — the container image carries it already.
+
 ### Install as a Windows Service
 
 **Scripted (recommended):** the packaged zips ship `install-darling.ps1` beside the service exe. Extract the zip to its final location (e.g. `C:\PerformanceMonitorDarling`), then from an elevated PowerShell in that folder run `.\install-darling.ps1`. It checks for `darling.json` (copying the sample and stopping for you to edit it on first run), runs the `--test-connection` pre-flight, registers the Event Log source, creates the service under the virtual account (or upgrades an existing install's binPath in place, preserving config/store/credentials), starts it, and creates Desktop + Start Menu **Darling Viewer** shortcuts (pin to taskbar from the Start Menu entry — Windows does not allow programmatic pinning). `uninstall-darling.ps1` reverses it, deliberately leaving the store/config in place unless you pass `-PurgeData`.
