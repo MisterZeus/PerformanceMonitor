@@ -44,17 +44,42 @@ public sealed class AnalysisNotificationService
     private readonly Action<string, string>? _showTrayNotification;
 
     /// <summary>
-    /// Per-symptom re-notification cooldown (escalate-on-CRITICAL keying). A below-critical finding is
+    /// Per-symptom notification state (escalate-on-CRITICAL keying). A below-critical finding is
     /// keyed by its incident ("{serverId}:{IncidentId}", falling back to its StoryPathHash when it has
     /// no incident id — legacy rows / absolution findings — so those never collapse into one shared
     /// bucket), so co-fired non-critical symptoms stay one-e-mail-per-incident. A CRITICAL-band finding
     /// (severity &gt;= <see cref="CriticalSeverityCutoff"/>) is instead keyed by its OWN StoryPathHash, so
     /// a new critical escalates past that dedup and is never silently held inside an already-alerted
     /// incident. Seeded lazily from the alert log on first lookup per key so a symptom that just fired
-    /// and entered its cooldown stays suppressed across an app restart. Pruned on each notify cycle to
-    /// entries within 2 × AnalysisNotifyCooldownMinutes.
+    /// stays suppressed across an app restart.
+    ///
+    /// <para>#2054 fresh-or-worsening: each bucket remembers the severity it last NOTIFIED at and the
+    /// last time its story was SEEN at all. A story that keeps firing at the same severity notifies
+    /// once and then stays silent — the first weekday on a 52-server fleet showed why: ~46 of 50
+    /// alerts were the IDENTICAL ambient chain sitting exactly at the notify threshold, once per
+    /// server, drowning the one genuine outlier. Re-notification needs the story to WORSEN
+    /// (<see cref="WorseningStep"/>) — the same standing-condition treatment the PVS-pressure alert
+    /// shipped with — or to RESOLVE first: a bucket unseen for 2 × AnalysisNotifyCooldownMinutes is
+    /// pruned, so a chain that stops firing and later returns is fresh and notifies again. Pruning is
+    /// by last-SEEN, deliberately not last-notified: a standing ambient chain refreshes its bucket
+    /// every cycle and never ages back into freshness while it persists.</para>
     /// </summary>
-    private readonly ConcurrentDictionary<string, DateTime> _cooldowns = new();
+    private readonly ConcurrentDictionary<string, BucketState> _cooldowns = new();
+
+    /// <summary>One bucket's memory: when it last notified, at what severity, and when its story was
+    /// last SEEN (notified or held — the prune horizon runs on this, so a persisting story cannot age
+    /// back into freshness while it keeps firing).</summary>
+    private sealed record BucketState(DateTime LastNotified, double LastNotifiedSeverity, DateTime LastSeen);
+
+    /// <summary>
+    /// How much a story's severity must rise over its last-notified level to re-notify while it keeps
+    /// firing (#2054) — the analysis twin of the PVS alert's worsening re-fire. 0.25 on the 0–2 band:
+    /// the fleet's ambient chain sat at exactly 1.50 while the one server worth a second look reached
+    /// 1.80, so a quarter-band step separates precisely those two on live evidence. A restart-seeded
+    /// bucket has no persisted severity and conservatively assumes the notify threshold, so the first
+    /// post-restart re-notify needs threshold + step.
+    /// </summary>
+    private const double WorseningStep = 0.25;
 
     /// <summary>
     /// Severity at/above which a finding is CRITICAL-band — the canonical <c>&gt;= 1.5</c> cutoff every
@@ -127,14 +152,16 @@ public sealed class AnalysisNotificationService
         var cooldown = TimeSpan.FromMinutes(_settings.AnalysisNotifyCooldownMinutes);
         var now = DateTime.UtcNow;
 
-        /* Drop entries past 2× cooldown so the dict stays bounded — any entry
-           past 1× is already re-fire-eligible, doubling gives clock-skew margin.
-           If a key here also matches an incident in this batch, the per-incident
-           seed below will re-add it from history; that's a wash, not a bug. */
+        /* Drop entries UNSEEN for 2× cooldown so the dict stays bounded AND a resolved story becomes
+           fresh again (#2054): last-SEEN, not last-notified — a standing ambient chain refreshes its
+           bucket every cycle it fires and so never ages back into freshness while it persists, while
+           a chain that genuinely stopped firing is forgotten and re-alerts on recurrence. If a key
+           here also matches an incident in this batch, the per-incident seed below re-adds it from
+           history; that's a wash, not a bug. */
         var pruneBefore = now - TimeSpan.FromTicks(cooldown.Ticks * 2);
         foreach (var stale in _cooldowns)
         {
-            if (stale.Value < pruneBefore)
+            if (stale.Value.LastSeen < pruneBefore)
                 _cooldowns.TryRemove(stale.Key, out _);
         }
 
@@ -182,8 +209,11 @@ public sealed class AnalysisNotificationService
             /* Seed each not-yet-known bucket from the alert log on first lookup so a symptom that
                fired shortly before an app restart is not re-fired afterward. The persisted equivalent
                is the latest row for that member's metric_name (which embeds the finding's hash).
-               Below-critical members share one bucket, so only the first (highest-severity) below-
-               critical member — the one that would lead a below-critical e-mail — is looked up. */
+               History carries no severity, so the seed conservatively assumes the notify threshold —
+               the minimum a notified finding can have had — and the first post-restart re-notify needs
+               threshold + WorseningStep (#2054). Below-critical members share one bucket, so only the
+               first (highest-severity) below-critical member — the one that would lead a
+               below-critical e-mail — is looked up. */
             foreach (var m in members)
             {
                 var seedKey = BucketKey(m);
@@ -191,23 +221,40 @@ public sealed class AnalysisNotificationService
                     continue;
                 var lastPersisted = await _sender.GetLastAlertTimeAsync(serverId, FindingMessageFormatter.MetricName(m));
                 if (lastPersisted.HasValue)
-                    _cooldowns.TryAdd(seedKey, lastPersisted.Value);
+                    _cooldowns.TryAdd(seedKey, new BucketState(lastPersisted.Value, threshold, now));
             }
 
-            /* Lead = the highest-severity member whose bucket is not cooling; the whole incident is
-               held only when EVERY member's bucket is cooling (send-if-any-fresh, the same rule the
-               live IncidentCooldown path uses). So a fresh critical leads its own e-mail even when the
-               incident's top finding is still cooling. */
+            /* Lead = the highest-severity member whose bucket allows a notification (#2054
+               fresh-or-worsening): a member with NO bucket is fresh and notifies; a member with a
+               bucket re-notifies ONLY when it worsened by WorseningStep over the severity it last
+               notified at AND its last notification is outside the cooldown (the cooldown keeps a
+               rapidly-climbing story from e-mailing every analysis cycle; genuine escalation is
+               band-jumping, and a new critical already gets its own fresh hash bucket). Steady
+               severity holds forever while the story keeps firing — the whole point: an ambient
+               fleet truth notifies once per server, not once per cooldown expiry. The whole incident
+               is held only when EVERY member holds (send-if-any-fresh, unchanged). */
             AnalysisFinding? lead = null;
             foreach (var m in members)
             {
-                if (_cooldowns.TryGetValue(BucketKey(m), out var last) && now - last < cooldown)
+                if (_cooldowns.TryGetValue(BucketKey(m), out var state)
+                    && (now - state.LastNotified < cooldown || m.Severity < state.LastNotifiedSeverity + WorseningStep))
                     continue;
                 lead = m;
                 break;
             }
+
             if (lead is null)
+            {
+                /* Held entirely — still refresh every member's last-SEEN so a standing story keeps
+                   its bucket alive (the prune horizon runs on LastSeen; see the field doc). */
+                foreach (var m in members)
+                {
+                    if (_cooldowns.TryGetValue(BucketKey(m), out var held))
+                        _cooldowns[BucketKey(m)] = held with { LastSeen = now };
+                }
+
                 continue;
+            }
 
             try
             {
@@ -253,11 +300,19 @@ public sealed class AnalysisNotificationService
                 }
 
                 /* Stamp EVERY member's bucket (send-if-any-fresh, stamp-all): the e-mail named every
-                   member, so none should re-fire until its cooldown elapses — the just-led critical on
-                   its hash bucket, each co-fired critical on its own, and every below-critical member on
-                   the shared incident bucket. */
+                   member, so none should re-fire until it WORSENS past what was just notified — the
+                   just-led critical on its hash bucket, each co-fired critical on its own, and every
+                   below-critical member on the shared incident bucket. Members arrive severity-DESC,
+                   so the FIRST write to a shared bucket carries its highest member's severity; later
+                   (lower) members must not overwrite it downward, or a mid-severity member would
+                   spuriously "worsen" past the lowest next cycle. */
+                var stamped = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var m in members)
-                    _cooldowns[BucketKey(m)] = now;
+                {
+                    var key = BucketKey(m);
+                    if (stamped.Add(key))
+                        _cooldowns[key] = new BucketState(now, m.Severity, now);
+                }
             }
             catch (Exception ex)
             {

@@ -703,6 +703,73 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
         Assert.Single(sender.Sent);
     }
 
+    /// <summary>A capturing sender whose alert-log seed is test-controlled — the only way to place a
+    /// bucket OUTSIDE the cooldown without time-travelling the service's DateTime.UtcNow (#2054).</summary>
+    private sealed class SeededCapturingSender : IFindingAlertSender
+    {
+        public DateTime? LastAlert { get; set; }
+        public List<FindingAlert> Sent { get; } = new();
+        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName) =>
+            Task.FromResult(LastAlert);
+        public Task SendFindingAlertAsync(FindingAlert alert)
+        {
+            Sent.Add(alert);
+            return Task.CompletedTask;
+        }
+    }
+
+    [Fact]
+    public async Task NotifyAsync_SteadyStory_PastCooldown_StaysHeld()
+    {
+        /* #2054 fresh-or-worsening: the fleet's ambient chain sat at exactly the notify threshold and
+           re-fired every cooldown expiry, once per server — 46 identical alerts in a day. With the
+           bucket seeded from history (severity assumed = threshold) and the cooldown long expired, a
+           story STILL at threshold severity must stay held: expiry alone no longer re-fires. */
+        App.AnalysisNotifySeverity = 1.5;
+        App.AnalysisNotifyCooldownMinutes = 360;
+        var sender = new SeededCapturingSender { LastAlert = DateTime.UtcNow.AddMinutes(-3 * 360) };
+        var notifier = new AnalysisNotificationService(
+            sender, _settings, f => f.ServerId.ToString(), new AppLoggerAdapter<AnalysisNotificationService>());
+
+        await notifier.NotifyAsync(new[] { MakeFinding("ambient000000001", severity: 1.5, incidentId: "inc-ambient") });
+
+        Assert.Empty(sender.Sent);
+    }
+
+    [Fact]
+    public async Task NotifyAsync_WorsenedStory_PastCooldown_Renotifies()
+    {
+        /* The other half of #2054: the one server whose chain reached 1.80 IS worth a second look —
+           past the cooldown, severity >= last-notified (seeded as threshold 1.5) + 0.25 re-fires. */
+        App.AnalysisNotifySeverity = 1.5;
+        App.AnalysisNotifyCooldownMinutes = 360;
+        var sender = new SeededCapturingSender { LastAlert = DateTime.UtcNow.AddMinutes(-3 * 360) };
+        var notifier = new AnalysisNotificationService(
+            sender, _settings, f => f.ServerId.ToString(), new AppLoggerAdapter<AnalysisNotificationService>());
+
+        await notifier.NotifyAsync(new[] { MakeFinding("worsened00000001", severity: 1.8, incidentId: "inc-worse") });
+
+        var alert = Assert.Single(sender.Sent);
+        Assert.Equal(1.8, alert.Severity);
+    }
+
+    [Fact]
+    public async Task NotifyAsync_WorsenedStory_WithinCooldown_StaysHeld()
+    {
+        /* Worsening does NOT bypass the cooldown: a rapidly-climbing story must not e-mail every
+           analysis cycle (a band-jumping escalation already gets a fresh per-hash critical bucket).
+           Here the seed is RECENT, so even the worsened severity holds until the cooldown passes. */
+        App.AnalysisNotifySeverity = 1.5;
+        App.AnalysisNotifyCooldownMinutes = 360;
+        var sender = new SeededCapturingSender { LastAlert = DateTime.UtcNow.AddMinutes(-5) };
+        var notifier = new AnalysisNotificationService(
+            sender, _settings, f => f.ServerId.ToString(), new AppLoggerAdapter<AnalysisNotificationService>());
+
+        await notifier.NotifyAsync(new[] { MakeFinding("recentworse00001", severity: 1.9, incidentId: "inc-recent") });
+
+        Assert.Empty(sender.Sent);
+    }
+
     [Fact]
     public async Task NotifyAsync_DistinctCriticalIncidents_EachSend()
     {
