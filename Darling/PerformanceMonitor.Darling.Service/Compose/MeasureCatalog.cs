@@ -986,7 +986,7 @@ public static class MeasureCatalog
         new ComposeMeasure
         {
             Key = "plan_correction_captures", DisplayName = "APC recommendation captures", Category = CatQueries, SourceTable = "plan_correction",
-            Archetype = MeasureArchetype.PerEvent, Column = "collection_time",
+            Archetype = MeasureArchetype.PerEvent, Column = "recommendation_state",
             NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
             DefaultTimeAgg = ComposeAggregate.Count, ValidAggs = CountOnlyAggs, AllowedDimensions = PlanCorrectionDims,
         },
