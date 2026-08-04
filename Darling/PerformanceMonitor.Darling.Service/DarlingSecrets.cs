@@ -51,8 +51,10 @@ public static class DarlingSecrets
     }
 
     /// <summary>
-    /// Resolves a monitored server's SQL-auth password: DPAPI blob preferred, plaintext fallback
-    /// (dev convenience — callers should warn when <paramref name="usedPlaintext"/> is true).
+    /// Resolves a monitored server's SQL-auth password: DPAPI blob preferred, then the <c>password</c>
+    /// slot — which since #1804 may be an <c>env:</c>/<c>file:</c> REFERENCE
+    /// (<see cref="DarlingSecretSource"/>) rather than a literal. <paramref name="usedPlaintext"/> is true
+    /// only for a LITERAL (a reference is not plaintext-in-config, so callers do not warn on it).
     /// </summary>
     public static string ResolvePassword(MonitoredServer server, out bool usedPlaintext)
     {
@@ -69,8 +71,8 @@ public static class DarlingSecrets
 
         if (!string.IsNullOrWhiteSpace(server.Password))
         {
-            usedPlaintext = true;
-            return server.Password;
+            usedPlaintext = !DarlingSecretSource.IsReference(server.Password);
+            return DarlingSecretSource.Resolve(server.Password, $"servers['{server.DisplayName}'].password");
         }
 
         throw new InvalidOperationException(

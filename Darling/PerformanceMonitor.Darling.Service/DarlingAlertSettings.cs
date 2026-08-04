@@ -152,24 +152,32 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public string SmtpRecipients => _config.Smtp.To;
 
     /// <summary>
-    /// DPAPI-decrypts smtp.encryptedPassword (the --encrypt-password pattern); null when unset.
-    /// Called inside EmailSendCore's send try/catch, so a decrypt failure surfaces as that
-    /// alert's send_error rather than killing the sweep.
+    /// The SMTP password: smtp.encryptedPassword (DPAPI, Windows, preferred) else smtp.password — a
+    /// literal or an <c>env:</c>/<c>file:</c> reference (#1804), the only non-Windows email path; null
+    /// when neither is set. Called inside EmailSendCore's send try/catch, so a decrypt/dereference
+    /// failure surfaces as that alert's send_error rather than killing the sweep.
     /// </summary>
     public string? GetSmtpPassword()
     {
         var blob = _config.Smtp.EncryptedPassword;
-        if (string.IsNullOrWhiteSpace(blob))
+        if (!string.IsNullOrWhiteSpace(blob))
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                throw new PlatformNotSupportedException(
+                    "smtp.encryptedPassword requires Windows (DPAPI); use smtp.password with an env:/file: reference on other platforms.");
+            }
+
+            return DarlingSecrets.Unprotect(blob);
+        }
+
+        var password = _config.Smtp.Password;
+        if (string.IsNullOrWhiteSpace(password))
         {
             return null;
         }
 
-        if (!OperatingSystem.IsWindows())
-        {
-            throw new PlatformNotSupportedException("smtp.encryptedPassword requires Windows (DPAPI).");
-        }
-
-        return DarlingSecrets.Unprotect(blob);
+        return DarlingSecretSource.Resolve(password, "smtp.password");
     }
 
     public int EmailCooldownMinutes => Math.Clamp(_config.Smtp.EmailCooldownMinutes, 1, 120);

@@ -85,7 +85,7 @@ Minimal working example — one server, integrated auth, bring-your-own PostgreS
 PerformanceMonitor.Darling.Service.exe --encrypt-password
 ```
 
-It prompts for the password on stdin (so the plaintext never lands in your shell history) and prints a base64 DPAPI blob. Paste that blob into the server's `"encryptedPassword"`. The blob is protected with **DPAPI LocalMachine scope**, so an administrator can encrypt it interactively and the service account can decrypt it later on the same machine — but it is machine-bound: run `--encrypt-password` **on the machine that will run the service**, and re-encrypt if you move `darling.json` to another machine. A plaintext `"password"` also works as a dev convenience, but the service logs a warning every time it is used.
+It prompts for the password on stdin (so the plaintext never lands in your shell history) and prints a base64 DPAPI blob. Paste that blob into the server's `"encryptedPassword"`. The blob is protected with **DPAPI LocalMachine scope**, so an administrator can encrypt it interactively and the service account can decrypt it later on the same machine — but it is machine-bound: run `--encrypt-password` **on the machine that will run the service**, and re-encrypt if you move `darling.json` to another machine. A plaintext `"password"` also works as a dev convenience, but the service logs a warning every time it is used. The same slot also takes an **`env:NAME` or `file:/path` reference** (#1804): the service reads the named environment variable or the file's (trimmed) contents at connect time, nothing secret lands in `darling.json`, and no warning is logged — the supported shape on non-Windows hosts, and compose-`secrets:`-friendly everywhere. A missing or empty reference target is a configuration error naming both the setting and the target, never a silent empty password.
 
 **excludedDatabases** (per server) removes databases from collection: per-database collectors skip them and the exclusion is spliced into the collector queries — the same filter Lite applies. There is a second, separate `alerts.excludedDatabases` list that excludes databases from blocking/deadlock/long-running-query **alert evaluation** without affecting collection.
 
@@ -267,7 +267,7 @@ Two mutually exclusive modes — setting both `managed: true` and `connectionStr
 | `auth` | `"integrated"` | `"integrated"` or `"sql"` |
 | `username` | *(none)* | Required for `"sql"` |
 | `encryptedPassword` | *(none)* | DPAPI blob from `--encrypt-password` (preferred) |
-| `password` | *(none)* | Plaintext fallback — dev only, warned on every use |
+| `password` | *(none)* | A literal (dev only, warned on every use) or an `env:NAME` / `file:/path` reference (#1804) — references are the supported non-Windows shape and are not warned |
 | `readOnlyIntent` | `false` | Route to a readable AG secondary (`ApplicationIntent=ReadOnly`) |
 | `trustServerCertificate` | `false` | |
 | `encryptMode` | `"Mandatory"` | `Mandatory` / `Strict` / `Optional`; unknown values fail closed to `Mandatory` |
@@ -330,6 +330,7 @@ Email delivery is enabled when `host`, `from`, and `to` are all set — there is
 | `useSsl` | `true` | |
 | `username` | *(none)* | For authenticated relays |
 | `encryptedPassword` | *(none)* | Same `--encrypt-password` DPAPI pattern as SQL auth |
+| `password` | *(none)* | A literal or an `env:NAME` / `file:/path` reference (#1804) — the non-Windows email path |
 | `from` | `""` | |
 | `to` | `""` | Comma-separated recipients |
 | `emailCooldownMinutes` | `15` | Email/webhook channel cooldown (clamped 1–120) |

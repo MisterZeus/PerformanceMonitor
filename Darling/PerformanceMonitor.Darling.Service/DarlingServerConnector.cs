@@ -82,12 +82,14 @@ SELECT
             }
             else
             {
-                /* Non-Windows: DPAPI (DarlingSecrets) is unavailable, so only the plaintext
-                   fallback of ResolvePassword applies — inlined here to keep the DPAPI call
-                   provably Windows-only for the platform analyzer. */
+                /* Non-Windows: DPAPI (DarlingSecrets) is unavailable, so only the password slot applies —
+                   inlined here to keep the DPAPI call provably Windows-only for the platform analyzer.
+                   The slot takes the same env:/file: references as everywhere else (#1804), which is the
+                   supported non-Windows shape; a literal still works and still warns below. */
                 if (!string.IsNullOrWhiteSpace(config.EncryptedPassword))
                 {
-                    throw new PlatformNotSupportedException("encryptedPassword requires Windows (DPAPI).");
+                    throw new PlatformNotSupportedException(
+                        "encryptedPassword requires Windows (DPAPI); use password with an env:/file: reference on other platforms.");
                 }
 
                 if (string.IsNullOrWhiteSpace(config.Password))
@@ -96,14 +98,14 @@ SELECT
                         $"Server '{config.DisplayName}' uses sql auth but has neither encryptedPassword nor password.");
                 }
 
-                password = config.Password;
-                usedPlaintext = true;
+                usedPlaintext = !DarlingSecretSource.IsReference(config.Password);
+                password = DarlingSecretSource.Resolve(config.Password, $"servers['{config.DisplayName}'].password");
             }
 
             if (usedPlaintext)
             {
                 logger?.LogWarning(
-                    "Server '{Server}' uses a plaintext password in darling.json — run --encrypt-password and switch to encryptedPassword.",
+                    "Server '{Server}' uses a plaintext password in darling.json — run --encrypt-password and switch to encryptedPassword, or reference it via env:/file:.",
                     config.DisplayName);
             }
         }
