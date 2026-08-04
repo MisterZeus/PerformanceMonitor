@@ -439,8 +439,18 @@ END;
     /// <para>References <c>@cutoff_time</c>, supplied by <see cref="BuildCutoffParameters"/> — as an
     /// sp_executesql parameter on-prem, as a command parameter on Azure. Contains no double quotes and
     /// no braces, so it survives both the interpolation here and the escaping there unchanged.</para>
+    ///
+    /// <para>With <paramref name="backfill"/> true (#2022 phase 2), the SAME body flips its window and
+    /// direction: the one-sided live cutoff (<c>&gt; @cutoff_time</c>) becomes the two-sided
+    /// <c>&gt; @floor_time AND &lt; @ceiling_time</c> (interval pre-filter and HAVING both), and the ship
+    /// order becomes <c>DESC</c> — newest history first, walking DOWN from the live path's floor. Strict
+    /// <c>&lt;</c> on the ceiling is correct for the same reason the live path's strict <c>&gt;</c> is:
+    /// both bounded cuts (TOP ... WITH TIES and the client byte budget) complete the boundary tie group,
+    /// so nothing sharing a shipped boundary last_execution_time is ever left stranded behind the strict
+    /// comparison — the #1960 invariant, mirror-imaged. Everything else (columns, slice aggregation,
+    /// version gates) is byte-identical, so the reader contract cannot drift between live and backfill.</para>
     /// </summary>
-    internal static string BuildPayloadBody(CollectorContext context)
+    internal static string BuildPayloadBody(CollectorContext context, bool backfill = false)
     {
         /* Detect server version for version-gated columns.
            isNew = true for SQL Server 2017+ (product version > 13) or Azure SQL DB/MI.
@@ -744,6 +754,22 @@ END;
            a bare TOP could split a group of rows sharing the boundary last_execution_time, stranding
            the unshipped half behind the strict comparison forever. The client byte budget completes
            boundary groups the same way (see ReadRowsAsync). */
+        /* Backfill (#2022) is the mirror image: newest-first DESC inside (floor, ceiling), where the
+           ceiling is the DERIVED backfill boundary — MIN(last_execution_time) over the rows already
+           stored for the database — so each bounded slice leaves the next ceiling sitting exactly at
+           its oldest shipped row, and the next slice's strict `< @ceiling_time` resumes with no hole
+           or re-ship. Same TIES, same budget, same tie-group completion; only the window and the
+           direction differ. */
+        var intervalPreFilter = backfill
+            ? @"f.last_execution_time > @floor_time
+        AND   f.last_execution_time < @ceiling_time"
+            : "f.last_execution_time > @cutoff_time";
+        var intervalHaving = backfill
+            ? @"MAX(qsrs.last_execution_time) > @floor_time
+        AND MAX(qsrs.last_execution_time) < @ceiling_time"
+            : "MAX(qsrs.last_execution_time) > @cutoff_time";
+        var shipOrder = backfill ? "DESC" : "ASC";
+
         return $@"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase}) WITH TIES
@@ -844,14 +870,14 @@ FROM
         SELECT
             f.runtime_stats_interval_id
         FROM sys.query_store_runtime_stats AS f
-        WHERE f.last_execution_time > @cutoff_time
+        WHERE {intervalPreFilter}
     )
     GROUP BY
         qsrs.plan_id,
         qsrs.runtime_stats_interval_id,
         qsrs.execution_type_desc{replicaGroupKey}
     HAVING
-        MAX(qsrs.last_execution_time) > @cutoff_time
+        {intervalHaving}
 ) AS qsrs
 JOIN sys.query_store_plan AS qsp
   ON qsp.plan_id = qsrs.plan_id
@@ -862,7 +888,7 @@ JOIN sys.query_store_query_text AS qst
 LEFT JOIN sys.query_store_runtime_stats_interval AS qsrsi
   ON qsrsi.runtime_stats_interval_id = qsrs.runtime_stats_interval_id
 {replicaJoin}
-ORDER BY qsrs.last_execution_time ASC
+ORDER BY qsrs.last_execution_time {shipOrder}
 OPTION(RECOMPILE, LOOP JOIN);";
     }
 
@@ -939,6 +965,37 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
     @cutoff_time;";
 
         return new CollectorQuery(text, BuildCutoffParameters(context));
+    }
+
+    /// <summary>
+    /// The #2022 phase-2 backfill slice for one on-prem/RDS/MI database: <see cref="BuildPayloadBody"/>
+    /// in its backfill shape (newest-first DESC inside the two-sided window) nested in the same
+    /// <c>[db].sys.sp_executesql</c> wrapper as <see cref="BuildPerItemQuery"/>. The window is
+    /// (<paramref name="floorUtc"/>, <paramref name="ceilingUtc"/>) EXCLUSIVE on both ends: the ceiling
+    /// is the derived backfill boundary (MIN(last_execution_time) already stored for this database —
+    /// everything at or above it shipped complete, because both bounded cuts finish the boundary tie
+    /// group), and the floor is the backfill horizon the worker refuses to dig below. The caller reads
+    /// the result through the same <see cref="ReadItemAsync"/>/budget machinery as the live path;
+    /// <see cref="CollectorContext.PerItemShippedBoundary"/> comes back as the slice's OLDEST shipped
+    /// row — the next slice's ceiling.
+    /// </summary>
+    public CollectorQuery BuildBackfillPerItemQuery(string item, CollectorContext context, DateTime floorUtc, DateTime ceilingUtc)
+    {
+        var escapedBody = BuildPayloadBody(context, backfill: true).Replace("'", "''", StringComparison.Ordinal);
+        var escapedDbName = item.Replace("]", "]]", StringComparison.Ordinal);
+
+        var text = $@"
+EXECUTE [{escapedDbName}].sys.sp_executesql
+    N'{escapedBody}',
+    N'@floor_time datetime2(7), @ceiling_time datetime2(7)',
+    @floor_time,
+    @ceiling_time;";
+
+        return new CollectorQuery(text, new List<CollectorParameter>
+        {
+            new("@floor_time", floorUtc, CollectorParameterType.DateTime2),
+            new("@ceiling_time", ceilingUtc, CollectorParameterType.DateTime2),
+        });
     }
 
     /// <summary>

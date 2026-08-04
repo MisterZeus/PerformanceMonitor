@@ -403,6 +403,18 @@ public sealed class DarlingCollectorRunner
                                 _logger?.LogWarning(
                                     "{Collector} on '{Server}' database [{Database}] catch-up clamped to {Hours}h (stored watermark {Raw:o} is older) — a bounded, logged history hole.",
                                     definition.Name, server.Config.DisplayName, item, WatermarkPolicy.MaxCatchup.TotalHours, raw.Value);
+
+                                /* #2022: the clamp opens a hole (raw, clamped) the live path will never
+                                   revisit — its next cutoff IS the clamped floor. Record it for the
+                                   backfill worker, merged wider with any hole already pending for this
+                                   database. Only query_store reaches this lambda today; the name guard
+                                   keeps a future enumeration collector from inheriting backfill state
+                                   it has no worker for. */
+                                if (clamped.HasValue
+                                    && string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                                {
+                                    await RecordQueryStoreBackfillHoleAsync(server.ServerId, item, raw.Value, clamped.Value, ct);
+                                }
                             }
                             context.Watermark = clamped;
                         },
@@ -803,6 +815,70 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     }
 
     /// <summary>
+    /// Records a clamp-opened Query Store hole for the #2022 backfill worker, under the WORKER's
+    /// collector_state name (not the definition's — query_store still declares no state keys).
+    /// Merged wider with any pending hole so a repeat outage cannot overwrite an unserviced one.
+    /// Best-effort: a lost record means a lost backfill opportunity, never wrong data — the live
+    /// path's own WARNING already disclosed the hole.
+    /// </summary>
+    private async Task RecordQueryStoreBackfillHoleAsync(
+        int serverId, string databaseName, DateTime fromUtc, DateTime toUtc, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var key = QueryStoreBackfill.HoleKeyPrefix + databaseName;
+            var existing = await GetCollectorStateAsync(serverId, QueryStoreBackfill.StateCollectorName, cancellationToken);
+            var merged = QueryStoreBackfill.MergeHole(existing.TryGetValue(key, out var encoded) ? encoded : null, fromUtc, toUtc);
+            await SaveCollectorStateAsync(
+                serverId, QueryStoreBackfill.StateCollectorName,
+                new Dictionary<string, string>(StringComparer.Ordinal) { [key] = QueryStoreBackfill.EncodeHole(merged.FromUtc, merged.ToUtc) },
+                cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Recording query_store backfill hole for [{Database}] failed; the live WARNING remains the disclosure", databaseName);
+        }
+    }
+
+    /// <summary>
+    /// Deletes ONE collector_state key — the backfill worker's retirement path for a serviced or
+    /// expired hole record (#2022). Best-effort like its siblings: a failed delete leaves the row,
+    /// and the worker's scan re-derives the same verdict next tick.
+    /// </summary>
+    public async Task DeleteCollectorStateKeyAsync(
+        int serverId, string collectorName, string stateKey, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            using var command = new NpgsqlCommand(
+                "DELETE FROM collector_state WHERE server_id = $1 AND collector_name = $2 AND state_key = $3", connection);
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.AddWithValue(collectorName);
+            command.Parameters.AddWithValue(stateKey);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Deleting collector state {Key} for {Collector} failed; next tick re-derives", stateKey, collectorName);
+        }
+    }
+
+    /// <summary>
+    /// The #2022 backfill write entry: the SAME private COPY writer every live path routes through
+    /// (dimension diversion, positional contract, naive-UTC stamp), on its own store connection.
+    /// <paramref name="collectionTime"/> is the slice's BACKDATED ceiling — see QueryStoreBackfill's
+    /// horizon contract for why that is safe only inside the raw tier's window.
+    /// </summary>
+    public async Task<int> WriteBackfillBatchAsync<TRow>(
+        ICollectorDefinition<TRow> definition, List<TRow> rows, ServerRuntime server,
+        DateTime collectionTime, CollectorContext context, CancellationToken cancellationToken)
+    {
+        await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+        return await WriteBatchAsync(pgConnection, definition, rows, server, collectionTime, context, cancellationToken);
+    }
+
+    /// <summary>
     /// Postgres twin of Lite's GetLastCollectedTimeForDatabaseAsync: the newest already-collected
     /// value for ONE database, for definitions with a PerDatabaseWatermarkColumn (Azure SQL DB
     /// per-database XE capture, #1535). Null on first run for that database or on failure — the
@@ -1049,7 +1125,9 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     internal static bool ShouldFallBackToSingleDatabaseError(int errorNumber) =>
         SqlErrorClassification.ShouldFallBackToSingleDatabase(errorNumber);
 
-    private static SqlCommand CreateCollectorCommand(CollectorQuery plan, SqlConnection connection, int commandTimeoutSeconds)
+    /* Internal, not private: QueryStoreBackfill (#2022) builds its slice commands through the same
+       parameter mapping so the two paths cannot drift on a type. */
+    internal static SqlCommand CreateCollectorCommand(CollectorQuery plan, SqlConnection connection, int commandTimeoutSeconds)
     {
         var command = new SqlCommand(plan.Text, connection) { CommandTimeout = commandTimeoutSeconds };
 
