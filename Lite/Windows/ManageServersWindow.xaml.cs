@@ -25,11 +25,21 @@ public partial class ManageServersWindow : Window
     /// </summary>
     public bool ServersChanged { get; private set; }
 
-    public ManageServersWindow(ServerManager serverManager, ProfileManager profileManager)
+    /// <summary>
+    /// The caller's per-server deep cleanup, invoked after a Delete removes the registry entry (#2033):
+    /// MainWindow passes its <c>ForgetServerRuntimeStateAsync</c> so this door clears the same
+    /// hash-keyed state (collection health, AG edge state, tag assignments) the sidebar Remove does —
+    /// this window can't reach those services itself, and before this it silently left all three behind
+    /// for a re-added server to resurrect. Null-safe for any caller without cleanup to do.
+    /// </summary>
+    private readonly Func<ServerConnection, Task>? _onServerDeleted;
+
+    public ManageServersWindow(ServerManager serverManager, ProfileManager profileManager, Func<ServerConnection, Task>? onServerDeleted = null)
     {
         InitializeComponent();
         _serverManager = serverManager;
         _profileManager = profileManager;
+        _onServerDeleted = onServerDeleted;
         RefreshGrid();
     }
 
@@ -120,7 +130,7 @@ public partial class ManageServersWindow : Window
         }
     }
 
-    private void DeleteButton_Click(object sender, RoutedEventArgs e)
+    private async void DeleteButton_Click(object sender, RoutedEventArgs e)
     {
         if (ServersGrid.SelectedItem is not ServerConnection selected)
         {
@@ -135,6 +145,14 @@ public partial class ManageServersWindow : Window
 
         if (result == MessageBoxResult.Yes)
         {
+            /* #2033: run the caller's deep cleanup BEFORE the registry delete so the cleanup can still
+               derive the storage-name hash from the intact connection — the same order the sidebar
+               Remove uses. A cleanup failure logs inside the callback and never blocks the delete. */
+            if (_onServerDeleted is not null)
+            {
+                await _onServerDeleted(selected);
+            }
+
             _serverManager.DeleteServer(selected.Id);
             ServersChanged = true;
             RefreshGrid();

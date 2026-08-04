@@ -1304,7 +1304,10 @@ public partial class MainWindow : Window
 
     private void ManageServersButton_Click(object sender, RoutedEventArgs e)
     {
-        var window = new ManageServersWindow(_serverManager, _profileManager) { Owner = this };
+        /* #2033: hand this door the SAME per-server deep cleanup the sidebar Remove runs (health, AG edge
+           state, tag assignments), so the two delete paths cannot drift. The ClearHealthExcept sweep below
+           stays as the belt for anything else that changed while the dialog was open. */
+        var window = new ManageServersWindow(_serverManager, _profileManager, ForgetServerRuntimeStateAsync) { Owner = this };
         window.ShowDialog();
 
         if (window.ServersChanged)
@@ -1662,30 +1665,37 @@ public partial class MainWindow : Window
         if (result == MessageBoxResult.Yes)
         {
             CloseServerTab(server.Id);
-            var removedServerId = RemoteCollectorService.GetDeterministicHashCode(
-                RemoteCollectorService.GetServerNameForStorage(server));
-            _collectorService?.ClearHealthForServer(removedServerId);
-            /* #1696: drop this server's AG edge state, or a remove-then-re-add would compare the new first
-               sighting against the OLD role and page a phantom failover. The storage name hashes
-               deterministically, so a re-added server really does get the same id back. */
-            _agAlertEvaluator.Forget(removedServerId);
-            /* #2020 2b-i: drop the removed server's tag assignments for the same reason as the AG forget
-               above — the id hashes deterministically, so a removed-then-re-added server would silently
-               resurrect its old tags. */
-            if (_dataService != null)
-            {
-                try
-                {
-                    await _dataService.ClearServerTagsForServerAsync(removedServerId);
-                }
-                catch (Exception ex)
-                {
-                    AppLogger.Info("Tags", $"Failed to clear tags for removed server: {ex.Message}");
-                }
-            }
+            await ForgetServerRuntimeStateAsync(server);
             _serverManager.DeleteServer(server.Id);
             RefreshServerList();
             StatusText.Text = $"Removed server: {server.DisplayNameWithIntent}";
+        }
+    }
+
+    /// <summary>
+    /// The ONE deep-cleanup for a server leaving monitoring (#2033) — every piece of per-server runtime
+    /// state keyed on the deterministic storage-name hash, which a removed-then-re-added server gets BACK:
+    /// collection health, AG edge state (#1696 — stale role state pages a phantom failover on re-add), and
+    /// tag assignments (#2020 — stale rows silently resurrect the old tags). Both delete doors call this —
+    /// the sidebar context menu's Remove and Manage Servers' Delete — so the two paths cannot drift again;
+    /// before this, Manage Servers deleted the registry entry and left all three behind.
+    /// </summary>
+    private async Task ForgetServerRuntimeStateAsync(ServerConnection server)
+    {
+        var removedServerId = RemoteCollectorService.GetDeterministicHashCode(
+            RemoteCollectorService.GetServerNameForStorage(server));
+        _collectorService?.ClearHealthForServer(removedServerId);
+        _agAlertEvaluator.Forget(removedServerId);
+        if (_dataService != null)
+        {
+            try
+            {
+                await _dataService.ClearServerTagsForServerAsync(removedServerId);
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Info("Tags", $"Failed to clear tags for removed server: {ex.Message}");
+            }
         }
     }
 
