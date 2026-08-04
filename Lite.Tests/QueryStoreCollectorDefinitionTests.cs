@@ -1067,6 +1067,50 @@ public sealed class QueryStoreCollectorDefinitionTests
     }
 
     [Fact]
+    public void BuildBackfillPerItemQuery_WindowedDescWithTies_MirrorsTheLiveInvariant()
+    {
+        /* #2022 phase 2: the SAME payload body, window and direction flipped. The two-sided strict
+           window ((floor, ceiling) exclusive) appears in BOTH the interval pre-filter and the
+           HAVING; the ship order is DESC (newest history first); TOP ... WITH TIES and the byte
+           budget still complete boundary tie groups, which is what makes the strict `<` ceiling
+           resumable — the #1960 invariant, mirror-imaged. The live @cutoff_time must NOT appear:
+           a backfill slice that accidentally kept the live cutoff would silently re-collect the
+           live window instead of the backlog. */
+        var floor = new DateTime(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc);
+        var ceiling = new DateTime(2026, 7, 3, 0, 0, 0, DateTimeKind.Utc);
+        var plan = QueryStoreCollector.Instance.BuildBackfillPerItemQuery("StackOverflow", MakeContext(), floor, ceiling);
+
+        Assert.Contains("EXECUTE [StackOverflow].sys.sp_executesql", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("N'@floor_time datetime2(7), @ceiling_time datetime2(7)'", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("f.last_execution_time > @floor_time", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("f.last_execution_time < @ceiling_time", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("MAX(qsrs.last_execution_time) > @floor_time", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("MAX(qsrs.last_execution_time) < @ceiling_time", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY qsrs.last_execution_time DESC", plan.Text, StringComparison.Ordinal);
+        Assert.Contains($"TOP ({QueryStoreCollector.MaxRowsPerDatabase}) WITH TIES", plan.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("@cutoff_time", plan.Text, StringComparison.Ordinal);
+
+        Assert.Collection(
+            plan.Parameters,
+            p => { Assert.Equal("@floor_time", p.Name); Assert.Equal(floor, p.Value); Assert.Equal(CollectorParameterType.DateTime2, p.Type); },
+            p => { Assert.Equal("@ceiling_time", p.Name); Assert.Equal(ceiling, p.Value); Assert.Equal(CollectorParameterType.DateTime2, p.Type); });
+    }
+
+    [Fact]
+    public void BuildBackfillPerItemQuery_LiveBodyStaysUntouched()
+    {
+        /* The backfill flag must be a pure additive variant: the LIVE per-item query keeps its
+           one-sided cutoff and ASC order byte-for-byte, or phase 1's watermark-exact resume breaks
+           in the same PR that builds on it. */
+        var live = QueryStoreCollector.Instance.BuildPerItemQuery("StackOverflow", MakeContext());
+        Assert.Contains("f.last_execution_time > @cutoff_time", live.Text, StringComparison.Ordinal);
+        Assert.Contains("MAX(qsrs.last_execution_time) > @cutoff_time", live.Text, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY qsrs.last_execution_time ASC", live.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("@floor_time", live.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("@ceiling_time", live.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void BuildPerItemQuery_NoWatermark_FallsBack60Minutes()
     {
         var collectionTime = new DateTime(2026, 7, 2, 12, 0, 0, DateTimeKind.Utc);

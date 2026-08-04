@@ -81,6 +81,13 @@ public sealed class DarlingWorker : BackgroundService
        one alter_job per stuck job) — no need for the 15s sweep or the 30s alert cadence. */
     private static readonly TimeSpan s_compressionCheckInterval = TimeSpan.FromHours(1);
 
+    /* The Query Store backfill worker's tick (#2022): its OWN loop like the command plane, so a slow
+       byte-budgeted slice can never delay or starve the collection sweep — the two share only the
+       cancellation token and the guarded server snapshot. One slice per server per tick keeps it a
+       trickle; the steady state (every tail drained, no holes) costs a candidate query and a few
+       MIN() lookups per server per tick, which is why 5 minutes is ample. */
+    private static readonly TimeSpan s_queryStoreBackfillInterval = TimeSpan.FromMinutes(5);
+
     /* The analysis pipeline's per-run budget — Lite's App default hardcoded (AnalysisTimeoutSeconds
        120; not a control-plane knob). The CADENCE (interval), the enabled gate, and the notify gate
        are now control-plane knobs read live from config.Analysis (config_alert_settings' analysis
@@ -1026,6 +1033,13 @@ public sealed class DarlingWorker : BackgroundService
         var commandExecutor = new DarlingCommandExecutor(postgres, commandHost, serviceInstance, _logger);
         var commandLoop = RunCommandLoopAsync(commandExecutor, stoppingToken);
 
+        /* #2022 phase 2: the Query Store backfill worker, on its own tick (see s_queryStoreBackfillInterval).
+           Fills the two windows the live path discards by design — the 60-minute first-contact tail and
+           24h-clamped outage holes — newest-first, byte-budgeted, strictly BELOW the live path's floor, and
+           never past the raw tier's horizon. Plan capture reads the same live provider the runner does. */
+        var queryStoreBackfill = new QueryStoreBackfill(postgres, runner, deltas, _logger, () => config.CapturePlans);
+        var backfillLoop = RunQueryStoreBackfillLoopAsync(queryStoreBackfill, servers, stoppingToken);
+
         /* The fleet concurrency gate (#1553 D2): at most N=4 per-server collection bodies open a SQL connection
            at once, so one slow or hung server cannot head-of-line-block the fleet the way the old strictly
            sequential foreach did. Deliberately NOT disposed (CA2000 suppressed, not "fixed" back by an analyzer
@@ -1316,6 +1330,18 @@ public sealed class DarlingWorker : BackgroundService
             /* Expected on shutdown. */
         }
 
+        /* Drain the Query Store backfill loop the same way (#2022): a slice abandoned mid-shutdown is
+           fine — its boundary is derived (or hole-recorded) from what actually landed, so the next
+           start resumes exactly where the COPY committed. */
+        try
+        {
+            await backfillLoop;
+        }
+        catch (OperationCanceledException)
+        {
+            /* Expected on shutdown. */
+        }
+
         /* Drain the background baseline backfill the same way (#1757). It observes the same token, and its
            own body already swallows everything but cancellation, so this is about not leaving an unobserved
            Task behind — a backfill still running at shutdown is fine to abandon: TimescaleDB commits it in
@@ -1532,6 +1558,65 @@ public sealed class DarlingWorker : BackgroundService
     /// out — a per-command failure is reported on the row and swallowed by the executor — so the loop lives
     /// for the service's lifetime. Cancellation ends it cleanly.
     /// </summary>
+    /// <summary>
+    /// The #2022 backfill tick: at most one Query Store backfill slice per CONNECTED server per
+    /// interval, sequentially — sequence IS the fleet-wide concurrency bound, so a fleet of slow
+    /// slices stretches the tick instead of stacking connections. Servers are snapshotted under
+    /// the reconcile lock and only their Runtime is carried out of it; a server that disconnects
+    /// mid-tick fails its slice like any other per-server error and is skipped, not fatal.
+    /// Deliberately does NOT touch the per-server CollectionGate: taking it would make backfill
+    /// delay live collection (the sweep skips a held server), which inverts the issue's own
+    /// constraint — a backfill slice is read-only against the monitored server and writes on its
+    /// own store connection, so running beside a live sweep is safe.
+    /// </summary>
+    private async Task RunQueryStoreBackfillLoopAsync(QueryStoreBackfill backfill, List<ServerLoopState> servers, CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(s_queryStoreBackfillInterval, stoppingToken);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            List<ServerRuntime> runtimes;
+            lock (_serversLock)
+            {
+                runtimes = servers
+                    .Where(s => s.Runtime is not null)
+                    .Select(s => s.Runtime!)
+                    .ToList();
+            }
+
+            foreach (var runtime in runtimes)
+            {
+                if (stoppingToken.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                try
+                {
+                    await backfill.RunServerSliceAsync(runtime, stoppingToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    /* One server's slice failing (unreachable, permissions, a mid-tick disconnect) is
+                       that server's problem for this tick; the loop and the rest of the fleet continue. */
+                    _logger.LogWarning("query_store backfill slice on '{Server}' failed: {Message}",
+                        runtime.Config.DisplayName, ex.Message);
+                }
+            }
+        }
+    }
+
     private async Task RunCommandLoopAsync(DarlingCommandExecutor executor, CancellationToken stoppingToken)
     {
         while (!stoppingToken.IsCancellationRequested)
