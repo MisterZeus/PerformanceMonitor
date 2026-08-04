@@ -203,4 +203,78 @@ public sealed class BulkServerListParserTests
         Assert.Empty(result.Servers);
         Assert.Empty(result.Errors);
     }
+
+    // ── The #2027 port rule: "host,port" is SQL Server's own syntax, not a display name ────────────────
+
+    [Fact]
+    public void CommaPort_FoldsIntoTheServerName_AloneAndWithDisplayAndDatabase()
+    {
+        var result = BulkServerListParser.Parse("sql01,2433\nsql02,14330, Prod POS\nsql03,50000, Prod POS, master");
+
+        Assert.Empty(result.Errors);
+        Assert.Equal(3, result.Servers.Count);
+
+        Assert.Equal("sql01,2433", result.Servers[0].ServerName);
+        Assert.Null(result.Servers[0].DisplayName);
+
+        Assert.Equal("sql02,14330", result.Servers[1].ServerName);
+        Assert.Equal("Prod POS", result.Servers[1].DisplayName);
+        Assert.Null(result.Servers[1].DatabaseName);
+
+        Assert.Equal("sql03,50000", result.Servers[2].ServerName);
+        Assert.Equal("Prod POS", result.Servers[2].DisplayName);
+        Assert.Equal("master", result.Servers[2].DatabaseName);
+    }
+
+    [Fact]
+    public void CommaPort_WithDisplayAndDatabase_IsThreeLogicalFields_NotTooMany()
+    {
+        /* Four comma fields, but the port folds before the max-field check — the exact paste the
+           #2027 report shows failing. A FIFTH field is still an error. */
+        var ok = BulkServerListParser.Parse("sql01,2433,Prod,master");
+        Assert.Empty(ok.Errors);
+        Assert.Equal("sql01,2433", Assert.Single(ok.Servers).ServerName);
+
+        var bad = BulkServerListParser.Parse("sql01,2433,Prod,master,extra");
+        Assert.Empty(bad.Servers);
+        Assert.Contains("too many fields", Assert.Single(bad.Errors).Message);
+    }
+
+    [Theory]
+    [InlineData("sql01,0", "0")]           /* port 0 is not a valid port */
+    [InlineData("sql01,65536", "65536")]   /* out of range */
+    [InlineData("sql01,24x3", "24x3")]     /* not all digits */
+    [InlineData("sql01,-1433", "-1433")]   /* signed */
+    public void NonPortNumericLookalikes_StayDisplayNames(string line, string expectedDisplay)
+    {
+        var result = BulkServerListParser.Parse(line);
+
+        var parsed = Assert.Single(result.Servers);
+        Assert.Equal("sql01", parsed.ServerName);
+        Assert.Equal(expectedDisplay, parsed.DisplayName);
+    }
+
+    [Fact]
+    public void TabSeparatedLines_KeepCommaPortInsideTheFirstCell_Unchanged()
+    {
+        var result = BulkServerListParser.Parse("sql01,2433\t1234\tmaster");
+
+        var parsed = Assert.Single(result.Servers);
+        Assert.Equal("sql01,2433", parsed.ServerName);
+        /* On a tab line a pure-numeric display name survives — the documented escape for the one
+           thing the comma-line port rule costs. */
+        Assert.Equal("1234", parsed.DisplayName);
+        Assert.Equal("master", parsed.DatabaseName);
+    }
+
+    [Fact]
+    public void CommaLine_PureNumericSecondField_IsTakenAsPort_TheDocumentedTradeoff()
+    {
+        /* Pinning the tradeoff by name: on a comma line "1433" cannot be a display name anymore. */
+        var result = BulkServerListParser.Parse("sql01,1433");
+
+        var parsed = Assert.Single(result.Servers);
+        Assert.Equal("sql01,1433", parsed.ServerName);
+        Assert.Null(parsed.DisplayName);
+    }
 }

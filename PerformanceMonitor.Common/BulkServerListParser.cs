@@ -24,6 +24,16 @@ namespace PerformanceMonitor.Common;
 /// the optional display name and database (empty-after-trim → null, INTERIOR empties are null not errors),
 /// and more than three fields is an error. The parser does NO duplicate detection and NO normalization —
 /// both are app-side by design (the shared <see cref="ServerIdHelper"/> identity + each app's dedupe gate).</para>
+///
+/// <para>Port rule (#2027): SQL Server's own non-default-port syntax is <c>host,port</c>, which collides
+/// with the comma grammar — under the plain rules <c>sql01,2433</c> parsed as server "sql01" with display
+/// name "2433", silently connecting to the default port. So on a COMMA-separated line, a second field that
+/// is a pure number in the valid port range (1–65535) is a PORT riding the server name, not a display name:
+/// it folds back into field one and the remaining fields shift left, so
+/// <c>sql01,2433, Prod POS, master</c> is server "sql01,2433" + display + database. The one thing this
+/// costs is a pure-numeric display name on a comma line — use the tab form for that (the same escape the
+/// grammar already prescribes for display names containing commas). Tab-separated lines are untouched:
+/// their first cell already carries <c>host,port</c> intact.</para>
 /// </summary>
 public static class BulkServerListParser
 {
@@ -71,13 +81,28 @@ public static class BulkServerListParser
                 count--;
             }
 
-            // Rule 5: field 1 (server name) must be present; at most 3 fields.
+            // Rule 5: field 1 (server name) must be present.
             if (count == 0 || fields[0].Length == 0)
             {
                 errors.Add(new BulkServerParseError(lineNumber, rawText, "server name is empty"));
                 continue;
             }
 
+            // Port rule (#2027, comma lines only — a tab line's first cell already holds "host,port"
+            // intact): a pure-numeric second field is SQL Server's ",port" suffix, not a display name.
+            // Fold it into the server name and shift the remaining fields left BEFORE the max-field
+            // check, so "sql01,2433, Prod POS, master" is three logical fields, not four.
+            if (separator == ',' && count >= 2 && IsPortNumber(fields[1]))
+            {
+                fields[0] = fields[0] + "," + fields[1];
+                for (var f = 2; f < count; f++)
+                {
+                    fields[f - 1] = fields[f];
+                }
+                count--;
+            }
+
+            // Rule 5 continued: at most 3 (logical) fields.
             if (count > 3)
             {
                 errors.Add(new BulkServerParseError(lineNumber, rawText, "too many fields (max 3: server, display name, database)"));
@@ -93,6 +118,26 @@ public static class BulkServerListParser
         }
 
         return new BulkServerParseResult(servers, errors);
+    }
+
+    /// <summary>Whether a trimmed field is a valid TCP port (all ASCII digits, 1–65535) — the #2027 port
+    /// rule's gate. "0", empty, signed, and out-of-range numbers are NOT ports and stay display names.</summary>
+    private static bool IsPortNumber(string field)
+    {
+        if (field.Length is 0 or > 5)
+        {
+            return false;
+        }
+
+        foreach (var c in field)
+        {
+            if (c is < '0' or > '9')
+            {
+                return false;
+            }
+        }
+
+        return int.Parse(field, System.Globalization.CultureInfo.InvariantCulture) is >= 1 and <= 65535;
     }
 }
 
