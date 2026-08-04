@@ -92,6 +92,7 @@ public sealed class McpPvsTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                as_of = rows[0].CollectionTime.ToString("o"),
                 databases,
                 trend_hours_back = trend_hours_back > 0 ? trend_hours_back : (int?)null,
                 trend,
