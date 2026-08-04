@@ -146,6 +146,24 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
         "server_properties.physical_memory_mb",
     };
 
+    /// <summary>
+    /// Columns ADDED to a collector table since the extraction, each paired with the schema version
+    /// that adds them to existing databases. Same philosophy as
+    /// <see cref="IntentionalStorageDivergences"/>: the golden snapshot stays frozen — it proves the
+    /// extraction was lossless — so a deliberate addition is recorded here, and it is held to the
+    /// append-only contract the stores rely on: the column must sit at the END of the generated table
+    /// (every golden ordinal untouched) and must be nullable (existing rows are never backfilled).
+    ///
+    /// <para>#2012 stage 2 / schema v52: <c>query_stats.host_object_name</c> — the statement's hosting
+    /// module (<c>schema.object</c>) captured at collection, so the hash-grouped top-queries reads can
+    /// split INSERT...EXEC callers that share a <c>query_hash</c>. <see cref="DuckDbInitializer"/>'s
+    /// v52 migration adds it to existing databases.</para>
+    /// </summary>
+    private static readonly HashSet<string> IntentionalAppendedColumns = new(StringComparer.Ordinal)
+    {
+        "query_stats.host_object_name",
+    };
+
     [Fact]
     public void GeneratedCollectorTables_AreStorageEquivalentToPreChangeHandWritten()
     {
@@ -170,7 +188,27 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
                 .Select(c => IntentionalStorageDivergences.Contains($"{table}.{c.Name}") ? c with { NotNull = false } : c)
                 .ToList();
 
-            if (!goldenComparable.SequenceEqual(generatedInfo))
+            /* Recorded appended-since-extraction columns are allowed ONLY at the tail and nullable;
+               strip them before the row-for-row comparison so the frozen golden keeps proving the
+               original extraction was lossless while the appended column proves its own contract. */
+            var generatedComparable = new List<ColumnInfo>();
+            foreach (var column in generatedInfo)
+            {
+                if (!IntentionalAppendedColumns.Contains($"{table}.{column.Name}"))
+                {
+                    generatedComparable.Add(column);
+                    continue;
+                }
+
+                if (column.NotNull || column.Cid < goldenInfo.Count)
+                {
+                    failures.Add(
+                        $"{table}.{column.Name}: a recorded appended column must be nullable and sit " +
+                        $"after every golden column (append-only contract), got: {column}");
+                }
+            }
+
+            if (!goldenComparable.SequenceEqual(generatedComparable))
             {
                 failures.Add(BuildTableDiff(table, goldenInfo, generatedInfo));
             }
