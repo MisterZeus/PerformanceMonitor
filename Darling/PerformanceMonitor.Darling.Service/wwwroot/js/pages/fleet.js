@@ -187,7 +187,13 @@ function serverCard(c) {
     "div",
     { class: "server-card " + cls, onActivate: () => navigateServer(c.server_name || c.display_name) },
     [
-      el("div", { class: "head" }, [el("span", { class: "dot " + cls }), el("span", { class: "title", text: c.display_name })]),
+      el("div", { class: "head" }, [
+        el("span", { class: "dot " + cls }),
+        /* #2031: a muted-bell right of the dot when a whole-server alert silence is active — display-only
+           (the web seat has no silence action), so a silenced server stops looking healthy-quiet. */
+        c.is_silenced ? el("span", { class: "silenced-bell", title: "Alerts silenced for this server", role: "img", "aria-label": "Alerts silenced" }) : null,
+        el("span", { class: "title", text: c.display_name }),
+      ]),
       statusLine,
       metricBands(c),
     ]

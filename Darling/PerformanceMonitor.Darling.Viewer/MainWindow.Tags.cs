@@ -343,6 +343,30 @@ public partial class MainWindow
             return;
         }
 
+        /* #2031: Silence / Unsilence are mutually exclusive — DISABLE the inapplicable one (never hide it;
+           Lite's semantics, and the same disabled-with-reason idiom as the read-only tag gate below). Driven
+           from the polled IsSilenced flag so opening the menu costs no store read; the click handlers re-check
+           the live rules anyway, so a stale flag degrades to a status-bar note, never a wrong write. Runs
+           BEFORE the tag gating's early returns so the pair is gated on every seat. */
+        var silenceItem = fe.ContextMenu.Items.OfType<MenuItem>().FirstOrDefault(m => (m.Tag as string) == "SilenceServer");
+        var unsilenceItem = fe.ContextMenu.Items.OfType<MenuItem>().FirstOrDefault(m => (m.Tag as string) == "UnsilenceServer");
+        if (silenceItem is not null && unsilenceItem is not null)
+        {
+            var silenced = row.Server.IsSilenced;
+
+            silenceItem.IsEnabled = !silenced;
+            silenceItem.ToolTip = silenced
+                ? "Already silenced — use Unsilence to restore alert delivery"
+                : "Mute every alert for this server until you Unsilence it";
+            ToolTipService.SetShowOnDisabled(silenceItem, true);
+
+            unsilenceItem.IsEnabled = silenced;
+            unsilenceItem.ToolTip = silenced
+                ? "Remove this server's whole-server alert silence"
+                : "Not silenced — there is nothing to remove";
+            ToolTipService.SetShowOnDisabled(unsilenceItem, true);
+        }
+
         /* Located by Tag, not by header text — the header carries an Alt mnemonic now. */
         var assignItem = fe.ContextMenu.Items.OfType<MenuItem>().FirstOrDefault(m => (m.Tag as string) == "AssignTags");
         if (assignItem is null)

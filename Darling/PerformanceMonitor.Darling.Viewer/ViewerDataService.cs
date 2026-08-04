@@ -189,6 +189,28 @@ public sealed class DarlingServer : INotifyPropertyChanged
         OnPropertyChanged(nameof(AttentionTooltip));
     }
 
+    // ── Whole-server alert silence indicator (#2031) ──
+    // Set by MainWindow's silenced-state refresh (riding the same alert poll that drives the badge) and
+    // immediately by the Silence/Unsilence handlers. Drives the sidebar row's muted-bell glyph and the
+    // context menu's Silence/Unsilence exclusivity.
+
+    private bool _isSilenced;
+
+    /// <summary>True when a whole-server alert silence (store-side mute rule) is active for this server.</summary>
+    public bool IsSilenced => _isSilenced;
+
+    /// <summary>Updates the silenced indicator in place; raises change notification only on a real flip.</summary>
+    public void SetSilenced(bool silenced)
+    {
+        if (_isSilenced == silenced)
+        {
+            return;
+        }
+
+        _isSilenced = silenced;
+        OnPropertyChanged(nameof(IsSilenced));
+    }
+
     public event PropertyChangedEventHandler? PropertyChanged;
 
     private void OnPropertyChanged(string name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));

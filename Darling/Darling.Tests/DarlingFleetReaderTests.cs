@@ -36,10 +36,34 @@ public sealed class DarlingFleetReaderSqlTests
     {
         var sql = DarlingFleetReader.FleetServersSql;
         Assert.Contains("FROM servers", sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE is_enabled", sql, StringComparison.Ordinal);
-        Assert.Contains("COALESCE(display_name, server_name)", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE s.is_enabled", sql, StringComparison.Ordinal);
+        Assert.Contains("COALESCE(s.display_name, s.server_name)", sql, StringComparison.Ordinal);
         /* The per-server platform signal (D4) rides on the same registry row — no extra round-trip. */
         Assert.Contains("sql_engine_edition", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The is_silenced column (#2031) must stay the SQL mirror of the Viewer's IsWholeServerSilence predicate:
+    /// server-scoped (case-insensitive, on the SAME COALESCE(display, storage) name the card shows — the name
+    /// the Viewer's Silence writes), enabled, unexpired, and with EVERY narrowing pattern NULL — so a
+    /// metric/database/query/wait/job mute an operator authored for the server never renders the whole-server
+    /// bell. Losing any one of the five NULL guards would silently widen what counts as "silenced".
+    /// </summary>
+    [Fact]
+    public void FleetServersSql_IsSilenced_MirrorsTheWholeServerSilencePredicate()
+    {
+        var sql = DarlingFleetReader.FleetServersSql;
+        Assert.Contains("EXISTS", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM config_mute_rules m", sql, StringComparison.Ordinal);
+        Assert.Contains("lower(m.server_name) = lower(COALESCE(s.display_name, s.server_name))", sql, StringComparison.Ordinal);
+        Assert.Contains("m.enabled", sql, StringComparison.Ordinal);
+        Assert.Contains("m.expires_at_utc IS NULL OR m.expires_at_utc >", sql, StringComparison.Ordinal);
+        Assert.Contains("m.metric_name IS NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("m.database_pattern IS NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("m.query_text_pattern IS NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("m.wait_type_pattern IS NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("m.job_name_pattern IS NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("AS is_silenced", sql, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -168,7 +192,7 @@ public sealed class DarlingFleetDtoJsonTests
         foreach (var field in new[]
         {
             "\"server_id\"", "\"display_name\"", "\"server_name\"", "\"engine_edition\"",
-            "\"is_azure_sql_db\"", "\"is_azure_mi\"", "\"band\"", "\"status\"",
+            "\"is_azure_sql_db\"", "\"is_azure_mi\"", "\"is_silenced\"", "\"band\"", "\"status\"",
             "\"is_online\"", "\"last_collection\"", "\"cpu_percent\"", "\"total_cpu_percent\"",
             "\"cpu_severity\"", "\"memory_severity\"", "\"blocking_count\"", "\"blocking_severity\"",
             "\"deadlock_count\"", "\"deadlock_last_seen\"", "\"deadlock_severity\"", "\"threads_severity\"",
