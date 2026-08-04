@@ -158,6 +158,34 @@ CREATE TABLE IF NOT EXISTS config_database_state_expected (
     PRIMARY KEY (server_id, database_name)
 )";
 
+    /* Fleet tags (#2020 2b-i): the user's visual organisation of the server list, the twin of the Darling
+       viewer's config.server_tags tree + config.server_tag_map (PgMigrations V32 + the V50 colour column).
+       server_tags is hierarchical (parent_id null = a root tag) with an optional #RRGGBB colour; server_tag_map
+       is the many-to-many join keyed on the SAME server_id hash the Overview cards use (RemoteCollectorService
+       .GetServerId). Deliberately NO IDENTITY, foreign keys, or expression unique index — DuckDB has none of
+       those the way Postgres does — so ids are assigned in C# and the tree invariants (unique name per parent,
+       cascade-on-delete, cycle + depth caps) are enforced in the tag store and the Manage Tags window, exactly
+       where the Darling viewer already enforces the ones Postgres can't. */
+    public const string CreateServerTagsTable = @"
+CREATE TABLE IF NOT EXISTS server_tags (
+    id INTEGER PRIMARY KEY,
+    name VARCHAR NOT NULL,
+    parent_id INTEGER,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    colour VARCHAR,
+    created_at TIMESTAMP NOT NULL DEFAULT current_timestamp
+)";
+
+    public const string CreateServerTagMapTable = @"
+CREATE TABLE IF NOT EXISTS server_tag_map (
+    server_id INTEGER NOT NULL,
+    tag_id INTEGER NOT NULL,
+    PRIMARY KEY (server_id, tag_id)
+)";
+
+    public const string CreateServerTagMapIndex =
+        "CREATE INDEX IF NOT EXISTS idx_server_tag_map_tag ON server_tag_map(tag_id)";
+
     /// <summary>
     /// All table creation statements: the hand-written non-collector tables, then the 36 collector
     /// tables generated from <see cref="PerformanceMonitor.Collectors.CollectorCatalog"/> by
@@ -175,6 +203,8 @@ CREATE TABLE IF NOT EXISTS config_database_state_expected (
         yield return CreateMuteRulesTable;
         yield return CreateDismissedArchiveAlertsTable;
         yield return CreateDatabaseStateExpectedTable;
+        yield return CreateServerTagsTable;
+        yield return CreateServerTagMapTable;
 
         foreach (var statement in DuckDbSchemaGenerator.CreateTableStatements())
         {

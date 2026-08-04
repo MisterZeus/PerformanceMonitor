@@ -124,12 +124,35 @@ WHERE server_id = $1";
     }
 }
 
+/// <summary>One tag pill on an Overview card (#2020 2b-i): the tag name plus the brushes to render it,
+/// resolved once from the stored colour via <see cref="TagColorBrushes"/> (neutral when the tag has no
+/// colour). The Lite twin of the viewer's ServerTagPill; the constant light label reads in either theme.</summary>
+public sealed class ServerTagPill
+{
+    public ServerTagPill(string name, string? colour)
+    {
+        Name = name;
+        Fill = TagColorBrushes.Fill(colour);
+    }
+
+    public string Name { get; }
+
+    public System.Windows.Media.Brush Fill { get; }
+
+    public System.Windows.Media.Brush TextBrush => TagColorBrushes.PillText;
+}
+
 public class ServerSummaryItem
 {
     public string DisplayName { get; set; } = "";
     public string ServerName { get; set; } = "";
     public int ServerId { get; set; }
     public bool? IsOnline { get; set; }
+
+    /// <summary>The server's tags as coloured pills, empty when it has none. Stamped by the Overview loader
+    /// from the loaded tag list, so it survives a re-sort (which reuses these item instances).</summary>
+    public System.Collections.Generic.IReadOnlyList<ServerTagPill> TagPills { get; set; } =
+        System.Array.Empty<ServerTagPill>();
     /// <summary>True when the server is reachable but one or more collectors have consecutive errors.</summary>
     public bool HasCollectorErrors { get; set; }
     /// <summary>SQL Server scheduler ProcessUtilization from sys.dm_os_ring_buffers. NULL on Azure SQL DB.</summary>
