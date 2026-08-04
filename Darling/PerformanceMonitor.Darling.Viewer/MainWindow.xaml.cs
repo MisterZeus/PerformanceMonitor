@@ -517,6 +517,9 @@ public partial class MainWindow : Window
             /* Per-server badges: always, independent of the toast master switch. */
             UpdateServerAttention(rows);
 
+            /* The sidebar's muted-bell (#2031): same cadence, its own small read (mute rules, not history). */
+            await UpdateServerSilencedAsync();
+
             /* Tray toasts: only when notifications are enabled and the tray exists. */
             if (_alertsEnabled && _trayService is not null)
             {

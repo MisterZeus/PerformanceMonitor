@@ -484,11 +484,14 @@
                                         <!-- One-click whole-server alert silence: writes/removes a server-scoped
                                              mute rule the running service honors (email/Teams/Slack + in-app toasts),
                                              the shortcut over the multi-step Manage Mute Rules dialog. -->
-                                        <MenuItem Header="_Silence This Server" Click="ServerContextMenu_Silence_Click"
+                                        <!-- Mutually exclusive since #2031 (Lite's semantics): ServerRow_ContextMenuOpening
+                                             DISABLES the inapplicable one (never hides it) from the polled silenced state,
+                                             located by Tag like the Assign Tags item above. -->
+                                        <MenuItem Header="_Silence This Server" Tag="SilenceServer" Click="ServerContextMenu_Silence_Click"
                                                   ToolTip="Mute every alert for this server until you Unsilence it">
                                             <MenuItem.Icon><TextBlock Text="&#x1F507;"/></MenuItem.Icon>
                                         </MenuItem>
-                                        <MenuItem Header="_Unsilence" Click="ServerContextMenu_Unsilence_Click"
+                                        <MenuItem Header="_Unsilence" Tag="UnsilenceServer" Click="ServerContextMenu_Unsilence_Click"
                                                   ToolTip="Remove this server's whole-server alert silence">
                                             <MenuItem.Icon><TextBlock Text="&#x1F514;"/></MenuItem.Icon>
                                         </MenuItem>
@@ -514,28 +517,52 @@
                                         <RowDefinition Height="Auto"/>
                                     </Grid.RowDefinitions>
 
-                                    <!-- Status dot (collection freshness) -->
-                                    <Ellipse Grid.Column="0" Grid.RowSpan="2"
-                                             Width="10" Height="10"
-                                             Margin="0,0,8,0"
-                                             VerticalAlignment="Center">
-                                        <Ellipse.Style>
-                                            <Style TargetType="Ellipse">
-                                                <Setter Property="Fill" Value="{DynamicResource ForegroundMutedBrush}"/>
-                                                <Style.Triggers>
-                                                    <DataTrigger Binding="{Binding Server.DotStatus}" Value="Online">
-                                                        <Setter Property="Fill" Value="{DynamicResource SuccessBrush}"/>
-                                                    </DataTrigger>
-                                                    <DataTrigger Binding="{Binding Server.DotStatus}" Value="Offline">
-                                                        <Setter Property="Fill" Value="{DynamicResource ErrorBrush}"/>
-                                                    </DataTrigger>
-                                                    <DataTrigger Binding="{Binding Server.DotStatus}" Value="Warning">
-                                                        <Setter Property="Fill" Value="{DynamicResource WarningBrush}"/>
-                                                    </DataTrigger>
-                                                </Style.Triggers>
-                                            </Style>
-                                        </Ellipse.Style>
-                                    </Ellipse>
+                                    <!-- Status dot (collection freshness) + the muted-bell silence indicator
+                                         (#2031: a silenced server must not look healthy-quiet). -->
+                                    <StackPanel Grid.Column="0" Grid.RowSpan="2"
+                                                Orientation="Horizontal" VerticalAlignment="Center">
+                                        <Ellipse Width="10" Height="10"
+                                                 Margin="0,0,8,0"
+                                                 VerticalAlignment="Center">
+                                            <Ellipse.Style>
+                                                <Style TargetType="Ellipse">
+                                                    <Setter Property="Fill" Value="{DynamicResource ForegroundMutedBrush}"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding Server.DotStatus}" Value="Online">
+                                                            <Setter Property="Fill" Value="{DynamicResource SuccessBrush}"/>
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding Server.DotStatus}" Value="Offline">
+                                                            <Setter Property="Fill" Value="{DynamicResource ErrorBrush}"/>
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding Server.DotStatus}" Value="Warning">
+                                                            <Setter Property="Fill" Value="{DynamicResource WarningBrush}"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Ellipse.Style>
+                                        </Ellipse>
+                                        <!-- A greyed vector bell with a slash (never an emoji), shown only while a
+                                             whole-server alert silence is active. -->
+                                        <Viewbox Width="11" Height="11" Margin="0,0,6,0" VerticalAlignment="Center"
+                                                 ToolTip="Alerts silenced for this server — right-click → Unsilence to restore">
+                                            <Viewbox.Style>
+                                                <Style TargetType="Viewbox">
+                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding Server.IsSilenced}" Value="True">
+                                                            <Setter Property="Visibility" Value="Visible"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Viewbox.Style>
+                                            <Grid Width="24" Height="24">
+                                                <Path Fill="{DynamicResource ForegroundMutedBrush}"
+                                                      Data="M12,2 C10.9,2 10,2.9 10,4 L10,4.29 C7.12,5.14 5,7.83 5,11 L5,17 L3,19 L3,20 L21,20 L21,19 L19,17 L19,11 C19,7.83 16.88,5.14 14,4.29 L14,4 C14,2.9 13.1,2 12,2 Z M10,21 A2,2 0 0,0 14,21 Z"/>
+                                                <Line X1="3" Y1="3" X2="21" Y2="21"
+                                                      Stroke="{DynamicResource ForegroundMutedBrush}" StrokeThickness="2.4"/>
+                                            </Grid>
+                                        </Viewbox>
+                                    </StackPanel>
 
                                     <!-- Server name -->
                                     <TextBlock Grid.Column="1" Grid.Row="0"

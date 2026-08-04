@@ -59,11 +59,32 @@ internal static class DarlingFleetReader
     /// SERVERPROPERTY('EngineEdition') the worker stamped on connect (5 = Azure SQL DB, 8 = Azure MI, box
     /// editions otherwise), the reliable per-server platform signal the composer's D4 auto-greying keys on;
     /// nullable when a server has not yet connected. $ none.</summary>
+    /// <summary>
+    /// The <c>is_silenced</c> column (#2031) is the SQL mirror of the Viewer's
+    /// <c>ViewerDataService.IsWholeServerSilence</c> predicate — an enabled, unexpired mute rule scoped to the
+    /// server (matched case-insensitively on the same COALESCE(display, storage) name the card shows, which is
+    /// the name the Viewer's Silence writes) with NO narrowing pattern on any other field. Display-only: the
+    /// web seat has no silence action; this exists so a dataless-quiet server and a silenced one stop looking
+    /// identical on the fleet cards and to <c>get_fleet_overview</c>.
+    /// </summary>
     public const string FleetServersSql = @"
-SELECT server_id, COALESCE(display_name, server_name) AS display_name, server_name, sql_engine_edition
-FROM servers
-WHERE is_enabled
-ORDER BY server_name";
+SELECT s.server_id, COALESCE(s.display_name, s.server_name) AS display_name, s.server_name, s.sql_engine_edition,
+       EXISTS
+       (
+           SELECT 1
+           FROM config_mute_rules m
+           WHERE lower(m.server_name) = lower(COALESCE(s.display_name, s.server_name))
+           AND   m.enabled
+           AND   (m.expires_at_utc IS NULL OR m.expires_at_utc > (now() AT TIME ZONE 'UTC'))
+           AND   m.metric_name IS NULL
+           AND   m.database_pattern IS NULL
+           AND   m.query_text_pattern IS NULL
+           AND   m.wait_type_pattern IS NULL
+           AND   m.job_name_pattern IS NULL
+       ) AS is_silenced
+FROM servers s
+WHERE s.is_enabled
+ORDER BY s.server_name";
 
     /// <summary>Latest SQL + other-process CPU per server (newest ring-buffer sample). $ none.</summary>
     public const string FleetCpuSql = @"
@@ -306,6 +327,7 @@ GROUP BY server_id, collector_name";
             EngineEdition = server.EngineEdition,
             IsAzureSqlDb = isAzureSqlDb,
             IsAzureManagedInstance = isAzureManagedInstance,
+            IsSilenced = server.IsSilenced,
             Band = band,
             Status = StatusLabel(isOnline, awaitingFirstCollection, hasCollectorErrors),
             IsOnline = isOnline,
@@ -509,7 +531,8 @@ GROUP BY server_id, collector_name";
                 reader.GetInt32(0),
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
                 reader.IsDBNull(2) ? "" : reader.GetString(2),
-                reader.IsDBNull(3) ? null : reader.GetInt32(3)));
+                reader.IsDBNull(3) ? null : reader.GetInt32(3),
+                !reader.IsDBNull(4) && reader.GetBoolean(4)));
         }
 
         return rows;
@@ -670,7 +693,7 @@ GROUP BY server_id, collector_name";
 
     /* ─────────────────────────── raw-read carriers (internal) ─────────────────────────── */
 
-    private readonly record struct FleetServerRow(int ServerId, string DisplayName, string ServerName, int? EngineEdition);
+    private readonly record struct FleetServerRow(int ServerId, string DisplayName, string ServerName, int? EngineEdition, bool IsSilenced);
     private readonly record struct CpuRow(double? SqlCpu, double? OtherCpu);
     private readonly record struct MemoryRow(double? MemoryMb, double? BufferPoolMb);
     private readonly record struct MemoryPressureRow(long WaiterCount, long TimeoutCount, long ForcedCount, double? GrantedMemoryMb);
@@ -703,6 +726,11 @@ public sealed class FleetServerCard
     /// <summary>True when this server is Azure SQL Managed Instance (engine edition 8) — reliable, derived from
     /// <see cref="EngineEdition"/>.</summary>
     [JsonPropertyName("is_azure_mi")] public bool IsAzureManagedInstance { get; init; }
+
+    /// <summary>True when a whole-server alert silence (an enabled, unexpired mute rule scoped to this server
+    /// with no narrowing pattern) is active (#2031) — display-only, so a silenced server stops looking like a
+    /// healthy-quiet one. The web seat has no silence action; silencing stays with the Viewer/MCP.</summary>
+    [JsonPropertyName("is_silenced")] public bool IsSilenced { get; init; }
 
     [JsonPropertyName("band")] public FleetHealthBand Band { get; init; }
     [JsonPropertyName("status")] public string Status { get; init; } = "";
