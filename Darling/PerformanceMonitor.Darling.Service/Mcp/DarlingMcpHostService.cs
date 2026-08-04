@@ -122,22 +122,44 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// </summary>
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        DarlingConfig config;
-        try
-        {
-            config = DarlingConfig.Load();
-        }
-        catch (Exception ex)
-        {
-            /* The worker logs the missing/broken config as critical; without a file config there is no
-               bind/network/store definition to serve with, so the MCP host stands down entirely. */
-            _logger.LogDebug("MCP server not started (configuration unavailable): {Message}", ex.Message);
-            return;
-        }
-
+        /* Config load lives INSIDE the supervisor loop, on the failed-start backoff (#2038) — the web host's
+           twin fix. A front-loaded Load() failure used to stand this host down for the process LIFETIME at
+           Debug level, so one transient darling.json read failure at boot silently killed MCP until the next
+           manual restart. Once loaded, the config is held for the process lifetime exactly as before (the
+           network exposure block is restart-only by design). */
+        DarlingConfig? config = null;
         var lastFailedStartUtc = DateTime.MinValue;
         while (!stoppingToken.IsCancellationRequested)
         {
+            if (config is null && DateTime.UtcNow - lastFailedStartUtc >= FailedStartBackoff)
+            {
+                try
+                {
+                    config = DarlingConfig.Load();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(
+                        "MCP server configuration could not be loaded ({Message}) — retrying in {Backoff}s. The worker logs a missing/broken config as critical; a transient read failure self-heals here.",
+                        ex.Message, (int)FailedStartBackoff.TotalSeconds);
+                    lastFailedStartUtc = DateTime.UtcNow;
+                }
+            }
+
+            if (config is null)
+            {
+                try
+                {
+                    await Task.Delay(SupervisorPollInterval, stoppingToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+
+                continue;
+            }
+
             var published = _state.Read();
             var enabled = published?.Enabled ?? config.Mcp.Enabled;
             var desiredPort = published?.Port ?? config.Mcp.Port;

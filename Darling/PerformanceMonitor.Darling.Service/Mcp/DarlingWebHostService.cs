@@ -109,22 +109,45 @@ public sealed class DarlingWebHostService : BackgroundService
     /// </summary>
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        DarlingConfig config;
-        try
-        {
-            config = DarlingConfig.Load();
-        }
-        catch (Exception ex)
-        {
-            /* The worker logs the missing/broken config as critical; without a file config there is no
-               bind/network/store definition to serve with, so the web host stands down entirely. */
-            _logger.LogDebug("Web dashboard not started (configuration unavailable): {Message}", ex.Message);
-            return;
-        }
-
+        /* Config load lives INSIDE the supervisor loop, on the failed-start backoff (#2038). It used to be a
+           single front-loaded Load() whose failure stood this host down for the process LIFETIME, logged only
+           at Debug — so one transient darling.json read failure at boot (an AV pass over the file mid service
+           restart is enough) silently killed the dashboard until the next manual restart while the worker kept
+           collecting, and the default-level log said nothing. Once loaded, the config is held for the process
+           lifetime exactly as before (the network exposure block is restart-only by design). */
+        DarlingConfig? config = null;
         var lastFailedStartUtc = DateTime.MinValue;
         while (!stoppingToken.IsCancellationRequested)
         {
+            if (config is null && DateTime.UtcNow - lastFailedStartUtc >= FailedStartBackoff)
+            {
+                try
+                {
+                    config = DarlingConfig.Load();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(
+                        "Web dashboard configuration could not be loaded ({Message}) — retrying in {Backoff}s. The worker logs a missing/broken config as critical; a transient read failure self-heals here.",
+                        ex.Message, (int)FailedStartBackoff.TotalSeconds);
+                    lastFailedStartUtc = DateTime.UtcNow;
+                }
+            }
+
+            if (config is null)
+            {
+                try
+                {
+                    await Task.Delay(SupervisorPollInterval, stoppingToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+
+                continue;
+            }
+
             var published = _state.Read();
             var enabled = published?.Enabled ?? config.Web.Enabled;
             var desiredPort = published?.Port ?? config.Web.Port;
