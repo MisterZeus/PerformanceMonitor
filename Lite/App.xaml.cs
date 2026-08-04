@@ -206,6 +206,11 @@ public partial class App : Application
     /* NOC Overview tile sort ("Cpu" = CPU% descending default, or "Name") */
     public static ServerOverviewSortMode OverviewSortMode { get; set; } = ServerOverviewSort.Default;
 
+    /// <summary>Sidebar fleet-tree groups the user has collapsed (#2020 2b-i-b), each a
+    /// <c>FleetGroupKey.ToStorageString()</c> value ("Favorites" / "Untagged" / "Tag:{id}"), so expand/collapse
+    /// survives a restart — the Lite twin of the viewer's <c>ViewerPreferences.CollapsedFleetGroups</c>.</summary>
+    public static List<string> CollapsedFleetGroups { get; set; } = new();
+
     /* Update check settings */
     public static bool CheckForUpdatesOnStartup { get; set; } = true;
 
@@ -704,6 +709,15 @@ public partial class App : Application
 
             /* NOC Overview tile sort */
             if (root.TryGetProperty("overview_sort_mode", out v)) OverviewSortMode = ServerOverviewSort.ParseMode(v.GetString());
+
+            /* Sidebar fleet-tree collapsed groups (#2020 2b-i-b) */
+            if (root.TryGetProperty("collapsed_fleet_groups", out v) && v.ValueKind == JsonValueKind.Array)
+            {
+                CollapsedFleetGroups = v.EnumerateArray()
+                    .Where(e => e.ValueKind == JsonValueKind.String)
+                    .Select(e => e.GetString()!)
+                    .ToList();
+            }
 
             /* Update check settings */
             if (root.TryGetProperty("check_for_updates_on_startup", out v)) CheckForUpdatesOnStartup = v.GetBoolean();
