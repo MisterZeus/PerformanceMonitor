@@ -34,6 +34,61 @@ let fleetFilter = "";
 let lastCards = [];
 let gridNode = null;
 
+/* Grouped (tree) view — the web twin of the desktop FleetView: opt-in, and both the toggle and the collapsed
+   groups persist client-side (localStorage, guarded so a locked-down browser still renders flat). lastTags is
+   the full tag forest /api/fleet returns, so an organisational parent tag with no directly-tagged servers still
+   nests its children correctly, exactly as FleetView does. */
+let fleetGrouped = readStored("darling.fleet.grouped") === "1";
+let lastTags = [];
+const collapsedGroups = new Set(readStoredJson("darling.fleet.collapsed", []));
+const GROUP_INDENT = 16; // px per tree depth
+
+function readStored(key) { try { return localStorage.getItem(key); } catch { return null; } }
+function readStoredJson(key, dflt) { try { return JSON.parse(localStorage.getItem(key) || "null") ?? dflt; } catch { return dflt; } }
+function writeStored(key, value) { try { localStorage.setItem(key, value); } catch { /* private mode / disabled — view stays session-only */ } }
+
+/* The web twin of FleetView's projection: the tag forest depth-first (child tags before a tag's own servers),
+   then an Untagged group last. Each entry is one group header with its DIRECTLY-assigned server cards; a server
+   carrying multiple tags appears under each, and an untagged server appears only under Untagged. Cycle- and
+   dangling-parent-safe (an orphaned tag surfaces as a root rather than vanishing). No Favorites group — the web
+   fleet has no per-user favourites. */
+function buildTagGroups(forest, cards, sortFn) {
+  const known = new Set(forest.map((t) => t.id));
+  const byParent = new Map();
+  for (const t of forest) {
+    const p = t.parent_id != null && known.has(t.parent_id) ? t.parent_id : 0; // dangling parent -> root
+    if (!byParent.has(p)) byParent.set(p, []);
+    byParent.get(p).push(t);
+  }
+  for (const list of byParent.values()) list.sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name));
+
+  const serversByTag = new Map();
+  for (const c of cards) {
+    for (const t of c.tags || []) {
+      if (!serversByTag.has(t.id)) serversByTag.set(t.id, []);
+      serversByTag.get(t.id).push(c);
+    }
+  }
+
+  const groups = [];
+  const visited = new Set();
+  function emit(tag, depth) {
+    if (visited.has(tag.id)) return;
+    visited.add(tag.id);
+    const servers = (serversByTag.get(tag.id) || []).slice().sort(sortFn);
+    const kids = byParent.get(tag.id) || [];
+    groups.push({ key: "tag:" + tag.id, name: tag.name, depth, cards: servers, hasChildren: kids.length > 0 || servers.length > 0 });
+    for (const kid of kids) emit(kid, depth + 1);
+  }
+  for (const root of byParent.get(0) || []) emit(root, 0);
+  for (const t of forest) if (!visited.has(t.id)) emit(t, 0); // cycle / disconnected -> surface as a root
+
+  const untagged = cards.filter((c) => !(c.tags || []).length).slice().sort(sortFn);
+  if (untagged.length) groups.push({ key: "untagged", name: "Untagged", depth: 0, cards: untagged, hasChildren: true });
+
+  return groups;
+}
+
 /* Name/tag filter, matching the desktop apps' ServerOverviewFilter rule: an empty term matches everything,
    otherwise a case-insensitive substring of the display name, the instance name, or any of the server's tag
    names (#2020) — so `prod` finds both sql-prod-01 and everything tagged Production, as on the desktop. */
@@ -116,7 +171,8 @@ export async function renderFleet(main) {
 
   nodes.push(el("h3", { class: "section-title", style: "margin-top:1.25rem", text: "Servers" }));
   lastCards = d.cards || [];
-  gridNode = el("div", { class: "grid" });
+  lastTags = d.tags || [];
+  gridNode = el("div", { class: "fleet-cards" });
   redrawCards();
   nodes.push(gridNode);
 
@@ -127,12 +183,80 @@ export async function renderFleet(main) {
 function redrawCards() {
   if (!gridNode) return;
   const matched = lastCards.filter((c) => cardMatches(c, fleetFilter)).sort(SORTS[fleetSort] || SORTS.severity);
+
+  if (fleetGrouped && lastTags.length) {
+    mount(gridNode, renderGrouped(matched));
+    return;
+  }
+
   mount(
     gridNode,
     matched.length
-      ? matched.map(serverCard)
+      ? [el("div", { class: "grid" }, matched.map(serverCard))]
       : [el("div", { class: "muted", style: "padding:0.5rem", text: "No servers match “" + fleetFilter.trim() + "”." })]
   );
+}
+
+/* Renders the grouped (tree) view: DFS group headers each followed by a grid of their cards. Collapsing a
+   header hides its cards AND every descendant group via the hideBelow depth-gate, mirroring FleetView's
+   collapse-reveal (a collapsed tag hides its whole subtree). */
+function renderGrouped(matched) {
+  const groups = buildTagGroups(lastTags, matched, SORTS[fleetSort] || SORTS.severity);
+  if (!groups.length) {
+    return [el("div", { class: "muted", style: "padding:0.5rem", text: fleetFilter.trim() ? "No servers match “" + fleetFilter.trim() + "”." : "No tagged servers yet." })];
+  }
+
+  const nodes = [];
+  let hideBelow = Infinity;
+  for (const g of groups) {
+    if (g.depth > hideBelow) continue; // inside a collapsed ancestor's subtree
+    hideBelow = Infinity;
+    const collapsed = collapsedGroups.has(g.key);
+    nodes.push(groupHeader(g, collapsed));
+    if (collapsed) {
+      hideBelow = g.depth;
+      continue;
+    }
+    if (g.cards.length) {
+      nodes.push(el("div", { class: "grid tag-group-grid", style: "margin-left:" + (g.depth + 1) * GROUP_INDENT + "px" }, g.cards.map(serverCard)));
+    }
+  }
+  return nodes;
+}
+
+/** One collapsible tag-group header: chevron + name + (n) count, indented by tree depth. Click or Enter/Space
+    toggles it; the collapsed set persists client-side so it survives the 60s refresh and a reload. */
+function groupHeader(g, collapsed) {
+  const chevron = g.hasChildren ? (collapsed ? "▸" : "▾") : "";
+  const header = el(
+    "div",
+    {
+      class: "tag-group-header",
+      style: "margin-left:" + g.depth * GROUP_INDENT + "px",
+      role: "button",
+      tabindex: "0",
+      "aria-expanded": collapsed ? "false" : "true",
+    },
+    [
+      el("span", { class: "tag-group-chevron", text: chevron }),
+      el("span", { class: "tag-group-name", text: g.name }),
+      el("span", { class: "tag-group-count", text: g.cards.length ? "(" + g.cards.length + ")" : "" }),
+    ]
+  );
+  const toggle = () => {
+    if (collapsedGroups.has(g.key)) collapsedGroups.delete(g.key);
+    else collapsedGroups.add(g.key);
+    writeStored("darling.fleet.collapsed", JSON.stringify([...collapsedGroups]));
+    redrawCards();
+  };
+  header.addEventListener("click", toggle);
+  header.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      toggle();
+    }
+  });
+  return header;
 }
 
 function pageHead(d) {
@@ -140,6 +264,7 @@ function pageHead(d) {
     el("h2", { text: "Fleet Overview" }),
     el("div", { class: "spacer" }),
     d && d.total_servers ? searchControl() : null,
+    d && d.tags && d.tags.length ? groupControl() : null,
     d && d.total_servers ? sortControl() : null,
     d ? el("div", { class: "meta", text: "Updated " + localTime(d.generated_at) }) : null,
   ]);
@@ -151,8 +276,8 @@ function searchControl() {
   const input = el("input", {
     class: "search-input",
     type: "search",
-    placeholder: "server name",
-    "aria-label": "Filter servers by name",
+    placeholder: "server name / tag",
+    "aria-label": "Filter servers by name or tag",
   });
   input.value = fleetFilter;
   input.addEventListener("input", () => {
@@ -175,6 +300,19 @@ function sortControl() {
     redrawCards();
   });
   return el("label", { class: "sort-control" }, [el("span", { text: "Sort" }), sel]);
+}
+
+/** Toggles the grouped (tag-tree) view (#2020) — shown only when tags exist. Groups the fleet cards under a
+    nested, collapsible tag tree (then Untagged), the read-only web twin of the desktop sidebar. Persists. */
+function groupControl() {
+  const cb = el("input", { type: "checkbox", class: "group-toggle", "aria-label": "Group servers by tag" });
+  cb.checked = fleetGrouped;
+  cb.addEventListener("change", () => {
+    fleetGrouped = cb.checked;
+    writeStored("darling.fleet.grouped", fleetGrouped ? "1" : "0");
+    redrawCards();
+  });
+  return el("label", { class: "group-control" }, [cb, el("span", { text: "Group by tag" })]);
 }
 
 function rollup(d) {

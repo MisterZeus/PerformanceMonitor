@@ -96,6 +96,16 @@ FROM server_tag_map m
 JOIN server_tags t ON t.id = m.tag_id
 ORDER BY m.server_id, t.sort_order, lower(t.name)";
 
+    /// <summary>The full tag forest — every tag with its parent and colour — for the web fleet's read-only
+    /// tree/group rendering (#2020). Ordered by sort order then name so siblings render stably. Separate from the
+    /// per-server <see cref="FleetTagsSql"/> because the tree needs the WHOLE hierarchy: an organisational parent
+    /// tag with no directly-assigned servers must still nest its children correctly, exactly as the desktop
+    /// FleetView does (it is handed the whole tag list). $ none.</summary>
+    public const string FleetTagForestSql = @"
+SELECT id, name, parent_id, sort_order, colour
+FROM server_tags
+ORDER BY sort_order, lower(name)";
+
     /// <summary>Latest SQL + other-process CPU per server (newest ring-buffer sample). $ none.</summary>
     public const string FleetCpuSql = @"
 SELECT DISTINCT ON (server_id)
@@ -238,6 +248,7 @@ GROUP BY server_id, collector_name";
         var lastCollection = await ReadLastCollectionAsync(postgres, cancellationToken);
         var failingCollectors = await ReadFailingCollectorCountsAsync(postgres, now, cancellationToken);
         var tags = await ReadTagsAsync(postgres, cancellationToken);
+        var tagForest = await ReadTagForestAsync(postgres, cancellationToken);
 
         var cards = new List<FleetServerCard>(servers.Count);
         foreach (var server in servers)
@@ -255,7 +266,7 @@ GROUP BY server_id, collector_name";
             cards.Add(BuildCard(server, c, m, mp, t, b, deadlock, lastColl, collectors, serverTags, now));
         }
 
-        return BuildRollup(cards, now, windowStartUtc, windowEndUtc, worstCount);
+        return BuildRollup(cards, now, windowStartUtc, windowEndUtc, worstCount, tagForest);
     }
 
     /// <summary>Builds one pre-banded card from a server's raw cross-server reads (pure — the reduction the WPF
@@ -386,7 +397,8 @@ GROUP BY server_id, collector_name";
         DateTime now,
         DateTime windowStartUtc,
         DateTime windowEndUtc,
-        int worstCount = DefaultWorstCount)
+        int worstCount = DefaultWorstCount,
+        IReadOnlyList<FleetTagNode>? tags = null)
     {
         var healthy = 0;
         var warning = 0;
@@ -451,6 +463,7 @@ GROUP BY server_id, collector_name";
             WorstServers = worst,
             AdditionalProblemCount = Math.Max(0, problems.Count - worst.Count),
             Cards = cards,
+            Tags = tags ?? Array.Empty<FleetTagNode>(),
         };
     }
 
@@ -575,6 +588,26 @@ GROUP BY server_id, collector_name";
         }
 
         return map;
+    }
+
+    private static async Task<List<FleetTagNode>> ReadTagForestAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        var forest = new List<FleetTagNode>();
+        await using var command = postgres.CreateCommand(FleetTagForestSql);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            forest.Add(new FleetTagNode
+            {
+                Id = reader.GetInt32(0),
+                Name = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                ParentId = reader.IsDBNull(2) ? null : reader.GetInt32(2),
+                SortOrder = reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
+                Colour = reader.IsDBNull(4) ? null : reader.GetString(4),
+            });
+        }
+
+        return forest;
     }
 
     private static async Task<Dictionary<int, CpuRow>> ReadCpuAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
@@ -847,6 +880,18 @@ public sealed class FleetTag
     [JsonPropertyName("colour")] public string? Colour { get; init; }
 }
 
+/// <summary>One node in the fleet's tag forest — read-only, for the web tree/group rendering (#2020). Carries the
+/// hierarchy (<c>parent_id</c>, null at a root) and the ordering the desktop FleetView projects with; a
+/// <c>colour</c> of null renders as a neutral header, matching the pills.</summary>
+public sealed class FleetTagNode
+{
+    [JsonPropertyName("id")] public int Id { get; init; }
+    [JsonPropertyName("name")] public string Name { get; init; } = "";
+    [JsonPropertyName("parent_id")] public int? ParentId { get; init; }
+    [JsonPropertyName("sort_order")] public int SortOrder { get; init; }
+    [JsonPropertyName("colour")] public string? Colour { get; init; }
+}
+
 /// <summary>One entry in the fleet's worst-first "Needs attention" ranking.</summary>
 public sealed class FleetRankedServer
 {
@@ -877,4 +922,9 @@ public sealed class FleetOverviewResult
     [JsonPropertyName("additional_problem_count")] public int AdditionalProblemCount { get; init; }
     [JsonPropertyName("worst_servers")] public IReadOnlyList<FleetRankedServer> WorstServers { get; init; } = Array.Empty<FleetRankedServer>();
     [JsonPropertyName("cards")] public IReadOnlyList<FleetServerCard> Cards { get; init; } = Array.Empty<FleetServerCard>();
+
+    /// <summary>The full tag forest for the read-only web tree/group rendering (#2020) — every tag with its
+    /// parent, ordering, and colour, so the fleet page can group cards under a nested tag tree even when a parent
+    /// tag has no directly-assigned servers. Empty when no tags are defined. Assignment/editing stays desktop-only.</summary>
+    [JsonPropertyName("tags")] public IReadOnlyList<FleetTagNode> Tags { get; init; } = Array.Empty<FleetTagNode>();
 }
