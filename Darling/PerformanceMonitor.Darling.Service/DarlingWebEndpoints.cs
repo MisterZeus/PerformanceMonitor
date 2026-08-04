@@ -1143,6 +1143,7 @@ public static class DarlingWebEndpoints
 
             /* ── object / index stats (DarlingMcpObjectStatsTools) ── */
             ["get_database_sizes"] = R(CatObjects, "Per-database size breakdown.", PServer()),
+            ["get_pvs_stats"] = R(CatObjects, "ADR persistent version store state per database, with an optional top-5 size trend.", PServer(), PInt("trend_hours_back", 0)),
             ["get_index_usage"] = R(CatObjects, "Index usage (seeks/scans/updates) per index.", PServer()),
             ["get_object_locking"] = R(CatObjects, "Per-object locking/contention stats.", PServer()),
             ["get_table_index_sizes"] = R(CatObjects, "Per-table/index size breakdown.", PServer()),
@@ -1576,6 +1577,7 @@ public static class DarlingWebEndpoints
 
             /* ── object / index stats ── */
             ["get_database_sizes"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetDatabaseSizes(pg, Server(c)),
+            ["get_pvs_stats"] = (c, pg, an) => DarlingMcpPvsTools.GetPvsStats(pg, Server(c), QueryInt(c, "trend_hours_back", null, 0)),
             ["get_index_usage"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetIndexUsage(pg, Server(c)),
             ["get_object_locking"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetObjectLocking(pg, Server(c)),
             ["get_table_index_sizes"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetTableIndexSizes(pg, Server(c)),

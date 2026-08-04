@@ -448,6 +448,9 @@ public sealed class DarlingMcpHostService : BackgroundService
                    FORCE_LAST_GOOD_PLAN enablement, the one collected table that previously had no
                    agent-readable path at all. Twin registered in Lite's host. */
                 .WithGeminiCompatibleTools<DarlingMcpPlanCorrectionTools>()
+                /* #2029 get_pvs_stats — the ADR persistent version store, previously reachable only
+                   indirectly (alert knobs + compose measures). Twin registered in Lite's host. */
+                .WithGeminiCompatibleTools<DarlingMcpPvsTools>()
                 /* #1496 get_long_query_completions — the opt-in long-query completion trace (rpc/batch over
                    the duration threshold + attentions), over Darling's Postgres store (STORED read). */
                 .WithGeminiCompatibleTools<DarlingMcpLongQueryTools>()
