@@ -165,6 +165,7 @@
                         <Button x:Name="AddMultipleServersButton" Content="Add Multiple Servers…" Click="AddMultipleServersButton_Click" Margin="0,8,0,0"
                                 ToolTip="Paste a list of servers and add them all at once with shared credentials"/>
                         <Button x:Name="ManageServersButton" Content="Manage Servers" Click="ManageServersButton_Click" Margin="0,8,0,0"/>
+                        <Button x:Name="ManageTagsButton" Content="Manage Tags" Click="ManageTagsButton_Click" Margin="0,8,0,0"/>
                         <Button Click="OpenPlanViewerButton_Click" Margin="0,8,0,0"
                                 ToolTip="Open or paste an execution plan (independent of any server)">
                             <StackPanel Orientation="Horizontal">
@@ -300,6 +301,33 @@
                                                     </DockPanel>
                                                     <TextBlock Text="{Binding StatusDisplay}" Foreground="{Binding StatusBrush}"
                                                                FontSize="11" Margin="0,0,0,10"/>
+                                                    <!-- Tag pills (#2020 2b-i): the server's tags as coloured chips,
+                                                         collapsed when it has none so untagged cards are unchanged. -->
+                                                    <ItemsControl ItemsSource="{Binding TagPills}" Margin="0,0,0,10">
+                                                        <ItemsControl.Style>
+                                                            <Style TargetType="ItemsControl">
+                                                                <Style.Triggers>
+                                                                    <DataTrigger Binding="{Binding TagPills.Count}" Value="0">
+                                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                                    </DataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </ItemsControl.Style>
+                                                        <ItemsControl.ItemsPanel>
+                                                            <ItemsPanelTemplate>
+                                                                <WrapPanel/>
+                                                            </ItemsPanelTemplate>
+                                                        </ItemsControl.ItemsPanel>
+                                                        <ItemsControl.ItemTemplate>
+                                                            <DataTemplate>
+                                                                <Border Background="{Binding Fill}" CornerRadius="3"
+                                                                        Padding="6,1" Margin="0,0,4,4">
+                                                                    <TextBlock Text="{Binding Name}" FontSize="10"
+                                                                               Foreground="{Binding TextBrush}"/>
+                                                                </Border>
+                                                            </DataTemplate>
+                                                        </ItemsControl.ItemTemplate>
+                                                    </ItemsControl>
                                                     <Grid>
                                                         <Grid.ColumnDefinitions>
                                                             <ColumnDefinition Width="Auto"/>

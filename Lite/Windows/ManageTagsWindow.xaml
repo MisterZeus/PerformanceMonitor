@@ -1,0 +1,128 @@
+<Window x:Class="PerformanceMonitorLite.Windows.ManageTagsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Manage Tags"
+        Height="520" Width="740"
+        WindowStartupLocation="CenterOwner"
+        Icon="/EDD.ico"
+        ShowInTaskbar="False"
+        Background="{DynamicResource BackgroundDarkBrush}">
+    <Grid Margin="14">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Margin="0,0,0,10"
+                   Text="Organize your fleet into tags. Tags are folders in the sidebar; a server can carry any number of them. Nesting goes up to four levels. Deleting a tag never touches collected data."
+                   TextWrapping="Wrap"
+                   Foreground="{DynamicResource ForegroundMutedBrush}"/>
+
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="300"/>
+                <ColumnDefinition Width="12"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Left: the tag tree + its CRUD toolbar -->
+            <DockPanel Grid.Column="0">
+                <TextBlock DockPanel.Dock="Top" Text="Tags" FontWeight="Bold" Margin="0,0,0,6"
+                           Foreground="{DynamicResource ForegroundBrush}"/>
+                <!-- WrapPanel (not a single row): the fifth button pushes the toolbar past the 300px column,
+                     so let them flow to a second row rather than clip. -->
+                <WrapPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
+                    <Button x:Name="NewRootButton" Content="_New Tag" Width="78" Margin="0,0,6,6" Click="NewRoot_Click"/>
+                    <Button x:Name="NewChildButton" Content="New C_hild" Width="78" Margin="0,0,6,6" Click="NewChild_Click"/>
+                    <Button x:Name="RenameButton" Content="_Rename" Width="72" Margin="0,0,6,6" Click="Rename_Click"/>
+                    <Button x:Name="ColourButton" Content="_Colour…" Width="72" Margin="0,0,6,6" Click="Colour_Click"/>
+                    <Button x:Name="DeleteButton" Content="_Delete" Width="66" Margin="0,0,6,6" Click="Delete_Click"/>
+                </WrapPanel>
+                <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+                    <TreeView x:Name="TagTree"
+                              Background="{DynamicResource BackgroundBrush}"
+                              BorderThickness="0"
+                              SelectedItemChanged="TagTree_SelectedItemChanged">
+                        <TreeView.ItemTemplate>
+                            <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+                                <StackPanel Orientation="Horizontal">
+                                    <Border Width="11" Height="11" CornerRadius="2" Margin="0,0,6,0"
+                                            VerticalAlignment="Center"
+                                            Background="{Binding SwatchBrush}"
+                                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"/>
+                                    <TextBlock Text="{Binding Name}" Foreground="{DynamicResource ForegroundBrush}"/>
+                                </StackPanel>
+                            </HierarchicalDataTemplate>
+                        </TreeView.ItemTemplate>
+                        <TreeView.ItemContainerStyle>
+                            <Style TargetType="TreeViewItem">
+                                <Setter Property="IsExpanded" Value="True"/>
+                                <Setter Property="Foreground" Value="{DynamicResource ForegroundBrush}"/>
+                            </Style>
+                        </TreeView.ItemContainerStyle>
+                    </TreeView>
+                </Border>
+            </DockPanel>
+
+            <!-- Right: servers in the selected tag -->
+            <DockPanel Grid.Column="2">
+                <TextBlock x:Name="MembersHeader" DockPanel.Dock="Top"
+                           Text="Select a tag to assign servers" FontWeight="Bold" Margin="0,0,0,6"
+                           Foreground="{DynamicResource ForegroundBrush}"/>
+                <Grid DockPanel.Dock="Top" Margin="0,0,0,6">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBox x:Name="ServerFilterBox" Grid.Column="0"
+                             Padding="4" VerticalContentAlignment="Center"
+                             Background="{DynamicResource BackgroundBrush}"
+                             Foreground="{DynamicResource ForegroundBrush}"
+                             BorderBrush="{DynamicResource BorderBrush}"
+                             TextChanged="ServerFilterBox_TextChanged"/>
+                    <Button x:Name="CheckAllButton" Grid.Column="1" Content="_Add all" Width="66" Margin="6,0,0,0"
+                            Click="CheckAll_Click" IsEnabled="False"/>
+                    <Button x:Name="UncheckAllButton" Grid.Column="2" Content="Re_move all" Width="82" Margin="6,0,0,0"
+                            Click="UncheckAll_Click" IsEnabled="False"/>
+                </Grid>
+                <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+                    <ListBox x:Name="ServerCheckList"
+                             Background="{DynamicResource BackgroundBrush}"
+                             BorderThickness="0"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                        <ListBox.ItemContainerStyle>
+                            <Style TargetType="ListBoxItem">
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                                <Setter Property="Background" Value="Transparent"/>
+                            </Style>
+                        </ListBox.ItemContainerStyle>
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <!-- Label is a nested TextBlock, not Content: a CheckBox's ContentPresenter
+                                     parses a single "_" in a bound string as an access-key marker, which
+                                     would eat the underscore out of a server name like SQL_PROD_01 and
+                                     claim Alt+P. TextBlock.Text does not parse access keys. -->
+                                <CheckBox IsChecked="{Binding IsChecked, Mode=TwoWay}"
+                                          Foreground="{DynamicResource ForegroundBrush}"
+                                          Margin="4,2"
+                                          Click="ServerCheck_Click">
+                                    <TextBlock Text="{Binding DisplayName}"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                </CheckBox>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </Border>
+            </DockPanel>
+        </Grid>
+
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <!-- IsCancel keeps Esc closing the window; IsDefault is gone because Enter in the server
+                 filter box would have closed the window mid-filter, which is the same Enter-from-a-
+                 half-filled-form surprise #1828 declined (#1859). -->
+            <Button Content="_Close" Width="80" IsCancel="True" Click="Close_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>

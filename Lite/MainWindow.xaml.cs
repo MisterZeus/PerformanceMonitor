@@ -663,6 +663,8 @@ public partial class MainWindow : Window
         OverviewSortToolbar.Visibility = servers.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
         if (servers.Count == 0) return;
 
+        await LoadServerTagsAsync();
+
         try
         {
             var summaries = new List<ServerSummaryItem>();
@@ -688,6 +690,7 @@ public partial class MainWindow : Window
                 }
             }
 
+            StampTagPills(summaries);
             _overviewSummaries = summaries;
             ApplyOverviewView();
 
@@ -769,18 +772,88 @@ public partial class MainWindow : Window
     /// in-memory pass, so running it per keystroke is fine.</summary>
     private void OverviewSearchBox_TextChanged(object sender, TextChangedEventArgs e) => ApplyOverviewView();
 
-    /// <summary>Projects <see cref="_overviewSummaries"/> to the cards: filter by the search box (name), then
-    /// sort by the current mode. The single place both controls funnel through, so filter and sort always
-    /// compose the same way regardless of which the user touched last.</summary>
+    /// <summary>Projects <see cref="_overviewSummaries"/> to the cards: filter by the search box (name AND tag
+    /// names), then sort by the current mode. The single place both controls funnel through, so filter and
+    /// sort always compose the same way regardless of which the user touched last.</summary>
     private void ApplyOverviewView()
     {
         var filtered = _overviewSummaries
-            .Where(s => ServerOverviewFilter.Matches(OverviewSearchBox?.Text, s.DisplayName, s.ServerName))
+            .Where(s => ServerOverviewFilter.Matches(OverviewSearchBox?.Text, SearchFields(s)))
             .ToList();
 
         OverviewItemsControl.ItemsSource = ServerOverviewSort.Order(
             filtered, App.OverviewSortMode,
             s => s.CpuPercentForAlert, s => s.DisplayName, s => s.ServerId);
+    }
+
+    /// <summary>The fields a search term matches against for a card: its display and instance names, plus each
+    /// of its tag names — so typing "prod" finds both <c>sql-prod-01</c> and every server tagged Production,
+    /// the same rule the viewer's sidebar uses.</summary>
+    private static string?[] SearchFields(ServerSummaryItem s)
+    {
+        var fields = new List<string?> { s.DisplayName, s.ServerName };
+        fields.AddRange(s.TagPills.Select(p => p.Name));
+        return fields.ToArray();
+    }
+
+    // ── Tags on the Overview (#2020 2b-i) ─────────────────────────────────────────────────────────────
+
+    private List<ServerTag> _tags = new();
+
+    /// <summary>serverId → the set of tag ids assigned to it, for pill stamping and tag-name search.</summary>
+    private Dictionary<int, HashSet<int>> _serverTagIds = new();
+
+    /// <summary>Loads the fleet tags + assignments into memory (for the Overview pills and tag search). Cheap
+    /// — a couple of small reads — so it runs each Overview refresh to stay current with edits.</summary>
+    private async Task LoadServerTagsAsync()
+    {
+        if (_dataService == null) return;
+
+        try
+        {
+            _tags = await _dataService.GetServerTagsAsync();
+            var assignments = await _dataService.GetServerTagAssignmentsAsync();
+
+            var map = new Dictionary<int, HashSet<int>>();
+            foreach (var a in assignments)
+            {
+                if (!map.TryGetValue(a.ServerId, out var set))
+                {
+                    set = new HashSet<int>();
+                    map[a.ServerId] = set;
+                }
+                set.Add(a.TagId);
+            }
+            _serverTagIds = map;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Info("Tags", $"Failed to load fleet tags: {ex.Message}");
+        }
+    }
+
+    /// <summary>Attaches each server's tags (as coloured pills) to its Overview summary, joining the loaded tag
+    /// list. Ordered by tag name so a card is stable; a server with no tags keeps its empty default.</summary>
+    private void StampTagPills(IReadOnlyList<ServerSummaryItem> summaries)
+    {
+        if (_tags.Count == 0 || _serverTagIds.Count == 0) return;
+
+        var tagById = _tags.ToDictionary(t => t.Id);
+        foreach (var summary in summaries)
+        {
+            if (!_serverTagIds.TryGetValue(summary.ServerId, out var tagIds) || tagIds.Count == 0)
+            {
+                summary.TagPills = Array.Empty<ServerTagPill>();
+                continue;
+            }
+
+            summary.TagPills = tagIds
+                .Select(id => tagById.TryGetValue(id, out var tag) ? tag : null)
+                .Where(t => t is not null)
+                .OrderBy(t => t!.Name, StringComparer.OrdinalIgnoreCase)
+                .Select(t => new ServerTagPill(t!.Name, t!.Colour))
+                .ToList();
+        }
     }
 
     private async void ConnectToServer(ServerConnection server)
@@ -1237,6 +1310,23 @@ public partial class MainWindow : Window
             }
 
             RefreshServerList();
+        }
+    }
+
+    private async void ManageTagsButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_dataService == null)
+        {
+            return;
+        }
+
+        var dialog = new PerformanceMonitorLite.Windows.ManageTagsWindow(
+            _dataService, _serverManager.GetAllServers()) { Owner = this };
+        dialog.ShowDialog();
+
+        if (dialog.ChangedAny)
+        {
+            await RefreshOverviewAsync();
         }
     }
 
