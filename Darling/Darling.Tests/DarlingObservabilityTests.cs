@@ -521,6 +521,27 @@ public sealed class DarlingObservabilityTests
     }
 
     /// <summary>
+    /// The DELETED-server half of the mirror (#2030). The enable/cost sync is an inner join on the config
+    /// row, so a server REMOVED from the desired config kept its last observed is_enabled forever and stayed
+    /// on the web dashboard as a ghost. This pin holds the orphan sweep to its three load-bearing choices: it
+    /// DISABLES (never deletes — the row anchors un-aged collected history and a re-add under the same
+    /// storage name resumes the identity), it matches on NOT EXISTS against the desired config, and it only
+    /// touches rows still flagged enabled (idempotent re-runs are free). Pure SQL-shape pin (no store).
+    /// </summary>
+    [Fact]
+    public void DisableOrphanedServersSql_DisablesNotDeletes_OnNotExistsAgainstDesiredConfig()
+    {
+        var sql = DarlingObservability.DisableOrphanedServersSql;
+
+        Assert.Contains("UPDATE collect.servers", sql, StringComparison.Ordinal);
+        Assert.Contains("SET is_enabled = FALSE", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("DELETE", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("WHERE s.is_enabled", sql, StringComparison.Ordinal);
+        Assert.Contains("NOT EXISTS", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM config.config_monitored_servers c WHERE c.server_id = s.server_id", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The analysis-state marker write (V19) is an UPSERT on the natural server_id key over the four marker
     /// columns, so a re-run for a server overwrites its prior determination rather than accumulating rows.
     /// Bare <c>analysis_state</c> resolves through the collect/config search path to collect.analysis_state
