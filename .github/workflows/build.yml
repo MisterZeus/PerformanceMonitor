@@ -728,3 +728,64 @@ jobs:
             ${{ runner.temp }}/darling-pg.log
             TestResults/
           if-no-files-found: ignore
+
+  # ── Linux service build + container image (#1804) ────────────────────────────────────────────────
+  # The Darling service is cross-platform .NET on purpose, but until this job nothing PROVED it on
+  # every PR — the linux-x64 publish and the container image both built for the first time at release
+  # time or never. Same path-filter shape as darling-pg above: only runs the expensive work when
+  # Darling/service code (or this workflow, or the Dockerfile) changed, always reports a result so it
+  # can be a required check. No tests run here — the test projects are net10.0-windows (they reference
+  # the WPF apps); the cross-platform behavior they pin is exercised by the Windows jobs, and the
+  # container smoke lives in the compose quickstart. This job answers exactly two questions: does the
+  # service still publish for linux-x64, and does the image still build.
+  darling-linux:
+    name: Darling Linux build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Detect changed paths
+        id: filter
+        if: github.event_name != 'release'
+        uses: dorny/paths-filter@v4
+        with:
+          base: ${{ github.event_name == 'push' && github.event.before || '' }}
+          filters: |
+            darling:
+              - 'Darling/**/!(*.md)'
+              - 'PerformanceMonitor.Common/**'
+              - 'PerformanceMonitor.Collectors/**'
+              - 'PerformanceMonitor.Analysis/**'
+              - '.github/workflows/build.yml'
+
+      - name: Report the Linux gate decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "::notice title=Darling Linux build skipped::Release event - the dev push that produced this commit already ran it."
+          elif [ "${{ steps.filter.outputs.darling }}" = "true" ]; then
+            echo "::notice title=Darling Linux build running::Darling/service code (or this workflow) changed."
+          else
+            echo "::notice title=Darling Linux build skipped::No Darling/service code changed."
+          fi
+
+      - name: Setup .NET 10.0
+        if: steps.filter.outputs.darling == 'true'
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      - name: Publish service (linux-x64)
+        if: steps.filter.outputs.darling == 'true'
+        run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -r linux-x64 --self-contained false -o publish/DarlingService-linux
+
+      - name: Build container image
+        if: steps.filter.outputs.darling == 'true'
+        run: docker build -f Darling/Dockerfile -t performancemonitor-darling:pr .

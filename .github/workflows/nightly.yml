@@ -14,6 +14,8 @@ on:
 
 permissions:
   contents: write
+  # #1804: the linux job pushes the nightly container image to ghcr.
+  packages: write
 
 jobs:
   # Scheduled workflows always execute the DEFAULT branch's copy of this file, while nightly
@@ -389,3 +391,66 @@ jobs:
             ${{ runner.temp }}/darling-pg.log
             TestResults/
           if-no-files-found: ignore
+
+  # ── Linux artifact + container image (#1804) ─────────────────────────────────────────────────────
+  # Runs AFTER the windows build job so the nightly release exists to upload into. Publishes the
+  # linux-x64 service tar.gz with its own checksum file (the windows job owns SHA256SUMS.txt; a
+  # cross-job rewrite of one file is a race), and pushes the service image to ghcr tagged :nightly.
+  # The bundled pg-runtime is deliberately absent from the linux artifact — the compose distribution
+  # pairs the service with the official timescale/timescaledb image, and managed mode stays Windows.
+  linux:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: dev
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      - name: Set nightly version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=$(grep -oPm1 '(?<=<Version>)[^<]+' Lite/PerformanceMonitorLite.csproj)
+          date=$(date +%Y%m%d)
+          echo "VERSION=${base}-nightly.${date}" >> "$GITHUB_OUTPUT"
+          echo "Nightly version: ${base}-nightly.${date}"
+
+      - name: Publish service (linux-x64)
+        run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -r linux-x64 --self-contained false -o publish/DarlingService-linux
+
+      - name: Package linux artifact + checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.VERSION }}"
+          mkdir -p releases
+          tar -C publish/DarlingService-linux -czf "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz" .
+          (cd releases && sha256sum "PerformanceMonitorDarling-linux-x64-${version}.tar.gz" > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt)
+
+      - name: Upload linux artifact to the nightly release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload nightly releases/PerformanceMonitorDarling-linux-x64-*.tar.gz releases/SHA256SUMS-linux.txt --clobber
+
+      - name: Build and push container image (ghcr, :nightly)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.VERSION }}"
+          image="ghcr.io/${{ github.repository_owner }}/performancemonitor-darling"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker build -f Darling/Dockerfile -t "${image}:nightly" -t "${image}:${version}" .
+          docker push "${image}:nightly"
+          docker push "${image}:${version}"
