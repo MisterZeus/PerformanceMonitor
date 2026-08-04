@@ -35,6 +35,19 @@ public partial class App : Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        /* #2005: the headless --test flag runs the #1954 connection self-test (provenance block + the
+           six-layer ladder) to the console and the log, then exits with 0/1 — no window, no theme, no
+           single-instance dance (a diagnostics run must not surface or fight the running viewer).
+           Blocking here is fine: nothing UI exists yet, and Shutdown before base.OnStartup prevents
+           StartupUri from ever creating MainWindow (the second-instance pattern below). */
+        if (HeadlessSelfTest.IsRequested(e.Args))
+        {
+            var exitCode = HeadlessSelfTest.RunAsync(HeadlessSelfTest.ExplicitConfigPath(e.Args))
+                .GetAwaiter().GetResult();
+            Shutdown(exitCode);
+            return;
+        }
+
         /* Apply the saved color theme through ThemeManager (App.xaml merges Dark as the design-time
            default) so ThemeManager owns the app-level merged dictionary at runtime, before StartupUri
            creates MainWindow. Reads the viewer-local settings directly (cheap JSON read) so the very
