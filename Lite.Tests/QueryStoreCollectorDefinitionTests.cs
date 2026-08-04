@@ -1033,11 +1033,11 @@ public sealed class QueryStoreCollectorDefinitionTests
             async () => await QueryStoreCollector.Instance.ReadAsync(reader, context, CancellationToken.None));
     }
 
-    /// <summary>One reader row shaped to the 55-ordinal payload contract both paths select.</summary>
     /// <summary>
-    /// One 55-ordinal reader row. <paramref name="lastExecRaw"/> overrides last_execution_time
-    /// (ordinal 4) for the #1960 boundary tests — pass a <see cref="DateTimeOffset"/> or
-    /// <see cref="DBNull.Value"/>; null keeps the standard 11:00Z.
+    /// One reader row shaped to the 55-ordinal payload contract both paths select.
+    /// <paramref name="lastExecRaw"/> overrides last_execution_time (ordinal 4) for the #1960
+    /// boundary tests — pass a <see cref="DateTimeOffset"/> or <see cref="DBNull.Value"/>;
+    /// null keeps the standard 11:00Z.
     /// </summary>
     private static object[] MakeReaderRow(long queryId, string sqlText, object? lastExecRaw = null)
     {
