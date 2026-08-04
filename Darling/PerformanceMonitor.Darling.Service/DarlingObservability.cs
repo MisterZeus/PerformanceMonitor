@@ -59,6 +59,23 @@ WHERE s.server_id = c.server_id
   AND (s.is_enabled IS DISTINCT FROM c.is_enabled
        OR s.monthly_cost_usd IS DISTINCT FROM c.monthly_cost_usd);";
 
+    /* The DELETED-server half of the mirror (#2030): the sync above is an inner join on the config row, so a
+       server REMOVED from config_monitored_servers (not merely disabled) kept its last observed is_enabled —
+       almost always TRUE — forever, and every reader that scopes to `WHERE is_enabled` (the web dashboard's
+       /api/fleet card list, get_fleet_overview, the fleet Collection-Health aggregate, FinOps) showed the
+       ghost indefinitely. An observed row with NO desired row flips to disabled here. Deliberately an UPDATE,
+       never a DELETE: the row anchors whatever collected history retention has not yet aged out, and a
+       re-added server (same storage name ⇒ same server_id) gets flipped back by the sync above on the next
+       reload, resuming under its old identity. The fleet sentinel (server_id 0) is never registered in
+       collect.servers, so it cannot match. Internal so a pure test can pin the SHAPE. */
+    internal const string DisableOrphanedServersSql = @"
+UPDATE collect.servers s
+SET is_enabled = FALSE,
+    modified_date = (now() AT TIME ZONE 'UTC')
+WHERE s.is_enabled
+  AND NOT EXISTS
+      (SELECT 1 FROM config.config_monitored_servers c WHERE c.server_id = s.server_id);";
+
     private const string InsertCollectionLogSql = @"
 INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);";
@@ -131,19 +148,32 @@ ON CONFLICT (server_id) DO UPDATE SET
     /// <c>is_enabled</c> and <c>monthly_cost_usd</c>. So a control-plane <c>disable_server</c> flips the
     /// observed row to FALSE even though the disabled server stops upserting (a later <c>enable_server</c>
     /// flips it back), and a cost-only edit reaches the FinOps display through this reload sync with NO
-    /// disconnect+reconnect. Runs on each control-plane reload. Failure-isolated (Debug + no-op) like the
-    /// other observability writes.
+    /// disconnect+reconnect. A server DELETED from the desired config is handled by the second statement
+    /// (#2030): its orphaned observed row flips to disabled, so it leaves the web dashboard and every other
+    /// <c>WHERE is_enabled</c> reader instead of lingering as a ghost. Runs on each control-plane reload.
+    /// Failure-isolated (Debug + no-op) like the other observability writes.
     /// </summary>
     public static async Task SyncServerEnabledStatesAsync(NpgsqlDataSource postgres, ILogger? logger, CancellationToken cancellationToken)
     {
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand(SyncEnabledStatesSql, connection);
-            var changed = await command.ExecuteNonQueryAsync(cancellationToken);
-            if (changed > 0)
+            using (var command = new NpgsqlCommand(SyncEnabledStatesSql, connection))
             {
-                logger?.LogInformation("Synced observed enable-state/cost for {Count} server(s) from the desired config", changed);
+                var changed = await command.ExecuteNonQueryAsync(cancellationToken);
+                if (changed > 0)
+                {
+                    logger?.LogInformation("Synced observed enable-state/cost for {Count} server(s) from the desired config", changed);
+                }
+            }
+
+            using (var command = new NpgsqlCommand(DisableOrphanedServersSql, connection))
+            {
+                var orphaned = await command.ExecuteNonQueryAsync(cancellationToken);
+                if (orphaned > 0)
+                {
+                    logger?.LogInformation("Disabled {Count} observed server(s) no longer present in the desired config (removed from monitoring; collected history stays until retention ages it out)", orphaned);
+                }
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
