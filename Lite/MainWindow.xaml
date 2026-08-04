@@ -65,28 +65,52 @@
                             <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
 
-                        <!-- Status Indicator -->
-                        <Ellipse Grid.Column="0" Grid.RowSpan="2"
-                                 Width="10" Height="10"
-                                 Margin="0,0,8,0"
-                                 VerticalAlignment="Center">
-                            <Ellipse.Style>
-                                <Style TargetType="Ellipse">
-                                    <Setter Property="Fill" Value="{DynamicResource ForegroundMutedBrush}"/>
-                                    <Style.Triggers>
-                                        <DataTrigger Binding="{Binding Server.Connection.DotStatus}" Value="Online">
-                                            <Setter Property="Fill" Value="{DynamicResource SuccessBrush}"/>
-                                        </DataTrigger>
-                                        <DataTrigger Binding="{Binding Server.Connection.DotStatus}" Value="Offline">
-                                            <Setter Property="Fill" Value="{DynamicResource ErrorBrush}"/>
-                                        </DataTrigger>
-                                        <DataTrigger Binding="{Binding Server.Connection.DotStatus}" Value="Warning">
-                                            <Setter Property="Fill" Value="{DynamicResource WarningBrush}"/>
-                                        </DataTrigger>
-                                    </Style.Triggers>
-                                </Style>
-                            </Ellipse.Style>
-                        </Ellipse>
+                        <!-- Status dot (collection freshness) + the muted-bell silence indicator
+                             (#2031: a silenced server must not look healthy-quiet). -->
+                        <StackPanel Grid.Column="0" Grid.RowSpan="2"
+                                    Orientation="Horizontal" VerticalAlignment="Center">
+                            <Ellipse Width="10" Height="10"
+                                     Margin="0,0,8,0"
+                                     VerticalAlignment="Center">
+                                <Ellipse.Style>
+                                    <Style TargetType="Ellipse">
+                                        <Setter Property="Fill" Value="{DynamicResource ForegroundMutedBrush}"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Server.Connection.DotStatus}" Value="Online">
+                                                <Setter Property="Fill" Value="{DynamicResource SuccessBrush}"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding Server.Connection.DotStatus}" Value="Offline">
+                                                <Setter Property="Fill" Value="{DynamicResource ErrorBrush}"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding Server.Connection.DotStatus}" Value="Warning">
+                                                <Setter Property="Fill" Value="{DynamicResource WarningBrush}"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Ellipse.Style>
+                            </Ellipse>
+                            <!-- A greyed vector bell with a slash (never an emoji), shown only while a
+                                 whole-server alert silence is active. -->
+                            <Viewbox Width="11" Height="11" Margin="0,0,6,0" VerticalAlignment="Center"
+                                     ToolTip="Alerts silenced for this server">
+                                <Viewbox.Style>
+                                    <Style TargetType="Viewbox">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Server.Connection.IsSilenced}" Value="True">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Viewbox.Style>
+                                <Grid Width="24" Height="24">
+                                    <Path Fill="{DynamicResource ForegroundMutedBrush}"
+                                          Data="M12,2 C10.9,2 10,2.9 10,4 L10,4.29 C7.12,5.14 5,7.83 5,11 L5,17 L3,19 L3,20 L21,20 L21,19 L19,17 L19,11 C19,7.83 16.88,5.14 14,4.29 L14,4 C14,2.9 13.1,2 12,2 Z M10,21 A2,2 0 0,0 14,21 Z"/>
+                                    <Line X1="3" Y1="3" X2="21" Y2="21"
+                                          Stroke="{DynamicResource ForegroundMutedBrush}" StrokeThickness="2.4"/>
+                                </Grid>
+                            </Viewbox>
+                        </StackPanel>
 
                         <!-- Server Name -->
                         <TextBlock Grid.Column="1" Grid.Row="0"
@@ -387,10 +411,33 @@
                                             <Grid>
                                                 <StackPanel Margin="16">
                                                     <DockPanel Margin="0,0,0,4">
+                                                        <!-- Muted-bell silence indicator (#2031) + status dot, mirroring the sidebar row -->
+                                                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                                                            <Viewbox Width="12" Height="12" Margin="0,0,6,0" VerticalAlignment="Center"
+                                                                     ToolTip="Alerts silenced for this server">
+                                                                <Viewbox.Style>
+                                                                    <Style TargetType="Viewbox">
+                                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                                        <Style.Triggers>
+                                                                            <DataTrigger Binding="{Binding IsSilenced}" Value="True">
+                                                                                <Setter Property="Visibility" Value="Visible"/>
+                                                                            </DataTrigger>
+                                                                        </Style.Triggers>
+                                                                    </Style>
+                                                                </Viewbox.Style>
+                                                                <Grid Width="24" Height="24">
+                                                                    <Path Fill="{DynamicResource ForegroundMutedBrush}"
+                                                                          Data="M12,2 C10.9,2 10,2.9 10,4 L10,4.29 C7.12,5.14 5,7.83 5,11 L5,17 L3,19 L3,20 L21,20 L21,19 L19,17 L19,11 C19,7.83 16.88,5.14 14,4.29 L14,4 C14,2.9 13.1,2 12,2 Z M10,21 A2,2 0 0,0 14,21 Z"/>
+                                                                    <Line X1="3" Y1="3" X2="21" Y2="21"
+                                                                          Stroke="{DynamicResource ForegroundMutedBrush}" StrokeThickness="2.4"/>
+                                                                </Grid>
+                                                            </Viewbox>
+                                                            <Ellipse Width="10" Height="10" Fill="{Binding StatusBrush}"
+                                                                     VerticalAlignment="Center"/>
+                                                        </StackPanel>
                                                         <TextBlock Text="{Binding DisplayName}" FontSize="16" FontWeight="SemiBold"
+                                                                   TextTrimming="CharacterEllipsis"
                                                                    Foreground="{DynamicResource ForegroundBrush}"/>
-                                                        <Ellipse Width="10" Height="10" Fill="{Binding StatusBrush}"
-                                                                 HorizontalAlignment="Right" VerticalAlignment="Center"/>
                                                     </DockPanel>
                                                     <TextBlock Text="{Binding StatusDisplay}" Foreground="{Binding StatusBrush}"
                                                                FontSize="11" Margin="0,0,0,10"/>
