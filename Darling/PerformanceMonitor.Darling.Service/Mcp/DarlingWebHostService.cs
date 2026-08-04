@@ -245,7 +245,7 @@ public sealed class DarlingWebHostService : BackgroundService
     /// the --configure-network wizard validates candidate web blocks through the SAME resolver the host
     /// fail-closes on (#1617), exactly as the wizard's MCP path calls ResolveMcpBind.
     /// </summary>
-    internal static DarlingHostBinding.BindDecision ResolveWebBind(WebConfig web, bool managed)
+    internal static DarlingHostBinding.BindDecision ResolveWebBind(WebConfig web, bool managed, bool? inContainer = null)
     {
         var network = web.Network;
         return DarlingHostBinding.ResolveBind(
@@ -254,7 +254,9 @@ public sealed class DarlingWebHostService : BackgroundService
             tokenPresent: network is not null
                 && (!string.IsNullOrWhiteSpace(network.EncryptedToken) || !string.IsNullOrWhiteSpace(network.Token)),
             networkConfigured: network is { IsConfigured: true },
-            managed: managed);
+            managed: managed,
+            /* #1804: tests pass this explicitly; the running host takes the ambient container marker. */
+            inContainer: inContainer ?? DarlingHostBinding.IsRunningInContainer);
     }
 
     /// <summary>
@@ -799,8 +801,8 @@ public sealed class DarlingWebHostService : BackgroundService
 
             case DarlingHostBinding.BindReason.ManagedModeRequired:
                 _logger.Log(level.Value,
-                    "web.network.* is set but postgres.managed = false — web dashboard network exposure is managed-mode only and is " +
-                    "ignored; your own reverse proxy governs BYO exposure. Binding loopback-only.");
+                    "web.network.* is set but postgres.managed = false — web dashboard network exposure is managed-mode (or container, " +
+                    "#1804) only and is ignored; your own reverse proxy governs uncontained BYO exposure. Binding loopback-only.");
                 break;
 
             default:

@@ -53,7 +53,10 @@ internal static class DarlingHostBinding
         /// <summary>All preconditions met: non-loopback listen + managed + token present + valid allowFrom CIDR.</summary>
         NetworkExposed,
 
-        /// <summary>network.* is set but postgres.managed = false — network exposure is managed-mode only (a warning).</summary>
+        /// <summary>network.* is set but postgres.managed = false and the process is not containerized —
+        /// network exposure is managed-mode-or-container only (a warning). In a container (#1804) the
+        /// compose port mapping is the boundary the BYO reverse-proxy rule was standing in for, and a
+        /// loopback bind would be unreachable through it, so exposure is honored there.</summary>
         ManagedModeRequired,
 
         /// <summary>Exposed + managed but the listen value is not a parseable IP — fail-closed to loopback.</summary>
@@ -70,6 +73,19 @@ internal static class DarlingHostBinding
     internal readonly record struct BindDecision(BindMode Mode, BindReason Reason);
 
     /// <summary>
+    /// Whether this process runs inside a container (#1804) — the official .NET images set
+    /// <c>DOTNET_RUNNING_IN_CONTAINER=true</c>, and the Dockerfile shipped with the compose distribution
+    /// rides those images. IMPURE (environment read), which is why it lives beside — never inside — the
+    /// pure <see cref="ResolveBind"/> ladder: the callers read it once and pass it in, so the decision
+    /// table stays testable without environment games.
+    /// </summary>
+    internal static bool IsRunningInContainer
+        => string.Equals(
+            Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER"),
+            "true",
+            StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// PURE resolution of an effective host bind from the surface-agnostic inputs. Returns
     /// <see cref="BindMode.NetworkAndLoopback"/> ONLY when <paramref name="listen"/> is a genuine network
     /// (non-loopback) address (via <see cref="DarlingNetwork.IsExposedListenAddress"/> — so <c>127.0.0.1</c>
@@ -81,15 +97,21 @@ internal static class DarlingHostBinding
     /// the BYO "network.* is ignored" notice (the network path never runs in BYO).
     /// </summary>
     internal static BindDecision ResolveBind(
-        string? listen, string? allowFrom, bool tokenPresent, bool networkConfigured, bool managed)
+        string? listen, string? allowFrom, bool tokenPresent, bool networkConfigured, bool managed,
+        bool inContainer = false)
     {
         var exposed = DarlingNetwork.IsExposedListenAddress(listen);
+
+        /* #1804: a containerized BYO deployment (compose) is exposure-capable — the port mapping is the
+           boundary the BYO reverse-proxy rule was standing in for, and a loopback bind would be dead
+           through it. The token/CIDR preconditions below apply identically either way. */
+        var exposureCapable = managed || inContainer;
 
         if (!exposed)
         {
             /* Not exposed = the secure default. The one exception worth a word: a BYO store with a network
                block set at all (even a loopback/partial one) is ignored -> the managed-mode notice. */
-            if (!managed && networkConfigured)
+            if (!exposureCapable && networkConfigured)
             {
                 return new BindDecision(BindMode.LoopbackOnly, BindReason.ManagedModeRequired);
             }
@@ -97,9 +119,10 @@ internal static class DarlingHostBinding
             return new BindDecision(BindMode.LoopbackOnly, BindReason.LoopbackByDefault);
         }
 
-        /* Exposed. Managed-mode only: BYO never binds the network path, and this dominates a missing/invalid
-           listen/token/allowFrom so the operator sees the actionable "managed only" notice first. */
-        if (!managed)
+        /* Exposed. Managed-or-container only: uncontained BYO never binds the network path, and this
+           dominates a missing/invalid listen/token/allowFrom so the operator sees the actionable
+           "managed only" notice first. */
+        if (!exposureCapable)
         {
             return new BindDecision(BindMode.LoopbackOnly, BindReason.ManagedModeRequired);
         }
