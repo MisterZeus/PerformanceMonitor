@@ -21,7 +21,8 @@ namespace Lite.Tests;
 /// Pins the parity contract of the extracted query_stats definition: the full row-identity delta
 /// key (sql_handle:start:end:plan_handle — the multi-statement cross-contamination fix), the
 /// interval-captured worker delta feeding sample_interval_seconds, the two query variants, and
-/// the 50-column payload with the query_plan_xml placeholder.
+/// the 51-column payload with the query_plan_xml placeholder and the trailing host_object_name
+/// (#2012 stage 2).
 /// </summary>
 public sealed class QueryStatsCollectorDefinitionTests
 {
@@ -164,25 +165,28 @@ public sealed class QueryStatsCollectorDefinitionTests
         var deltas = new RecordingCollectorDeltaCalculator();
         var context = MakeContext(deltas: deltas, capturePlanXml: true);
 
-        /* Flag on = the SELECT carries the trailing query_plan_xml column at ordinal 42. */
-        var row43 = new object[43];
-        row43[0] = "SO"; row43[1] = "0xQH"; row43[2] = "0xQPH";
-        row43[3] = new DateTime(2026, 7, 2, 1, 0, 0, DateTimeKind.Utc);
-        row43[4] = new DateTime(2026, 7, 2, 2, 0, 0, DateTimeKind.Utc);
-        for (int i = 5; i < 36; i++) row43[i] = (long)i;
-        row43[22] = 4L; row43[23] = 8L;
-        row43[36] = "0xSH"; row43[37] = "0xPH"; row43[38] = "SELECT 1";
-        row43[39] = 3L; row43[40] = 66; row43[41] = 512;
-        row43[42] = "<ShowPlanXML>captured</ShowPlanXML>";
+        /* Flag on = the SELECT carries host_object_name at ordinal 42 (#2012 stage 2) and the
+           trailing query_plan_xml column at ordinal 43. */
+        var row44 = new object[44];
+        row44[0] = "SO"; row44[1] = "0xQH"; row44[2] = "0xQPH";
+        row44[3] = new DateTime(2026, 7, 2, 1, 0, 0, DateTimeKind.Utc);
+        row44[4] = new DateTime(2026, 7, 2, 2, 0, 0, DateTimeKind.Utc);
+        for (int i = 5; i < 36; i++) row44[i] = (long)i;
+        row44[22] = 4L; row44[23] = 8L;
+        row44[36] = "0xSH"; row44[37] = "0xPH"; row44[38] = "SELECT 1";
+        row44[39] = 3L; row44[40] = 66; row44[41] = 512;
+        row44[42] = "dbo.HostProc";
+        row44[43] = "<ShowPlanXML>captured</ShowPlanXML>";
 
-        using var reader = new FakeCollectorDataReader(row43);
+        using var reader = new FakeCollectorDataReader(row44);
         var rows = await QueryStatsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
 
         var writer = new RecordingCollectorRowWriter();
         QueryStatsCollector.Instance.WritePayload(Assert.Single(rows), writer, context);
 
-        Assert.Equal(50, writer.Values.Count);
+        Assert.Equal(51, writer.Values.Count);
         Assert.Equal("<ShowPlanXML>captured</ShowPlanXML>", writer.Values[37]);   /* query_plan_xml payload slot */
+        Assert.Equal("dbo.HostProc", writer.Values[50]);                          /* host_object_name payload slot */
     }
 
     private static string Collapse(string sql) => Regex.Replace(sql, @"\s+", "");
@@ -225,13 +229,15 @@ public sealed class QueryStatsCollectorDefinitionTests
     }
 
     [Fact]
-    public void PayloadColumns_MatchSchemaOrder_50Columns()
+    public void PayloadColumns_MatchSchemaOrder_51Columns()
     {
         var names = QueryStatsCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray();
-        Assert.Equal(50, names.Length);
+        Assert.Equal(51, names.Length);
         Assert.Equal("database_name", names[0]);
         Assert.Equal("query_plan_xml", names[37]);
         Assert.Equal("sample_interval_seconds", names[49]);
+        /* #2012 stage 2: appended LAST — append-only keeps every earlier ordinal stable. */
+        Assert.Equal("host_object_name", names[50]);
     }
 
     [Fact]
@@ -240,24 +246,26 @@ public sealed class QueryStatsCollectorDefinitionTests
         var deltas = new RecordingCollectorDeltaCalculator();
         var context = CollectorTestContext.Make(deltas);
 
-        var row42 = new object[42];
-        row42[0] = "SO"; row42[1] = "0xQH"; row42[2] = "0xQPH";
-        row42[3] = new DateTime(2026, 7, 2, 1, 0, 0, DateTimeKind.Utc);
-        row42[4] = new DateTime(2026, 7, 2, 2, 0, 0, DateTimeKind.Utc);
-        for (int i = 5; i < 36; i++) row42[i] = (long)i;
-        row42[22] = 4L; row42[23] = 8L;   /* dop as long via GetValue */
-        row42[36] = "0xSH"; row42[37] = "0xPH"; row42[38] = "SELECT 1";
-        row42[39] = 3L; row42[40] = 66; row42[41] = 512;
+        var row43 = new object[43];
+        row43[0] = "SO"; row43[1] = "0xQH"; row43[2] = "0xQPH";
+        row43[3] = new DateTime(2026, 7, 2, 1, 0, 0, DateTimeKind.Utc);
+        row43[4] = new DateTime(2026, 7, 2, 2, 0, 0, DateTimeKind.Utc);
+        for (int i = 5; i < 36; i++) row43[i] = (long)i;
+        row43[22] = 4L; row43[23] = 8L;   /* dop as long via GetValue */
+        row43[36] = "0xSH"; row43[37] = "0xPH"; row43[38] = "SELECT 1";
+        row43[39] = 3L; row43[40] = 66; row43[41] = 512;
+        row43[42] = "dbo.HostProc";       /* host_object_name (#2012 stage 2) */
 
-        using var reader = new FakeCollectorDataReader(row42);
+        using var reader = new FakeCollectorDataReader(row43);
         var rows = await QueryStatsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
 
         var writer = new RecordingCollectorRowWriter();
         QueryStatsCollector.Instance.WritePayload(Assert.Single(rows), writer, context);
 
-        Assert.Equal(50, writer.Values.Count);
+        Assert.Equal(51, writer.Values.Count);
         Assert.Null(writer.Values[37]);                                   /* query_plan_xml placeholder */
         Assert.Equal(0, writer.Values[49]);                               /* interval from recording fake */
+        Assert.Equal("dbo.HostProc", writer.Values[50]);                  /* host_object_name appended last */
         Assert.Equal(8, deltas.Calls.Count);
         Assert.All(deltas.Calls, c => Assert.Equal("0xSH:66:512:0xPH", c.Key));
         Assert.Equal(

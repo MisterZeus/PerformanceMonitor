@@ -18,8 +18,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>
 /// One Top-Queries-by-Duration grid row — the viewer copy of Lite's <c>QueryStatsRow</c>
-/// (LocalDataService.QueryStats.cs). A (database, query_hash) group's summed deltas + min/max
-/// spreads over the window, with the latest captured query text. Numeric members stay in the
+/// (LocalDataService.QueryStats.cs). A (database, query_hash, host_object) group's summed deltas +
+/// min/max spreads over the window, with the latest captured query text. Numeric members stay in the
 /// store's units (microseconds for CPU/duration, KB for grants); the display properties convert,
 /// mirroring Lite's grid. <see cref="LastExecutionTime"/>/<see cref="CreationTime"/> are the SQL
 /// SERVER's local wall clock (dm_exec_query_stats), NOT UTC — shown raw (no naive-UTC-to-local
@@ -77,18 +77,27 @@ public sealed class ViewerQueryStatsRow
     /// gates the grid's Query Plan column (the full plan is fetched on demand, not carried here).</summary>
     public bool HasQueryPlan { get; set; }
 
+    /// <summary>#2012 stage 2: the statement's hosting module (<c>schema.object</c>) captured at
+    /// collection from dm_exec_sql_text.objectid; null for ad-hoc/prepared text and for rows
+    /// collected before the column existed. Part of the group key, so same-hash statements hosted
+    /// by different procs (INSERT...EXEC) land in separate rows.</summary>
+    public string? HostObjectName { get; set; }
+
     /* #1568 module attribution (read-time stitch of query_stats.sql_handle -> procedure_stats): the
        matched procedure/function/trigger's identity, or empty when this statement is ad hoc. */
     public string ModuleObjectName { get; set; } = "";
     public string ModuleSchemaName { get; set; } = "";
     public string ModuleDatabaseName { get; set; } = "";
 
-    /// <summary>Grid "Module" column: <c>database.schema.object</c> when this statement's sql_handle matched a
-    /// cached module (procedure/function/trigger), else the literal <c>ad hoc</c> (#1568).</summary>
+    /// <summary>Grid "Module" column: the collection-time <see cref="HostObjectName"/> when present
+    /// (#2012 stage 2 — authoritative, resolved on the monitored server), else the #1568 sql_handle
+    /// stitch's <c>database.schema.object</c> for older rows, else the literal <c>ad hoc</c>.</summary>
     public string ModuleName =>
-        string.IsNullOrEmpty(ModuleObjectName)
-            ? "ad hoc"
-            : $"{ModuleDatabaseName}.{ModuleSchemaName}.{ModuleObjectName}";
+        !string.IsNullOrEmpty(HostObjectName)
+            ? $"{DatabaseName}.{HostObjectName}"
+            : string.IsNullOrEmpty(ModuleObjectName)
+                ? "ad hoc"
+                : $"{ModuleDatabaseName}.{ModuleSchemaName}.{ModuleObjectName}";
 
     /// <summary>True when this row carries a plan_handle — gates the grid's "Fetch Live Plan" context item (the
     /// live-cache fetch is keyed on plan_handle, distinct from the stored query_plan_xml "View Plan" opens).</summary>
@@ -119,8 +128,11 @@ public sealed partial class ViewerDataService
     /// ranks by summed <c>delta_elapsed_time</c>, matching the grid's default TotalElapsedMs-descending
     /// sort) ported to Postgres against <c>v_query_stats</c> (the view resolves the #1767 payload
     /// dimensions, so the text/plan columns read the same as they did inline). Group by
-    /// (database_name, query_hash) over the window, sum the deltas + carry the min/max spreads, fetch
-    /// each group's latest non-null query text via a LATERAL join, drop WAITFOR shells (over-fetch by 5
+    /// (database_name, query_hash, host_object_name) over the window (#2012 stage 2 — the host object
+    /// splits same-hash statements hosted by different procs, e.g. INSERT...EXEC callers; SQL GROUP BY
+    /// treats NULLs as equal so ad-hoc rows still collapse), sum the deltas + carry the min/max spreads,
+    /// fetch each group's latest non-null query text via a LATERAL join constrained to the group's own
+    /// host object, drop WAITFOR shells (over-fetch by 5
     /// exactly like Lite's <c>LIMIT top + 5</c> → filter → <c>LIMIT top</c>), and cap at top.
     /// Viewer deviations from Lite: (1) Postgres <c>SUM(bigint)</c> is numeric, so each summed aggregate
     /// is CAST back to bigint for the typed GetInt64 readers (MIN/MAX of bigint stay bigint, no cast);
@@ -181,13 +193,14 @@ public sealed partial class ViewerDataService
                    resolving view would make Postgres join the plan dimension per row to evaluate
                    it (it can drop an unreferenced unique join, but the COALESCE references it).
                    The LATERAL below, which needs the actual text, does read the view. */
-                bool_or(query_plan_xml IS NOT NULL OR query_plan_digest IS NOT NULL) AS has_query_plan
+                bool_or(query_plan_xml IS NOT NULL OR query_plan_digest IS NOT NULL) AS has_query_plan,
+                host_object_name
             FROM query_stats
             WHERE server_id = $1
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
-            GROUP BY database_name, query_hash
+            GROUP BY database_name, query_hash, host_object_name
             HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
             ORDER BY SUM(delta_elapsed_time) DESC
             LIMIT $4 + 5
@@ -263,7 +276,8 @@ public sealed partial class ViewerDataService
             r.has_query_plan,
             m.object_name AS module_object_name,
             m.schema_name AS module_schema_name,
-            m.database_name AS module_database_name
+            m.database_name AS module_database_name,
+            r.host_object_name
         FROM ranked AS r
         LEFT JOIN LATERAL (
             SELECT query_text
@@ -271,6 +285,10 @@ public sealed partial class ViewerDataService
             WHERE server_id = $1
             AND   query_hash = r.query_hash
             AND   database_name = r.database_name
+            /* #2012 stage 2: the representative text must come from THIS group's own rows — without
+               the host constraint a hash shared across host objects could label one caller's row
+               with another caller's text (NOT DISTINCT FROM so ad-hoc NULL hosts still match). */
+            AND   host_object_name IS NOT DISTINCT FROM r.host_object_name
             AND   query_text IS NOT NULL
             ORDER BY collection_time DESC
             LIMIT 1
@@ -353,6 +371,7 @@ public sealed partial class ViewerDataService
                 ModuleObjectName = reader.IsDBNull(42) ? "" : reader.GetString(42),
                 ModuleSchemaName = reader.IsDBNull(43) ? "" : reader.GetString(43),
                 ModuleDatabaseName = reader.IsDBNull(44) ? "" : reader.GetString(44),
+                HostObjectName = reader.IsDBNull(45) ? null : reader.GetString(45),
             });
         }
 

@@ -55,7 +55,12 @@ public sealed class ViewerQueriesSqlTests
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal); /* end bound for the slicer */
-        Assert.Contains("GROUP BY database_name, query_hash", sql, StringComparison.Ordinal);
+        /* #2012 stage 2: host_object_name joins the key so same-hash statements hosted by different
+           procs (INSERT...EXEC callers) split; SQL GROUP BY treats NULLs as equal, so ad-hoc rows
+           still collapse. The LATERAL's host constraint keeps each group's representative text from
+           another caller's rows (NOT DISTINCT FROM so ad-hoc NULL hosts still match ad-hoc rows). */
+        Assert.Contains("GROUP BY database_name, query_hash, host_object_name", sql, StringComparison.Ordinal);
+        Assert.Contains("host_object_name IS NOT DISTINCT FROM r.host_object_name", sql, StringComparison.Ordinal);
         Assert.Contains("HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0", sql, StringComparison.Ordinal);
     }
 
@@ -413,6 +418,26 @@ public sealed class ViewerQueriesDisplayTests
         Assert.Equal("StackOverflow.dbo.usp_Get", attributed.ModuleName);
         Assert.Equal("ad hoc", new ViewerQueryStatsRow().ModuleName);
         Assert.Equal("ad hoc", new ViewerQueryStatsRow { ModuleDatabaseName = "StackOverflow", ModuleSchemaName = "dbo" }.ModuleName);
+    }
+
+    [Fact]
+    public void QueryStatsRow_ModuleName_PrefersCollectionTimeHostObject_OverHandleStitch()
+    {
+        /* #2012 stage 2: host_object_name is resolved ON the monitored server at collection, so it
+           wins over the #1568 sql_handle stitch (which requires the module to also be in the
+           procedure-stats cache); pre-upgrade rows have a NULL host and keep the stitch. */
+        var both = new ViewerQueryStatsRow
+        {
+            DatabaseName = "StackOverflow",
+            HostObjectName = "dbo.usp_Host",
+            ModuleDatabaseName = "OtherDb",
+            ModuleSchemaName = "dbo",
+            ModuleObjectName = "usp_Stitched",
+        };
+        Assert.Equal("StackOverflow.dbo.usp_Host", both.ModuleName);
+
+        var hostOnly = new ViewerQueryStatsRow { DatabaseName = "StackOverflow", HostObjectName = "dbo.usp_Host" };
+        Assert.Equal("StackOverflow.dbo.usp_Host", hostOnly.ModuleName);
     }
 
     [Fact]

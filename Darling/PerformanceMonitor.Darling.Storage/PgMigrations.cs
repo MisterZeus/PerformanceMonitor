@@ -99,6 +99,7 @@ public static class PgMigrations
         new Migration(48, "pvs-pressure-alert", V48Sql),
         new Migration(49, "database-state-alert", V49Sql),
         new Migration(50, "server-tag-colour", V50Sql),
+        new Migration(51, "query-stats-host-object", V51Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
     };
 
     /// <summary>
@@ -965,6 +966,28 @@ ALTER TABLE config.config_alert_settings
     private const string V50Sql = @"
 ALTER TABLE config.server_tags
     ADD COLUMN IF NOT EXISTS colour text;";
+
+    /// <summary>
+    /// V51 — the statement's HOST OBJECT on query_stats (#2012 stage 2): <c>sys.dm_exec_sql_text.objectid</c>
+    /// resolved to schema.name at collection, NULL for ad-hoc/prepared text. This is what lets the
+    /// hash-grouped readers split <c>INSERT...EXEC</c> callers that share a <c>query_hash</c> (the hash
+    /// normalizes the callee away — reproduced and mis-attributed in live triage) while leaving the ad-hoc
+    /// literal-collapse behavior untouched (NULLs group as one). Appended LAST to match the collector's
+    /// append-only payload; nullable, no backfill — history rows stay NULL and read as "unknown host",
+    /// aging out with raw retention. TimescaleDB accepts a nullable ADD COLUMN on a compressed hypertable.
+    /// <para><c>v_query_stats</c> is NOT a passthrough on a V38+ store — it is the #1767 payload-RESOLVING
+    /// view (<see cref="PgSchemaGenerator.GenerateQueryStatsResolvingView"/>), so it must be rebuilt from
+    /// the generator, not replaced with <c>SELECT *</c> (which would silently return NULL query_text for
+    /// every digest-era row). And because the generator emits payload columns BEFORE the trailing digest
+    /// columns, the new column lands mid-list — an alteration <c>CREATE OR REPLACE VIEW</c> refuses
+    /// (append-at-end only) — hence DROP + recreate. Plain DROP, no CASCADE: nothing persistent depends
+    /// on the view; readers reference it per-query. The migration entry concatenates the regenerated view
+    /// after this constant, the V38 idiom, so the definition can never go stale here.</para>
+    /// </summary>
+    private const string V51Sql = @"
+ALTER TABLE query_stats
+    ADD COLUMN IF NOT EXISTS host_object_name text;
+DROP VIEW IF EXISTS v_query_stats;";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

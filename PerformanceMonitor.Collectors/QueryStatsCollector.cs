@@ -79,6 +79,10 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
         public long PlanGenerationNum { get; set; }
         public int StatementStartOffset { get; set; }
         public int StatementEndOffset { get; set; }
+
+        /// <summary>The statement's host object (schema.name) from <c>sys.dm_exec_sql_text.objectid</c>;
+        /// NULL for ad-hoc/prepared text (#2012 stage 2 — splits INSERT...EXEC callers sharing a hash).</summary>
+        public string? HostObjectName { get; set; }
     }
 
     private const string SelectColumnsText = @"
@@ -140,7 +144,16 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
         END,
     plan_generation_num = qs.plan_generation_num,
     statement_start_offset = qs.statement_start_offset,
-    statement_end_offset = qs.statement_end_offset";
+    statement_end_offset = qs.statement_end_offset,
+    host_object_name =
+        CASE
+            WHEN st.objectid IS NOT NULL
+            THEN ISNULL
+                 (
+                     OBJECT_SCHEMA_NAME(st.objectid, st.dbid) + N'.' + OBJECT_NAME(st.objectid, st.dbid),
+                     N'Unknown'
+                 )
+        END";
 
     /* #1959: rank on the CHEAP DMV columns inside the derived table FIRST, and run the text apply, the
        NOT LIKE self-filter, and the (Darling-only) plan-XML render against the survivors ONLY. The optimizer
@@ -316,6 +329,9 @@ OUTER APPLY
         new CollectorColumn("delta_spills", CollectorColumnType.BigInt),
         new CollectorColumn("plan_generation_num", CollectorColumnType.BigInt),
         new CollectorColumn("sample_interval_seconds", CollectorColumnType.Integer),
+        /* #2012 stage 2 — appended LAST so every existing store column keeps its position; the
+           store-side ALTER ADDs land at the end to match. NULL for ad-hoc/prepared statements. */
+        new CollectorColumn("host_object_name", CollectorColumnType.Varchar),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -368,9 +384,13 @@ OUTER APPLY
                 PlanGenerationNum = reader.IsDBNull(39) ? 0L : reader.GetInt64(39),
                 StatementStartOffset = reader.IsDBNull(40) ? 0 : reader.GetInt32(40),
                 StatementEndOffset = reader.IsDBNull(41) ? 0 : reader.GetInt32(41),
+                /* #2012 stage 2: the statement's HOST OBJECT (schema.name), NULL for ad-hoc/prepared
+                   text — sys.dm_exec_sql_text.objectid resolved in the SELECT. This is what lets
+                   readers split INSERT...EXEC callers that share a query_hash. */
+                HostObjectName = reader.IsDBNull(42) ? null : reader.GetString(42),
                 /* query_plan_xml is the trailing column present only when CapturePlanXml spliced it
-                   into the SELECT (ordinal 42); the short-circuit skips it entirely when off. */
-                QueryPlanXml = context.CapturePlanXml && !reader.IsDBNull(42) ? reader.GetString(42) : null,
+                   into the SELECT (ordinal 43); the short-circuit skips it entirely when off. */
+                QueryPlanXml = context.CapturePlanXml && !reader.IsDBNull(43) ? reader.GetString(43) : null,
             });
         }
 
@@ -443,6 +463,7 @@ OUTER APPLY
             .Value(deltaRows)
             .Value(deltaSpills)
             .Value(row.PlanGenerationNum)
-            .Value(sampleIntervalSeconds);     /* sample_interval_seconds INTEGER */
+            .Value(sampleIntervalSeconds)      /* sample_interval_seconds INTEGER */
+            .Value(row.HostObjectName);        /* #2012 stage 2: NULL for ad-hoc text */
     }
 }

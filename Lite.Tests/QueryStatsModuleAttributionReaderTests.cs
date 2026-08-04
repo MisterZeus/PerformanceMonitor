@@ -196,4 +196,24 @@ public sealed class QueryStatsRowModuleDisplayTests
         Assert.Equal("ad hoc", new QueryStatsRow().ModuleName);
         Assert.Equal("ad hoc", new QueryStatsRow { ModuleDatabaseName = "StackOverflow", ModuleSchemaName = "dbo" }.ModuleName);
     }
+
+    [Fact]
+    public void ModuleName_PrefersCollectionTimeHostObject_OverHandleStitch()
+    {
+        /* #2012 stage 2: host_object_name is resolved ON the monitored server at collection, so it
+           wins over the #1568 sql_handle stitch (which requires the module to also be in the
+           procedure-stats cache); pre-upgrade rows have a NULL host and keep the stitch. */
+        var both = new QueryStatsRow
+        {
+            DatabaseName = "StackOverflow",
+            HostObjectName = "dbo.usp_Host",
+            ModuleDatabaseName = "OtherDb",
+            ModuleSchemaName = "dbo",
+            ModuleObjectName = "usp_Stitched",
+        };
+        Assert.Equal("StackOverflow.dbo.usp_Host", both.ModuleName);
+
+        var hostOnly = new QueryStatsRow { DatabaseName = "StackOverflow", HostObjectName = "dbo.usp_Host" };
+        Assert.Equal("StackOverflow.dbo.usp_Host", hostOnly.ModuleName);
+    }
 }

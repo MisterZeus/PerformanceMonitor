@@ -9,7 +9,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpQueryTools
 {
-    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle. distinct_texts counts the statement texts merged into each hash group (query_hash normalizes INSERT...EXEC callees and ad-hoc literals together; >1 means query_text is one representative, 0 means no stored text for the group). Supports database and parallelism filtering.")]
+    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means no stored text for the group). Supports database and parallelism filtering.")]
     public static async Task<string> GetTopQueriesByCpu(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -66,12 +66,15 @@ public sealed class McpQueryTools
                 total_rows = r.TotalRows,
                 total_spills = r.TotalSpills,
                 avg_reads = r.AvgReads,
+                // #2012 stage 2: same annotations as Darling's twin — the host object joins the
+                // grouping key, so proc-hosted INSERT...EXEC callers sharing a hash land in
+                // separate, correctly-labeled rows; null = ad-hoc/prepared text (or pre-upgrade
+                // history, which ages out with retention).
+                host_object = r.HostObjectName,
                 query_text = McpHelpers.Truncate(r.QueryText, 2000),
-                // #2012: same annotation as Darling's twin — > 1 distinct texts means query_text
-                // labels a blend (INSERT...EXEC callees share a query_hash; ad-hoc literals collapse).
                 distinct_texts = r.DistinctTexts,
                 text_note = r.DistinctTexts > 1
-                    ? $"this hash groups {r.DistinctTexts} distinct statement texts (ad-hoc literal variants, or INSERT...EXEC callers naming different procedures); query_text is one representative — attribute per-caller work via sql_handle/OBJECT_DEFINITION before naming a caller"
+                    ? $"this group blends {r.DistinctTexts} distinct statement texts (ad-hoc literal variants; or history predating the host-object split for INSERT...EXEC callers); query_text is one representative"
                     : null
             });
 

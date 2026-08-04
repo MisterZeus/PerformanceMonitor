@@ -98,7 +98,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 51;
+    internal const int CurrentSchemaVersion = 52;
 
     private readonly string _archivePath;
 
@@ -1180,6 +1180,24 @@ public class DuckDbInitializer
                     below; the v_pvs_stats view the FinOps grid reads comes from CreateArchiveViewsAsync
                     via ArchivableTables, which is derived from CollectorCatalog. */
             _logger?.LogInformation("Running migration to v51: adding pvs_stats table");
+        }
+
+        if (fromVersion < 52)
+        {
+            /* v52 (#2012 stage 2): the statement's HOST OBJECT on query_stats — dm_exec_sql_text.objectid
+               resolved to schema.name at collection, NULL for ad-hoc/prepared text. Splits INSERT...EXEC
+               callers that share a query_hash in the hash-grouped readers; history rows stay NULL and age
+               out with retention. Appended last to match the collector's append-only payload; the
+               v_query_stats archive union re-derives per start with union_by_name, so no view work. */
+            _logger?.LogInformation("Running migration to v52: adding host_object_name to query_stats");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE query_stats ADD COLUMN IF NOT EXISTS host_object_name VARCHAR");
+            }
+            catch
+            {
+                /* Table doesn't exist yet — will be created with the full schema below */
+            }
         }
     }
 
