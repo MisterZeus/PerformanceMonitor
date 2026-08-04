@@ -671,7 +671,7 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// LADDER itself (exposed classifier, managed gate, listen/token/allowFrom validation, family match) now
     /// lives ONCE in <see cref="DarlingHostBinding"/>; this method's contract is byte-for-byte what it was.
     /// </summary>
-    internal static McpBindDecision ResolveMcpBind(McpConfig mcp, bool managed)
+    internal static McpBindDecision ResolveMcpBind(McpConfig mcp, bool managed, bool? inContainer = null)
     {
         var network = mcp.Network;
         var decision = DarlingHostBinding.ResolveBind(
@@ -680,7 +680,9 @@ public sealed class DarlingMcpHostService : BackgroundService
             tokenPresent: network is not null
                 && (!string.IsNullOrWhiteSpace(network.EncryptedToken) || !string.IsNullOrWhiteSpace(network.Token)),
             networkConfigured: network is { IsConfigured: true },
-            managed: managed);
+            managed: managed,
+            /* #1804: tests pass this explicitly; the running host takes the ambient container marker. */
+            inContainer: inContainer ?? DarlingHostBinding.IsRunningInContainer);
 
         /* The nested McpBind* enums mirror DarlingHostBinding's BindMode/BindReason 1:1 (same member order,
            pinned equal by DarlingHostBindingTests), so a numeric cast maps them without a per-value switch. */
@@ -800,8 +802,8 @@ public sealed class DarlingMcpHostService : BackgroundService
 
             case McpBindReason.ManagedModeRequired:
                 _logger.Log(level.Value,
-                    "mcp.network.* is set but postgres.managed = false — MCP network exposure is managed-mode only and is " +
-                    "ignored; your own PostgreSQL/reverse proxy governs BYO exposure. Binding loopback-only.");
+                    "mcp.network.* is set but postgres.managed = false — MCP network exposure is managed-mode (or container, #1804) " +
+                    "only and is ignored; your own PostgreSQL/reverse proxy governs uncontained BYO exposure. Binding loopback-only.");
                 break;
 
             default:

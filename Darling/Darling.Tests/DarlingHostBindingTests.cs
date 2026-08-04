@@ -104,6 +104,58 @@ public sealed class DarlingHostBindingTests
         Assert.Equal(DarlingHostBinding.BindReason.ManagedModeRequired, decision.Reason);
     }
 
+    /* ── the #1804 container gate: a containerized BYO deployment (compose) is exposure-capable — the
+       port mapping is the boundary the BYO reverse-proxy rule was standing in for, and a loopback bind
+       would be dead through it. Every other precondition applies IDENTICALLY. ── */
+
+    [Fact]
+    public void ResolveBind_Exposed_ByoInContainer_IsNetworkExposed()
+    {
+        var decision = DarlingHostBinding.ResolveBind(
+            "0.0.0.0", "10.0.0.0/8", tokenPresent: true, networkConfigured: true, managed: false, inContainer: true);
+
+        Assert.Equal(DarlingHostBinding.BindMode.NetworkAndLoopback, decision.Mode);
+        Assert.Equal(DarlingHostBinding.BindReason.NetworkExposed, decision.Reason);
+    }
+
+    [Fact]
+    public void ResolveBind_ByoInContainer_StillFailsClosed_WithoutTokenOrCidr()
+    {
+        /* The container gate relaxes ONLY the managed requirement — never the token or the CIDR. */
+        var noToken = DarlingHostBinding.ResolveBind(
+            "0.0.0.0", "10.0.0.0/8", tokenPresent: false, networkConfigured: true, managed: false, inContainer: true);
+        Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, noToken.Mode);
+        Assert.Equal(DarlingHostBinding.BindReason.TokenMissing, noToken.Reason);
+
+        var badCidr = DarlingHostBinding.ResolveBind(
+            "0.0.0.0", "not-a-cidr", tokenPresent: true, networkConfigured: true, managed: false, inContainer: true);
+        Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, badCidr.Mode);
+        Assert.Equal(DarlingHostBinding.BindReason.AllowFromInvalid, badCidr.Reason);
+    }
+
+    [Fact]
+    public void ResolveBind_ByoInContainer_NotExposed_NoManagedModeNotice()
+    {
+        /* In a container the network block is HONORED, so a not-exposed block is just the default —
+           the "network.* is ignored" notice would be a lie there. */
+        var decision = DarlingHostBinding.ResolveBind(
+            listen: null, allowFrom: "10.0.0.0/8", tokenPresent: false, networkConfigured: true, managed: false, inContainer: true);
+
+        Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
+        Assert.Equal(DarlingHostBinding.BindReason.LoopbackByDefault, decision.Reason);
+    }
+
+    [Fact]
+    public void ResolveBind_Exposed_ByoOutsideContainer_StaysManagedModeRequired()
+    {
+        /* The uncontained BYO rule is byte-for-byte unchanged — inContainer defaults to false. */
+        var decision = DarlingHostBinding.ResolveBind(
+            "192.168.1.205", "192.168.1.0/24", tokenPresent: true, networkConfigured: true, managed: false, inContainer: false);
+
+        Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
+        Assert.Equal(DarlingHostBinding.BindReason.ManagedModeRequired, decision.Reason);
+    }
+
     [Theory]
     [InlineData("127.0.0.1")]  // loopback resolves to the single-bind path, never a network bind
     [InlineData("127.0.0.5")]  // anywhere in 127.0.0.0/8
