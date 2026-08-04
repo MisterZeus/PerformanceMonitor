@@ -444,6 +444,10 @@ public sealed class DarlingMcpHostService : BackgroundService
                    get_database_sizes — the same names Lite and the Dashboard expose, over Darling's Postgres
                    store (STORED reads, no live hit). Result shapes follow Lite where the two SKUs diverge. */
                 .WithGeminiCompatibleTools<DarlingMcpBlockingTools>()
+                /* #2028 get_plan_corrections — automatic plan correction activity + per-database
+                   FORCE_LAST_GOOD_PLAN enablement, the one collected table that previously had no
+                   agent-readable path at all. Twin registered in Lite's host. */
+                .WithGeminiCompatibleTools<DarlingMcpPlanCorrectionTools>()
                 /* #1496 get_long_query_completions — the opt-in long-query completion trace (rpc/batch over
                    the duration threshold + attentions), over Darling's Postgres store (STORED read). */
                 .WithGeminiCompatibleTools<DarlingMcpLongQueryTools>()

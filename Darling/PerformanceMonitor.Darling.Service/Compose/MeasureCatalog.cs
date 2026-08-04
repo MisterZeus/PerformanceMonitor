@@ -322,6 +322,9 @@ public static class MeasureCatalog
 
         new ComposeDimension("pvs_stats", "database_name", "database_name", Likeable: true),
 
+        new ComposeDimension("plan_correction", "database_name", "database_name", Likeable: true),
+        new ComposeDimension("plan_correction", "recommendation_state", "recommendation_state", Likeable: true),
+
         new ComposeDimension("index_object_stats", "database_name", "database_name", Likeable: true),
         new ComposeDimension("index_object_stats", "schema_name", "schema_name", Likeable: true),
         new ComposeDimension("index_object_stats", "table_name", "table_name", Likeable: true),
@@ -472,6 +475,7 @@ public static class MeasureCatalog
     private static readonly string[] BlockingDims = { "database_name", "contentious_object", "lock_mode" };
     private static readonly string[] DmvBlockingDims = { "database_name", "contentious_object", "lock_mode", "blocking_status" };
     private static readonly string[] DeadlockDims = { "database_name" };
+    private static readonly string[] PlanCorrectionDims = { "database_name", "recommendation_state" };
     private static readonly string[] SysHealthDims = { "event_type" };
     private static readonly string[] DefaultTraceDims = { "event_name", "database_name", "object_name", "login_name" };
     private static readonly string[] RunningJobDims = { "job_name" };
@@ -971,6 +975,20 @@ public static class MeasureCatalog
             Archetype = MeasureArchetype.PerEvent, Column = "deadlock_time",
             NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
             DefaultTimeAgg = ComposeAggregate.Count, ValidAggs = CountOnlyAggs, AllowedDimensions = DeadlockDims,
+        },
+
+        /* ── plan_correction (#2028, per-event, count-only — no numeric per-event column worth charting).
+           HONESTY NOTE: the collector snapshots sys.dm_db_tuning_recommendations on a schedule, so a
+           long-lived recommendation lands one row PER CAPTURE — this counts captures (APC activity
+           observed), not distinct recommendations, and the recommendation_state dimension is what makes
+           it useful (Active vs Success vs Reverted over time). Enablement-only rows (a database with
+           nothing to recommend) are included; they carry a NULL recommendation_state and group apart. */
+        new ComposeMeasure
+        {
+            Key = "plan_correction_captures", DisplayName = "APC recommendation captures", Category = CatQueries, SourceTable = "plan_correction",
+            Archetype = MeasureArchetype.PerEvent, Column = "collection_time",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Count, ValidAggs = CountOnlyAggs, AllowedDimensions = PlanCorrectionDims,
         },
 
         /* ── system_health_events (per-event, count-only) ── */
