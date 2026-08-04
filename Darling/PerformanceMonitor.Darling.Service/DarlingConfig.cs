@@ -540,6 +540,16 @@ public sealed class SmtpConfig
     [JsonPropertyName("encryptedPassword")]
     public string? EncryptedPassword { get; set; }
 
+    /// <summary>
+    /// The SMTP password as a literal or an <c>env:</c>/<c>file:</c> reference (#1804 —
+    /// <see cref="DarlingSecretSource"/>). Before this, SMTP had ONLY the DPAPI field, so non-Windows
+    /// hosts had no email-alerting path at all. <see cref="EncryptedPassword"/> stays preferred where
+    /// both are set (Windows); a reference is the supported non-Windows shape and does not count as
+    /// plaintext-in-config.
+    /// </summary>
+    [JsonPropertyName("password")]
+    public string? Password { get; set; }
+
     [JsonPropertyName("from")]
     public string From { get; set; } = "";
 
@@ -665,8 +675,9 @@ public sealed class McpNetworkConfig
     public string? EncryptedToken { get; set; }
 
     /// <summary>
-    /// Plaintext bearer token — dev convenience only; the caller warns when it is used. Prefer
-    /// <see cref="EncryptedToken"/>.
+    /// The bearer token as a literal (dev convenience only; the caller warns) or an
+    /// <c>env:</c>/<c>file:</c> reference (#1804 — <see cref="DarlingSecretSource"/>, which does not
+    /// count as plaintext-in-config). Prefer <see cref="EncryptedToken"/> on Windows.
     /// </summary>
     [JsonPropertyName("token")]
     public string? Token { get; set; }
@@ -708,8 +719,9 @@ public sealed class McpNetworkConfig
 
         if (!string.IsNullOrWhiteSpace(Token))
         {
-            usedPlaintext = true;
-            return Token;
+            /* An env:/file: reference (#1804) is not plaintext-in-config — no warning for it. */
+            usedPlaintext = !DarlingSecretSource.IsReference(Token);
+            return DarlingSecretSource.Resolve(Token, "mcp.network.token");
         }
 
         return null;
@@ -821,8 +833,9 @@ public sealed class WebNetworkConfig
 
         if (!string.IsNullOrWhiteSpace(Token))
         {
-            usedPlaintext = true;
-            return Token;
+            /* An env:/file: reference (#1804) is not plaintext-in-config — no warning for it. */
+            usedPlaintext = !DarlingSecretSource.IsReference(Token);
+            return DarlingSecretSource.Resolve(Token, "web.network.token");
         }
 
         return null;
