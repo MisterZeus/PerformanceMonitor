@@ -145,6 +145,27 @@ a:hover { text-decoration: underline; }
   gap: 1rem;
 }
 
+/* #2020: grouped (tag-tree) fleet view — collapsible tag headers, each with its card grid indented beneath.
+   The read-only web twin of the desktop sidebar tree; indent is applied inline per tree depth. */
+.tag-group-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.35rem;
+  margin-top: 0.6rem;
+  cursor: pointer;
+  user-select: none;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+}
+.tag-group-header:hover { background: rgba(127, 127, 127, 0.08); }
+.tag-group-header:focus-visible { outline: 2px solid var(--muted); outline-offset: 1px; }
+.tag-group-chevron { width: 0.9rem; flex: 0 0 auto; color: var(--muted); font-size: 0.7rem; }
+.tag-group-count { color: var(--muted); font-weight: 400; font-size: 0.85rem; }
+.tag-group-grid { margin: 0.5rem 0 0.2rem; }
+.group-control { display: flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; color: var(--muted); cursor: pointer; }
+.group-control input { cursor: pointer; }
+
 .card {
   background: var(--card);
   border: 1px solid var(--border);
@@ -218,6 +239,26 @@ a:hover { text-decoration: underline; }
 }
 .server-card .status-line { font-size: 0.75rem; color: var(--muted); margin-bottom: 0.6rem; }
 .server-card .awaiting { color: var(--warn); }
+
+/* #2020: read-only tag pills on a fleet card. The colour is applied inline from the stored #RRGGBB; an
+   uncoloured tag falls back to this neutral. The neutral background and the light label are fixed (the same
+   values the desktop TagColorBrushes use), so a pill reads identically whatever the viewer's theme — exactly
+   as it does in Lite and the Viewer. Hidden entirely for a server with no tags. */
+.server-card .tag-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-bottom: 0.6rem;
+}
+.server-card .tag-pill {
+  font-size: 0.7rem;
+  line-height: 1.2;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  background: #2a2d35;
+  color: #e4e6eb;
+  white-space: nowrap;
+}
 
 .metric-bands {
   display: grid;
