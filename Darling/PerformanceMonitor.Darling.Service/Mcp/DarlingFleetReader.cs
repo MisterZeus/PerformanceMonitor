@@ -85,6 +85,17 @@ FROM servers s
 WHERE s.is_enabled
 ORDER BY s.server_name";
 
+    /// <summary>Every (server, tag) assignment — one row per tag a server carries — for the fleet cards'
+    /// read-only tag pills (#2020). Ordered by the tag's sort order then name so a card's pills are stable;
+    /// <c>colour</c> is the stored <c>#RRGGBB</c> or NULL (an uncoloured tag renders as a neutral pill, the same
+    /// as the desktop apps — no palette is resolved here). Bare table names resolve through the store's
+    /// search_path to <c>config.server_tag_map</c> / <c>config.server_tags</c>. $ none.</summary>
+    public const string FleetTagsSql = @"
+SELECT m.server_id, t.id, t.name, t.colour
+FROM server_tag_map m
+JOIN server_tags t ON t.id = m.tag_id
+ORDER BY m.server_id, t.sort_order, lower(t.name)";
+
     /// <summary>Latest SQL + other-process CPU per server (newest ring-buffer sample). $ none.</summary>
     public const string FleetCpuSql = @"
 SELECT DISTINCT ON (server_id)
@@ -226,6 +237,7 @@ GROUP BY server_id, collector_name";
         var deadlocks = await ReadDeadlocksAsync(postgres, windowStartUtc, windowEndUtc, cancellationToken);
         var lastCollection = await ReadLastCollectionAsync(postgres, cancellationToken);
         var failingCollectors = await ReadFailingCollectorCountsAsync(postgres, now, cancellationToken);
+        var tags = await ReadTagsAsync(postgres, cancellationToken);
 
         var cards = new List<FleetServerCard>(servers.Count);
         foreach (var server in servers)
@@ -238,8 +250,9 @@ GROUP BY server_id, collector_name";
             deadlocks.TryGetValue(server.ServerId, out var deadlock);
             lastCollection.TryGetValue(server.ServerId, out var lastColl);
             failingCollectors.TryGetValue(server.ServerId, out var collectors);
+            tags.TryGetValue(server.ServerId, out var serverTags);
 
-            cards.Add(BuildCard(server, c, m, mp, t, b, deadlock, lastColl, collectors, now));
+            cards.Add(BuildCard(server, c, m, mp, t, b, deadlock, lastColl, collectors, serverTags, now));
         }
 
         return BuildRollup(cards, now, windowStartUtc, windowEndUtc, worstCount);
@@ -257,6 +270,7 @@ GROUP BY server_id, collector_name";
         DeadlockRow deadlock,
         DateTime? lastCollection,
         CollectorCounts collectors,
+        List<FleetTag>? tags,
         DateTime now)
     {
         var deadlockCount = deadlock.Count;
@@ -327,6 +341,7 @@ GROUP BY server_id, collector_name";
             IsAzureSqlDb = isAzureSqlDb,
             IsAzureManagedInstance = isAzureManagedInstance,
             IsSilenced = server.IsSilenced,
+            Tags = tags ?? (IReadOnlyList<FleetTag>)Array.Empty<FleetTag>(),
             Band = band,
             Status = StatusLabel(isOnline, awaitingFirstCollection, hasCollectorErrors),
             IsOnline = isOnline,
@@ -537,6 +552,31 @@ GROUP BY server_id, collector_name";
         return rows;
     }
 
+    private static async Task<Dictionary<int, List<FleetTag>>> ReadTagsAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        var map = new Dictionary<int, List<FleetTag>>();
+        await using var command = postgres.CreateCommand(FleetTagsSql);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var serverId = reader.GetInt32(0);
+            if (!map.TryGetValue(serverId, out var list))
+            {
+                list = new List<FleetTag>();
+                map[serverId] = list;
+            }
+
+            list.Add(new FleetTag
+            {
+                Id = reader.GetInt32(1),
+                Name = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                Colour = reader.IsDBNull(3) ? null : reader.GetString(3),
+            });
+        }
+
+        return map;
+    }
+
     private static async Task<Dictionary<int, CpuRow>> ReadCpuAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
         var map = new Dictionary<int, CpuRow>();
@@ -731,6 +771,11 @@ public sealed class FleetServerCard
     /// healthy-quiet one. The web seat has no silence action; silencing stays with the Viewer/MCP.</summary>
     [JsonPropertyName("is_silenced")] public bool IsSilenced { get; init; }
 
+    /// <summary>The server's tags for the read-only fleet pills (#2020) — id, name, and stored <c>#RRGGBB</c>
+    /// colour (null = neutral pill). Empty when the server has none. Tagging stays with the Viewer / Lite; the
+    /// web seat only reads them.</summary>
+    [JsonPropertyName("tags")] public IReadOnlyList<FleetTag> Tags { get; init; } = Array.Empty<FleetTag>();
+
     [JsonPropertyName("band")] public FleetHealthBand Band { get; init; }
     [JsonPropertyName("status")] public string Status { get; init; } = "";
     [JsonPropertyName("is_online")] public bool? IsOnline { get; init; }
@@ -790,6 +835,16 @@ public sealed class FleetServerCard
         RequestsWaitingForThreads = RequestsWaitingForThreads,
         FailedCollectorCount = FailedCollectorCount,
     };
+}
+
+/// <summary>One tag on a fleet card — read-only, for the web pills (#2020). Serialized snake_case like the card.
+/// <c>colour</c> is the stored <c>#RRGGBB</c> or null (null renders as a neutral pill, matching the desktop
+/// apps); tagging itself stays with the Viewer / Lite.</summary>
+public sealed class FleetTag
+{
+    [JsonPropertyName("id")] public int Id { get; init; }
+    [JsonPropertyName("name")] public string Name { get; init; } = "";
+    [JsonPropertyName("colour")] public string? Colour { get; init; }
 }
 
 /// <summary>One entry in the fleet's worst-first "Needs attention" ranking.</summary>

@@ -219,6 +219,26 @@ a:hover { text-decoration: underline; }
 .server-card .status-line { font-size: 0.75rem; color: var(--muted); margin-bottom: 0.6rem; }
 .server-card .awaiting { color: var(--warn); }
 
+/* #2020: read-only tag pills on a fleet card. The colour is applied inline from the stored #RRGGBB; an
+   uncoloured tag falls back to this neutral. The neutral background and the light label are fixed (the same
+   values the desktop TagColorBrushes use), so a pill reads identically whatever the viewer's theme — exactly
+   as it does in Lite and the Viewer. Hidden entirely for a server with no tags. */
+.server-card .tag-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-bottom: 0.6rem;
+}
+.server-card .tag-pill {
+  font-size: 0.7rem;
+  line-height: 1.2;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  background: #2a2d35;
+  color: #e4e6eb;
+  white-space: nowrap;
+}
+
 .metric-bands {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

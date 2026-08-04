@@ -34,14 +34,38 @@ let fleetFilter = "";
 let lastCards = [];
 let gridNode = null;
 
-/* Name filter, matching the desktop apps' ServerOverviewFilter rule: an empty term matches everything,
-   otherwise a case-insensitive substring of the display name or the instance name. */
+/* Name/tag filter, matching the desktop apps' ServerOverviewFilter rule: an empty term matches everything,
+   otherwise a case-insensitive substring of the display name, the instance name, or any of the server's tag
+   names (#2020) — so `prod` finds both sql-prod-01 and everything tagged Production, as on the desktop. */
 function cardMatches(c, q) {
   const needle = (q || "").trim().toLowerCase();
   if (!needle) return true;
   return (
     (c.display_name || "").toLowerCase().includes(needle) ||
-    (c.server_name || "").toLowerCase().includes(needle)
+    (c.server_name || "").toLowerCase().includes(needle) ||
+    (c.tags || []).some((t) => (t.name || "").toLowerCase().includes(needle))
+  );
+}
+
+/* The server's tags as read-only coloured pills (#2020). Colour is the stored #RRGGBB or, when unset, a
+   neutral pill (matching the desktop apps — no palette is resolved here). The hex is format-checked before it
+   reaches the style attribute, so only a well-formed colour from the store is ever applied. Nothing renders
+   for a server with no tags. */
+function tagPills(c) {
+  const tags = c.tags || [];
+  if (!tags.length) return null;
+  return el(
+    "div",
+    { class: "tag-pills" },
+    tags.map((t) => {
+      const safeColour = /^#[0-9a-fA-F]{6}$/.test(t.colour || "") ? t.colour : null;
+      return el("span", {
+        class: "tag-pill",
+        text: t.name,
+        title: t.name,
+        style: safeColour ? "background:" + safeColour : null,
+      });
+    })
   );
 }
 
@@ -195,6 +219,7 @@ function serverCard(c) {
         el("span", { class: "title", text: c.display_name }),
       ]),
       statusLine,
+      tagPills(c),
       metricBands(c),
     ]
   );

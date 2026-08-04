@@ -132,8 +132,24 @@ public sealed class DarlingFleetReaderSqlTests
         Assert.Contains("collection_time >= $1", sql, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The read-only fleet-tag join (#2020): every (server, tag) assignment, joined to the tag for its name and
+    /// stored colour, ordered so a card's pills are stable. Bare table names resolve through the store's
+    /// search_path to the config-schema tag tables, the same way FleetServersSql reads servers / config_mute_rules.
+    /// </summary>
+    [Fact]
+    public void FleetTagsSql_JoinsAssignmentsToTags_OrderedForStablePills()
+    {
+        var sql = DarlingFleetReader.FleetTagsSql;
+        Assert.Contains("FROM server_tag_map m", sql, StringComparison.Ordinal);
+        Assert.Contains("JOIN server_tags t ON t.id = m.tag_id", sql, StringComparison.Ordinal);
+        Assert.Contains("t.colour", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY m.server_id, t.sort_order, lower(t.name)", sql, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(nameof(DarlingFleetReader.FleetServersSql))]
+    [InlineData(nameof(DarlingFleetReader.FleetTagsSql))]
     [InlineData(nameof(DarlingFleetReader.FleetCpuSql))]
     [InlineData(nameof(DarlingFleetReader.FleetMemorySql))]
     [InlineData(nameof(DarlingFleetReader.FleetMemoryPressureSql))]
@@ -192,7 +208,7 @@ public sealed class DarlingFleetDtoJsonTests
         foreach (var field in new[]
         {
             "\"server_id\"", "\"display_name\"", "\"server_name\"", "\"engine_edition\"",
-            "\"is_azure_sql_db\"", "\"is_azure_mi\"", "\"is_silenced\"", "\"band\"", "\"status\"",
+            "\"is_azure_sql_db\"", "\"is_azure_mi\"", "\"is_silenced\"", "\"tags\"", "\"band\"", "\"status\"",
             "\"is_online\"", "\"last_collection\"", "\"cpu_percent\"", "\"total_cpu_percent\"",
             "\"cpu_severity\"", "\"memory_severity\"", "\"blocking_count\"", "\"blocking_severity\"",
             "\"deadlock_count\"", "\"deadlock_last_seen\"", "\"deadlock_severity\"", "\"threads_severity\"",
