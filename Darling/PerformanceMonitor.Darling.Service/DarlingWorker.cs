@@ -1552,13 +1552,6 @@ public sealed class DarlingWorker : BackgroundService
     }
 
     /// <summary>
-    /// The command plane's poll loop (Stage 2), run concurrently with the collection sweep on its own
-    /// ~5-second tick. Each tick DRAINS every currently-pending command (claim one at a time until the
-    /// queue is empty), so a burst of viewer commands is not throttled to one per 5 seconds. Never throws
-    /// out — a per-command failure is reported on the row and swallowed by the executor — so the loop lives
-    /// for the service's lifetime. Cancellation ends it cleanly.
-    /// </summary>
-    /// <summary>
     /// The #2022 backfill tick: at most one Query Store backfill slice per CONNECTED server per
     /// interval, sequentially — sequence IS the fleet-wide concurrency bound, so a fleet of slow
     /// slices stretches the tick instead of stacking connections. Servers are snapshotted under
@@ -1617,6 +1610,13 @@ public sealed class DarlingWorker : BackgroundService
         }
     }
 
+    /// <summary>
+    /// The command plane's poll loop (Stage 2), run concurrently with the collection sweep on its own
+    /// ~5-second tick. Each tick DRAINS every currently-pending command (claim one at a time until the
+    /// queue is empty), so a burst of viewer commands is not throttled to one per 5 seconds. Never throws
+    /// out — a per-command failure is reported on the row and swallowed by the executor — so the loop lives
+    /// for the service's lifetime. Cancellation ends it cleanly.
+    /// </summary>
     private async Task RunCommandLoopAsync(DarlingCommandExecutor executor, CancellationToken stoppingToken)
     {
         while (!stoppingToken.IsCancellationRequested)
