@@ -111,6 +111,41 @@ public sealed class DarlingNetworkConfigEditorTests
         Assert.True(liveNetwork!.Value.KeyStart > connectAs!.Value.KeyStart);
     }
 
+    [Fact]
+    public void UpsertStore_MinimalConfig_StringValuedLastMemberNoTrailingComma_PutsTheCommaAfterTheValue()
+    {
+        /* #2073 (gotqn's repro): a minimal darling.json whose postgres section ENDS with a string-valued
+           member and no trailing comma. A string value is entirely StringLiteral region — quotes
+           included — so the code-only backward walk from the closing brace skipped the whole value,
+           landed on the member's COLON, and spliced the synthesized separator there:
+           "dataDirectory":, "E:\\Foo\\pg" — invalid JSON. The wizard's write-time parse gate caught the
+           damage and refused to write, so the shipped symptom was "--configure-network cannot configure
+           this file", never a corrupted config. The shipped sample cannot trip it: every section's last
+           member there carries a trailing comma, which is Code and is found first. */
+        var json = "{\n"
+            + "  \"postgres\": {\n"
+            + "    \"managed\": true,\n"
+            + "    \"dataDirectory\": \"E:\\\\Foo\\\\pg\"\n"
+            + "  },\n"
+            + "  \"servers\": []\n"
+            + "}\n";
+
+        var block = Editor.BuildStoreNetworkBlock("192.168.1.205", "192.168.1.0/24", "viewer");
+        var edited = Editor.UpsertNetworkBlock(json, "postgres", block);
+
+        /* Parses — the exact gate the wizard enforces before writing. */
+        var config = DarlingConfig.Parse(edited);
+
+        /* The separator rides AFTER the string value, and the colon splice shape never appears. */
+        Assert.Contains("\"dataDirectory\": \"E:\\\\Foo\\\\pg\",", edited, StringComparison.Ordinal);
+        Assert.DoesNotContain(":,", edited, StringComparison.Ordinal);
+
+        /* And the block is live, not just syntactically present. */
+        var decision = DarlingManagedPostgres.ResolveNetworkExposure(config.Postgres.Network, CertPath, KeyPath);
+        Assert.True(decision.Exposed);
+        Assert.Equal("192.168.1.205", decision.ListenIp);
+    }
+
     /* ============================ mcp insert ============================ */
 
     [Fact]
