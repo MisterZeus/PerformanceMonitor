@@ -94,7 +94,14 @@ public static class CollectorScheduleOverlay
                 continue; /* Not a known collector — never persist an override for it. */
             }
 
-            if (item.FrequencyMinutes == def.FrequencyMinutes && item.RetentionDays == def.RetentionDays && item.Enabled)
+            /* #2064: compare Enabled to the collector's DEFAULT, not to bare true. The old test
+               skipped the row whenever the item was enabled at default frequency/retention — so
+               ENABLING a default-OFF collector (long_query_completions) at fleet scope wrote
+               NOTHING and silently never took effect, while the same edit at SERVER scope (which
+               writes every row unconditionally) did. That asymmetry is the #2061 report. */
+            if (item.FrequencyMinutes == def.FrequencyMinutes
+                && item.RetentionDays == def.RetentionDays
+                && item.Enabled == def.DefaultEnabled)
             {
                 continue; /* Matches the code default — no override row (keeps the table sparse). */
             }

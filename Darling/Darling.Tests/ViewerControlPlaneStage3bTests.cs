@@ -291,7 +291,10 @@ public sealed class ViewerCollectorScheduleLogicTests
             var def = CollectorScheduleDefaults.All[item.Name];
             Assert.Equal(def.FrequencyMinutes, item.FrequencyMinutes);
             Assert.Equal(def.RetentionDays, item.RetentionDays);
-            Assert.True(item.Enabled);
+            /* #2064: each collector's OWN shipped enabled state. The old blanket Assert.True is
+               what let the seed hardcode true — which showed default-OFF long_query_completions
+               as CHECKED in the editor while the feature was off (#2061). */
+            Assert.Equal(def.DefaultEnabled, item.Enabled);
         }
     }
 
@@ -385,6 +388,28 @@ public sealed class ViewerCollectorScheduleLogicTests
         Assert.Null(row.ServerId);
         Assert.Equal("wait_stats", row.CollectorName);
         Assert.Equal(15, row.FrequencyMinutes);
+    }
+
+    [Fact]
+    public void FleetOverrideRows_EnablingADefaultOffCollector_IsPersisted()
+    {
+        /* #2064 regression (#2061 as reported): enabling a default-OFF collector at FLEET scope while
+           its frequency/retention stay at the code default must still write a row. The sparse filter
+           used to test `item.Enabled` as bare truth, so this exact edit produced NO row — the save
+           looked successful, the store held nothing, and the Long Queries tab correctly reported the
+           feature OFF while the editor showed it checked. Server scope always worked (full snapshot),
+           which is what made the asymmetry so confusing to diagnose. */
+        var offByDefault = CollectorScheduleDefaults.All.First(kv => !kv.Value.DefaultEnabled).Key;
+
+        var edited = CollectorSchedulePresets.BuildDefaultSchedule();
+        var item = edited.First(s => s.Name == offByDefault);
+        Assert.False(item.Enabled);          /* the seed is honest now */
+        item.Enabled = true;                 /* the operator opts in, nothing else touched */
+
+        var row = Assert.Single(CollectorScheduleOverlay.ToFleetOverrideRows(edited));
+        Assert.Equal(offByDefault, row.CollectorName);
+        Assert.True(row.Enabled);
+        Assert.Null(row.ServerId);
     }
 
     [Fact]

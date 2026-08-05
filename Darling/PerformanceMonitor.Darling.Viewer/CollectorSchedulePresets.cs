@@ -107,7 +107,7 @@ public static class CollectorSchedulePresets
 
     /// <summary>
     /// The full editable schedule seeded from the shared <see cref="CollectorScheduleDefaults"/> (every
-    /// collector, at its code-default frequency/retention, enabled) — the baseline the editor overlays store
+    /// collector, at its code-default frequency/retention and code-default ENABLED state) — the baseline the editor overlays store
     /// overrides onto. Ordered by collector name for a stable grid.
     /// </summary>
     public static List<CollectorScheduleEditItem> BuildDefaultSchedule() =>
@@ -116,7 +116,11 @@ public static class CollectorSchedulePresets
             .Select(kv => new CollectorScheduleEditItem
             {
                 Name = kv.Key,
-                Enabled = true,
+                /* #2064: the collector's OWN shipped enabled state, not a blanket true. Hardcoding
+                   true made the editor show a default-OFF collector (long_query_completions) as
+                   CHECKED at default scope — it read as "already enabled" while the store held
+                   nothing and the feature was off, which is exactly how #2061 was reported. */
+                Enabled = kv.Value.DefaultEnabled,
                 FrequencyMinutes = kv.Value.FrequencyMinutes,
                 RetentionDays = kv.Value.RetentionDays,
             })
