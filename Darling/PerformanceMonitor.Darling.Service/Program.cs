@@ -271,6 +271,35 @@ if (args.Length > 0 && DarlingCliCommands.IsCollapseLegacySlicesVerb(args[0]))
         collapseConfigPath, dryRun, Console.Out, Console.Error, CancellationToken.None);
 }
 
+/* #2076 — convert the plan dimension's pre-V54 text rows to gzip (#2069's write form), in batches, while
+   the service runs. Same Windows-only managed-credential guard and same --dry-run shape as the verbs above. */
+if (args.Length > 0 && DarlingCliCommands.IsRecompressPlanDimVerb(args[0]))
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        Console.Error.WriteLine("--recompress-plan-dim requires Windows (DPAPI store credential).");
+        return 1;
+    }
+
+    var rest = args.AsSpan(1);
+    var dryRun = false;
+    string? recompressConfigPath = null;
+    foreach (var arg in rest)
+    {
+        if (string.Equals(arg, "--dry-run", StringComparison.OrdinalIgnoreCase))
+        {
+            dryRun = true;
+        }
+        else
+        {
+            recompressConfigPath = arg;
+        }
+    }
+
+    return await DarlingCliCommands.RecompressPlanDimAsync(
+        recompressConfigPath, dryRun, Console.Out, Console.Error, CancellationToken.None);
+}
+
 var builder = Host.CreateApplicationBuilder(args);
 
 /* Windows-service lifetime is a no-op when run from a console, so the same exe

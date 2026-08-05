@@ -663,7 +663,108 @@ public sealed class PayloadDimensionLiveTests
         }
     }
 
-    // ── (g) NUL handling ──
+    // ── (g) the recompression verb (#2076) ──
+
+    [Fact]
+    public async Task Recompression_ConvertsTextRowsToVerifiedGzip_LeavesLastSeenAndGzRowsAlone_AndConverges()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), SkipReason);
+
+        var ct = TestContext.Current.CancellationToken;
+        var run = Guid.NewGuid().ToString("N")[..12];
+
+        /* Three pre-V54-shaped text rows (one carrying non-ASCII, the codec's UTF-8 leg) and one
+           already-gz row the run must not touch. */
+        var textPlans = new[]
+        {
+            $"<ShowPlanXML recompress=\"a-{run}\"><StmtSimple/></ShowPlanXML>",
+            $"<ShowPlanXML recompress=\"b-{run}\"><StmtSimple StatementText=\"SELECT N'Ærø — 数据'\"/></ShowPlanXML>",
+            $"<ShowPlanXML recompress=\"c-{run}\"><StmtSimple/></ShowPlanXML>",
+        };
+        var textDigests = textPlans.Select(PayloadDimensions.Digest).ToArray();
+        var gzPlan = $"<ShowPlanXML recompress=\"gz-{run}\"/>";
+        var gzDigest = PayloadDimensions.Digest(gzPlan);
+        var gzBytes = PayloadDimensions.CompressContent(gzPlan);
+        var t0 = new DateTime(2026, 4, 1, 12, 0, 0, DateTimeKind.Unspecified);
+
+        await using var connection = await OpenMigratedStoreAsync(connectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            for (var i = 0; i < textPlans.Length; i++)
+            {
+                using var insert = new NpgsqlCommand(
+                    "INSERT INTO query_plan_dim (digest, query_plan_xml, last_seen) VALUES ($1, $2, $3)",
+                    connection);
+                insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bytea, Value = textDigests[i] });
+                insert.Parameters.AddWithValue(textPlans[i]);
+                insert.Parameters.AddWithValue(t0);
+                await insert.ExecuteNonQueryAsync(ct);
+            }
+
+            using (var insert = new NpgsqlCommand(
+                "INSERT INTO query_plan_dim (digest, query_plan_gz, last_seen) VALUES ($1, $2, $3)",
+                connection))
+            {
+                insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bytea, Value = gzDigest });
+                insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bytea, Value = gzBytes });
+                insert.Parameters.AddWithValue(t0);
+                await insert.ExecuteNonQueryAsync(ct);
+            }
+
+            /* The survey counts the whole table (fleet-wide on a shared rig), so pin relatively. */
+            var survey = await PlanDimRecompression.SurveyAsync(connection, ct);
+            Assert.True(survey.Pending >= textPlans.Length, "the seeded text rows must count as pending");
+
+            var result = await PlanDimRecompression.ConvertAsync(connection, progress: null, ct);
+            Assert.True(result.Rows >= textPlans.Length, "the seeded text rows must convert");
+            Assert.Equal(0, result.VerifyFailures);
+            Assert.True(result.TextBytes > result.GzipBytes, "gzip must actually be smaller than the text it replaced");
+
+            /* Each converted row: text NULL, gz decompresses to the ORIGINAL text, and last_seen is
+               UNTOUCHED — recompression is not a sighting (stamping it would push GC-eligible rows a
+               full retention window into the future). */
+            for (var i = 0; i < textPlans.Length; i++)
+            {
+                using var read = new NpgsqlCommand(
+                    "SELECT query_plan_xml, query_plan_gz, last_seen FROM query_plan_dim WHERE digest = $1",
+                    connection);
+                read.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bytea, Value = textDigests[i] });
+                await using var reader = await read.ExecuteReaderAsync(ct);
+                Assert.True(await reader.ReadAsync(ct));
+                Assert.True(reader.IsDBNull(0), "converted row must have NULL text");
+                Assert.Equal(textPlans[i], PayloadDimensions.DecompressContent(reader.GetFieldValue<byte[]>(1)));
+                Assert.Equal(t0, reader.GetDateTime(2));
+            }
+
+            /* The already-gz row's bytes are untouched (the fetch predicate never selects it). */
+            var gzAfter = (byte[])(await ScalarAsync(
+                connection, "SELECT query_plan_gz FROM query_plan_dim WHERE digest = $1", ct, gzDigest))!;
+            Assert.Equal(gzBytes, gzAfter);
+
+            /* Convergence: a second run finds nothing left to do. */
+            var second = await PlanDimRecompression.ConvertAsync(connection, progress: null, ct);
+            Assert.Equal(0, second.Rows);
+            Assert.Equal(0, second.VerifyFailures);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                foreach (var digest in textDigests)
+                {
+                    await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryPlanDimTable, digest, cleanupCt);
+                }
+
+                await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryPlanDimTable, gzDigest, cleanupCt);
+            });
+        }
+    }
+
+    // ── (h) NUL handling ──
 
     [Fact]
     public async Task NulLadenPayload_RoundTripsStripped_AndItsDigestKeysTheStoredBytes()

@@ -145,6 +145,7 @@ public sealed class DarlingStartupArgsTests
     [InlineData("--configure-network", true)]
     [InlineData("--backfill-rollups", true)]
     [InlineData("--collapse-legacy-slices", true)]
+    [InlineData("--recompress-plan-dim", true)]
     [InlineData("--version", false)]   // its own classification, not a "known verb"
     [InlineData("--help", false)]
     [InlineData("--nonsense", false)]
