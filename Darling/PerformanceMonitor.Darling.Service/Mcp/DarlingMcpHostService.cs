@@ -451,6 +451,11 @@ public sealed class DarlingMcpHostService : BackgroundService
                 /* #2029 get_pvs_stats — the ADR persistent version store, previously reachable only
                    indirectly (alert knobs + compose measures). Twin registered in Lite's host. */
                 .WithGeminiCompatibleTools<DarlingMcpPvsTools>()
+                /* #2068 get_store_metrics — the monitoring store's OWN hourly self-metrics series
+                   (per-hypertable size/compression, payload-dimension sizes + row counts, whole-store
+                   size + enabled-server count) for capacity forecasting. Darling-only: a single-server
+                   edition has no central store to measure, so no Lite twin. */
+                .WithGeminiCompatibleTools<DarlingMcpStoreMetricsTools>()
                 /* #1496 get_long_query_completions — the opt-in long-query completion trace (rpc/batch over
                    the duration threshold + attentions), over Darling's Postgres store (STORED read). */
                 .WithGeminiCompatibleTools<DarlingMcpLongQueryTools>()

@@ -81,6 +81,12 @@ public sealed class DarlingWorker : BackgroundService
        one alter_job per stuck job) — no need for the 15s sweep or the 30s alert cadence. */
     private static readonly TimeSpan s_compressionCheckInterval = TimeSpan.FromHours(1);
 
+    /* The store self-metrics sweep's cadence (fleet-level, #2068). Store growth is a slow signal — the
+       series exists to forecast weeks out, and the compression tier only changes state once a day per
+       chunk — so hourly matches the compression check it rides beside, and each run is a handful of
+       catalog-function reads plus ~30 narrow INSERTs. */
+    private static readonly TimeSpan s_storeMetricsInterval = TimeSpan.FromHours(1);
+
     /* The Query Store backfill worker's tick (#2022): its OWN loop like the command plane, so a slow
        byte-budgeted slice can never delay or starve the collection sweep — the two share only the
        cancellation token and the guarded server snapshot. One slice per server per tick keeps it a
@@ -306,6 +312,12 @@ public sealed class DarlingWorker : BackgroundService
        every s_compressionCheckInterval. Fleet-level (one shared store), so it is a single field, not
        per-server; only consulted when _timescaleAvailable. */
     private DateTime _nextCompressionCheckUtc = DateTime.MinValue;
+
+    /* MinValue = the first sweep after startup records the store self-metrics snapshot (#2068), then every
+       s_storeMetricsInterval. Fleet-level (one shared store), so it is a single field, not per-server. NOT
+       gated on _timescaleAvailable at the loop: the dimension and whole-store rows apply to plain-PG stores
+       too; only the per-hypertable arm inside the sweep needs (and gets) the flag. */
+    private DateTime _nextStoreMetricsUtc = DateTime.MinValue;
 
     /* Fleet-level working-set launch-guard latch (#1556): true once ShouldLaunchSweeps has tripped this
        episode, so its CRITICAL log is emitted ONCE rather than every sweep (the WarnedThisEpisode idiom —
@@ -1285,6 +1297,19 @@ public sealed class DarlingWorker : BackgroundService
                 await EvaluateCompressionJobHealthAsync(stoppingToken);
             }
 
+            /* #2068: the store self-metrics sweep. Capacity forecasting previously required ad-hoc
+               archaeology over the TimescaleDB chunk catalog, whose raw window is 4 days — a measured 3x
+               daily-ingest jump was only visible because the catalog still held both eras. This persists
+               the store's own size/compression/growth series (per-hypertable, per-dimension, whole-store)
+               into the plain collect.store_metrics table hourly, retention bounded by the sweep's own
+               DELETE. Every store shape (the hypertable arm gates on _timescaleAvailable INSIDE);
+               failure-isolated inside SweepStoreSelfMetricsAsync like the two checks above. */
+            if (DateTime.UtcNow >= _nextStoreMetricsUtc)
+            {
+                _nextStoreMetricsUtc = DateTime.UtcNow.Add(s_storeMetricsInterval);
+                await SweepStoreSelfMetricsAsync(stoppingToken);
+            }
+
             try
             {
                 await Task.Delay(s_sweepInterval, stoppingToken);
@@ -2256,6 +2281,32 @@ LIMIT 1", connection);
         catch (Exception ex)
         {
             _logger.LogError("Compression-job health check failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// The #2068 store self-metrics sweep (fleet-level, hourly): one <see cref="StoreSelfMetrics"/> run —
+    /// per-hypertable size/compression rows (Timescale stores only, gated on the cached
+    /// <see cref="_timescaleAvailable"/> flag INSIDE the sweep so plain-PG stores still record their
+    /// dimension + whole-store rows), the payload-dimension size/row-count rows, the whole-store summary
+    /// row, and the series' own bounded retention DELETE. Failure-isolated at the worker level like the
+    /// disk-pressure and compression checks: a store hiccup logs and skips this tick, never aborting the
+    /// sweep loop, and the series simply gains a one-hour gap.
+    /// </summary>
+    private async Task SweepStoreSelfMetricsAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
+            await StoreSelfMetrics.SweepAsync(connection, _timescaleAvailable, DateTime.UtcNow, _logger, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* Shutdown — quiet and expected. */
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError("Store self-metrics sweep failed: {Message}", ex.Message);
         }
     }
 
