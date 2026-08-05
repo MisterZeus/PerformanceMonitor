@@ -265,7 +265,30 @@ public sealed class PayloadDimensionLiveTests
                     connection,
                     "SELECT is_nullable FROM information_schema.columns WHERE table_name = $1 AND column_name = $2",
                     ct, dimTable, column);
-                Assert.Equal("NO", nullable);
+
+                /* #2069: the plan dim's TEXT column is nullable BY DESIGN — new rows carry gzip bytes
+                   and leave it NULL (fresh stores create it nullable; upgraded stores get V54's DROP
+                   NOT NULL). Digest and last_seen — and the text dim entirely — stay NOT NULL. */
+                var expectNullable =
+                    string.Equals(dimTable, PayloadDimensions.CompressedContentDimTable, StringComparison.Ordinal) &&
+                    string.Equals(column, payloadColumn, StringComparison.Ordinal)
+                        ? "YES"
+                        : "NO";
+                Assert.Equal(expectNullable, nullable);
+            }
+
+            /* #2069: the plan dim also carries the gz bytea column, nullable — pre-V54 rows have text
+               only, so NOT NULL could never hold. */
+            if (string.Equals(dimTable, PayloadDimensions.CompressedContentDimTable, StringComparison.Ordinal))
+            {
+                Assert.Equal("bytea", await ScalarAsync(
+                    connection,
+                    "SELECT data_type FROM information_schema.columns WHERE table_name = $1 AND column_name = $2",
+                    ct, dimTable, PayloadDimensions.CompressedContentColumn));
+                Assert.Equal("YES", await ScalarAsync(
+                    connection,
+                    "SELECT is_nullable FROM information_schema.columns WHERE table_name = $1 AND column_name = $2",
+                    ct, dimTable, PayloadDimensions.CompressedContentColumn));
             }
 
             /* The digest is the PRIMARY KEY — that is what makes ON CONFLICT (digest) the dedup mechanism
