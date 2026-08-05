@@ -236,6 +236,20 @@ public sealed class DarlingCollectorRunner
                             _logger?.LogWarning(
                                 "{Collector} on '{Server}' database [{Database}] catch-up clamped to {Hours}h (stored watermark {Raw:o} is older) — a bounded, logged history hole.",
                                 definition.Name, server.Config.DisplayName, databaseName, WatermarkPolicy.MaxCatchup.TotalHours, context.Watermark);
+
+                            /* #2058 (the Azure arm of #2022's hole recording): context.Watermark still
+                               holds the RAW value here — the definition clamped only its own cutoff
+                               parameter — so the hole is (raw, re-derived clamp floor), same merge
+                               semantics as the enumerated site. Only query_store both clamps AND has a
+                               backfill worker; the name guard keeps the XE collectors that share this
+                               branch from growing backfill state they have no worker for. */
+                            if (context.Watermark.HasValue
+                                && string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
+                                && WatermarkPolicy.ClampCatchup(context.Watermark, collectionTime) is DateTime azureClampedFloor)
+                            {
+                                await RecordQueryStoreBackfillHoleAsync(
+                                    server.ServerId, databaseName, context.Watermark.Value, azureClampedFloor, cancellationToken);
+                            }
                         }
                     }
 

@@ -55,8 +55,10 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para><b>Pacing.</b> One slice per server per tick on the worker's OWN loop (the command-loop
 /// precedent), each slice bounded by the same per-database byte budget as the live path, on its own
 /// SQL and store connections, never touching the sweep gate — backfill can be slow forever without
-/// delaying collection. Azure SQL DB targets are deferred (per-database connections need the Azure
-/// branch's plumbing); Lite is deferred with it — both are follow-up scope, not accidents.</para>
+/// delaying collection. Azure SQL DB targets ride the same state model on per-database connections
+/// (#2058 — the window travels as command parameters, since Azure rejects the sp_executesql
+/// nesting); Lite remains deferred scope with its own horizon decision (30-day raw + parquet, no
+/// CAGG/retention tiers), tracked on #2058.</para>
 /// </summary>
 public sealed class QueryStoreBackfill
 {
@@ -111,10 +113,7 @@ public sealed class QueryStoreBackfill
     /// </summary>
     public async Task<bool> RunServerSliceAsync(ServerRuntime server, CancellationToken cancellationToken)
     {
-        /* Azure SQL DB reaches Query Store through per-database connections (#1836) — deferred
-           scope for this worker; the tail/hole state model is connection-shape-agnostic, so the
-           Azure arm can be added without changing what is stored. */
-        if (server.Target.IsAzureSqlDb || !QueryStoreCollector.Instance.AppliesTo(server.Target))
+        if (!QueryStoreCollector.Instance.AppliesTo(server.Target))
         {
             return false;
         }
@@ -198,36 +197,52 @@ public sealed class QueryStoreBackfill
             CapturePlanXml = _capturePlans(),
         };
 
-        using var sqlConnection = new SqlConnection(server.ConnectionString);
-        await sqlConnection.OpenAsync(cancellationToken);
+        var timeout = definition.CommandTimeoutSecondsOverride ?? DarlingCollectorRunner.CommandTimeoutSeconds;
+        var rows = new List<QueryStoreCollector.Row>();
 
-        /* Same best-effort 10-second PRODUCTVERSION probe as the live enumeration path — the
-           version gates shape the SELECT, and the fallback default is the conservative one. */
-        var probePlan = definition.BuildEnumerationProbe(context);
-        if (probePlan is not null)
+        if (server.Target.IsAzureSqlDb)
         {
-            try
+            /* Azure arm (#2058): the window travels as command parameters on a per-database
+               connection — Azure SQL DB rejects the [db].sys.sp_executesql nesting (#1836). The
+               version gates are forced on by the target flags, so no PRODUCTVERSION probe is
+               needed; CurrentDatabaseName feeds ReadAsync's database attribution exactly as on
+               the live Azure path. */
+            context.CurrentDatabaseName = databaseName;
+            var azurePlan = definition.BuildBackfillQuery(context, floorUtc, ceilingUtc);
+            using var dbConnection = await _runner.OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
+            using var dbCommand = DarlingCollectorRunner.CreateCollectorCommand(azurePlan, dbConnection, timeout);
+            using var dbReader = await dbCommand.ExecuteReaderAsync(cancellationToken);
+            rows = await definition.ReadAsync(dbReader, context, cancellationToken);
+        }
+        else
+        {
+            using var sqlConnection = new SqlConnection(server.ConnectionString);
+            await sqlConnection.OpenAsync(cancellationToken);
+
+            /* Same best-effort 10-second PRODUCTVERSION probe as the live enumeration path — the
+               version gates shape the SELECT, and the fallback default is the conservative one. */
+            var probePlan = definition.BuildEnumerationProbe(context);
+            if (probePlan is not null)
             {
-                using var probeCommand = DarlingCollectorRunner.CreateCollectorCommand(probePlan, sqlConnection, 10);
-                var probeResult = await probeCommand.ExecuteScalarAsync(cancellationToken);
-                if (probeResult is not null && probeResult != DBNull.Value)
+                try
                 {
-                    context.EnumerationProbeResult = probeResult;
+                    using var probeCommand = DarlingCollectorRunner.CreateCollectorCommand(probePlan, sqlConnection, 10);
+                    var probeResult = await probeCommand.ExecuteScalarAsync(cancellationToken);
+                    if (probeResult is not null && probeResult != DBNull.Value)
+                    {
+                        context.EnumerationProbeResult = probeResult;
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger?.LogDebug("Backfill version probe on '{Server}' failed; using defaults: {Error}",
+                        server.Config.DisplayName, ex.Message);
                 }
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _logger?.LogDebug("Backfill version probe on '{Server}' failed; using defaults: {Error}",
-                    server.Config.DisplayName, ex.Message);
-            }
-        }
 
-        var plan = definition.BuildBackfillPerItemQuery(databaseName, context, floorUtc, ceilingUtc);
-        var rows = new List<QueryStoreCollector.Row>();
-        using (var command = DarlingCollectorRunner.CreateCollectorCommand(
-                   plan, sqlConnection, definition.CommandTimeoutSecondsOverride ?? DarlingCollectorRunner.CommandTimeoutSeconds))
-        using (var reader = await command.ExecuteReaderAsync(cancellationToken))
-        {
+            var plan = definition.BuildBackfillPerItemQuery(databaseName, context, floorUtc, ceilingUtc);
+            using var command = DarlingCollectorRunner.CreateCollectorCommand(plan, sqlConnection, timeout);
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
             await definition.ReadItemAsync(databaseName, reader, rows, context, cancellationToken);
         }
 
