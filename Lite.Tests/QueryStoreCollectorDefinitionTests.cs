@@ -1097,6 +1097,35 @@ public sealed class QueryStoreCollectorDefinitionTests
     }
 
     [Fact]
+    public void BuildBackfillQuery_Azure_SameWindowShape_NoSpExecutesql_ThrowsOffAzure()
+    {
+        /* #2058, the Azure arm: the same backfill body runs VERBATIM on the per-database connection
+           (Azure rejects [db].sys.sp_executesql nesting, #1836), behind the same eligibility gate as
+           the live Azure query, with the window as command parameters. Off-Azure it throws — the
+           enumerated per-item path drives the slice there, and silently collecting the connection's
+           own catalog would be worse than a loud wrong-path error. */
+        var floor = new DateTime(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc);
+        var ceiling = new DateTime(2026, 7, 3, 0, 0, 0, DateTimeKind.Utc);
+        var plan = QueryStoreCollector.Instance.BuildBackfillQuery(MakeContext(isAzureSqlDb: true), floor, ceiling);
+
+        Assert.DoesNotContain("sp_executesql", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("f.last_execution_time > @floor_time", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("f.last_execution_time < @ceiling_time", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY qsrs.last_execution_time DESC", plan.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("@cutoff_time", plan.Text, StringComparison.Ordinal);
+        /* The same eligibility gate the live Azure query leads with. */
+        Assert.StartsWith(QueryStoreCollector.Instance.BuildQuery(MakeContext(isAzureSqlDb: true)).Text.Split('\n')[0],
+            plan.Text, StringComparison.Ordinal);
+        Assert.Collection(
+            plan.Parameters,
+            p => { Assert.Equal("@floor_time", p.Name); Assert.Equal(floor, p.Value); },
+            p => { Assert.Equal("@ceiling_time", p.Name); Assert.Equal(ceiling, p.Value); });
+
+        Assert.Throws<NotSupportedException>(
+            () => QueryStoreCollector.Instance.BuildBackfillQuery(MakeContext(), floor, ceiling));
+    }
+
+    [Fact]
     public void BuildBackfillPerItemQuery_LiveBodyStaysUntouched()
     {
         /* The backfill flag must be a pure additive variant: the LIVE per-item query keeps its

@@ -402,6 +402,32 @@ END;
     }
 
     /// <summary>
+    /// The Azure SQL DB backfill slice (#2058, the Azure arm of #2022): the same eligibility gate and
+    /// the same backfill-shaped payload as <see cref="BuildBackfillPerItemQuery"/>, executed verbatim
+    /// on the host's per-database connection — Azure SQL DB rejects the on-prem
+    /// <c>[db].sys.sp_executesql</c> nesting (#1836), so the window travels as command parameters
+    /// instead. Same exclusive (floor, ceiling) window contract; the caller reads through
+    /// <see cref="ReadAsync"/> with <see cref="CollectorContext.CurrentDatabaseName"/> set, exactly
+    /// like the live Azure path. Throws off-Azure for the same reason <see cref="BuildQuery"/> does:
+    /// silently collecting the connection's own catalog is worse than a loud wrong-path error.
+    /// </summary>
+    public CollectorQuery BuildBackfillQuery(CollectorContext context, DateTime floorUtc, DateTime ceilingUtc)
+    {
+        if (!context.Target.IsAzureSqlDb)
+        {
+            throw new NotSupportedException("query_store backfills per enumerated database on this target; BuildBackfillPerItemQuery drives the slice.");
+        }
+
+        return new CollectorQuery(
+            AzureEligibilityGateText + BuildPayloadBody(context, backfill: true),
+            new List<CollectorParameter>
+            {
+                new("@floor_time", floorUtc, CollectorParameterType.DateTime2),
+                new("@ceiling_time", ceilingUtc, CollectorParameterType.DateTime2),
+            });
+    }
+
+    /// <summary>
     /// On-prem / RDS / Managed Instance only: list the databases whose Query Store is usable, then
     /// collect each through <see cref="BuildPerItemQuery"/>. Null on Azure SQL DB — enumeration is not
     /// how that target is collected (<see cref="RunsPerDatabase"/>), and the Azure cursor this replaced
