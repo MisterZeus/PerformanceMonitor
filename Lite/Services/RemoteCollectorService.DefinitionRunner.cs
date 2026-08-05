@@ -180,6 +180,18 @@ public partial class RemoteCollectorService
                             _logger?.LogWarning(
                                 "{Collector} on '{Server}' database [{Database}] catch-up clamped to {Hours}h (stored watermark {Raw:o} is older) — a bounded, logged history hole.",
                                 definition.Name, server.DisplayName, databaseName, WatermarkPolicy.MaxCatchup.TotalHours, context.Watermark);
+
+                            /* #2058: record the hole for the backfill worker — context.Watermark still
+                               holds the RAW value here (the definition clamped only its own cutoff), so
+                               the hole is (raw, re-derived clamp floor); merged wider on repeat. The
+                               name guard keeps the XE collectors sharing this branch from growing
+                               backfill state they have no worker for. */
+                            if (context.Watermark.HasValue
+                                && string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
+                                && WatermarkPolicy.ClampCatchup(context.Watermark, collectionTime) is DateTime azureClampedFloor)
+                            {
+                                await RecordQueryStoreBackfillHoleAsync(serverId, databaseName, context.Watermark.Value, azureClampedFloor, cancellationToken);
+                            }
                         }
                     }
 
@@ -354,6 +366,15 @@ public partial class RemoteCollectorService
                                 _logger?.LogWarning(
                                     "{Collector} on '{Server}' database [{Database}] catch-up clamped to {Hours}h (stored watermark {Raw:o} is older) — a bounded, logged history hole.",
                                     definition.Name, server.DisplayName, item, WatermarkPolicy.MaxCatchup.TotalHours, raw.Value);
+
+                                /* #2058: the clamp opens a hole (raw, clamped) the live path never
+                                   revisits — record it for the backfill worker, merged wider with any
+                                   hole already pending. Name-guarded like the Azure site. */
+                                if (clamped.HasValue
+                                    && string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                                {
+                                    await RecordQueryStoreBackfillHoleAsync(serverId, item, raw.Value, clamped.Value, ct);
+                                }
                             }
                             context.Watermark = clamped;
                         },

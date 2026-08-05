@@ -37,6 +37,10 @@ public class CollectionBackgroundService : BackgroundService
     private static readonly TimeSpan CollectionInterval = TimeSpan.FromMinutes(1);
     /* Start at UtcNow so maintenance tasks don't all fire on the very first cycle. */
     private DateTime _lastArchiveTime = DateTime.UtcNow;
+
+    /* #2058: the Query Store backfill tick — one byte-budgeted slice per server per due-tick, on
+       Lite's IfDue ladder (the archival/retention/analysis idiom) rather than a separate loop. */
+    private DateTime _lastQueryStoreBackfill = DateTime.MinValue;
     private DateTime _lastRetentionTime = DateTime.UtcNow;
     private DateTime _lastAnalysisTime = DateTime.UtcNow;
     private DateTime _lastFindingsCleanupTime = DateTime.UtcNow;
@@ -48,6 +52,11 @@ public class CollectionBackgroundService : BackgroundService
 
     /* Archive every hour, retention once per day */
     private static readonly TimeSpan ArchiveInterval = TimeSpan.FromHours(1);
+
+    /// <summary>The backfill worker's cadence (#2058) — Darling's worker ticks at the same 5
+    /// minutes; the steady state (every tail drained, no holes) costs a candidate query and a few
+    /// MIN() lookups per server.</summary>
+    private static readonly TimeSpan QueryStoreBackfillInterval = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan RetentionInterval = TimeSpan.FromHours(24);
     /* Analysis-findings retention purge — daily, matching the parquet-retention cadence
        above and Darling's daily findings-cleanup horizon. */
@@ -132,6 +141,8 @@ public class CollectionBackgroundService : BackgroundService
                 /* Periodic archival (time-based or size-based) */
                 await RunArchivalIfDueAsync();
 
+                await RunQueryStoreBackfillIfDueAsync(stoppingToken);
+
                 /* Periodic retention cleanup */
                 RunRetentionIfDue();
 
@@ -163,6 +174,28 @@ public class CollectionBackgroundService : BackgroundService
         }
 
         _logger?.LogInformation("Collection background service stopped");
+    }
+
+    /// <summary>#2058: fills the Query Store history the live path never takes — the 60-minute
+    /// first-contact tail and 24h-clamped outage holes — newest-first, strictly behind the live
+    /// path's floor, never past the resolved query_store retention. See
+    /// RemoteCollectorService.QueryStoreBackfill for the worker itself.</summary>
+    private async Task RunQueryStoreBackfillIfDueAsync(CancellationToken stoppingToken)
+    {
+        if (DateTime.UtcNow - _lastQueryStoreBackfill < QueryStoreBackfillInterval)
+        {
+            return;
+        }
+
+        _lastQueryStoreBackfill = DateTime.UtcNow;
+        try
+        {
+            await _collectorService.RunQueryStoreBackfillTickAsync(stoppingToken);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Query Store backfill tick failed");
+        }
     }
 
     private async Task RunArchivalIfDueAsync()

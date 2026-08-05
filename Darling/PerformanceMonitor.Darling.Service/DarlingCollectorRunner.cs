@@ -840,12 +840,12 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     {
         try
         {
-            var key = QueryStoreBackfill.HoleKeyPrefix + databaseName;
-            var existing = await GetCollectorStateAsync(serverId, QueryStoreBackfill.StateCollectorName, cancellationToken);
-            var merged = QueryStoreBackfill.MergeHole(existing.TryGetValue(key, out var encoded) ? encoded : null, fromUtc, toUtc);
+            var key = QueryStoreBackfillState.HoleKeyPrefix + databaseName;
+            var existing = await GetCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName, cancellationToken);
+            var merged = QueryStoreBackfillState.MergeHole(existing.TryGetValue(key, out var encoded) ? encoded : null, fromUtc, toUtc);
             await SaveCollectorStateAsync(
-                serverId, QueryStoreBackfill.StateCollectorName,
-                new Dictionary<string, string>(StringComparer.Ordinal) { [key] = QueryStoreBackfill.EncodeHole(merged.FromUtc, merged.ToUtc) },
+                serverId, QueryStoreBackfillState.StateCollectorName,
+                new Dictionary<string, string>(StringComparer.Ordinal) { [key] = QueryStoreBackfillState.EncodeHole(merged.FromUtc, merged.ToUtc) },
                 cancellationToken);
         }
         catch (Exception ex)
