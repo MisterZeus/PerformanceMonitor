@@ -55,6 +55,13 @@ public sealed class CrossAppMcpToolInventoryPinTests
     // system_health parser tools). A NEW Darling-only tool must be either ported to Lite or added here.
     private static readonly HashSet<string> KnownLiteMissingMcpTools = new(StringComparer.Ordinal)
     {
+        /* #2068: the store self-metrics read (get_store_metrics) over collect.store_metrics — the central
+           Postgres store measuring ITSELF (hypertable sizes/compression, payload dims, whole-store growth)
+           for capacity forecasting. Darling-ONLY by architecture, not a "not ported yet" item: Lite is a
+           single-instance app over local DuckDB with no central store to measure, no hypertables, and no
+           payload dimensions, so there is no Lite twin to port. */
+        "get_store_metrics",
+
         /* #1562: the pre-banded fleet-overview read born from the web dashboard's DarlingFleetReader.
            Lite twin = a DuckDB fleet reader over the SAME shared ServerHealthClassifier (Common) — tracked
            in #1573 alongside unifying Lite's own card banding onto that classifier; port it, then remove
