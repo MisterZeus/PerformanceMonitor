@@ -100,6 +100,7 @@ public static class PgMigrations
         new Migration(49, "database-state-alert", V49Sql),
         new Migration(50, "server-tag-colour", V50Sql),
         new Migration(51, "query-stats-host-object", V51Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
+        new Migration(52, "finding-drilldown-json", V52Sql),
     };
 
     /// <summary>
@@ -988,6 +989,21 @@ ALTER TABLE config.server_tags
 ALTER TABLE query_stats
     ADD COLUMN IF NOT EXISTS host_object_name text;
 DROP VIEW IF EXISTS v_query_stats;";
+
+    /// <summary>
+    /// V52 — the persisted finding drill-down (#2060): the evidence rows behind a finding
+    /// (parameter-sensitive plans, top spill queries, blocking chains) previously existed only on
+    /// the write path, so <c>get_analysis_findings</c> could say "13 plans showed the pattern"
+    /// while no surface could enumerate them. Additive nullable text column carrying the CAPPED
+    /// JSON (<c>DrillDownSerializer</c>: rows-per-section + total-size caps, explicit truncation
+    /// note — never a silent cap), written beside <c>remediation_action_json</c> with the same D2
+    /// rationale and read back into the finding. No backfill: pre-upgrade findings honestly return
+    /// no drill-down and age out with finding retention. A fresh store's V4 creates the table
+    /// without the column and this ALTER adds it later in the same ladder run — the V9 idiom.
+    /// </summary>
+    private const string V52Sql = @"
+ALTER TABLE analysis_findings
+    ADD COLUMN IF NOT EXISTS drill_down_json text;";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

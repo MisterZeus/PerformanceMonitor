@@ -11,7 +11,7 @@ public static class AnalysisSchema
     /// <summary>
     /// Analysis schema version. Independent of main schema version.
     /// </summary>
-    public const int CurrentVersion = 4;
+    public const int CurrentVersion = 5;
 
     public const string CreateAnalysisFindingsTable = @"
 CREATE TABLE IF NOT EXISTS analysis_findings (
@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS analysis_findings (
     leaf_fact_value DOUBLE PRECISION,
     fact_count INTEGER NOT NULL,
     incident_id VARCHAR,
-    remediation_action_json VARCHAR
+    remediation_action_json VARCHAR,
+    drill_down_json VARCHAR
 )";
 
     public const string CreateAnalysisMutedTable = @"
@@ -96,6 +97,15 @@ CREATE INDEX IF NOT EXISTS idx_analysis_muted_hash
             // read-back the Recommendations reader deserializes it and the shared renderer turns it
             // into the copy-paste T-SQL, so a Lite card produces the SAME command a Darling card does.
             yield return "ALTER TABLE analysis_findings ADD COLUMN IF NOT EXISTS remediation_action_json VARCHAR";
+        }
+
+        if (fromVersion < 5)
+        {
+            /* v5 (#2060): the persisted CAPPED drill-down beside the built action — the evidence rows
+               (parameter-sensitive plans, spill queries) previously existed only on the write path, so
+               get_analysis_findings could count them but never enumerate them. Nullable, no backfill:
+               pre-upgrade findings honestly return no drill-down and age out with finding retention. */
+            yield return "ALTER TABLE analysis_findings ADD COLUMN IF NOT EXISTS drill_down_json VARCHAR";
         }
     }
 
