@@ -101,6 +101,7 @@ public static class PgMigrations
         new Migration(50, "server-tag-colour", V50Sql),
         new Migration(51, "query-stats-host-object", V51Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
         new Migration(52, "finding-drilldown-json", V52Sql),
+        new Migration(53, "store-self-metrics", V53Sql),
     };
 
     /// <summary>
@@ -1004,6 +1005,40 @@ DROP VIEW IF EXISTS v_query_stats;";
     private const string V52Sql = @"
 ALTER TABLE analysis_findings
     ADD COLUMN IF NOT EXISTS drill_down_json text;";
+
+    /// <summary>
+    /// V53 — the store self-metrics table (#2068): the hourly fleet-level sweep
+    /// (<see cref="StoreSelfMetrics"/>) persists the store's OWN size/compression/growth series here — one
+    /// row per hypertable (total / pre- / post-compression bytes, chunk count), one per payload dimension
+    /// table (total bytes, row count), and one whole-store summary row (pg_database_size + the
+    /// enabled-server count) per run — so capacity forecasting is a stored query instead of ad-hoc
+    /// archaeology over a chunk catalog whose raw window is 4 days.
+    /// <para>Deliberately a PLAIN table, and deliberately NOT a collector: it is not in
+    /// <c>CollectorCatalog.All</c>, so <see cref="TimescaleSupport"/>'s catalog-driven hypertable
+    /// conversion and DarlingRetention's catalog purge can never recurse onto the table that measures them
+    /// (pinned by test). At ~30 narrow rows/hour it needs neither chunks nor compression; its retention is
+    /// the sweep's own bounded DELETE (<see cref="StoreSelfMetrics.RetentionDays"/> days), no policy
+    /// machinery. No <c>v_*</c> passthrough view — not a collector table, nothing twins with Lite (a
+    /// single-server edition has no central store to measure). Fresh stores get the table from this
+    /// migration too (V1's generator walks the collector catalog, which this is not in — the V49
+    /// <c>config.database_state_expected</c> precedent), so fresh and upgraded stores take the same path.
+    /// <c>collect.</c>-qualified like V44/V47/V49; the (metric_time) index serves both the read surface's
+    /// windowed scans and the retention DELETE.</para>
+    /// </summary>
+    private const string V53Sql = @"
+CREATE TABLE IF NOT EXISTS collect.store_metrics (
+    metric_time timestamp NOT NULL,
+    object_name text NOT NULL,
+    object_kind text NOT NULL,
+    total_bytes bigint,
+    compressed_before_bytes bigint,
+    compressed_after_bytes bigint,
+    chunk_count integer,
+    row_count bigint,
+    enabled_server_count integer
+);
+
+CREATE INDEX IF NOT EXISTS idx_store_metrics_time ON collect.store_metrics(metric_time);";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

@@ -42,10 +42,11 @@ public sealed class PvsStatsStoreTests
         Assert.Equal("pvs-stats", v47.Name);
         /* V48 (#1984, the PVS-pressure alert knobs), then V49 (#1986, the database-state alert), then V50
            (#2008 2a, the server-tag colour), then V51 (#2012 stage 2, the query-stats host object), then V52
-           (#2060, the persisted finding drill-down) followed this migration — the newest-rung pins track the newest, the V47 identity pins below are
+           (#2060, the persisted finding drill-down), then V53 (#2068, the store self-metrics table) followed
+           this migration — the newest-rung pins track the newest, the V47 identity pins below are
            unchanged. */
-        Assert.Equal(52, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(52, StorageVersion.SchemaVersion);
+        Assert.Equal(53, PgMigrations.Scripts[^1].Version);
+        Assert.Equal(53, StorageVersion.SchemaVersion);
 
         /* collect.-qualified like V44 and V34, and idempotent so a re-run is a no-op. */
         Assert.Contains("CREATE TABLE IF NOT EXISTS collect.pvs_stats (", v47.Sql, StringComparison.Ordinal);
@@ -84,9 +85,9 @@ public sealed class PvsStatsStoreTests
         /* The trap a StorageVersion bump sets: the viewer's connect-time gate probes the store and
            compares the result against RequiredStoreSchemaVersion. A probe that cannot SEE the newest
            migration reports every healthy store as skewed and refuses to open it — permanently.
-           (52 since #2060's persisted finding drill-down; the full-sentinel pin lives in
+           (53 since #2068's store self-metrics table; the full-sentinel pin lives in
            ViewerDataServiceTests.) */
-        Assert.Equal(52, ViewerDataService.RequiredStoreSchemaVersion);
+        Assert.Equal(53, ViewerDataService.RequiredStoreSchemaVersion);
         Assert.Contains("table_name = 'pvs_stats'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         /* The V47 arm: pvs_stats present (and nothing newer) maps to exactly 47. */

@@ -526,6 +526,14 @@ public sealed class ViewerSchemaVersionGateTests
     public void MapProbedSchemaVersion_ServerTagColourAbsent_CapsAt49() =>
         Assert.Equal(49, ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
 
+    /// <summary>V53 (#2068) rung: every sentinel through V52 present but collect.store_metrics absent — the
+    /// probe must report 52, so a store one migration behind maps to 52 not 53. Like the V44 rung the viewer
+    /// never reads this table (the service's own hourly capacity series, surfaced over MCP/REST), so the arm
+    /// is the don't-under-report guard, not a failing-read gate.</summary>
+    [Fact]
+    public void MapProbedSchemaVersion_StoreMetricsAbsent_CapsAt52() =>
+        Assert.Equal(52, ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+
     [Fact]
     public void RequiredStoreSchemaVersion_TracksTheBuildSchemaVersion_AndTheProbeCoversIt()
     {
@@ -538,7 +546,7 @@ public sealed class ViewerSchemaVersionGateTests
            the connect-time gate refuse to open the viewer against a perfectly healthy store. */
         Assert.Equal(
             ViewerDataService.RequiredStoreSchemaVersion,
-            ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+            ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
     }
 }
 
