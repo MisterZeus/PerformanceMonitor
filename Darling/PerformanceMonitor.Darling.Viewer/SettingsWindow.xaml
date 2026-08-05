@@ -31,8 +31,16 @@
             </Style>
         </ResourceDictionary>
     </Window.Resources>
-    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-    <Grid Margin="16">
+    <!-- #2063: two fixed rows — the settings scroll, the Save/Close bar stays pinned below the
+         scroll (the Collector Schedules dialog's always-visible-actions shape), so a change made at
+         the top of a long settings list saves without a scroll to the bottom. -->
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+    <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+    <Grid Margin="16,16,16,0">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
@@ -781,11 +789,15 @@
             </StackPanel>
         </Border>
 
-        <!-- Buttons -->
-        <StackPanel Grid.Row="9" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
-            <Button Content="_Save" Click="SaveButton_Click" Style="{DynamicResource AccentButton}" Margin="0,0,8,0"/>
-            <Button Content="_Close" Click="CloseButton_Click" IsCancel="True"/>
-        </StackPanel>
     </Grid>
     </ScrollViewer>
+
+        <!-- Pinned action bar (#2063) — outside the ScrollViewer, always visible. -->
+        <Border Grid.Row="1" Background="{DynamicResource BackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="16,10,16,12">
+                <Button Content="_Save" Click="SaveButton_Click" Style="{DynamicResource AccentButton}" Margin="0,0,8,0"/>
+                <Button Content="_Close" Click="CloseButton_Click" IsCancel="True"/>
+            </StackPanel>
+        </Border>
+    </Grid>
 </Window>
