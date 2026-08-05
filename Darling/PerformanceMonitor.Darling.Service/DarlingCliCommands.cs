@@ -116,6 +116,11 @@ public static class DarlingCliCommands
     public static bool IsCollapseLegacySlicesVerb(string arg) =>
         string.Equals(arg, "--collapse-legacy-slices", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The verb <see cref="RecompressPlanDimAsync"/> handles — convert the plan dimension's
+    /// pre-V54 text rows to the gzip form V54's write path produces (#2076).</summary>
+    public static bool IsRecompressPlanDimVerb(string arg) =>
+        string.Equals(arg, "--recompress-plan-dim", StringComparison.OrdinalIgnoreCase);
+
     /// <summary><c>--version</c>/<c>-v</c> — print the product version and exit.</summary>
     public static bool IsVersionVerb(string arg) =>
         string.Equals(arg, "--version", StringComparison.OrdinalIgnoreCase)
@@ -145,7 +150,8 @@ public static class DarlingCliCommands
         || IsEnableWebVerb(arg)
         || IsDisableWebVerb(arg)
         || IsBackfillRollupsVerb(arg)
-        || IsCollapseLegacySlicesVerb(arg);
+        || IsCollapseLegacySlicesVerb(arg)
+        || IsRecompressPlanDimVerb(arg);
 
     /// <summary>
     /// Classifies the exe's command line from its FIRST argument (#1581): no args → run the host; a recognized
@@ -217,6 +223,7 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --disable-web       Disable the web dashboard in the store and remove its firewall rule (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups  Materialize the retention rollups back over existing history, after a disk preflight." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --collapse-legacy-slices  Repair Query Store rows collected before the split-slice fix, then re-materialize the rollups they fed." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --recompress-plan-dim  Convert the plan dimension's pre-V54 text rows to gzip, in batches, while the service runs." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run   Show the plan, the disk estimate and the time budget, and change nothing.";
 
     /// <summary>
@@ -3028,6 +3035,203 @@ public static class DarlingCliCommands
     /// <summary>Floors an instant to its bucket, so a refresh window covers whole buckets on both edges.</summary>
     private static DateTime Floor(DateTime value, TimeSpan bucket)
         => bucket <= TimeSpan.Zero ? value : new DateTime(value.Ticks - (value.Ticks % bucket.Ticks), value.Kind);
+
+    /// <summary>
+    /// <c>--recompress-plan-dim</c> (#2076): convert the plan dimension's pre-V54 text rows to the gzip form
+    /// V54's write path produces (#2069), in bounded batches, while the service keeps running.
+    ///
+    /// <para><b>Why a verb.</b> V54 left old rows to convert by GC attrition, but the dimension GC retires a
+    /// row only when its digest stops being re-seen — a STABLE plan's text row never ages out, so the tail
+    /// never converts on its own. Rewriting the store's largest table runs when a person decides it should
+    /// (the <c>--collapse-legacy-slices</c> rationale), with <c>--dry-run</c> measuring the real ratio on
+    /// this store's own content first.</para>
+    ///
+    /// <para><b>No outage.</b> Each 1,000-row batch is one transaction against rows the collectors only ever
+    /// touch via <c>ON CONFLICT ... SET last_seen</c>; the service stays up, collection keeps running, and an
+    /// interrupted run resumes from wherever it stopped (the fetch predicate IS the resume point). Every
+    /// row's gzip bytes are round-trip verified before its text is nulled — a row that fails keeps its text
+    /// and is counted, never converted blind.</para>
+    ///
+    /// <para><b>Disclosed limit.</b> Converts live content; does not shrink the file — PostgreSQL returns old
+    /// row versions as reusable space INSIDE the relation, so the observable outcome is the dimension's
+    /// growth flatlining. Handing space back to the volume is a separate one-time VACUUM FULL/repack.</para>
+    ///
+    /// <para>Returns 0 when the conversion completed (or had nothing to do), 1 on a load/mode/credential
+    /// error or when any row failed round-trip verification (those rows keep their text; re-run after
+    /// investigating).</para>
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public static async Task<int> RecompressPlanDimAsync(
+        string? configPath, bool dryRun, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(output);
+        ArgumentNullException.ThrowIfNull(error);
+
+        DarlingConfig config;
+        try
+        {
+            config = DarlingConfig.Load(configPath);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not load configuration: {ex.Message}");
+            return 1;
+        }
+
+        var postgres = config.Postgres;
+        if (postgres is null)
+        {
+            error.WriteLine("postgres section is required.");
+            return 1;
+        }
+
+        var connectionString = postgres.Managed
+            ? DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres)
+            : postgres.ConnectionString;
+
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            error.WriteLine(postgres.Managed
+                ? "The managed store credential does not exist yet — start the PerformanceMonitor Darling service once so its first run initializes the store, then re-run this command."
+                : "postgres.connectionString is empty, so there is no store to convert.");
+            return 1;
+        }
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        try
+        {
+            await connection.OpenAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"Could not connect to the store: {ex.Message}");
+            return 1;
+        }
+
+        output.WriteLine();
+        output.WriteLine("PerformanceMonitor Darling — plan-dimension recompression (--recompress-plan-dim)");
+        output.WriteLine();
+
+        PlanDimRecompression.Survey survey;
+        try
+        {
+            survey = await PlanDimRecompression.SurveyAsync(connection, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"Could not survey query_plan_dim: {ex.Message}");
+            return 1;
+        }
+
+        output.WriteLine($"  {survey.Pending:N0} text row(s) to convert; {survey.Converted:N0} already gzip; {survey.Total:N0} total.");
+        output.WriteLine($"  Relation size (table + TOAST + indexes): {survey.RelationBytes / (1024.0 * 1024 * 1024):N1} GB.");
+        output.WriteLine();
+
+        if (!survey.HasWork)
+        {
+            output.WriteLine("  Nothing to convert — every dimension row already carries gzip content.");
+            output.WriteLine("  That is the expected end state: V54 writes gzip, and this verb (or GC attrition)");
+            output.WriteLine("  has already converted whatever text rows existed.");
+            return 0;
+        }
+
+        if (dryRun)
+        {
+            PlanDimRecompression.Result sample;
+            try
+            {
+                sample = await PlanDimRecompression.SampleAsync(connection, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                error.WriteLine($"Could not sample query_plan_dim: {ex.Message}");
+                return 1;
+            }
+
+            if (sample.Rows == 0)
+            {
+                output.WriteLine("  DRY RUN — the sample fetch returned no rows; nothing further to report.");
+                return 0;
+            }
+
+            var ratio = sample.GzipBytes == 0 ? 0 : (double)sample.TextBytes / sample.GzipBytes;
+            var avgGzip = sample.GzipBytes / (double)sample.Rows;
+            var projected = survey.Pending * avgGzip;
+            output.WriteLine($"  DRY RUN — sampled {sample.Rows:N0} pending row(s), compressed in memory, wrote nothing:");
+            output.WriteLine($"    measured ratio: {ratio:N1}x (raw text -> gzip), average {avgGzip / 1024.0:N1} KB per plan");
+            output.WriteLine($"    projected gzip content for all {survey.Pending:N0} pending rows: ~{projected / (1024.0 * 1024 * 1024):N1} GB");
+            output.WriteLine();
+            output.WriteLine("  The real run converts in 1,000-row batches (one transaction each) while the service");
+            output.WriteLine("  runs; it is safe to interrupt and re-run. NOTE: the relation's FILE size does not");
+            output.WriteLine("  shrink — freed space is reused internally; a later VACUUM FULL/repack returns it");
+            output.WriteLine("  to the volume if wanted.");
+            return 0;
+        }
+
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var pending = survey.Pending;
+        long lastNarrated = 0;
+        PlanDimRecompression.Result result;
+        try
+        {
+            result = await PlanDimRecompression.ConvertAsync(
+                connection,
+                running =>
+                {
+                    /* Narrate every ~25k rows: enough to prove liveness on a multi-hour run without
+                       scrolling the console into noise. */
+                    if (running.Rows - lastNarrated < 25_000)
+                    {
+                        return;
+                    }
+
+                    lastNarrated = running.Rows;
+                    var pct = pending == 0 ? 100 : running.Rows * 100.0 / pending;
+                    var rate = running.Rows / Math.Max(stopwatch.Elapsed.TotalSeconds, 1);
+                    var etaSeconds = rate <= 0 ? 0 : (pending - running.Rows) / rate;
+                    output.WriteLine(
+                        $"  {running.Rows:N0} / {pending:N0} ({pct:N1}%) — " +
+                        $"{running.TextBytes / (1024.0 * 1024 * 1024):N1} GB text -> {running.GzipBytes / (1024.0 * 1024 * 1024):N1} GB gzip — " +
+                        $"~{TimeSpan.FromSeconds(etaSeconds):hh\\:mm\\:ss} remaining");
+                },
+                cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"Conversion failed mid-run: {ex.Message}");
+            error.WriteLine("Committed batches are converted; re-running resumes from the remainder.");
+            return 1;
+        }
+
+        PlanDimRecompression.Survey after;
+        try
+        {
+            after = await PlanDimRecompression.SurveyAsync(connection, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"Post-run survey failed: {ex.Message}");
+            after = default;
+        }
+
+        var finalRatio = result.GzipBytes == 0 ? 0 : (double)result.TextBytes / result.GzipBytes;
+        output.WriteLine();
+        output.WriteLine($"  DONE in {stopwatch.Elapsed:hh\\:mm\\:ss} — {result.Rows:N0} row(s) converted, " +
+            $"{result.TextBytes / (1024.0 * 1024 * 1024):N1} GB text -> {result.GzipBytes / (1024.0 * 1024 * 1024):N1} GB gzip ({finalRatio:N1}x).");
+        if (after.Total > 0)
+        {
+            output.WriteLine($"  Remaining text rows: {after.Pending:N0} (new sightings during the run convert on the next pass).");
+        }
+
+        if (result.VerifyFailures > 0)
+        {
+            error.WriteLine($"  [WARN] {result.VerifyFailures:N0} row(s) FAILED round-trip verification and kept their text unchanged.");
+            error.WriteLine("  Investigate before re-running; those rows are readable exactly as before.");
+            return 1;
+        }
+
+        return 0;
+    }
 
     /// <summary>
     /// Materializes the query-acceleration rollups back over pre-existing history so the held raw retention
