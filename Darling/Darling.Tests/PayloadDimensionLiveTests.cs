@@ -675,12 +675,16 @@ public sealed class PayloadDimensionLiveTests
         var run = Guid.NewGuid().ToString("N")[..12];
 
         /* Three pre-V54-shaped text rows (one carrying non-ASCII, the codec's UTF-8 leg) and one
-           already-gz row the run must not touch. */
+           already-gz row the run must not touch. The repeated operator block gives each plan realistic
+           bulk (~6 KB): a payload smaller than gzip's own framing would compress LARGER and turn the
+           smaller-than-text assertion below into a lie about real plans. */
+        var bulk = string.Concat(Enumerable.Repeat(
+            "<RelOp NodeId=\"1\" PhysicalOp=\"Index Seek\" LogicalOp=\"Index Seek\" EstimateRows=\"1\"/>", 80));
         var textPlans = new[]
         {
-            $"<ShowPlanXML recompress=\"a-{run}\"><StmtSimple/></ShowPlanXML>",
-            $"<ShowPlanXML recompress=\"b-{run}\"><StmtSimple StatementText=\"SELECT N'Ærø — 数据'\"/></ShowPlanXML>",
-            $"<ShowPlanXML recompress=\"c-{run}\"><StmtSimple/></ShowPlanXML>",
+            $"<ShowPlanXML recompress=\"a-{run}\">{bulk}<StmtSimple/></ShowPlanXML>",
+            $"<ShowPlanXML recompress=\"b-{run}\">{bulk}<StmtSimple StatementText=\"SELECT N'Ærø — 数据'\"/></ShowPlanXML>",
+            $"<ShowPlanXML recompress=\"c-{run}\">{bulk}<StmtSimple/></ShowPlanXML>",
         };
         var textDigests = textPlans.Select(PayloadDimensions.Digest).ToArray();
         var gzPlan = $"<ShowPlanXML recompress=\"gz-{run}\"/>";
