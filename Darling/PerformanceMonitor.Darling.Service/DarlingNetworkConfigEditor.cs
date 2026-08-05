@@ -574,6 +574,30 @@ internal static class DarlingNetworkConfigEditor
     }
 
     /// <summary>
+    /// Index of the end of the previous MEMBER before <paramref name="before"/> — the last character that
+    /// is either code (skipping ws + comments, like <see cref="PreviousCodeIndex"/>) or part of a string
+    /// literal; -1 if none. The distinction is the #2073 bug: a string VALUE is entirely
+    /// <see cref="RegionKind.StringLiteral"/> (quotes included), so the code-only walk skips the whole
+    /// value and lands on the colon BEFORE it — and a comma synthesized "after the previous member" then
+    /// splices in after the colon (<c>"dataDirectory":, "…"</c>), invalid JSON. A string-literal hit here
+    /// is always a real value's closing quote: quoted runs inside comments classify as Comment, and any
+    /// trailing comma after the string is Code and would be found first.
+    /// </summary>
+    private static int PreviousMemberEndIndex(string json, RegionKind[] regions, int before, int floor)
+    {
+        for (var i = before - 1; i >= floor && i >= 0; i--)
+        {
+            if (regions[i] == RegionKind.StringLiteral
+                || (regions[i] == RegionKind.Code && !char.IsWhiteSpace(json[i])))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>
     /// End (exclusive) of the value that starts at <paramref name="valueStart"/>: the matching brace for
     /// an object/array, the closing quote for a string, or the char after the last non-whitespace token
     /// for a primitive (up to the next code comma or closing brace/bracket).
@@ -627,7 +651,10 @@ internal static class DarlingNetworkConfigEditor
         string json, RegionKind[] regions, int objectOpen, int objectClose, string member, string childIndent)
     {
         var lineStart = LineStartOf(json, objectClose);
-        var lastCodeIdx = PreviousCodeIndex(json, regions, objectClose, objectOpen);
+        /* Member-end, not code-only (#2073): the previous member's value may be a string, whose every
+           character (quotes included) is StringLiteral region — the code-only walk would skip it and put
+           the synthesized comma after the member's COLON. */
+        var lastCodeIdx = PreviousMemberEndIndex(json, regions, objectClose, objectOpen);
 
         /* Empty object (only the open brace precedes the close): drop the member in on its own line. */
         if (lastCodeIdx < 0 || lastCodeIdx == objectOpen)
