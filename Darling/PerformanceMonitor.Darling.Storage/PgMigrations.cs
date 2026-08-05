@@ -1027,6 +1027,21 @@ ALTER TABLE analysis_findings
     /// windowed scans and the retention DELETE.</para>
     /// </summary>
 
+    private const string V53Sql = @"
+CREATE TABLE IF NOT EXISTS collect.store_metrics (
+    metric_time timestamp NOT NULL,
+    object_name text NOT NULL,
+    object_kind text NOT NULL,
+    total_bytes bigint,
+    compressed_before_bytes bigint,
+    compressed_after_bytes bigint,
+    chunk_count integer,
+    row_count bigint,
+    enabled_server_count integer
+);
+
+CREATE INDEX IF NOT EXISTS idx_store_metrics_time ON collect.store_metrics(metric_time);";
+
     /// <summary>
     /// V54 — gzip-compressed plan-dimension content (#2069). The plan dim was 101 GB (69%) of the
     /// production store under lz4 TOAST (8.9× on plan XML); app-level gzip measured 14.0× on the
@@ -1043,21 +1058,6 @@ ALTER TABLE query_plan_dim
     ADD COLUMN IF NOT EXISTS query_plan_gz bytea;
 ALTER TABLE query_plan_dim
     ALTER COLUMN query_plan_xml DROP NOT NULL;";
-
-    private const string V53Sql = @"
-CREATE TABLE IF NOT EXISTS collect.store_metrics (
-    metric_time timestamp NOT NULL,
-    object_name text NOT NULL,
-    object_kind text NOT NULL,
-    total_bytes bigint,
-    compressed_before_bytes bigint,
-    compressed_after_bytes bigint,
-    chunk_count integer,
-    row_count bigint,
-    enabled_server_count integer
-);
-
-CREATE INDEX IF NOT EXISTS idx_store_metrics_time ON collect.store_metrics(metric_time);";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

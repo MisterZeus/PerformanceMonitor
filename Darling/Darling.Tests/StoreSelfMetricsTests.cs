@@ -29,8 +29,8 @@ public sealed class StoreSelfMetricsTests
         var v53 = PgMigrations.Scripts.Single(m => m.Version == 53);
 
         Assert.Equal("store-self-metrics", v53.Name);
-        Assert.Equal(53, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(53, StorageVersion.SchemaVersion);
+        Assert.Equal(54, PgMigrations.Scripts[^1].Version);
+        Assert.Equal(54, StorageVersion.SchemaVersion);
 
         /* collect.-qualified like V44/V47/V49, and idempotent so a re-run is a no-op. */
         Assert.Contains("CREATE TABLE IF NOT EXISTS collect.store_metrics (", v53.Sql, StringComparison.Ordinal);
@@ -70,10 +70,11 @@ public sealed class StoreSelfMetricsTests
     {
         /* The trap a StorageVersion bump sets: a probe that cannot SEE the newest migration maps every
            healthy store below RequiredStoreSchemaVersion and the connect-time gate refuses it permanently. */
-        Assert.Equal(53, ViewerDataService.RequiredStoreSchemaVersion);
+        Assert.Equal(54, ViewerDataService.RequiredStoreSchemaVersion);
         Assert.Contains("table_name = 'store_metrics'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
-        /* The V53 arm: store_metrics present (and everything below it) maps to exactly 53. */
+        /* The V53 arm: store_metrics present (and everything below it, but NOT V54's gz column —
+           hasPlanDimGzip defaults false) maps to exactly 53, the mid-ladder rung this feature added. */
         Assert.Equal(53, ViewerDataService.MapProbedSchemaVersion(
             hasConfigControlPlane: true, hasAlertDeliveryOverride: true, hasAnalysisState: true,
             hasAlertTuningKnobs: true, hasDefaultTraceEvents: true, hasIndexObjectStatsLatestIndex: true,
