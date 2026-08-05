@@ -7,6 +7,7 @@
  */
 
 using System;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -28,19 +29,19 @@ public sealed class QueryStoreBackfillTests
         var from = new DateTime(2026, 7, 1, 3, 15, 30, DateTimeKind.Utc).AddTicks(1234567);
         var to = new DateTime(2026, 7, 2, 3, 15, 30, DateTimeKind.Utc);
 
-        var encoded = QueryStoreBackfill.EncodeHole(from, to);
-        Assert.True(QueryStoreBackfill.TryDecodeHole(encoded, out var decodedFrom, out var decodedTo));
+        var encoded = QueryStoreBackfillState.EncodeHole(from, to);
+        Assert.True(QueryStoreBackfillState.TryDecodeHole(encoded, out var decodedFrom, out var decodedTo));
         Assert.Equal(from, decodedFrom);
         Assert.Equal(to, decodedTo);
 
         /* Malformed values decode false — the scan treats that as "no hole recorded", the
            conservative direction (the tail logic still runs; nothing throws mid-loop). */
-        Assert.False(QueryStoreBackfill.TryDecodeHole("", out _, out _));
-        Assert.False(QueryStoreBackfill.TryDecodeHole("not|dates", out _, out _));
-        Assert.False(QueryStoreBackfill.TryDecodeHole(from.ToString("o"), out _, out _));
+        Assert.False(QueryStoreBackfillState.TryDecodeHole("", out _, out _));
+        Assert.False(QueryStoreBackfillState.TryDecodeHole("not|dates", out _, out _));
+        Assert.False(QueryStoreBackfillState.TryDecodeHole(from.ToString("o"), out _, out _));
         /* An inverted or empty range is malformed too: from must be strictly before to. */
-        Assert.False(QueryStoreBackfill.TryDecodeHole(QueryStoreBackfill.EncodeHole(to, from), out _, out _));
-        Assert.False(QueryStoreBackfill.TryDecodeHole(QueryStoreBackfill.EncodeHole(from, from), out _, out _));
+        Assert.False(QueryStoreBackfillState.TryDecodeHole(QueryStoreBackfillState.EncodeHole(to, from), out _, out _));
+        Assert.False(QueryStoreBackfillState.TryDecodeHole(QueryStoreBackfillState.EncodeHole(from, from), out _, out _));
     }
 
     [Fact]
@@ -50,19 +51,19 @@ public sealed class QueryStoreBackfillTests
         var to = new DateTime(2026, 7, 3, 0, 0, 0, DateTimeKind.Utc);
 
         /* No existing record: the new clamp IS the hole. */
-        Assert.Equal((from, to), QueryStoreBackfill.MergeHole(null, from, to));
+        Assert.Equal((from, to), QueryStoreBackfillState.MergeHole(null, from, to));
 
         /* A repeat outage WIDENS the pending hole in both directions — overwriting would lose the
            unserviced earlier range, a silent hole in a design whose premise is that holes are
            recorded. */
-        var earlierWider = QueryStoreBackfill.EncodeHole(from.AddDays(-1), to.AddHours(-12));
-        Assert.Equal((from.AddDays(-1), to), QueryStoreBackfill.MergeHole(earlierWider, from, to));
+        var earlierWider = QueryStoreBackfillState.EncodeHole(from.AddDays(-1), to.AddHours(-12));
+        Assert.Equal((from.AddDays(-1), to), QueryStoreBackfillState.MergeHole(earlierWider, from, to));
 
-        var laterWider = QueryStoreBackfill.EncodeHole(from.AddHours(12), to.AddDays(1));
-        Assert.Equal((from, to.AddDays(1)), QueryStoreBackfill.MergeHole(laterWider, from, to));
+        var laterWider = QueryStoreBackfillState.EncodeHole(from.AddHours(12), to.AddDays(1));
+        Assert.Equal((from, to.AddDays(1)), QueryStoreBackfillState.MergeHole(laterWider, from, to));
 
         /* Garbage in the state row falls back to the fresh clamp, never a throw. */
-        Assert.Equal((from, to), QueryStoreBackfill.MergeHole("garbage", from, to));
+        Assert.Equal((from, to), QueryStoreBackfillState.MergeHole("garbage", from, to));
     }
 
     [Fact]
@@ -85,9 +86,10 @@ public sealed class QueryStoreBackfillTests
            TheOnlyCollectorDeclaringStateIsDefaultTraceEvents — this is the seam that lets both
            stay true). The key prefixes are part of the stored contract: rows written today must
            decode after an upgrade. */
-        Assert.Equal("query_store_backfill", QueryStoreBackfill.StateCollectorName);
-        Assert.Equal("done:", QueryStoreBackfill.DoneKeyPrefix);
-        Assert.Equal("hole:", QueryStoreBackfill.HoleKeyPrefix);
-        Assert.Empty(PerformanceMonitor.Collectors.QueryStoreCollector.Instance.StateKeys);
+        Assert.Equal("query_store_backfill", QueryStoreBackfillState.StateCollectorName);
+        Assert.Equal(QueryStoreBackfillState.StateCollectorName, QueryStoreBackfill.StateCollectorName);
+        Assert.Equal("done:", QueryStoreBackfillState.DoneKeyPrefix);
+        Assert.Equal("hole:", QueryStoreBackfillState.HoleKeyPrefix);
+        Assert.Empty(QueryStoreCollector.Instance.StateKeys);
     }
 }

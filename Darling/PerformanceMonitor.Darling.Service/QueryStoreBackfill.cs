@@ -62,16 +62,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// </summary>
 public sealed class QueryStoreBackfill
 {
-    /// <summary>The collector_state owner name for this worker's rows — distinct from the
-    /// query_store definition on purpose, so the definition keeps declaring NO state keys and the
-    /// state-contract pins stay honest.</summary>
-    public const string StateCollectorName = "query_store_backfill";
-
-    /// <summary>State key prefix marking a database's first-contact tail as drained (value: when).</summary>
-    public const string DoneKeyPrefix = "done:";
-
-    /// <summary>State key prefix for a recorded clamp hole (value: <see cref="EncodeHole"/>).</summary>
-    public const string HoleKeyPrefix = "hole:";
+    /// <summary>The stored identity/codec is SHARED with Lite's worker (#2058) — see
+    /// <see cref="QueryStoreBackfillState"/>; only the horizon and the host plumbing are per-SKU.</summary>
+    public const string StateCollectorName = QueryStoreBackfillState.StateCollectorName;
 
     /// <summary>
     /// How far below now a backfill slice may reach — the raw tier's read horizon
@@ -129,14 +122,14 @@ public sealed class QueryStoreBackfill
             cancellationToken.ThrowIfCancellationRequested();
 
             /* Holes before the tail: a recorded outage gap is the history closest to expiring. */
-            if (state.TryGetValue(HoleKeyPrefix + databaseName, out var encoded)
-                && TryDecodeHole(encoded, out var holeFrom, out var holeTo))
+            if (state.TryGetValue(QueryStoreBackfillState.HoleKeyPrefix + databaseName, out var encoded)
+                && QueryStoreBackfillState.TryDecodeHole(encoded, out var holeFrom, out var holeTo))
             {
                 if (holeTo <= floorLimit)
                 {
                     /* The whole hole sank below the horizon before it was serviced — expired, and
                        deliberately NOT dug after: the staging rule above. */
-                    await _runner.DeleteCollectorStateKeyAsync(server.ServerId, StateCollectorName, HoleKeyPrefix + databaseName, cancellationToken);
+                    await _runner.DeleteCollectorStateKeyAsync(server.ServerId, StateCollectorName, QueryStoreBackfillState.HoleKeyPrefix + databaseName, cancellationToken);
                     continue;
                 }
 
@@ -145,7 +138,7 @@ public sealed class QueryStoreBackfill
                 return true;
             }
 
-            if (state.ContainsKey(DoneKeyPrefix + databaseName))
+            if (state.ContainsKey(QueryStoreBackfillState.DoneKeyPrefix + databaseName))
             {
                 continue;
             }
@@ -163,7 +156,7 @@ public sealed class QueryStoreBackfill
             {
                 /* History already reaches the horizon — the pre-existing-store case, marked done
                    without shipping a row so the steady state never re-probes it. */
-                await SaveStateAsync(server.ServerId, DoneKeyPrefix + databaseName, nowUtc.ToString("o", CultureInfo.InvariantCulture), cancellationToken);
+                await SaveStateAsync(server.ServerId, QueryStoreBackfillState.DoneKeyPrefix + databaseName, nowUtc.ToString("o", CultureInfo.InvariantCulture), cancellationToken);
                 continue;
             }
 
@@ -253,11 +246,11 @@ public sealed class QueryStoreBackfill
                for this range, and cheaper to record than to re-ask every tick. */
             if (isHole)
             {
-                await _runner.DeleteCollectorStateKeyAsync(server.ServerId, StateCollectorName, HoleKeyPrefix + databaseName, cancellationToken);
+                await _runner.DeleteCollectorStateKeyAsync(server.ServerId, StateCollectorName, QueryStoreBackfillState.HoleKeyPrefix + databaseName, cancellationToken);
             }
             else
             {
-                await SaveStateAsync(server.ServerId, DoneKeyPrefix + databaseName, DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture), cancellationToken);
+                await SaveStateAsync(server.ServerId, QueryStoreBackfillState.DoneKeyPrefix + databaseName, DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture), cancellationToken);
             }
 
             _logger?.LogInformation(
@@ -275,18 +268,18 @@ public sealed class QueryStoreBackfill
         {
             if (boundary is null || boundary <= floorUtc)
             {
-                await _runner.DeleteCollectorStateKeyAsync(server.ServerId, StateCollectorName, HoleKeyPrefix + databaseName, cancellationToken);
+                await _runner.DeleteCollectorStateKeyAsync(server.ServerId, StateCollectorName, QueryStoreBackfillState.HoleKeyPrefix + databaseName, cancellationToken);
             }
             else
             {
                 /* Shrink the ceiling to the oldest shipped row; the from-side stays at the floor we
                    actually used (anything below it is horizon-expired either way). */
-                await SaveStateAsync(server.ServerId, HoleKeyPrefix + databaseName, EncodeHole(floorUtc, boundary.Value), cancellationToken);
+                await SaveStateAsync(server.ServerId, QueryStoreBackfillState.HoleKeyPrefix + databaseName, QueryStoreBackfillState.EncodeHole(floorUtc, boundary.Value), cancellationToken);
             }
         }
         else if (boundary is not null && boundary <= floorUtc)
         {
-            await SaveStateAsync(server.ServerId, DoneKeyPrefix + databaseName, DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture), cancellationToken);
+            await SaveStateAsync(server.ServerId, QueryStoreBackfillState.DoneKeyPrefix + databaseName, DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture), cancellationToken);
         }
 
         _logger?.LogInformation(
@@ -294,41 +287,6 @@ public sealed class QueryStoreBackfill
             server.Config.DisplayName, databaseName, written,
             context.PerItemTextBytesShipped / (1024.0 * 1024.0),
             boundary ?? floorUtc, isHole ? "hole" : "tail", ceilingUtc);
-    }
-
-    /// <summary>Encodes a hole range as <c>from|to</c> in round-trip format — deliberately not
-    /// JSON, so the state row stays greppable and the codec dependency-free.</summary>
-    public static string EncodeHole(DateTime fromUtc, DateTime toUtc)
-        => fromUtc.ToString("o", CultureInfo.InvariantCulture) + "|" + toUtc.ToString("o", CultureInfo.InvariantCulture);
-
-    /// <summary>Decodes <see cref="EncodeHole"/>; false on any malformed value, which the scan
-    /// treats as "no hole recorded" — the conservative direction (the tail logic still runs).</summary>
-    public static bool TryDecodeHole(string encoded, out DateTime fromUtc, out DateTime toUtc)
-    {
-        fromUtc = default;
-        toUtc = default;
-
-        var split = encoded.Split('|');
-        if (split.Length != 2)
-        {
-            return false;
-        }
-
-        return DateTime.TryParseExact(split[0], "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out fromUtc)
-            && DateTime.TryParseExact(split[1], "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out toUtc)
-            && fromUtc < toUtc;
-    }
-
-    /// <summary>Merges a newly-clamped hole into whatever is already recorded — a repeat outage
-    /// WIDENS the range rather than overwriting it, so the earlier hole cannot be lost.</summary>
-    public static (DateTime FromUtc, DateTime ToUtc) MergeHole(string? existingEncoded, DateTime fromUtc, DateTime toUtc)
-    {
-        if (existingEncoded is not null && TryDecodeHole(existingEncoded, out var f, out var t))
-        {
-            return (fromUtc < f ? fromUtc : f, toUtc > t ? toUtc : t);
-        }
-
-        return (fromUtc, toUtc);
     }
 
     private Task SaveStateAsync(int serverId, string key, string value, CancellationToken cancellationToken)
