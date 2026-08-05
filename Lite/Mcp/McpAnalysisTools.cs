@@ -500,12 +500,13 @@ public sealed class McpAnalysisTools
         }
     }
 
-    [McpServerTool(Name = "get_analysis_findings"), Description("Gets persisted findings from previous analysis runs without running a new analysis, deduplicated to one entry per diagnostic chain (story_path_hash + incident_id) - the engine re-persists the same stories every cycle, so each entry is the chain's LATEST occurrence plus occurrence stats (occurrences, first_seen, last_seen, peak_severity) spanning the window. Use this to review historical findings or check if anything has changed since the last analysis. A remediable finding carries remediation_command: the full copy-paste T-SQL remediation (identical to the viewer card), rendered from the finding's persisted action and including a two-sided risk-disclosure comment header on destructive changes; it is advisory only and never executed.")]
+    [McpServerTool(Name = "get_analysis_findings"), Description("Gets persisted findings from previous analysis runs without running a new analysis, deduplicated to one entry per diagnostic chain (story_path_hash + incident_id) - the engine re-persists the same stories every cycle, so each entry is the chain's LATEST occurrence plus occurrence stats (occurrences, first_seen, last_seen, peak_severity) spanning the window. Use this to review historical findings or check if anything has changed since the last analysis. A remediable finding carries remediation_command: the full copy-paste T-SQL remediation (identical to the viewer card), rendered from the finding's persisted action and including a two-sided risk-disclosure comment header on destructive changes; it is advisory only and never executed. Set include_drilldown to also return each chain's persisted evidence rows (the specific plans/queries behind the finding, capped at write time with an explicit _truncation_note; null on findings persisted before the column existed).")]
     public static async Task<string> GetAnalysisFindings(
         AnalysisService analysisService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of finding history to retrieve. Default 24.")] int hours_back = 24)
+        [Description("Hours of finding history to retrieve. Default 24.")] int hours_back = 24,
+        [Description("If true, each finding carries drill_down: the persisted evidence rows (e.g. the parameter-sensitive plans, top spill queries) behind the chain's latest occurrence. Default false - the rows can be bulky and the summary usually suffices.")] bool include_drilldown = false)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -590,6 +591,7 @@ public sealed class McpAnalysisTools
                         story_path = f.StoryPath,
                         story_path_hash = f.StoryPathHash,
                         fact_count = f.FactCount,
+                        drill_down = include_drilldown ? f.DrillDown : null,
                         incident_id = f.IncidentId,
                         // #2000 occurrence stats: the collapsed timeline. severity above is the
                         // LATEST occurrence's; peak_severity is the highest any occurrence reached.

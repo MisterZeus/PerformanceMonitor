@@ -183,6 +183,12 @@ public sealed class DarlingAnalysisStoreTests
         /* The write persists all 20 columns including the built action... */
         Assert.Contains("remediation_action_json", PgFindingStore.InsertFindingSql);
         Assert.Contains("$20", PgFindingStore.InsertFindingSql);
+        /* #2060: the capped drill-down persists beside the built action and survives BOTH reads —
+           appended last so every earlier ordinal stays put. */
+        Assert.Contains("drill_down_json", PgFindingStore.InsertFindingSql);
+        Assert.Contains("$21", PgFindingStore.InsertFindingSql);
+        Assert.Contains("drill_down_json", PgFindingStore.GetRecentFindingsSql);
+        Assert.Contains("drill_down_json", PgFindingStore.GetLatestFindingsSql);
 
         /* ...and BOTH reads return it (the Dashboard twin omits it from GetLatest — here the
            reads share one column list), with the twins' ordering/window semantics. */

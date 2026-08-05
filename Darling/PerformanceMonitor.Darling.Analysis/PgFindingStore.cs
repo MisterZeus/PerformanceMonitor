@@ -88,15 +88,15 @@ INSERT INTO analysis_findings
      time_range_start, time_range_end, severity, confidence, category,
      story_path, story_path_hash, story_text,
      root_fact_key, root_fact_value, leaf_fact_key, leaf_fact_value, fact_count,
-     incident_id, remediation_action_json)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)";
+     incident_id, remediation_action_json, drill_down_json)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)";
 
     public const string GetRecentFindingsSql = @"
 SELECT finding_id, analysis_time, server_id, server_name, database_name,
        time_range_start, time_range_end, severity, confidence, category,
        story_path, story_path_hash, story_text,
        root_fact_key, root_fact_value, leaf_fact_key, leaf_fact_value, fact_count,
-       incident_id, remediation_action_json
+       incident_id, remediation_action_json, drill_down_json
 FROM analysis_findings
 WHERE server_id = $1
 AND   analysis_time >= $2
@@ -108,7 +108,7 @@ SELECT finding_id, analysis_time, server_id, server_name, database_name,
        time_range_start, time_range_end, severity, confidence, category,
        story_path, story_path_hash, story_text,
        root_fact_key, root_fact_value, leaf_fact_key, leaf_fact_value, fact_count,
-       incident_id, remediation_action_json
+       incident_id, remediation_action_json, drill_down_json
 FROM analysis_findings
 WHERE server_id = $1
 AND   analysis_time = (
@@ -503,6 +503,13 @@ VALUES ($1, $2, $3, $4, $5, $6)";
                 NpgsqlDbType = NpgsqlDbType.Text,
                 Value = (object?)AlertContextSerializer.SerializeAction(finding.Remediation) ?? DBNull.Value
             });
+            /* #2060: persist the CAPPED drill-down beside the built action — same D2 rationale
+               (the evidence rows exist only on the write path), same degrade-to-NULL discipline. */
+            command.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlDbType.Text,
+                Value = (object?)DrillDownSerializer.Serialize(finding.DrillDown) ?? DBNull.Value
+            });
 
             await command.ExecuteNonQueryAsync();
         }
@@ -542,7 +549,10 @@ VALUES ($1, $2, $3, $4, $5, $6)";
             IncidentId = reader.IsDBNull(18) ? string.Empty : reader.GetString(18),
             /* D2: the BUILT action deserialized via the SAME serializer the alert path uses;
                null/garbage degrades to "no Apply affordance" inside DeserializeAction. */
-            Remediation = reader.IsDBNull(19) ? null : AlertContextSerializer.DeserializeAction(reader.GetString(19))
+            Remediation = reader.IsDBNull(19) ? null : AlertContextSerializer.DeserializeAction(reader.GetString(19)),
+            /* #2060: the capped drill-down survives read-back; null/garbage degrades to
+               "no drill-down" inside the serializer, mirroring the action's discipline. */
+            DrillDown = reader.IsDBNull(20) ? null : DrillDownSerializer.Deserialize(reader.GetString(20))
         };
     }
 

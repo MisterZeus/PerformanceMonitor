@@ -94,10 +94,10 @@ public sealed class DarlingPlanCorrectionLiveMigrationTests
         var applied = await PgMigrations.MigrateAsync(connection, cancellationToken);
 
         /* Exactly the six scripts above 44 ran — V46, V47, V48 (#1984), V49 (#1986 database-state alert),
-           V50 (#2008 2a server-tag colour), and V51 (#2012 stage 2 query-stats host object). If the applier
-           had stumbled over the permanent V45 gap it would either re-run everything above 1 or nothing at
-           all, and both show up right here. */
-        Assert.Equal(6, applied);
+           V50 (#2008 2a server-tag colour), V51 (#2012 stage 2 query-stats host object), and V52 (#2060
+           persisted finding drill-down). If the applier had stumbled over the permanent V45 gap it would
+           either re-run everything above 1 or nothing at all, and both show up right here. */
+        Assert.Equal(7, applied);
         Assert.Equal(StorageVersion.SchemaVersion, await CurrentVersionAsync(connection, cancellationToken));
 
         var fromMigration = await ReadColumnsAsync(connection, cancellationToken);

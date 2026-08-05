@@ -152,7 +152,7 @@ SELECT finding_id, analysis_time, server_id, server_name, database_name,
        time_range_start, time_range_end, severity, confidence, category,
        story_path, story_path_hash, story_text,
        root_fact_key, root_fact_value, leaf_fact_key, leaf_fact_value, fact_count, incident_id,
-       remediation_action_json
+       remediation_action_json, drill_down_json
 FROM analysis_findings
 WHERE server_id = $1
 AND   analysis_time >= $2
@@ -189,7 +189,8 @@ LIMIT $3";
                 IncidentId = reader.IsDBNull(18) ? string.Empty : reader.GetString(18),
                 // Persisted BUILT action (the recommendations copy-paste command) deserialized via the
                 // SAME shared serializer the alert path uses; null/garbage degrades to "no command".
-                Remediation = reader.IsDBNull(19) ? null : AlertContextSerializer.DeserializeAction(reader.GetString(19))
+                Remediation = reader.IsDBNull(19) ? null : AlertContextSerializer.DeserializeAction(reader.GetString(19)),
+                DrillDown = reader.IsDBNull(20) ? null : DrillDownSerializer.Deserialize(reader.GetString(20))
             });
         }
 
@@ -213,7 +214,7 @@ SELECT finding_id, analysis_time, server_id, server_name, database_name,
        time_range_start, time_range_end, severity, confidence, category,
        story_path, story_path_hash, story_text,
        root_fact_key, root_fact_value, leaf_fact_key, leaf_fact_value, fact_count, incident_id,
-       remediation_action_json
+       remediation_action_json, drill_down_json
 FROM analysis_findings
 WHERE server_id = $1
 AND   analysis_time = (
@@ -249,7 +250,8 @@ ORDER BY severity DESC";
                 IncidentId = reader.IsDBNull(18) ? string.Empty : reader.GetString(18),
                 // Persisted BUILT action (the recommendations copy-paste command) deserialized via the
                 // SAME shared serializer the alert path uses; null/garbage degrades to "no command".
-                Remediation = reader.IsDBNull(19) ? null : AlertContextSerializer.DeserializeAction(reader.GetString(19))
+                Remediation = reader.IsDBNull(19) ? null : AlertContextSerializer.DeserializeAction(reader.GetString(19)),
+                DrillDown = reader.IsDBNull(20) ? null : DrillDownSerializer.Deserialize(reader.GetString(20))
             });
         }
 
@@ -336,8 +338,8 @@ INSERT INTO analysis_findings
      time_range_start, time_range_end, severity, confidence, category,
      story_path, story_path_hash, story_text,
      root_fact_key, root_fact_value, leaf_fact_key, leaf_fact_value, fact_count, incident_id,
-     remediation_action_json)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)";
+     remediation_action_json, drill_down_json)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)";
 
         cmd.Parameters.Add(new DuckDBParameter { Value = finding.FindingId });
         cmd.Parameters.Add(new DuckDBParameter { Value = finding.AnalysisTime });
@@ -361,6 +363,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         // Persist the BUILT action (mirrors the alert path's ContextJson) so the Recommendations
         // reader can render the copy-paste command from a stored finding. Null when no shape applies.
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)AlertContextSerializer.SerializeAction(finding.Remediation) ?? DBNull.Value });
+        // #2060: the CAPPED drill-down beside the built action — same rationale (the evidence rows
+        // exist only on the write path), same degrade-to-NULL discipline.
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)DrillDownSerializer.Serialize(finding.DrillDown) ?? DBNull.Value });
 
         await cmd.ExecuteNonQueryAsync();
     }
