@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -68,17 +69,28 @@ public static class PayloadDimensionWriter
                 continue;
             }
 
+            /* #2069: the plan dim stores gzip bytes (measured 14.0x vs lz4-TOAST's 8.9x on live
+               content). Compressed HERE — one seam — with the digest untouched: it was computed
+               over the uncompressed text upstream, so content identity is format-stable. */
+            var compress = string.Equals(dimTable, PayloadDimensions.CompressedContentDimTable, StringComparison.Ordinal);
+
             await using var command = new NpgsqlCommand(PayloadDimensions.UpsertSql(dimTable), connection, transaction);
             command.Parameters.Add(new NpgsqlParameter
             {
                 NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea,
                 Value = digests,
             });
-            command.Parameters.Add(new NpgsqlParameter
-            {
-                NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text,
-                Value = payloads,
-            });
+            command.Parameters.Add(compress
+                ? new NpgsqlParameter
+                {
+                    NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea,
+                    Value = payloads.Select(PayloadDimensions.CompressContent).ToArray(),
+                }
+                : new NpgsqlParameter
+                {
+                    NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text,
+                    Value = payloads,
+                });
             command.Parameters.Add(new NpgsqlParameter
             {
                 NpgsqlDbType = NpgsqlDbType.Timestamp,

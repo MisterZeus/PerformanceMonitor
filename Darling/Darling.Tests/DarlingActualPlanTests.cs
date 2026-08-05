@@ -235,6 +235,9 @@ public sealed class ActualPlanDispatchTests
         Assert.Contains("server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("query_hash = $2", sql, StringComparison.Ordinal);
         Assert.Contains("database_name = $3", sql, StringComparison.Ordinal);
+        /* #2069: query_stats plans written since V54 are gzip bytes with the text NULL — the resolver
+           carries both forms so the actual-plan command keeps its estimated-plan context. */
+        Assert.Contains("query_plan_gz", sql, StringComparison.Ordinal);
         AssertReadOnlyResolver(sql);
     }
 

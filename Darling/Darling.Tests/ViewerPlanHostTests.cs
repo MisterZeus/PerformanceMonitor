@@ -36,7 +36,8 @@ public sealed class ViewerPlanHostSqlTests
     public void QueryStatsPlanXmlSql_ReadsStoredXml_KeyedByDatabaseAndHash_LatestNonNull()
     {
         var sql = ViewerDataService.QueryStatsPlanXmlSql;
-        Assert.Contains("SELECT query_plan_xml", sql, StringComparison.Ordinal);
+        /* Both content forms (#2069): plans written since V54 are gzip bytes with the text NULL. */
+        Assert.Contains("SELECT query_plan_xml, query_plan_gz", sql, StringComparison.Ordinal);
 
         /* The RESOLVING view, not the base table (#1767): query_stats.query_plan_xml is NULL on every row
            written since the migration, with the plan itself in query_plan_dim behind a digest. Reading the
@@ -45,7 +46,9 @@ public sealed class ViewerPlanHostSqlTests
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("database_name = $2", sql, StringComparison.Ordinal);
         Assert.Contains("query_hash = $3", sql, StringComparison.Ordinal);
-        Assert.Contains("query_plan_xml IS NOT NULL", sql, StringComparison.Ordinal); /* skip rows the collector left NULL */
+        /* The presence guard must accept EITHER form — on the text column alone it discards every
+           post-V54 plan silently (zero rows, no error), the #1767 bare-column regression re-run. */
+        Assert.Contains("(query_plan_xml IS NOT NULL OR query_plan_gz IS NOT NULL)", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY collection_time DESC", sql, StringComparison.Ordinal); /* most-recent plan for the key */
         Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
     }
@@ -72,7 +75,7 @@ public sealed class ViewerPlanHostSqlTests
 
         /* There is no v_procedure_stats to resolve the #1767 plan dimension (that view has never existed),
            so this read joins query_plan_dim itself and coalesces. */
-        Assert.Contains("SELECT COALESCE(ps.query_plan_xml, qpd.query_plan_xml)", sql, StringComparison.Ordinal);
+        Assert.Contains("SELECT COALESCE(ps.query_plan_xml, qpd.query_plan_xml), qpd.query_plan_gz", sql, StringComparison.Ordinal);
         Assert.Contains("FROM procedure_stats AS ps", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("v_procedure_stats", sql, StringComparison.Ordinal);
         Assert.Contains("LEFT JOIN query_plan_dim AS qpd", sql, StringComparison.Ordinal);
@@ -89,7 +92,7 @@ public sealed class ViewerPlanHostSqlTests
            could resolve it — zero rows back, no error, indistinguishable from "no plan captured". Putting
            the guard back on the bare column is the single most likely way to break this read, and it fails
            completely silently, so assert the coalesced form explicitly rather than by substring luck. */
-        Assert.Contains("AND   COALESCE(ps.query_plan_xml, qpd.query_plan_xml) IS NOT NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   (COALESCE(ps.query_plan_xml, qpd.query_plan_xml) IS NOT NULL OR qpd.query_plan_gz IS NOT NULL)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("AND   ps.query_plan_xml IS NOT NULL", sql, StringComparison.Ordinal);
 
         Assert.Contains("ORDER BY ps.collection_time DESC", sql, StringComparison.Ordinal); /* most-recent plan for the key */

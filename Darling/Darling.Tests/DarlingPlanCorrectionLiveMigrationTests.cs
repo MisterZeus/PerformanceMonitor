@@ -98,7 +98,7 @@ public sealed class DarlingPlanCorrectionLiveMigrationTests
            persisted finding drill-down), and V53 (#2068 store self-metrics). If the applier had stumbled
            over the permanent V45 gap it would either re-run everything above 1 or nothing at all, and both
            show up right here. */
-        Assert.Equal(8, applied);
+        Assert.Equal(9, applied);
         Assert.Equal(StorageVersion.SchemaVersion, await CurrentVersionAsync(connection, cancellationToken));
 
         var fromMigration = await ReadColumnsAsync(connection, cancellationToken);
