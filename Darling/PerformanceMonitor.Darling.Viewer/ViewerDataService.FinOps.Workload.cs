@@ -552,7 +552,8 @@ SELECT
     SUM(delta_execution_count) AS executions,
     LEFT(query_text, 200) AS query_preview,
     query_text AS full_query_text,
-    MAX(query_plan_xml) AS query_plan_xml
+    MAX(query_plan_xml) AS query_plan_xml,
+    MAX(query_plan_gz) AS query_plan_gz
 FROM v_query_stats
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -594,7 +595,11 @@ LIMIT $3";
                 Executions = reader.IsDBNull(5) ? 0 : Convert.ToInt64(reader.GetValue(5)),
                 QueryPreview = reader.IsDBNull(6) ? "" : reader.GetString(6),
                 FullQueryText = reader.IsDBNull(7) ? "" : reader.GetString(7),
-                QueryPlanXml = reader.IsDBNull(8) ? null : reader.GetString(8)
+                /* #2069: plans written since V54 ride as gzip bytes with the text column NULL —
+                   text-else-gz, same rule as every plan reader. */
+                QueryPlanXml = PayloadDimensions.ResolveContent(
+                    reader.IsDBNull(8) ? null : reader.GetString(8),
+                    reader.IsDBNull(9) ? null : reader.GetFieldValue<byte[]>(9))
             });
         }
         return items;
@@ -635,7 +640,14 @@ SELECT
      AND qs2.collection_time >= $2
      AND qs2.query_plan_xml IS NOT NULL AND qs2.query_plan_xml != ''
      ORDER BY qs2.delta_execution_count DESC NULLS LAST
-     LIMIT 1) AS query_plan_xml
+     LIMIT 1) AS query_plan_xml,
+    (SELECT qs2.query_plan_gz FROM v_query_stats qs2
+     WHERE qs2.query_hash = qs.query_hash
+     AND qs2.server_id = $1
+     AND qs2.collection_time >= $2
+     AND qs2.query_plan_gz IS NOT NULL
+     ORDER BY qs2.delta_execution_count DESC NULLS LAST
+     LIMIT 1) AS query_plan_gz
 FROM v_query_stats AS qs
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -669,7 +681,12 @@ ORDER BY SUM(delta_worker_time) DESC";
                 TotalMemoryMb = reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7)),
                 SampleQueryText = reader.IsDBNull(8) ? "" : reader.GetString(8),
                 FullQueryText = reader.IsDBNull(9) ? "" : reader.GetString(9),
-                QueryPlanXml = reader.IsDBNull(10) ? null : reader.GetString(10)
+                /* #2069: the two correlated subqueries may land on DIFFERENT sample rows (one
+                   pre-V54 text row, one post-V54 gz row); either is "a sample plan for the hash",
+                   and text-first keeps the free form when both exist. */
+                QueryPlanXml = PayloadDimensions.ResolveContent(
+                    reader.IsDBNull(10) ? null : reader.GetString(10),
+                    reader.IsDBNull(11) ? null : reader.GetFieldValue<byte[]>(11))
             });
         }
 

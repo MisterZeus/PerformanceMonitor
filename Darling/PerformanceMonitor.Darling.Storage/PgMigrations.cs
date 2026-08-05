@@ -102,6 +102,7 @@ public static class PgMigrations
         new Migration(51, "query-stats-host-object", V51Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
         new Migration(52, "finding-drilldown-json", V52Sql),
         new Migration(53, "store-self-metrics", V53Sql),
+        new Migration(54, "plan-dim-gzip", V54Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
     };
 
     /// <summary>
@@ -1025,6 +1026,7 @@ ALTER TABLE analysis_findings
     /// <c>collect.</c>-qualified like V44/V47/V49; the (metric_time) index serves both the read surface's
     /// windowed scans and the retention DELETE.</para>
     /// </summary>
+
     private const string V53Sql = @"
 CREATE TABLE IF NOT EXISTS collect.store_metrics (
     metric_time timestamp NOT NULL,
@@ -1039,6 +1041,23 @@ CREATE TABLE IF NOT EXISTS collect.store_metrics (
 );
 
 CREATE INDEX IF NOT EXISTS idx_store_metrics_time ON collect.store_metrics(metric_time);";
+
+    /// <summary>
+    /// V54 — gzip-compressed plan-dimension content (#2069). The plan dim was 101 GB (69%) of the
+    /// production store under lz4 TOAST (8.9× on plan XML); app-level gzip measured 14.0× on the
+    /// same live content, and PG 18 has no zstd TOAST to do it in-engine. Additive bytea column:
+    /// new rows carry gzip bytes and NULL text, pre-upgrade rows keep text, readers take
+    /// gz-else-text and inflate in C#, and the dim's own GC turnover (~9 days) converts the store
+    /// with no rewrite. The existing V51-era text column becomes effectively nullable-by-use; the
+    /// NOT NULL constraint is dropped so gz-only rows can insert. The resolving view is re-emitted
+    /// from the generator with the gz column APPENDED (a legal CREATE OR REPLACE — additions at the
+    /// end only), and V38's generated body pre-adds the column for stores upgrading from below it.
+    /// </summary>
+    private const string V54Sql = @"
+ALTER TABLE query_plan_dim
+    ADD COLUMN IF NOT EXISTS query_plan_gz bytea;
+ALTER TABLE query_plan_dim
+    ALTER COLUMN query_plan_xml DROP NOT NULL;";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

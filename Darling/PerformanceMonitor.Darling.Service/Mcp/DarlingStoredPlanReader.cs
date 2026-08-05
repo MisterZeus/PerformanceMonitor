@@ -11,6 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -48,12 +49,15 @@ internal static class DarlingStoredPlanReader
     /// database. $1 server_id, $2 query_hash, $3 database_name (NULL = no database filter).
     /// </summary>
     public const string QueryStatsPlanXmlByHashSql = """
-        SELECT query_plan_xml
+        SELECT query_plan_xml, query_plan_gz
         FROM v_query_stats
         WHERE server_id = $1
         AND   query_hash = $2
         AND   ($3::text IS NULL OR database_name = $3)
-        AND   query_plan_xml IS NOT NULL
+        /* #2069: plans written since V54 live as gzip bytes (query_plan_gz) with the text column
+           NULL, so the presence guard and the projection must carry BOTH forms — the C# side
+           resolves text-else-gz (PayloadDimensions.ResolveContent). */
+        AND   (query_plan_xml IS NOT NULL OR query_plan_gz IS NOT NULL)
         ORDER BY collection_time DESC
         LIMIT 1
         """;
@@ -66,7 +70,7 @@ internal static class DarlingStoredPlanReader
     /// resolve the #1767 plan dimension, so this read joins it itself. $1 server_id, $2 sql_handle.
     /// </summary>
     public const string ProcedurePlanXmlBySqlHandleSql = """
-        SELECT COALESCE(ps.query_plan_xml, qpd.query_plan_xml)
+        SELECT COALESCE(ps.query_plan_xml, qpd.query_plan_xml), qpd.query_plan_gz
         FROM procedure_stats AS ps
         LEFT JOIN query_plan_dim AS qpd
           ON qpd.digest = ps.query_plan_digest
@@ -74,8 +78,10 @@ internal static class DarlingStoredPlanReader
         AND   ps.sql_handle = $2
         /* The guard rides the COALESCED expression, not the bare inline column: rows written since
            #1767 leave query_plan_xml NULL and carry the plan in the dimension, so testing the inline
-           column would discard every new row before the join could resolve it. */
-        AND   COALESCE(ps.query_plan_xml, qpd.query_plan_xml) IS NOT NULL
+           column would discard every new row before the join could resolve it. The gz arm (#2069)
+           extends the same reasoning one step: dim rows written since V54 carry gzip bytes with the
+           dim TEXT column NULL too, so the coalesced text alone would discard every post-V54 plan. */
+        AND   (COALESCE(ps.query_plan_xml, qpd.query_plan_xml) IS NOT NULL OR qpd.query_plan_gz IS NOT NULL)
         ORDER BY ps.collection_time DESC
         LIMIT 1
         """;
@@ -117,8 +123,7 @@ internal static class DarlingStoredPlanReader
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = queryHash });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)databaseName ?? DBNull.Value });
-        var result = await command.ExecuteScalarAsync(cancellationToken);
-        return result is string s ? s : null;
+        return await ReadPlanTextOrGzipAsync(command, cancellationToken);
     }
 
     /// <summary>
@@ -137,8 +142,7 @@ internal static class DarlingStoredPlanReader
         await using var command = postgres.CreateCommand(ProcedurePlanXmlBySqlHandleSql);
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = sqlHandle });
-        var result = await command.ExecuteScalarAsync(cancellationToken);
-        return result is string s ? s : null;
+        return await ReadPlanTextOrGzipAsync(command, cancellationToken);
     }
 
     /// <summary>
@@ -156,5 +160,22 @@ internal static class DarlingStoredPlanReader
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = (object?)planId ?? DBNull.Value });
         var result = await command.ExecuteScalarAsync(cancellationToken);
         return result is string s ? s : null;
+    }
+
+    /// <summary>
+    /// Executes a two-column (text, gzip bytea) plan read and resolves the form the row carries —
+    /// the #2069 read seam shared by both dimension-resolving reads above. One row max (LIMIT 1).
+    /// </summary>
+    private static async Task<string?> ReadPlanTextOrGzipAsync(NpgsqlCommand command, CancellationToken cancellationToken)
+    {
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        return PayloadDimensions.ResolveContent(
+            reader.IsDBNull(0) ? null : reader.GetString(0),
+            reader.IsDBNull(1) ? null : reader.GetFieldValue<byte[]>(1));
     }
 }

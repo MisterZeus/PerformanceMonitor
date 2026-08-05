@@ -445,13 +445,73 @@ public sealed class PayloadDimensionTests
             "WHERE query_text_dim.last_seen < EXCLUDED.last_seen - INTERVAL '1 hour'",
             sql);
 
-        /* The plan dimension is the same statement over its own content column. */
-        Assert.Contains(
-            "INSERT INTO query_plan_dim (digest, query_plan_xml, last_seen)",
-            PayloadDimensions.UpsertSql(PayloadDimensions.QueryPlanDimTable),
-            StringComparison.Ordinal);
+        /* The plan dimension upserts gzip BYTES into query_plan_gz (#2069) — same statement shape,
+           same conflict semantics, bytea payload array instead of text. The text column is never
+           written on new rows; pre-V54 rows keep theirs until the GC retires them. */
+        Assert.Equal(
+            "INSERT INTO query_plan_dim (digest, query_plan_gz, last_seen)\n" +
+            "SELECT u.digest, u.payload, $3\n" +
+            "FROM unnest($1::bytea[], $2::bytea[]) AS u(digest, payload)\n" +
+            "ON CONFLICT (digest) DO UPDATE SET last_seen = EXCLUDED.last_seen\n" +
+            "WHERE query_plan_dim.last_seen < EXCLUDED.last_seen - INTERVAL '1 hour'",
+            PayloadDimensions.UpsertSql(PayloadDimensions.QueryPlanDimTable));
 
         Assert.Throws<ArgumentOutOfRangeException>(() => PayloadDimensions.UpsertSql("not_a_dim"));
+    }
+
+    // ── the gzip codec (#2069) ──
+
+    [Fact]
+    public void CompressContent_RoundTrips_IncludingNonAscii_AndEmitsRealGzip()
+    {
+        /* Non-ASCII in the payload pins the UTF-8 leg of the codec: plan XML carries object names in
+           whatever the monitored server's collation produced. */
+        var plan = "<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\">" +
+                   "<StmtSimple StatementText=\"SELECT N'Ærøskøbing — 数据库'\"/></ShowPlanXML>";
+
+        var compressed = PayloadDimensions.CompressContent(plan);
+
+        /* A real gzip member (RFC 1952 magic), not raw deflate — so the bytes are also recoverable
+           outside the product (gunzip, psql + a one-liner) if it ever comes to that. */
+        Assert.True(compressed.Length > 2);
+        Assert.Equal(0x1f, compressed[0]);
+        Assert.Equal(0x8b, compressed[1]);
+
+        Assert.Equal(plan, PayloadDimensions.DecompressContent(compressed));
+    }
+
+    [Fact]
+    public void DecompressContent_ResolvesAbsentToNull_NeverToEmptyText()
+    {
+        /* NULL column and empty bytea both read as "no plan" — the conservative direction every
+           reader already takes for a NULL text column. */
+        Assert.Null(PayloadDimensions.DecompressContent(null));
+        Assert.Null(PayloadDimensions.DecompressContent(Array.Empty<byte>()));
+    }
+
+    [Fact]
+    public void ResolveContent_PrefersInlineText_ElseDecompresses_ElseNull()
+    {
+        var gz = PayloadDimensions.CompressContent("<FromGz/>");
+
+        /* Text-first: a row never carries both forms, so the order only decides which column a mixed
+           RESULT (e.g. COALESCE across old/new rows) prefers — and text costs nothing to return. */
+        Assert.Equal("<FromText/>", PayloadDimensions.ResolveContent("<FromText/>", gz));
+        Assert.Equal("<FromGz/>", PayloadDimensions.ResolveContent(null, gz));
+        Assert.Null(PayloadDimensions.ResolveContent(null, null));
+    }
+
+    [Fact]
+    public void Digest_IsComputedOverTheUncompressedText_SoIdentityIsStableAcrossTheFormatChange()
+    {
+        /* The write path digests the payload STRING before compressing (#2069 changed the stored form,
+           not the key): a plan first seen pre-V54 as text and seen again post-V54 as gzip lands on the
+           SAME dim row — dedup, fact-row digests, and has_query_plan presence all survive the upgrade. */
+        const string plan = "<ShowPlanXML><StmtSimple/></ShowPlanXML>";
+        var direct = PayloadDimensions.Digest(plan);
+        var roundTripped = PayloadDimensions.Digest(
+            PayloadDimensions.DecompressContent(PayloadDimensions.CompressContent(plan))!);
+        Assert.Equal(direct, roundTripped);
     }
 
     [Fact]
@@ -483,14 +543,28 @@ public sealed class PayloadDimensionTests
     {
         /* Plain tables, deliberately NOT hypertables: no time axis to partition on, and a hypertable's
            unique constraint must include the partitioning column, which a content key cannot satisfy. */
+        /* #2069: the plan dim is the compressed-content dim — its text column is NULLABLE (new rows
+           store gzip bytes only) and the bytea column exists from creation, because fresh stores run
+           V38's generated view, which references it. */
         Assert.Equal(
             "CREATE TABLE IF NOT EXISTS query_plan_dim (\n" +
             "    digest bytea NOT NULL PRIMARY KEY,\n" +
-            "    query_plan_xml text NOT NULL,\n" +
+            "    query_plan_xml text NULL,\n" +
+            "    query_plan_gz bytea NULL,\n" +
             "    last_seen timestamp NOT NULL\n" +
             ");\n" +
             "CREATE INDEX IF NOT EXISTS idx_query_plan_dim_last_seen ON query_plan_dim(last_seen);",
             PayloadDimensions.CreateDimTable(PayloadDimensions.QueryPlanDimTable));
+
+        /* The text dim keeps the original NOT NULL text shape — compression is plan-dim-only. */
+        Assert.Equal(
+            "CREATE TABLE IF NOT EXISTS query_text_dim (\n" +
+            "    digest bytea NOT NULL PRIMARY KEY,\n" +
+            "    query_text text NOT NULL,\n" +
+            "    last_seen timestamp NOT NULL\n" +
+            ");\n" +
+            "CREATE INDEX IF NOT EXISTS idx_query_text_dim_last_seen ON query_text_dim(last_seen);",
+            PayloadDimensions.CreateDimTable(PayloadDimensions.QueryTextDimTable));
 
         Assert.Equal("query_text", PayloadDimensions.PayloadColumnOf(PayloadDimensions.QueryTextDimTable));
         Assert.Equal("query_plan_xml", PayloadDimensions.PayloadColumnOf(PayloadDimensions.QueryPlanDimTable));
@@ -566,7 +640,7 @@ public sealed class PayloadDimensionTests
     }
 
     [Fact]
-    public void ResolvingView_ProjectsEveryTableColumnInOrder_ThenTheTwoDigestsLast()
+    public void ResolvingView_ProjectsEveryTableColumnInOrder_ThenDigests_ThenPlanGzLast()
     {
         var view = PgSchemaGenerator.GenerateQueryStatsResolvingView();
         var selectList = ViewSelectList(view);
@@ -577,7 +651,7 @@ public sealed class PayloadDimensionTests
         var tableColumns = CreateTableColumns(PgSchemaGenerator.CreateTable(QueryStatsCollector.Instance));
         var digestColumns = PayloadDimensions.ForTable("query_stats").Select(d => d.DigestColumn).ToArray();
 
-        Assert.Equal(tableColumns.Length + digestColumns.Length, selectList.Length);
+        Assert.Equal(tableColumns.Length + digestColumns.Length + 1, selectList.Length);
         Assert.Equal(
             tableColumns,
             selectList.Take(tableColumns.Length).Select(OutputName).ToArray());
@@ -587,7 +661,11 @@ public sealed class PayloadDimensionTests
            replace the previous SELECT * definition on every upgraded store. */
         Assert.Equal(
             digestColumns.Select(c => "    f." + c).ToArray(),
-            selectList.Skip(tableColumns.Length).Select(entry => "    " + entry).ToArray());
+            selectList.Skip(tableColumns.Length).Take(digestColumns.Length).Select(entry => "    " + entry).ToArray());
+
+        /* #2069: the gz bytes ride LAST, after the digests, for the same replace-only-appends reason —
+           V54 regenerates this view on stores whose previous definition ended at the digests. */
+        Assert.Equal("qpd.query_plan_gz", selectList[^1]);
     }
 
     // ── the migration ──
@@ -632,6 +710,17 @@ public sealed class PayloadDimensionTests
 
         /* The view body is the generated one, not a second hand-written copy that could drift. */
         Assert.Contains(PgSchemaGenerator.GenerateQueryStatsResolvingView(), v38, StringComparison.Ordinal);
+
+        /* #2069: the generated view also projects query_plan_gz. The CREATE TABLE above already
+           carries the column on the happy path, but a plan dim that EXISTS without it — a V38 attempt
+           from a pre-#2069 build that failed after its CREATE TABLE, re-run on this build — would fail
+           the view on column-does-not-exist. So the body pre-adds it, before the view (the same
+           ladder-ordering fix as the digest pre-adds). */
+        var gzPreAdd = v38.IndexOf(
+            "ALTER TABLE query_plan_dim ADD COLUMN IF NOT EXISTS query_plan_gz bytea;", StringComparison.Ordinal);
+        Assert.True(
+            gzPreAdd >= 0 && gzPreAdd < viewIndex,
+            "V38 must add query_plan_gz before the view that projects it");
     }
 
     [Fact]
@@ -658,7 +747,7 @@ public sealed class PayloadDimensionTests
            exactly this tripwire's regression in review: its first cut was a SELECT * passthrough.
            The shipped V51 DROPs the view (the new column lands mid-list, which CREATE OR REPLACE
            refuses) and re-emits the generator's resolving definition. */
-        Assert.Equal(51, definers[^1].Version);
+        Assert.Equal(54, definers[^1].Version);
         Assert.Contains(
             "COALESCE(f.query_text, qtd.query_text) AS query_text",
             definers[^1].Sql,

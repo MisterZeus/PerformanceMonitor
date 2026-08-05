@@ -453,13 +453,16 @@ AND COALESCE(qs.query_text, td.query_text) LIKE '%' || $2 || '%'", connection);
     private static async Task<long> CountReachablePlansAsync(NpgsqlDataSource dataSource, int serverId, CancellationToken ct)
     {
         await using var connection = await dataSource.OpenConnectionAsync(ct);
+        /* #2069: plans written since V54 land as gzip bytes in the dim (text NULL), so "reachable"
+           means EITHER form — the same text-else-gz rule every product reader applies. */
         using var command = new NpgsqlCommand(@"
 SELECT COUNT(*)
 FROM query_stats AS qs
 LEFT JOIN query_plan_dim AS pd ON pd.digest = qs.query_plan_digest
 WHERE qs.server_id = $1
-AND COALESCE(qs.query_plan_xml, pd.query_plan_xml) IS NOT NULL
-AND COALESCE(qs.query_plan_xml, pd.query_plan_xml) <> ''", connection);
+AND ((COALESCE(qs.query_plan_xml, pd.query_plan_xml) IS NOT NULL
+      AND COALESCE(qs.query_plan_xml, pd.query_plan_xml) <> '')
+  OR pd.query_plan_gz IS NOT NULL)", connection);
         command.Parameters.AddWithValue(serverId);
         return (long)(await command.ExecuteScalarAsync(ct))!;
     }
@@ -469,18 +472,28 @@ AND COALESCE(qs.query_plan_xml, pd.query_plan_xml) <> ''", connection);
     {
         await using var connection = await dataSource.OpenConnectionAsync(ct);
         using var command = new NpgsqlCommand(@"
-SELECT COALESCE(qs.query_plan_xml, pd.query_plan_xml)
+SELECT COALESCE(qs.query_plan_xml, pd.query_plan_xml), pd.query_plan_gz
 FROM query_stats AS qs
 LEFT JOIN query_text_dim AS td ON td.digest = qs.query_text_digest
 LEFT JOIN query_plan_dim AS pd ON pd.digest = qs.query_plan_digest
 WHERE qs.server_id = $1
 AND COALESCE(qs.query_text, td.query_text) LIKE '%' || $2 || '%'
-AND COALESCE(qs.query_plan_xml, pd.query_plan_xml) IS NOT NULL
-AND COALESCE(qs.query_plan_xml, pd.query_plan_xml) <> ''
+AND ((COALESCE(qs.query_plan_xml, pd.query_plan_xml) IS NOT NULL
+      AND COALESCE(qs.query_plan_xml, pd.query_plan_xml) <> '')
+  OR pd.query_plan_gz IS NOT NULL)
 LIMIT 1", connection);
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(MarkerToken);
-        return await command.ExecuteScalarAsync(ct) as string;
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct))
+        {
+            return null;
+        }
+
+        /* #2069: text-else-gz, the product readers' rule — the real runner now stores gz. */
+        return PayloadDimensions.ResolveContent(
+            reader.IsDBNull(0) ? null : reader.GetString(0),
+            reader.IsDBNull(1) ? null : reader.GetFieldValue<byte[]>(1));
     }
 
     private static MonitoredServer MakeLiveConfig(string name, string sqlHost)

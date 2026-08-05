@@ -558,6 +558,12 @@ public static class PgSchemaGenerator
               .Append(' ').Append(TypeFor(column)).Append(";\n");
         }
 
+        /* #2069, same reasoning as the payload-column pre-adds above: the generated view now
+           references the plan dim's compressed-content column, whose ALTER migration sits at V54 —
+           pre-add it here so a store upgrading from <38 survives the ladder in order. */
+        sb.Append("ALTER TABLE ").Append(PayloadDimensions.CompressedContentDimTable)
+          .Append(" ADD COLUMN IF NOT EXISTS ").Append(PayloadDimensions.CompressedContentColumn).Append(" bytea;\n");
+
         sb.Append('\n').Append(GenerateQueryStatsResolvingView());
         return sb.ToString();
     }
@@ -620,6 +626,12 @@ public static class PgSchemaGenerator
         {
             columns.Add($"    {Fact}.{dimension.DigestColumn}");
         }
+
+        /* #2069, after the digests (still a legal append-at-end): the gzip-compressed plan content.
+           New rows carry bytes here and NULL query_plan_xml; readers take gz-else-text and inflate
+           in C# — PostgreSQL cannot gunzip in SQL, so the view exposes the bytes rather than
+           pretending to resolve them. */
+        columns.Add($"    {AliasFor(PayloadDimensions.CompressedContentDimTable)}.{PayloadDimensions.CompressedContentColumn}");
 
         sb.Append(string.Join(",\n", columns)).Append('\n');
         sb.Append("FROM ").Append(schema.TargetTable).Append(" AS ").Append(Fact).Append('\n');

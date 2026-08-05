@@ -9,6 +9,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.IO;
+using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 using PerformanceMonitor.Collectors;
@@ -211,6 +213,66 @@ public static class PayloadDimensions
     }
 
     /// <summary>
+    /// The dimension table whose CONTENT is stored gzip-compressed (#2069): plan XML measured 14.0×
+    /// under gzip against lz4-TOAST's 8.9× on live content — 101 GB of the production store was this
+    /// one table. Query text stays uncompressed (21 MB total; 1.5× ratio; not worth reader churn).
+    /// The digest is ALWAYS computed over the UNCOMPRESSED text (see <see cref="Digest"/>), so
+    /// content identity is stable across the format change and a digest written by an old build
+    /// matches the same plan written by a new one.
+    /// </summary>
+    public const string CompressedContentDimTable = QueryPlanDimTable;
+
+    /// <summary>The compressed-content column added beside the legacy text column (#2069):
+    /// new rows carry gzip bytes here and NULL text; pre-upgrade rows keep text; readers take
+    /// gz-if-present-else-text and the GC ages the text era out within its window.</summary>
+    public const string CompressedContentColumn = "query_plan_gz";
+
+    /// <summary>Gzips dimension content for storage (#2069) — CompressionLevel.Optimal, measured
+    /// 14.0× on live plan XML at ~10 MB/s single-threaded (write-path cost is minutes of one core
+    /// per hour at peak intake).</summary>
+    public static byte[] CompressContent(string payload)
+    {
+        if (payload is null)
+        {
+            throw new ArgumentNullException(nameof(payload));
+        }
+
+        using var output = new MemoryStream();
+        using (var gzip = new GZipStream(output, CompressionLevel.Optimal, leaveOpen: true))
+        {
+            var bytes = Encoding.UTF8.GetBytes(payload);
+            gzip.Write(bytes, 0, bytes.Length);
+        }
+
+        return output.ToArray();
+    }
+
+    /// <summary>Inflates stored dimension content (#2069). Null in, null out — the reader's
+    /// gz-else-text coalesce handles the pre-upgrade era.</summary>
+    public static string? DecompressContent(byte[]? compressed)
+    {
+        if (compressed is null || compressed.Length == 0)
+        {
+            return null;
+        }
+
+        using var input = new MemoryStream(compressed);
+        using var gzip = new GZipStream(input, CompressionMode.Decompress);
+        using var reader = new StreamReader(gzip, Encoding.UTF8);
+        return reader.ReadToEnd();
+    }
+
+    /// <summary>
+    /// The one resolution rule every plan reader applies: inline/dimension TEXT when the row still
+    /// carries it (pre-V54 content), else the gzip bytes decompressed (post-V54 content), else null.
+    /// Text-first is deliberate — a row can never carry both (the writer stores exactly one form),
+    /// so the order only decides which column a mixed RESULT prefers, and text is free while gzip
+    /// costs a decompression.
+    /// </summary>
+    public static string? ResolveContent(string? inlineText, byte[]? compressed)
+        => inlineText ?? DecompressContent(compressed);
+
+    /// <summary>
     /// The CREATE TABLE for one dimension table. PLAIN PostgreSQL tables, deliberately NOT
     /// hypertables: they have no time axis to partition on, and a hypertable's unique constraint
     /// must include the partitioning column, which a content-keyed dim cannot satisfy. Being plain
@@ -220,10 +282,17 @@ public static class PayloadDimensions
     public static string CreateDimTable(string dimTable)
     {
         var payloadColumn = PayloadColumnOf(dimTable);
+        /* #2069: the compressed-content dim carries its bytea column from creation (fresh stores run
+           V38's generated view, which references it) and its text column NULLABLE — new rows store
+           gzip bytes only. Other dims keep the original NOT NULL text shape. */
+        var contentColumns = string.Equals(dimTable, CompressedContentDimTable, StringComparison.Ordinal)
+            ? $"    {payloadColumn} text NULL,\n" +
+              $"    {CompressedContentColumn} bytea NULL,\n"
+            : $"    {payloadColumn} text NOT NULL,\n";
         return
             $"CREATE TABLE IF NOT EXISTS {dimTable} (\n" +
             $"    {DigestColumn} bytea NOT NULL PRIMARY KEY,\n" +
-            $"    {payloadColumn} text NOT NULL,\n" +
+            contentColumns +
             $"    {LastSeenColumn} timestamp NOT NULL\n" +
             ");\n" +
             $"CREATE INDEX IF NOT EXISTS idx_{dimTable}_last_seen ON {dimTable}({LastSeenColumn});";
@@ -256,8 +325,21 @@ public static class PayloadDimensions
     /// it -- deliberately client-side rather than an ORDER BY here, so the lock order is a property of
     /// the values bound and owes nothing to how the planner chooses to execute this statement.</para>
     /// </summary>
+    /// <para>#2069: the compressed-content dim upserts gzip BYTES into
+    /// <see cref="CompressedContentColumn"/> (text column left NULL on new rows); every other dim
+    /// keeps the text shape. One method so the two shapes cannot drift on conflict semantics.</para>
     public static string UpsertSql(string dimTable)
     {
+        if (string.Equals(dimTable, CompressedContentDimTable, StringComparison.Ordinal))
+        {
+            return
+                $"INSERT INTO {dimTable} ({DigestColumn}, {CompressedContentColumn}, {LastSeenColumn})\n" +
+                $"SELECT u.digest, u.payload, $3\n" +
+                $"FROM unnest($1::bytea[], $2::bytea[]) AS u(digest, payload)\n" +
+                $"ON CONFLICT ({DigestColumn}) DO UPDATE SET {LastSeenColumn} = EXCLUDED.{LastSeenColumn}\n" +
+                $"WHERE {dimTable}.{LastSeenColumn} < EXCLUDED.{LastSeenColumn} - INTERVAL '1 hour'";
+        }
+
         var payloadColumn = PayloadColumnOf(dimTable);
         return
             $"INSERT INTO {dimTable} ({DigestColumn}, {payloadColumn}, {LastSeenColumn})\n" +

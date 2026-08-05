@@ -152,6 +152,9 @@ public sealed class ViewerFinOpsSqlTests
         /* The stored statement-level plan is aggregated per group so "View Plan" opens it (Darling stores
            plans) — restores the plan action the port had wrongly dropped as "no live SQL". */
         Assert.Contains("MAX(query_plan_xml)", sql, StringComparison.Ordinal);
+        /* #2069: plans written since V54 are gzip bytes with the text NULL — the aggregate must carry
+           both forms or the plan action goes dark as the GC retires the last text rows. */
+        Assert.Contains("MAX(query_plan_gz)", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -164,11 +167,13 @@ public sealed class ViewerFinOpsSqlTests
            since the migration, and the panel just goes empty with no error anywhere. */
         Assert.Contains("FROM v_query_stats AS qs", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_query_stats qs2", sql, StringComparison.Ordinal);
-        Assert.Equal(3, sql.Split("FROM v_query_stats qs2").Length - 1); /* sample text, full text, plan */
+        Assert.Equal(4, sql.Split("FROM v_query_stats qs2").Length - 1); /* sample text, full text, plan text, plan gz (#2069) */
         Assert.Contains("GROUP BY query_hash", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY qs2.delta_execution_count DESC NULLS LAST", sql, StringComparison.Ordinal);
-        /* The stored statement-level plan is fetched by the correlated subquery so "View Plan" opens it. */
+        /* The stored statement-level plan is fetched by the correlated subquery so "View Plan" opens it —
+           one subquery per content form (#2069): post-V54 plans are gzip bytes with the text NULL. */
         Assert.Contains("qs2.query_plan_xml", sql, StringComparison.Ordinal);
+        Assert.Contains("qs2.query_plan_gz IS NOT NULL", sql, StringComparison.Ordinal);
 
         var ddl = PgSchemaGenerator.CreateTable(QueryStatsCollector.Instance);
         foreach (var col in new[]

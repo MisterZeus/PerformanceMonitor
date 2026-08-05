@@ -3029,7 +3029,7 @@ LIMIT 1", connection);
     /// FinOps High Impact grid. The third column (isolation level) is NULL here (query_stats does not capture it).
     /// Public const so a test can pin its shape ($1 server_id, $2 query_hash, $3 database_name).</summary>
     public const string ResolveStoredQueryForActualPlanSql = @"
-SELECT query_text, query_plan_xml, NULL::text AS transaction_isolation_level
+SELECT query_text, query_plan_xml, NULL::text AS transaction_isolation_level, query_plan_gz
 FROM v_query_stats
 WHERE server_id = $1
 AND   query_hash = $2
@@ -3050,7 +3050,7 @@ LIMIT 1";
     /// readers' semantics.
     /// </para></summary>
     public const string ResolveStoredQueryStoreForActualPlanSql = @"
-SELECT query_text, query_plan_text, NULL::text AS transaction_isolation_level
+SELECT query_text, query_plan_text, NULL::text AS transaction_isolation_level, NULL::bytea AS query_plan_gz
 FROM query_store_stats
 WHERE server_id = $1
 AND   database_name = $2
@@ -3064,7 +3064,7 @@ LIMIT 1";
     /// level. $1 server_id, $2 collection_time, $3 session_id. The exact-timestamp match keys the one snapshot
     /// the row represents.</summary>
     public const string ResolveStoredSnapshotForActualPlanSql = @"
-SELECT query_text, COALESCE(live_query_plan, query_plan), transaction_isolation_level
+SELECT query_text, COALESCE(live_query_plan, query_plan), transaction_isolation_level, NULL::bytea AS query_plan_gz
 FROM query_snapshots
 WHERE server_id = $1
 AND   collection_time = $2
@@ -3139,7 +3139,12 @@ LIMIT 1";
             if (await reader.ReadAsync(cancellationToken))
             {
                 queryText = reader.IsDBNull(0) ? null : reader.GetString(0);
-                estimatedPlanXml = reader.IsDBNull(1) ? null : reader.GetString(1);
+                /* #2069: query_stats plans written since V54 ride as gzip bytes (column 3) with the
+                   text column NULL; the other two resolvers bind NULL::bytea there, so text-else-gz
+                   is the one rule for all three source kinds. */
+                estimatedPlanXml = PayloadDimensions.ResolveContent(
+                    reader.IsDBNull(1) ? null : reader.GetString(1),
+                    reader.IsDBNull(3) ? null : reader.GetFieldValue<byte[]>(3));
                 isolationLevel = reader.IsDBNull(2) ? null : reader.GetString(2);
             }
         }

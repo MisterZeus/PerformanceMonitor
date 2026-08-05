@@ -265,7 +265,30 @@ public sealed class PayloadDimensionLiveTests
                     connection,
                     "SELECT is_nullable FROM information_schema.columns WHERE table_name = $1 AND column_name = $2",
                     ct, dimTable, column);
-                Assert.Equal("NO", nullable);
+
+                /* #2069: the plan dim's TEXT column is nullable BY DESIGN — new rows carry gzip bytes
+                   and leave it NULL (fresh stores create it nullable; upgraded stores get V54's DROP
+                   NOT NULL). Digest and last_seen — and the text dim entirely — stay NOT NULL. */
+                var expectNullable =
+                    string.Equals(dimTable, PayloadDimensions.CompressedContentDimTable, StringComparison.Ordinal) &&
+                    string.Equals(column, payloadColumn, StringComparison.Ordinal)
+                        ? "YES"
+                        : "NO";
+                Assert.Equal(expectNullable, nullable);
+            }
+
+            /* #2069: the plan dim also carries the gz bytea column, nullable — pre-V54 rows have text
+               only, so NOT NULL could never hold. */
+            if (string.Equals(dimTable, PayloadDimensions.CompressedContentDimTable, StringComparison.Ordinal))
+            {
+                Assert.Equal("bytea", await ScalarAsync(
+                    connection,
+                    "SELECT data_type FROM information_schema.columns WHERE table_name = $1 AND column_name = $2",
+                    ct, dimTable, PayloadDimensions.CompressedContentColumn));
+                Assert.Equal("YES", await ScalarAsync(
+                    connection,
+                    "SELECT is_nullable FROM information_schema.columns WHERE table_name = $1 AND column_name = $2",
+                    ct, dimTable, PayloadDimensions.CompressedContentColumn));
             }
 
             /* The digest is the PRIMARY KEY — that is what makes ON CONFLICT (digest) the dedup mechanism
@@ -338,21 +361,34 @@ public sealed class PayloadDimensionLiveTests
                 Assert.False(await reader.ReadAsync(ct));
             }
 
-            /* The content is in the dimensions, once. */
+            /* The content is in the dimensions, once. Text keeps its text shape; the plan dim stores
+               gzip BYTES with its text column NULL (#2069) — the digest was still computed over the
+               UNCOMPRESSED text, so identity is stable across the format change. */
             Assert.Equal(queryText, await ScalarAsync(
                 connection, "SELECT query_text FROM query_text_dim WHERE digest = $1", ct, textDigest));
-            Assert.Equal(planXml, await ScalarAsync(
-                connection, "SELECT query_plan_xml FROM query_plan_dim WHERE digest = $1", ct, planDigest));
-
-            /* And the view hands back exactly what was collected — the property every reader depends on. */
             using (var read = new NpgsqlCommand(
-                "SELECT query_text, query_plan_xml FROM v_query_stats WHERE server_id = $1", connection))
+                "SELECT query_plan_xml, query_plan_gz FROM query_plan_dim WHERE digest = $1", connection))
+            {
+                read.Parameters.AddWithValue(planDigest);
+                await using var reader = await read.ExecuteReaderAsync(ct);
+                Assert.True(await reader.ReadAsync(ct));
+                Assert.True(reader.IsDBNull(0), "query_plan_dim.query_plan_xml must be NULL on a row written since #2069");
+                Assert.Equal(planXml, PayloadDimensions.DecompressContent(reader.GetFieldValue<byte[]>(1)));
+            }
+
+            /* And the view hands back exactly what was collected. The TEXT arrives through query_text as
+               before; the PLAN arrives as gzip bytes in query_plan_gz with the coalesced query_plan_xml
+               NULL — the #2069 disclosed contract change: raw-SQL consumers of the view see NULL plan
+               text on new rows and must read the gz column (every product reader resolves text-else-gz). */
+            using (var read = new NpgsqlCommand(
+                "SELECT query_text, query_plan_xml, query_plan_gz FROM v_query_stats WHERE server_id = $1", connection))
             {
                 read.Parameters.AddWithValue(serverId);
                 await using var reader = await read.ExecuteReaderAsync(ct);
                 Assert.True(await reader.ReadAsync(ct));
                 Assert.Equal(queryText, reader.GetString(0));
-                Assert.Equal(planXml, reader.GetString(1));
+                Assert.True(reader.IsDBNull(1), "v_query_stats.query_plan_xml must be NULL for a post-#2069 plan");
+                Assert.Equal(planXml, PayloadDimensions.DecompressContent(reader.GetFieldValue<byte[]>(2)));
             }
 
             bodySucceeded = true;
