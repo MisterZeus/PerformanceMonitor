@@ -102,6 +102,53 @@ public static class PlanDimRecompression
         AND   query_plan_dim.query_plan_xml IS NOT NULL
         """;
 
+    /// <summary>
+    /// The compaction that makes the conversion's saving visible to the OPERATING SYSTEM (#2076, follow-up):
+    /// converting rewrites rows, so the relation keeps its high-water-mark size with the freed space
+    /// internal — real, reusable, but invisible to a df/volume view. VACUUM FULL rewrites the relation to
+    /// its live content. ACCESS EXCLUSIVE for the duration: the collectors' dimension flushes queue behind
+    /// it and resume when it releases (the same backpressure a slow monitored server produces). Unqualified
+    /// table name like every statement here — the connection's search_path owns schema resolution.
+    /// </summary>
+    public const string VacuumFullSql = "VACUUM FULL query_plan_dim";
+
+    /// <summary>
+    /// A fast estimate of the compacted relation's size, for the disk preflight: heap + indexes copy
+    /// as-is, and the TOAST rebuilds to roughly row-count × the SAMPLED average gzip size. Sampled
+    /// (<see cref="DryRunSampleSize"/> rows) because summing octet_length over the whole dimension detoasts
+    /// the entire content — minutes of read for a preflight that needs one significant digit.
+    /// </summary>
+    public const string EstimateCompactedSql = """
+        SELECT
+            pg_relation_size('query_plan_dim')
+            + pg_indexes_size('query_plan_dim')
+            + (SELECT COUNT(*) FROM query_plan_dim)
+              * COALESCE((SELECT AVG(octet_length(query_plan_gz))::bigint
+                          FROM (SELECT query_plan_gz FROM query_plan_dim
+                                WHERE query_plan_gz IS NOT NULL LIMIT 500) AS sample), 0)
+        """;
+
+    /// <summary>Rewrites the dimension to its live content. Unbounded command timeout — a 100+ GB relation
+    /// legitimately takes many minutes, and killing it mid-rewrite just wastes the work (the rewrite is
+    /// transactional; an interrupted VACUUM FULL leaves the original untouched).</summary>
+    public static async Task VacuumFullAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        await using var command = new NpgsqlCommand(VacuumFullSql, connection) { CommandTimeout = 0 };
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>The compacted-size estimate for the disk preflight (see <see cref="EstimateCompactedSql"/>).</summary>
+    public static async Task<long> EstimateCompactedBytesAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        await using var command = new NpgsqlCommand(EstimateCompactedSql, connection) { CommandTimeout = 300 };
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        return result is long bytes ? bytes : Convert.ToInt64(result, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
     /// <summary>The survey's answer — the CLI prints it for both the dry run and the real run's preamble.</summary>
     public readonly record struct Survey(long Pending, long Converted, long Total, long RelationBytes)
     {

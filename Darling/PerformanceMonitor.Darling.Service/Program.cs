@@ -281,23 +281,15 @@ if (args.Length > 0 && DarlingCliCommands.IsRecompressPlanDimVerb(args[0]))
         return 1;
     }
 
-    var rest = args.AsSpan(1);
-    var dryRun = false;
-    string? recompressConfigPath = null;
-    foreach (var arg in rest)
+    var (recompressConfigPath, dryRun, vacuumMode, parseError) = DarlingCliCommands.ParseRecompressArgs(args.AsSpan(1));
+    if (parseError is not null)
     {
-        if (string.Equals(arg, "--dry-run", StringComparison.OrdinalIgnoreCase))
-        {
-            dryRun = true;
-        }
-        else
-        {
-            recompressConfigPath = arg;
-        }
+        Console.Error.WriteLine(parseError);
+        return 1;
     }
 
     return await DarlingCliCommands.RecompressPlanDimAsync(
-        recompressConfigPath, dryRun, Console.Out, Console.Error, CancellationToken.None);
+        recompressConfigPath, dryRun, vacuumMode, Console.Out, Console.Error, CancellationToken.None);
 }
 
 var builder = Host.CreateApplicationBuilder(args);

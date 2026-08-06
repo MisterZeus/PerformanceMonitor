@@ -752,6 +752,16 @@ public sealed class PayloadDimensionLiveTests
             Assert.Equal(0, second.Rows);
             Assert.Equal(0, second.VerifyFailures);
 
+            /* The closing compaction (#2076): VACUUM FULL runs against a live store and the content
+               survives it byte-for-byte — the estimate is sane (positive, no bigger than the current
+               relation plus slack) and a converted row still decompresses to its original text after
+               the rewrite. */
+            var estimate = await PlanDimRecompression.EstimateCompactedBytesAsync(connection, ct);
+            Assert.True(estimate > 0, "compacted-size estimate must be positive");
+            await PlanDimRecompression.VacuumFullAsync(connection, ct);
+            Assert.Equal(textPlans[0], PayloadDimensions.DecompressContent((byte[])(await ScalarAsync(
+                connection, "SELECT query_plan_gz FROM query_plan_dim WHERE digest = $1", ct, textDigests[0]))!));
+
             bodySucceeded = true;
         }
         finally
