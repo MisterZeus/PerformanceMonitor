@@ -736,14 +736,22 @@ jobs:
   # Darling/service code (or this workflow, or the Dockerfile) changed, always reports a result so it
   # can be a required check. No tests run here — the test projects are net10.0-windows (they reference
   # the WPF apps); the cross-platform behavior they pin is exercised by the Windows jobs, and the
-  # container smoke lives in the compose quickstart. This job answers exactly two questions: does the
-  # service still publish for linux-x64, and does the image still build.
+  # container smoke lives in the compose quickstart. On PRs/pushes this job answers exactly two
+  # questions: does the service still publish for linux-x64, and does the image still build.
+  #
+  # On the RELEASE event this job is the Linux PUBLISHER: before it, a stable release shipped Windows
+  # zips and Setup.exes while the linux tar.gz and the ghcr image existed only at nightly quality
+  # (nightly.yml, tag :nightly) — the compose quickstart pointed released users at a nightly image.
+  # Now the release uploads PerformanceMonitorDarling-linux-x64-<v>.tar.gz + SHA256SUMS-linux.txt to
+  # the release and pushes ghcr :<version> and :latest. Linux binaries are NOT SignPath-signed
+  # (SignPath signs Windows PEs); the checksums file is the integrity story, same as the nightly.
   darling-linux:
     name: Darling Linux build
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: read
+      contents: write
+      packages: write
 
     steps:
       - uses: actions/checkout@v7
@@ -767,7 +775,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" = "release" ]; then
-            echo "::notice title=Darling Linux build skipped::Release event - the dev push that produced this commit already ran it."
+            echo "::notice title=Darling Linux publishing::Release event - packaging the versioned linux tar.gz and pushing the ghcr image."
           elif [ "${{ steps.filter.outputs.darling }}" = "true" ]; then
             echo "::notice title=Darling Linux build running::Darling/service code (or this workflow) changed."
           else
@@ -775,7 +783,7 @@ jobs:
           fi
 
       - name: Setup .NET 10.0
-        if: steps.filter.outputs.darling == 'true'
+        if: github.event_name == 'release' || steps.filter.outputs.darling == 'true'
         uses: actions/setup-dotnet@v6
         with:
           global-json-file: global.json
@@ -783,9 +791,50 @@ jobs:
           cache-dependency-path: '**/packages.lock.json'
 
       - name: Publish service (linux-x64)
-        if: steps.filter.outputs.darling == 'true'
+        if: github.event_name == 'release' || steps.filter.outputs.darling == 'true'
         run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -r linux-x64 --self-contained false -o publish/DarlingService-linux
 
       - name: Build container image
-        if: steps.filter.outputs.darling == 'true'
+        if: github.event_name != 'release' && steps.filter.outputs.darling == 'true'
         run: docker build -f Darling/Dockerfile -t performancemonitor-darling:pr .
+
+      # ── Release-only publishing (mirrors nightly.yml's linux job, versioned instead of :nightly) ──
+
+      - name: Get version
+        if: github.event_name == 'release'
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(grep -oPm1 '(?<=<Version>)[^<]+' Lite/PerformanceMonitorLite.csproj)"
+          echo "VERSION=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Package linux artifact + checksum
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.VERSION }}"
+          mkdir -p releases
+          tar -C publish/DarlingService-linux -czf "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz" .
+          (cd releases && sha256sum "PerformanceMonitorDarling-linux-x64-${version}.tar.gz" > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt)
+
+      - name: Upload linux artifact to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload ${{ github.event.release.tag_name }} releases/PerformanceMonitorDarling-linux-x64-*.tar.gz releases/SHA256SUMS-linux.txt --clobber
+
+      - name: Build and push container image (ghcr, versioned + latest)
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.VERSION }}"
+          image="ghcr.io/${{ github.repository_owner }}/performancemonitor-darling"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker build -f Darling/Dockerfile -t "${image}:${version}" -t "${image}:latest" .
+          docker push "${image}:${version}"
+          docker push "${image}:latest"
