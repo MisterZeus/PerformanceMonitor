@@ -3229,9 +3229,10 @@ public static class DarlingCliCommands
             output.WriteLine("  The real run converts in 1,000-row batches (one transaction each) while the service");
             output.WriteLine("  runs; it is safe to interrupt and re-run. When the conversion CONVERGES it ends with");
             output.WriteLine("  VACUUM FULL, which rewrites the dimension to its live content and returns the freed");
-            output.WriteLine("  space to the volume — that step takes an EXCLUSIVE lock (collections queue for its");
-            output.WriteLine("  duration, typically minutes) and is preflighted against free disk. --no-vacuum-full");
-            output.WriteLine("  skips it if you want to schedule the lock window separately.");
+            output.WriteLine("  space to the volume — that step takes an EXCLUSIVE lock and is preflighted against");
+            output.WriteLine("  free disk. Size the lock window by your dimension: measured ~46 minutes on a 174 GB");
+            output.WriteLine("  dimension (7.1M plans), during which collection freshness DEGRADES and recovers within");
+            output.WriteLine("  minutes after. --no-vacuum-full skips it to schedule that window separately.");
             return 0;
         }
 
@@ -3363,8 +3364,9 @@ public static class DarlingCliCommands
         var before = (await PlanDimRecompression.SurveyAsync(connection, cancellationToken)).RelationBytes;
         output.WriteLine();
         output.WriteLine($"  Compacting (VACUUM FULL): rewriting ~{estimated / (1024.0 * 1024 * 1024):N1} GB of live content.");
-        output.WriteLine("  This takes an EXCLUSIVE lock on the plan dimension — collections queue until it");
-        output.WriteLine("  finishes (typically minutes; the service does not need to stop).");
+        output.WriteLine("  This takes an EXCLUSIVE lock on the plan dimension — collections DEGRADE until it");
+        output.WriteLine("  finishes and recover within minutes after (measured: ~46 minutes of lock on a 174 GB");
+        output.WriteLine("  dimension; scale by yours). The service does not need to stop.");
 
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         try
