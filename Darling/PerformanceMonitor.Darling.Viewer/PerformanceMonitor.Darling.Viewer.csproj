@@ -15,7 +15,7 @@
          hooks go unhandled. It is a harmless no-op for the co-located (non-Velopack) viewer that
          ships inside the service zip. -->
     <StartupObject>PerformanceMonitor.Darling.Viewer.Program</StartupObject>
-    <Version>3.3.0</Version>
+    <Version>3.4.0</Version>
     <AssemblyVersion>3.3.0.0</AssemblyVersion>
     <FileVersion>3.3.0.0</FileVersion>
     <Company>Darling Data, LLC</Company>

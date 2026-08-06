@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.4.0] - 2026-08-06
+
 ### Important
 
 - **Darling keeps hourly-grain history 90 days instead of 21, and existing stores are moved to the new horizon automatically** ([#1937], also closes [#1939]) - the viewer offers month-plus windows, and at 21 days a 30-day view could never render at hourly grain: the range either emptied out or dropped to daily resolution partway through, no matter how long the store had been collecting. Retention on the five hourly rollups is now 90 days, covering quarter-scale windows with room, and the read routing follows the horizon by derivation rather than by a second hand-maintained number - the shipped defect was exactly that pair drifting (the router's hourly ceiling was an independent hardcoded 20 days, so raising retention alone would have changed nothing an operator could see). On upgrade, stores that already carry the 21-day policies are converged to 90 automatically on the next service start, preserving each policy's armed-or-held state and its next scheduled run - the convergence cannot trigger a purge. **Two honest limits.** Hourly history already purged under the old horizon is gone: raw reaches back only 4 days, so the hourly tier regrows forward from upgrade day and takes about ten weeks to fill the new window - during that regrowth, a window the hourly tier cannot yet cover COMPLETELY is served at daily grain instead of partially at hourly with the older weeks silently blank ([#1939]), so month views stay whole the entire time. And the hourly tier's steady-state footprint grows roughly 4x (compressed) to hold the deeper window.
