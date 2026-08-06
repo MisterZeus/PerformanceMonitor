@@ -16,6 +16,11 @@ permissions:
   contents: write
   # #1804: the linux job pushes the nightly container image to ghcr.
   packages: write
+  # Sigstore keyless signing + GitHub provenance for the linux artifacts: id-token lets the job
+  # obtain its OIDC identity (Fulcio issues the short-lived signing cert against it), attestations
+  # lets attest-build-provenance store the tarball's provenance. Neither grants anything else.
+  id-token: write
+  attestations: write
 
 jobs:
   # Scheduled workflows always execute the DEFAULT branch's copy of this file, while nightly
@@ -454,3 +459,29 @@ jobs:
           docker build -f Darling/Dockerfile -t "${image}:nightly" -t "${image}:${version}" .
           docker push "${image}:nightly"
           docker push "${image}:${version}"
+
+      # Keyless Sigstore signing: Fulcio issues a short-lived certificate against this job's OIDC
+      # identity and the signature lands in ghcr next to the image, logged in Rekor. No keys exist
+      # anywhere to manage or leak — the signature attests "built by this repository's workflow",
+      # which is the claim a container consumer actually wants verified. (SignPath's cosign support
+      # is edition-gated; this path has no subscription dependency.) Verify:
+      #   cosign verify ghcr.io/erikdarlingdata/performancemonitor-darling:nightly \
+      #     --certificate-identity-regexp 'github.com/erikdarlingdata/PerformanceMonitor' \
+      #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign container image (keyless, Sigstore)
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${{ github.repository_owner }}/performancemonitor-darling"
+          digest="$(docker inspect --format='{{index .RepoDigests 0}}' "${image}:nightly")"
+          cosign sign --yes "${digest}"
+
+      # GitHub-native provenance for the tarball (SLSA): verified with
+      #   gh attestation verify PerformanceMonitorDarling-linux-x64-<v>.tar.gz -R erikdarlingdata/PerformanceMonitor
+      - name: Attest the linux tarball (GitHub provenance)
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: releases/PerformanceMonitorDarling-linux-x64-*.tar.gz
