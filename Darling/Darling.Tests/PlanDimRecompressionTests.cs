@@ -7,6 +7,7 @@
  */
 
 using System;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -64,6 +65,47 @@ public sealed class PlanDimRecompressionTests
         Assert.Contains("COUNT(*) FILTER (WHERE query_plan_gz IS NOT NULL) AS converted", PlanDimRecompression.SurveySql, StringComparison.Ordinal);
         Assert.Contains("pg_total_relation_size('query_plan_dim')", PlanDimRecompression.SurveySql, StringComparison.Ordinal);
         Assert.Contains("FROM query_plan_dim", PlanDimRecompression.SurveySql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void VacuumFull_TargetsExactlyThePlanDim_AndTheEstimateSamplesRatherThanDetoastingEverything()
+    {
+        /* The compaction is the step that makes the conversion visible to the OS (#2076). Exactly this
+           statement — a broader VACUUM FULL would rewrite hypertables TimescaleDB manages itself. */
+        Assert.Equal("VACUUM FULL query_plan_dim", PlanDimRecompression.VacuumFullSql);
+
+        /* The preflight estimate must SAMPLE the gzip average (LIMIT) — summing octet_length across the
+           dimension detoasts the whole content, minutes of read for a one-significant-digit number. */
+        Assert.Contains("LIMIT 500", PlanDimRecompression.EstimateCompactedSql, StringComparison.Ordinal);
+        Assert.Contains("pg_relation_size('query_plan_dim')", PlanDimRecompression.EstimateCompactedSql, StringComparison.Ordinal);
+        Assert.Contains("pg_indexes_size('query_plan_dim')", PlanDimRecompression.EstimateCompactedSql, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(new string[0], null, false, DarlingCliCommands.RecompressVacuumMode.Auto, false)]
+    [InlineData(new[] { "--dry-run" }, null, true, DarlingCliCommands.RecompressVacuumMode.Auto, false)]
+    [InlineData(new[] { "--no-vacuum-full" }, null, false, DarlingCliCommands.RecompressVacuumMode.Skip, false)]
+    [InlineData(new[] { "--vacuum-full" }, null, false, DarlingCliCommands.RecompressVacuumMode.Force, false)]
+    [InlineData(new[] { "C:\\x\\darling.json", "--dry-run" }, "C:\\x\\darling.json", true, DarlingCliCommands.RecompressVacuumMode.Auto, false)]
+    [InlineData(new[] { "--DRY-RUN", "--VACUUM-FULL" }, null, true, DarlingCliCommands.RecompressVacuumMode.Force, false)]
+    [InlineData(new[] { "--vaccum-full" }, null, false, DarlingCliCommands.RecompressVacuumMode.Auto, true)]
+    public void ParseRecompressArgs_PinsTheFlagGrammar_AndRefusesTypos(
+        string[] rest, string? configPath, bool dryRun, DarlingCliCommands.RecompressVacuumMode mode, bool errors)
+    {
+        /* The typo case is the point of refusing unknown --flags: '--vaccum-full' silently treated as a
+           CONFIG PATH would fail config load with a misleading message — or worse, load a default config
+           and run against the wrong store. */
+        var parsed = DarlingCliCommands.ParseRecompressArgs(rest);
+        if (errors)
+        {
+            Assert.NotNull(parsed.Error);
+            return;
+        }
+
+        Assert.Null(parsed.Error);
+        Assert.Equal(configPath, parsed.ConfigPath);
+        Assert.Equal(dryRun, parsed.DryRun);
+        Assert.Equal(mode, parsed.Mode);
     }
 
     [Fact]

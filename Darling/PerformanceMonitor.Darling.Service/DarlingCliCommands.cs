@@ -223,7 +223,7 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --disable-web       Disable the web dashboard in the store and remove its firewall rule (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups  Materialize the retention rollups back over existing history, after a disk preflight." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --collapse-legacy-slices  Repair Query Store rows collected before the split-slice fix, then re-materialize the rollups they fed." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --recompress-plan-dim  Convert the plan dimension's pre-V54 text rows to gzip, in batches, while the service runs." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --recompress-plan-dim  Convert the plan dimension's pre-V54 text rows to gzip in batches while the service runs, then VACUUM FULL to return the space to the volume (--no-vacuum-full to skip; --vacuum-full to compact an already-converted store)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run   Show the plan, the disk estimate and the time budget, and change nothing.";
 
     /// <summary>
@@ -3036,6 +3036,62 @@ public static class DarlingCliCommands
     private static DateTime Floor(DateTime value, TimeSpan bucket)
         => bucket <= TimeSpan.Zero ? value : new DateTime(value.Ticks - (value.Ticks % bucket.Ticks), value.Kind);
 
+    /// <summary>How <c>--recompress-plan-dim</c> handles the closing VACUUM FULL (#2076).</summary>
+    public enum RecompressVacuumMode
+    {
+        /// <summary>Compact after a CONVERGED, zero-failure conversion — the default, because the moment of
+        /// convergence is the moment of maximum bloat, and shipping the saving only as internal free space
+        /// leaves operators wondering why df never moved.</summary>
+        Auto,
+
+        /// <summary>Compact even when there is nothing left to convert (<c>--vacuum-full</c>) — for a store
+        /// converted by an earlier run/build whose file still sits at its high-water mark.</summary>
+        Force,
+
+        /// <summary>Never compact (<c>--no-vacuum-full</c>) — for operators who want the exclusive-lock
+        /// window scheduled separately. The conversion's saving stays internal until they take it.</summary>
+        Skip,
+    }
+
+    /// <summary>
+    /// Parses the verb's trailing arguments. PURE so the flag grammar pins: <c>--dry-run</c>,
+    /// <c>--vacuum-full</c>, <c>--no-vacuum-full</c> in any order, at most one bare argument (the config
+    /// path). Unknown flags are NOT config paths — refusing beats silently treating a typo as a file.
+    /// </summary>
+    public static (string? ConfigPath, bool DryRun, RecompressVacuumMode Mode, string? Error) ParseRecompressArgs(
+        ReadOnlySpan<string> rest)
+    {
+        string? configPath = null;
+        var dryRun = false;
+        var mode = RecompressVacuumMode.Auto;
+
+        foreach (var arg in rest)
+        {
+            if (string.Equals(arg, "--dry-run", StringComparison.OrdinalIgnoreCase))
+            {
+                dryRun = true;
+            }
+            else if (string.Equals(arg, "--vacuum-full", StringComparison.OrdinalIgnoreCase))
+            {
+                mode = RecompressVacuumMode.Force;
+            }
+            else if (string.Equals(arg, "--no-vacuum-full", StringComparison.OrdinalIgnoreCase))
+            {
+                mode = RecompressVacuumMode.Skip;
+            }
+            else if (arg.StartsWith("--", StringComparison.Ordinal))
+            {
+                return (null, false, RecompressVacuumMode.Auto, $"unknown option '{arg}' for --recompress-plan-dim");
+            }
+            else
+            {
+                configPath = arg;
+            }
+        }
+
+        return (configPath, dryRun, mode, null);
+    }
+
     /// <summary>
     /// <c>--recompress-plan-dim</c> (#2076): convert the plan dimension's pre-V54 text rows to the gzip form
     /// V54's write path produces (#2069), in bounded batches, while the service keeps running.
@@ -3062,7 +3118,8 @@ public static class DarlingCliCommands
     /// </summary>
     [SupportedOSPlatform("windows")]
     public static async Task<int> RecompressPlanDimAsync(
-        string? configPath, bool dryRun, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+        string? configPath, bool dryRun, RecompressVacuumMode vacuumMode, TextWriter output, TextWriter error,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(output);
         ArgumentNullException.ThrowIfNull(error);
@@ -3132,6 +3189,14 @@ public static class DarlingCliCommands
             output.WriteLine("  Nothing to convert — every dimension row already carries gzip content.");
             output.WriteLine("  That is the expected end state: V54 writes gzip, and this verb (or GC attrition)");
             output.WriteLine("  has already converted whatever text rows existed.");
+
+            if (vacuumMode == RecompressVacuumMode.Force && !dryRun)
+            {
+                return await CompactPlanDimAsync(connection, output, error, cancellationToken);
+            }
+
+            output.WriteLine("  (Pass --vacuum-full to compact a previously-converted store whose file still");
+            output.WriteLine("  sits at its pre-conversion high-water mark.)");
             return 0;
         }
 
@@ -3162,9 +3227,11 @@ public static class DarlingCliCommands
             output.WriteLine($"    projected gzip content for all {survey.Pending:N0} pending rows: ~{projected / (1024.0 * 1024 * 1024):N1} GB");
             output.WriteLine();
             output.WriteLine("  The real run converts in 1,000-row batches (one transaction each) while the service");
-            output.WriteLine("  runs; it is safe to interrupt and re-run. NOTE: the relation's FILE size does not");
-            output.WriteLine("  shrink — freed space is reused internally; a later VACUUM FULL/repack returns it");
-            output.WriteLine("  to the volume if wanted.");
+            output.WriteLine("  runs; it is safe to interrupt and re-run. When the conversion CONVERGES it ends with");
+            output.WriteLine("  VACUUM FULL, which rewrites the dimension to its live content and returns the freed");
+            output.WriteLine("  space to the volume — that step takes an EXCLUSIVE lock (collections queue for its");
+            output.WriteLine("  duration, typically minutes) and is preflighted against free disk. --no-vacuum-full");
+            output.WriteLine("  skips it if you want to schedule the lock window separately.");
             return 0;
         }
 
@@ -3227,9 +3294,94 @@ public static class DarlingCliCommands
         {
             error.WriteLine($"  [WARN] {result.VerifyFailures:N0} row(s) FAILED round-trip verification and kept their text unchanged.");
             error.WriteLine("  Investigate before re-running; those rows are readable exactly as before.");
+            error.WriteLine("  VACUUM FULL was skipped — compaction can wait until the conversion is clean.");
             return 1;
         }
 
+        if (vacuumMode == RecompressVacuumMode.Skip)
+        {
+            output.WriteLine("  --no-vacuum-full: the freed space stays INTERNAL to the relation (growth is flat,");
+            output.WriteLine("  but the file keeps its high-water mark). Re-run with --vacuum-full to compact later.");
+            return 0;
+        }
+
+        if (after.Total > 0 && after.Pending > 0)
+        {
+            output.WriteLine($"  {after.Pending:N0} row(s) arrived mid-run and are still text — re-run to convert them;");
+            output.WriteLine("  compaction will run when the conversion converges.");
+            return 0;
+        }
+
+        return await CompactPlanDimAsync(connection, output, error, cancellationToken);
+    }
+
+    /// <summary>
+    /// The closing VACUUM FULL (#2076): rewrites the dimension to its live content so the conversion's
+    /// saving reaches the VOLUME, not just the relation's internal free-space map. Preflighted against free
+    /// disk on the store's own volume (the rewrite needs room for the compacted copy while the original
+    /// still exists); an unmeasurable volume is a REFUSAL, not a shrug — "probably fits" is not a plan for
+    /// a rewrite of the store's largest table. Returns 0 on success, 1 on a preflight refusal or a failed
+    /// vacuum (the conversion itself is already committed either way).
+    /// </summary>
+    private static async Task<int> CompactPlanDimAsync(
+        NpgsqlConnection connection, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        long estimated;
+        try
+        {
+            estimated = await PlanDimRecompression.EstimateCompactedBytesAsync(connection, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"  Could not estimate the compacted size: {ex.Message}");
+            return 1;
+        }
+
+        var (freeBytes, freeError) = await ResolveStoreFreeSpaceAsync(connection, cancellationToken);
+        if (freeError is not null)
+        {
+            error.WriteLine($"  REFUSING to VACUUM FULL: {freeError}");
+            error.WriteLine("  The conversion is committed; re-run with --vacuum-full on the store host (or after");
+            error.WriteLine("  fixing the above) to compact.");
+            return 1;
+        }
+
+        /* 1.2x headroom on a sampled estimate: the rewrite holds old + new copies simultaneously, and the
+           new copy is the estimate — the old one is already on disk and costs nothing extra. */
+        var required = (long)(estimated * 1.2);
+        if (freeBytes < required)
+        {
+            error.WriteLine("  REFUSING to VACUUM FULL: not enough free disk for the compacted copy.");
+            error.WriteLine($"    estimated compacted size : {estimated / (1024.0 * 1024 * 1024):N1} GB");
+            error.WriteLine($"    required (x1.2 headroom) : {required / (1024.0 * 1024 * 1024):N1} GB");
+            error.WriteLine($"    free on the store volume : {freeBytes / (1024.0 * 1024 * 1024):N1} GB");
+            error.WriteLine("  The conversion is committed and its space is reusable internally; free up disk and");
+            error.WriteLine("  re-run with --vacuum-full to compact.");
+            return 1;
+        }
+
+        var before = (await PlanDimRecompression.SurveyAsync(connection, cancellationToken)).RelationBytes;
+        output.WriteLine();
+        output.WriteLine($"  Compacting (VACUUM FULL): rewriting ~{estimated / (1024.0 * 1024 * 1024):N1} GB of live content.");
+        output.WriteLine("  This takes an EXCLUSIVE lock on the plan dimension — collections queue until it");
+        output.WriteLine("  finishes (typically minutes; the service does not need to stop).");
+
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            await PlanDimRecompression.VacuumFullAsync(connection, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"  VACUUM FULL failed: {ex.Message}");
+            error.WriteLine("  The original relation is untouched (the rewrite is transactional); the conversion");
+            error.WriteLine("  is committed. Re-run with --vacuum-full to retry the compaction.");
+            return 1;
+        }
+
+        var after = (await PlanDimRecompression.SurveyAsync(connection, cancellationToken)).RelationBytes;
+        output.WriteLine($"  COMPACTED in {stopwatch.Elapsed:hh\\:mm\\:ss} — " +
+            $"{before / (1024.0 * 1024 * 1024):N1} GB -> {after / (1024.0 * 1024 * 1024):N1} GB on disk.");
         return 0;
     }
 
