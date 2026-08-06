@@ -752,6 +752,10 @@ jobs:
     permissions:
       contents: write
       packages: write
+      # Sigstore keyless signing + GitHub provenance (proven on the nightly first): id-token yields
+      # the OIDC identity Fulcio certifies against; attestations stores the tarball's provenance.
+      id-token: write
+      attestations: write
 
     steps:
       - uses: actions/checkout@v7
@@ -838,3 +842,31 @@ jobs:
           docker build -f Darling/Dockerfile -t "${image}:${version}" -t "${image}:latest" .
           docker push "${image}:${version}"
           docker push "${image}:latest"
+
+      # Keyless Sigstore signature on the released image — the same steps the nightly runs (verified
+      # end-to-end from a client 2026-08-06: cosign validated the claims, the Rekor log entry, and the
+      # workflow identity). SignPath's cosign support is edition-gated, and this path needs no keys or
+      # subscription at all. Verify:
+      #   cosign verify ghcr.io/erikdarlingdata/performancemonitor-darling:<version> \
+      #     --certificate-identity-regexp 'github.com/erikdarlingdata/PerformanceMonitor' \
+      #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      - name: Install cosign
+        if: github.event_name == 'release'
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign container image (keyless, Sigstore)
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.VERSION }}"
+          image="ghcr.io/${{ github.repository_owner }}/performancemonitor-darling"
+          digest="$(docker inspect --format='{{index .RepoDigests 0}}' "${image}:${version}")"
+          cosign sign --yes "${digest}"
+
+      # GitHub-native SLSA provenance for the released tarball: gh attestation verify <file> -R <repo>.
+      - name: Attest the linux tarball (GitHub provenance)
+        if: github.event_name == 'release'
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: releases/PerformanceMonitorDarling-linux-x64-*.tar.gz
