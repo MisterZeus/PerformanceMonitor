@@ -154,6 +154,13 @@ internal sealed class DarlingSelfAlertEvaluator
     private readonly ConcurrentDictionary<string, bool> _activeDiskPressure = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastDiskPressureAlert = new();
 
+    /// <summary>
+    /// The free-percent level the last Store Disk Pressure alert reported (#2101) — the worsening
+    /// watermark <see cref="LowDiskAlertGate.ShouldAlert"/> compares against, exactly the engine's
+    /// <c>_lastAlertedLowDiskPercent</c> idiom. Cleared on recovery so the next breach is fresh.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, double> _lastAlertedDiskPressurePercent = new();
+
     /// <summary>The fixed key for the fleet-level Store Disk Pressure edge (not a real server).</summary>
     private const string DiskKey = "store";
 
@@ -1135,9 +1142,22 @@ internal sealed class DarlingSelfAlertEvaluator
         if (pressure)
         {
             _activeDiskPressure[DiskKey] = true;
-            if (CooldownElapsed(_lastDiskPressureAlert, DiskKey, now))
+
+            /* #2101: a standing breach at an UNCHANGED level must not re-notify every cooldown — a
+               store volume parked at 7% free is one condition, not a condition per 15 minutes. The
+               same #754 worsening gate the target-server volume alert runs behind: fire on entry,
+               re-fire only when free% has dropped at least the margin below the last-alerted level
+               (still cooldown-limited), one resolution on recovery. This is THE self-alert with a
+               real measurement, which is what makes the gate fit here and deliberately NOT on the
+               state-only siblings (Collection Stopped / Agent Not Running / Capture Down) — those
+               have no level to worsen, and their per-cooldown "still broken" reminder is wanted. */
+            double? lastAlertedPercent =
+                _lastAlertedDiskPressurePercent.TryGetValue(DiskKey, out var lastPct) ? lastPct : (double?)null;
+            if (LowDiskAlertGate.ShouldAlert(percentFree, lastAlertedPercent)
+                && CooldownElapsed(_lastDiskPressureAlert, DiskKey, now))
             {
                 _lastDiskPressureAlert[DiskKey] = now;
+                _lastAlertedDiskPressurePercent[DiskKey] = percentFree;
                 var storeText = storeSizeBytes is long size ? $" The store currently holds {FormatGb(size)}." : "";
                 await FireAsync(
                     DiskKey, "Monitor Store", "Store Disk Pressure", reason,
@@ -1161,6 +1181,7 @@ internal sealed class DarlingSelfAlertEvaluator
         }
         else if (_activeDiskPressure.TryRemove(DiskKey, out var was) && was)
         {
+            _lastAlertedDiskPressurePercent.TryRemove(DiskKey, out _);
             await RecordResolutionAsync(new AlertResolution(
                 DiskKey, "Monitor Store", "Store Disk Pressure",
                 "Store Disk Pressure Resolved", "Monitor store volume free space recovered"), cancellationToken);
