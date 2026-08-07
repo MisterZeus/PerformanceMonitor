@@ -927,7 +927,8 @@ internal sealed class DarlingSelfAlertEvaluator
                             $"suspended ({suspendReason})",
                         /* suspend_reason_desc against "SYNCHRONIZING". */
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
-                        cancellationToken);
+                        cancellationToken,
+                        context: AgDatabaseContext(database, ("Suspend Reason", suspendReason)));
                 }
                 else if (suspension == AgSuspensionDecision.Resumed)
                 {
@@ -972,7 +973,8 @@ internal sealed class DarlingSelfAlertEvaluator
                            ("Sales2024"), neither. #1846 already classified this metric state-only for exactly
                            that reason; this is the write side finally agreeing with it. */
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
-                        cancellationToken);
+                        cancellationToken,
+                        context: AgDatabaseContext(database));
                 }
             }
         }
@@ -995,6 +997,11 @@ internal sealed class DarlingSelfAlertEvaluator
             }
         }
     }
+
+    /// <summary>The #2109 discrete-facts context for a database-scoped AG alert — the shared
+    /// builder keyed off the reading, so the fact names cannot drift from Lite's.</summary>
+    private static AlertContext AgDatabaseContext(AgDatabaseReading database, params (string, string)[] extras)
+        => AgAlertContexts.ForDatabase(database.DatabaseName, database.AgName, database.ReplicaServerName, extras);
 
     /// <summary>The prefix every AG state key for one server starts with — the scope for
     /// <see cref="Forget"/> and for the per-server recovery sweep.</summary>
@@ -1798,10 +1805,14 @@ ORDER BY ag_name, database_name, replica_server_name", connection);
     /// <param name="numericThresholdValue">The bound behind <paramref name="thresholdValue"/>, on the same
     /// terms. Almost every self-alert's threshold is an English phrase ("collecting", "Online", "running
     /// on schedule"), not a bound.</param>
+    /* The optional context TRAILS the cancellation token so the dozens of existing positional call
+       sites stay untouched — only the callers that have discrete facts to carry (#2109: the AG
+       database alerts) name it. */
     private async Task FireAsync(
         string serverKey, string serverName, string metricName, string currentValue, string thresholdValue,
         string detail, AlertSeverityLevel? severity, string shortMessage,
-        double? numericCurrentValue, double? numericThresholdValue, CancellationToken cancellationToken)
+        double? numericCurrentValue, double? numericThresholdValue, CancellationToken cancellationToken,
+        AlertContext? context = null)
     {
         /* Same mute treatment as the engine: a muted self-alert is still recorded (flagged muted) but its
            channels are skipped — the deliverer honors AlertOutcome.Muted. */
@@ -1822,7 +1833,7 @@ ORDER BY ag_name, database_name, replica_server_name", connection);
 
         await _deliverer.DeliverAsync(new AlertOutcome(
             serverKey, serverName, metricName, currentValue, thresholdValue,
-            Context: null, DetailText: detail,
+            Context: context, DetailText: detail,
             NumericCurrentValue: numericCurrentValue, NumericThresholdValue: numericThresholdValue,
             Muted: muted, Severity: severity, ShortMessage: shortMessage), cancellationToken);
     }

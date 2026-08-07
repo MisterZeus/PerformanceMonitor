@@ -1265,11 +1265,25 @@ public sealed class AlertEngine
                     ? $"{dbName} first observed {stateText} (no baseline yet)"
                     : $"{dbName} changed to {stateText} (expected {expectedText})";
 
+                /* #2109: the same fields the prose carries, as discrete facts — this alert fired with
+                   Context: null, which left the database name reachable only by parsing the title. */
+                var stateContext = new AlertContext();
+                stateContext.Details.Add(new AlertDetailItem
+                {
+                    Heading = dbName,
+                    Fields = new()
+                    {
+                        ("Database", dbName),
+                        ("Current State", stateText),
+                        ("Expected State", expectedText)
+                    }
+                });
+
                 await FireAsync(new AlertOutcome(
                     key, serverName, DatabaseStateTokens.MetricName,
                     $"{dbName}: {stateText}",
                     expectedText,
-                    Context: null, DetailText: detailText,
+                    Context: stateContext, DetailText: detailText,
                     NumericCurrentValue: null, NumericThresholdValue: null,
                     Muted: isMuted, Severity: severity,
                     ShortMessage: shortMessage), ct);

@@ -113,11 +113,19 @@ public static class AlertContextBuilders
     }
 
     /// <summary>
-    /// The deadlock-alert context from the store's deadlock rows. Body verbatim from Lite's
-    /// pre-slice-B <c>BuildDeadlockContextAsync</c> minus the fetch: deadlocks whose processes ALL
-    /// ran in excluded databases are dropped (<see cref="IsDeadlockExcluded"/>); the first 3 render
-    /// as "Deadlock Victim" items; the first graph XML becomes the attachment; ALL deadlocks in the
-    /// window feed the #1140 involved-object fingerprint grouping. Null when nothing survives.
+    /// The deadlock-alert context from the store's deadlock rows. Deadlocks whose processes ALL ran in
+    /// excluded databases are dropped (<see cref="IsDeadlockExcluded"/>); the first graph XML becomes
+    /// the attachment; ALL deadlocks in the window feed the #1140 involved-object fingerprint grouping.
+    /// Null when nothing survives.
+    ///
+    /// <para>#2108 reshaped what displays: each fingerprint incident is now a SELF-CONTAINED unit — its
+    /// own Database (#2109), Victim SQL, Processes, Dedup Key, Involved Objects, Occurrences — rendered
+    /// via <see cref="AlertIncidentRenderer.BuildItem"/> with the forensic fields INCLUDED, and the old
+    /// standalone "Deadlock Victim" items are kept only for deadlocks the fingerprint cannot see
+    /// (no parseable objects). Before, the victim fields and the fingerprint metadata lived in separate
+    /// items — on a multi-incident card there was no way to tell which victim belonged to which
+    /// fingerprint, and the two lists even disagreed on membership (victims = first 3 raw events,
+    /// incidents = all fingerprints).</para>
     /// </summary>
     public static AlertContext? BuildDeadlockContext(
         string serverName, IReadOnlyList<DeadlockAlertRow>? deadlocks, IReadOnlyList<string> excludedDatabases)
@@ -134,9 +142,25 @@ public static class AlertContextBuilders
         }
 
         var context = new AlertContext();
-        var firstGraph = (string?)null;
+        var firstGraph = filtered.FirstOrDefault(d => d.HasDeadlockXml)?.DeadlockGraphXml;
+        if (!string.IsNullOrEmpty(firstGraph))
+        {
+            context.AttachmentXml = firstGraph;
+            context.AttachmentFileName = "deadlock_graph.xml";
+        }
 
-        foreach (var d in filtered.Take(3))
+        /* One parse pass per deadlock: the fingerprint's object set and the discrete Database fact's
+           database set (#2109) both come off the graph. */
+        var parsed = filtered
+            .Select(d => (Row: d,
+                Objects: DeadlockObjectExtractor.FromGraphXml(d.DeadlockGraphXml),
+                Databases: DeadlockObjectExtractor.DatabasesFromGraphXml(d.DeadlockGraphXml)))
+            .ToList();
+
+        /* Deadlocks the fingerprint cannot see (no parseable objects) would vanish entirely under the
+           incident-only rendering, so they keep the standalone victim item — the #1140 rule that "the
+           builder still displays them", now scoped to exactly the events that need it. */
+        foreach (var p in parsed.Where(p => p.Objects.Count == 0).Take(3))
         {
             var item = new AlertDetailItem
             {
@@ -144,40 +168,47 @@ public static class AlertContextBuilders
                 Fields = new()
             };
 
-            if (!string.IsNullOrEmpty(d.VictimSqlText))
-                item.Fields.Add(("Victim SQL", TruncateText(d.VictimSqlText)));
-            if (!string.IsNullOrEmpty(d.ProcessSummary))
-                item.Fields.Add(("Processes", d.ProcessSummary));
+            if (p.Databases.Count > 0)
+                item.Fields.Add(("Database", string.Join(", ", p.Databases)));
+            if (!string.IsNullOrEmpty(p.Row.VictimSqlText))
+                item.Fields.Add(("Victim SQL", TruncateText(p.Row.VictimSqlText)));
+            if (!string.IsNullOrEmpty(p.Row.ProcessSummary))
+                item.Fields.Add(("Processes", p.Row.ProcessSummary));
 
             context.Details.Add(item);
-            if (firstGraph == null && d.HasDeadlockXml)
-                firstGraph = d.DeadlockGraphXml;
         }
 
-        if (!string.IsNullOrEmpty(firstGraph))
-        {
-            context.AttachmentXml = firstGraph;
-            context.AttachmentFileName = "deadlock_graph.xml";
-        }
-
-        /* #1140: fingerprint each deadlock by its sorted involved-object set (parsed from the
-           graph), across ALL deadlocks in the window — not just the 3 displayed — grouped so
-           recurrences over the same objects collapse to one incident with a count. */
+        /* #1140: fingerprint each deadlock by its sorted involved-object set, across ALL deadlocks in
+           the window, grouped so recurrences over the same objects collapse to one incident with a
+           count. Each incident renders self-contained (#2108): heading + its representative's forensic
+           fields + the dedup metadata, one item per incident. */
         var groups = DeadlockIncidentGrouper.Group(
             serverName,
-            filtered.Select(d => new DeadlockIncidentGrouper.DeadlockEvent(
-                DeadlockObjectExtractor.FromGraphXml(d.DeadlockGraphXml),
-                DeadlockDetailFields(d.VictimSqlText, d.ProcessSummary))));
-        AlertIncidentRenderer.Apply(context, groups.Select(g => g.Incident).ToList());
+            parsed.Select(p => new DeadlockIncidentGrouper.DeadlockEvent(
+                p.Objects,
+                DeadlockDetailFields(p.Databases, p.Row.VictimSqlText, p.Row.ProcessSummary))));
+        var incidents = groups.Select(g => g.Incident).ToList();
+        if (incidents.Count > 0)
+        {
+            context.Incidents = new List<AlertIncident>(incidents);
+            for (int n = 0; n < incidents.Count; n++)
+            {
+                var heading = incidents.Count == 1 ? "Deadlock" : $"Deadlock {n + 1} of {incidents.Count}";
+                context.Details.Add(AlertIncidentRenderer.BuildItem(incidents[n], heading, includeDetailFields: true));
+            }
+        }
 
         return context;
     }
 
-    /* #1141: forensic detail carried on a deadlock incident so per-event cards keep the victim SQL
-       + process summary (Summary mode shows them via the builder's own items). */
-    private static List<AlertIncidentField>? DeadlockDetailFields(string? victimSql, string? processes)
+    /* #1141/#2109: forensic detail carried on a deadlock incident — the representative event's
+       databases, victim SQL, and process summary. Since #2108 these render on the incident's own
+       summary item too, not just per-event cards. */
+    private static List<AlertIncidentField>? DeadlockDetailFields(
+        IReadOnlyList<string> databases, string? victimSql, string? processes)
     {
         var f = new List<AlertIncidentField>();
+        if (databases.Count > 0) f.Add(new AlertIncidentField("Database", string.Join(", ", databases)));
         if (!string.IsNullOrWhiteSpace(victimSql)) f.Add(new AlertIncidentField("Victim SQL", TruncateText(victimSql)));
         if (!string.IsNullOrWhiteSpace(processes)) f.Add(new AlertIncidentField("Processes", processes!));
         return f.Count > 0 ? f : null;
@@ -345,6 +376,9 @@ public static class AlertContextBuilders
         {
             var fields = new List<(string, string)>
             {
+                /* #2109: the database as a discrete fact, not only in the heading — downstream
+                   automation routes on the fact name, and headings are display prose. */
+                ("Database", d.DatabaseName),
                 ("PVS Size (off-row)", $"{d.PvsGb:F1} GB"),
                 ("Database Data Size", $"{d.DatabaseDataSizeMb / 1024.0:F1} GB"),
                 ("Aborted Transactions", d.CurrentAbortedTransactionCount.ToString()),
