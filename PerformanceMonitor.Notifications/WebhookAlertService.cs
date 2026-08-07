@@ -332,6 +332,12 @@ public class WebhookAlertService
             facts.Add(new { name = "Time (Local)", value = localNow.ToString("yyyy-MM-dd HH:mm:ss") });
         }
 
+        /* #2108: each Fields-carrying detail item becomes its OWN section further down, so a
+           multi-incident alert reads as labeled, self-contained units instead of one flat fact
+           list where a victim's fields and its fingerprint's fields drift apart. Advice prose and
+           remediation-T-SQL items stay folded into the lead section's facts — they are commentary
+           on the whole alert, not incidents. */
+        var itemSections = new List<object>();
         if (context?.Details != null)
         {
             foreach (var detail in context.Details)
@@ -358,10 +364,18 @@ public class WebhookAlertService
                     continue;
                 }
 
+                var itemFacts = new List<object>();
                 foreach (var (label, value) in detail.Fields)
                 {
-                    facts.Add(new { name = label, value });
+                    itemFacts.Add(new { name = label, value });
                 }
+
+                itemSections.Add(new
+                {
+                    activityTitle = detail.Heading,
+                    facts = itemFacts,
+                    markdown = true
+                });
             }
         }
 
@@ -379,6 +393,7 @@ public class WebhookAlertService
                 markdown = true
             }
         };
+        sections.AddRange(itemSections);
 
         if (!isTest && branding.SnoozeHint is not null)
         {
