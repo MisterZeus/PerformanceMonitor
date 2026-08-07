@@ -131,6 +131,10 @@ public class AgAlertEvaluatorTests
            builder Darling's evaluator uses — the fact names cannot drift between the SKUs. */
         var e = new AgAlertEvaluator();
 
+        /* Suspension is edge-triggered with first-sighting-silent semantics — establish the healthy
+           baseline first, exactly like the edge test above. */
+        Assert.Empty(e.EvaluateDatabases(ServerId, new[] { Database(suspended: false) }, 300, 0, Cooldown));
+
         var suspended = Assert.Single(e.EvaluateDatabases(
             ServerId, new[] { Database(suspended: true, suspendReason: "SUSPEND_FROM_USER") }, 300, 0, Cooldown));
         var item = Assert.Single(suspended.Context!.Details);
