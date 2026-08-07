@@ -54,11 +54,13 @@ public sealed class MigrationLadderPins
     }
 
     [Fact]
-    public void TheLadder_IsStrictlyOrdered_WithNoGapsOrDuplicates()
+    public void TheLadder_IsStrictlyOrdered_WithNoDuplicates()
     {
-        /* The replay math above only holds when versions are strictly increasing and dense — a
+        /* The replay math above only holds when versions are strictly increasing and unique — a
            duplicated or out-of-order version would let two rungs disagree about what "already ran"
-           means. Cheap to pin, catastrophic to debug from a half-migrated field store. */
+           means. Density is deliberately NOT pinned: the ladder has one historical gap (V45) and a
+           gap is harmless (the stamp comparison is >, not sequence arithmetic). Cheap to pin,
+           catastrophic to debug from a half-migrated field store. */
         var versions = PgMigrations.Scripts.Select(m => m.Version).ToList();
         Assert.Equal(versions.OrderBy(v => v).ToList(), versions);
         Assert.Equal(versions.Count, versions.Distinct().Count());

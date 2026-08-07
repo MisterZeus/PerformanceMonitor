@@ -135,6 +135,10 @@ jobs:
               - 'Lite/Windows/ProcedureHistoryWindow.xaml'
               - 'Lite/Windows/QueryStatsHistoryWindow.xaml'
               - 'Lite/Windows/QueryStoreHistoryWindow.xaml'
+              # #2114: XamlStaticResourceHygieneTests scans EVERY Lite XAML file — a StaticResource
+              # regression in one outside the six named above must still trigger the Darling job
+              # that runs the guard, or it slips to the nightly.
+              - 'Lite/**/*.xaml'
             # The DOCUMENTATION allowlist: files that cannot affect a build under any
             # job in this workflow. Deliberately an allowlist of non-executable content,
             # not a "everything that isn't code" subtraction — a new file type defaults
