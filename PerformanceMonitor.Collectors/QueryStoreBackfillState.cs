@@ -37,6 +37,31 @@ public static class QueryStoreBackfillState
     /// <summary>State key prefix for a recorded clamp hole (value: <see cref="EncodeHole"/>).</summary>
     public const string HoleKeyPrefix = "hole:";
 
+    /// <summary>
+    /// The widest window a single backfill slice may hand the per-database query (#2102) — matched
+    /// to <see cref="WatermarkPolicy.MaxCatchup"/> so NO path, live or backfill, ever windows wider
+    /// than the steady state the fleet proves. The backfill query aggregates and sorts its whole
+    /// window before the byte budget can bound anything (the same row-cap-is-not-a-cost-cap flaw
+    /// that wedged the live path), so an unchunked wide hole on a big database re-times-out forever
+    /// instead of draining.
+    /// </summary>
+    public static readonly TimeSpan MaxSliceSpan = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// Bounds one newest-first slice to the top <see cref="MaxSliceSpan"/> of the remaining range:
+    /// returns the floor the slice should actually query, which is the requested floor once the
+    /// remainder is narrow enough. A pure function so the placement is pinnable in isolation, like
+    /// <see cref="WatermarkPolicy.ClampCatchup"/>. The caller distinguishes "chunk exhausted"
+    /// (result &gt; <paramref name="floorUtc"/>: an empty slice means only this CHUNK is quiet —
+    /// shrink the ceiling and keep walking) from "range exhausted" (result ==
+    /// <paramref name="floorUtc"/>: an empty slice is terminal, exactly the pre-chunking semantics).
+    /// </summary>
+    public static DateTime BoundSliceFloor(DateTime floorUtc, DateTime ceilingUtc)
+    {
+        var chunkFloor = ceilingUtc - MaxSliceSpan;
+        return chunkFloor > floorUtc ? chunkFloor : floorUtc;
+    }
+
     /// <summary>Encodes a hole range as <c>from|to</c> in round-trip format — deliberately not
     /// JSON, so the state row stays greppable and the codec dependency-free.</summary>
     public static string EncodeHole(DateTime fromUtc, DateTime toUtc)

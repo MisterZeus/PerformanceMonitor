@@ -79,6 +79,29 @@ public sealed class QueryStoreBackfillTests
     }
 
     [Fact]
+    public void BoundSliceFloor_CapsWideRanges_AndPassesNarrowOnesThrough()
+    {
+        /* #2102: a slice queries at most the top MaxSliceSpan of its remaining range — the byte
+           budget bounds what ships, not what the query aggregates and sorts, so an unchunked wide
+           window on a big database re-times-out every tick and the range never drains. The caller
+           reads the verdict from the result: floor moved = chunk (an empty slice shrinks the
+           ceiling and keeps walking); floor unmoved = the whole remainder was asked (an empty
+           slice is terminal, the pre-chunking semantics). */
+        var ceiling = new DateTime(2026, 8, 7, 12, 0, 0, DateTimeKind.Utc);
+
+        var wideFloor = ceiling.AddHours(-23);
+        Assert.Equal(ceiling - QueryStoreBackfillState.MaxSliceSpan, QueryStoreBackfillState.BoundSliceFloor(wideFloor, ceiling));
+
+        var narrowFloor = ceiling.AddMinutes(-25);
+        Assert.Equal(narrowFloor, QueryStoreBackfillState.BoundSliceFloor(narrowFloor, ceiling));
+
+        /* Exactly MaxSliceSpan wide is narrow enough — one slice takes it whole, so its empty
+           verdict stays terminal rather than saving a zero-width hole. */
+        var exactFloor = ceiling - QueryStoreBackfillState.MaxSliceSpan;
+        Assert.Equal(exactFloor, QueryStoreBackfillState.BoundSliceFloor(exactFloor, ceiling));
+    }
+
+    [Fact]
     public void StateIdentity_IsTheWorkersOwn_NotTheDefinitions()
     {
         /* The worker owns its collector_state rows under its OWN name, so the query_store
