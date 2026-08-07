@@ -33,6 +33,7 @@ namespace Darling.Tests;
 /// Verified two-sided at birth: against the pre-#2120 build it fails with the exact field 42703;
 /// against the fixed build it climbs V39→V54 clean, including from a mid-failure retry.</para>
 /// </summary>
+[Collection("live-postgres")]
 public sealed class MigrationUpgradeLadderLiveTests
 {
     private const string SkipReason =
