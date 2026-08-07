@@ -322,6 +322,17 @@ public sealed class DarlingCollectorRunner
                        routine one-database miss. */
                     failed++;
                     firstFailure ??= ex;
+
+                    /* #2111: the yield-to-live stamp for the Azure SQL DB arm — query_store reaches
+                       THIS per-database loop there, not the enumeration path's onItemError, and
+                       without the stamp the backfill worker would never yield on an Azure target
+                       (the review catch on #2112). Same query_store-only guard as the hole
+                       recording above. */
+                    if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                    {
+                        _lastQueryStoreItemFailureUtc[server.ServerId] = DateTime.UtcNow;
+                    }
+
                     _logger?.LogDebug("Skipping database '{Database}' for {Collector}: {Error}", databaseName, definition.Name, ex.Message);
                 }
             }
