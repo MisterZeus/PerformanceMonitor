@@ -464,20 +464,32 @@ ON CONFLICT (server_id) DO NOTHING";
 
     /* ─────────────────────────────── helpers ─────────────────────────────── */
 
-    /// <summary>DPAPI-encrypts a SQL password for storage, or null for Windows auth (no secret). The
-    /// <c>OperatingSystem.IsWindows()</c> guard keeps CA1416 honest and gives a clear failure on a non-Windows BYO
-    /// host — the same platform posture as every other DPAPI surface here; managed mode (where onboarding runs) is
-    /// Windows-only. The plaintext is not logged and never leaves this method.</summary>
-    private static string? ProtectPasswordForStorage(string? plaintextPassword)
+    /// <summary>Prepares a SQL password for storage: an <c>env:</c>/<c>file:</c> secret REFERENCE (#1804) is
+    /// stored VERBATIM — a reference is a pointer, not a secret; the secret stays in the mounted file or
+    /// environment variable, which is the whole Linux/compose contract and needs no DPAPI (#2087: before this,
+    /// <c>add_servers</c> refused ALL SQL-auth passwords off-Windows, dead-ending the designed onboarding path
+    /// for compose deployments — the store-authoritative control plane means darling.json edits do not add
+    /// servers after first seed). A LITERAL password is DPAPI-encrypted and therefore Windows-only, with the
+    /// refusal now pointing at references as the cross-platform alternative. Null for Windows auth (no secret).
+    /// The plaintext is not logged and never leaves this method.</summary>
+    internal static string? ProtectPasswordForStorage(string? plaintextPassword)
     {
         if (string.IsNullOrEmpty(plaintextPassword))
         {
             return null;
         }
 
+        if (DarlingSecretSource.IsReference(plaintextPassword))
+        {
+            return plaintextPassword;
+        }
+
         if (!OperatingSystem.IsWindows())
         {
-            throw new PlatformNotSupportedException("Storing a SQL-auth password requires Windows (DPAPI).");
+            throw new PlatformNotSupportedException(
+                "Storing a LITERAL SQL-auth password requires Windows (DPAPI). On Linux, pass an env:/file: " +
+                "secret reference instead (e.g. file:/run/secrets/sql_password) — it is stored as-is and " +
+                "resolved at connect time (#1804).");
         }
 
         return DarlingSecrets.Protect(plaintextPassword);
