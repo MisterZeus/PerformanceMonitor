@@ -503,6 +503,52 @@ public sealed class DarlingFileSecurityTests
         }
     }
 
+    /// <summary>
+    /// #2093 (ghauan): a backup whose exposure is ALREADY closed must be skipped entirely — not re-hardened,
+    /// not errored about. The field shape: an operator ran the error message's icacls commands (which fix the
+    /// ACL but do not transfer OWNERSHIP), so the sweep's rewrite kept throwing "unauthorized" on every start
+    /// about a file that was already secure. The canary ACE proves the skip: HardenFile's rewrite would strip
+    /// it, so its survival means the sweep never touched the descriptor.
+    /// </summary>
+    [Fact]
+    public void ConfigBackupSweep_AlreadyHardenedBackup_IsSkippedUntouched()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "darling-bak-idem-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var configPath = Path.Combine(directory, "darling.json");
+        var backup = configPath + ".bak-20260807-094518";
+        var canary = new SecurityIdentifier(WellKnownSidType.BuiltinGuestsSid, null);
+        try
+        {
+            File.WriteAllText(configPath, "{}");
+            File.WriteAllText(backup, "{}");
+
+            /* Hand-hardened, the way the error message instructs: inheritance off, no ordinary-user
+               read — plus the canary ACE a HardenFile rewrite would remove. */
+            var acl = new FileInfo(backup).GetAccessControl();
+            acl.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+            acl.AddAccessRule(new FileSystemAccessRule(
+                WindowsIdentity.GetCurrent().User!, FileSystemRights.FullControl, AccessControlType.Allow));
+            acl.AddAccessRule(new FileSystemAccessRule(
+                canary, FileSystemRights.Read, AccessControlType.Allow));
+            new FileInfo(backup).SetAccessControl(acl);
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(backup));
+
+            DarlingWorker.TryHardenConfigBackups(configPath, NullLogger.Instance);
+
+            /* The canary survives — the sweep skipped the already-closed exposure instead of rewriting. */
+            var after = new FileInfo(backup).GetAccessControl();
+            var survived = after.GetAccessRules(true, false, typeof(SecurityIdentifier))
+                .Cast<FileSystemAccessRule>()
+                .Any(rule => rule.IdentityReference == canary);
+            Assert.True(survived, "an already-hardened backup must be skipped, not re-hardened");
+        }
+        finally
+        {
+            try { Directory.Delete(directory, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
     [Fact]
     public void ConfigBackupSweep_NoBackups_IsANoOp()
     {
