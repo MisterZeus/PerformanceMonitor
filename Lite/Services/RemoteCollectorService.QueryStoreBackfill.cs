@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Threading;
@@ -73,6 +74,14 @@ public partial class RemoteCollectorService
         }
     }
 
+    /// <summary>
+    /// When a server's live query_store collection last failed a per-database item — the yield-to-
+    /// live signal (#2111), stamped by the definition runner's item-error path and judged by
+    /// <see cref="QueryStoreBackfillState.ShouldYieldToLive"/>. In-memory on purpose — a restart
+    /// forgetting the stamps just means one backfill slice races one live cycle once.
+    /// </summary>
+    private readonly ConcurrentDictionary<int, DateTime> _lastQueryStoreItemFailureUtc = new();
+
     /// <summary>One server's scan-and-slice — the twin of Darling's RunServerSliceAsync, on Lite's
     /// plumbing (DuckDB reads, ServerConnection credentials, the shared appender write).</summary>
     internal async Task<bool> RunQueryStoreBackfillSliceAsync(ServerConnection server, CancellationToken cancellationToken)
@@ -93,6 +102,20 @@ public partial class RemoteCollectorService
         }
 
         var serverId = GetDeterministicHashCode(GetServerNameForStorage(server));
+
+        /* #2111 yield-to-live: a backfill slice scans the same QS internal tables the live sweep
+           reads — when the live path is failing on this server, running a slice anyway is the
+           contention that keeps it failing. Skip the server this tick; the hole waits, live
+           recovers, backfill resumes. Same policy, same window as Darling's worker. */
+        if (QueryStoreBackfillState.ShouldYieldToLive(
+            _lastQueryStoreItemFailureUtc.TryGetValue(serverId, out var lastLiveFailure) ? lastLiveFailure : null,
+            DateTime.UtcNow))
+        {
+            _logger?.LogDebug(
+                "query_store backfill on '{Server}': yielding to the live path (recent live query_store failure)",
+                server.DisplayName);
+            return false;
+        }
         var state = await GetCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName, cancellationToken);
         var databases = await GetBackfillCandidateDatabasesAsync(serverId, cancellationToken);
 

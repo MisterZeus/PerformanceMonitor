@@ -114,6 +114,21 @@ public sealed class QueryStoreBackfill
             return false;
         }
 
+        /* #2111 yield-to-live: a backfill slice scans the same QS internal tables the live sweep
+           reads, on a replica that is often MAXDOP-1 — when the live path is failing on this
+           server, running a slice anyway is the contention that keeps it failing. Skip the server
+           this tick (false = the tick is free for another server); the hole waits, live recovers,
+           backfill resumes. Debug, not Warning: the live failure already logs loudly every cycle,
+           and this is the designed response to it. */
+        if (QueryStoreBackfillState.ShouldYieldToLive(
+            _runner.LastQueryStoreItemFailureUtc(server.ServerId), DateTime.UtcNow))
+        {
+            _logger?.LogDebug(
+                "query_store backfill on '{Server}': yielding to the live path (recent live query_store failure)",
+                server.Config.DisplayName);
+            return false;
+        }
+
         var state = await _runner.GetCollectorStateAsync(server.ServerId, StateCollectorName, cancellationToken);
         var databases = await GetCandidateDatabasesAsync(server.ServerId, cancellationToken);
 
