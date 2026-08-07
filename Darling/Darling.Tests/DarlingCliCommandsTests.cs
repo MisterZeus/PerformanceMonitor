@@ -502,6 +502,46 @@ public sealed class DarlingConfigureNetworkTests
         }
     }
 
+    /// <summary>
+    /// #2097 (gotqn): in the PowerShell ISE / remote sessions / redirected stdin, ReadLine() returns null
+    /// immediately and stderr is not surfaced — so the wizard "bailed" with no visible reason. EOF at the
+    /// menu must be told apart from an explicit quit: it writes the non-interactive guidance to STDOUT
+    /// (the one stream every host shows) and exits nonzero so scripts notice. An explicit 'q' keeps the
+    /// quiet "No changes made." + 0 contract.
+    /// </summary>
+    [Fact]
+    public async Task ConfigureNetwork_EofAtMenu_ExplainsNonInteractiveConsole_OnStdout()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-confignet-eof-");
+        try
+        {
+            var configPath = CopySampleTo(root.FullName);
+
+            /* An exhausted reader IS the ISE shape: first ReadLine returns null. */
+            var input = new StringReader(string.Empty);
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            var exit = await DarlingCliCommands.ConfigureNetworkAsync(configPath, input, output, error, CancellationToken.None);
+
+            Assert.Equal(1, exit);
+            Assert.Contains("non-interactive", output.ToString(), StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("Read-Host", output.ToString(), StringComparison.Ordinal);
+
+            /* And an explicit quit is still the quiet success it always was. */
+            var quitOutput = new StringWriter();
+            var quitExit = await DarlingCliCommands.ConfigureNetworkAsync(
+                configPath, Script("q"), quitOutput, new StringWriter(), CancellationToken.None);
+            Assert.Equal(0, quitExit);
+            Assert.Contains("No changes made.", quitOutput.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("non-interactive", quitOutput.ToString(), StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
     [Fact]
     public async Task ConfigureNetwork_Mcp_GeneratesToken_PrintsPlaintextOnce_WarnsOnStderr_StoresEncrypted()
     {

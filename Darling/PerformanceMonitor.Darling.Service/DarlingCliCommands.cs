@@ -1338,7 +1338,17 @@ public static class DarlingCliCommands
         output.WriteLine("  [5] Disable — remove all exposure (back to loopback-only)");
         output.WriteLine("  [q] Quit without changes");
         var choice = Prompt(input, output, "Choice", "q");
-        if (choice is null || choice.Length == 0 || string.Equals(choice, "q", StringComparison.OrdinalIgnoreCase))
+
+        /* #2097: null is EOF — a NON-INTERACTIVE host, not a human pressing q. Saying "No changes made."
+           there reads as the wizard shrugging for no reason; name the actual cause on stdout and exit
+           nonzero so scripts notice. An empty line or explicit q remains the deliberate quit. */
+        if (choice is null)
+        {
+            WriteNonInteractiveGuidance(output);
+            return 1;
+        }
+
+        if (choice.Length == 0 || string.Equals(choice, "q", StringComparison.OrdinalIgnoreCase))
         {
             output.WriteLine("No changes made.");
             return 0;
@@ -2174,6 +2184,24 @@ public static class DarlingCliCommands
     {
         using var identity = WindowsIdentity.GetCurrent();
         return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+    }
+
+    /// <summary>
+    /// The actionable message for a verb that read EOF where it expected a human (#2097, gotqn): in the
+    /// PowerShell ISE, remote/PSRemoting sessions, and some integrated terminals, stdin is not an
+    /// interactive console — <c>ReadLine()</c> returns null immediately — and STDERR (where the prompts
+    /// and errors went) is not surfaced at all, so the verb read as a silent no-op. This goes to STDOUT,
+    /// the one stream every host shows, and names both the cause and the ways forward.
+    /// </summary>
+    internal static void WriteNonInteractiveGuidance(TextWriter output)
+    {
+        output.WriteLine();
+        output.WriteLine("No interactive input received. This console appears to be non-interactive (PowerShell ISE,");
+        output.WriteLine("a remote/PSRemoting session, or redirected stdin) - in these hosts, prompts written to");
+        output.WriteLine("stderr may not be shown at all, so the verb looks like it did nothing.");
+        output.WriteLine("Run this verb from a regular interactive console (Windows Terminal, powershell.exe, cmd),");
+        output.WriteLine("or, for single-value verbs, pipe the value in, e.g.:");
+        output.WriteLine("  Read-Host -Prompt 'password' | PerformanceMonitor.Darling.Service.exe --encrypt-password");
     }
 
     /// <summary>Writes a prompt and reads a trimmed line. Returns null on EOF (input exhausted); an empty line yields <paramref name="defaultValue"/> (or "").</summary>

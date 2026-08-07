@@ -57,7 +57,10 @@ if (args.Length > 0 && DarlingCliCommands.IsEncryptPasswordVerb(args[0]))
     var plaintext = Console.ReadLine();
     if (string.IsNullOrEmpty(plaintext))
     {
+        /* #2097: on a non-interactive host (ISE/remote/redirected stdin) ReadLine returns null instantly
+           and stderr is invisible — the guidance must ride STDOUT, the stream every host shows. */
         Console.Error.WriteLine("No password read from stdin.");
+        DarlingCliCommands.WriteNonInteractiveGuidance(Console.Out);
         return 1;
     }
 
