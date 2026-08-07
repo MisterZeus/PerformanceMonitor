@@ -99,7 +99,15 @@ public static class PgMigrations
         new Migration(48, "pvs-pressure-alert", V48Sql),
         new Migration(49, "database-state-alert", V49Sql),
         new Migration(50, "server-tag-colour", V50Sql),
-        new Migration(51, "query-stats-host-object", V51Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
+        /* #2119: V54Sql is PREPENDED ahead of the generated view. This rung's view SQL comes from the
+           LIVE generator, which since #2069 emits the V54 gz column — a ≤V50 store replaying this rung
+           on current code referenced a column three rungs before the ALTER that adds it (42703, the
+           ladder halts, every 3.3.0→3.4.0 upgrade failed). V54's ALTERs are idempotent, so pre-adding
+           here costs a fresh-through-this-rung store nothing and rung 54's own copy no-ops. This is
+           the standing hazard of generator-built rungs: any LATER column the generator learns must be
+           pre-added in EVERY earlier rung that re-emits generated SQL over existing tables — pinned by
+           MigrationLadderPins so the next collision fails in CI, not on an operator's store. */
+        new Migration(51, "query-stats-host-object", V51Sql + "\n" + V54Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
         new Migration(52, "finding-drilldown-json", V52Sql),
         new Migration(53, "store-self-metrics", V53Sql),
         new Migration(54, "plan-dim-gzip", V54Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
