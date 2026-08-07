@@ -66,6 +66,15 @@ public static class DarlingSecrets
         if (!string.IsNullOrWhiteSpace(server.EncryptedPassword))
         {
             usedPlaintext = false;
+
+            /* #2087: add_servers stores env:/file: REFERENCES verbatim in this slot on Linux (a pointer is
+               not a secret; DPAPI cannot exist there). A reference can never be confused with a DPAPI blob:
+               blobs are base64 and contain no ':' prefix match. */
+            if (DarlingSecretSource.IsReference(server.EncryptedPassword))
+            {
+                return DarlingSecretSource.Resolve(server.EncryptedPassword, $"servers['{server.DisplayName}'].encryptedPassword");
+            }
+
             return Unprotect(server.EncryptedPassword);
         }
 

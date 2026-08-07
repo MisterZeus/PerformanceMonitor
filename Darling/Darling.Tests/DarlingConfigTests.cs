@@ -14,6 +14,8 @@ using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Notifications;
 using Xunit;
 
+using PerformanceMonitor.Darling.Service.Mcp;
+
 namespace Darling.Tests;
 
 /// <summary>
@@ -345,5 +347,54 @@ public sealed class DarlingConfigTests
         var devServer = Server(s => { s.Auth = "sql"; s.Username = "u"; s.Password = "dev-pw"; });
         Assert.Equal("dev-pw", DarlingSecrets.ResolvePassword(devServer, out usedPlaintext));
         Assert.True(usedPlaintext);
+    }
+
+    /// <summary>
+    /// #2087: add_servers stores env:/file: secret REFERENCES verbatim in the encrypted-password slot on
+    /// Linux (a pointer is not a secret, and DPAPI does not exist there). The resolver must therefore
+    /// recognize a reference in that slot and resolve it instead of feeding it to DPAPI Unprotect — which
+    /// would throw on every platform, since a reference is not a base64 blob.
+    /// </summary>
+    [Fact]
+    public void ResolvePassword_ReferenceInEncryptedSlot_ResolvesInsteadOfUnprotecting()
+    {
+        Environment.SetEnvironmentVariable("DARLING_TEST_2087_PW", "ref-resolved!");
+        try
+        {
+            var server = Server(s => { s.Auth = "sql"; s.Username = "u"; s.EncryptedPassword = "env:DARLING_TEST_2087_PW"; });
+            Assert.Equal("ref-resolved!", DarlingSecrets.ResolvePassword(server, out var usedPlaintext));
+
+            /* A reference is not plaintext-in-config — callers must not warn on it (the #1804 rule). */
+            Assert.False(usedPlaintext);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("DARLING_TEST_2087_PW", null);
+        }
+    }
+
+    /// <summary>
+    /// #2087's storage half: a reference passes through UNTOUCHED on every platform (the Linux onboarding
+    /// path), a literal still DPAPI-encrypts on Windows, and Windows-auth (no password) stays null.
+    /// </summary>
+    [Fact]
+    public void ProtectPasswordForStorage_ReferencesPassThrough_LiteralsEncrypt()
+    {
+        Assert.Equal(
+            "file:/run/secrets/sql_password",
+            DarlingMcpServerAdminTools.ProtectPasswordForStorage("file:/run/secrets/sql_password"));
+        Assert.Equal(
+            "env:SQL_PW",
+            DarlingMcpServerAdminTools.ProtectPasswordForStorage("env:SQL_PW"));
+        Assert.Null(DarlingMcpServerAdminTools.ProtectPasswordForStorage(null));
+        Assert.Null(DarlingMcpServerAdminTools.ProtectPasswordForStorage(""));
+
+        if (OperatingSystem.IsWindows())
+        {
+            var stored = DarlingMcpServerAdminTools.ProtectPasswordForStorage("literal-pw");
+            Assert.NotNull(stored);
+            Assert.NotEqual("literal-pw", stored);
+            Assert.Equal("literal-pw", DarlingSecrets.Unprotect(stored!));
+        }
     }
 }
