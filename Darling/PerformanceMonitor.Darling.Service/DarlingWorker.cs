@@ -650,6 +650,17 @@ public sealed class DarlingWorker : BackgroundService
 
         foreach (var backup in backups)
         {
+            /* #2093 (ghauan): idempotence gate. The rewrite below needs OWNERSHIP, which an operator's
+               manual icacls fix does not transfer — so a backup that had already been hardened by hand
+               kept erroring on every start about an exposure that was already closed. The sweep exists
+               to close the ordinary-users-can-read gap; when that gap is closed, there is nothing left
+               to do and no error to report. The CRITICAL check below remains the independent witness
+               for the still-exposed case. */
+            if (!DarlingFileSecurity.IsReadableByOrdinaryUsers(backup))
+            {
+                continue;
+            }
+
             try
             {
                 DarlingFileSecurity.HardenFile(backup, allowInteractiveRead: false);
