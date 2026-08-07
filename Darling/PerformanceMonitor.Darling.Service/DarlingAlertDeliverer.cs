@@ -126,6 +126,18 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
         AlertOutcome outcome, string currentValue, AlertContext? context, string? detailText,
         double? numericCurrentValue, double? numericThresholdValue)
     {
+        /* #2090: the fire site's severity rode AlertOutcome.Severity but the channel builders read
+           only Context.SeverityOverride — so every self-alert (fired with Context: null) rendered
+           INFO-blue in Teams/Slack/PagerDuty/webhooks while its log line said Critical. Fold the
+           outcome's severity into the context here, once, upstream of every channel; ??= so an
+           explicit override set by a context builder still wins. The context also serializes into
+           alert history, so replays keep the severity too. */
+        if (outcome.Severity is not null)
+        {
+            context ??= new AlertContext();
+            context.SeverityOverride ??= outcome.Severity;
+        }
+
         /* Lite's EmailAlertService.cs:65-66 — muted alerts skip both channels but still record below. */
         var result = await _core.TrySendAsync(
             outcome.MetricName, outcome.ServerName, currentValue, outcome.ThresholdValue,

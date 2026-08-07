@@ -99,4 +99,56 @@ public class AlertSeverityTests
         Assert.Contains("CRITICAL", payload);
         Assert.Contains("#DC2626", payload);
     }
+
+    /// <summary>
+    /// The #1136 fall-through tripwire (#2090): every metric name any fire site uses must have an arm in
+    /// <see cref="AlertSeverity.ForMetric"/>, or an alert-history replay (the renderer with no context)
+    /// silently renders INFO-blue for a WARNING/CRITICAL condition. This gap SHIPPED four separate times
+    /// (blocking wait, capture down, failed agent job, database state) and #2090 found six more — because
+    /// nothing forced a new alert's author to visit the map. This inventory is that forcing function:
+    /// firing a NEW metric name means adding it here, and adding it here fails until the map has its arm.
+    /// </summary>
+    [Fact]
+    public void EveryFiredMetricName_HasASeverityArm_NotTheInfoFallThrough()
+    {
+        var infoFallThrough = AlertSeverity.ForMetric("no-such-metric-name");
+
+        foreach (var metric in new[]
+        {
+            /* The alert engine's thresholds. */
+            "Blocking Detected", "Blocking Wait Time", "Deadlocks Detected", "High CPU", "Poison Wait",
+            "Long-Running Query", "tempdb Space", "Long-Running Job", "Failed Agent Job",
+            "Database State", "Volume Free Space", "Version Store (PVS)",
+            /* Connection-state family. */
+            "Server Unreachable", "Server Restored",
+            /* Availability Groups (#991). */
+            "AG Failover", "AG Replica Disconnected", "AG Replica Reconnected",
+            "AG Sync Fell Behind", "AG Database Suspended",
+            /* Darling self-alerts (#2090's batch — all fire Critical at their sites). */
+            "Capture Down", "Collection Stopped", "Agent Not Running",
+            "Store Disk Pressure", "Store Runtime Upgrade", "Compression Job Stuck",
+        })
+        {
+            var (hex, badge, _) = AlertSeverity.ForMetric(metric);
+            Assert.False(
+                hex == infoFallThrough.HexColor && badge == infoFallThrough.BadgeText,
+                $"'{metric}' hits the INFO fall-through — add its arm to AlertSeverity.ForMetric " +
+                "(and if this is a brand-new alert, its fire site should also pass an explicit severity).");
+        }
+    }
+
+    /// <summary>#2090's root cause, pinned end-to-end: a self-alert-shaped send (context null at the fire
+    /// site, severity on the outcome) must NOT render INFO once the deliverer folds the severity in.</summary>
+    [Fact]
+    public void SelfAlertSeverity_FoldedIntoContext_RendersCriticalNotInfo()
+    {
+        var ctx = new AlertContext();
+        ctx.SeverityOverride ??= AlertSeverityLevel.Critical; /* the deliverer's #2090 fold */
+        var payload = WebhookAlertService.BuildTeamsPayload(
+            "Collection Stopped", "S1", "5 runs failing", "collecting", Branding, context: ctx);
+
+        Assert.Contains("CRITICAL", payload);
+        Assert.DoesNotContain("2eaef1", payload);
+    }
+
 }
