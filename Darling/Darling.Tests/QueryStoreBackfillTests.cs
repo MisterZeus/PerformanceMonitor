@@ -102,6 +102,23 @@ public sealed class QueryStoreBackfillTests
     }
 
     [Fact]
+    public void ShouldYieldToLive_YieldsInsideTheWindow_RunsOutsideIt_AndNeverOnNull()
+    {
+        /* #2111: a live query_store failure inside the window means the replica is contended NOW —
+           the slice yields. At or beyond the window (or never failed), backfill runs. The window is
+           two poll cycles: current-or-previous-cycle failures count, older ones are history. */
+        var now = new DateTime(2026, 8, 7, 17, 0, 0, DateTimeKind.Utc);
+
+        Assert.False(QueryStoreBackfillState.ShouldYieldToLive(null, now));
+        Assert.True(QueryStoreBackfillState.ShouldYieldToLive(now.AddMinutes(-1), now));
+        Assert.True(QueryStoreBackfillState.ShouldYieldToLive(now - QueryStoreBackfillState.YieldToLiveWindow + TimeSpan.FromSeconds(1), now));
+        Assert.False(QueryStoreBackfillState.ShouldYieldToLive(now - QueryStoreBackfillState.YieldToLiveWindow, now));
+        Assert.False(QueryStoreBackfillState.ShouldYieldToLive(now.AddHours(-2), now));
+
+        Assert.Equal(TimeSpan.FromMinutes(10), QueryStoreBackfillState.YieldToLiveWindow);
+    }
+
+    [Fact]
     public void StateIdentity_IsTheWorkersOwn_NotTheDefinitions()
     {
         /* The worker owns its collector_state rows under its OWN name, so the query_store

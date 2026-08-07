@@ -410,8 +410,17 @@ public partial class RemoteCollectorService
                         }
                     },
                     onItemError: (item, ex) =>
+                    {
+                        /* #2111: stamp the yield-to-live signal — any database's live failure vouches
+                           for the whole replica being contended. */
+                        if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                        {
+                            _lastQueryStoreItemFailureUtc[serverId] = DateTime.UtcNow;
+                        }
+
                         _logger?.LogWarning("Failed to collect {Collector} from [{Database}] on '{Server}': {Message}",
-                            definition.Name, item, server.DisplayName, ex.Message),
+                            definition.Name, item, server.DisplayName, ex.Message);
+                    },
                     cancellationToken);
 
                 rowsWritten = driverResult.Rows;

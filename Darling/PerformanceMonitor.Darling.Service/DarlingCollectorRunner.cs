@@ -70,6 +70,20 @@ public sealed class DarlingCollectorRunner
        could permanently demote a healthy server to single-database collection (#1506). */
     private readonly ConcurrentDictionary<int, DateTime> _azureMasterInaccessibleSince = new();
 
+    /// <summary>
+    /// When a server's live query_store collection last failed a per-database item — the backfill
+    /// worker's yield-to-live signal (#2111), read through <see cref="LastQueryStoreItemFailureUtc"/>
+    /// and judged by <see cref="QueryStoreBackfillState.ShouldYieldToLive"/>. Stamped only for
+    /// query_store (the one collector with a backfill worker to yield); in-memory on purpose — a
+    /// service restart forgetting the stamps just means one backfill slice races one live cycle once.
+    /// </summary>
+    private readonly ConcurrentDictionary<int, DateTime> _lastQueryStoreItemFailureUtc = new();
+
+    /// <summary>The #2111 yield-to-live read side: null when the server has never failed a live
+    /// query_store item this process lifetime.</summary>
+    public DateTime? LastQueryStoreItemFailureUtc(int serverId)
+        => _lastQueryStoreItemFailureUtc.TryGetValue(serverId, out var failure) ? failure : null;
+
     private static readonly TimeSpan AzureMasterRecheckInterval = TimeSpan.FromMinutes(15);
 
     public const int CommandTimeoutSeconds = 60;
@@ -465,8 +479,17 @@ public sealed class DarlingCollectorRunner
                         }
                     },
                     onItemError: (item, ex) =>
+                    {
+                        /* #2111: stamp the yield-to-live signal — any database's live failure vouches
+                           for the whole replica being contended. */
+                        if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                        {
+                            _lastQueryStoreItemFailureUtc[server.ServerId] = DateTime.UtcNow;
+                        }
+
                         _logger?.LogWarning("Failed to collect {Collector} from [{Database}] on '{Server}': {Message}",
-                            definition.Name, item, server.Config.DisplayName, ex.Message),
+                            definition.Name, item, server.Config.DisplayName, ex.Message);
+                    },
                     cancellationToken);
 
                 rowsWritten = driverResult.Rows;

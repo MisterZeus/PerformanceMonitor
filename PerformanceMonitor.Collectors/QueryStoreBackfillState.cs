@@ -48,6 +48,26 @@ public static class QueryStoreBackfillState
     public static readonly TimeSpan MaxSliceSpan = TimeSpan.FromHours(1);
 
     /// <summary>
+    /// How recently the live path may have failed a server's query_store collection before the
+    /// backfill worker yields that server's slice (#2111). Two poll cycles: a failure inside the
+    /// current or previous cycle means the live path is struggling NOW, and a backfill slice
+    /// scanning the same QS internal tables on a MAXDOP-1 replica is exactly the contention that
+    /// keeps it struggling. The class doc's contract — "backfill can be slow forever without
+    /// delaying collection" — is what this enforces; holes wait, live recovers, backfill resumes.
+    /// </summary>
+    public static readonly TimeSpan YieldToLiveWindow = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// True when the backfill worker should skip a server's slice this tick because its live
+    /// query_store collection failed within <see cref="YieldToLiveWindow"/> (#2111). Server-grain
+    /// on purpose: the contention is server-wide, and any database's live failure vouches for the
+    /// whole replica being contended. A pure function so the placement is pinnable in isolation,
+    /// like its siblings above.
+    /// </summary>
+    public static bool ShouldYieldToLive(DateTime? lastLiveFailureUtc, DateTime nowUtc)
+        => lastLiveFailureUtc is DateTime failure && nowUtc - failure < YieldToLiveWindow;
+
+    /// <summary>
     /// Bounds one newest-first slice to the top <see cref="MaxSliceSpan"/> of the remaining range:
     /// returns the floor the slice should actually query, which is the requested floor once the
     /// remainder is narrow enough. A pure function so the placement is pinnable in isolation, like
