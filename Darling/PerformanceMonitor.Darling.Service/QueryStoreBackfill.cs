@@ -23,8 +23,11 @@ namespace PerformanceMonitor.Darling.Service;
 /// #2022 — Query Store phase 2 (of #1960): the newest-first backfill worker for the history the
 /// live path never takes. Phase 1 made the LIVE path hole-free, but two bounded windows still
 /// discard history by design: first contact takes only the trailing 60 minutes of a ~30-day
-/// catalog, and post-outage catch-up is clamped to 24h (the #1556 incident fix) as a bounded,
-/// logged hole. One mechanism fills both:
+/// catalog, and post-outage catch-up is clamped to <see cref="WatermarkPolicy.MaxCatchup"/> (the
+/// #1556 incident fix, tightened to 1h by #2102) as a bounded, logged hole. One mechanism fills
+/// both, and every slice of it windows at most <see cref="QueryStoreBackfillState.MaxSliceSpan"/>
+/// at a time (#2102 — the query's cost grows with window width, so an unchunked wide range on a
+/// big database re-times-out forever instead of draining):
 ///
 /// <para><b>The tail (first contact).</b> The backfill ceiling is DERIVED, exactly like the live
 /// watermark: MIN(last_execution_time) over the rows already stored for a database. Everything at
@@ -178,6 +181,12 @@ public sealed class QueryStoreBackfill
     private async Task RunSliceAsync(
         ServerRuntime server, string databaseName, DateTime floorUtc, DateTime ceilingUtc, bool isHole, CancellationToken cancellationToken)
     {
+        /* #2102: one slice queries at most the top MaxSliceSpan of the remaining range. The byte
+           budget bounds what SHIPS, not what the query aggregates and sorts — an unchunked wide
+           window on a big database times out at the command timeout every tick and the range never
+           drains, the same row-cap-is-not-a-cost-cap flaw that wedged the live path. */
+        var sliceFloor = QueryStoreBackfillState.BoundSliceFloor(floorUtc, ceilingUtc);
+
         var definition = QueryStoreCollector.Instance;
         var context = new CollectorContext
         {
@@ -201,7 +210,7 @@ public sealed class QueryStoreBackfill
                needed; CurrentDatabaseName feeds ReadAsync's database attribution exactly as on
                the live Azure path. */
             context.CurrentDatabaseName = databaseName;
-            var azurePlan = definition.BuildBackfillQuery(context, floorUtc, ceilingUtc);
+            var azurePlan = definition.BuildBackfillQuery(context, sliceFloor, ceilingUtc);
             using var dbConnection = await _runner.OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
             using var dbCommand = DarlingCollectorRunner.CreateCollectorCommand(azurePlan, dbConnection, timeout);
             using var dbReader = await dbCommand.ExecuteReaderAsync(cancellationToken);
@@ -233,7 +242,7 @@ public sealed class QueryStoreBackfill
                 }
             }
 
-            var plan = definition.BuildBackfillPerItemQuery(databaseName, context, floorUtc, ceilingUtc);
+            var plan = definition.BuildBackfillPerItemQuery(databaseName, context, sliceFloor, ceilingUtc);
             using var command = DarlingCollectorRunner.CreateCollectorCommand(plan, sqlConnection, timeout);
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
             await definition.ReadItemAsync(databaseName, reader, rows, context, cancellationToken);
@@ -241,6 +250,27 @@ public sealed class QueryStoreBackfill
 
         if (rows.Count == 0)
         {
+            if (sliceFloor > floorUtc)
+            {
+                /* Only this CHUNK is quiet — the range below it is unexplored, so this is an
+                   advance, not a terminal verdict (#2102). The persisted hole ceiling shrinks past
+                   the quiet chunk; a derived-boundary tail converts its remainder to a hole record,
+                   because MIN over stored rows cannot walk through quiet space (an empty chunk
+                   ships nothing, so the derived ceiling would re-ask the same chunk forever). The
+                   tail marks done in the same breath — the hole owns the rest of the dig, and the
+                   scan services holes first. */
+                await SaveStateAsync(server.ServerId, QueryStoreBackfillState.HoleKeyPrefix + databaseName, QueryStoreBackfillState.EncodeHole(floorUtc, sliceFloor), cancellationToken);
+                if (!isHole)
+                {
+                    await SaveStateAsync(server.ServerId, QueryStoreBackfillState.DoneKeyPrefix + databaseName, DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture), cancellationToken);
+                }
+
+                _logger?.LogInformation(
+                    "query_store backfill on '{Server}' [{Database}]: quiet chunk {Floor:o}..{Ceiling:o}, continuing below ({Range}).",
+                    server.Config.DisplayName, databaseName, sliceFloor, ceilingUtc, isHole ? "hole" : "tail");
+                return;
+            }
+
             /* Query Store retains nothing inside the window — the monitored catalog is shorter
                than the horizon (or the hole's span was never persisted at the source). Terminal
                for this range, and cheaper to record than to re-ask every tick. */
@@ -266,7 +296,11 @@ public sealed class QueryStoreBackfill
         var boundary = context.PerItemShippedBoundary;
         if (isHole)
         {
-            if (boundary is null || boundary <= floorUtc)
+            /* A chunked slice's rows all sit at or above its own chunk floor, so a missing shipped
+               boundary falls back to the chunk floor rather than deleting (#2102) — deletion under
+               a bounded window would orphan the unexplored range below it. */
+            var shippedTo = boundary ?? sliceFloor;
+            if (shippedTo <= floorUtc)
             {
                 await _runner.DeleteCollectorStateKeyAsync(server.ServerId, StateCollectorName, QueryStoreBackfillState.HoleKeyPrefix + databaseName, cancellationToken);
             }
@@ -274,7 +308,7 @@ public sealed class QueryStoreBackfill
             {
                 /* Shrink the ceiling to the oldest shipped row; the from-side stays at the floor we
                    actually used (anything below it is horizon-expired either way). */
-                await SaveStateAsync(server.ServerId, QueryStoreBackfillState.HoleKeyPrefix + databaseName, QueryStoreBackfillState.EncodeHole(floorUtc, boundary.Value), cancellationToken);
+                await SaveStateAsync(server.ServerId, QueryStoreBackfillState.HoleKeyPrefix + databaseName, QueryStoreBackfillState.EncodeHole(floorUtc, shippedTo), cancellationToken);
             }
         }
         else if (boundary is not null && boundary <= floorUtc)

@@ -163,6 +163,12 @@ public partial class RemoteCollectorService
         ServerConnection server, int serverId, CollectorTargetInfo target, string databaseName,
         DateTime floorUtc, DateTime ceilingUtc, bool isHole, CancellationToken cancellationToken)
     {
+        /* #2102: one slice queries at most the top MaxSliceSpan of the remaining range. The byte
+           budget bounds what SHIPS, not what the query aggregates and sorts — an unchunked wide
+           window on a big database times out at the command timeout every tick and the range never
+           drains, the same row-cap-is-not-a-cost-cap flaw that wedged the live path. */
+        var sliceFloor = QueryStoreBackfillState.BoundSliceFloor(floorUtc, ceilingUtc);
+
         var definition = QueryStoreCollector.Instance;
         var context = new CollectorContext
         {
@@ -183,7 +189,7 @@ public partial class RemoteCollectorService
             /* Azure arm: the window travels as command parameters on a per-database connection —
                same contract as Darling's, same shared BuildBackfillQuery. */
             context.CurrentDatabaseName = databaseName;
-            var azurePlan = definition.BuildBackfillQuery(context, floorUtc, ceilingUtc);
+            var azurePlan = definition.BuildBackfillQuery(context, sliceFloor, ceilingUtc);
             using var dbConnection = await OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
             using var dbCommand = new SqlCommand(azurePlan.Text, dbConnection) { CommandTimeout = timeout };
             AddCollectorParameters(dbCommand, azurePlan);
@@ -215,7 +221,7 @@ public partial class RemoteCollectorService
                 }
             }
 
-            var plan = definition.BuildBackfillPerItemQuery(databaseName, context, floorUtc, ceilingUtc);
+            var plan = definition.BuildBackfillPerItemQuery(databaseName, context, sliceFloor, ceilingUtc);
             using var command = new SqlCommand(plan.Text, sqlConnection) { CommandTimeout = timeout };
             AddCollectorParameters(command, plan);
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -224,6 +230,32 @@ public partial class RemoteCollectorService
 
         if (rows.Count == 0)
         {
+            if (sliceFloor > floorUtc)
+            {
+                /* Only this CHUNK is quiet — the range below it is unexplored, so this is an
+                   advance, not a terminal verdict (#2102). The persisted hole ceiling shrinks past
+                   the quiet chunk; a derived-boundary tail converts its remainder to a hole record,
+                   because MIN over stored rows cannot walk through quiet space (an empty chunk
+                   ships nothing, so the derived ceiling would re-ask the same chunk forever). The
+                   tail marks done in the same breath — the hole owns the rest of the dig, and the
+                   scan services holes first. */
+                var advance = new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    [QueryStoreBackfillState.HoleKeyPrefix + databaseName] = QueryStoreBackfillState.EncodeHole(floorUtc, sliceFloor)
+                };
+                if (!isHole)
+                {
+                    advance[QueryStoreBackfillState.DoneKeyPrefix + databaseName] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
+                }
+
+                await SaveCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName, advance, cancellationToken);
+
+                _logger?.LogInformation(
+                    "query_store backfill on '{Server}' [{Database}]: quiet chunk {Floor:o}..{Ceiling:o}, continuing below ({Range}).",
+                    server.DisplayName, databaseName, sliceFloor, ceilingUtc, isHole ? "hole" : "tail");
+                return;
+            }
+
             if (isHole)
             {
                 await DeleteCollectorStateKeyAsync(serverId, QueryStoreBackfillState.StateCollectorName, QueryStoreBackfillState.HoleKeyPrefix + databaseName, cancellationToken);
@@ -255,7 +287,11 @@ public partial class RemoteCollectorService
         var boundary = context.PerItemShippedBoundary;
         if (isHole)
         {
-            if (boundary is null || boundary <= floorUtc)
+            /* A chunked slice's rows all sit at or above its own chunk floor, so a missing shipped
+               boundary falls back to the chunk floor rather than deleting (#2102) — deletion under
+               a bounded window would orphan the unexplored range below it. */
+            var shippedTo = boundary ?? sliceFloor;
+            if (shippedTo <= floorUtc)
             {
                 await DeleteCollectorStateKeyAsync(serverId, QueryStoreBackfillState.StateCollectorName, QueryStoreBackfillState.HoleKeyPrefix + databaseName, cancellationToken);
             }
@@ -264,7 +300,7 @@ public partial class RemoteCollectorService
                 await SaveCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName,
                     new Dictionary<string, string>(StringComparer.Ordinal)
                     {
-                        [QueryStoreBackfillState.HoleKeyPrefix + databaseName] = QueryStoreBackfillState.EncodeHole(floorUtc, boundary.Value)
+                        [QueryStoreBackfillState.HoleKeyPrefix + databaseName] = QueryStoreBackfillState.EncodeHole(floorUtc, shippedTo)
                     }, cancellationToken);
             }
         }
