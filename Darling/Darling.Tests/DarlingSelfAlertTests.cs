@@ -813,7 +813,7 @@ public sealed class DarlingSelfAlertTests
     /* ---------------- store disk pressure edge ---------------- */
 
     [Fact]
-    public async Task DiskPressure_FiresOnce_ThenCooldownSuppresses_ThenReFires()
+    public async Task DiskPressure_FiresOnce_ThenStaysQuietAtUnchangedLevel_ReFiresOnlyOnWorsening()
     {
         var h = new Harness();
         var e = h.Build();
@@ -829,8 +829,37 @@ public sealed class DarlingSelfAlertTests
         await e.ApplyDiskPressureAsync(5 * Gib, 100 * Gib, null, Ct);
         Assert.Single(h.Deliverer.Outcomes);
 
-        /* After the cooldown the standing condition re-fires. */
+        /* #2101: the cooldown elapsing is NOT enough — a standing breach at an UNCHANGED level stays
+           quiet (the field report: 7.3% free re-notified every 15 minutes for hours). */
         h.Now = h.Now.AddMinutes(5);
+        await e.ApplyDiskPressureAsync(5 * Gib, 100 * Gib, null, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Worsened less than the 1pp margin (5.0% → 4.5%) — jitter, still quiet. */
+        h.Now = h.Now.AddMinutes(5);
+        await e.ApplyDiskPressureAsync(45 * Gib, 1000 * Gib, null, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Genuinely worsened (5.0% → 3.5%, past the margin) — re-fires, and re-anchors the watermark. */
+        h.Now = h.Now.AddMinutes(5);
+        await e.ApplyDiskPressureAsync(35 * Gib, 1000 * Gib, null, Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task DiskPressure_Recovery_ClearsTheWorseningWatermark_SoTheNextBreachIsFresh()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyDiskPressureAsync(5 * Gib, 100 * Gib, null, Ct);   /* breach at 5% */
+        Assert.Single(h.Deliverer.Outcomes);
+
+        await e.ApplyDiskPressureAsync(50 * Gib, 100 * Gib, null, Ct);  /* recovered */
+
+        /* A NEW breach at the same 5% level after recovery must fire — the watermark died with the
+           old episode, or a volume that oscillates around the threshold would go permanently silent. */
+        h.Now = h.Now.AddMinutes(6);
         await e.ApplyDiskPressureAsync(5 * Gib, 100 * Gib, null, Ct);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
     }
