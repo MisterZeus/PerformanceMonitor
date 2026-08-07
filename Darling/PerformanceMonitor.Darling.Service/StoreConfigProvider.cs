@@ -167,10 +167,12 @@ INSERT INTO config_alert_settings (
     notify_connection_down_at_startup, connection_refire_minutes,
     notify_ag_health, ag_lag_alert_seconds, ag_redo_queue_alert_kb,
     ag_disconnect_refire_minutes, blocking_wait_seconds_threshold, pvs_enabled, pvs_threshold_percent,
-    pvs_floor_gb, modified_at, database_state_enabled)
+    pvs_floor_gb, modified_at, database_state_enabled,
+    self_disk_free_warn_percent, collection_stale_minutes, collection_failure_threshold,
+    disk_critical_free_percent, disk_critical_free_gb, analysis_notify_cooldown_minutes)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
         $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42,
-        $43, $44, $45, $46, $47, $48)
+        $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54)
 ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(a.Enabled);
         command.Parameters.AddWithValue(a.CpuEnabled);
@@ -229,6 +231,13 @@ ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(now);
         /* V49 database-state alert master switch (appended last, matching the ALTER's physical order). */
         command.Parameters.AddWithValue(a.DatabaseStateEnabled);
+        /* V55 #2107: the previously-hardcoded threshold knobs, appended in the ALTER's order. */
+        command.Parameters.AddWithValue(a.SelfDiskFreeWarnPercent);
+        command.Parameters.AddWithValue(a.CollectionStaleMinutes);
+        command.Parameters.AddWithValue(a.CollectionFailureThreshold);
+        command.Parameters.AddWithValue(a.DiskCriticalFreePercent);
+        command.Parameters.AddWithValue(a.DiskCriticalFreeGb);
+        command.Parameters.AddWithValue(a.AnalysisNotifyCooldownMinutes);
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -374,7 +383,9 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        notify_connection_down_at_startup, connection_refire_minutes,
        notify_ag_health, ag_lag_alert_seconds, ag_redo_queue_alert_kb,
        ag_disconnect_refire_minutes, blocking_wait_seconds_threshold, pvs_enabled, pvs_threshold_percent,
-       pvs_floor_gb, database_state_enabled
+       pvs_floor_gb, database_state_enabled,
+       self_disk_free_warn_percent, collection_stale_minutes, collection_failure_threshold,
+       disk_critical_free_percent, disk_critical_free_gb, analysis_notify_cooldown_minutes
 FROM config_alert_settings WHERE id = 1", connection);
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -447,6 +458,15 @@ FROM config_alert_settings WHERE id = 1", connection);
             /* database-state alert master switch appended (V49) at ordinal 46; NOT NULL DEFAULT true so a
                pre-V49 row can't reach here without the column present. */
             DatabaseStateEnabled = reader.GetBoolean(46),
+            /* #2107 threshold knobs appended (V55) at ordinals 47–52; NOT NULL DEFAULTs are the
+               constants they replace, so a pre-V55 row can't reach here without the columns present
+               and the wholesale ApplyToConfig replacement never resets a knob. */
+            SelfDiskFreeWarnPercent = reader.GetInt32(47),
+            CollectionStaleMinutes = reader.GetInt32(48),
+            CollectionFailureThreshold = reader.GetInt32(49),
+            DiskCriticalFreePercent = reader.GetInt32(50),
+            DiskCriticalFreeGb = reader.GetInt32(51),
+            AnalysisNotifyCooldownMinutes = reader.GetInt32(52),
         };
         var analysis = new AnalysisConfig
         {

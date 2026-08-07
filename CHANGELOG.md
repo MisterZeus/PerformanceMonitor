@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Every previously-hardcoded alert threshold is now a real setting** ([#2107], the split-out from gotqn's #2101 - "it was fine to hardcode these for development but any serious monitoring allows configuring of alert thresholds") - six new knobs ride the store control plane (V55), the Viewer's Settings window, and `get_alert_settings`/`update_alert_settings`, clamped on read like their siblings: the monitor store volume's self-alert warning percent (was 10), the Collection Stopped staleness window (was 30 minutes) and consecutive-failure fast path (was 10), the low-disk CRITICAL severity tier's percent and GB floors (were 3% / 2 GB - these grade the target-volume alert in BOTH apps, and Lite reads its pair from `settings.json` as `alert_disk_critical_free_percent` / `alert_disk_critical_free_gb`), and the analysis notification cooldown (was a hardcoded 360 in Darling while Lite always honored a configured value - the parity gap closed). MCP shape: `low_disk.critical_free_percent` / `low_disk.critical_free_gb`, a new `self_alerts` group, and `analysis.notify_cooldown_minutes`.
+
 ### Fixed
 
 - **Query Store catch-up can no longer spiral a big database into permanent timeout** ([#2102], found dogfooding the use1 migration) - the live path's incremental window was `(watermark, now)` with only a 24h clamp, and the watermark only advances when a cycle SUCCEEDS. The per-database query aggregates, window-functions, and sorts its WHOLE window before `TOP` or the client byte budget can bound anything - a row cap is not a cost cap - so one missed 60s cycle (a flush burst, a CPU blip, a migration cutover) widened the next window, which cost more and timed out again, growing without bound below a clamp that sat far above the tipping point. On the field evidence the big tenants wedged at 0.5-6.5h stale and re-ran the same doomed query every cycle forever while small databases on the same servers stayed current - and the backfill worker's slices had the same latent flaw one layer down, querying a hole's full remaining range in one statement. Catch-up now trickles the way it was always meant to: the clamp is one hour (the envelope the fleet proves every day under Query Store's 900s flush cadence - and it slides forward with now, so recovery is immediate no matter how stale the watermark got), the skipped range is recorded as a hole exactly as before, and every backfill slice windows at most one hour at a time, with an empty chunk SHRINKING the persisted ceiling past the quiet hour instead of wrongly declaring the range complete (a quiet chunk on a derived-boundary tail converts the remainder to a hole record, because MIN over stored rows cannot walk through quiet space). Both SKUs, both the SQL Server and Azure SQL DB arms.
@@ -2610,6 +2614,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#2093]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2093
 [#2097]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2097
 [#2101]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2101
+[#2107]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2107
 [#2102]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2102
 [#2108]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2108
 [#2109]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2109

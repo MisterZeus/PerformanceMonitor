@@ -62,6 +62,12 @@ public sealed class AlertEngineTests
         public int TempDbSpaceThresholdPercent { get; set; } = 80;
         public int LowDiskThresholdPercent { get; set; } = 10;
         public int LowDiskThresholdGb { get; set; } = 5;
+        /* #2107: the previously-hardcoded knobs, at their shipped defaults. */
+        public int DiskCriticalFreePercent { get; set; } = 3;
+        public int DiskCriticalFreeGb { get; set; } = 2;
+        public int SelfDiskFreeWarnPercent { get; set; } = 10;
+        public int CollectionStaleMinutes { get; set; } = 30;
+        public int CollectionFailureThreshold { get; set; } = 10;
         /* #1984: DarlingConfig defaults (40% / 1 GB); enable stays the class's opt-in OFF. */
         public int PvsThresholdPercent { get; set; } = 40;
         public int PvsFloorGb { get; set; } = 1;

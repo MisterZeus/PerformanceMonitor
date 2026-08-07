@@ -63,6 +63,16 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
     public int TempDbSpaceThresholdPercent => App.AlertTempDbSpaceThresholdPercent;
     public int LowDiskThresholdPercent => App.AlertLowDiskThresholdPercent;
     public int LowDiskThresholdGb => App.AlertLowDiskThresholdGb;
+
+    /* #2107: the low-disk CRITICAL tier floors — settings.json-backed like their WARNING-tier
+       siblings above. The three Darling self-monitoring knobs below them return the shipped
+       defaults: Lite has no headless store volume or fleet collection loop to self-monitor, and
+       the members exist so the two apps' settings objects stay one shape (the PVS precedent). */
+    public int DiskCriticalFreePercent => App.AlertDiskCriticalFreePercent;
+    public int DiskCriticalFreeGb => App.AlertDiskCriticalFreeGb;
+    public int SelfDiskFreeWarnPercent => 10;
+    public int CollectionStaleMinutes => 30;
+    public int CollectionFailureThreshold => 10;
     public int PvsThresholdPercent => App.AlertPvsThresholdPercent;
     public int PvsFloorGb => App.AlertPvsFloorGb;
     public int LongRunningJobMultiplier => App.AlertLongRunningJobMultiplier;

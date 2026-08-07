@@ -703,6 +703,11 @@ public partial class SettingsWindow : Window
         AlertLowDiskCheckBox.IsChecked = r.LowDiskEnabled;
         AlertLowDiskThresholdPercentBox.Text = r.LowDiskThresholdPercent.ToString(CultureInfo.InvariantCulture);
         AlertLowDiskThresholdGbBox.Text = r.LowDiskThresholdGb.ToString(CultureInfo.InvariantCulture);
+        AlertDiskCriticalPercentBox.Text = r.DiskCriticalFreePercent.ToString(CultureInfo.InvariantCulture);
+        AlertDiskCriticalGbBox.Text = r.DiskCriticalFreeGb.ToString(CultureInfo.InvariantCulture);
+        AlertSelfDiskWarnPercentBox.Text = r.SelfDiskFreeWarnPercent.ToString(CultureInfo.InvariantCulture);
+        AlertCollectionStaleMinutesBox.Text = r.CollectionStaleMinutes.ToString(CultureInfo.InvariantCulture);
+        AlertCollectionFailureThresholdBox.Text = r.CollectionFailureThreshold.ToString(CultureInfo.InvariantCulture);
         AlertPvsCheckBox.IsChecked = r.PvsEnabled;
         AlertPvsThresholdPercentBox.Text = r.PvsThresholdPercent.ToString(CultureInfo.InvariantCulture);
         AlertPvsFloorGbBox.Text = r.PvsFloorGb.ToString(CultureInfo.InvariantCulture);
@@ -716,6 +721,7 @@ public partial class SettingsWindow : Window
         AnalysisIntervalBox.Text = r.AnalysisIntervalMinutes.ToString(CultureInfo.InvariantCulture);
         AnalysisNotificationsCheckBox.IsChecked = r.AnalysisNotificationsEnabled;
         AnalysisNotifySeverityBox.Text = r.AnalysisNotifySeverity.ToString("0.0", CultureInfo.InvariantCulture);
+        AnalysisNotifyCooldownBox.Text = r.AnalysisNotifyCooldownMinutes.ToString(CultureInfo.InvariantCulture);
         /* #1141/#1236: the delivery mode + per-event cap are now STORE-backed (the service honors them),
            seeded from the row like every other alert-engine control. */
         AlertDeliveryModeBox.SelectedIndex = r.DeliveryMode == "PerEvent" ? 1 : 0;
@@ -794,6 +800,17 @@ public partial class SettingsWindow : Window
             row.LowDiskThresholdPercent = lowDiskPct;
         if (int.TryParse(AlertLowDiskThresholdGbBox.Text, out var lowDiskGb) && lowDiskGb >= 0)
             row.LowDiskThresholdGb = lowDiskGb;
+        /* #2107: the previously-hardcoded knobs, validated to the same ranges the service clamps. */
+        if (int.TryParse(AlertDiskCriticalPercentBox.Text, out var critPct) && critPct is >= 0 and <= 100)
+            row.DiskCriticalFreePercent = critPct;
+        if (int.TryParse(AlertDiskCriticalGbBox.Text, out var critGb) && critGb >= 0)
+            row.DiskCriticalFreeGb = critGb;
+        if (int.TryParse(AlertSelfDiskWarnPercentBox.Text, out var selfDiskPct) && selfDiskPct is >= 0 and <= 100)
+            row.SelfDiskFreeWarnPercent = selfDiskPct;
+        if (int.TryParse(AlertCollectionStaleMinutesBox.Text, out var staleMin) && staleMin is >= 5 and <= 1440)
+            row.CollectionStaleMinutes = staleMin;
+        if (int.TryParse(AlertCollectionFailureThresholdBox.Text, out var failThresh) && failThresh is >= 1 and <= 1000)
+            row.CollectionFailureThreshold = failThresh;
         if (int.TryParse(AlertPvsThresholdPercentBox.Text, out var pvsPct) && pvsPct is >= 0 and <= 100)
             row.PvsThresholdPercent = pvsPct;
         if (int.TryParse(AlertPvsFloorGbBox.Text, out var pvsFloor) && pvsFloor >= 0)
@@ -816,6 +833,8 @@ public partial class SettingsWindow : Window
         if (double.TryParse(AnalysisNotifySeverityBox.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var analysisSeverity)
             && analysisSeverity is >= 0.0 and <= 2.0)
             row.AnalysisNotifySeverity = analysisSeverity;
+        if (int.TryParse(AnalysisNotifyCooldownBox.Text, out var analysisCooldown) && analysisCooldown is >= 30 and <= 10080)
+            row.AnalysisNotifyCooldownMinutes = analysisCooldown;
         else
             errors.Add("Analysis notify severity must be between 0.0 and 2.0.");
 
@@ -860,6 +879,13 @@ public partial class SettingsWindow : Window
         AlertTempDbSpaceThresholdBox.Text = "80";
         AlertLowDiskThresholdPercentBox.Text = "10";
         AlertLowDiskThresholdGbBox.Text = "5";
+        /* #2107: the previously-hardcoded knobs reset to the constants they replaced. */
+        AlertDiskCriticalPercentBox.Text = "3";
+        AlertDiskCriticalGbBox.Text = "2";
+        AlertSelfDiskWarnPercentBox.Text = "10";
+        AlertCollectionStaleMinutesBox.Text = "30";
+        AlertCollectionFailureThresholdBox.Text = "10";
+        AnalysisNotifyCooldownBox.Text = "360";
         AlertPvsThresholdPercentBox.Text = "40";
         AlertPvsFloorGbBox.Text = "1";
         AlertLongRunningJobMultiplierBox.Text = "3";

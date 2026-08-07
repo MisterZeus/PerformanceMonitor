@@ -677,6 +677,8 @@ public partial class SettingsWindow : Window
             root["alert_low_disk_enabled"] = App.AlertLowDiskEnabled;
             root["alert_low_disk_threshold_percent"] = App.AlertLowDiskThresholdPercent;
             root["alert_low_disk_threshold_gb"] = App.AlertLowDiskThresholdGb;
+            root["alert_disk_critical_free_percent"] = App.AlertDiskCriticalFreePercent;
+            root["alert_disk_critical_free_gb"] = App.AlertDiskCriticalFreeGb;
             root["alert_pvs_enabled"] = App.AlertPvsEnabled;
             root["alert_pvs_threshold_percent"] = App.AlertPvsThresholdPercent;
             root["alert_pvs_floor_gb"] = App.AlertPvsFloorGb;

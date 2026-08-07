@@ -434,6 +434,35 @@ public sealed class AlertsConfig
     [JsonPropertyName("pvsFloorGb")]
     public int PvsFloorGb { get; set; } = 1;
 
+    /// <summary>#2107: the store volume's self-alert warning percent (was a compile-time 10.0;
+    /// 0 disables the check — percent is its only trigger).</summary>
+    [JsonPropertyName("selfDiskFreeWarnPercent")]
+    public int SelfDiskFreeWarnPercent { get; set; } = 10;
+
+    /// <summary>#2107: how long collection may go quiet before Collection Stopped / Agent Not
+    /// Running fire (was a compile-time 30 minutes).</summary>
+    [JsonPropertyName("collectionStaleMinutes")]
+    public int CollectionStaleMinutes { get; set; } = 30;
+
+    /// <summary>#2107: the Collection Stopped fast path — consecutive failures with zero successes
+    /// that fire without waiting out the staleness window (was a compile-time 10).</summary>
+    [JsonPropertyName("collectionFailureThreshold")]
+    public int CollectionFailureThreshold { get; set; } = 10;
+
+    /// <summary>#2107: the low-disk CRITICAL severity tier's percent floor (#1136 — grades the
+    /// target-volume alert; was a compile-time 3.0).</summary>
+    [JsonPropertyName("diskCriticalFreePercent")]
+    public int DiskCriticalFreePercent { get; set; } = 3;
+
+    /// <summary>#2107: the low-disk CRITICAL severity tier's GB floor (was a compile-time 2.0).</summary>
+    [JsonPropertyName("diskCriticalFreeGb")]
+    public int DiskCriticalFreeGb { get; set; } = 2;
+
+    /// <summary>#2107: the analysis notification cooldown — the shared engine clamps [30, 10080]
+    /// and Lite always passed a configured value through; Darling hardcoded 360.</summary>
+    [JsonPropertyName("analysisNotifyCooldownMinutes")]
+    public int AnalysisNotifyCooldownMinutes { get; set; } = 360;
+
     [JsonPropertyName("longRunningJobEnabled")]
     public bool LongRunningJobEnabled { get; set; } = true;
 

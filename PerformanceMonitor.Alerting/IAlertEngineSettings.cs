@@ -136,6 +136,33 @@ public interface IAlertEngineSettings
     int LowDiskThresholdGb { get; }
 
     /// <summary>
+    /// The low-disk CRITICAL severity tier's percent floor (#1136/#2107): free space at/below this
+    /// % grades the Volume Free Space alert CRITICAL instead of WARNING. Was a compile-time 3.0 in
+    /// <c>LowDiskAlertGate</c>; both apps now pass their configured value.
+    /// </summary>
+    int DiskCriticalFreePercent { get; }
+
+    /// <summary>The critical tier's GB floor — at/below this many GB free is CRITICAL on any
+    /// volume, OR-ed with the percent floor exactly as before (#1136/#2107).</summary>
+    int DiskCriticalFreeGb { get; }
+
+    /// <summary>
+    /// The store/self-monitoring warning percent (#2107, Darling's self-alerts): the monitor's own
+    /// store volume warns below this % free. Lite has no headless store volume to self-monitor and
+    /// returns the shipped default — on the engine surface anyway so the two apps' settings
+    /// objects stay one shape (the PVS-knob precedent).
+    /// </summary>
+    int SelfDiskFreeWarnPercent { get; }
+
+    /// <summary>How long collection may go quiet before Collection Stopped / Agent Not Running
+    /// fire (#2107; was a compile-time 30 minutes). Lite returns the default.</summary>
+    int CollectionStaleMinutes { get; }
+
+    /// <summary>The Collection Stopped fast path — this many consecutive failures with zero
+    /// successes fires without waiting out the staleness window (#2107). Lite returns the default.</summary>
+    int CollectionFailureThreshold { get; }
+
+    /// <summary>
     /// Fire when an ADR database's persistent version store reaches this % of the database's data
     /// files (#1984). Percent rather than absolute size because a shipped absolute guess is
     /// workload-specific and would page half a fleet (the ag_redo_queue precedent) — this ratio is
