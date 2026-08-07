@@ -74,8 +74,6 @@ public partial class RemoteCollectorService
         }
     }
 
-    /// <summary>One server's scan-and-slice — the twin of Darling's RunServerSliceAsync, on Lite's
-    /// plumbing (DuckDB reads, ServerConnection credentials, the shared appender write).</summary>
     /// <summary>
     /// When a server's live query_store collection last failed a per-database item — the yield-to-
     /// live signal (#2111), stamped by the definition runner's item-error path and judged by
@@ -84,6 +82,8 @@ public partial class RemoteCollectorService
     /// </summary>
     private readonly ConcurrentDictionary<int, DateTime> _lastQueryStoreItemFailureUtc = new();
 
+    /// <summary>One server's scan-and-slice — the twin of Darling's RunServerSliceAsync, on Lite's
+    /// plumbing (DuckDB reads, ServerConnection credentials, the shared appender write).</summary>
     internal async Task<bool> RunQueryStoreBackfillSliceAsync(ServerConnection server, CancellationToken cancellationToken)
     {
         var status = _serverManager.GetConnectionStatus(server.Id);
