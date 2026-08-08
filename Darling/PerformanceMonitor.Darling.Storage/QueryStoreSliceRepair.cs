@@ -250,13 +250,6 @@ public static class QueryStoreSliceRepair
     }
 
     /// <summary>
-    /// Runs the collapse over one half-open collection-time slice and returns how many rows it removed.
-    ///
-    /// <para>One transaction per slice: the DELETE and the INSERT must not be separable, or an abort between
-    /// them destroys the interval outright rather than leaving it split. Slicing keeps that transaction — and
-    /// the locks it takes on chunks a compression job may also want — short.</para>
-    /// </summary>
-    /// <summary>
     /// Per-statement timeout for the repair's heavy statements (#2105 field failure): Npgsql's
     /// default 30s killed the STAGE aggregation on a store fresh off a large catch-up — a day
     /// slice's GROUP BY spools every row of the day including the query-text payloads, and the
@@ -269,6 +262,13 @@ public static class QueryStoreSliceRepair
     /// </summary>
     public const int SliceStatementTimeoutSeconds = 900;
 
+    /// <summary>
+    /// Runs the collapse over one half-open collection-time slice and returns how many rows it removed.
+    ///
+    /// <para>One transaction per slice: the DELETE and the INSERT must not be separable, or an abort between
+    /// them destroys the interval outright rather than leaving it split. Slicing keeps that transaction — and
+    /// the locks it takes on chunks a compression job may also want — short.</para>
+    /// </summary>
     public static async Task<long> CollapseSliceAsync(
         NpgsqlConnection connection, DateTime fromUtc, DateTime toUtc, CancellationToken cancellationToken)
     {
