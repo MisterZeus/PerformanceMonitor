@@ -592,6 +592,29 @@ public sealed class ViewerStoreUnreachableTests
         Assert.Contains("Darling service", ex.Message, StringComparison.Ordinal);
         Assert.Contains("darling.json", ex.Message, StringComparison.Ordinal);
         Assert.Equal("connection refused", ex.InnerException?.Message);
+
+        /* #2117 finding 2: the message itself carries the underlying error's first line — the swallowed
+           detail cost a field operator hours, and the fixed prose alone reads identically for a TLS chain
+           rejection, a wrong password, a pg_hba refusal, and a dead host. */
+        Assert.Contains("Underlying error: connection refused", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The surfaced first line is trimmed of the CR a CRLF-raised exception leaves behind (Windows is
+    /// exactly where this fix is aimed), and only the FIRST line is taken — a multi-line inner message
+    /// must not flood the one-line status surface.
+    /// </summary>
+    [Fact]
+    public void ViewerStoreUnreachableException_SurfacesTheFirstLineOnly_WithNoTrailingCarriageReturn()
+    {
+        var ex = new ViewerStoreUnreachableException(new InvalidOperationException("boom\r\nmore detail\r\neven more"));
+
+        Assert.Contains("Underlying error: boom", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("boom\r", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("more detail", ex.Message, StringComparison.Ordinal);
+
+        /* And a null inner message degrades to the explicit placeholder, never a crash. */
+        Assert.Contains("Underlying error: (none)", new ViewerStoreUnreachableException(null!).Message, StringComparison.Ordinal);
     }
 
     [Fact]

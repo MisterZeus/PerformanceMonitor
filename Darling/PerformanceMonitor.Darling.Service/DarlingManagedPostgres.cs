@@ -1731,6 +1731,8 @@ public sealed class DarlingManagedPostgres
     /// </summary>
     internal void EnsureServerCertificate(IPAddress listenIp, string certPath, string keyPath)
     {
+        var rootPath = RootCertificatePathFor(certPath);
+
         if (File.Exists(certPath) && File.Exists(keyPath))
         {
             try
@@ -1741,6 +1743,25 @@ public sealed class DarlingManagedPostgres
                     /* Present + loads + the SAN covers this listen IP -> reuse (delete-to-rotate). Re-harden
                        the key every start (self-healing), same discipline as the credential files. */
                     TryHardenCredentialFile(keyPath, allowInteractiveRead: false);
+
+                    /* #2117: a cert pair WITHOUT root.crt beside it is the legacy single self-signed
+                       end-entity shape, whose critical CA=false Basic Constraints Windows' chain engine
+                       refuses as its own trust anchor under Npgsql's Root Certificate custom-root trust —
+                       verify-full with the printed cert fails on exactly the machines viewers run on.
+                       Deliberately NOT auto-rotated: operators who worked around it via the OS trust
+                       store have a WORKING setup a silent regeneration would break. Advise instead. */
+                    if (!File.Exists(rootPath))
+                    {
+                        _logger.LogWarning(
+                            "The store TLS cert at {Cert} is the legacy single self-signed shape — remote viewers using " +
+                            "SSL Mode=VerifyFull with Root Certificate fail certificate-chain validation on Windows " +
+                            "(#2117). To rotate to the fixed chain shape: stop the service, delete {Cert} and {Key}, " +
+                            "start the service, then re-run --print-viewer-connection and redistribute the new root " +
+                            "certificate to viewer machines. Viewers that imported the old cert into the OS trust " +
+                            "store keep working until you rotate.",
+                            certPath, certPath, keyPath);
+                    }
+
                     return;
                 }
 
@@ -1755,35 +1776,28 @@ public sealed class DarlingManagedPostgres
                     certPath, ex.Message);
             }
 
-            /* Fall through to regenerate — overwrites both files (the service account owns them). */
+            /* Fall through to regenerate — overwrites the files (the service account owns them). */
         }
 
-        using var rsa = RSA.Create(2048);
-        var request = new CertificateRequest(
-            $"CN={Environment.MachineName}", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        /* #2117: a real two-cert chain — throwaway local CA signs the leaf, the CA key is discarded
+           inside Create(), postgres serves leaf+CA, and root.crt is what the operator distributes.
+           See StoreTlsCertificates for why the old single self-signed shape failed verify-full. */
+        var generated = StoreTlsCertificates.Create(Environment.MachineName, listenIp, ServerCertValidityYears);
 
-        var sanBuilder = new SubjectAlternativeNameBuilder();
-        sanBuilder.AddIpAddress(listenIp);
-        sanBuilder.AddDnsName(Environment.MachineName);
-        request.CertificateExtensions.Add(sanBuilder.Build());
-        request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
-        request.CertificateExtensions.Add(
-            new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyEncipherment, true));
-        request.CertificateExtensions.Add(
-            new X509EnhancedKeyUsageExtension(new OidCollection { new Oid("1.3.6.1.5.5.7.3.1") /* serverAuth */ }, false));
-
-        var notBefore = DateTimeOffset.UtcNow.AddDays(-1);
-        var notAfter = notBefore.AddYears(ServerCertValidityYears);
-        using var certificate = request.CreateSelfSigned(notBefore, notAfter);
-
-        File.WriteAllText(certPath, certificate.ExportCertificatePem());
-        File.WriteAllText(keyPath, rsa.ExportPkcs8PrivateKeyPem());
+        File.WriteAllText(certPath, generated.ServerCertChainPem);
+        File.WriteAllText(keyPath, generated.ServerKeyPem);
+        File.WriteAllText(rootPath, generated.RootCertPem);
         TryHardenCredentialFile(keyPath, allowInteractiveRead: false);
 
         _logger.LogInformation(
-            "Generated a self-signed store TLS cert (CN/DNS SAN {Host}, IP SAN {Ip}, ~{Years}yr) at {Cert}",
-            Environment.MachineName, listenIp, ServerCertValidityYears, certPath);
+            "Generated the store TLS chain (CN/DNS SAN {Host}, IP SAN {Ip}, ~{Years}yr): leaf+CA at {Cert}, distributable root at {Root}",
+            Environment.MachineName, listenIp, ServerCertValidityYears, certPath, rootPath);
     }
+
+    /// <summary>The distributable root's path — always beside the served cert (#2117). Public-key
+    /// material only, so it is deliberately not hardened like the key.</summary>
+    internal static string RootCertificatePathFor(string certPath)
+        => Path.Combine(Path.GetDirectoryName(certPath) ?? ".", "root.crt");
 
     /// <summary>
     /// Whether <paramref name="certificate"/> carries an iPAddress SAN equal to <paramref name="listenIp"/>
