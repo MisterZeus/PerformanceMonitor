@@ -880,7 +880,8 @@ public sealed class AlertEngine
 
                     var lowDiskContext = AlertContextBuilders.BuildVolumeFreeSpaceContext(serverName, breached); /* :515 */
                     /* :516-522 — #1136: grade WARNING normally, CRITICAL when critically low. */
-                    if (lowDiskContext is not null && LowDiskAlertGate.IsCriticallyLow(worst.FreePercent, worst.FreeGb))
+                    if (lowDiskContext is not null && LowDiskAlertGate.IsCriticallyLow(
+                        worst.FreePercent, worst.FreeGb, _settings.DiskCriticalFreePercent, _settings.DiskCriticalFreeGb))
                     {
                         lowDiskContext.SeverityOverride = AlertSeverityLevel.Critical;
                     }

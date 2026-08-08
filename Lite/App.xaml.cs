@@ -150,6 +150,8 @@ public partial class App : Application
     public static bool AlertLowDiskEnabled { get; set; } = true;
     public static int AlertLowDiskThresholdPercent { get; set; } = 10; // Alert when a volume's free space < X% (0 disables this check)
     public static int AlertLowDiskThresholdGb { get; set; } = 5;        // Alert when a volume's free space < X GB (0 disables this check)
+    public static int AlertDiskCriticalFreePercent { get; set; } = 3;   // #2107: at/below this % free the low-disk alert grades CRITICAL (#1136 tier)
+    public static int AlertDiskCriticalFreeGb { get; set; } = 2;        // #2107: at/below this many GB free is CRITICAL on any volume (OR-ed with the %)
     public static bool AlertPvsEnabled { get; set; } = true;            // #1984 ADR persistent version store pressure
     public static int AlertPvsThresholdPercent { get; set; } = 40;      // Alert when an ADR database's PVS >= X% of its data files (0 disables this check)
     public static int AlertPvsFloorGb { get; set; } = 1;                // AND-qualifier: the PVS must also be >= X GB (0 removes the floor)
@@ -650,6 +652,9 @@ public partial class App : Application
             if (root.TryGetProperty("alert_low_disk_enabled", out v)) AlertLowDiskEnabled = v.GetBoolean();
             if (root.TryGetProperty("alert_low_disk_threshold_percent", out v)) AlertLowDiskThresholdPercent = (int)Math.Clamp(v.GetInt64(), 0, 100);
             if (root.TryGetProperty("alert_low_disk_threshold_gb", out v)) AlertLowDiskThresholdGb = (int)Math.Max(0, v.GetInt64());
+            /* #2107: the CRITICAL tier floors, clamped like the WARNING thresholds above. */
+            if (root.TryGetProperty("alert_disk_critical_free_percent", out v)) AlertDiskCriticalFreePercent = Math.Clamp(v.GetInt32(), 0, 100);
+            if (root.TryGetProperty("alert_disk_critical_free_gb", out v)) AlertDiskCriticalFreeGb = (int)Math.Max(0, v.GetInt64());
             if (root.TryGetProperty("alert_pvs_enabled", out v)) AlertPvsEnabled = v.GetBoolean();
             if (root.TryGetProperty("alert_pvs_threshold_percent", out v)) AlertPvsThresholdPercent = (int)Math.Clamp(v.GetInt64(), 0, 100);
             if (root.TryGetProperty("alert_pvs_floor_gb", out v)) AlertPvsFloorGb = (int)Math.Max(0, v.GetInt64());

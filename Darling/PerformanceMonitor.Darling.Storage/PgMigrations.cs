@@ -111,6 +111,7 @@ public static class PgMigrations
         new Migration(52, "finding-drilldown-json", V52Sql),
         new Migration(53, "store-self-metrics", V53Sql),
         new Migration(54, "plan-dim-gzip", V54Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
+        new Migration(55, "self-alert-knobs", V55Sql),
     };
 
     /// <summary>
@@ -1066,6 +1067,28 @@ ALTER TABLE query_plan_dim
     ADD COLUMN IF NOT EXISTS query_plan_gz bytea;
 ALTER TABLE query_plan_dim
     ALTER COLUMN query_plan_xml DROP NOT NULL;";
+
+    /// <summary>
+    /// V55 — the #2107 alert-threshold knobs, all previously compile-time constants: the store
+    /// volume's self-alert warning percent, the Collection Stopped staleness window and
+    /// consecutive-failure fast path, the low-disk CRITICAL severity tier's two floors (#1136 —
+    /// these grade the shared target-volume alert, not just the self-alert), and the analysis
+    /// notification cooldown Lite already passed through while Darling hardcoded 360. Defaults are
+    /// the constants they replace, NOT NULL so pre-V55 rows read cleanly at the appended ordinals.
+    /// </summary>
+    private const string V55Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS self_disk_free_warn_percent integer NOT NULL DEFAULT 10;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS collection_stale_minutes integer NOT NULL DEFAULT 30;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS collection_failure_threshold integer NOT NULL DEFAULT 10;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS disk_critical_free_percent integer NOT NULL DEFAULT 3;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS disk_critical_free_gb integer NOT NULL DEFAULT 2;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS analysis_notify_cooldown_minutes integer NOT NULL DEFAULT 360;";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

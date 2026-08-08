@@ -62,6 +62,16 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public int LowDiskThresholdPercent => Math.Clamp(_config.Alerts.LowDiskThresholdPercent, 0, 100);
     public int LowDiskThresholdGb => Math.Max(0, _config.Alerts.LowDiskThresholdGb);
 
+    /* #2107: the previously-hardcoded thresholds, clamped on read like their siblings so a
+       hand-edited store value can't drive a nonsense threshold. The critical floors keep low-disk's
+       0-100 percent clamp and 0-floor GB shape; the staleness window and failure fast-path get
+       floors that keep the self-alerts meaningful (a 0-minute window would fire on every sweep). */
+    public int DiskCriticalFreePercent => Math.Clamp(_config.Alerts.DiskCriticalFreePercent, 0, 100);
+    public int DiskCriticalFreeGb => Math.Max(0, _config.Alerts.DiskCriticalFreeGb);
+    public int SelfDiskFreeWarnPercent => Math.Clamp(_config.Alerts.SelfDiskFreeWarnPercent, 0, 100);
+    public int CollectionStaleMinutes => Math.Clamp(_config.Alerts.CollectionStaleMinutes, 5, 1440);
+    public int CollectionFailureThreshold => Math.Clamp(_config.Alerts.CollectionFailureThreshold, 1, 1000);
+
     /* #1984: percent clamped like low-disk's (0 = off); the GB floor merely floored at 0 — unlike
        the percent it has no meaningful upper bound. */
     public int PvsThresholdPercent => Math.Clamp(_config.Alerts.PvsThresholdPercent, 0, 100);
@@ -209,5 +219,7 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
        1) read through the by-reference config seam — a store reload reflects it immediately; clamped
        0–2 like Lite/Dashboard. The re-notify cooldown stays Lite's hardcoded default (not a knob). */
     public double AnalysisNotifySeverity => Math.Clamp(_config.Analysis.NotifySeverity, 0.0, 2.0);
-    public int AnalysisNotifyCooldownMinutes => 360;
+    /* #2107: was a hardcoded 360 while the shared engine accepts a clamped [30, 10080] value and
+       Lite always passed a configured one through — the Darling parity gap gotqn called out. */
+    public int AnalysisNotifyCooldownMinutes => Math.Clamp(_config.Alerts.AnalysisNotifyCooldownMinutes, 30, 10080);
 }

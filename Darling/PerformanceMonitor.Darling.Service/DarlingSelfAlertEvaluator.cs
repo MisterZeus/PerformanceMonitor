@@ -303,9 +303,13 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             try
             {
+                /* #2107: store-backed window/threshold (clamped on read); the constants remain
+                   only as the shipped defaults. */
                 var (lastSuccess, recentRuns, recentSuccess) =
-                    await ReadCollectionSignalsAsync(postgres, serverId, ConsecutiveFailureThreshold, cancellationToken);
-                bool stopped = IsCollectionStopped(lastSuccess, recentRuns, recentSuccess, _utcNow(), out var reason);
+                    await ReadCollectionSignalsAsync(postgres, serverId, _settings.CollectionFailureThreshold, cancellationToken);
+                bool stopped = IsCollectionStopped(
+                    lastSuccess, recentRuns, recentSuccess, _utcNow(),
+                    SettingsStaleWindow, _settings.CollectionFailureThreshold, out var reason);
                 await ApplyCollectionStoppedAsync(serverId, serverName, stopped, reason, cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -345,7 +349,7 @@ internal sealed class DarlingSelfAlertEvaluator
             var (agentCollectionTimeUtc, agentRunning) = await ReadLatestAgentStatusAsync(postgres, serverId, cancellationToken);
             bool? freshRunning = agentRunning.HasValue
                 && agentCollectionTimeUtc.HasValue
-                && _utcNow() - agentCollectionTimeUtc.Value < StaleWindow
+                && _utcNow() - agentCollectionTimeUtc.Value < SettingsStaleWindow
                     ? agentRunning
                     : null;
 
@@ -417,8 +421,12 @@ internal sealed class DarlingSelfAlertEvaluator
         /* A snapshot only judges while it is fresh; a missing one (no AGs, or the collector has never run) and
            a stale one are both "no signal", exactly as agent_status is treated above. */
         bool IsFresh(DateTime? snapshotUtc) =>
-            snapshotUtc.HasValue && _utcNow() - snapshotUtc.Value < StaleWindow;
+            snapshotUtc.HasValue && _utcNow() - snapshotUtc.Value < SettingsStaleWindow;
     }
+
+    /// <summary>#2107: the staleness window the sweep actually uses — store-backed, clamped on
+    /// read; <see cref="StaleWindow"/> remains only as the shipped default.</summary>
+    private TimeSpan SettingsStaleWindow => TimeSpan.FromMinutes(_settings.CollectionStaleMinutes);
 
     /// <summary>
     /// Pure collection-stopped decision from the three store signals — no I/O, so it pins directly.
@@ -429,16 +437,23 @@ internal sealed class DarlingSelfAlertEvaluator
     /// </summary>
     internal static bool IsCollectionStopped(
         DateTime? lastSuccessUtc, int recentRunCount, int recentSuccessCount, DateTime nowUtc, out string reason)
+        => IsCollectionStopped(lastSuccessUtc, recentRunCount, recentSuccessCount, nowUtc, StaleWindow, ConsecutiveFailureThreshold, out reason);
+
+    /// <summary>#2107: the configurable form — the sweep passes the store-backed window and
+    /// threshold; the constant overload keeps the shipped defaults for the tests pinning them.</summary>
+    internal static bool IsCollectionStopped(
+        DateTime? lastSuccessUtc, int recentRunCount, int recentSuccessCount, DateTime nowUtc,
+        TimeSpan staleWindow, int consecutiveFailureThreshold, out string reason)
     {
         /* Fast path: the most-recent N runs all failed. */
-        if (recentRunCount >= ConsecutiveFailureThreshold && recentSuccessCount == 0)
+        if (recentRunCount >= consecutiveFailureThreshold && recentSuccessCount == 0)
         {
             reason = $"The last {recentRunCount.ToString(CultureInfo.InvariantCulture)} collector runs all failed — no data is landing.";
             return true;
         }
 
         /* Backstop: a server that HAS collected before but hasn't succeeded within the staleness window. */
-        if (lastSuccessUtc.HasValue && nowUtc - lastSuccessUtc.Value >= StaleWindow)
+        if (lastSuccessUtc.HasValue && nowUtc - lastSuccessUtc.Value >= staleWindow)
         {
             int minutes = (int)(nowUtc - lastSuccessUtc.Value).TotalMinutes;
             reason = $"No successful collection in {minutes.ToString(CultureInfo.InvariantCulture)} minutes — the collectors are failing or the server is unreachable.";
@@ -1073,6 +1088,12 @@ internal sealed class DarlingSelfAlertEvaluator
     /// the one dangerous ambiguity this metric must never have back into the signature.</para>
     /// </summary>
     internal static bool IsDiskPressure(long freeBytes, long totalBytes, out string reason, out double percentFree)
+        => IsDiskPressure(freeBytes, totalBytes, DiskFreeWarnPercent, out reason, out percentFree);
+
+    /// <summary>#2107: the configurable form — the sweep passes the store-backed
+    /// <c>SelfDiskFreeWarnPercent</c>; the constant-threshold overload keeps the shipped default
+    /// for the tests pinning it.</summary>
+    internal static bool IsDiskPressure(long freeBytes, long totalBytes, double warnPercent, out string reason, out double percentFree)
     {
         if (totalBytes <= 0)
         {
@@ -1082,7 +1103,7 @@ internal sealed class DarlingSelfAlertEvaluator
         }
 
         percentFree = (double)freeBytes / totalBytes * 100.0;
-        if (percentFree < DiskFreeWarnPercent)
+        if (percentFree < warnPercent)
         {
             reason = $"The monitor store's disk volume has only {percentFree.ToString("0.#", CultureInfo.InvariantCulture)}% free ({FormatGb(freeBytes)} of {FormatGb(totalBytes)}).";
             return true;
@@ -1144,7 +1165,10 @@ internal sealed class DarlingSelfAlertEvaluator
         }
 
         var now = _utcNow();
-        bool pressure = IsDiskPressure(free, total, out var reason, out var percentFree);
+        /* #2107: store-backed threshold (clamped on read); the constant remains only as the
+           shipped default. */
+        double warnPercent = _settings.SelfDiskFreeWarnPercent;
+        bool pressure = IsDiskPressure(free, total, warnPercent, out var reason, out var percentFree);
 
         if (pressure)
         {
@@ -1168,7 +1192,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 var storeText = storeSizeBytes is long size ? $" The store currently holds {FormatGb(size)}." : "";
                 await FireAsync(
                     DiskKey, "Monitor Store", "Store Disk Pressure", reason,
-                    $"{DiskFreeWarnPercent.ToString("0.#", CultureInfo.InvariantCulture)}% free",
+                    $"{warnPercent.ToString("0.#", CultureInfo.InvariantCulture)}% free",
                     detail: reason + storeText + " When the store volume fills, collection and every write stop " +
                         "for the WHOLE fleet, and a headless service has no dashboard to warn you. Free space on the " +
                         "store volume, shorten retention (config_collector_schedules), enable TimescaleDB compression, " +
@@ -1182,7 +1206,7 @@ internal sealed class DarlingSelfAlertEvaluator
                        explicitly means an operator's volume path ("D2:\\") can no longer get there first,
                        and the stored value stops depending on prose word order. The threshold is a real
                        bound too, which is what separates this metric from every sibling above. */
-                    numericCurrentValue: percentFree, numericThresholdValue: DiskFreeWarnPercent,
+                    numericCurrentValue: percentFree, numericThresholdValue: warnPercent,
                     cancellationToken);
             }
         }
