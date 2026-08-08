@@ -104,6 +104,40 @@ public sealed class DarlingCliCommandsTests
         Assert.Equal("Azure SQL Managed Instance", DarlingServerConnector.DescribeEngineEdition(8));
         Assert.Contains("Unknown", DarlingServerConnector.DescribeEngineEdition(999), StringComparison.Ordinal);
     }
+
+    /* ---- the collapse verb's adaptive narrowing decision (#2105 round three) — pure pins ---- */
+
+    private static readonly TimeSpan Day = TimeSpan.FromDays(1);
+
+    [Fact]
+    public void NextNarrowingFailureCount_FullWidthSlice_TakesTheFirstHalvingStep()
+    {
+        /* A failed 24h slice narrows to 12h — one more failure than before. */
+        Assert.Equal(1, DarlingCliCommands.NextNarrowingFailureCount(Day, 0, Day));
+        /* And a 12h slice that fails again narrows to 6h. */
+        Assert.Equal(2, DarlingCliCommands.NextNarrowingFailureCount(Day, 1, TimeSpan.FromHours(12)));
+    }
+
+    [Fact]
+    public void NextNarrowingFailureCount_ClampedTail_SkipsStepsThatWouldRerunTheSameWindow()
+    {
+        /* The review catch: a clamped 30-minute final slice is already narrower than the 12h/6h/3h/1.5h/45m
+           nominal steps — re-running any of them is the identical window. The first step that actually
+           narrows 30m is the 22.5m floor (failure count 6). */
+        Assert.Equal(6, DarlingCliCommands.NextNarrowingFailureCount(Day, 0, TimeSpan.FromMinutes(30)));
+    }
+
+    [Fact]
+    public void NextNarrowingFailureCount_AtOrBelowTheFloor_ReturnsNull_TheSameWidthRetryTakesOver()
+    {
+        /* The 24h schedule floors at 22.5m (6 halvings). A slice at or under that width cannot be
+           narrowed — the caller's one fresh-connection same-width retry is the only move left, and it
+           must NOT be skipped just because narrowing is impossible (the run's usual last slice is a
+           partial-day clamp of arbitrary width). */
+        Assert.Null(DarlingCliCommands.NextNarrowingFailureCount(Day, 0, TimeSpan.FromMinutes(22.5)));
+        Assert.Null(DarlingCliCommands.NextNarrowingFailureCount(Day, 0, TimeSpan.FromMinutes(5)));
+        Assert.Null(DarlingCliCommands.NextNarrowingFailureCount(Day, 6, TimeSpan.FromMinutes(22.5)));
+    }
 }
 
 /// <summary>

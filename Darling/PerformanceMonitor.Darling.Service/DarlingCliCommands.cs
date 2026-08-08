@@ -21,6 +21,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -3000,42 +3001,109 @@ public static class DarlingCliCommands
             return 0;
         }
 
-        /* SLICED PER DAY, not one call over the whole span. CollapseSliceAsync runs each slice in ONE
+        /* SLICED, not one call over the whole span. CollapseSliceAsync runs each slice in ONE
            transaction, and that transaction takes locks on the raw chunks it touches — which the compression
            policy also wants. Handing it the entire survey span would make one long transaction sitting across
            however much history the store keeps, which is exactly the lock-duration family that has bitten this
-           repo before (#1564/#1567). On a default 4-day raw tier this is a handful of slices; on a store with
-           a widened retention it is the protection the method's own doc promises.
+           repo before (#1564/#1567).
+
+           Slice width is ADAPTIVE (#2105 round three): a day is the fast default, but on the field store
+           that motivated this the FIRST day-wide stage aggregation blew through the 15-minute statement
+           timeout — the operator watched it die at minute ~15 with the bare stream exception, three walls
+           deep. A failed slice now halves the window and retries the SAME start (the shared
+           QueryStoreBackfillState.AdaptiveSpan schedule the backfill worker uses, 24h base → 22.5m floor),
+           a completed slice resets to full width, and only a slice that fails AT the floor gives up to the
+           existing re-run message. Narrowing is announced so the operator sees progress, not a hang.
 
            The half-open upper bound includes the newest collapsed row — the survey reports that instant
            itself, not a bound past it — hence the final slice's one-second nudge. */
         long removed = 0;
         var sliceStart = survey.OldestUtc!.Value.Date;
         var collapseEnd = survey.NewestUtc!.Value.AddSeconds(1);
+        var fullWidth = TimeSpan.FromDays(1);
+        var consecutiveFailures = 0;
+        var retriedAtWidth = false;
 
-        try
+        while (sliceStart < collapseEnd)
         {
-            while (sliceStart < collapseEnd)
+            var span = QueryStoreBackfillState.AdaptiveSpan(fullWidth, consecutiveFailures);
+            var sliceEnd = sliceStart + span;
+            if (sliceEnd > collapseEnd)
             {
-                var sliceEnd = sliceStart.AddDays(1);
-                if (sliceEnd > collapseEnd)
-                {
-                    sliceEnd = collapseEnd;
-                }
+                sliceEnd = collapseEnd;
+            }
 
+            /* The width the slice ACTUALLY covers — the final slice clamps to the range end, so the
+               nominal AdaptiveSpan width can overstate it, and both the retry decision and the operator
+               messages must speak in real terms (review catch). */
+            var actualWidth = sliceEnd - sliceStart;
+
+            try
+            {
                 removed += await QueryStoreSliceRepair.CollapseSliceAsync(
                     connection, sliceStart, sliceEnd, cancellationToken);
 
+                consecutiveFailures = 0;
+                retriedAtWidth = false;
                 sliceStart = sliceEnd;
             }
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            /* Each slice is its own transaction, so earlier slices are already committed and are not lost —
-               and the collapse is idempotent, so re-running picks up where this stopped. */
-            error.WriteLine($"  The collapse failed after {removed:N0} row(s); the failing slice was rolled back: {ex.Message}");
-            error.WriteLine("  Slices already committed are safe. Re-run to continue — the repair is idempotent.");
-            return 1;
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                var next = NextNarrowingFailureCount(fullWidth, consecutiveFailures, actualWidth);
+
+                /* A slice already at/below the adaptive floor (usually the clamped final tail — nothing
+                   says the leftover is ≥ the floor) can't be narrowed, but its likeliest failure is the
+                   transient/connection kind the fresh-connection retry exists for — so it earns ONE
+                   same-width retry before the give-up (review catch: giving up on the tail's first
+                   failure silently exempted the run's usual last slice from the retry mechanism). */
+                var sameWidthRetry = next is null && !retriedAtWidth;
+
+                if (next is int || sameWidthRetry)
+                {
+                    /* The statement-timeout failure this loop exists to survive surfaces as a broken
+                       STREAM, not a clean server-side cancel — the connection underneath is very likely
+                       dead, and retrying on it would fail instantly through every halving step (review
+                       catch). Cycle it: close is safe on a broken connection, and reopen draws a fresh
+                       physical connection. Session state doesn't matter — the slice's SET LOCAL and
+                       per-command timeouts are transaction/command scoped. A failed REOPEN degrades to
+                       the same clean idempotent-rerun message as every other failure here, never an
+                       unhandled crash (review catch — this verb has no caller safety net). */
+                    try
+                    {
+                        await connection.CloseAsync();
+                        await connection.OpenAsync(cancellationToken);
+                    }
+                    catch (Exception reopenEx) when (reopenEx is not OperationCanceledException)
+                    {
+                        error.WriteLine($"  The collapse failed after {removed:N0} row(s); the slice at {sliceStart:yyyy-MM-dd HH:mm} failed ({FirstLineOf(ex.Message)}) and the store connection could not be reopened: {FirstLineOf(reopenEx.Message)}");
+                        error.WriteLine("  Slices already committed are safe. Re-run to continue — the repair is idempotent.");
+                        return 1;
+                    }
+
+                    if (next is int narrowerFailures)
+                    {
+                        consecutiveFailures = narrowerFailures;
+                        retriedAtWidth = false;
+                        var narrower = QueryStoreBackfillState.AdaptiveSpan(fullWidth, narrowerFailures);
+                        output.WriteLine($"  [RETRY] slice {sliceStart:yyyy-MM-dd HH:mm} +{actualWidth.TotalMinutes:F0}m failed ({FirstLineOf(ex.Message)}); narrowing to {narrower.TotalMinutes:F0}m and retrying.");
+                    }
+                    else
+                    {
+                        retriedAtWidth = true;
+                        output.WriteLine($"  [RETRY] slice {sliceStart:yyyy-MM-dd HH:mm} +{actualWidth.TotalMinutes:F0}m failed ({FirstLineOf(ex.Message)}); already at the narrowest width — retrying once on a fresh connection.");
+                    }
+
+                    continue;
+                }
+
+                /* Narrowing exhausted AND the same-width retry spent — this range cannot be repaired
+                   unattended. Each slice is its own transaction, so earlier slices are already committed
+                   and are not lost — and the collapse is idempotent, so re-running picks up where this
+                   stopped. */
+                error.WriteLine($"  The collapse failed after {removed:N0} row(s); the failing {actualWidth.TotalMinutes:F0}m slice at {sliceStart:yyyy-MM-dd HH:mm} was rolled back: {ex.Message}");
+                error.WriteLine("  Slices already committed are safe. Re-run to continue — the repair is idempotent.");
+                return 1;
+            }
         }
 
         output.WriteLine($"  Collapsed. Rows removed: {removed:N0}");
@@ -3082,6 +3150,37 @@ public static class DarlingCliCommands
     /// <summary>Floors an instant to its bucket, so a refresh window covers whole buckets on both edges.</summary>
     private static DateTime Floor(DateTime value, TimeSpan bucket)
         => bucket <= TimeSpan.Zero ? value : new DateTime(value.Ticks - (value.Ticks % bucket.Ticks), value.Kind);
+
+    /// <summary>
+    /// The collapse loop's narrowing decision, pure so it pins without a live timeout: the smallest
+    /// failure count whose <see cref="QueryStoreBackfillState.AdaptiveSpan"/> width actually narrows a
+    /// slice that COVERED <paramref name="actualWidth"/> (a clamped final slice can be narrower than
+    /// several nominal halving steps, and re-running an identical window just re-hits the same wall), or
+    /// null when no step can — the slice already sits at/below the adaptive floor, where the caller's
+    /// one same-width fresh-connection retry is the only move left.
+    /// </summary>
+    internal static int? NextNarrowingFailureCount(TimeSpan fullWidth, int consecutiveFailures, TimeSpan actualWidth)
+    {
+        var next = consecutiveFailures + 1;
+        var narrower = QueryStoreBackfillState.AdaptiveSpan(fullWidth, next);
+        while (narrower >= actualWidth)
+        {
+            var evenNarrower = QueryStoreBackfillState.AdaptiveSpan(fullWidth, next + 1);
+            if (evenNarrower >= narrower)
+            {
+                return null;
+            }
+
+            next++;
+            narrower = evenNarrower;
+        }
+
+        return next;
+    }
+
+    /// <summary>An exception message's first line, CR-trimmed — one-line operator output must stay one line.</summary>
+    private static string FirstLineOf(string message)
+        => message.Split('\n')[0].TrimEnd('\r');
 
     /// <summary>How <c>--recompress-plan-dim</c> handles the closing VACUUM FULL (#2076).</summary>
     public enum RecompressVacuumMode
