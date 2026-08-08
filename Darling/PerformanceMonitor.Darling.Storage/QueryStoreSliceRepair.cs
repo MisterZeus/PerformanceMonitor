@@ -276,6 +276,19 @@ public static class QueryStoreSliceRepair
 
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
+        /* #2105 field failure round two: the repair's DELETE touches COMPRESSED chunks (a store old
+           enough to need this repair has had its compression policy running the whole time), and
+           TimescaleDB caps decompression at 100k tuples per DML transaction by default — the field
+           run died at `53400: tuple decompression limit exceeded` four minutes in. Lift it for this
+           transaction only (SET LOCAL dies with the transaction), the same rail-lift the retention
+           purge's fallback DELETE already does — deliberate bulk decompression is this verb's job.
+           On a store without the extension the qualified name is a placeholder GUC, safe everywhere. */
+        await using (var lift = new NpgsqlCommand(
+            "SET LOCAL timescaledb.max_tuples_decompressed_per_dml_transaction = 0", connection, transaction))
+        {
+            await lift.ExecuteNonQueryAsync(cancellationToken);
+        }
+
         long before;
         await using (var count = new NpgsqlCommand($"SELECT count(*) FROM collect.{Table} WHERE collection_time >= $1 AND collection_time < $2", connection, transaction) { CommandTimeout = SliceStatementTimeoutSeconds })
         {
