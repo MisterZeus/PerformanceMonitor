@@ -465,7 +465,7 @@ public sealed class QueryStoreCollectorDefinitionTests
            Anything coarser would merge work that is genuinely distinct; anything finer would leave the
            slices split, which is the bug. */
         Assert.Contains(
-            "GROUP BY\n    qsrs.plan_id,\n    qsrs.runtime_stats_interval_id,\n    qsrs.execution_type_desc,\n        qsrs.replica_group_id",
+            "GROUP BY\n    qsrs.plan_id,\n    qsrs.runtime_stats_interval_id,\n    qsrs.execution_type_desc,\n    qsrs.replica_group_id",
             text,
             StringComparison.Ordinal);
 
@@ -583,11 +583,11 @@ public sealed class QueryStoreCollectorDefinitionTests
         foreach (var probe in new object[] { 16, 17 })
         {
             var attributed = PayloadSql(MakeContext(probeResult: probe));
-            Assert.Contains("qsrs.execution_type_desc,\n        qsrs.replica_group_id", attributed, StringComparison.Ordinal);
+            Assert.Contains("qsrs.execution_type_desc,\n    qsrs.replica_group_id", attributed, StringComparison.Ordinal);
         }
 
         var azure = AzurePayloadSql(MakeContext(isAzureSqlDb: true, probeResult: 12));
-        Assert.Contains("qsrs.execution_type_desc,\n        qsrs.replica_group_id", azure, StringComparison.Ordinal);
+        Assert.Contains("qsrs.execution_type_desc,\n    qsrs.replica_group_id", azure, StringComparison.Ordinal);
 
         /* Pre-2022 box and Managed Instance: the column must not be named anywhere, GROUP BY included. */
         foreach (var probe in new object?[] { 13, 14, 15, null })

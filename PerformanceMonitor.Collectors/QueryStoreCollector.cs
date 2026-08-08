@@ -605,15 +605,15 @@ END;
            comma and sit at the END of the inner select list precisely because they can be empty; the
            outer ones keep their original trailing-comma form because they are never empty. */
         string numPhysIoReadsAgg = isNew
-            ? $",\n        {WeightedAverage("avg_num_physical_io_reads")},\n        min_num_physical_io_reads = MIN(qsrs.min_num_physical_io_reads),\n        max_num_physical_io_reads = MAX(qsrs.max_num_physical_io_reads)"
+            ? $",\n    {WeightedAverage("avg_num_physical_io_reads")},\n    min_num_physical_io_reads = MIN(qsrs.min_num_physical_io_reads),\n    max_num_physical_io_reads = MAX(qsrs.max_num_physical_io_reads)"
             : "";
 
         string logBytesAgg = isNew
-            ? $",\n        {WeightedAverage("avg_log_bytes_used")},\n        min_log_bytes_used = MIN(qsrs.min_log_bytes_used),\n        max_log_bytes_used = MAX(qsrs.max_log_bytes_used)"
+            ? $",\n    {WeightedAverage("avg_log_bytes_used")},\n    min_log_bytes_used = MIN(qsrs.min_log_bytes_used),\n    max_log_bytes_used = MAX(qsrs.max_log_bytes_used)"
             : "";
 
         string tempdbAgg = isNew
-            ? $",\n        {WeightedAverage("avg_tempdb_space_used")},\n        min_tempdb_space_used = MIN(qsrs.min_tempdb_space_used),\n        max_tempdb_space_used = MAX(qsrs.max_tempdb_space_used)"
+            ? $",\n    {WeightedAverage("avg_tempdb_space_used")},\n    min_tempdb_space_used = MIN(qsrs.min_tempdb_space_used),\n    max_tempdb_space_used = MAX(qsrs.max_tempdb_space_used)"
             : "";
 
         string numPhysIoReadsCols = isNew
@@ -681,7 +681,7 @@ END;
            Leading comma: it splices into both the inner select list and the GROUP BY, and is empty on
            targets without the column. */
         string replicaGroupKey = hasReplicaAttribution
-            ? ",\n        qsrs.replica_group_id"
+            ? ",\n    qsrs.replica_group_id"
             : "";
 
         /* There is deliberately NO self-exclusion predicate in this query (#1565, actual-plan evidence
@@ -796,11 +796,11 @@ END;
            below stays the exact row-level filter, so shipped semantics are unchanged. */
         var intervalPreFilter = backfill
             ? @"i.end_time > @floor_time
-        AND   i.start_time < @ceiling_time"
+    AND   i.start_time < @ceiling_time"
             : "i.end_time > @cutoff_time";
         var intervalHaving = backfill
             ? @"MAX(qsrs.last_execution_time) > @floor_time
-        AND MAX(qsrs.last_execution_time) < @ceiling_time"
+    AND MAX(qsrs.last_execution_time) < @ceiling_time"
             : "MAX(qsrs.last_execution_time) > @cutoff_time";
         var shipOrder = backfill ? "DESC" : "ASC";
 
@@ -820,7 +820,12 @@ END;
            result set (the reader/byte-budget contract). Inside the on-prem [db].sys.sp_executesql
            nesting the temp's scope dies with the invocation; on Azure's direct per-database path the
            leading DROP TABLE IF EXISTS covers pooled-connection reuse. TOP ... WITH TIES, the ship
-           order, and the derived-watermark semantics live on the final SELECT, unchanged. */
+           order, and the derived-watermark semantics live on the final SELECT, unchanged.
+
+           BOTH statements carry OPTION(RECOMPILE) (review catch): split out on its own, the staging
+           statement would otherwise be cached via sp_executesql's parameterized text and sniffed
+           across live vs backfill windows of wildly different selectivity — the same fixed-guess
+           failure mode this rewrite removes, reintroduced one statement earlier. */
         return $@"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 DROP TABLE IF EXISTS #pm_qs_slice;
@@ -829,35 +834,35 @@ SELECT /* PerformanceMonitorLite */
     qsrs.plan_id,
     qsrs.runtime_stats_interval_id,
     qsrs.execution_type_desc{replicaGroupKey},
-        first_execution_time = MIN(qsrs.first_execution_time),
-        last_execution_time = MAX(qsrs.last_execution_time),
-        count_executions = SUM(qsrs.count_executions),
-        {WeightedAverage("avg_duration")},
-        min_duration = MIN(qsrs.min_duration),
-        max_duration = MAX(qsrs.max_duration),
-        {WeightedAverage("avg_cpu_time")},
-        min_cpu_time = MIN(qsrs.min_cpu_time),
-        max_cpu_time = MAX(qsrs.max_cpu_time),
-        {WeightedAverage("avg_logical_io_reads")},
-        min_logical_io_reads = MIN(qsrs.min_logical_io_reads),
-        max_logical_io_reads = MAX(qsrs.max_logical_io_reads),
-        {WeightedAverage("avg_logical_io_writes")},
-        min_logical_io_writes = MIN(qsrs.min_logical_io_writes),
-        max_logical_io_writes = MAX(qsrs.max_logical_io_writes),
-        {WeightedAverage("avg_physical_io_reads")},
-        min_physical_io_reads = MIN(qsrs.min_physical_io_reads),
-        max_physical_io_reads = MAX(qsrs.max_physical_io_reads),
-        {WeightedAverage("avg_clr_time")},
-        min_clr_time = MIN(qsrs.min_clr_time),
-        max_clr_time = MAX(qsrs.max_clr_time),
-        min_dop = MIN(qsrs.min_dop),
-        max_dop = MAX(qsrs.max_dop),
-        {WeightedAverage("avg_query_max_used_memory")},
-        min_query_max_used_memory = MIN(qsrs.min_query_max_used_memory),
-        max_query_max_used_memory = MAX(qsrs.max_query_max_used_memory),
-        {WeightedAverage("avg_rowcount")},
-        min_rowcount = MIN(qsrs.min_rowcount),
-        max_rowcount = MAX(qsrs.max_rowcount){numPhysIoReadsAgg}{logBytesAgg}{tempdbAgg}
+    first_execution_time = MIN(qsrs.first_execution_time),
+    last_execution_time = MAX(qsrs.last_execution_time),
+    count_executions = SUM(qsrs.count_executions),
+    {WeightedAverage("avg_duration")},
+    min_duration = MIN(qsrs.min_duration),
+    max_duration = MAX(qsrs.max_duration),
+    {WeightedAverage("avg_cpu_time")},
+    min_cpu_time = MIN(qsrs.min_cpu_time),
+    max_cpu_time = MAX(qsrs.max_cpu_time),
+    {WeightedAverage("avg_logical_io_reads")},
+    min_logical_io_reads = MIN(qsrs.min_logical_io_reads),
+    max_logical_io_reads = MAX(qsrs.max_logical_io_reads),
+    {WeightedAverage("avg_logical_io_writes")},
+    min_logical_io_writes = MIN(qsrs.min_logical_io_writes),
+    max_logical_io_writes = MAX(qsrs.max_logical_io_writes),
+    {WeightedAverage("avg_physical_io_reads")},
+    min_physical_io_reads = MIN(qsrs.min_physical_io_reads),
+    max_physical_io_reads = MAX(qsrs.max_physical_io_reads),
+    {WeightedAverage("avg_clr_time")},
+    min_clr_time = MIN(qsrs.min_clr_time),
+    max_clr_time = MAX(qsrs.max_clr_time),
+    min_dop = MIN(qsrs.min_dop),
+    max_dop = MAX(qsrs.max_dop),
+    {WeightedAverage("avg_query_max_used_memory")},
+    min_query_max_used_memory = MIN(qsrs.min_query_max_used_memory),
+    max_query_max_used_memory = MAX(qsrs.max_query_max_used_memory),
+    {WeightedAverage("avg_rowcount")},
+    min_rowcount = MIN(qsrs.min_rowcount),
+    max_rowcount = MAX(qsrs.max_rowcount){numPhysIoReadsAgg}{logBytesAgg}{tempdbAgg}
 INTO #pm_qs_slice
 FROM sys.query_store_runtime_stats AS qsrs
 WHERE qsrs.runtime_stats_interval_id IN
@@ -872,7 +877,8 @@ GROUP BY
     qsrs.runtime_stats_interval_id,
     qsrs.execution_type_desc{replicaGroupKey}
 HAVING
-    {intervalHaving};
+    {intervalHaving}
+OPTION(RECOMPILE);
 
 SELECT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase}) WITH TIES
     query_id = qsq.query_id,
