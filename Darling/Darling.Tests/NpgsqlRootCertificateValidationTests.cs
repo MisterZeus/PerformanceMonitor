@@ -106,7 +106,15 @@ public sealed class NpgsqlRootCertificateValidationTests
             chain.ImportFromPem(serverCertChainPem);
             using var keyRsa = RSA.Create();
             keyRsa.ImportFromPem(serverKeyPem);
-            using var serving = chain[0].CopyWithPrivateKey(keyRsa);
+            /* Windows SChannel cannot serve TLS from an EPHEMERAL private key — CopyWithPrivateKey
+               alone makes AuthenticateAsServer fail server-side before the client validates anything,
+               poisoning both shapes' verdicts (the first CI round's lesson: BOTH shapes reported
+               completed=false on Windows while passing on macOS). The PFX round-trip persists the
+               key where SChannel can use it; a no-op on the other platforms. */
+            using var ephemeral = chain[0].CopyWithPrivateKey(keyRsa);
+            using var serving = X509CertificateLoader.LoadPkcs12(
+                ephemeral.Export(X509ContentType.Pkcs12), password: null,
+                keyStorageFlags: X509KeyStorageFlags.DefaultKeySet);
             var extras = new X509Certificate2Collection();
             for (var i = 1; i < chain.Count; i++)
             {
