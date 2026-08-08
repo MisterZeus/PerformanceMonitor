@@ -21,6 +21,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -3000,42 +3001,62 @@ public static class DarlingCliCommands
             return 0;
         }
 
-        /* SLICED PER DAY, not one call over the whole span. CollapseSliceAsync runs each slice in ONE
+        /* SLICED, not one call over the whole span. CollapseSliceAsync runs each slice in ONE
            transaction, and that transaction takes locks on the raw chunks it touches — which the compression
            policy also wants. Handing it the entire survey span would make one long transaction sitting across
            however much history the store keeps, which is exactly the lock-duration family that has bitten this
-           repo before (#1564/#1567). On a default 4-day raw tier this is a handful of slices; on a store with
-           a widened retention it is the protection the method's own doc promises.
+           repo before (#1564/#1567).
+
+           Slice width is ADAPTIVE (#2105 round three): a day is the fast default, but on the field store
+           that motivated this the FIRST day-wide stage aggregation blew through the 15-minute statement
+           timeout — the operator watched it die at minute ~15 with the bare stream exception, three walls
+           deep. A failed slice now halves the window and retries the SAME start (the shared
+           QueryStoreBackfillState.AdaptiveSpan schedule the backfill worker uses, 24h base → 22.5m floor),
+           a completed slice resets to full width, and only a slice that fails AT the floor gives up to the
+           existing re-run message. Narrowing is announced so the operator sees progress, not a hang.
 
            The half-open upper bound includes the newest collapsed row — the survey reports that instant
            itself, not a bound past it — hence the final slice's one-second nudge. */
         long removed = 0;
         var sliceStart = survey.OldestUtc!.Value.Date;
         var collapseEnd = survey.NewestUtc!.Value.AddSeconds(1);
+        var fullWidth = TimeSpan.FromDays(1);
+        var consecutiveFailures = 0;
 
-        try
+        while (sliceStart < collapseEnd)
         {
-            while (sliceStart < collapseEnd)
+            var span = QueryStoreBackfillState.AdaptiveSpan(fullWidth, consecutiveFailures);
+            var sliceEnd = sliceStart + span;
+            if (sliceEnd > collapseEnd)
             {
-                var sliceEnd = sliceStart.AddDays(1);
-                if (sliceEnd > collapseEnd)
-                {
-                    sliceEnd = collapseEnd;
-                }
+                sliceEnd = collapseEnd;
+            }
 
+            try
+            {
                 removed += await QueryStoreSliceRepair.CollapseSliceAsync(
                     connection, sliceStart, sliceEnd, cancellationToken);
 
+                consecutiveFailures = 0;
                 sliceStart = sliceEnd;
             }
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            /* Each slice is its own transaction, so earlier slices are already committed and are not lost —
-               and the collapse is idempotent, so re-running picks up where this stopped. */
-            error.WriteLine($"  The collapse failed after {removed:N0} row(s); the failing slice was rolled back: {ex.Message}");
-            error.WriteLine("  Slices already committed are safe. Re-run to continue — the repair is idempotent.");
-            return 1;
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                var narrower = QueryStoreBackfillState.AdaptiveSpan(fullWidth, consecutiveFailures + 1);
+                if (narrower < span)
+                {
+                    consecutiveFailures++;
+                    output.WriteLine($"  [RETRY] slice {sliceStart:yyyy-MM-dd HH:mm} +{span.TotalMinutes:F0}m failed ({ex.Message.Split('\n')[0].TrimEnd('\r')}); narrowing to {narrower.TotalMinutes:F0}m and retrying.");
+                    continue;
+                }
+
+                /* Already at the adaptive floor — this range cannot be repaired unattended. Each slice is
+                   its own transaction, so earlier slices are already committed and are not lost — and the
+                   collapse is idempotent, so re-running picks up where this stopped. */
+                error.WriteLine($"  The collapse failed after {removed:N0} row(s); the failing {span.TotalMinutes:F0}m slice at {sliceStart:yyyy-MM-dd HH:mm} was rolled back: {ex.Message}");
+                error.WriteLine("  Slices already committed are safe. Re-run to continue — the repair is idempotent.");
+                return 1;
+            }
         }
 
         output.WriteLine($"  Collapsed. Rows removed: {removed:N0}");
