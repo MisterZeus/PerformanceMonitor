@@ -2800,13 +2800,24 @@ AND   j.schedule_interval IS DISTINCT FROM INTERVAL '{CompressScheduleInterval}'
     /// <summary>
     /// The pure stuck-compression-job decision (#1581). A compression policy job is STUCK when either:
     /// <list type="bullet">
-    /// <item>its <c>next_start</c> is <c>-infinity</c> — the scheduler will NEVER re-fire it (the dead-job
-    /// bug that let uncompressed data grow without bound until the disk filled), or</item>
+    /// <item>its <c>next_start</c> is <c>-infinity</c> while the job is NOT currently running — the scheduler
+    /// abandoned it and will NEVER re-fire it (the dead-job bug that let uncompressed data grow without bound
+    /// until the disk filled), or</item>
     /// <item>it has been in the <c>Running</c> state since a <c>last_run_started_at</c> older than
     /// <see cref="StuckRunningBound"/> — a run that began long ago and never finished (a hung run).</item>
     /// </list>
     /// A job with neither condition is healthy and is NOT flagged. No I/O, so it pins directly with a
     /// controllable clock. Scoping to compression jobs happens in the query — this decides only "stuck".
+    ///
+    /// <para><b><c>-infinity</c> is ALSO the engine's mid-run marker</b>, measured live on TimescaleDB
+    /// 2.x (pg17): from the moment the scheduler picks up a due job until its run completes,
+    /// <c>job_stats.next_start</c> reads <c>-infinity</c> with <c>job_status = 'Running'</c>, and the real
+    /// next start is only computed at completion. So <c>-infinity</c> alone cannot mean "dead" — an
+    /// unconditioned first arm flagged every healthy job the check happened to catch mid-run, alerted it as
+    /// stuck, and "self-healed" it with a pointless re-arm (the field's transient stuck→self-healed noise;
+    /// the CI flake was the live test catching its own re-arm-triggered run). A running job is therefore
+    /// left to the second arm, whose elapsed bound is what actually distinguishes a hung run from a
+    /// healthy one.</para>
     ///
     /// <para>A <paramref name="lastRunStartedAtUtc"/> of <see cref="DateTime.MinValue"/> counts as NEVER RAN,
     /// not as "started in year 1" (#1760). <see cref="StuckCompressionJobsSql"/> already NULLIFs TimescaleDB's
@@ -2822,13 +2833,15 @@ AND   j.schedule_interval IS DISTINCT FROM INTERVAL '{CompressScheduleInterval}'
         DateTime nowUtc,
         out string reason)
     {
-        if (nextStartIsNegativeInfinity)
+        var isRunning = string.Equals(jobStatus, "Running", StringComparison.OrdinalIgnoreCase);
+
+        if (nextStartIsNegativeInfinity && !isRunning)
         {
             reason = "next_start is -infinity — the scheduler will never run it again";
             return true;
         }
 
-        if (string.Equals(jobStatus, "Running", StringComparison.OrdinalIgnoreCase)
+        if (isRunning
             && lastRunStartedAtUtc is DateTime startedUtc
             && startedUtc != DateTime.MinValue)
         {
