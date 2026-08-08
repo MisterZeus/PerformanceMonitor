@@ -343,7 +343,8 @@ OPTION(RECOMPILE);
     /// MEMORY_PARTITION_MODE = NONE for a single readable ring buffer / AWS RDS compatibility, mirroring
     /// the deadlock session). The <paramref name="thresholdMicroseconds"/> duration predicate is applied
     /// to the two COMPLETED events only; <c>attention</c> is captured unfiltered (see the class doc). The
-    /// customizable text/object columns are turned on via SET so they are actually collected.
+    /// customizable TEXT columns (statement / batch_text) are turned on via SET so they are actually
+    /// collected; object_name needs no SET — it is one of rpc_completed's default data fields (#2129).
     /// </summary>
     public static string BuildCreateSessionSql(bool databaseScoped, long thresholdMicroseconds)
     {
