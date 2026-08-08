@@ -353,14 +353,16 @@ OPTION(RECOMPILE);
            AWS RDS compatible). Azure database-scoped sessions do not accept MEMORY_PARTITION_MODE. */
         var partitionMode = databaseScoped ? "" : "\n    MEMORY_PARTITION_MODE = NONE,";
 
+        /* #2129: rpc_completed SETs only collect_statement. object_name is one of that event's
+           DEFAULT data fields — the collect_object_name customizable attribute belongs to
+           sp_statement_completed, and SETting it here made the CREATE fail on every server. The
+           note lives in C# on purpose: the DDL string ships to every monitored server, and the
+           test pin asserts the bogus attribute appears NOWHERE in it, comment included. */
         return $@"
 CREATE EVENT SESSION [{XeSessionName}]
 ON {scope}
 ADD EVENT sqlserver.rpc_completed
 (
-    /* #2129: object_name is one of rpc_completed's DEFAULT data fields — there is no
-       collect_object_name customizable attribute on this event (that one belongs to
-       sp_statement_completed), and SETting it made the CREATE fail on every server. */
     SET
         collect_statement = 1
     ACTION
