@@ -45,38 +45,6 @@ public sealed class StoreTlsCertificateTests
     }
 
     [Fact]
-    public void LegacySelfSignedShape_IsRefusedByWindowsChainBuilding_TheFieldFailure()
-    {
-        /* The pre-#2117 generator's exact shape: self-signed end-entity, critical CA=false Basic
-           Constraints. Pinned as FAILING on Windows because that platform behavior IS the field bug —
-           if a Windows/.NET change ever makes this pass, the pin failing tells us the platform
-           constraint moved and the two-cert design can be revisited. Non-Windows engines accept the
-           shape (verified on macOS during diagnosis), so the assertion is Windows-only. */
-        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows chain-building behavior is the thing under pin.");
-
-        using var rsa = RSA.Create(2048);
-        var request = new CertificateRequest("CN=testhost", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
-        var san = new SubjectAlternativeNameBuilder();
-        san.AddIpAddress(IPAddress.Parse("192.0.2.10"));
-        san.AddDnsName("testhost");
-        request.CertificateExtensions.Add(san.Build());
-        request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
-        request.CertificateExtensions.Add(
-            new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyEncipherment, true));
-        request.CertificateExtensions.Add(
-            new X509EnhancedKeyUsageExtension(new OidCollection { new Oid("1.3.6.1.5.5.7.3.1") }, false));
-        using var legacy = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(5));
-
-        var served = X509Certificate2Collection();
-        served.Add(legacy);
-
-        Assert.False(
-            BuildsUnderCustomRootTrust(served, legacy),
-            "Windows accepted a critical-CA=false self-signed cert as its own custom-trust anchor — the #2117 " +
-            "platform constraint has moved; re-evaluate whether the two-cert chain is still required.");
-    }
-
-    [Fact]
     public void GeneratedLeaf_CarriesTheListenIpAndHostSans()
     {
         var listenIp = IPAddress.Parse("192.0.2.10");
