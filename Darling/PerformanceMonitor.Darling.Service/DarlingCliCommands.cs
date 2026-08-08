@@ -338,8 +338,18 @@ public static class DarlingCliCommands
         /* Read the cert BEFORE anything reaches STDOUT: every STDERR line — including the missing-cert NOTE —
            must be emitted ahead of the payload (#1953 item 3). The field report watched the live password scroll
            past and only THEN saw the redirect advice, which is exactly backwards for a warning. */
-        var certificate = File.Exists(handoff.CertificatePath)
-            ? (await File.ReadAllTextAsync(handoff.CertificatePath, cancellationToken)).Trim()
+        /* #2117: prefer the distributable ROOT (the CA that signed the served leaf) when the store
+           carries the fixed chain shape — that is what verify-full's Root Certificate must anchor
+           on. A legacy store has no root.crt, and its single self-signed server.crt remains the
+           right (if Windows-hostile) thing to print. */
+        var distributableCertPath = DarlingManagedPostgres.RootCertificatePathFor(handoff.CertificatePath);
+        if (!File.Exists(distributableCertPath))
+        {
+            distributableCertPath = handoff.CertificatePath;
+        }
+
+        var certificate = File.Exists(distributableCertPath)
+            ? (await File.ReadAllTextAsync(distributableCertPath, cancellationToken)).Trim()
             : null;
 
         /* Guidance + the live-secret warning go to STDERR, so redirecting STDOUT to a file or the clipboard
@@ -644,13 +654,20 @@ public static class DarlingCliCommands
             return 1;
         }
 
+        /* #2117: prefer the distributable ROOT on chain-shaped stores — the print verb's rule. */
+        var exportCertPath = DarlingManagedPostgres.RootCertificatePathFor(handoff.CertificatePath);
+        if (!File.Exists(exportCertPath))
+        {
+            exportCertPath = handoff.CertificatePath;
+        }
+
         try
         {
-            certificate = (await File.ReadAllTextAsync(handoff.CertificatePath, cancellationToken)).Trim();
+            certificate = (await File.ReadAllTextAsync(exportCertPath, cancellationToken)).Trim();
         }
         catch (Exception ex)
         {
-            error.WriteLine($"Could not read the server TLS certificate ({handoff.CertificatePath}): {ex.Message}");
+            error.WriteLine($"Could not read the server TLS certificate ({exportCertPath}): {ex.Message}");
             return 1;
         }
 
