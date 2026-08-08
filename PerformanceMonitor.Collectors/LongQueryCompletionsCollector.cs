@@ -137,8 +137,10 @@ public sealed class LongQueryCompletionsCollector : CollectorDefinitionBase<Long
     /* Server- vs database-scoped ring-buffer source is the only engine difference; the event/action
        shred is shared. The session only captures the three long-completion events, so the read shreds
        everything in the ring buffer newer than the watermark — the duration predicate lives in the
-       session DDL (BuildCreateSessionSql), not here. Customizable text columns (statement / batch_text
-       / object_name) are turned on in the DDL's SET clause, so they are present in the payload here. */
+       session DDL (BuildCreateSessionSql), not here. The customizable text columns (statement /
+       batch_text) are turned on in the DDL's SET clause; object_name is rpc_completed's own default
+       data field (#2129 — SETting a collect_object_name there fails the CREATE), so all three are
+       present in the payload here. */
     private const string ShredSelect = @"
 SELECT
     event_time = evt.value('(@timestamp)[1]', 'datetime2'),
@@ -356,9 +358,11 @@ CREATE EVENT SESSION [{XeSessionName}]
 ON {scope}
 ADD EVENT sqlserver.rpc_completed
 (
+    /* #2129: object_name is one of rpc_completed's DEFAULT data fields — there is no
+       collect_object_name customizable attribute on this event (that one belongs to
+       sp_statement_completed), and SETting it made the CREATE fail on every server. */
     SET
-        collect_statement = 1,
-        collect_object_name = 1
+        collect_statement = 1
     ACTION
     ({actions}
     )
