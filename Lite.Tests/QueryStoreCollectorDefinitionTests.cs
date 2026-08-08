@@ -192,10 +192,11 @@ public sealed class QueryStoreCollectorDefinitionTests
 
         /* Interval-grain incremental filter since #1907, on this path too — the Azure body IS the shared
            body, so the WHERE→HAVING move lands here by construction rather than by a second edit. */
-        Assert.Contains("HAVING\n        MAX(qsrs.last_execution_time) > @cutoff_time", Lf(plan.Text), StringComparison.Ordinal);
+        Assert.Contains("HAVING\n    MAX(qsrs.last_execution_time) > @cutoff_time", Lf(plan.Text), StringComparison.Ordinal);
         Assert.DoesNotContain("WHERE qsrs.last_execution_time > @cutoff_time", plan.Text, StringComparison.Ordinal);
         Assert.Contains("ORDER BY qsrs.last_execution_time ASC", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("OPTION(RECOMPILE, LOOP JOIN);", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("OPTION(RECOMPILE);", plan.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("LOOP JOIN", plan.Text, StringComparison.Ordinal);
 
         var parameter = Assert.Single(plan.Parameters);
         Assert.Equal("@cutoff_time", parameter.Name);
@@ -481,20 +482,34 @@ public sealed class QueryStoreCollectorDefinitionTests
         Assert.Contains("max_dop = MAX(qsrs.max_dop)", text, StringComparison.Ordinal);
 
         /* The pre-filter is a prune, not a semantic: its interval list is a superset of what the HAVING
-           keeps, so it can never subtract a row. Without it the aggregate runs over the database's entire
-           retained Query Store every cycle — measured 1203ms against 375ms on a real 212k-row store. */
+           keeps, so it can never subtract a row. #2133: the ids resolve from the INTERVAL CATALOG —
+           hundreds of rows — never by scanning runtime_stats itself (measured 20 ms vs 426 ms for the
+           identical id set on the field store that wedged). */
         Assert.Contains("WHERE qsrs.runtime_stats_interval_id IN", text, StringComparison.Ordinal);
-        Assert.Contains("WHERE f.last_execution_time > @cutoff_time", text, StringComparison.Ordinal);
+        Assert.Contains("FROM sys.query_store_runtime_stats_interval AS i", text, StringComparison.Ordinal);
+        Assert.Contains("WHERE i.end_time > @cutoff_time", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("FROM sys.query_store_runtime_stats AS f", text, StringComparison.Ordinal);
 
-        /* The row SHAPE must not move: 55 selected columns, and the TOP/ORDER BY stay OUTSIDE the
-           aggregate so the cap counts intervals and can never truncate one interval's slices into a
+        /* #2133 STAGING: the aggregate lands in a temp table and the plan/query/text joins run FROM it,
+           so the optimizer joins with real cardinalities instead of TVF fixed guesses — the monolithic
+           join re-materialized a TVF per probe, a fixed ≥30s cost on an 82k-plan catalog that no
+           catch-up width could reduce (staged: 524 ms, same store, same window). SELECT INTO emits no
+           result set, so the batch still returns exactly one; the leading DROP covers Azure's pooled
+           direct connections (on-prem the sp_executesql scope self-cleans). */
+        Assert.Contains("DROP TABLE IF EXISTS #pm_qs_slice;", text, StringComparison.Ordinal);
+        Assert.Contains("INTO #pm_qs_slice", text, StringComparison.Ordinal);
+        Assert.Contains("FROM #pm_qs_slice AS qsrs\nJOIN sys.query_store_plan AS qsp", Lf(text), StringComparison.Ordinal);
+
+        /* The row SHAPE must not move: 55 selected columns, and the TOP/ORDER BY stay on the final
+           SELECT so the cap counts intervals and can never truncate one interval's slices into a
            partial sum. WITH TIES + ASC are the #1960 never-a-hole pair: oldest-first shipping keeps
            the derived watermark at the shipped boundary, and WITH TIES stops a bare TOP from splitting
            a group of rows tied at that boundary — the strict `> @cutoff_time` would strand the
-           unshipped half forever. */
+           unshipped half forever. The LOOP JOIN hint must never return to this query: looping from the
+           temp into the TVFs is the per-probe re-materialization #2133 removed. */
         Assert.Contains($"TOP ({QueryStoreCollector.MaxRowsPerDatabase}) WITH TIES", text, StringComparison.Ordinal);
-        Assert.Contains(") AS qsrs\nJOIN sys.query_store_plan AS qsp", text, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY qsrs.last_execution_time ASC\nOPTION(RECOMPILE, LOOP JOIN);", text, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY qsrs.last_execution_time ASC\nOPTION(RECOMPILE);", Lf(text), StringComparison.Ordinal);
+        Assert.DoesNotContain("LOOP JOIN", text, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -763,7 +778,7 @@ public sealed class QueryStoreCollectorDefinitionTests
            original defect with an aggregate bolted on. HAVING MAX(...) asks whether the INTERVAL saw new
            activity and then takes all of it. */
         var normalized = plan.Text.Replace("\r\n", "\n", StringComparison.Ordinal);
-        Assert.Contains("HAVING\n        MAX(qsrs.last_execution_time) > @cutoff_time", normalized, StringComparison.Ordinal);
+        Assert.Contains("HAVING\n    MAX(qsrs.last_execution_time) > @cutoff_time", normalized, StringComparison.Ordinal);
         Assert.DoesNotContain("WHERE qsrs.last_execution_time > @cutoff_time", normalized, StringComparison.Ordinal);
         /* #1565: NO SQL-side self-exclusion — the old NOT LIKE was 75% of the read's elapsed time (full
            nvarchar(max) scan per row on a column no index can serve; field A/B: 4.3x without it), and no
@@ -771,7 +786,8 @@ public sealed class QueryStoreCollectorDefinitionTests
            where the text is already materialized (pinned below). The query still CONTAINS the marker —
            in its own leading comment. */
         Assert.DoesNotContain("NOT LIKE", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("OPTION(RECOMPILE, LOOP JOIN);", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("OPTION(RECOMPILE);", plan.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("LOOP JOIN", plan.Text, StringComparison.Ordinal);
         Assert.Contains("N'@cutoff_time datetime2(7)',", plan.Text, StringComparison.Ordinal);
 
         var parameter = Assert.Single(plan.Parameters);
@@ -823,8 +839,11 @@ public sealed class QueryStoreCollectorDefinitionTests
         {
             Assert.Contains($"TOP ({QueryStoreCollector.MaxRowsPerDatabase}) WITH TIES", plan.Text, StringComparison.Ordinal);
             Assert.Contains("ORDER BY qsrs.last_execution_time ASC", plan.Text, StringComparison.Ordinal);
-            /* The row-bounding ORDER BY sits before the existing query hint, which the OPTION pin still checks. */
-            Assert.Contains("OPTION(RECOMPILE, LOOP JOIN);", plan.Text, StringComparison.Ordinal);
+            /* The row-bounding ORDER BY sits before the existing query hint, which the OPTION pin still
+               checks. RECOMPILE only — the old LOOP JOIN hint is the #2133 pathology (per-probe TVF
+               re-materialization) and must never return. */
+            Assert.Contains("OPTION(RECOMPILE);", plan.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain("LOOP JOIN", plan.Text, StringComparison.Ordinal);
         }
 
         Assert.Equal(50_000, QueryStoreCollector.MaxRowsPerDatabase);
@@ -1082,8 +1101,11 @@ public sealed class QueryStoreCollectorDefinitionTests
 
         Assert.Contains("EXECUTE [StackOverflow].sys.sp_executesql", plan.Text, StringComparison.Ordinal);
         Assert.Contains("N'@floor_time datetime2(7), @ceiling_time datetime2(7)'", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("f.last_execution_time > @floor_time", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("f.last_execution_time < @ceiling_time", plan.Text, StringComparison.Ordinal);
+        /* #2133: the pre-filter's two-sided window asks the INTERVAL CATALOG which intervals OVERLAP
+           (floor, ceiling) — end after the floor AND start before the ceiling — a superset the exact
+           HAVING below then narrows, exactly like the live path's one-sided form. */
+        Assert.Contains("i.end_time > @floor_time", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("i.start_time < @ceiling_time", plan.Text, StringComparison.Ordinal);
         Assert.Contains("MAX(qsrs.last_execution_time) > @floor_time", plan.Text, StringComparison.Ordinal);
         Assert.Contains("MAX(qsrs.last_execution_time) < @ceiling_time", plan.Text, StringComparison.Ordinal);
         Assert.Contains("ORDER BY qsrs.last_execution_time DESC", plan.Text, StringComparison.Ordinal);
@@ -1109,8 +1131,8 @@ public sealed class QueryStoreCollectorDefinitionTests
         var plan = QueryStoreCollector.Instance.BuildBackfillQuery(MakeContext(isAzureSqlDb: true), floor, ceiling);
 
         Assert.DoesNotContain("sp_executesql", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("f.last_execution_time > @floor_time", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("f.last_execution_time < @ceiling_time", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("i.end_time > @floor_time", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("i.start_time < @ceiling_time", plan.Text, StringComparison.Ordinal);
         Assert.Contains("ORDER BY qsrs.last_execution_time DESC", plan.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("@cutoff_time", plan.Text, StringComparison.Ordinal);
         /* The same eligibility gate the live Azure query leads with. */
@@ -1132,7 +1154,7 @@ public sealed class QueryStoreCollectorDefinitionTests
            one-sided cutoff and ASC order byte-for-byte, or phase 1's watermark-exact resume breaks
            in the same PR that builds on it. */
         var live = QueryStoreCollector.Instance.BuildPerItemQuery("StackOverflow", MakeContext());
-        Assert.Contains("f.last_execution_time > @cutoff_time", live.Text, StringComparison.Ordinal);
+        Assert.Contains("i.end_time > @cutoff_time", live.Text, StringComparison.Ordinal);
         Assert.Contains("MAX(qsrs.last_execution_time) > @cutoff_time", live.Text, StringComparison.Ordinal);
         Assert.Contains("ORDER BY qsrs.last_execution_time ASC", live.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("@floor_time", live.Text, StringComparison.Ordinal);
