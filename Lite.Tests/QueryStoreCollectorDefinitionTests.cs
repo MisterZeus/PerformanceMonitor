@@ -465,7 +465,7 @@ public sealed class QueryStoreCollectorDefinitionTests
            Anything coarser would merge work that is genuinely distinct; anything finer would leave the
            slices split, which is the bug. */
         Assert.Contains(
-            "GROUP BY\n        qsrs.plan_id,\n        qsrs.runtime_stats_interval_id,\n        qsrs.execution_type_desc,\n        qsrs.replica_group_id",
+            "GROUP BY\n    qsrs.plan_id,\n    qsrs.runtime_stats_interval_id,\n    qsrs.execution_type_desc,\n        qsrs.replica_group_id",
             text,
             StringComparison.Ordinal);
 
@@ -532,11 +532,13 @@ public sealed class QueryStoreCollectorDefinitionTests
     {
         var text = PayloadSql(MakeContext(probeResult: 16));
 
-        /* Only the aggregating derived table — the outer projection references the same names as plain
-           columns, which is correct there and must not be mistaken for an un-weighted aggregate. */
-        var open = text.IndexOf("FROM\n(", StringComparison.Ordinal);
-        var close = text.IndexOf(") AS qsrs", StringComparison.Ordinal);
-        Assert.True(open > 0 && close > open, "could not locate the slice-aggregating derived table");
+        /* Only the aggregating STAGING statement (#2133: the aggregate lands in #pm_qs_slice and the
+           joins run from it) — the final projection references the same names as plain columns, which
+           is correct there and must not be mistaken for an un-weighted aggregate. The staging SELECT
+           is the marker's first occurrence; the final SELECT carries TOP on the marker line. */
+        var open = text.IndexOf("SELECT /* PerformanceMonitorLite */\n", StringComparison.Ordinal);
+        var close = text.IndexOf("INTO #pm_qs_slice", StringComparison.Ordinal);
+        Assert.True(open > 0 && close > open, "could not locate the slice-aggregating staging statement");
         var aggregate = text[open..close];
 
         var averages = System.Text.RegularExpressions.Regex
@@ -592,7 +594,7 @@ public sealed class QueryStoreCollectorDefinitionTests
         {
             var ungated = PayloadSql(MakeContext(probeResult: probe));
             Assert.DoesNotContain("replica_group_id", ungated, StringComparison.Ordinal);
-            Assert.Contains("GROUP BY\n        qsrs.plan_id,\n        qsrs.runtime_stats_interval_id,\n        qsrs.execution_type_desc\n", ungated, StringComparison.Ordinal);
+            Assert.Contains("GROUP BY\n    qsrs.plan_id,\n    qsrs.runtime_stats_interval_id,\n    qsrs.execution_type_desc\n", ungated, StringComparison.Ordinal);
         }
     }
 
@@ -619,13 +621,14 @@ public sealed class QueryStoreCollectorDefinitionTests
         Assert.Contains("avg_log_bytes_used = NULL, min_log_bytes_used = NULL, max_log_bytes_used = NULL,", old, StringComparison.Ordinal);
         Assert.Contains("avg_tempdb_space_used = NULL, min_tempdb_space_used = NULL, max_tempdb_space_used = NULL,", old, StringComparison.Ordinal);
 
-        /* The inner list must end cleanly on the last ungated column when all three are absent. */
-        Assert.Contains("max_rowcount = MAX(qsrs.max_rowcount)\n    FROM sys.query_store_runtime_stats AS qsrs", old, StringComparison.Ordinal);
+        /* The staging list must end cleanly on the last ungated column when all three are absent —
+           #2133: the aggregate lands in #pm_qs_slice, so INTO sits between the list and FROM. */
+        Assert.Contains("max_rowcount = MAX(qsrs.max_rowcount)\nINTO #pm_qs_slice\nFROM sys.query_store_runtime_stats AS qsrs", old, StringComparison.Ordinal);
 
         /* On 2017+ they are present, aggregated, and the list ends with the last gated family instead. */
         var newer = PayloadSql(MakeContext(probeResult: 14));
         Assert.Contains("max_rowcount = MAX(qsrs.max_rowcount),\n", newer, StringComparison.Ordinal);
-        Assert.Contains("max_tempdb_space_used = MAX(qsrs.max_tempdb_space_used)\n    FROM sys.query_store_runtime_stats AS qsrs", newer, StringComparison.Ordinal);
+        Assert.Contains("max_tempdb_space_used = MAX(qsrs.max_tempdb_space_used)\nINTO #pm_qs_slice\nFROM sys.query_store_runtime_stats AS qsrs", newer, StringComparison.Ordinal);
     }
 
     [Fact]
