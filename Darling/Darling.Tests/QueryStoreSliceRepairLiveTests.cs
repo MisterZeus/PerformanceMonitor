@@ -285,6 +285,65 @@ public sealed class QueryStoreSliceRepairLiveTests
         }
     }
 
+    /// <summary>
+    /// The SECOND #2105 field failure, pinned the way DarlingRetentionTests pins the first of this class
+    /// (#1564): the collapse's DELETE touches COMPRESSED chunks — a store old enough to need this repair has
+    /// had its compression policy running the whole time — and TimescaleDB rails DML decompression at 100k
+    /// tuples per transaction by default, so the field run died at <c>53400: tuple decompression limit
+    /// exceeded</c> four minutes in. The fix is the <c>SET LOCAL ... = 0</c> lift at the top of the slice
+    /// transaction, and this test is its tripwire: the session arms the rail at ONE tuple before calling the
+    /// collapse, so the transaction-local lift is the only thing standing between the DELETE and the exact
+    /// field error. Drop the lift and this fails with the operator's 53400 instead of a silent coverage hole.
+    /// Compression is applied SYNCHRONOUSLY (the retention test's pattern — no background-job race), and the
+    /// compressed shape is PROVEN before the repair runs, not assumed.
+    /// </summary>
+    [Fact]
+    public async Task CollapsingRowsInsideACompressedChunk_SurvivesTheDecompressionRail_TheSecondFieldFailure()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #2105 compressed-chunk collapse test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        var hour = new DateTime(2026, 6, 12, 8, 0, 0, DateTimeKind.Unspecified);
+        await SeedSliceAsync(connection, hour.AddMinutes(5), intervalId: 8201, queryId: 91, planId: 111,
+            intervalStart: hour, executionCount: FlushedCount, avgDurationUs: FlushedAvgUs, ct: ct);
+        await SeedSliceAsync(connection, hour.AddMinutes(5), intervalId: 8201, queryId: 91, planId: 111,
+            intervalStart: hour, executionCount: MemoryCount, avgDurationUs: MemoryAvgUs, ct: ct);
+
+        /* ConvertToHypertablesAsync already enabled compression on the table; compress the seeded chunk
+           synchronously (if_not_compressed tolerates the policy job having beaten us to it), then PROVE the
+           compressed shape is what the collapse is about to run against. */
+        await ExecAsync(connection,
+            "SELECT compress_chunk(c, if_not_compressed => true) FROM show_chunks('collect.query_store_stats') c", ct);
+        Assert.True(await ScalarAsync(connection, @"
+SELECT count(*)
+FROM timescaledb_information.chunks
+WHERE hypertable_name = 'query_store_stats'
+  AND is_compressed", ct) >= 1,
+            "expected the seeded query_store_stats chunk to be compressed — the fixture is not exercising the compressed-chunk shape");
+
+        /* Arm the rail at ONE tuple for this session. The DELETE must decompress the seeded rows' batch
+           (two tuples at minimum), so only the transaction-local SET LOCAL lift lets the collapse commit. */
+        await ExecAsync(connection, "SET timescaledb.max_tuples_decompressed_per_dml_transaction = 1", ct);
+
+        var removed = await QueryStoreSliceRepair.CollapseSliceAsync(connection, hour, hour.AddHours(1), ct);
+        Assert.Equal(1, removed);
+
+        Assert.Equal(1, await RawRowCountAsync(connection, queryId: 91, ct));
+        Assert.Equal(TrueCount, await RawExecutionCountAsync(connection, queryId: 91, ct));
+    }
+
     /* ─────────────────────────── helpers ─────────────────────────── */
 
     private static async Task SeedSliceAsync(
