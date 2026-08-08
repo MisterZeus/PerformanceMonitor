@@ -3032,6 +3032,11 @@ public static class DarlingCliCommands
                 sliceEnd = collapseEnd;
             }
 
+            /* The width the slice ACTUALLY covers — the final slice clamps to the range end, so the
+               nominal AdaptiveSpan width can overstate it, and both the retry decision and the operator
+               messages must speak in real terms (review catch). */
+            var actualWidth = sliceEnd - sliceStart;
+
             try
             {
                 removed += await QueryStoreSliceRepair.CollapseSliceAsync(
@@ -3042,18 +3047,43 @@ public static class DarlingCliCommands
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                var narrower = QueryStoreBackfillState.AdaptiveSpan(fullWidth, consecutiveFailures + 1);
-                if (narrower < span)
+                /* Find the next halving step that actually narrows THIS slice — a clamped final slice can
+                   already be narrower than several nominal steps, and re-running the identical window
+                   would just re-hit the same wall (review catch). */
+                var next = consecutiveFailures + 1;
+                var narrower = QueryStoreBackfillState.AdaptiveSpan(fullWidth, next);
+                while (narrower >= actualWidth)
                 {
-                    consecutiveFailures++;
-                    output.WriteLine($"  [RETRY] slice {sliceStart:yyyy-MM-dd HH:mm} +{span.TotalMinutes:F0}m failed ({ex.Message.Split('\n')[0].TrimEnd('\r')}); narrowing to {narrower.TotalMinutes:F0}m and retrying.");
+                    var evenNarrower = QueryStoreBackfillState.AdaptiveSpan(fullWidth, next + 1);
+                    if (evenNarrower >= narrower)
+                    {
+                        break; /* the adaptive floor — no step narrows this slice */
+                    }
+
+                    next++;
+                    narrower = evenNarrower;
+                }
+
+                if (narrower < actualWidth)
+                {
+                    /* The statement-timeout failure this loop exists to survive surfaces as a broken
+                       STREAM, not a clean server-side cancel — the connection underneath is very likely
+                       dead, and retrying on it would fail instantly through every halving step (review
+                       catch). Cycle it: close is safe on a broken connection, and reopen draws a fresh
+                       physical connection. Session state doesn't matter — the slice's SET LOCAL and
+                       per-command timeouts are transaction/command scoped. */
+                    await connection.CloseAsync();
+                    await connection.OpenAsync(cancellationToken);
+
+                    consecutiveFailures = next;
+                    output.WriteLine($"  [RETRY] slice {sliceStart:yyyy-MM-dd HH:mm} +{actualWidth.TotalMinutes:F0}m failed ({ex.Message.Split('\n')[0].TrimEnd('\r')}); narrowing to {narrower.TotalMinutes:F0}m and retrying.");
                     continue;
                 }
 
                 /* Already at the adaptive floor — this range cannot be repaired unattended. Each slice is
                    its own transaction, so earlier slices are already committed and are not lost — and the
                    collapse is idempotent, so re-running picks up where this stopped. */
-                error.WriteLine($"  The collapse failed after {removed:N0} row(s); the failing {span.TotalMinutes:F0}m slice at {sliceStart:yyyy-MM-dd HH:mm} was rolled back: {ex.Message}");
+                error.WriteLine($"  The collapse failed after {removed:N0} row(s); the failing {actualWidth.TotalMinutes:F0}m slice at {sliceStart:yyyy-MM-dd HH:mm} was rolled back: {ex.Message}");
                 error.WriteLine("  Slices already committed are safe. Re-run to continue — the repair is idempotent.");
                 return 1;
             }
