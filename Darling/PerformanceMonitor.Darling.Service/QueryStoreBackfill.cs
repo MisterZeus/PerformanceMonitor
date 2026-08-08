@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Threading;
@@ -190,9 +191,10 @@ public sealed class QueryStoreBackfill
     /// promoted): a server whose hour-wide slices keep dying at the command timeout digs in
     /// progressively narrower chunks (<see cref="QueryStoreBackfillState.AdaptiveSpan"/>) until one
     /// fits. Reset by any completed slice; in-memory on purpose, like the live counters — a restart
-    /// forgetting it costs one full-width slice.
+    /// forgetting it costs one full-width slice. Concurrent for symmetry with the Lite twin — the
+    /// worker is single-threaded today, but nothing pins that.
     /// </summary>
-    private readonly Dictionary<int, int> _consecutiveSliceFailures = new();
+    private readonly ConcurrentDictionary<int, int> _consecutiveSliceFailures = new();
 
     /// <summary>Runs one slice with the failure accounting wrapped around it — the worker's outer
     /// catch still logs the throw exactly as before.</summary>
@@ -202,12 +204,11 @@ public sealed class QueryStoreBackfill
         try
         {
             await RunSliceAsync(server, databaseName, floorUtc, ceilingUtc, isHole, cancellationToken);
-            _consecutiveSliceFailures.Remove(server.ServerId);
+            _consecutiveSliceFailures.TryRemove(server.ServerId, out _);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _consecutiveSliceFailures[server.ServerId] =
-                (_consecutiveSliceFailures.TryGetValue(server.ServerId, out var count) ? count : 0) + 1;
+            _consecutiveSliceFailures.AddOrUpdate(server.ServerId, 1, static (_, count) => count + 1);
             throw;
         }
     }

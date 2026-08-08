@@ -175,17 +175,28 @@ public partial class RemoteCollectorService
                            passes through untouched; the skipped range rides the backfill hole. */
                         var azureFailures = ConsecutiveQueryStoreItemFailures(serverId, databaseName);
                         if (azureFailures > 0
-                            && context.Watermark is DateTime azureRaw
                             && string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                         {
                             var adaptiveSpan = QueryStoreBackfillState.AdaptiveSpan(WatermarkPolicy.MaxCatchup, azureFailures);
                             var tighterFloor = collectionTime - adaptiveSpan;
-                            if (azureRaw < tighterFloor)
+                            if (context.Watermark is DateTime azureRaw)
                             {
+                                if (azureRaw < tighterFloor)
+                                {
+                                    _logger?.LogWarning(
+                                        "query_store on '{Server}' database [{Database}] adaptive catch-up shrink: {Failures} consecutive failed cycles — window narrowed to {Minutes:F0}m; the skipped range rides the backfill hole.",
+                                        server.DisplayName, databaseName, azureFailures, adaptiveSpan.TotalMinutes);
+                                    await RecordQueryStoreBackfillHoleAsync(serverId, databaseName, azureRaw, tighterFloor, cancellationToken);
+                                    context.Watermark = tighterFloor;
+                                }
+                            }
+                            else
+                            {
+                                /* Never-succeeded database: tighten the first-run fallback too (the
+                                   review catch); no hole — pre-watermark history is the tail's job. */
                                 _logger?.LogWarning(
-                                    "query_store on '{Server}' database [{Database}] adaptive catch-up shrink: {Failures} consecutive failed cycles — window narrowed to {Minutes:F0}m; the skipped range rides the backfill hole.",
+                                    "query_store on '{Server}' database [{Database}] adaptive first-contact shrink: {Failures} consecutive failed cycles — first-run window narrowed to {Minutes:F0}m.",
                                     server.DisplayName, databaseName, azureFailures, adaptiveSpan.TotalMinutes);
-                                await RecordQueryStoreBackfillHoleAsync(serverId, databaseName, azureRaw, tighterFloor, cancellationToken);
                                 context.Watermark = tighterFloor;
                             }
                         }
@@ -420,17 +431,29 @@ public partial class RemoteCollectorService
                                dropped. Success resets the count via onItemComplete. */
                             var failures = ConsecutiveQueryStoreItemFailures(serverId, item);
                             if (failures > 0
-                                && clamped is DateTime current
                                 && string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                             {
                                 var span = QueryStoreBackfillState.AdaptiveSpan(WatermarkPolicy.MaxCatchup, failures);
                                 var tighterFloor = collectionTime - span;
-                                if (current < tighterFloor)
+                                if (clamped is DateTime current)
                                 {
+                                    if (current < tighterFloor)
+                                    {
+                                        _logger?.LogWarning(
+                                            "query_store on '{Server}' database [{Database}] adaptive catch-up shrink: {Failures} consecutive failed cycles — window narrowed to {Minutes:F0}m; the skipped range rides the backfill hole.",
+                                            server.DisplayName, item, failures, span.TotalMinutes);
+                                        await RecordQueryStoreBackfillHoleAsync(serverId, item, current, tighterFloor, ct);
+                                        clamped = tighterFloor;
+                                    }
+                                }
+                                else
+                                {
+                                    /* Never-succeeded database (null watermark): tighten the 60-minute
+                                       first-run fallback the same way — the review catch; see Darling's
+                                       twin. No hole: pre-watermark history is the tail's job. */
                                     _logger?.LogWarning(
-                                        "query_store on '{Server}' database [{Database}] adaptive catch-up shrink: {Failures} consecutive failed cycles — window narrowed to {Minutes:F0}m; the skipped range rides the backfill hole.",
+                                        "query_store on '{Server}' database [{Database}] adaptive first-contact shrink: {Failures} consecutive failed cycles — first-run window narrowed to {Minutes:F0}m.",
                                         server.DisplayName, item, failures, span.TotalMinutes);
-                                    await RecordQueryStoreBackfillHoleAsync(serverId, item, current, tighterFloor, ct);
                                     clamped = tighterFloor;
                                 }
                             }
