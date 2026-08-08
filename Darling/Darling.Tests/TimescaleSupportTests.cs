@@ -152,12 +152,31 @@ public sealed class TimescaleSupportTests
     [Fact]
     public void IsCompressionJobStuck_NextStartNegativeInfinity_IsStuck()
     {
-        /* The dominant failure mode: next_start = -infinity, so the scheduler never re-fires it. Stuck
-           regardless of status/last-run — it will never run again. */
+        /* The dominant failure mode: next_start = -infinity on a job that is NOT running — the scheduler
+           abandoned it and never re-fires it. */
         Assert.True(TimescaleSupport.IsCompressionJobStuck(
             nextStartIsNegativeInfinity: true, jobStatus: "Scheduled", lastRunStartedAtUtc: null,
             scheduleInterval: TimeSpan.FromHours(12), nowUtc: s_now, out var reason));
         Assert.Contains("-infinity", reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void IsCompressionJobStuck_NegativeInfinityWhileRunning_IsTheMidRunMarker_NotStuck()
+    {
+        /* Measured live on TimescaleDB 2.x: from scheduler pickup to run completion, next_start reads
+           -infinity WITH job_status = 'Running' — the engine only computes the real next start when the
+           run finishes. An unconditioned -infinity arm flagged every healthy job caught mid-run (the
+           field's transient stuck→self-healed alert noise, and the CI flake where the live test caught
+           its own re-arm-triggered run). Mid-run belongs to the elapsed-bound arm: */
+        Assert.False(TimescaleSupport.IsCompressionJobStuck(
+            nextStartIsNegativeInfinity: true, jobStatus: "Running", lastRunStartedAtUtc: s_now.AddMinutes(-3),
+            scheduleInterval: TimeSpan.FromHours(12), nowUtc: s_now, out _));
+
+        /* ...which still catches a genuinely HUNG run that carries the mid-run marker. */
+        Assert.True(TimescaleSupport.IsCompressionJobStuck(
+            nextStartIsNegativeInfinity: true, jobStatus: "Running", lastRunStartedAtUtc: s_now.AddHours(-30),
+            scheduleInterval: TimeSpan.FromHours(12), nowUtc: s_now, out var reason));
+        Assert.Contains("Running", reason, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1553,9 +1572,12 @@ LIMIT 1", connection))
            DETECTION logic is covered by the pure IsCompressionJobStuck unit tests. */
         Assert.True(await TimescaleSupport.TryRearmJobAsync(connection, jobId, null, ct));
 
-        /* (3) After a real re-arm (next_start => now()) the job is scheduled/running within bound, not stuck. */
-        var afterRearm = await TimescaleSupport.ReadStuckCompressionJobsAsync(connection, DateTime.UtcNow, null, ct);
-        Assert.DoesNotContain(afterRearm, s => s.JobId == jobId);
+        /* (3) After a real re-arm (next_start => now()) the job settles healthy. SETTLES, not "reads healthy
+           on one snapshot": next_start => now() makes the job immediately due, the scheduler picks it up, and
+           from pickup to completion job_stats reads next_start = -infinity with status Running — the mid-run
+           marker (measured live; the detector now defers that state to its elapsed-bound arm). A single
+           un-settled read raced the very run the re-arm triggered, which was this test's own flake. */
+        await WaitUntilDetectorReportsHealthyAsync(connection, jobId, ct);
     }
 
     /// <summary>

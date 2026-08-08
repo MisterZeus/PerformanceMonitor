@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Threading;
@@ -152,7 +153,7 @@ public sealed class QueryStoreBackfill
                 }
 
                 var holeFloor = holeFrom > floorLimit ? holeFrom : floorLimit;
-                await RunSliceAsync(server, databaseName, holeFloor, holeTo, isHole: true, cancellationToken);
+                await RunCountedSliceAsync(server, databaseName, holeFloor, holeTo, isHole: true, cancellationToken);
                 return true;
             }
 
@@ -178,11 +179,38 @@ public sealed class QueryStoreBackfill
                 continue;
             }
 
-            await RunSliceAsync(server, databaseName, floorLimit, storedFloor.Value, isHole: false, cancellationToken);
+            await RunCountedSliceAsync(server, databaseName, floorLimit, storedFloor.Value, isHole: false, cancellationToken);
             return true;
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Consecutive failed slices per server — the adaptive-shrink signal's backfill half (#2111
+    /// promoted): a server whose hour-wide slices keep dying at the command timeout digs in
+    /// progressively narrower chunks (<see cref="QueryStoreBackfillState.AdaptiveSpan"/>) until one
+    /// fits. Reset by any completed slice; in-memory on purpose, like the live counters — a restart
+    /// forgetting it costs one full-width slice. Concurrent for symmetry with the Lite twin — the
+    /// worker is single-threaded today, but nothing pins that.
+    /// </summary>
+    private readonly ConcurrentDictionary<int, int> _consecutiveSliceFailures = new();
+
+    /// <summary>Runs one slice with the failure accounting wrapped around it — the worker's outer
+    /// catch still logs the throw exactly as before.</summary>
+    private async Task RunCountedSliceAsync(
+        ServerRuntime server, string databaseName, DateTime floorUtc, DateTime ceilingUtc, bool isHole, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await RunSliceAsync(server, databaseName, floorUtc, ceilingUtc, isHole, cancellationToken);
+            _consecutiveSliceFailures.TryRemove(server.ServerId, out _);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _consecutiveSliceFailures.AddOrUpdate(server.ServerId, 1, static (_, count) => count + 1);
+            throw;
+        }
     }
 
     /// <summary>
@@ -200,7 +228,12 @@ public sealed class QueryStoreBackfill
            budget bounds what SHIPS, not what the query aggregates and sorts — an unchunked wide
            window on a big database times out at the command timeout every tick and the range never
            drains, the same row-cap-is-not-a-cost-cap flaw that wedged the live path. */
-        var sliceFloor = QueryStoreBackfillState.BoundSliceFloor(floorUtc, ceilingUtc);
+        /* #2111 adaptive shrink: after consecutive failed slices this server digs in narrower
+           chunks until one fits its command timeout; a completed slice resets to full width. */
+        var sliceSpan = QueryStoreBackfillState.AdaptiveSpan(
+            QueryStoreBackfillState.MaxSliceSpan,
+            _consecutiveSliceFailures.TryGetValue(server.ServerId, out var recentFailures) ? recentFailures : 0);
+        var sliceFloor = QueryStoreBackfillState.BoundSliceFloor(floorUtc, ceilingUtc, sliceSpan);
 
         var definition = QueryStoreCollector.Instance;
         var context = new CollectorContext
