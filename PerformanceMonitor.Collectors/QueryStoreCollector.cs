@@ -166,11 +166,11 @@ DECLARE
 
 DECLARE db_check CURSOR LOCAL FAST_FORWARD FOR
     SELECT /* PerformanceMonitorLite */
-    d.name
+        d.name
     FROM sys.databases AS d
     LEFT JOIN sys.dm_hadr_database_replica_states AS drs
-    ON d.database_id = drs.database_id
-    AND drs.is_local = 1
+        ON d.database_id = drs.database_id
+        AND drs.is_local = 1
     WHERE d.database_id > 4
     AND   d.database_id < 32761
     AND   d.state_desc = N'ONLINE'
@@ -182,17 +182,17 @@ DECLARE db_check CURSOR LOCAL FAST_FORWARD FOR
        Second group = common DBA-convention tooling names, screened by operator decision; the inverse
        case (exclude a real workload db) is what excludedDatabases handles. */
     AND   d.name NOT IN
-      (
-          N'master', N'model', N'msdb', N'tempdb',
-          N'rdsadmin', N'gcloud_cloudsqladmin',
-          N'ReportServer', N'ReportServerTempDB',
-          N'DWConfiguration', N'DWDiagnostics', N'DWQueue',
-          N'DBAUtil', N'DBAUtils', N'Utility'
-      )
+          (
+              N'master', N'model', N'msdb', N'tempdb',
+              N'rdsadmin', N'gcloud_cloudsqladmin',
+              N'ReportServer', N'ReportServerTempDB',
+              N'DWConfiguration', N'DWDiagnostics', N'DWQueue',
+              N'DBAUtil', N'DBAUtils', N'Utility'
+          )
     AND
     (
-    drs.database_id IS NULL          /*not in any AG*/
-    OR drs.is_primary_replica = 1    /*primary replica*/
+        drs.database_id IS NULL          /*not in any AG*/
+        OR drs.is_primary_replica = 1    /*primary replica*/
     )
     /*EXCLUSION_FILTER*/
     OPTION(RECOMPILE);
@@ -206,39 +206,39 @@ INTO @db;
 WHILE @@FETCH_STATUS = 0
 BEGIN
     BEGIN TRY
-    /* actual_state IN (1,2,4) = READ_ONLY / READ_WRITE / READ_CAPTURE_SECONDARY (#1546: > 0 also
-       admitted 3 = ERROR). readonly_reason & 8 = 0 (#1558): bit 8 is the engine saying read-only
-       BECAUSE this database is a readable secondary replica — its Query Store content is the
-       PRIMARY's persisted QS tables arriving via replication, not local activity, so collecting it
-       is duplicate, lagged primary data (caught live: 24 RDS read replicas each re-reading the same
-       primary's QS — pathological volume for zero information). The HADR join in the cursor above
-       only catches Always On AG secondaries; reason bit 8 is the engine's mechanism-agnostic flag
-       (AG, RDS read replicas, geo-secondaries alike). An operator-set read-only QS on a PRIMARY has
-       reason <> 8 and still collects; a 2025 READ_CAPTURE_SECONDARY (state 4, reason 0) captures
-       REAL local secondary workload and still collects. */
-    SET @sql = N'
-        SELECT ' + QUOTENAME(@db, '''') + N'
-        WHERE EXISTS
-        (
-            SELECT
-                1
-            FROM sys.database_query_store_options
-            WHERE actual_state IN (1, 2, 4)
-            AND   readonly_reason & 8 = 0
-        );';
+        /* actual_state IN (1,2,4) = READ_ONLY / READ_WRITE / READ_CAPTURE_SECONDARY (#1546: > 0 also
+           admitted 3 = ERROR). readonly_reason & 8 = 0 (#1558): bit 8 is the engine saying read-only
+           BECAUSE this database is a readable secondary replica — its Query Store content is the
+           PRIMARY's persisted QS tables arriving via replication, not local activity, so collecting it
+           is duplicate, lagged primary data (caught live: 24 RDS read replicas each re-reading the same
+           primary's QS — pathological volume for zero information). The HADR join in the cursor above
+           only catches Always On AG secondaries; reason bit 8 is the engine's mechanism-agnostic flag
+           (AG, RDS read replicas, geo-secondaries alike). An operator-set read-only QS on a PRIMARY has
+           reason <> 8 and still collects; a 2025 READ_CAPTURE_SECONDARY (state 4, reason 0) captures
+           REAL local secondary workload and still collects. */
+        SET @sql = N'
+            SELECT ' + QUOTENAME(@db, '''') + N'
+            WHERE EXISTS
+            (
+                SELECT
+                    1
+                FROM sys.database_query_store_options
+                WHERE actual_state IN (1, 2, 4)
+                AND   readonly_reason & 8 = 0
+            );';
 
-    SET @exec_sp = QUOTENAME(@db) + N'.sys.sp_executesql';
+        SET @exec_sp = QUOTENAME(@db) + N'.sys.sp_executesql';
 
-    INSERT @result (name)
-    EXECUTE @exec_sp @sql;
+        INSERT @result (name)
+        EXECUTE @exec_sp @sql;
     END TRY
     BEGIN CATCH
-    /* The failure modes this catches are ordinary and per-database (mid-restore, an AG failover
-       mid-cursor, a login without access, a database that went offline between the cursor and the
-       probe), so the cursor keeps going — but the database is now MISSING from a collection that
-       still reports SUCCESS, which is exactly the hole #1837 closes. */
-    INSERT @probe_failures (name, error_text)
-    VALUES (@db, ERROR_MESSAGE());
+        /* The failure modes this catches are ordinary and per-database (mid-restore, an AG failover
+           mid-cursor, a login without access, a database that went offline between the cursor and the
+           probe), so the cursor keeps going — but the database is now MISSING from a collection that
+           still reports SUCCESS, which is exactly the hole #1837 closes. */
+        INSERT @probe_failures (name, error_text)
+        VALUES (@db, ERROR_MESSAGE());
     END CATCH;
 
     FETCH NEXT
@@ -276,7 +276,7 @@ ORDER BY
 IF NOT EXISTS
 (
     SELECT
-    1
+        1
     FROM sys.database_query_store_options
     WHERE actual_state IN (1, 2, 4)
     AND   readonly_reason & 8 = 0
@@ -289,7 +289,7 @@ END;
 
     /// <summary>The live version probe deciding the 2017+/2022+ column gates (see class remarks).</summary>
     public const string ProductVersionProbeText =
-    "SELECT CONVERT(integer, PARSENAME(CONVERT(sysname, SERVERPROPERTY('PRODUCTVERSION')), 4))";
+        "SELECT CONVERT(integer, PARSENAME(CONVERT(sysname, SERVERPROPERTY('PRODUCTVERSION')), 4))";
 
     /// <summary>PRODUCTVERSION assumed when the probe fails or returns NULL (SQL Server 2016).</summary>
     public const int DefaultProductVersion = 13;
@@ -347,7 +347,7 @@ END;
     /// version-gated columns are selected; this gate decides whether the collector runs at all.)
     /// </summary>
     public override bool AppliesTo(CollectorTargetInfo target) =>
-    target.SqlMajorVersion == 0 || target.SqlMajorVersion >= 13 || target.IsAzureSqlDb || target.IsAzureManagedInstance;
+        target.SqlMajorVersion == 0 || target.SqlMajorVersion >= 13 || target.IsAzureSqlDb || target.IsAzureManagedInstance;
 
     /// <summary>Incremental: only intervals with newer last_execution_time are fetched per cycle.</summary>
     public override string? WatermarkColumn => "last_execution_time";
@@ -391,14 +391,14 @@ END;
     /// </summary>
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
-    if (!context.Target.IsAzureSqlDb)
-    {
-        throw new NotSupportedException("query_store enumerates databases on this target; BuildEnumerationQuery drives the cycle.");
-    }
+        if (!context.Target.IsAzureSqlDb)
+        {
+            throw new NotSupportedException("query_store enumerates databases on this target; BuildEnumerationQuery drives the cycle.");
+        }
 
-    return new CollectorQuery(
-        AzureEligibilityGateText + BuildPayloadBody(context),
-        BuildCutoffParameters(context));
+        return new CollectorQuery(
+            AzureEligibilityGateText + BuildPayloadBody(context),
+            BuildCutoffParameters(context));
     }
 
     /// <summary>
@@ -413,18 +413,18 @@ END;
     /// </summary>
     public CollectorQuery BuildBackfillQuery(CollectorContext context, DateTime floorUtc, DateTime ceilingUtc)
     {
-    if (!context.Target.IsAzureSqlDb)
-    {
-        throw new NotSupportedException("query_store backfills per enumerated database on this target; BuildBackfillPerItemQuery drives the slice.");
-    }
-
-    return new CollectorQuery(
-        AzureEligibilityGateText + BuildPayloadBody(context, backfill: true),
-        new List<CollectorParameter>
+        if (!context.Target.IsAzureSqlDb)
         {
-            new("@floor_time", floorUtc, CollectorParameterType.DateTime2),
-            new("@ceiling_time", ceilingUtc, CollectorParameterType.DateTime2),
-        });
+            throw new NotSupportedException("query_store backfills per enumerated database on this target; BuildBackfillPerItemQuery drives the slice.");
+        }
+
+        return new CollectorQuery(
+            AzureEligibilityGateText + BuildPayloadBody(context, backfill: true),
+            new List<CollectorParameter>
+            {
+                new("@floor_time", floorUtc, CollectorParameterType.DateTime2),
+                new("@ceiling_time", ceilingUtc, CollectorParameterType.DateTime2),
+            });
     }
 
     /// <summary>
@@ -438,20 +438,20 @@ END;
     /// </summary>
     public override CollectorQuery? BuildEnumerationQuery(CollectorContext context)
     {
-    if (context.Target.IsAzureSqlDb)
-    {
-        return null;
-    }
+        if (context.Target.IsAzureSqlDb)
+        {
+            return null;
+        }
 
-    var (exclusionClause, exclusionParameters) = DatabaseExclusionFilter.Build(context.ExcludedDatabases, "d.name");
-    var text = OnPremDatabaseListQueryText
-        .Replace("/*EXCLUSION_FILTER*/", exclusionClause, StringComparison.Ordinal);
+        var (exclusionClause, exclusionParameters) = DatabaseExclusionFilter.Build(context.ExcludedDatabases, "d.name");
+        var text = OnPremDatabaseListQueryText
+            .Replace("/*EXCLUSION_FILTER*/", exclusionClause, StringComparison.Ordinal);
 
-    return new CollectorQuery(text, exclusionParameters);
+        return new CollectorQuery(text, exclusionParameters);
     }
 
     public override CollectorQuery? BuildEnumerationProbe(CollectorContext context)
-    => new(ProductVersionProbeText);
+        => new(ProductVersionProbeText);
 
     /// <summary>
     /// The per-database Query Store payload — the ONE body both execution paths run (#1836). It is
@@ -478,350 +478,350 @@ END;
     /// </summary>
     internal static string BuildPayloadBody(CollectorContext context, bool backfill = false)
     {
-    /* Detect server version for version-gated columns.
-       isNew = true for SQL Server 2017+ (product version > 13) or Azure SQL DB/MI.
-       Controls: avg_num_physical_io_reads, avg_log_bytes_used, avg_tempdb_space_used, plan_forcing_type_desc.
-       hasPlanType = true for SQL Server 2022+ (product version >= 16), and on Azure SQL DB/MI.
-       Controls: plan_type_desc. */
-    var productVersion = context.EnumerationProbeResult is null
-        ? DefaultProductVersion
-        : Convert.ToInt32(context.EnumerationProbeResult, CultureInfo.InvariantCulture);
-    bool isNew = productVersion > 13 || context.Target.IsAzureSqlDb || context.Target.IsAzureManagedInstance;
+        /* Detect server version for version-gated columns.
+           isNew = true for SQL Server 2017+ (product version > 13) or Azure SQL DB/MI.
+           Controls: avg_num_physical_io_reads, avg_log_bytes_used, avg_tempdb_space_used, plan_forcing_type_desc.
+           hasPlanType = true for SQL Server 2022+ (product version >= 16), and on Azure SQL DB/MI.
+           Controls: plan_type_desc. */
+        var productVersion = context.EnumerationProbeResult is null
+            ? DefaultProductVersion
+            : Convert.ToInt32(context.EnumerationProbeResult, CultureInfo.InvariantCulture);
+        bool isNew = productVersion > 13 || context.Target.IsAzureSqlDb || context.Target.IsAzureManagedInstance;
 
-    /* plan_type_desc: version-gated on box SQL Server, but ALWAYS on for Azure SQL DB, which the
-       version probe cannot speak for — it reports PRODUCTVERSION major 12 (the same reason isNew
-       overrides above), while the engine underneath is evergreen and never older than 2022. The
-       column's own catalog-view page lists Azure SQL Database in its Applies-to banner and names
-       exactly one platform where referencing it errors — Azure Synapse Analytics, engine edition 6,
-       which is never IsAzureSqlDb (edition 5).
+        /* plan_type_desc: version-gated on box SQL Server, but ALWAYS on for Azure SQL DB, which the
+           version probe cannot speak for — it reports PRODUCTVERSION major 12 (the same reason isNew
+           overrides above), while the engine underneath is evergreen and never older than 2022. The
+           column's own catalog-view page lists Azure SQL Database in its Applies-to banner and names
+           exactly one platform where referencing it errors — Azure Synapse Analytics, engine edition 6,
+           which is never IsAzureSqlDb (edition 5).
 
-       Managed Instance is ON as of #1886, on the same live-evidence basis Azure SQL DB was flipped on
-       and NOT by pattern-matching the Azure change — see the replica-attribution comment below for
-       the full probe, which answered both gates in one session. The short form: plan_type_desc binds
-       on MI (COL_LENGTH = 120), measured on an instance following the CONSERVATIVE update policy. */
-    bool hasPlanType = productVersion >= 16 || context.Target.IsAzureSqlDb || context.Target.IsAzureManagedInstance;
+           Managed Instance is ON as of #1886, on the same live-evidence basis Azure SQL DB was flipped on
+           and NOT by pattern-matching the Azure change — see the replica-attribution comment below for
+           the full probe, which answered both gates in one session. The short form: plan_type_desc binds
+           on MI (COL_LENGTH = 120), measured on an instance following the CONSERVATIVE update policy. */
+        bool hasPlanType = productVersion >= 16 || context.Target.IsAzureSqlDb || context.Target.IsAzureManagedInstance;
 
-    /* Replica attribution — SQL Server 2022+ (product version >= 16). Controls: replica_role.
+        /* Replica attribution — SQL Server 2022+ (product version >= 16). Controls: replica_role.
 
-       "Query Store for secondary replicas" (2022+) gives an AG ONE shared Query Store that lives
-       on the PRIMARY: secondary-replica workload is streamed to the primary and persisted in the
-       primary's QS tables, distinguishable only by replica_group_id. We collect from primaries
-       only (is_primary_replica = 1, in the enumeration cursor) — which is correct and stays — but
-       without this attribution the primary's "Top Queries by CPU" silently BLENDS secondary
-       workload into the primary's own numbers, with no way for a reader to tell. (Microsoft's own
-       Query Performance Insight has this exact bug.)
+           "Query Store for secondary replicas" (2022+) gives an AG ONE shared Query Store that lives
+           on the PRIMARY: secondary-replica workload is streamed to the primary and persisted in the
+           primary's QS tables, distinguishable only by replica_group_id. We collect from primaries
+           only (is_primary_replica = 1, in the enumeration cursor) — which is correct and stays — but
+           without this attribution the primary's "Top Queries by CPU" silently BLENDS secondary
+           workload into the primary's own numbers, with no way for a reader to tell. (Microsoft's own
+           Query Performance Insight has this exact bug.)
 
-       Gated on >= 16, NOT the docs' claimed 2025+: sys.query_store_replicas and
-       sys.query_store_runtime_stats.replica_group_id both verified present on SQL 2022
-       (16.0.4255.1) and SQL 2025 (17.0.4045.5).
+           Gated on >= 16, NOT the docs' claimed 2025+: sys.query_store_replicas and
+           sys.query_store_runtime_stats.replica_group_id both verified present on SQL 2022
+           (16.0.4255.1) and SQL 2025 (17.0.4045.5).
 
-       LEFT JOIN, deliberately: on a 2022 standalone (non-AG) server sys.query_store_replicas has
-       ZERO rows, yet real runtime-stats rows still carry replica_group_id = 1. An INNER JOIN — or
-       a WHERE replica_name = 'Primary' filter — would match nothing and silently delete ALL Query
-       Store collection on every 2022 standalone server. Do not "tighten" this.
+           LEFT JOIN, deliberately: on a 2022 standalone (non-AG) server sys.query_store_replicas has
+           ZERO rows, yet real runtime-stats rows still carry replica_group_id = 1. An INNER JOIN — or
+           a WHERE replica_name = 'Primary' filter — would match nothing and silently delete ALL Query
+           Store collection on every 2022 standalone server. Do not "tighten" this.
 
-       replica_name is read DIRECTLY rather than mapped from role_type: contrary to the docs, it IS
-       populated on box SQL Server (observed: Primary, Secondary, Geo Secondary, Geo HA Secondary),
-       and the docs' sample CASEs replica_group_id as though it were role_type — it is not, it is a
-       replica SET number that accumulates per role across failovers.
+           replica_name is read DIRECTLY rather than mapped from role_type: contrary to the docs, it IS
+           populated on box SQL Server (observed: Primary, Secondary, Geo Secondary, Geo HA Secondary),
+           and the docs' sample CASEs replica_group_id as though it were role_type — it is not, it is a
+           replica SET number that accumulates per role across failovers.
 
-       Resulting replica_role: NULL on a 2022 standalone, 'Primary' on a 2025 standalone, the actual
-       role on an AG with the feature enabled. NULL honestly means "the server did not attribute
-       this row" and is deliberately NOT coalesced to an invented value.
+           Resulting replica_role: NULL on a 2022 standalone, 'Primary' on a 2025 standalone, the actual
+           role on an AG with the feature enabled. NULL honestly means "the server did not attribute
+           this row" and is deliberately NOT coalesced to an invented value.
 
-       Azure SQL DB is ON, riding the same "Azure means newest" rule plan_type_desc gets above —
-       but only because the live probe the previous version of this comment demanded was actually
-       run. It was gated OFF from #1836 until then, and that carve-out was about bind SAFETY, not
-       taste: a missing column is not a NULL, it fails the whole SELECT for that database, and on
-       Azure this collector's per-database loop would then fail in EVERY database — a worse outcome
-       than declining the attribution. The docs still do not settle it (replica_group_id's
-       applies-to note names only "SQL Server (Starting with SQL Server 2022 (16.x))", and Query
-       Store for secondary replicas is documented as unavailable on the Hyperscale service tier,
-       silent on whether the view and column still BIND there), so this is flipped on live evidence
-       instead — gathered on both service tiers the old comment worried about, 2026-07-31 UTC, both
-       running Microsoft SQL Azure (RTM) 12.0.2000.8, EngineEdition 5:
+           Azure SQL DB is ON, riding the same "Azure means newest" rule plan_type_desc gets above —
+           but only because the live probe the previous version of this comment demanded was actually
+           run. It was gated OFF from #1836 until then, and that carve-out was about bind SAFETY, not
+           taste: a missing column is not a NULL, it fails the whole SELECT for that database, and on
+           Azure this collector's per-database loop would then fail in EVERY database — a worse outcome
+           than declining the attribution. The docs still do not settle it (replica_group_id's
+           applies-to note names only "SQL Server (Starting with SQL Server 2022 (16.x))", and Query
+           Store for secondary replicas is documented as unavailable on the Hyperscale service tier,
+           silent on whether the view and column still BIND there), so this is flipped on live evidence
+           instead — gathered on both service tiers the old comment worried about, 2026-07-31 UTC, both
+           running Microsoft SQL Azure (RTM) 12.0.2000.8, EngineEdition 5:
 
-         - The exact probe the old comment specified, answered on both: General Purpose
-           (GP_S_Gen5_1, #1848) and Hyperscale (HS_S_Gen5_2, #1872) each returned
-           OBJECT_ID('sys.query_store_replicas') = -660 and
-           COL_LENGTH('sys.query_store_runtime_stats', 'replica_group_id') = 8.
-         - sys.query_store_replicas binds on both and holds the same 4 role rows box SQL Server has
-           (Primary, Secondary, Geo Secondary, Geo HA Secondary) — a static enumeration of ROLES,
-           not instances, which is why a database with 0 HA replicas does not empty it. Every
-           runtime-stats row carries replica_group_id = 1 and LEFT JOINs cleanly to 'Primary'.
-         - Decisive (#1872): the full 55-column payload composed with hasReplicaAttribution = true —
-           the exact text this method emits — executed on Hyperscale. 55 of 55 columns bound, exit
-           0, and replica_role came back 'Primary' on every row.
+             - The exact probe the old comment specified, answered on both: General Purpose
+               (GP_S_Gen5_1, #1848) and Hyperscale (HS_S_Gen5_2, #1872) each returned
+               OBJECT_ID('sys.query_store_replicas') = -660 and
+               COL_LENGTH('sys.query_store_runtime_stats', 'replica_group_id') = 8.
+             - sys.query_store_replicas binds on both and holds the same 4 role rows box SQL Server has
+               (Primary, Secondary, Geo Secondary, Geo HA Secondary) — a static enumeration of ROLES,
+               not instances, which is why a database with 0 HA replicas does not empty it. Every
+               runtime-stats row carries replica_group_id = 1 and LEFT JOINs cleanly to 'Primary'.
+             - Decisive (#1872): the full 55-column payload composed with hasReplicaAttribution = true —
+               the exact text this method emits — executed on Hyperscale. 55 of 55 columns bound, exit
+               0, and replica_role came back 'Primary' on every row.
 
-       A per-tier gate was considered and rejected: Hyperscale reports EngineEdition 5, the same as
-       General Purpose, so the collector cannot tell the tiers apart at query-build time. It does
-       not need to — both bind identically.
+           A per-tier gate was considered and rejected: Hyperscale reports EngineEdition 5, the same as
+           General Purpose, so the collector cannot tell the tiers apart at query-build time. It does
+           not need to — both bind identically.
 
-       Managed Instance is ON as of #1886 — the probe the previous version of this comment demanded
-       was run, so nobody needs to provision an MI to re-answer this. MI was held back through #1844
-       and #1872 for a reason that does NOT apply to Azure SQL DB and had to be retired on its own
-       terms: MI is not evergreen. Its feature set follows a per-instance UPDATE POLICY, so "Azure
-       means 2022+" is a claim about the fleet that does not transfer to a specific instance, and an
-       MI on an older policy genuinely might not have the catalog. The bar #1886 set for the simple
-       edition gate was therefore stricter than Azure's: the catalog must be present on the OLDEST
-       update policy still in support, not merely on whatever instance was to hand.
+           Managed Instance is ON as of #1886 — the probe the previous version of this comment demanded
+           was run, so nobody needs to provision an MI to re-answer this. MI was held back through #1844
+           and #1872 for a reason that does NOT apply to Azure SQL DB and had to be retired on its own
+           terms: MI is not evergreen. Its feature set follows a per-instance UPDATE POLICY, so "Azure
+           means 2022+" is a claim about the fleet that does not transfer to a specific instance, and an
+           MI on an older policy genuinely might not have the catalog. The bar #1886 set for the simple
+           edition gate was therefore stricter than Azure's: the catalog must be present on the OLDEST
+           update policy still in support, not merely on whatever instance was to hand.
 
-       Measured 2026-07-31 on a GPv2 Gen5 4-vCore Managed Instance, westus3, provisioned for the run
-       and torn down after — reporting ProductVersion 12.0.2000.8, EngineEdition 8, and crucially
-       SERVERPROPERTY('ProductUpdateType') = 'CU', i.e. the CONSERVATIVE (SQL Server 2022) update
-       policy rather than Always-up-to-date. That is exactly the "oldest policy still in support"
-       case, so the bar is met without an AlwaysUpToDate instance: catalog presence is a 2022-surface
-       fact, not an evergreen one.
+           Measured 2026-07-31 on a GPv2 Gen5 4-vCore Managed Instance, westus3, provisioned for the run
+           and torn down after — reporting ProductVersion 12.0.2000.8, EngineEdition 8, and crucially
+           SERVERPROPERTY('ProductUpdateType') = 'CU', i.e. the CONSERVATIVE (SQL Server 2022) update
+           policy rather than Always-up-to-date. That is exactly the "oldest policy still in support"
+           case, so the bar is met without an AlwaysUpToDate instance: catalog presence is a 2022-surface
+           fact, not an evergreen one.
 
-         - OBJECT_ID('sys.query_store_replicas') = -660 and
-           COL_LENGTH('sys.query_store_runtime_stats', 'replica_group_id') = 8 — the same two-value
-           probe #1848/#1872 ran on Azure SQL DB, non-NULL on both counts.
-         - Answered THROUGH THE COLLECTOR'S OWN MECHANISM, not just in master: the same two values
-           came back from a user-database context via [db].sys.sp_executesql (msdb standing in, since
-           these catalog views are per-database). MI takes the on-prem enumeration path, so binding in
-           master would not have settled it — that path is what the issue said MI lacked.
-         - COL_LENGTH('sys.query_store_plan', 'plan_type_desc') = 120, which is what flips the
-           hasPlanType carve-out above in the same session rather than provisioning MI twice.
+             - OBJECT_ID('sys.query_store_replicas') = -660 and
+               COL_LENGTH('sys.query_store_runtime_stats', 'replica_group_id') = 8 — the same two-value
+               probe #1848/#1872 ran on Azure SQL DB, non-NULL on both counts.
+             - Answered THROUGH THE COLLECTOR'S OWN MECHANISM, not just in master: the same two values
+               came back from a user-database context via [db].sys.sp_executesql (msdb standing in, since
+               these catalog views are per-database). MI takes the on-prem enumeration path, so binding in
+               master would not have settled it — that path is what the issue said MI lacked.
+             - COL_LENGTH('sys.query_store_plan', 'plan_type_desc') = 120, which is what flips the
+               hasPlanType carve-out above in the same session rather than provisioning MI twice.
 
-       A standalone MI's sys.query_store_replicas is an EMPTY enumeration — zero rows — unlike Azure
-       SQL DB's, which is a static 4-row roles table even with no replicas present. That difference
-       is worth stating because it looks alarming and is not: BINDING is the collection-safety
-       question and the answer is yes, while an empty enumeration only means a GP instance with no
-       read replicas has nothing to attribute. The LEFT JOIN below is what makes that harmless — it
-       is the same shape that keeps a 2022 standalone (whose view is also empty) collecting, and
-       tightening it would break both. replica_role simply reads NULL there, which is the honest
-       state rather than an invented one. */
-    bool hasReplicaAttribution = productVersion >= 16 || context.Target.IsAzureSqlDb || context.Target.IsAzureManagedInstance;
+           A standalone MI's sys.query_store_replicas is an EMPTY enumeration — zero rows — unlike Azure
+           SQL DB's, which is a static 4-row roles table even with no replicas present. That difference
+           is worth stating because it looks alarming and is not: BINDING is the collection-safety
+           question and the answer is yes, while an empty enumeration only means a GP instance with no
+           read replicas has nothing to attribute. The LEFT JOIN below is what makes that harmless — it
+           is the same shape that keeps a 2022 standalone (whose view is also empty) collecting, and
+           tightening it would break both. replica_role simply reads NULL there, which is the honest
+           state rather than an invented one. */
+        bool hasReplicaAttribution = productVersion >= 16 || context.Target.IsAzureSqlDb || context.Target.IsAzureManagedInstance;
 
-    /* Build version-conditional column fragments for the Query Store query.
-       None of these contain a single quote, so they splice into the body identically whether the
-       body stays as written (Azure) or gets quote-doubled for sp_executesql nesting (on-prem).
+        /* Build version-conditional column fragments for the Query Store query.
+           None of these contain a single quote, so they splice into the body identically whether the
+           body stays as written (Azure) or gets quote-doubled for sp_executesql nesting (on-prem).
 
-       Each version-gated family now needs TWO fragments (#1907): one INSIDE the slice-aggregating
-       derived table, which must vanish entirely when the columns do not exist (referencing an
-       unbound column inside an aggregate fails the whole SELECT exactly as it would outside one),
-       and one in the OUTER projection, which keeps emitting the typed NULL placeholder at the same
-       ordinal so the 55-column reader contract never moves. The inner fragments carry a LEADING
-       comma and sit at the END of the inner select list precisely because they can be empty; the
-       outer ones keep their original trailing-comma form because they are never empty. */
-    string numPhysIoReadsAgg = isNew
-        ? $",\n    {WeightedAverage("avg_num_physical_io_reads")},\n    min_num_physical_io_reads = MIN(qsrs.min_num_physical_io_reads),\n    max_num_physical_io_reads = MAX(qsrs.max_num_physical_io_reads)"
-        : "";
+           Each version-gated family now needs TWO fragments (#1907): one INSIDE the slice-aggregating
+           derived table, which must vanish entirely when the columns do not exist (referencing an
+           unbound column inside an aggregate fails the whole SELECT exactly as it would outside one),
+           and one in the OUTER projection, which keeps emitting the typed NULL placeholder at the same
+           ordinal so the 55-column reader contract never moves. The inner fragments carry a LEADING
+           comma and sit at the END of the inner select list precisely because they can be empty; the
+           outer ones keep their original trailing-comma form because they are never empty. */
+        string numPhysIoReadsAgg = isNew
+            ? $",\n        {WeightedAverage("avg_num_physical_io_reads")},\n        min_num_physical_io_reads = MIN(qsrs.min_num_physical_io_reads),\n        max_num_physical_io_reads = MAX(qsrs.max_num_physical_io_reads)"
+            : "";
 
-    string logBytesAgg = isNew
-        ? $",\n    {WeightedAverage("avg_log_bytes_used")},\n    min_log_bytes_used = MIN(qsrs.min_log_bytes_used),\n    max_log_bytes_used = MAX(qsrs.max_log_bytes_used)"
-        : "";
+        string logBytesAgg = isNew
+            ? $",\n        {WeightedAverage("avg_log_bytes_used")},\n        min_log_bytes_used = MIN(qsrs.min_log_bytes_used),\n        max_log_bytes_used = MAX(qsrs.max_log_bytes_used)"
+            : "";
 
-    string tempdbAgg = isNew
-        ? $",\n    {WeightedAverage("avg_tempdb_space_used")},\n    min_tempdb_space_used = MIN(qsrs.min_tempdb_space_used),\n    max_tempdb_space_used = MAX(qsrs.max_tempdb_space_used)"
-        : "";
+        string tempdbAgg = isNew
+            ? $",\n        {WeightedAverage("avg_tempdb_space_used")},\n        min_tempdb_space_used = MIN(qsrs.min_tempdb_space_used),\n        max_tempdb_space_used = MAX(qsrs.max_tempdb_space_used)"
+            : "";
 
-    string numPhysIoReadsCols = isNew
-        ? "qsrs.avg_num_physical_io_reads, qsrs.min_num_physical_io_reads, qsrs.max_num_physical_io_reads,"
-        : "avg_num_physical_io_reads = NULL, min_num_physical_io_reads = NULL, max_num_physical_io_reads = NULL,";
+        string numPhysIoReadsCols = isNew
+            ? "qsrs.avg_num_physical_io_reads, qsrs.min_num_physical_io_reads, qsrs.max_num_physical_io_reads,"
+            : "avg_num_physical_io_reads = NULL, min_num_physical_io_reads = NULL, max_num_physical_io_reads = NULL,";
 
-    string logBytesCols = isNew
-        ? "avg_log_bytes_used = qsrs.avg_log_bytes_used, min_log_bytes_used = qsrs.min_log_bytes_used, max_log_bytes_used = qsrs.max_log_bytes_used,"
-        : "avg_log_bytes_used = NULL, min_log_bytes_used = NULL, max_log_bytes_used = NULL,";
+        string logBytesCols = isNew
+            ? "avg_log_bytes_used = qsrs.avg_log_bytes_used, min_log_bytes_used = qsrs.min_log_bytes_used, max_log_bytes_used = qsrs.max_log_bytes_used,"
+            : "avg_log_bytes_used = NULL, min_log_bytes_used = NULL, max_log_bytes_used = NULL,";
 
-    string tempdbCols = isNew
-        ? "avg_tempdb_space_used = qsrs.avg_tempdb_space_used, min_tempdb_space_used = qsrs.min_tempdb_space_used, max_tempdb_space_used = qsrs.max_tempdb_space_used,"
-        : "avg_tempdb_space_used = NULL, min_tempdb_space_used = NULL, max_tempdb_space_used = NULL,";
+        string tempdbCols = isNew
+            ? "avg_tempdb_space_used = qsrs.avg_tempdb_space_used, min_tempdb_space_used = qsrs.min_tempdb_space_used, max_tempdb_space_used = qsrs.max_tempdb_space_used,"
+            : "avg_tempdb_space_used = NULL, min_tempdb_space_used = NULL, max_tempdb_space_used = NULL,";
 
-    string planForcingCol = isNew
-        ? "plan_forcing_type = qsp.plan_forcing_type_desc,"
-        : "plan_forcing_type = NULL,";
+        string planForcingCol = isNew
+            ? "plan_forcing_type = qsp.plan_forcing_type_desc,"
+            : "plan_forcing_type = NULL,";
 
-    string planTypeCol = hasPlanType
-        ? "plan_type = qsp.plan_type_desc,"
-        : "plan_type = NULL,";
+        string planTypeCol = hasPlanType
+            ? "plan_type = qsp.plan_type_desc,"
+            : "plan_type = NULL,";
 
-    /* Execution-plan capture — mirrors the full Dashboard's @collect_plan path in
-       install/09_collect_query_store.sql: CONVERT(nvarchar(max), qsp.query_plan) from
-       sys.query_store_plan, no size guard. On only when the host sets CapturePlanXml (Darling);
-       off = the nvarchar(1) NULL placeholder (Lite), byte-identical to the no-plan form. No
-       single quotes, so it splices straight into the sp_executesql body.
+        /* Execution-plan capture — mirrors the full Dashboard's @collect_plan path in
+           install/09_collect_query_store.sql: CONVERT(nvarchar(max), qsp.query_plan) from
+           sys.query_store_plan, no size guard. On only when the host sets CapturePlanXml (Darling);
+           off = the nvarchar(1) NULL placeholder (Lite), byte-identical to the no-plan form. No
+           single quotes, so it splices straight into the sp_executesql body.
 
-       #1556 plan-text dedupe (ON branch only): a plan is landed ONCE per plan_id per cycle — on its
-       newest runtime-stats interval in the window (rn = 1) — and NULL on the older intervals, instead
-       of repeating the full plan XML on every interval row of the same plan. The partition ORDER BY
-       stays DESC even though the outer sort is now ASC (#1960): under oldest-first shipping a plan's
-       rn = 1 row sorts LAST among its rows, so a bounded cycle can cut before it and ship that plan's
-       intervals without XML — harmless, because rn is recomputed over the NEXT cycle's window, whose
-       newest-in-window row carries the XML then; steady-state cycles see one interval per plan and are
-       unaffected. The consumers tolerate the per-row NULL — Lite selects NULL for the grid and fetches
-       plans live, and Darling's stored-plan readers all guard `query_plan_text IS NOT NULL`. Not
-       mirrored into the Dashboard proc: its "Download Plan" reads by exact collection_id, where
-       per-row NULLs would break a real reader. */
-    string planTextCol = context.CapturePlanXml
-        ? "query_plan_text = CASE WHEN ROW_NUMBER() OVER (PARTITION BY qsp.plan_id ORDER BY qsrs.last_execution_time DESC) = 1 THEN CONVERT(nvarchar(max), qsp.query_plan) ELSE CONVERT(nvarchar(max), NULL) END,"
-        : "query_plan_text = CONVERT(nvarchar(1), NULL),";
+           #1556 plan-text dedupe (ON branch only): a plan is landed ONCE per plan_id per cycle — on its
+           newest runtime-stats interval in the window (rn = 1) — and NULL on the older intervals, instead
+           of repeating the full plan XML on every interval row of the same plan. The partition ORDER BY
+           stays DESC even though the outer sort is now ASC (#1960): under oldest-first shipping a plan's
+           rn = 1 row sorts LAST among its rows, so a bounded cycle can cut before it and ship that plan's
+           intervals without XML — harmless, because rn is recomputed over the NEXT cycle's window, whose
+           newest-in-window row carries the XML then; steady-state cycles see one interval per plan and are
+           unaffected. The consumers tolerate the per-row NULL — Lite selects NULL for the grid and fetches
+           plans live, and Darling's stored-plan readers all guard `query_plan_text IS NOT NULL`. Not
+           mirrored into the Dashboard proc: its "Download Plan" reads by exact collection_id, where
+           per-row NULLs would break a real reader. */
+        string planTextCol = context.CapturePlanXml
+            ? "query_plan_text = CASE WHEN ROW_NUMBER() OVER (PARTITION BY qsp.plan_id ORDER BY qsrs.last_execution_time DESC) = 1 THEN CONVERT(nvarchar(max), qsp.query_plan) ELSE CONVERT(nvarchar(max), NULL) END,"
+            : "query_plan_text = CONVERT(nvarchar(1), NULL),";
 
-    /* The replica-attribution column + its join (see hasReplicaAttribution above). Selected after every
-       version-gated column, so pre-2022 targets read the nvarchar(1) NULL placeholder at the same
-       ordinal — byte-identical shape to the attributed form. The interval-identity pair (#1841 tier 2)
-       follows it and is NOT version-gated, so this fragment stays comma-free and the template supplies
-       the separator. */
-    string replicaRoleCol = hasReplicaAttribution
-        ? "replica_role = qsr.replica_name"
-        : "replica_role = CONVERT(nvarchar(1), NULL)";
+        /* The replica-attribution column + its join (see hasReplicaAttribution above). Selected after every
+           version-gated column, so pre-2022 targets read the nvarchar(1) NULL placeholder at the same
+           ordinal — byte-identical shape to the attributed form. The interval-identity pair (#1841 tier 2)
+           follows it and is NOT version-gated, so this fragment stays comma-free and the template supplies
+           the separator. */
+        string replicaRoleCol = hasReplicaAttribution
+            ? "replica_role = qsr.replica_name"
+            : "replica_role = CONVERT(nvarchar(1), NULL)";
 
-    string replicaJoin = hasReplicaAttribution
-        ? "LEFT JOIN sys.query_store_replicas AS qsr\n  ON qsr.replica_group_id = qsrs.replica_group_id"
-        : "";
+        string replicaJoin = hasReplicaAttribution
+            ? "LEFT JOIN sys.query_store_replicas AS qsr\n  ON qsr.replica_group_id = qsrs.replica_group_id"
+            : "";
 
-    /* replica_group_id is part of sys.query_store_runtime_stats' natural key, so it belongs in the
-       slice-aggregation grouping (#1907) — two replicas' rows for one interval are DIFFERENT work,
-       not slices of the same work, and summing them together would blend a secondary's executions
-       into the primary's, re-creating by hand the exact bug replica attribution exists to prevent.
-       It carries the SAME 2022+/Azure gate as the attribution column above, and for the same
-       bind-safety reason: the column does not exist on older servers, and naming it in a GROUP BY
-       fails the whole SELECT just as naming it in a select list would. When the gate is off there is
-       only ever one replica group to begin with, so dropping it from the key changes no grouping.
-       Leading comma: it splices into both the inner select list and the GROUP BY, and is empty on
-       targets without the column. */
-    string replicaGroupKey = hasReplicaAttribution
-        ? ",\n    qsrs.replica_group_id"
-        : "";
+        /* replica_group_id is part of sys.query_store_runtime_stats' natural key, so it belongs in the
+           slice-aggregation grouping (#1907) — two replicas' rows for one interval are DIFFERENT work,
+           not slices of the same work, and summing them together would blend a secondary's executions
+           into the primary's, re-creating by hand the exact bug replica attribution exists to prevent.
+           It carries the SAME 2022+/Azure gate as the attribution column above, and for the same
+           bind-safety reason: the column does not exist on older servers, and naming it in a GROUP BY
+           fails the whole SELECT just as naming it in a select list would. When the gate is off there is
+           only ever one replica group to begin with, so dropping it from the key changes no grouping.
+           Leading comma: it splices into both the inner select list and the GROUP BY, and is empty on
+           targets without the column. */
+        string replicaGroupKey = hasReplicaAttribution
+            ? ",\n        qsrs.replica_group_id"
+            : "";
 
-    /* There is deliberately NO self-exclusion predicate in this query (#1565, actual-plan evidence
-       from a 103k-row burst). The old form (query_sql_text NOT LIKE N'%marker%') was 75% of the
-       query's total elapsed time — a per-row substring scan over full nvarchar(max) text (11.2s of
-       a 14.9s read; the field A/B measured 4.3x faster without it) — and no predicate shape fixes
-       that server-side: the QS internal text table has no index on the column, so every variant is
-       a residual scan whose cost is the bytes it reads. The exclusion instead happens in the read
-       loop, where the query text is ALREADY materialized for every row — a client-side Contains at
-       zero SQL cost, identical semantics. Self rows cross the wire (~2% of a busy database's rows)
-       and are dropped before they enter the batch (never stored, never counted against the byte
-       budget). The query still CONTAINS the marker, in its own leading comment. */
+        /* There is deliberately NO self-exclusion predicate in this query (#1565, actual-plan evidence
+           from a 103k-row burst). The old form (query_sql_text NOT LIKE N'%marker%') was 75% of the
+           query's total elapsed time — a per-row substring scan over full nvarchar(max) text (11.2s of
+           a 14.9s read; the field A/B measured 4.3x faster without it) — and no predicate shape fixes
+           that server-side: the QS internal text table has no index on the column, so every variant is
+           a residual scan whose cost is the bytes it reads. The exclusion instead happens in the read
+           loop, where the query text is ALREADY materialized for every row — a client-side Contains at
+           zero SQL cost, identical semantics. Self rows cross the wire (~2% of a busy database's rows)
+           and are dropped before they enter the batch (never stored, never counted against the byte
+           budget). The query still CONTAINS the marker, in its own leading comment. */
 
-    /* Interval identity (#1841 tier 2), the last two SELECT items. Not version-gated: both
-       sys.query_store_runtime_stats.runtime_stats_interval_id and the
-       sys.query_store_runtime_stats_interval catalog view are original Query Store surface, verified
-       present on SQL Server 2016 SP3 (13.0.6300.2) — the collector's own AppliesTo floor — so there is
-       no target this collector runs on that lacks them.
+        /* Interval identity (#1841 tier 2), the last two SELECT items. Not version-gated: both
+           sys.query_store_runtime_stats.runtime_stats_interval_id and the
+           sys.query_store_runtime_stats_interval catalog view are original Query Store surface, verified
+           present on SQL Server 2016 SP3 (13.0.6300.2) — the collector's own AppliesTo floor — so there is
+           no target this collector runs on that lacks them.
 
-       LEFT JOIN, not JOIN, for the same reason the replica join above is one: an INNER JOIN here would
-       make every runtime-stats row's survival depend on its interval row resolving, and a Query Store
-       that trimmed an interval row out from under us would silently delete real collection rather than
-       lose one column. The id comes off qsrs directly and is unaffected either way; only
-       interval_start_time_utc goes NULL if the join misses.
+           LEFT JOIN, not JOIN, for the same reason the replica join above is one: an INNER JOIN here would
+           make every runtime-stats row's survival depend on its interval row resolving, and a Query Store
+           that trimmed an interval row out from under us would silently delete real collection rather than
+           lose one column. The id comes off qsrs directly and is unaffected either way; only
+           interval_start_time_utc goes NULL if the join misses.
 
-       start_time is datetimeoffset. AT TIME ZONE 'UTC' re-expresses it at +00:00 and the CONVERT drops
-       the offset, so the stored value is naive UTC — the same clock as collection_time and as
-       first_execution_time (which ReadRowsAsync already normalizes via DateTimeOffset.UtcDateTime).
-       That is what makes it safe to bucket on: it is NOT the monitored server's local wall clock.
-       AT TIME ZONE is SQL Server 2016+, matching the floor above, and the expression contains no
-       single quote... except the timezone literal, which quote-doubles cleanly for the sp_executesql
-       nesting exactly like the rest of the body. */
+           start_time is datetimeoffset. AT TIME ZONE 'UTC' re-expresses it at +00:00 and the CONVERT drops
+           the offset, so the stored value is naive UTC — the same clock as collection_time and as
+           first_execution_time (which ReadRowsAsync already normalizes via DateTimeOffset.UtcDateTime).
+           That is what makes it safe to bucket on: it is NOT the monitored server's local wall clock.
+           AT TIME ZONE is SQL Server 2016+, matching the floor above, and the expression contains no
+           single quote... except the timezone literal, which quote-doubles cleanly for the sp_executesql
+           nesting exactly like the rest of the body. */
 
-    /* Slice aggregation (#1907) — the derived table below, and the reason this query has one.
+        /* Slice aggregation (#1907) — the derived table below, and the reason this query has one.
 
-       sys.query_store_runtime_stats returns the FLUSHED slice and the still-IN-MEMORY slice of one
-       runtime_stats_interval_id as SEPARATE ROWS, and they are ADDITIVE members of one interval, not
-       competing snapshots of it. Verified on box SQL Server 2022 (16.0.4255.1) as well as the Azure
-       SQL Database where it was found: 100 executions flushed + 25 executions in memory came back as
-       two rows, and sys.dm_exec_procedure_stats — an entirely separate source, same instant —
-       reported 125. SUM matches; the larger slice alone (100) does not. With a 900s default flush
-       against a 3600s default interval, ONE interval can hold several flushed slices, so the count
-       is not bounded at two.
+           sys.query_store_runtime_stats returns the FLUSHED slice and the still-IN-MEMORY slice of one
+           runtime_stats_interval_id as SEPARATE ROWS, and they are ADDITIVE members of one interval, not
+           competing snapshots of it. Verified on box SQL Server 2022 (16.0.4255.1) as well as the Azure
+           SQL Database where it was found: 100 executions flushed + 25 executions in memory came back as
+           two rows, and sys.dm_exec_procedure_stats — an entirely separate source, same instant —
+           reported 125. SUM matches; the larger slice alone (100) does not. With a 900s default flush
+           against a 3600s default interval, ONE interval can hold several flushed slices, so the count
+           is not bounded at two.
 
-       Selecting them straight through stored both, and they then shared every column of the
-       read-side dedup key (#1841/#1845/#1853) AND collection_time, so the ROW_NUMBER survivor and the
-       CAGGs' last() were decided by whichever row the engine happened to emit first — a grid could
-       show the in-memory sliver (8) where the interval's truth was 94. The dedup itself is correct
-       and stays: it exists to collapse RE-COLLECTIONS of one interval across cycles. It just cannot
-       also be asked to ADD two slices within one cycle, and no read-side rule can express both.
+           Selecting them straight through stored both, and they then shared every column of the
+           read-side dedup key (#1841/#1845/#1853) AND collection_time, so the ROW_NUMBER survivor and the
+           CAGGs' last() were decided by whichever row the engine happened to emit first — a grid could
+           show the in-memory sliver (8) where the interval's truth was 94. The dedup itself is correct
+           and stays: it exists to collapse RE-COLLECTIONS of one interval across cycles. It just cannot
+           also be asked to ADD two slices within one cycle, and no read-side rule can express both.
 
-       So the slices are combined HERE, where the identity is unambiguous, keyed on exactly the
-       natural key of the view — (plan_id, runtime_stats_interval_id, execution_type, replica_group) —
-       and one interval now yields at most one row per cycle. The EMITTED ROW SHAPE is unchanged: the
-       same 55 columns in the same order, only fewer rows, so the positional writers and every
-       downstream reader are untouched.
+           So the slices are combined HERE, where the identity is unambiguous, keyed on exactly the
+           natural key of the view — (plan_id, runtime_stats_interval_id, execution_type, replica_group) —
+           and one interval now yields at most one row per cycle. The EMITTED ROW SHAPE is unchanged: the
+           same 55 columns in the same order, only fewer rows, so the positional writers and every
+           downstream reader are untouched.
 
-       How each column combines:
-         - count_executions      SUM — the additive counter itself.
-         - avg_*                 the count-WEIGHTED mean, SUM(avg * count) / SUM(count). Query Store
-                                 stores avg and count, never a total, so avg * count reconstructs
-                                 each slice's total exactly and the quotient is the interval's true
-                                 average. A plain AVG() of the slice averages would weight a 25-
-                                 execution sliver equally with a 100-execution flush. NULLIF guards
-                                 the divide-by-zero rather than letting a zero-execution row (which
-                                 should not exist, and would still not be worth failing a whole
-                                 database's collection over) raise 8134.
-         - min_* / max_*         MIN / MAX — extremes over a union of slices are the extremes of the
-                                 slice extremes. Includes min_dop / max_dop, which have no avg.
-         - first_execution_time  MIN, last_execution_time MAX — the interval's own span. Both slices
-                                 of a pair share first_execution_time in practice, which is exactly
-                                 why the tier-1 proxy key could not tell them apart either.
+           How each column combines:
+             - count_executions      SUM — the additive counter itself.
+             - avg_*                 the count-WEIGHTED mean, SUM(avg * count) / SUM(count). Query Store
+                                     stores avg and count, never a total, so avg * count reconstructs
+                                     each slice's total exactly and the quotient is the interval's true
+                                     average. A plain AVG() of the slice averages would weight a 25-
+                                     execution sliver equally with a 100-execution flush. NULLIF guards
+                                     the divide-by-zero rather than letting a zero-execution row (which
+                                     should not exist, and would still not be worth failing a whole
+                                     database's collection over) raise 8134.
+             - min_* / max_*         MIN / MAX — extremes over a union of slices are the extremes of the
+                                     slice extremes. Includes min_dop / max_dop, which have no avg.
+             - first_execution_time  MIN, last_execution_time MAX — the interval's own span. Both slices
+                                     of a pair share first_execution_time in practice, which is exactly
+                                     why the tier-1 proxy key could not tell them apart either.
 
-       The incremental filter moves from WHERE to HAVING, and that is load-bearing rather than
-       cosmetic. A per-slice WHERE would break the SUM within one cycle of the fix: the flushed slice
-       is STATIC, so once the growing in-memory slice pushes the watermark past the flushed slice's
-       last_execution_time, the flushed slice stops qualifying and the "sum" becomes the sliver alone
-       — the original bug with extra steps. HAVING MAX(last_execution_time) > @cutoff_time asks the
-       question at interval grain: has this interval seen new activity, and if so give me ALL of it.
-       It is strictly more permissive than the old per-slice predicate, so nothing that used to be
-       collected stops being collected.
+           The incremental filter moves from WHERE to HAVING, and that is load-bearing rather than
+           cosmetic. A per-slice WHERE would break the SUM within one cycle of the fix: the flushed slice
+           is STATIC, so once the growing in-memory slice pushes the watermark past the flushed slice's
+           last_execution_time, the flushed slice stops qualifying and the "sum" becomes the sliver alone
+           — the original bug with extra steps. HAVING MAX(last_execution_time) > @cutoff_time asks the
+           question at interval grain: has this interval seen new activity, and if so give me ALL of it.
+           It is strictly more permissive than the old per-slice predicate, so nothing that used to be
+           collected stops being collected.
 
-       The IN (...) pre-filter is a performance prune, not a semantic one — the HAVING already gives
-       the exact answer, and the pre-filter's interval list is by construction a superset of the
-       intervals the HAVING can keep, so it can never subtract a row. It is here because without it
-       the aggregate has to run over the database's ENTIRE retained Query Store every cycle, which is
-       the one shape that made this materially slower. Measured on a real 212k-row Query Store
-       (SQL 2025), full 55-column payload, warm, three runs: pre-fix 453/485/516 ms for 510 rows;
-       post-fix 375/422/438 ms for 262 rows; post-fix WITHOUT the pre-filter 1203/1203/1235 ms. The
-       fixed query is FASTER than the one it replaces despite the added aggregate, because half the
-       rows means half the nvarchar(max) query text and plan XML to materialize and ship. */
-    /* Oldest-first + WITH TIES (#1960): rows ship FORWARD from the watermark, so a bounded cycle
-       (byte budget or this TOP) leaves the derived watermark — MAX(last_execution_time) over the
-       rows actually stored — sitting exactly at the shipped boundary, and the next cycle's strict
-       `> @cutoff_time` resumes there with no hole. WITH TIES is load-bearing for that invariant:
-       a bare TOP could split a group of rows sharing the boundary last_execution_time, stranding
-       the unshipped half behind the strict comparison forever. The client byte budget completes
-       boundary groups the same way (see ReadRowsAsync). */
-    /* Backfill (#2022) is the mirror image: newest-first DESC inside (floor, ceiling), where the
-       ceiling is the DERIVED backfill boundary — MIN(last_execution_time) over the rows already
-       stored for the database — so each bounded slice leaves the next ceiling sitting exactly at
-       its oldest shipped row, and the next slice's strict `< @ceiling_time` resumes with no hole
-       or re-ship. Same TIES, same budget, same tie-group completion; only the window and the
-       direction differ. */
-    /* The interval pre-filter resolves candidate interval ids from the INTERVAL CATALOG
-       (sys.query_store_runtime_stats_interval, ~one row per interval of retained history — hundreds
-       of rows) rather than from runtime_stats itself (#2133; measured on the field store: 20 ms vs
-       426 ms for the identical id set). end_time/start_time are datetimeoffset; the datetime2
-       parameters promote with a zero offset, i.e. as the UTC instants they are — the same implicit
-       promotion the HAVING's last_execution_time comparison has always relied on. The catalog bound
-       is a SUPERSET (an interval can end after the cutoff while all its rows are older); the HAVING
-       below stays the exact row-level filter, so shipped semantics are unchanged. */
-    var intervalPreFilter = backfill
-        ? @"i.end_time > @floor_time
-    AND   i.start_time < @ceiling_time"
-        : "i.end_time > @cutoff_time";
-    var intervalHaving = backfill
-        ? @"MAX(qsrs.last_execution_time) > @floor_time
-    AND MAX(qsrs.last_execution_time) < @ceiling_time"
-        : "MAX(qsrs.last_execution_time) > @cutoff_time";
-    var shipOrder = backfill ? "DESC" : "ASC";
+           The IN (...) pre-filter is a performance prune, not a semantic one — the HAVING already gives
+           the exact answer, and the pre-filter's interval list is by construction a superset of the
+           intervals the HAVING can keep, so it can never subtract a row. It is here because without it
+           the aggregate has to run over the database's ENTIRE retained Query Store every cycle, which is
+           the one shape that made this materially slower. Measured on a real 212k-row Query Store
+           (SQL 2025), full 55-column payload, warm, three runs: pre-fix 453/485/516 ms for 510 rows;
+           post-fix 375/422/438 ms for 262 rows; post-fix WITHOUT the pre-filter 1203/1203/1235 ms. The
+           fixed query is FASTER than the one it replaces despite the added aggregate, because half the
+           rows means half the nvarchar(max) query text and plan XML to materialize and ship. */
+        /* Oldest-first + WITH TIES (#1960): rows ship FORWARD from the watermark, so a bounded cycle
+           (byte budget or this TOP) leaves the derived watermark — MAX(last_execution_time) over the
+           rows actually stored — sitting exactly at the shipped boundary, and the next cycle's strict
+           `> @cutoff_time` resumes there with no hole. WITH TIES is load-bearing for that invariant:
+           a bare TOP could split a group of rows sharing the boundary last_execution_time, stranding
+           the unshipped half behind the strict comparison forever. The client byte budget completes
+           boundary groups the same way (see ReadRowsAsync). */
+        /* Backfill (#2022) is the mirror image: newest-first DESC inside (floor, ceiling), where the
+           ceiling is the DERIVED backfill boundary — MIN(last_execution_time) over the rows already
+           stored for the database — so each bounded slice leaves the next ceiling sitting exactly at
+           its oldest shipped row, and the next slice's strict `< @ceiling_time` resumes with no hole
+           or re-ship. Same TIES, same budget, same tie-group completion; only the window and the
+           direction differ. */
+        /* The interval pre-filter resolves candidate interval ids from the INTERVAL CATALOG
+           (sys.query_store_runtime_stats_interval, ~one row per interval of retained history — hundreds
+           of rows) rather than from runtime_stats itself (#2133; measured on the field store: 20 ms vs
+           426 ms for the identical id set). end_time/start_time are datetimeoffset; the datetime2
+           parameters promote with a zero offset, i.e. as the UTC instants they are — the same implicit
+           promotion the HAVING's last_execution_time comparison has always relied on. The catalog bound
+           is a SUPERSET (an interval can end after the cutoff while all its rows are older); the HAVING
+           below stays the exact row-level filter, so shipped semantics are unchanged. */
+        var intervalPreFilter = backfill
+            ? @"i.end_time > @floor_time
+        AND   i.start_time < @ceiling_time"
+            : "i.end_time > @cutoff_time";
+        var intervalHaving = backfill
+            ? @"MAX(qsrs.last_execution_time) > @floor_time
+        AND MAX(qsrs.last_execution_time) < @ceiling_time"
+            : "MAX(qsrs.last_execution_time) > @cutoff_time";
+        var shipOrder = backfill ? "DESC" : "ASC";
 
-    /* STAGED, not monolithic (#2133). Joining the slice aggregate straight into the
-       query_store_plan/query/text TVFs handed the optimizer nothing but fixed-guess cardinalities,
-       and the shape it picked re-materialized a TVF per probe — a fixed cost no window width could
-       reduce. Field bisection on an 82k-plan catalog (echo, SQL 2022): the aggregate alone ran in
-       81 ms and each TVF scanned bare in ~300 ms, yet aggregate-JOIN-qsp could not finish in 30 s,
-       hinted or not; staged through the temp the same work totaled 524 ms (56 stage + 409 join).
-       That fixed cost is what wedged the big-catalog databases at EVERY catch-up width and made
-       #2125's shrink floor-pin instead of converge. The temp gives the final join REAL row counts —
-       and for that reason the old LOOP JOIN hint must NOT return: looping from the temp into the
-       TVFs is the same per-probe re-materialization by another name; the 524 ms join is unhinted,
-       chosen by the optimizer from true cardinalities. sp_QuickieStore stages for the same reason.
+        /* STAGED, not monolithic (#2133). Joining the slice aggregate straight into the
+           query_store_plan/query/text TVFs handed the optimizer nothing but fixed-guess cardinalities,
+           and the shape it picked re-materialized a TVF per probe — a fixed cost no window width could
+           reduce. Field bisection on an 82k-plan catalog (echo, SQL 2022): the aggregate alone ran in
+           81 ms and each TVF scanned bare in ~300 ms, yet aggregate-JOIN-qsp could not finish in 30 s,
+           hinted or not; staged through the temp the same work totaled 524 ms (56 stage + 409 join).
+           That fixed cost is what wedged the big-catalog databases at EVERY catch-up width and made
+           #2125's shrink floor-pin instead of converge. The temp gives the final join REAL row counts —
+           and for that reason the old LOOP JOIN hint must NOT return: looping from the temp into the
+           TVFs is the same per-probe re-materialization by another name; the 524 ms join is unhinted,
+           chosen by the optimizer from true cardinalities. sp_QuickieStore stages for the same reason.
 
-       Batch mechanics: SELECT INTO emits no result set, so the batch still returns exactly ONE
-       result set (the reader/byte-budget contract). Inside the on-prem [db].sys.sp_executesql
-       nesting the temp's scope dies with the invocation; on Azure's direct per-database path the
-       leading DROP TABLE IF EXISTS covers pooled-connection reuse. TOP ... WITH TIES, the ship
-       order, and the derived-watermark semantics live on the final SELECT, unchanged. */
-    return $@"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+           Batch mechanics: SELECT INTO emits no result set, so the batch still returns exactly ONE
+           result set (the reader/byte-budget contract). Inside the on-prem [db].sys.sp_executesql
+           nesting the temp's scope dies with the invocation; on Azure's direct per-database path the
+           leading DROP TABLE IF EXISTS covers pooled-connection reuse. TOP ... WITH TIES, the ship
+           order, and the derived-watermark semantics live on the final SELECT, unchanged. */
+        return $@"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 DROP TABLE IF EXISTS #pm_qs_slice;
 
@@ -829,35 +829,35 @@ SELECT /* PerformanceMonitorLite */
     qsrs.plan_id,
     qsrs.runtime_stats_interval_id,
     qsrs.execution_type_desc{replicaGroupKey},
-    first_execution_time = MIN(qsrs.first_execution_time),
-    last_execution_time = MAX(qsrs.last_execution_time),
-    count_executions = SUM(qsrs.count_executions),
-    {WeightedAverage("avg_duration")},
-    min_duration = MIN(qsrs.min_duration),
-    max_duration = MAX(qsrs.max_duration),
-    {WeightedAverage("avg_cpu_time")},
-    min_cpu_time = MIN(qsrs.min_cpu_time),
-    max_cpu_time = MAX(qsrs.max_cpu_time),
-    {WeightedAverage("avg_logical_io_reads")},
-    min_logical_io_reads = MIN(qsrs.min_logical_io_reads),
-    max_logical_io_reads = MAX(qsrs.max_logical_io_reads),
-    {WeightedAverage("avg_logical_io_writes")},
-    min_logical_io_writes = MIN(qsrs.min_logical_io_writes),
-    max_logical_io_writes = MAX(qsrs.max_logical_io_writes),
-    {WeightedAverage("avg_physical_io_reads")},
-    min_physical_io_reads = MIN(qsrs.min_physical_io_reads),
-    max_physical_io_reads = MAX(qsrs.max_physical_io_reads),
-    {WeightedAverage("avg_clr_time")},
-    min_clr_time = MIN(qsrs.min_clr_time),
-    max_clr_time = MAX(qsrs.max_clr_time),
-    min_dop = MIN(qsrs.min_dop),
-    max_dop = MAX(qsrs.max_dop),
-    {WeightedAverage("avg_query_max_used_memory")},
-    min_query_max_used_memory = MIN(qsrs.min_query_max_used_memory),
-    max_query_max_used_memory = MAX(qsrs.max_query_max_used_memory),
-    {WeightedAverage("avg_rowcount")},
-    min_rowcount = MIN(qsrs.min_rowcount),
-    max_rowcount = MAX(qsrs.max_rowcount){numPhysIoReadsAgg}{logBytesAgg}{tempdbAgg}
+        first_execution_time = MIN(qsrs.first_execution_time),
+        last_execution_time = MAX(qsrs.last_execution_time),
+        count_executions = SUM(qsrs.count_executions),
+        {WeightedAverage("avg_duration")},
+        min_duration = MIN(qsrs.min_duration),
+        max_duration = MAX(qsrs.max_duration),
+        {WeightedAverage("avg_cpu_time")},
+        min_cpu_time = MIN(qsrs.min_cpu_time),
+        max_cpu_time = MAX(qsrs.max_cpu_time),
+        {WeightedAverage("avg_logical_io_reads")},
+        min_logical_io_reads = MIN(qsrs.min_logical_io_reads),
+        max_logical_io_reads = MAX(qsrs.max_logical_io_reads),
+        {WeightedAverage("avg_logical_io_writes")},
+        min_logical_io_writes = MIN(qsrs.min_logical_io_writes),
+        max_logical_io_writes = MAX(qsrs.max_logical_io_writes),
+        {WeightedAverage("avg_physical_io_reads")},
+        min_physical_io_reads = MIN(qsrs.min_physical_io_reads),
+        max_physical_io_reads = MAX(qsrs.max_physical_io_reads),
+        {WeightedAverage("avg_clr_time")},
+        min_clr_time = MIN(qsrs.min_clr_time),
+        max_clr_time = MAX(qsrs.max_clr_time),
+        min_dop = MIN(qsrs.min_dop),
+        max_dop = MAX(qsrs.max_dop),
+        {WeightedAverage("avg_query_max_used_memory")},
+        min_query_max_used_memory = MIN(qsrs.min_query_max_used_memory),
+        max_query_max_used_memory = MAX(qsrs.max_query_max_used_memory),
+        {WeightedAverage("avg_rowcount")},
+        min_rowcount = MIN(qsrs.min_rowcount),
+        max_rowcount = MAX(qsrs.max_rowcount){numPhysIoReadsAgg}{logBytesAgg}{tempdbAgg}
 INTO #pm_qs_slice
 FROM sys.query_store_runtime_stats AS qsrs
 WHERE qsrs.runtime_stats_interval_id IN
