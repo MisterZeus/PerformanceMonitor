@@ -437,6 +437,69 @@ public sealed class DarlingPrintViewerConnectionTests
             root.Delete(recursive: true);
         }
     }
+
+    /// <summary>
+    /// #2117's print-verb half, pinned on the CHAIN-shaped store the sibling test cannot see (it lays down
+    /// only the legacy server.crt): when root.crt exists beside server.crt, the verb must emit the ROOT —
+    /// that is what verify-full's Root Certificate anchors on against a chain-serving store — and the
+    /// header must name the file whose content is actually below (the review-caught label lie: it said
+    /// server.crt over root.crt's bytes).
+    /// </summary>
+    [Fact]
+    public async Task PrintViewerConnectionAsync_ChainShapedStore_EmitsTheRoot_AndLabelsItHonestly()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "DPAPI requires Windows.");
+
+        var root = Directory.CreateTempSubdirectory("darling-printconn-chain-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            var viewerCredential = PerformanceMonitor.Darling.Service.DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory);
+            File.WriteAllText(viewerCredential, PerformanceMonitor.Darling.Service.DarlingSecrets.Protect("viewer-secret-pw"));
+
+            var certPath = Path.Combine(
+                Path.GetDirectoryName(viewerCredential)!,
+                PerformanceMonitor.Darling.Service.DarlingManagedPostgres.ServerCertFileName);
+            const string leafPem = "-----BEGIN CERTIFICATE-----\nMIIBLEAFCHAINPEM\n-----END CERTIFICATE-----";
+            const string rootPem = "-----BEGIN CERTIFICATE-----\nMIIBROOTCAPEM\n-----END CERTIFICATE-----";
+            File.WriteAllText(certPath, leafPem);
+            File.WriteAllText(
+                PerformanceMonitor.Darling.Service.DarlingManagedPostgres.RootCertificatePathFor(certPath), rootPem);
+
+            var configPath = Path.Combine(root.FullName, "darling.json");
+            var json = $$"""
+                {
+                  "postgres": {
+                    "managed": true,
+                    "port": 5641,
+                    "dataDirectory": {{JsonSerializer.Serialize(dataDirectory)}},
+                    "network": { "listen": "192.168.1.205", "allowFrom": "192.168.1.0/24", "role": "viewer" }
+                  },
+                  "servers": [ { "name": "SQL2022", "host": "SQL2022" } ]
+                }
+                """;
+            await File.WriteAllTextAsync(configPath, json);
+
+            var output = new StringWriter();
+            var exit = await DarlingCliCommands.PrintViewerConnectionAsync(configPath, output, new StringWriter(), CancellationToken.None);
+            var stdout = output.ToString();
+
+            Assert.Equal(0, exit);
+
+            /* The ROOT's content, labeled as root.crt — never the leaf chain the server serves. */
+            Assert.Contains(rootPem, stdout, StringComparison.Ordinal);
+            Assert.DoesNotContain(leafPem, stdout, StringComparison.Ordinal);
+            Assert.Contains("(root.crt)", stdout, StringComparison.Ordinal);
+
+            /* The client-side FILE name stays server.crt (ViewerClientCertificateFileName) on purpose —
+               the save-as path in the connection string does not change with the store's shape. */
+            Assert.Contains("Root Certificate=server.crt", stdout, StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
 }
 
 /// <summary>

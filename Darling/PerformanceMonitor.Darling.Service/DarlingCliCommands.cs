@@ -393,7 +393,9 @@ public static class DarlingCliCommands
         /* Emit the server cert PEM so the operator can copy it to the viewer machine. */
         if (certificate is not null)
         {
-            output.WriteLine($"# Server TLS certificate ({DarlingManagedPostgres.ServerCertFileName}) — save as '{clientCertificatePath}' on the viewer machine:");
+            /* #2117 review catch: name the file whose CONTENT is actually below — root.crt on a
+               chain-shaped store, server.crt only on a legacy one. */
+            output.WriteLine($"# Server TLS certificate ({Path.GetFileName(distributableCertPath)}) — save as '{clientCertificatePath}' on the viewer machine:");
             output.WriteLine(certificate);
         }
 
