@@ -605,15 +605,15 @@ END;
            comma and sit at the END of the inner select list precisely because they can be empty; the
            outer ones keep their original trailing-comma form because they are never empty. */
         string numPhysIoReadsAgg = isNew
-            ? $",\n        {WeightedAverage("avg_num_physical_io_reads")},\n        min_num_physical_io_reads = MIN(qsrs.min_num_physical_io_reads),\n        max_num_physical_io_reads = MAX(qsrs.max_num_physical_io_reads)"
+            ? $",\n    {WeightedAverage("avg_num_physical_io_reads")},\n    min_num_physical_io_reads = MIN(qsrs.min_num_physical_io_reads),\n    max_num_physical_io_reads = MAX(qsrs.max_num_physical_io_reads)"
             : "";
 
         string logBytesAgg = isNew
-            ? $",\n        {WeightedAverage("avg_log_bytes_used")},\n        min_log_bytes_used = MIN(qsrs.min_log_bytes_used),\n        max_log_bytes_used = MAX(qsrs.max_log_bytes_used)"
+            ? $",\n    {WeightedAverage("avg_log_bytes_used")},\n    min_log_bytes_used = MIN(qsrs.min_log_bytes_used),\n    max_log_bytes_used = MAX(qsrs.max_log_bytes_used)"
             : "";
 
         string tempdbAgg = isNew
-            ? $",\n        {WeightedAverage("avg_tempdb_space_used")},\n        min_tempdb_space_used = MIN(qsrs.min_tempdb_space_used),\n        max_tempdb_space_used = MAX(qsrs.max_tempdb_space_used)"
+            ? $",\n    {WeightedAverage("avg_tempdb_space_used")},\n    min_tempdb_space_used = MIN(qsrs.min_tempdb_space_used),\n    max_tempdb_space_used = MAX(qsrs.max_tempdb_space_used)"
             : "";
 
         string numPhysIoReadsCols = isNew
@@ -681,7 +681,7 @@ END;
            Leading comma: it splices into both the inner select list and the GROUP BY, and is empty on
            targets without the column. */
         string replicaGroupKey = hasReplicaAttribution
-            ? ",\n        qsrs.replica_group_id"
+            ? ",\n    qsrs.replica_group_id"
             : "";
 
         /* There is deliberately NO self-exclusion predicate in this query (#1565, actual-plan evidence
@@ -786,17 +786,99 @@ END;
            its oldest shipped row, and the next slice's strict `< @ceiling_time` resumes with no hole
            or re-ship. Same TIES, same budget, same tie-group completion; only the window and the
            direction differ. */
+        /* The interval pre-filter resolves candidate interval ids from the INTERVAL CATALOG
+           (sys.query_store_runtime_stats_interval, ~one row per interval of retained history — hundreds
+           of rows) rather than from runtime_stats itself (#2133; measured on the field store: 20 ms vs
+           426 ms for the identical id set). end_time/start_time are datetimeoffset; the datetime2
+           parameters promote with a zero offset, i.e. as the UTC instants they are — the same implicit
+           promotion the HAVING's last_execution_time comparison has always relied on. The catalog bound
+           is a SUPERSET (an interval can end after the cutoff while all its rows are older); the HAVING
+           below stays the exact row-level filter, so shipped semantics are unchanged. */
         var intervalPreFilter = backfill
-            ? @"f.last_execution_time > @floor_time
-        AND   f.last_execution_time < @ceiling_time"
-            : "f.last_execution_time > @cutoff_time";
+            ? @"i.end_time > @floor_time
+    AND   i.start_time < @ceiling_time"
+            : "i.end_time > @cutoff_time";
         var intervalHaving = backfill
             ? @"MAX(qsrs.last_execution_time) > @floor_time
-        AND MAX(qsrs.last_execution_time) < @ceiling_time"
+    AND MAX(qsrs.last_execution_time) < @ceiling_time"
             : "MAX(qsrs.last_execution_time) > @cutoff_time";
         var shipOrder = backfill ? "DESC" : "ASC";
 
+        /* STAGED, not monolithic (#2133). Joining the slice aggregate straight into the
+           query_store_plan/query/text TVFs handed the optimizer nothing but fixed-guess cardinalities,
+           and the shape it picked re-materialized a TVF per probe — a fixed cost no window width could
+           reduce. Field bisection on an 82k-plan catalog (echo, SQL 2022): the aggregate alone ran in
+           81 ms and each TVF scanned bare in ~300 ms, yet aggregate-JOIN-qsp could not finish in 30 s,
+           hinted or not; staged through the temp the same work totaled 524 ms (56 stage + 409 join).
+           That fixed cost is what wedged the big-catalog databases at EVERY catch-up width and made
+           #2125's shrink floor-pin instead of converge. The temp gives the final join REAL row counts —
+           and for that reason the old LOOP JOIN hint must NOT return: looping from the temp into the
+           TVFs is the same per-probe re-materialization by another name; the 524 ms join is unhinted,
+           chosen by the optimizer from true cardinalities. sp_QuickieStore stages for the same reason.
+
+           Batch mechanics: SELECT INTO emits no result set, so the batch still returns exactly ONE
+           result set (the reader/byte-budget contract). Inside the on-prem [db].sys.sp_executesql
+           nesting the temp's scope dies with the invocation; on Azure's direct per-database path the
+           leading DROP TABLE IF EXISTS covers pooled-connection reuse. TOP ... WITH TIES, the ship
+           order, and the derived-watermark semantics live on the final SELECT, unchanged.
+
+           BOTH statements carry OPTION(RECOMPILE) (review catch): split out on its own, the staging
+           statement would otherwise be cached via sp_executesql's parameterized text and sniffed
+           across live vs backfill windows of wildly different selectivity — the same fixed-guess
+           failure mode this rewrite removes, reintroduced one statement earlier. */
         return $@"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+DROP TABLE IF EXISTS #pm_qs_slice;
+
+SELECT /* PerformanceMonitorLite */
+    qsrs.plan_id,
+    qsrs.runtime_stats_interval_id,
+    qsrs.execution_type_desc{replicaGroupKey},
+    first_execution_time = MIN(qsrs.first_execution_time),
+    last_execution_time = MAX(qsrs.last_execution_time),
+    count_executions = SUM(qsrs.count_executions),
+    {WeightedAverage("avg_duration")},
+    min_duration = MIN(qsrs.min_duration),
+    max_duration = MAX(qsrs.max_duration),
+    {WeightedAverage("avg_cpu_time")},
+    min_cpu_time = MIN(qsrs.min_cpu_time),
+    max_cpu_time = MAX(qsrs.max_cpu_time),
+    {WeightedAverage("avg_logical_io_reads")},
+    min_logical_io_reads = MIN(qsrs.min_logical_io_reads),
+    max_logical_io_reads = MAX(qsrs.max_logical_io_reads),
+    {WeightedAverage("avg_logical_io_writes")},
+    min_logical_io_writes = MIN(qsrs.min_logical_io_writes),
+    max_logical_io_writes = MAX(qsrs.max_logical_io_writes),
+    {WeightedAverage("avg_physical_io_reads")},
+    min_physical_io_reads = MIN(qsrs.min_physical_io_reads),
+    max_physical_io_reads = MAX(qsrs.max_physical_io_reads),
+    {WeightedAverage("avg_clr_time")},
+    min_clr_time = MIN(qsrs.min_clr_time),
+    max_clr_time = MAX(qsrs.max_clr_time),
+    min_dop = MIN(qsrs.min_dop),
+    max_dop = MAX(qsrs.max_dop),
+    {WeightedAverage("avg_query_max_used_memory")},
+    min_query_max_used_memory = MIN(qsrs.min_query_max_used_memory),
+    max_query_max_used_memory = MAX(qsrs.max_query_max_used_memory),
+    {WeightedAverage("avg_rowcount")},
+    min_rowcount = MIN(qsrs.min_rowcount),
+    max_rowcount = MAX(qsrs.max_rowcount){numPhysIoReadsAgg}{logBytesAgg}{tempdbAgg}
+INTO #pm_qs_slice
+FROM sys.query_store_runtime_stats AS qsrs
+WHERE qsrs.runtime_stats_interval_id IN
+(
+    SELECT
+        i.runtime_stats_interval_id
+    FROM sys.query_store_runtime_stats_interval AS i
+    WHERE {intervalPreFilter}
+)
+GROUP BY
+    qsrs.plan_id,
+    qsrs.runtime_stats_interval_id,
+    qsrs.execution_type_desc{replicaGroupKey}
+HAVING
+    {intervalHaving}
+OPTION(RECOMPILE);
 
 SELECT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase}) WITH TIES
     query_id = qsq.query_id,
@@ -855,56 +937,7 @@ SELECT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase}) WITH TIES
     {replicaRoleCol},
     runtime_stats_interval_id = qsrs.runtime_stats_interval_id,
     interval_start_time_utc = CONVERT(datetime2, qsrsi.start_time AT TIME ZONE 'UTC')
-FROM
-(
-    SELECT
-        qsrs.plan_id,
-        qsrs.runtime_stats_interval_id,
-        qsrs.execution_type_desc{replicaGroupKey},
-        first_execution_time = MIN(qsrs.first_execution_time),
-        last_execution_time = MAX(qsrs.last_execution_time),
-        count_executions = SUM(qsrs.count_executions),
-        {WeightedAverage("avg_duration")},
-        min_duration = MIN(qsrs.min_duration),
-        max_duration = MAX(qsrs.max_duration),
-        {WeightedAverage("avg_cpu_time")},
-        min_cpu_time = MIN(qsrs.min_cpu_time),
-        max_cpu_time = MAX(qsrs.max_cpu_time),
-        {WeightedAverage("avg_logical_io_reads")},
-        min_logical_io_reads = MIN(qsrs.min_logical_io_reads),
-        max_logical_io_reads = MAX(qsrs.max_logical_io_reads),
-        {WeightedAverage("avg_logical_io_writes")},
-        min_logical_io_writes = MIN(qsrs.min_logical_io_writes),
-        max_logical_io_writes = MAX(qsrs.max_logical_io_writes),
-        {WeightedAverage("avg_physical_io_reads")},
-        min_physical_io_reads = MIN(qsrs.min_physical_io_reads),
-        max_physical_io_reads = MAX(qsrs.max_physical_io_reads),
-        {WeightedAverage("avg_clr_time")},
-        min_clr_time = MIN(qsrs.min_clr_time),
-        max_clr_time = MAX(qsrs.max_clr_time),
-        min_dop = MIN(qsrs.min_dop),
-        max_dop = MAX(qsrs.max_dop),
-        {WeightedAverage("avg_query_max_used_memory")},
-        min_query_max_used_memory = MIN(qsrs.min_query_max_used_memory),
-        max_query_max_used_memory = MAX(qsrs.max_query_max_used_memory),
-        {WeightedAverage("avg_rowcount")},
-        min_rowcount = MIN(qsrs.min_rowcount),
-        max_rowcount = MAX(qsrs.max_rowcount){numPhysIoReadsAgg}{logBytesAgg}{tempdbAgg}
-    FROM sys.query_store_runtime_stats AS qsrs
-    WHERE qsrs.runtime_stats_interval_id IN
-    (
-        SELECT
-            f.runtime_stats_interval_id
-        FROM sys.query_store_runtime_stats AS f
-        WHERE {intervalPreFilter}
-    )
-    GROUP BY
-        qsrs.plan_id,
-        qsrs.runtime_stats_interval_id,
-        qsrs.execution_type_desc{replicaGroupKey}
-    HAVING
-        {intervalHaving}
-) AS qsrs
+FROM #pm_qs_slice AS qsrs
 JOIN sys.query_store_plan AS qsp
   ON qsp.plan_id = qsrs.plan_id
 JOIN sys.query_store_query AS qsq
@@ -915,7 +948,7 @@ LEFT JOIN sys.query_store_runtime_stats_interval AS qsrsi
   ON qsrsi.runtime_stats_interval_id = qsrs.runtime_stats_interval_id
 {replicaJoin}
 ORDER BY qsrs.last_execution_time {shipOrder}
-OPTION(RECOMPILE, LOOP JOIN);";
+OPTION(RECOMPILE);";
     }
 
     /// <summary>
