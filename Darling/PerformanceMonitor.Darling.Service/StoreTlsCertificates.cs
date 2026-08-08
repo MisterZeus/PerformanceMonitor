@@ -17,12 +17,15 @@ namespace PerformanceMonitor.Darling.Service;
 /// The store's TLS material, generated as a REAL two-cert chain (#2117): a throwaway local root CA
 /// whose private key is discarded the moment it has signed the one server leaf, and the leaf
 /// postgres serves. The old single self-signed end-entity cert (critical <c>CA=false</c> Basic
-/// Constraints) was its own trust anchor, and Windows' chain engine refuses that shape under the
-/// custom-root trust Npgsql uses for <c>Root Certificate=…</c> — so the exact connection string
-/// <c>--print-viewer-connection</c> printed failed <c>VerifyFull</c> on the platform most viewers
-/// run on, while the same certificate imported into the OS trust store validated fine (the field
-/// report's workaround). A leaf under a real CA root is the textbook case every chain engine —
-/// Windows, macOS, Linux, and libpq for non-Npgsql clients — accepts.
+/// Constraints) was its own trust anchor. The field report (#2117) shows that shape failing
+/// <c>VerifyFull</c> chain validation on a real Windows viewer while the same certificate imported
+/// into the OS trust store validated fine — and the E2E pins in NpgsqlRootCertificateValidationTests
+/// show STOCK Windows CI accepting it, so the refusal is environmental (hardening policy is the
+/// likely class: "an end-entity certificate may not be its own anchor" is exactly what strict
+/// chain-policy configurations enforce). A leaf under a real CA root is the textbook shape every
+/// chain engine and policy regime accepts — Windows, macOS, Linux, and libpq for non-Npgsql
+/// clients — which is why the chain is the durable fix even though stock platforms tolerate the
+/// old shape.
 ///
 /// <para>Discarding the CA key is load-bearing: nothing can ever mint another certificate under
 /// the distributed root, so trusting <c>root.crt</c> pins exactly one server identity, the same
