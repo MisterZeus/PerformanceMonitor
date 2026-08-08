@@ -833,10 +833,13 @@ public partial class SettingsWindow : Window
         if (double.TryParse(AnalysisNotifySeverityBox.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var analysisSeverity)
             && analysisSeverity is >= 0.0 and <= 2.0)
             row.AnalysisNotifySeverity = analysisSeverity;
+        else
+            errors.Add("Analysis notify severity must be between 0.0 and 2.0.");
+
         if (int.TryParse(AnalysisNotifyCooldownBox.Text, out var analysisCooldown) && analysisCooldown is >= 30 and <= 10080)
             row.AnalysisNotifyCooldownMinutes = analysisCooldown;
         else
-            errors.Add("Analysis notify severity must be between 0.0 and 2.0.");
+            errors.Add("Analysis re-notify cooldown must be between 30 and 10080 minutes.");
 
         /* #1141/#1236: delivery mode + per-event cap (store-backed). */
         row.DeliveryMode = AlertDeliveryModeBox.SelectedIndex == 1 ? "PerEvent" : "Summary";
