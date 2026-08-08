@@ -102,6 +102,41 @@ public sealed class QueryStoreBackfillTests
     }
 
     [Fact]
+    public void AdaptiveSpan_HalvesPerFailure_FloorsAtFifteenMinutes_AndResetsAtZero()
+    {
+        /* #2111 promoted from reserve on field evidence: a member whose 1h window intermittently
+           exceeds the command timeout stayed stuck for hours (Redstone, 3+ hours flat overnight) —
+           halving toward a floor gives it a window that fits, and the skipped range rides the same
+           hole records the clamp writes. Zero failures = full width, success resets the counter at
+           every call site, and the exponent cap keeps the shift math from wrapping. */
+        var full = QueryStoreBackfillState.MaxSliceSpan;
+
+        Assert.Equal(full, QueryStoreBackfillState.AdaptiveSpan(full, 0));
+        Assert.Equal(TimeSpan.FromMinutes(30), QueryStoreBackfillState.AdaptiveSpan(full, 1));
+        Assert.Equal(TimeSpan.FromMinutes(15), QueryStoreBackfillState.AdaptiveSpan(full, 2));
+        Assert.Equal(QueryStoreBackfillState.MinAdaptiveSpan, QueryStoreBackfillState.AdaptiveSpan(full, 3));
+        Assert.Equal(QueryStoreBackfillState.MinAdaptiveSpan, QueryStoreBackfillState.AdaptiveSpan(full, 100));
+
+        Assert.Equal(TimeSpan.FromMinutes(15), QueryStoreBackfillState.MinAdaptiveSpan);
+    }
+
+    [Fact]
+    public void BoundSliceFloor_AdaptiveForm_CapsToThePassedSpan()
+    {
+        var ceiling = new DateTime(2026, 8, 8, 12, 0, 0, DateTimeKind.Utc);
+        var wideFloor = ceiling.AddHours(-23);
+
+        Assert.Equal(
+            ceiling - TimeSpan.FromMinutes(15),
+            QueryStoreBackfillState.BoundSliceFloor(wideFloor, ceiling, TimeSpan.FromMinutes(15)));
+
+        /* The parameterless form stays the full-span behavior. */
+        Assert.Equal(
+            ceiling - QueryStoreBackfillState.MaxSliceSpan,
+            QueryStoreBackfillState.BoundSliceFloor(wideFloor, ceiling));
+    }
+
+    [Fact]
     public void ShouldYieldToLive_YieldsInsideTheWindow_RunsOutsideIt_AndNeverOnNull()
     {
         /* #2111: a live query_store failure inside the window means the replica is contended NOW —
