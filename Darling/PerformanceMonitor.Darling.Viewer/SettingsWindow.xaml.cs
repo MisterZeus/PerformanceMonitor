@@ -987,6 +987,12 @@ public partial class SettingsWindow : Window
         AlertPvsThresholdPercentBox.IsEnabled = enabled;
         AlertPvsFloorGbBox.IsEnabled = enabled;
         AlertLowDiskThresholdGbBox.IsEnabled = enabled;
+        /* #2107: the new threshold boxes follow the master switch like every sibling. */
+        AlertDiskCriticalPercentBox.IsEnabled = enabled;
+        AlertDiskCriticalGbBox.IsEnabled = enabled;
+        AlertSelfDiskWarnPercentBox.IsEnabled = enabled;
+        AlertCollectionStaleMinutesBox.IsEnabled = enabled;
+        AlertCollectionFailureThresholdBox.IsEnabled = enabled;
         AlertLongRunningJobCheckBox.IsEnabled = enabled;
         AlertLongRunningJobMultiplierBox.IsEnabled = enabled;
         AlertFailedJobCheckBox.IsEnabled = enabled;
