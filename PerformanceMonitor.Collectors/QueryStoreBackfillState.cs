@@ -68,6 +68,34 @@ public static class QueryStoreBackfillState
         => lastLiveFailureUtc is DateTime failure && nowUtc - failure < YieldToLiveWindow;
 
     /// <summary>
+    /// The narrowest window the adaptive shrink may reach (#2111 reserve, promoted on field
+    /// evidence): a member whose 1h window exceeds the command timeout halves per consecutive
+    /// failure toward this floor — 15 minutes fits inside a 60s read on every store the fleet has
+    /// shown us, and anything narrower than a flush interval would mostly return empty.
+    /// </summary>
+    public static readonly TimeSpan MinAdaptiveSpan = TimeSpan.FromMinutes(15);
+
+    /// <summary>
+    /// The window a member gets after <paramref name="consecutiveFailures"/> straight failures:
+    /// the full span halved per failure, floored at <see cref="MinAdaptiveSpan"/> (the exponent is
+    /// capped so the shift math cannot wrap). Success resets the counter at the call sites, so a
+    /// recovered member is back at full span on its next cycle. Pure and pinned like its siblings —
+    /// the live clamp and the backfill slicing share it, so the two paths cannot drift on how fast
+    /// they back off.
+    /// </summary>
+    public static TimeSpan AdaptiveSpan(TimeSpan fullSpan, int consecutiveFailures)
+    {
+        if (consecutiveFailures <= 0)
+        {
+            return fullSpan;
+        }
+
+        var halvings = Math.Min(consecutiveFailures, 6);
+        var shrunk = TimeSpan.FromTicks(fullSpan.Ticks >> halvings);
+        return shrunk < MinAdaptiveSpan ? MinAdaptiveSpan : shrunk;
+    }
+
+    /// <summary>
     /// Bounds one newest-first slice to the top <see cref="MaxSliceSpan"/> of the remaining range:
     /// returns the floor the slice should actually query, which is the requested floor once the
     /// remainder is narrow enough. A pure function so the placement is pinnable in isolation, like
@@ -77,8 +105,14 @@ public static class QueryStoreBackfillState
     /// <paramref name="floorUtc"/>: an empty slice is terminal, exactly the pre-chunking semantics).
     /// </summary>
     public static DateTime BoundSliceFloor(DateTime floorUtc, DateTime ceilingUtc)
+        => BoundSliceFloor(floorUtc, ceilingUtc, MaxSliceSpan);
+
+    /// <summary>The adaptive form (#2111 promoted): the caller passes
+    /// <see cref="AdaptiveSpan"/>'s result so a server whose slices keep timing out digs in
+    /// progressively narrower chunks until one fits its command timeout.</summary>
+    public static DateTime BoundSliceFloor(DateTime floorUtc, DateTime ceilingUtc, TimeSpan span)
     {
-        var chunkFloor = ceilingUtc - MaxSliceSpan;
+        var chunkFloor = ceilingUtc - span;
         return chunkFloor > floorUtc ? chunkFloor : floorUtc;
     }
 

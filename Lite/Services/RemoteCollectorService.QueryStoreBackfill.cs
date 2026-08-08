@@ -82,6 +82,45 @@ public partial class RemoteCollectorService
     /// </summary>
     private readonly ConcurrentDictionary<int, DateTime> _lastQueryStoreItemFailureUtc = new();
 
+    /// <summary>Consecutive live query_store failures per (server, database) — the adaptive-shrink
+    /// signal (#2111 promoted); see Darling's twin for the semantics. Reset on the database's next
+    /// successful item.</summary>
+    private readonly ConcurrentDictionary<(int ServerId, string Database), int> _consecutiveQueryStoreItemFailures = new();
+
+    private int ConsecutiveQueryStoreItemFailures(int serverId, string database)
+        => _consecutiveQueryStoreItemFailures.TryGetValue((serverId, database), out var count) ? count : 0;
+
+    private void OnQueryStoreItemFailed(int serverId, string database)
+    {
+        _lastQueryStoreItemFailureUtc[serverId] = DateTime.UtcNow;
+        _consecutiveQueryStoreItemFailures.AddOrUpdate((serverId, database), 1, static (_, current) => current + 1);
+    }
+
+    private void OnQueryStoreItemSucceeded(int serverId, string database)
+        => _consecutiveQueryStoreItemFailures.TryRemove((serverId, database), out _);
+
+    /// <summary>Consecutive failed backfill slices per server — the shrink signal's backfill half;
+    /// any completed slice resets it.</summary>
+    private readonly ConcurrentDictionary<int, int> _consecutiveSliceFailures = new();
+
+    /// <summary>Runs one slice with the failure accounting wrapped around it — the caller's outer
+    /// catch still logs the throw exactly as before.</summary>
+    private async Task RunCountedBackfillSliceAsync(
+        ServerConnection server, int serverId, CollectorTargetInfo target, string databaseName,
+        DateTime floorUtc, DateTime ceilingUtc, bool isHole, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await RunBackfillSliceAsync(server, serverId, target, databaseName, floorUtc, ceilingUtc, isHole, cancellationToken);
+            _consecutiveSliceFailures.TryRemove(serverId, out _);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _consecutiveSliceFailures.AddOrUpdate(serverId, 1, static (_, current) => current + 1);
+            throw;
+        }
+    }
+
     /// <summary>One server's scan-and-slice — the twin of Darling's RunServerSliceAsync, on Lite's
     /// plumbing (DuckDB reads, ServerConnection credentials, the shared appender write).</summary>
     internal async Task<bool> RunQueryStoreBackfillSliceAsync(ServerConnection server, CancellationToken cancellationToken)
@@ -137,7 +176,7 @@ public partial class RemoteCollectorService
                 }
 
                 var holeFloor = holeFrom > floorLimit ? holeFrom : floorLimit;
-                await RunBackfillSliceAsync(server, serverId, target, databaseName, holeFloor, holeTo, isHole: true, cancellationToken);
+                await RunCountedBackfillSliceAsync(server, serverId, target, databaseName, holeFloor, holeTo, isHole: true, cancellationToken);
                 return true;
             }
 
@@ -165,7 +204,7 @@ public partial class RemoteCollectorService
                 continue;
             }
 
-            await RunBackfillSliceAsync(server, serverId, target, databaseName, floorLimit, storedFloor.Value, isHole: false, cancellationToken);
+            await RunCountedBackfillSliceAsync(server, serverId, target, databaseName, floorLimit, storedFloor.Value, isHole: false, cancellationToken);
             return true;
         }
 
@@ -190,7 +229,12 @@ public partial class RemoteCollectorService
            budget bounds what SHIPS, not what the query aggregates and sorts — an unchunked wide
            window on a big database times out at the command timeout every tick and the range never
            drains, the same row-cap-is-not-a-cost-cap flaw that wedged the live path. */
-        var sliceFloor = QueryStoreBackfillState.BoundSliceFloor(floorUtc, ceilingUtc);
+        /* #2111 adaptive shrink: after consecutive failed slices this server digs in narrower
+           chunks until one fits its command timeout; a completed slice resets to full width. */
+        var sliceSpan = QueryStoreBackfillState.AdaptiveSpan(
+            QueryStoreBackfillState.MaxSliceSpan,
+            _consecutiveSliceFailures.TryGetValue(serverId, out var recentFailures) ? recentFailures : 0);
+        var sliceFloor = QueryStoreBackfillState.BoundSliceFloor(floorUtc, ceilingUtc, sliceSpan);
 
         var definition = QueryStoreCollector.Instance;
         var context = new CollectorContext

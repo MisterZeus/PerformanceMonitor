@@ -169,6 +169,38 @@ public partial class RemoteCollectorService
                         context.Watermark = await GetLastCollectedTimeForDatabaseAsync(
                             serverId, definition.TargetTable, definition.WatermarkColumn!,
                             definition.PerDatabaseWatermarkColumn!, databaseName, cancellationToken);
+
+                        /* #2111 adaptive shrink, Azure arm — tighten BEFORE BuildQuery: the
+                           definition's own clamp only floors OLDER watermarks, so a tighter one
+                           passes through untouched; the skipped range rides the backfill hole. */
+                        var azureFailures = ConsecutiveQueryStoreItemFailures(serverId, databaseName);
+                        if (azureFailures > 0
+                            && string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                        {
+                            var adaptiveSpan = QueryStoreBackfillState.AdaptiveSpan(WatermarkPolicy.MaxCatchup, azureFailures);
+                            var tighterFloor = collectionTime - adaptiveSpan;
+                            if (context.Watermark is DateTime azureRaw)
+                            {
+                                if (azureRaw < tighterFloor)
+                                {
+                                    _logger?.LogWarning(
+                                        "query_store on '{Server}' database [{Database}] adaptive catch-up shrink: {Failures} consecutive failed cycles — window narrowed to {Minutes:F0}m; the skipped range rides the backfill hole.",
+                                        server.DisplayName, databaseName, azureFailures, adaptiveSpan.TotalMinutes);
+                                    await RecordQueryStoreBackfillHoleAsync(serverId, databaseName, azureRaw, tighterFloor, cancellationToken);
+                                    context.Watermark = tighterFloor;
+                                }
+                            }
+                            else
+                            {
+                                /* Never-succeeded database: tighten the first-run fallback too (the
+                                   review catch); no hole — pre-watermark history is the tail's job. */
+                                _logger?.LogWarning(
+                                    "query_store on '{Server}' database [{Database}] adaptive first-contact shrink: {Failures} consecutive failed cycles — first-run window narrowed to {Minutes:F0}m.",
+                                    server.DisplayName, databaseName, azureFailures, adaptiveSpan.TotalMinutes);
+                                context.Watermark = tighterFloor;
+                            }
+                        }
+
                         dbPlan = definition.BuildQuery(context);
 
                         /* The definition clamped its own cutoff — surface the same WARNING the
@@ -233,6 +265,12 @@ public partial class RemoteCollectorService
                        shipped boundary rather than dropping it — this log is how a long catch-up
                        stays observable. Read after the flush, as on the other path: the context
                        signal stays this database's until the next read resets it. */
+                    /* #2111: success resets the adaptive-shrink count on the Azure arm too. */
+                    if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                    {
+                        OnQueryStoreItemSucceeded(serverId, databaseName);
+                    }
+
                     var capHit = definition.PerItemRowCountWarnThreshold is int cap && batch.Count >= cap;
                     if (capHit || context.PerItemTextBudgetExceeded)
                     {
@@ -251,14 +289,14 @@ public partial class RemoteCollectorService
                     failed++;
                     firstFailure ??= ex;
 
-                    /* #2111: the yield-to-live stamp for the Azure SQL DB arm — query_store reaches
-                       THIS per-database loop there, not the enumeration path's onItemError, and
-                       without the stamp the backfill worker would never yield on an Azure target
-                       (the review catch on #2112). Same query_store-only guard as the hole
-                       recording above. */
+                    /* #2111: the yield-to-live stamp + adaptive-shrink count for the Azure SQL DB
+                       arm — query_store reaches THIS per-database loop there, not the enumeration
+                       path's onItemError, and without the stamp the backfill worker would never
+                       yield on an Azure target (the review catch on #2112). Same query_store-only
+                       guard as the hole recording above. */
                     if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                     {
-                        _lastQueryStoreItemFailureUtc[serverId] = DateTime.UtcNow;
+                        OnQueryStoreItemFailed(serverId, databaseName);
                     }
 
                     _logger?.LogDebug("Skipping database '{Database}' for {Collector}: {Error}", databaseName, definition.Name, ex.Message);
@@ -387,6 +425,39 @@ public partial class RemoteCollectorService
                                     await RecordQueryStoreBackfillHoleAsync(serverId, item, raw.Value, clamped.Value, ct);
                                 }
                             }
+
+                            /* #2111 adaptive shrink — see Darling's twin; the skipped range rides the
+                               same hole records the clamp writes, deferred to the trickle, never
+                               dropped. Success resets the count via onItemComplete. */
+                            var failures = ConsecutiveQueryStoreItemFailures(serverId, item);
+                            if (failures > 0
+                                && string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                            {
+                                var span = QueryStoreBackfillState.AdaptiveSpan(WatermarkPolicy.MaxCatchup, failures);
+                                var tighterFloor = collectionTime - span;
+                                if (clamped is DateTime current)
+                                {
+                                    if (current < tighterFloor)
+                                    {
+                                        _logger?.LogWarning(
+                                            "query_store on '{Server}' database [{Database}] adaptive catch-up shrink: {Failures} consecutive failed cycles — window narrowed to {Minutes:F0}m; the skipped range rides the backfill hole.",
+                                            server.DisplayName, item, failures, span.TotalMinutes);
+                                        await RecordQueryStoreBackfillHoleAsync(serverId, item, current, tighterFloor, ct);
+                                        clamped = tighterFloor;
+                                    }
+                                }
+                                else
+                                {
+                                    /* Never-succeeded database (null watermark): tighten the 60-minute
+                                       first-run fallback the same way — the review catch; see Darling's
+                                       twin. No hole: pre-watermark history is the tail's job. */
+                                    _logger?.LogWarning(
+                                        "query_store on '{Server}' database [{Database}] adaptive first-contact shrink: {Failures} consecutive failed cycles — first-run window narrowed to {Minutes:F0}m.",
+                                        server.DisplayName, item, failures, span.TotalMinutes);
+                                    clamped = tighterFloor;
+                                }
+                            }
+
                             context.Watermark = clamped;
                         },
                     readItem: async (item, ct) =>
@@ -400,6 +471,13 @@ public partial class RemoteCollectorService
                     writeBatch: (batch, ct) => Task.FromResult(WriteBatch(duckConnection, definition, batch, serverId, context.ServerName, collectionTime, context)),
                     onItemComplete: (item, batchCount, itemSqlMs, itemStorageMs) =>
                     {
+                        /* #2111: a completed item resets the adaptive-shrink count — recovery returns
+                           the member to the full catch-up width on its next cycle. */
+                        if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                        {
+                            OnQueryStoreItemSucceeded(serverId, item);
+                        }
+
                         /* Per-DATABASE line for non-empty batches (#1565): the per-server summary blends
                            every database into one number, hiding a single busy database's burst behind
                            quiet siblings. Quiet databases (0 rows) stay silent. */
@@ -422,11 +500,12 @@ public partial class RemoteCollectorService
                     },
                     onItemError: (item, ex) =>
                     {
-                        /* #2111: stamp the yield-to-live signal — any database's live failure vouches
-                           for the whole replica being contended. */
+                        /* #2111: stamp the yield-to-live signal (any database's live failure vouches
+                           for the whole replica being contended) + the per-database adaptive-shrink
+                           count. */
                         if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                         {
-                            _lastQueryStoreItemFailureUtc[serverId] = DateTime.UtcNow;
+                            OnQueryStoreItemFailed(serverId, item);
                         }
 
                         _logger?.LogWarning("Failed to collect {Collector} from [{Database}] on '{Server}': {Message}",
