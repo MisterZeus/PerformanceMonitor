@@ -34,6 +34,16 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class QueryStoreSliceRepairLiveTests
 {
+    [Fact]
+    public void SliceStatementTimeout_IsGenerousButBounded()
+    {
+        /* #2105 field failure: Npgsql's default 30s killed the stage aggregation on a store fresh
+           off a large catch-up, surfacing as "Exception while reading from stream" with no mention
+           of a timeout. Bounded on purpose - the slice transaction holds chunk locks the live
+           service's compression jobs also want, so infinite (the VACUUM precedent) is wrong here. */
+        Assert.Equal(900, QueryStoreSliceRepair.SliceStatementTimeoutSeconds);
+    }
+
     private const int TestServerId = -919120;
 
     /// <summary>
