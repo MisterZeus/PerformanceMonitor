@@ -250,6 +250,19 @@ public static class QueryStoreSliceRepair
     }
 
     /// <summary>
+    /// Per-statement timeout for the repair's heavy statements (#2105 field failure): Npgsql's
+    /// default 30s killed the STAGE aggregation on a store fresh off a large catch-up — a day
+    /// slice's GROUP BY spools every row of the day including the query-text payloads, and the
+    /// verb runs beside the live service (a managed store cannot stop it — stopping the service
+    /// stops Postgres), so collector writes and compression jobs contend for the same chunks.
+    /// The failure read as "Exception while reading from stream" after 0 rows, which is how an
+    /// Npgsql command timeout surfaces — nothing in the message says timeout. Fifteen minutes is
+    /// deliberately generous-but-bounded: the slice transaction holds chunk locks, so infinite
+    /// (the VACUUM precedent) is wrong here.
+    /// </summary>
+    public const int SliceStatementTimeoutSeconds = 900;
+
+    /// <summary>
     /// Runs the collapse over one half-open collection-time slice and returns how many rows it removed.
     ///
     /// <para>One transaction per slice: the DELETE and the INSERT must not be separable, or an abort between
@@ -264,7 +277,7 @@ public static class QueryStoreSliceRepair
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
         long before;
-        await using (var count = new NpgsqlCommand($"SELECT count(*) FROM collect.{Table} WHERE collection_time >= $1 AND collection_time < $2", connection, transaction))
+        await using (var count = new NpgsqlCommand($"SELECT count(*) FROM collect.{Table} WHERE collection_time >= $1 AND collection_time < $2", connection, transaction) { CommandTimeout = SliceStatementTimeoutSeconds })
         {
             count.Parameters.AddWithValue(fromUtc);
             count.Parameters.AddWithValue(toUtc);
@@ -273,25 +286,25 @@ public static class QueryStoreSliceRepair
 
         var statements = BuildCollapseStatements();
 
-        await using (var stage = new NpgsqlCommand(statements.Stage, connection, transaction))
+        await using (var stage = new NpgsqlCommand(statements.Stage, connection, transaction) { CommandTimeout = SliceStatementTimeoutSeconds })
         {
             stage.Parameters.AddWithValue(fromUtc);
             stage.Parameters.AddWithValue(toUtc);
             await stage.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using (var delete = new NpgsqlCommand(statements.Delete, connection, transaction))
+        await using (var delete = new NpgsqlCommand(statements.Delete, connection, transaction) { CommandTimeout = SliceStatementTimeoutSeconds })
         {
             await delete.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using (var insert = new NpgsqlCommand(statements.Insert, connection, transaction))
+        await using (var insert = new NpgsqlCommand(statements.Insert, connection, transaction) { CommandTimeout = SliceStatementTimeoutSeconds })
         {
             await insert.ExecuteNonQueryAsync(cancellationToken);
         }
 
         long after;
-        await using (var count = new NpgsqlCommand($"SELECT count(*) FROM collect.{Table} WHERE collection_time >= $1 AND collection_time < $2", connection, transaction))
+        await using (var count = new NpgsqlCommand($"SELECT count(*) FROM collect.{Table} WHERE collection_time >= $1 AND collection_time < $2", connection, transaction) { CommandTimeout = SliceStatementTimeoutSeconds })
         {
             count.Parameters.AddWithValue(fromUtc);
             count.Parameters.AddWithValue(toUtc);
@@ -315,7 +328,9 @@ public static class QueryStoreSliceRepair
     {
         ArgumentNullException.ThrowIfNull(connection);
 
-        await using var command = new NpgsqlCommand(SurveySql, connection);
+        /* Same #2105 timeout treatment: the survey aggregates the whole table's key columns, and a
+           dry run must not die on the store size the repair exists to handle. */
+        await using var command = new NpgsqlCommand(SurveySql, connection) { CommandTimeout = SliceStatementTimeoutSeconds };
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
         if (!await reader.ReadAsync(cancellationToken))
