@@ -321,9 +321,12 @@ public sealed class QueryStoreSliceRepairLiveTests
         await SeedSliceAsync(connection, hour.AddMinutes(5), intervalId: 8201, queryId: 91, planId: 111,
             intervalStart: hour, executionCount: MemoryCount, avgDurationUs: MemoryAvgUs, ct: ct);
 
-        /* ConvertToHypertablesAsync already enabled compression on the table; compress the seeded chunk
-           synchronously (if_not_compressed tolerates the policy job having beaten us to it), then PROVE the
-           compressed shape is what the collapse is about to run against. */
+        /* Compression enablement lives in ApplyCompressionPolicyAsync (a separate service-start step this
+           test deliberately skips — a background policy racing the assertions is pure interference), so
+           enable it directly, exactly like the retention test's compressed-chunk pin; then compress the
+           seeded chunk synchronously and PROVE the compressed shape is what the collapse runs against. */
+        await ExecAsync(connection,
+            "ALTER TABLE collect.query_store_stats SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')", ct);
         await ExecAsync(connection,
             "SELECT compress_chunk(c, if_not_compressed => true) FROM show_chunks('collect.query_store_stats') c", ct);
         Assert.True(await ScalarAsync(connection, @"
