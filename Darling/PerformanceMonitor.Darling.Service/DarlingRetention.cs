@@ -635,14 +635,13 @@ public static class DarlingRetention
     /// (warned; the caller falls back to DELETE for that table). drop_chunks returns one row per
     /// dropped chunk, so the count comes from reading the result set.
     /// </summary>
-    private static async Task<int?> DropChunksOneAsync(
+    private static Task<int?> DropChunksOneAsync(
         NpgsqlDataSource postgres,
         string tableName,
         string dropChunksSql,
         ILogger? logger,
         CancellationToken cancellationToken)
-    {
-        try
+        => ExecuteDropChunksWithDeadlockRetryAsync(async () =>
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand(dropChunksSql, connection) { CommandTimeout = DeleteTimeoutSeconds };
@@ -655,13 +654,40 @@ public static class DarlingRetention
             }
 
             return chunksDropped;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        }, tableName, logger);
+
+    /// <summary>
+    /// Runs one table's drop_chunks with a SINGLE immediate retry on deadlock (#2143). 40P01 is transient
+    /// by definition — the deadlock partner (in the field: a TimescaleDB background job holding chunk
+    /// locks, caught live by the nightly's purge e2e) commits or aborts within milliseconds of the abort,
+    /// so one retry converts a wasted purge cycle into a completed one. Exactly ONE retry: a second
+    /// deadlock in a row means the contention is standing, and the DELETE fallback plus next cycle's
+    /// sweep — the behavior this wraps — is the right posture, not a retry loop camped on a lock queue.
+    /// Any non-deadlock failure keeps the original single-shot behavior. Internal, delegate-seamed, so
+    /// the retry/give-up/no-retry arms pin without a store.
+    /// </summary>
+    internal static async Task<int?> ExecuteDropChunksWithDeadlockRetryAsync(
+        Func<Task<int>> dropChunks, string tableName, ILogger? logger)
+    {
+        for (var attempt = 1; ; attempt++)
         {
-            /* Failure-isolated per table — warned here, then the caller's DELETE fallback runs. */
-            logger?.LogWarning("Retention purge (drop_chunks) failed for {Table} — falling back to DELETE: {Message}",
-                tableName, ex.Message);
-            return null;
+            try
+            {
+                return await dropChunks();
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.DeadlockDetected && attempt == 1)
+            {
+                logger?.LogWarning(
+                    "Retention purge (drop_chunks) deadlocked for {Table} — retrying once (the partner clears in milliseconds): {Message}",
+                    tableName, ex.Message);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                /* Failure-isolated per table — warned here, then the caller's DELETE fallback runs. */
+                logger?.LogWarning("Retention purge (drop_chunks) failed for {Table} — falling back to DELETE: {Message}",
+                    tableName, ex.Message);
+                return null;
+            }
         }
     }
 
