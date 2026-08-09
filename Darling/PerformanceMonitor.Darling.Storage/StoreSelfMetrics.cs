@@ -88,6 +88,32 @@ LEFT JOIN LATERAL (
 ) c ON true";
 
     /// <summary>
+    /// The background-job rows (#2136) — TimescaleDB stores only, like the hypertable arm (the
+    /// timescaledb_information views do not exist on plain PostgreSQL). The store's own background jobs
+    /// (CAGG refreshes, compression, retention) are its heaviest recurring work, their runtimes scale
+    /// SERIALLY with raw volume (the finalize hash-aggregate runs in one process — measured in #2136:
+    /// the four most expensive jobs are all the query_store_stats family, compression at 157s and the
+    /// interval_hourly refresh at 96s on a 52-server store), and a job that outgrows its own schedule
+    /// interval compounds refresh lag silently. One row per job per sweep makes that a queryable series:
+    /// object_name is <c>proc_name</c> plus the hypertable/CAGG it serves (the telemetry job has
+    /// neither), and <c>schedule_interval_ms</c> rides along so "duration vs cadence" — the honest
+    /// tripwire — is one division. $1 metric_time.
+    /// </summary>
+    public const string BackgroundJobInsertSql = @"
+INSERT INTO collect.store_metrics
+    (metric_time, object_name, object_kind, last_run_duration_ms, schedule_interval_ms, total_runs, total_failures)
+SELECT
+    $1,
+    j.proc_name || coalesce(' ' || j.hypertable_name, ''),
+    'background_job',
+    (EXTRACT(EPOCH FROM js.last_run_duration) * 1000)::bigint,
+    (EXTRACT(EPOCH FROM j.schedule_interval) * 1000)::bigint,
+    js.total_runs,
+    js.total_failures
+FROM timescaledb_information.job_stats AS js
+JOIN timescaledb_information.jobs AS j USING (job_id)";
+
+    /// <summary>
     /// The payload dimension rows — every store shape (the dims are plain tables everywhere). Table names
     /// are the <see cref="PayloadDimensions"/> compile-time constants, so interpolation is safe (the
     /// DarlingRetention.DeleteSqlFor reasoning). The exact <c>count(*)</c> is deliberate over
@@ -161,6 +187,10 @@ WHERE metric_time < $1";
             using var hypertables = new NpgsqlCommand(HypertableInsertSql, connection);
             hypertables.Parameters.AddWithValue(metricTime);
             written += await hypertables.ExecuteNonQueryAsync(cancellationToken);
+
+            using var jobs = new NpgsqlCommand(BackgroundJobInsertSql, connection);
+            jobs.Parameters.AddWithValue(metricTime);
+            written += await jobs.ExecuteNonQueryAsync(cancellationToken);
         }
 
         using (var dimensions = new NpgsqlCommand(DimensionInsertSql, connection))

@@ -8,6 +8,8 @@
 
 using System;
 using System.Linq;
+using System.Threading.Tasks;
+using Npgsql;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -29,8 +31,8 @@ public sealed class StoreSelfMetricsTests
         var v53 = PgMigrations.Scripts.Single(m => m.Version == 53);
 
         Assert.Equal("store-self-metrics", v53.Name);
-        Assert.Equal(55, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(55, StorageVersion.SchemaVersion);
+        Assert.Equal(56, PgMigrations.Scripts[^1].Version);
+        Assert.Equal(56, StorageVersion.SchemaVersion);
 
         /* collect.-qualified like V44/V47/V49, and idempotent so a re-run is a no-op. */
         Assert.Contains("CREATE TABLE IF NOT EXISTS collect.store_metrics (", v53.Sql, StringComparison.Ordinal);
@@ -56,6 +58,43 @@ public sealed class StoreSelfMetricsTests
     }
 
     [Fact]
+    public void V56_JobTelemetryColumns_MigrationAndSweepAgree_AndTheProbeKnowsTheRung()
+    {
+        /* #2136: every column the background-job sweep arm writes must exist in the V56 migration, or the
+           first hourly run after an upgrade fails on a column fresh code writes and the store lacks —
+           the exact failure class the V53 column pin above guards. */
+        var v56 = PgMigrations.Scripts.Single(m => m.Version == 56);
+        Assert.Equal("store-metrics-background-jobs", v56.Name);
+        foreach (var column in new[]
+        {
+            "last_run_duration_ms", "schedule_interval_ms", "total_runs", "total_failures",
+        })
+        {
+            Assert.Contains($"ADD COLUMN IF NOT EXISTS {column} bigint", v56.Sql, StringComparison.Ordinal);
+            Assert.Contains(column, StoreSelfMetrics.BackgroundJobInsertSql, StringComparison.Ordinal);
+        }
+
+        /* The insert reads only TimescaleDB catalog surfaces, which is why the sweep gates it with the
+           hypertable arm — a plain-PG store skips it silently. schedule_interval rides along so
+           "duration vs cadence" — the tripwire that matters — is one division over the stored series. */
+        Assert.Contains("FROM timescaledb_information.job_stats", StoreSelfMetrics.BackgroundJobInsertSql, StringComparison.Ordinal);
+        Assert.Contains("JOIN timescaledb_information.jobs", StoreSelfMetrics.BackgroundJobInsertSql, StringComparison.Ordinal);
+        Assert.Contains("'background_job'", StoreSelfMetrics.BackgroundJobInsertSql, StringComparison.Ordinal);
+
+        /* The probe sentinel + arm: a fully-migrated V56 store maps to exactly the required version
+           (the connect-time-gate trap), and a V55 store without the columns caps at 55. */
+        Assert.Contains("column_name = 'last_run_duration_ms'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
+        Assert.Equal(56, ViewerDataService.MapProbedSchemaVersion(
+            true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true,
+            true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true,
+            true, true, true, true, true, true, hasJobMetricsColumns: true));
+        Assert.Equal(55, ViewerDataService.MapProbedSchemaVersion(
+            true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true,
+            true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true,
+            true, true, true, true, true, true, hasJobMetricsColumns: false));
+    }
+
+    [Fact]
     public void StoreMetrics_IsNotACollectorTable_SoTheMachineryItMeasuresCannotReachIt()
     {
         /* TimescaleSupport's hypertable conversion + compression policies and DarlingRetention's purge both
@@ -70,7 +109,7 @@ public sealed class StoreSelfMetricsTests
     {
         /* The trap a StorageVersion bump sets: a probe that cannot SEE the newest migration maps every
            healthy store below RequiredStoreSchemaVersion and the connect-time gate refuses it permanently. */
-        Assert.Equal(55, ViewerDataService.RequiredStoreSchemaVersion);
+        Assert.Equal(56, ViewerDataService.RequiredStoreSchemaVersion);
         Assert.Contains("table_name = 'store_metrics'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         /* The V53 arm: store_metrics present (and everything below it, but NOT V54's gz column —
@@ -165,5 +204,55 @@ public sealed class StoreSelfMetricsTests
            makes a run's rows join and keeps the timestamps naive UTC by the cross-store contract. */
         Assert.DoesNotContain("now()", sql, StringComparison.Ordinal);
         Assert.Contains("$1", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The sweep END TO END against a real TimescaleDB (#2136) — the drift-catcher the SQL pins alone
+    /// cannot be: every INSERT the sweep runs must agree with the columns the migrations created, and the
+    /// failure class this guards (sweep writes a column the upgraded store lacks) only surfaces when the
+    /// statements actually execute. Mints its own scratch store (the #1776 own-store idiom), migrates it,
+    /// converts + applies compression policies so real background jobs exist, then asserts one run writes
+    /// hypertable, dimension, store, AND background_job rows — the job rows carrying a schedule interval,
+    /// because "duration vs cadence" is the series' whole point.
+    /// </summary>
+    [Fact]
+    public async Task Sweep_EndToEnd_WritesEveryObjectKind_IncludingBackgroundJobs_AgainstDevPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live self-metrics sweep test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        await TimescaleSupport.ApplyCompressionPolicyAsync(connection, null, ct);
+
+        var written = await StoreSelfMetrics.SweepAsync(
+            connection, timescaleAvailable: true, DateTime.UtcNow, null, ct);
+        Assert.True(written > 0, "the sweep wrote nothing");
+
+        await using var kinds = new NpgsqlCommand(@"
+SELECT
+    count(*) FILTER (WHERE object_kind = 'hypertable'),
+    count(*) FILTER (WHERE object_kind = 'dimension'),
+    count(*) FILTER (WHERE object_kind = 'store'),
+    count(*) FILTER (WHERE object_kind = 'background_job'),
+    count(*) FILTER (WHERE object_kind = 'background_job' AND schedule_interval_ms > 0)
+FROM collect.store_metrics", connection);
+        await using var reader = await kinds.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct));
+
+        Assert.True(reader.GetInt64(0) > 0, "no hypertable rows");
+        Assert.True(reader.GetInt64(1) > 0, "no dimension rows");
+        Assert.Equal(1, reader.GetInt64(2));
+        Assert.True(reader.GetInt64(3) > 0, "no background_job rows — the compression policies just applied guarantee jobs exist");
+        Assert.True(reader.GetInt64(4) > 0, "background_job rows carry no schedule interval — duration-vs-cadence needs it");
     }
 }

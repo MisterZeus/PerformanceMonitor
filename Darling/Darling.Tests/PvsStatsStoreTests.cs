@@ -87,7 +87,7 @@ public sealed class PvsStatsStoreTests
            migration reports every healthy store as skewed and refuses to open it — permanently.
            (53 since #2068's store self-metrics table; the full-sentinel pin lives in
            ViewerDataServiceTests.) */
-        Assert.Equal(55, ViewerDataService.RequiredStoreSchemaVersion);
+        Assert.Equal(56, ViewerDataService.RequiredStoreSchemaVersion);
         Assert.Contains("table_name = 'pvs_stats'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         /* The V47 arm: pvs_stats present (and nothing newer) maps to exactly 47. */
