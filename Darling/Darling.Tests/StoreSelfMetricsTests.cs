@@ -303,12 +303,14 @@ FROM collect.store_metrics", connection);
     /// <summary>
     /// The #2136 capacity claim, proven end to end rather than asserted from one production observation:
     /// job runtimes scale with raw volume, the V56 telemetry RECORDS that growth, and the #2141 alert
-    /// FIRES from real store readings. One throwaway hypertable with a PARKED compression policy (the
-    /// #1888 one-transaction discipline, so the scheduler can never race the deterministic run_job calls
-    /// — the exact race #2143 documents on the shared store), driven at 1x and then 4x row volume:
+    /// FIRES from real store readings. One throwaway hypertable with a compression policy that is PARKED
+    /// except when a measurement deliberately arms it (created parked in one transaction — the #1888
+    /// discipline — so no background tick ever races a measurement, the #2143 class), driven at 1x and
+    /// then 4x row volume:
     /// <list type="number">
-    /// <item>run_job at each scale; job_stats.last_run_duration must be measurable (the premise the whole
-    /// telemetry stands on) and must GROW with volume;</item>
+    /// <item>a scheduler-driven run at each scale (arm, poll total_runs, park — foreground run_job does
+    /// NOT update this accounting, CI-proved); job_stats.last_run_duration must be measurable (the
+    /// premise the whole telemetry stands on) and must GROW with volume;</item>
     /// <item>a self-metrics sweep after each run; the store_metrics series must carry both readings, in
     /// order, growing — this is the series an operator (and the cadence alert's detail text) trends;</item>
     /// <item>alter_job shrinks the schedule interval to half the measured 4x duration, and the REAL
@@ -369,23 +371,25 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
 
         /* Warm-up: the first run of a policy pays one-time costs (worker spin-up, catalog warm-up) that
            would inflate d1 and could invert the monotonicity assertion. Run once on a token chunk and
-           discard the measurement. */
+           discard the measurement. Doubles as the canary that this scratch database HAS a scheduler:
+           if it never runs, the arm-and-poll below fails with its own diagnosis rather than a mystery. */
         await SeedTickRowsAsync(connection, Table, daysBack: 12, rows: 2_000, ct);
-        await RunJobAsync(connection, jobId, ct);
+        await RunJobViaSchedulerAsync(connection, jobId, ct);
 
         /* 1x: one closed chunk, 50k rows. */
         await SeedTickRowsAsync(connection, Table, daysBack: 10, rows: 50_000, ct);
-        await RunJobAsync(connection, jobId, ct);
+        await RunJobViaSchedulerAsync(connection, jobId, ct);
         long d1 = await ReadJobDurationMsAsync(connection, jobId, ct);
         Assert.True(d1 > 0,
-            "run_job left job_stats.last_run_duration unmeasurable — the premise the V56 telemetry " +
-            "and the #2141 alert both stand on. If TimescaleDB stopped accounting foreground runs, " +
-            "this whole surface needs a different duration source.");
+            "a scheduler-driven run left job_stats.last_run_duration unmeasurable — the premise the " +
+            "V56 telemetry and the #2141 alert both stand on. (Foreground run_job is already known " +
+            "not to update this accounting — CI proved that on this test's first version — which is " +
+            "why the runs go through the real scheduler.)");
         await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow, null, ct);
 
         /* 4x: one closed chunk, 200k rows. */
         await SeedTickRowsAsync(connection, Table, daysBack: 8, rows: 200_000, ct);
-        await RunJobAsync(connection, jobId, ct);
+        await RunJobViaSchedulerAsync(connection, jobId, ct);
         long d4 = await ReadJobDurationMsAsync(connection, jobId, ct);
         await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow.AddSeconds(2), null, ct);
 
@@ -455,11 +459,40 @@ SELECT date_trunc('day', now()::timestamp) - INTERVAL '{daysBack} days' + INTERV
        g
 FROM generate_series(1, {rows}) AS g", ct);
 
-    private static async Task RunJobAsync(NpgsqlConnection connection, long jobId, CancellationToken ct)
+    /// <summary>
+    /// Runs the job through the REAL scheduler — arm with <c>next_start => now()</c>, poll
+    /// <c>total_runs</c> until it increments, park again. Foreground <c>run_job</c> deliberately NOT
+    /// used: CI proved it does not update <c>job_stats.last_run_duration</c> (that accounting lives in
+    /// the scheduler path), and the scheduler path is the one production's telemetry actually reads —
+    /// so this is both the working mechanism and the honest one. Parking between measurements keeps
+    /// each run's chunks OURS (the #1888 concern, inverted: armed on purpose, once, per measurement;
+    /// the next background tick is an hour out, far beyond the test's lifetime).
+    /// </summary>
+    private static async Task RunJobViaSchedulerAsync(NpgsqlConnection connection, long jobId, CancellationToken ct)
     {
-        await using var run = new NpgsqlCommand("CALL run_job($1::integer)", connection);
-        run.Parameters.AddWithValue((int)jobId);
-        await run.ExecuteNonQueryAsync(ct);
+        long before = await ReadTotalRunsAsync(connection, jobId, ct);
+        await ExecAsync(connection, $"SELECT alter_job({jobId}::integer, scheduled => true, next_start => now())", ct);
+
+        var deadline = DateTime.UtcNow.AddSeconds(90);
+        while (await ReadTotalRunsAsync(connection, jobId, ct) <= before)
+        {
+            Assert.True(DateTime.UtcNow < deadline,
+                $"the scheduler did not run job {jobId} within 90s of next_start => now() — " +
+                "either this scratch database has no scheduler or the cluster is out of background workers " +
+                "(see CiClusterWorkerSizingTests for the sizing this suite depends on)");
+            await Task.Delay(500, ct);
+        }
+
+        await ExecAsync(connection, $"SELECT alter_job({jobId}::integer, scheduled => false)", ct);
+    }
+
+    private static async Task<long> ReadTotalRunsAsync(NpgsqlConnection connection, long jobId, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            "SELECT coalesce(total_runs, 0) FROM timescaledb_information.job_stats WHERE job_id = $1", connection);
+        command.Parameters.AddWithValue(jobId);
+        var value = await command.ExecuteScalarAsync(ct);
+        return value is null or DBNull ? 0L : Convert.ToInt64(value);
     }
 
     private static async Task<long> ReadJobDurationMsAsync(NpgsqlConnection connection, long jobId, CancellationToken ct)
