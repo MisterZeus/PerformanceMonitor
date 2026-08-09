@@ -470,29 +470,38 @@ FROM generate_series(1, {rows}) AS g", ct);
     /// </summary>
     private static async Task RunJobViaSchedulerAsync(NpgsqlConnection connection, long jobId, CancellationToken ct)
     {
-        long before = await ReadTotalRunsAsync(connection, jobId, ct);
+        /* Poll on last_successful_finish, NOT total_runs: total_runs increments when a run STARTS, and
+           job_stats reports last_run_duration as NULL while the run is in flight — CI proved it, by
+           catching the 4x run mid-flight and reading 0ms (the 1x run had merely finished inside one
+           poll tick). last_successful_finish only advances at COMPLETION, so a read after it moves is
+           a read of a finished run's accounting. */
+        var before = await ReadLastSuccessfulFinishAsync(connection, jobId, ct);
         await ExecAsync(connection, $"SELECT alter_job({jobId}::integer, scheduled => true, next_start => now())", ct);
 
         var deadline = DateTime.UtcNow.AddSeconds(90);
-        while (await ReadTotalRunsAsync(connection, jobId, ct) <= before)
+        while (await ReadLastSuccessfulFinishAsync(connection, jobId, ct) <= before)
         {
             Assert.True(DateTime.UtcNow < deadline,
-                $"the scheduler did not run job {jobId} within 90s of next_start => now() — " +
-                "either this scratch database has no scheduler or the cluster is out of background workers " +
-                "(see CiClusterWorkerSizingTests for the sizing this suite depends on)");
+                $"the scheduler did not COMPLETE a run of job {jobId} within 90s of next_start => now() — " +
+                "either this scratch database has no scheduler, the cluster is out of background workers " +
+                "(see CiClusterWorkerSizingTests for the sizing this suite depends on), or the run failed " +
+                "(last_successful_finish never advances for a failed run — check job_stats.last_run_status)");
             await Task.Delay(500, ct);
         }
 
         await ExecAsync(connection, $"SELECT alter_job({jobId}::integer, scheduled => false)", ct);
     }
 
-    private static async Task<long> ReadTotalRunsAsync(NpgsqlConnection connection, long jobId, CancellationToken ct)
+    private static async Task<DateTime> ReadLastSuccessfulFinishAsync(NpgsqlConnection connection, long jobId, CancellationToken ct)
     {
+        /* -infinity (never finished) maps to DateTime.MinValue via Npgsql, which orders below every real
+           finish — exactly the "before" baseline a first run needs. */
         await using var command = new NpgsqlCommand(
-            "SELECT coalesce(total_runs, 0) FROM timescaledb_information.job_stats WHERE job_id = $1", connection);
+            "SELECT coalesce(last_successful_finish, '-infinity'::timestamptz) FROM timescaledb_information.job_stats WHERE job_id = $1",
+            connection);
         command.Parameters.AddWithValue(jobId);
         var value = await command.ExecuteScalarAsync(ct);
-        return value is null or DBNull ? 0L : Convert.ToInt64(value);
+        return value is DateTime finish ? finish : DateTime.MinValue;
     }
 
     private static async Task<long> ReadJobDurationMsAsync(NpgsqlConnection connection, long jobId, CancellationToken ct)
