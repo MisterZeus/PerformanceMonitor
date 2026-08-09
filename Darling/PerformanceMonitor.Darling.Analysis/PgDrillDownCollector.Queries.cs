@@ -366,39 +366,59 @@ cheapest AS
     SELECT DISTINCT ON (database_name, query_id, replica_role) *
     FROM plan_dedup
     ORDER BY database_name, query_id, replica_role, cpu_per_exec ASC
+),
+scored AS
+(
+    SELECT
+        l.database_name,
+        l.query_id,
+        l.query_plan_hash AS latest_plan_hash,
+        l.cpu_per_exec AS latest_cpu,
+        l.dur_per_exec AS latest_dur,
+        b.query_plan_hash AS best_plan_hash,
+        b.plan_id AS best_plan_id,
+        b.cpu_per_exec AS best_cpu,
+        b.dur_per_exec AS best_dur,
+        -- #2138: the SAME CPU-primary scoring as the PLAN_REGRESSION fact (PgFactCollector.QueryPerf.cs,
+        -- where the rationale lives). The drill-down must agree with the fact that displays it: under the
+        -- old GREATEST a duration-only regression could appear here that the fact never counted.
+        CASE
+            WHEN l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0) >= 2
+                THEN l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0)
+            WHEN l.dur_per_exec / NULLIF(b.dur_per_exec, 0) >= 4
+             AND l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0) >= 1.25
+                THEN l.dur_per_exec / NULLIF(b.dur_per_exec, 0) / 2
+        END AS regression_factor,
+        LEFT(l.query_text, 500) AS query_text,
+        l.replica_role,
+        l.execs * l.cpu_per_exec AS latest_total_cpu_us
+    FROM latest AS l
+    JOIN cheapest AS b
+      ON  b.database_name = l.database_name
+      AND b.query_id = l.query_id
+      -- IS NOT DISTINCT FROM, never = (and never USING, which is an equi-join): replica_role is NULL on
+      -- every standalone server, every non-AG server and everything below SQL Server 2022, and NULL = NULL
+      -- is UNKNOWN — matching on it with = would join nothing and silently empty this drill-down for the
+      -- overwhelming majority of installs. The NULL-safe operator groups those rows as DISTINCT ON does.
+      AND b.replica_role IS NOT DISTINCT FROM l.replica_role
+    WHERE l.query_plan_hash <> b.query_plan_hash
 )
 SELECT
-    l.database_name,
-    l.query_id,
-    l.query_plan_hash AS latest_plan_hash,
-    l.cpu_per_exec AS latest_cpu,
-    l.dur_per_exec AS latest_dur,
-    b.query_plan_hash AS best_plan_hash,
-    b.plan_id AS best_plan_id,
-    b.cpu_per_exec AS best_cpu,
-    b.dur_per_exec AS best_dur,
-    GREATEST
-    (
-        l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0),
-        l.dur_per_exec / NULLIF(b.dur_per_exec, 0)
-    ) AS regression_factor,
-    LEFT(l.query_text, 500) AS query_text,
-    l.replica_role
-FROM latest AS l
-JOIN cheapest AS b
-  ON  b.database_name = l.database_name
-  AND b.query_id = l.query_id
-  -- IS NOT DISTINCT FROM, never = (and never USING, which is an equi-join): replica_role is NULL on
-  -- every standalone server, every non-AG server and everything below SQL Server 2022, and NULL = NULL
-  -- is UNKNOWN — matching on it with = would join nothing and silently empty this drill-down for the
-  -- overwhelming majority of installs. The NULL-safe operator groups those rows as DISTINCT ON does.
-  AND b.replica_role IS NOT DISTINCT FROM l.replica_role
-WHERE l.query_plan_hash <> b.query_plan_hash
-AND   GREATEST
-      (
-          l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0),
-          l.dur_per_exec / NULLIF(b.dur_per_exec, 0)
-      ) >= 2
+    database_name,
+    query_id,
+    latest_plan_hash,
+    latest_cpu,
+    latest_dur,
+    best_plan_hash,
+    best_plan_id,
+    best_cpu,
+    best_dur,
+    regression_factor,
+    query_text,
+    replica_role
+FROM scored
+WHERE regression_factor >= 2
+AND   latest_total_cpu_us >= 10000000
 ORDER BY regression_factor DESC
 LIMIT 5";
 

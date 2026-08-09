@@ -388,12 +388,18 @@ compared AS
         b.cpu_per_exec AS best_cpu,
         b.dur_per_exec AS best_dur,
         l.query_text,
-        GREATEST
-        (
-            l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0),
-            l.dur_per_exec / NULLIF(b.dur_per_exec, 0)
-        ) AS regression_factor,
-        l.replica_role
+        -- #2138: the SAME CPU-primary scoring as the PLAN_REGRESSION fact (DuckDbFactCollector.QueryPerf.cs,
+        -- where the rationale lives). The drill-down must agree with the fact that displays it: under the
+        -- old GREATEST a duration-only regression could appear here that the fact never counted.
+        CASE
+            WHEN l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0) >= 2
+                THEN l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0)
+            WHEN l.dur_per_exec / NULLIF(b.dur_per_exec, 0) >= 4
+             AND l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0) >= 1.25
+                THEN l.dur_per_exec / NULLIF(b.dur_per_exec, 0) / 2
+        END AS regression_factor,
+        l.replica_role,
+        l.execs * l.cpu_per_exec AS latest_total_cpu_us
     FROM ranked AS l
     JOIN ranked AS b
       ON  b.database_name = l.database_name
@@ -418,6 +424,7 @@ SELECT
     replica_role
 FROM compared
 WHERE regression_factor >= 2
+AND   latest_total_cpu_us >= 10000000
 ORDER BY regression_factor DESC
 LIMIT 5";
 

@@ -180,6 +180,79 @@ public sealed class QueryStoreReplicaSplitAnalysisLiveTests
                 Assert.Equal("", row.GetProperty("replica_role").GetString());
             }
 
+            /* ── #2138 CPU-primary scoring, against the REAL Postgres SQL. Duration-only: CPU flat,
+                  duration 5x worse. Duration alone is confounded by blocking, IO waits and machine
+                  contention that no plan choice caused — under the old GREATEST this fired at 5.0; now
+                  the CPU path (1x < 2) and the corroboration gate (1x < 1.25) both decline it. ── */
+            await using (var connection = await OpenWithSearchPathAsync(connectionString!, ct))
+            {
+                await DeleteTestRowsAsync(connection, ct);
+                await SeedSplitSignalsAsync(connection, periodStart, periodEnd,
+                    goodCpuUs: 100_000, goodDurUs: 120_000, badCpuUs: 100_000, badDurUs: 600_000, ct);
+            }
+
+            await using (var postgres = NpgsqlDataSource.Create(connectionString!))
+            {
+                Assert.Null(await CollectPlanRegressionFactAsync(postgres, context));
+                /* The drill-down runs the same scoring — a row here that the fact never counted would be
+                   incoherent in the report. */
+                Assert.Empty(await CollectRegressedQueriesDrillDownAsync(postgres, context));
+            }
+
+            /* ── #2138: extreme duration (6x) with mild CPU corroboration (1.5x) DOES fire, at HALF the
+                  duration ratio — 3.0, not 6.0 — so it competes honestly with CPU-detected rows. ── */
+            await using (var connection = await OpenWithSearchPathAsync(connectionString!, ct))
+            {
+                await DeleteTestRowsAsync(connection, ct);
+                await SeedSplitSignalsAsync(connection, periodStart, periodEnd,
+                    goodCpuUs: 100_000, goodDurUs: 100_000, badCpuUs: 150_000, badDurUs: 600_000, ct);
+            }
+
+            await using (var postgres = NpgsqlDataSource.Create(connectionString!))
+            {
+                var fact = await CollectPlanRegressionFactAsync(postgres, context);
+                Assert.NotNull(fact);
+                Assert.Equal(3.0, fact!.Metadata["worst_regression_factor"], precision: 1);
+                /* A duration-fired row reports the duration dimension. */
+                Assert.Equal(2.0, fact.Metadata["regressed_dimension"]);
+            }
+
+            /* ── #2138 review catch: CPU has PRECEDENCE, so cpu 2.5x with duration 10x (a genuine CPU
+                  regression that also picked up blocking) fires the CPU branch at 2.5 — and must be
+                  LABELED cpu. Comparing raw ratio magnitudes, correct under the old GREATEST, would
+                  call this duration-caused. ── */
+            await using (var connection = await OpenWithSearchPathAsync(connectionString!, ct))
+            {
+                await DeleteTestRowsAsync(connection, ct);
+                await SeedSplitSignalsAsync(connection, periodStart, periodEnd,
+                    goodCpuUs: 100_000, goodDurUs: 100_000, badCpuUs: 250_000, badDurUs: 1_000_000, ct);
+            }
+
+            await using (var postgres = NpgsqlDataSource.Create(connectionString!))
+            {
+                var fact = await CollectPlanRegressionFactAsync(postgres, context);
+                Assert.NotNull(fact);
+                Assert.Equal(2.5, fact!.Metadata["worst_regression_factor"], precision: 1);
+                Assert.Equal(1.0, fact.Metadata["regressed_dimension"]);
+            }
+
+            /* ── #2138: below the spend floor. A 12x CPU ratio on a query burning 1.2 CPU-seconds across
+                  the whole window (100 execs x 12ms) is sampling jitter, not a finding. Same 12x ratio as
+                  the arms above — the only difference is absolute spend, so this pins the 10-CPU-second
+                  noise floor and nothing else. ── */
+            await using (var connection = await OpenWithSearchPathAsync(connectionString!, ct))
+            {
+                await DeleteTestRowsAsync(connection, ct);
+                await SeedSplitSignalsAsync(connection, periodStart, periodEnd,
+                    goodCpuUs: 1_000, goodDurUs: 21_000, badCpuUs: 12_000, badDurUs: 32_000, ct);
+            }
+
+            await using (var postgres = NpgsqlDataSource.Create(connectionString!))
+            {
+                Assert.Null(await CollectPlanRegressionFactAsync(postgres, context));
+                Assert.Empty(await CollectRegressedQueriesDrillDownAsync(postgres, context));
+            }
+
             bodySucceeded = true;
         }
         finally
@@ -233,15 +306,32 @@ public sealed class QueryStoreReplicaSplitAnalysisLiveTests
             var collectionTime = periodEnd.AddMinutes(-10 + collection).AddSeconds(offsetSeconds);
 
             await SeedRowAsync(connection, collectionTime, planId: 1, GoodPlanHash, intervalId: 1,
-                goodFirstExec, goodLastExec, GoodCpuUs, role, ct);
+                goodFirstExec, goodLastExec, GoodCpuUs, role, avgDurUs: null, ct);
             await SeedRowAsync(connection, collectionTime, planId: 2, BadPlanHash, intervalId: 2,
-                badFirstExec, badLastExec, badCpuUs, role, ct);
+                badFirstExec, badLastExec, badCpuUs, role, avgDurUs: null, ct);
         }
+    }
+
+    /// <summary>
+    /// One replica-less query, two plans, CPU and duration controlled INDEPENDENTLY — the seed shape for
+    /// the #2138 CPU-primary scoring arms, where which signal moved is the entire test.
+    /// </summary>
+    private static async Task SeedSplitSignalsAsync(
+        NpgsqlConnection connection, DateTime periodStart, DateTime periodEnd,
+        long goodCpuUs, long goodDurUs, long badCpuUs, long badDurUs, CancellationToken ct)
+    {
+        var collectionTime = periodEnd.AddMinutes(-10);
+
+        await SeedRowAsync(connection, collectionTime, planId: 1, GoodPlanHash, intervalId: 1,
+            periodStart.AddDays(-6), periodStart.AddDays(-5), goodCpuUs, role: null, goodDurUs, ct);
+        await SeedRowAsync(connection, collectionTime, planId: 2, BadPlanHash, intervalId: 2,
+            periodStart.AddDays(-1), periodEnd, badCpuUs, role: null, badDurUs, ct);
     }
 
     private static async Task SeedRowAsync(
         NpgsqlConnection connection, DateTime collectionTime, long planId, string planHash, long intervalId,
-        DateTime firstExecutionTime, DateTime lastExecutionTime, long avgCpuUs, string? role, CancellationToken ct)
+        DateTime firstExecutionTime, DateTime lastExecutionTime, long avgCpuUs, string? role,
+        long? avgDurUs, CancellationToken ct)
     {
         const string sql = @"
 INSERT INTO query_store_stats
@@ -271,8 +361,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $8, $9, $10, $11, $12, $13, '0xRE
            after the dedup collapses the repeat collections down to one row. */
         command.Parameters.AddWithValue(100L);
         command.Parameters.AddWithValue(avgCpuUs);
-        /* Duration tracks CPU so GREATEST(cpu ratio, duration ratio) is unambiguous. */
-        command.Parameters.AddWithValue(avgCpuUs + 20_000);
+        /* Duration defaults to CPU + 20ms, so the classic seeds regress on BOTH signals and fire the
+           CPU-primary path (#2138); the split-signal arms pass avgDurUs to move one without the other. */
+        command.Parameters.AddWithValue(avgDurUs ?? avgCpuUs + 20_000);
         await command.ExecuteNonQueryAsync(ct);
     }
 
