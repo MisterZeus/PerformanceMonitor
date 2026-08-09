@@ -22,6 +22,10 @@ namespace Darling.Tests;
 /// whole design leans on — the table that MEASURES the compression/retention machinery is not in the
 /// collector catalog, so that machinery can never recurse onto it (no hypertable conversion, no
 /// compression policy, no catalog-driven purge; its retention is the sweep's own bounded DELETE).
+///
+/// <para><b>#1776 own-store</b> — the one live test here mints its own scratch database via
+/// ScratchPostgres (it applies compression policies, which the shared fixture must never inherit), so
+/// it cannot race the shared store and serializing it would be pure slowdown.</para>
 /// </summary>
 public sealed class StoreSelfMetricsTests
 {
