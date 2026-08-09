@@ -302,11 +302,22 @@ compared AS
         l.force_failure_count AS force_failure_count,
         b.cpu_per_exec AS best_cpu,
         b.dur_per_exec AS best_dur,
-        GREATEST
-        (
-            l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0),
-            l.dur_per_exec / NULLIF(b.dur_per_exec, 0)
-        ) AS regression_factor
+        -- #2138: CPU is the PRIMARY signal — duration alone is confounded by blocking, IO waits, and
+        -- machine contention that no plan choice caused, so it must not fire a plan-regression verdict
+        -- by itself. A CPU regression scores at its own ratio; a duration-dominant one fires only when
+        -- EXTREME (>= 4x) AND corroborated by at least mild CPU worsening (>= 1.25x), scored at half
+        -- the duration ratio so it competes honestly with CPU-detected rows. NULL when neither path
+        -- fires — the >= 2 gate below drops it.
+        CASE
+            WHEN l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0) >= 2
+                THEN l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0)
+            WHEN l.dur_per_exec / NULLIF(b.dur_per_exec, 0) >= 4
+             AND l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0) >= 1.25
+                THEN l.dur_per_exec / NULLIF(b.dur_per_exec, 0) / 2
+        END AS regression_factor,
+        -- The resource-expenditure half of the importance gate (#2138): total CPU the LATEST plan burned
+        -- over the window. The exec-count floor above only counts; this weighs.
+        l.execs * l.cpu_per_exec AS latest_total_cpu_us
     FROM ranked AS l
     JOIN ranked AS b
       ON  b.database_name = l.database_name
@@ -327,6 +338,10 @@ SELECT
     regression_factor
 FROM compared
 WHERE regression_factor >= 2
+-- 10 CPU-seconds across the window: a NOISE floor, not an importance ranking — it exists to exclude
+-- near-zero-cost queries whose ratios are all sampling jitter; magnitude ranking stays with
+-- regression_factor and the scorer.
+AND   latest_total_cpu_us >= 10000000
 ORDER BY regression_factor DESC
 LIMIT 20";
 
