@@ -258,5 +258,14 @@ FROM collect.store_metrics", connection);
         Assert.Equal(1, reader.GetInt64(2));
         Assert.True(reader.GetInt64(3) > 0, "no background_job rows — the compression policies just applied guarantee jobs exist");
         Assert.True(reader.GetInt64(4) > 0, "background_job rows carry no schedule interval — duration-vs-cadence needs it");
+        await reader.CloseAsync();
+
+        /* And the READ path carries the new fields end to end (the review catch: written but never read
+           back would leave get_store_metrics returning job rows with null metrics). */
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var latest = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetLatestAsync(dataSource, ct);
+        var job = latest.FirstOrDefault(r => r.ObjectKind == "background_job");
+        Assert.NotNull(job);
+        Assert.True(job!.ScheduleIntervalMs is > 0, "the reader dropped the job's schedule interval");
     }
 }
