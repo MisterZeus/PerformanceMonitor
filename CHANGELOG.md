@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Every previously-hardcoded alert threshold is now a real setting** ([#2107], the split-out from gotqn's #2101 - "it was fine to hardcode these for development but any serious monitoring allows configuring of alert thresholds") - six new knobs ride the store control plane (V55), the Viewer's Settings window, and `get_alert_settings`/`update_alert_settings`, clamped on read like their siblings: the monitor store volume's self-alert warning percent (was 10), the Collection Stopped staleness window (was 30 minutes) and consecutive-failure fast path (was 10), the low-disk CRITICAL severity tier's percent and GB floors (were 3% / 2 GB - these grade the target-volume alert in BOTH apps, and Lite reads its pair from `settings.json` as `alert_disk_critical_free_percent` / `alert_disk_critical_free_gb`), and the analysis notification cooldown (was a hardcoded 360 in Darling while Lite always honored a configured value - the parity gap closed). MCP shape: `low_disk.critical_free_percent` / `low_disk.critical_free_gb`, a new `self_alerts` group, and `analysis.notify_cooldown_minutes`.
+- **The store measures its own background jobs** ([#2136], the visibility half) - the hourly #2068 self-metrics sweep now writes one row per TimescaleDB background job (object_kind `background_job`, V56 columns): last run duration, schedule interval, total runs, total failures. Why: the store's heaviest recurring work is its own job machinery - on the production 52-server store the four most expensive jobs are all the query_store_stats family (compression 157s, interval_hourly refresh 96s) - their runtimes scale SERIALLY with raw volume (the finalize hash-aggregate runs in one process), and a job that outgrows its own cadence compounds refresh lag silently. With the interval stored beside the duration, 'how close is each job to its ceiling' is one division over a 400-day series instead of archaeology - the number an onboarding wave moves first. A threshold alert on the series is the issue's next half.
 
 ### Fixed
 
@@ -2638,3 +2639,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#2126]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2126
 [#2129]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2129
 [#2133]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2133
+[#2136]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2136

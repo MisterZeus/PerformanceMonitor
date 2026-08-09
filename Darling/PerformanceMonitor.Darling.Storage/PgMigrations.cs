@@ -112,6 +112,7 @@ public static class PgMigrations
         new Migration(53, "store-self-metrics", V53Sql),
         new Migration(54, "plan-dim-gzip", V54Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
         new Migration(55, "self-alert-knobs", V55Sql),
+        new Migration(56, "store-metrics-background-jobs", V56Sql),
     };
 
     /// <summary>
@@ -1089,6 +1090,25 @@ ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS disk_critical_free_gb integer NOT NULL DEFAULT 2;
 ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS analysis_notify_cooldown_minutes integer NOT NULL DEFAULT 360;";
+
+    /// <summary>
+    /// V56 — background-job telemetry columns on the #2068 self-metrics series (#2136): the store's own
+    /// TimescaleDB background jobs (CAGG refreshes, compression, retention) are its heaviest recurring
+    /// work — measured on the production store, the four most expensive jobs are all the
+    /// query_store_stats family (compression 157s, interval_hourly refresh 96s) — and their runtimes
+    /// scale serially with raw volume, so an onboarding wave moves them first. Job rows ride the same
+    /// hourly sweep under <c>object_kind = 'background_job'</c>. All nullable, appended (the V55/#1984
+    /// ordinal rule); non-job rows simply leave them NULL.
+    /// </summary>
+    private const string V56Sql = @"
+ALTER TABLE collect.store_metrics
+    ADD COLUMN IF NOT EXISTS last_run_duration_ms bigint;
+ALTER TABLE collect.store_metrics
+    ADD COLUMN IF NOT EXISTS schedule_interval_ms bigint;
+ALTER TABLE collect.store_metrics
+    ADD COLUMN IF NOT EXISTS total_runs bigint;
+ALTER TABLE collect.store_metrics
+    ADD COLUMN IF NOT EXISTS total_failures bigint;";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:
