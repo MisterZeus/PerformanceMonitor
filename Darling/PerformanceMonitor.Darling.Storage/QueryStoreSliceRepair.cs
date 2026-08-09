@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Threading;
@@ -268,6 +267,13 @@ public static class QueryStoreSliceRepair
     /// <para>One transaction per slice: the DELETE and the INSERT must not be separable, or an abort between
     /// them destroys the interval outright rather than leaving it split. Slicing keeps that transaction — and
     /// the locks it takes on chunks a compression job may also want — short.</para>
+    ///
+    /// <para>The removed count is DERIVED from the statements' own affected-row counts — the DELETE removes
+    /// every row of every split group and the INSERT restores one combined row per group, so
+    /// <c>deleted − reinserted</c> IS the net removal. The previous shape bracketed the work with two
+    /// window-wide <c>COUNT(*)</c> scans to compute the same number, which on the stores this verb exists
+    /// for (measured: ~12 s per day-wide scan, hash-aggregate spill + a backward index scan over the
+    /// uncompressed hot chunk) paid the slice's dominant cost twice more per slice for pure bookkeeping.</para>
     /// </summary>
     public static async Task<long> CollapseSliceAsync(
         NpgsqlConnection connection, DateTime fromUtc, DateTime toUtc, CancellationToken cancellationToken)
@@ -289,14 +295,6 @@ public static class QueryStoreSliceRepair
             await lift.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        long before;
-        await using (var count = new NpgsqlCommand($"SELECT count(*) FROM collect.{Table} WHERE collection_time >= $1 AND collection_time < $2", connection, transaction) { CommandTimeout = SliceStatementTimeoutSeconds })
-        {
-            count.Parameters.AddWithValue(fromUtc);
-            count.Parameters.AddWithValue(toUtc);
-            before = Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken) ?? 0L, CultureInfo.InvariantCulture);
-        }
-
         var statements = BuildCollapseStatements();
 
         await using (var stage = new NpgsqlCommand(statements.Stage, connection, transaction) { CommandTimeout = SliceStatementTimeoutSeconds })
@@ -306,26 +304,20 @@ public static class QueryStoreSliceRepair
             await stage.ExecuteNonQueryAsync(cancellationToken);
         }
 
+        long deleted;
         await using (var delete = new NpgsqlCommand(statements.Delete, connection, transaction) { CommandTimeout = SliceStatementTimeoutSeconds })
         {
-            await delete.ExecuteNonQueryAsync(cancellationToken);
+            deleted = await delete.ExecuteNonQueryAsync(cancellationToken);
         }
 
+        long reinserted;
         await using (var insert = new NpgsqlCommand(statements.Insert, connection, transaction) { CommandTimeout = SliceStatementTimeoutSeconds })
         {
-            await insert.ExecuteNonQueryAsync(cancellationToken);
-        }
-
-        long after;
-        await using (var count = new NpgsqlCommand($"SELECT count(*) FROM collect.{Table} WHERE collection_time >= $1 AND collection_time < $2", connection, transaction) { CommandTimeout = SliceStatementTimeoutSeconds })
-        {
-            count.Parameters.AddWithValue(fromUtc);
-            count.Parameters.AddWithValue(toUtc);
-            after = Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken) ?? 0L, CultureInfo.InvariantCulture);
+            reinserted = await insert.ExecuteNonQueryAsync(cancellationToken);
         }
 
         await transaction.CommitAsync(cancellationToken);
-        return before - after;
+        return deleted - reinserted;
     }
 
     /// <summary>The survey result: what a dry run reports and what a real run plans from.</summary>

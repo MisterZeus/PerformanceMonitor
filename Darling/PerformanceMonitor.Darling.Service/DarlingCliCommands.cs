@@ -3019,6 +3019,7 @@ public static class DarlingCliCommands
            itself, not a bound past it — hence the final slice's one-second nudge. */
         long removed = 0;
         var sliceStart = survey.OldestUtc!.Value.Date;
+        var spanStart = sliceStart;
         var collapseEnd = survey.NewestUtc!.Value.AddSeconds(1);
         var fullWidth = TimeSpan.FromDays(1);
         var consecutiveFailures = 0;
@@ -3040,8 +3041,16 @@ public static class DarlingCliCommands
 
             try
             {
-                removed += await QueryStoreSliceRepair.CollapseSliceAsync(
+                var sliceRemoved = await QueryStoreSliceRepair.CollapseSliceAsync(
                     connection, sliceStart, sliceEnd, cancellationToken);
+                removed += sliceRemoved;
+
+                /* Per-slice progress (#2105 operator feedback): the run used to be SILENT between the
+                   survey banner and DONE — on a big backlog that is an hour-plus of blank console that
+                   reads as a hang, on the exact stores where trust in this verb is already bruised.
+                   Percent is of the survey's own span, so it always ends at 100. */
+                var pctDone = 100.0 * (sliceEnd - spanStart).Ticks / (collapseEnd - spanStart).Ticks;
+                output.WriteLine($"  [OK] {sliceStart:yyyy-MM-dd HH:mm} +{actualWidth.TotalMinutes:F0}m — {sliceRemoved:N0} removed ({pctDone:F0}% of span, {removed:N0} total)");
 
                 consecutiveFailures = 0;
                 retriedAtWidth = false;

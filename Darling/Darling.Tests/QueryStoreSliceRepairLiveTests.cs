@@ -248,6 +248,7 @@ public sealed class QueryStoreSliceRepairLiveTests
             var dryText = dryOut.ToString();
             Assert.Contains("Split intervals found : 1", dryText, StringComparison.Ordinal);
             Assert.Contains("DRY RUN — nothing was changed.", dryText, StringComparison.Ordinal);
+            Assert.DoesNotContain("[OK]", dryText, StringComparison.Ordinal);
 
             await using (var check = new NpgsqlConnection(scratch.ConnectionString))
             {
@@ -262,6 +263,12 @@ public sealed class QueryStoreSliceRepairLiveTests
             var runText = runOut.ToString();
             Assert.Contains("Collapsed. Rows removed: 1", runText, StringComparison.Ordinal);
             Assert.Contains("DONE", runText, StringComparison.Ordinal);
+            /* Per-slice progress: the real run announces each slice with its removal count and span
+               percent — a big backlog is no longer a silent console between the banner and DONE. The
+               removed figure inside the [OK] line is the same deleted-minus-reinserted derivation the
+               summary total uses, so the two cannot disagree. */
+            Assert.Contains("[OK]", runText, StringComparison.Ordinal);
+            Assert.Contains("1 removed (100% of span, 1 total)", runText, StringComparison.Ordinal);
 
             await using (var check = new NpgsqlConnection(scratch.ConnectionString))
             {
