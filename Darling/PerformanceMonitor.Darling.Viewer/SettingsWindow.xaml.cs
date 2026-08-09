@@ -708,6 +708,7 @@ public partial class SettingsWindow : Window
         AlertSelfDiskWarnPercentBox.Text = r.SelfDiskFreeWarnPercent.ToString(CultureInfo.InvariantCulture);
         AlertCollectionStaleMinutesBox.Text = r.CollectionStaleMinutes.ToString(CultureInfo.InvariantCulture);
         AlertCollectionFailureThresholdBox.Text = r.CollectionFailureThreshold.ToString(CultureInfo.InvariantCulture);
+        AlertStoreJobCadenceWarnPercentBox.Text = r.StoreJobCadenceWarnPercent.ToString(CultureInfo.InvariantCulture);
         AlertPvsCheckBox.IsChecked = r.PvsEnabled;
         AlertPvsThresholdPercentBox.Text = r.PvsThresholdPercent.ToString(CultureInfo.InvariantCulture);
         AlertPvsFloorGbBox.Text = r.PvsFloorGb.ToString(CultureInfo.InvariantCulture);
@@ -811,6 +812,9 @@ public partial class SettingsWindow : Window
             row.CollectionStaleMinutes = staleMin;
         if (int.TryParse(AlertCollectionFailureThresholdBox.Text, out var failThresh) && failThresh is >= 1 and <= 1000)
             row.CollectionFailureThreshold = failThresh;
+        /* #2136: validated to the same range DarlingAlertSettings clamps ([5, 100]). */
+        if (int.TryParse(AlertStoreJobCadenceWarnPercentBox.Text, out var cadencePct) && cadencePct is >= 5 and <= 100)
+            row.StoreJobCadenceWarnPercent = cadencePct;
         if (int.TryParse(AlertPvsThresholdPercentBox.Text, out var pvsPct) && pvsPct is >= 0 and <= 100)
             row.PvsThresholdPercent = pvsPct;
         if (int.TryParse(AlertPvsFloorGbBox.Text, out var pvsFloor) && pvsFloor >= 0)

@@ -2946,6 +2946,55 @@ WHERE j.proc_name LIKE '%compression%'
         return stuck;
     }
 
+    /// <summary>
+    /// Every background job's last-run duration against its own schedule interval (#2136) — the readings
+    /// the Store Job Over Cadence self-alert judges. <c>job_stats</c> for the same reason the #1778
+    /// observability path uses it (maintained unconditionally; the per-execution history table is empty
+    /// unless job-execution logging is on). Only a SUCCESSFUL last run judges: a failed run's duration is
+    /// not a cadence signal, and job failures are their own condition (<c>total_failures</c> rides the
+    /// V56 telemetry). Tolerant like <see cref="ReadStuckCompressionJobsAsync"/> — a plain-PG store or a
+    /// hiccup yields no readings, never an exception.
+    /// </summary>
+    public static async Task<IReadOnlyList<StoreJobCadenceReading>> ReadJobCadenceReadingsAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        const string sql = @"
+SELECT
+    j.job_id,
+    j.proc_name || coalesce(' ' || j.hypertable_name, ''),
+    (EXTRACT(EPOCH FROM js.last_run_duration) * 1000)::bigint,
+    (EXTRACT(EPOCH FROM j.schedule_interval) * 1000)::bigint
+FROM timescaledb_information.job_stats AS js
+JOIN timescaledb_information.jobs AS j USING (job_id)
+WHERE js.last_run_status = 'Success'";
+
+        var readings = new List<StoreJobCadenceReading>();
+        try
+        {
+            using var command = new NpgsqlCommand(sql, connection);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                readings.Add(new StoreJobCadenceReading(
+                    Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture),
+                    reader.IsDBNull(1) ? "" : reader.GetString(1),
+                    reader.IsDBNull(2) ? null : Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture),
+                    reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3), CultureInfo.InvariantCulture)));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug("Store-job cadence check: could not read job stats: {Message}", ex.Message);
+        }
+
+        return readings;
+    }
+
     /* ---------------- compression-run observability (#1778) ---------------- */
 
     /// <summary>
@@ -3124,6 +3173,14 @@ WHERE j.proc_name LIKE '%compression%'
 /// may be null on an odd catalog), and the human-readable reason the pure predicate produced.
 /// </summary>
 public sealed record StuckCompressionJob(long JobId, string? HypertableName, string Reason);
+
+/// <summary>
+/// One background job's cadence reading (#2136): the last SUCCESSFUL run's duration against the job's own
+/// schedule interval, from <see cref="TimescaleSupport.ReadJobCadenceReadingsAsync"/>. <see cref="JobName"/>
+/// is <c>proc_name</c> plus the hypertable/CAGG it serves — the V56 telemetry's naming, minus the
+/// <c>[job_id]</c> suffix (the id rides separately as the alert key).
+/// </summary>
+public sealed record StoreJobCadenceReading(long JobId, string JobName, long? LastRunDurationMs, long ScheduleIntervalMs);
 
 /// <summary>
 /// One hypertable's compression-policy activity (#1778): whether a run is in progress, when it started, how

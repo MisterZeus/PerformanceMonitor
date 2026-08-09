@@ -463,6 +463,12 @@ public sealed class AlertsConfig
     [JsonPropertyName("analysisNotifyCooldownMinutes")]
     public int AnalysisNotifyCooldownMinutes { get; set; } = 360;
 
+    /// <summary>#2136: the Store Job Over Cadence warning threshold — a store background job whose
+    /// last run reaches this percent of its own schedule interval fires the Warning tier. The
+    /// Critical tier is fixed at 100 (a job outrunning its cadence compounds refresh lag).</summary>
+    [JsonPropertyName("storeJobCadenceWarnPercent")]
+    public int StoreJobCadenceWarnPercent { get; set; } = 25;
+
     [JsonPropertyName("longRunningJobEnabled")]
     public bool LongRunningJobEnabled { get; set; } = true;
 

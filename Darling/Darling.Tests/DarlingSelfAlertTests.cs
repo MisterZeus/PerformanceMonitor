@@ -166,6 +166,9 @@ public sealed class DarlingSelfAlertTests
         /// <summary>#1696 (V37): AG disconnect re-fire minutes. Default 0 = off, the shipped behavior.</summary>
         public int AgDisconnectRefireMinutes { get; set; }
 
+        /// <summary>#2136 (V57): the Store Job Over Cadence warning percent. Default is the shipped 25.</summary>
+        public int StoreJobCadenceWarnPercent { get; set; } = 25;
+
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
         /// <summary>#1681: captures what the evaluator writes to the service log, so the firing/recovery pair
@@ -182,7 +185,8 @@ public sealed class DarlingSelfAlertTests
             notifyAgHealth: () => NotifyAgHealth,
             agLagAlertSeconds: () => AgLagAlertSeconds,
             agRedoQueueAlertKb: () => AgRedoQueueAlertKb,
-            agDisconnectRefireMinutes: () => AgDisconnectRefireMinutes);
+            agDisconnectRefireMinutes: () => AgDisconnectRefireMinutes,
+            storeJobCadenceWarnPercent: () => StoreJobCadenceWarnPercent);
     }
 
     /* ---------------- #991 Availability Group fixtures ---------------- */
@@ -2315,5 +2319,109 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
             .ToList();
 
         Assert.Contains(warnings, x => x.Message.Contains("[muted]", StringComparison.Ordinal));
+    }
+
+    /* ---------------- #2136 Store Job Over Cadence ---------------- */
+
+    private static StoreJobCadenceReading CadenceJob(
+        long id = 1028, long? durMs = 900_000, long schedMs = 3_600_000,
+        string name = "policy_compression query_store_stats") =>
+        new(id, name, durMs, schedMs);
+
+    [Fact]
+    public async Task JobOverCadence_WarningTier_FiresAtTheKnobPercent()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* 900s of 3600s = exactly 25%, the shipped default — the boundary is inclusive. */
+        await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob() }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.JobCadenceMetric, fired.MetricName);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
+        Assert.Equal("storejob:1028", fired.ServerKey);  /* prefixed so it never parses as a server_id */
+        Assert.Contains("25% of its schedule interval", fired.ShortMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task JobOverCadence_UnderTheKnob_StaysSilent()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* 249s of 3600s ≈ 7% — the production store's worst job today. Must not fire at the default 25. */
+        await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob(durMs: 249_000) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task JobOverCadence_At100Percent_EscalatesToCritical()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* 3700s of 3600s — the job outruns its own cadence; runs back up behind each other. */
+        await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob(durMs: 3_700_000) }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+    }
+
+    [Fact]
+    public async Task JobOverCadence_HonorsTheLiveKnob()
+    {
+        var h = new Harness { StoreJobCadenceWarnPercent = 50 };
+        var e = h.Build();
+
+        /* 30% breaches the default 25 but not the configured 50 — the seam is read live. */
+        await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob(durMs: 1_080_000) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task JobOverCadence_NoScheduleOrNoRun_IsSkippedWithoutJudging()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* A one-shot job (no interval) and a job with no completed run have no cadence to breach. */
+        await e.ApplyStoreJobCadenceAsync(new[]
+        {
+            CadenceJob(id: 1, schedMs: 0),
+            CadenceJob(id: 2, durMs: null),
+        }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task JobOverCadence_IsAStandingCondition_ReFiresOnlyOnCooldown_AndWritesOneRecoveryRow()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* Breach: fires once. */
+        await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob() }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Still breaching one minute later — inside the 5-minute cooldown, no re-fire. */
+        h.Now = h.Now.AddMinutes(1);
+        await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob() }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Still breaching past the cooldown — re-fires under the SAME metric name. */
+        h.Now = h.Now.AddMinutes(10);
+        await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob() }, Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* A later run comes back under: exactly one recovery audit row, and a fresh breach fires again. */
+        await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob(durMs: 200_000) }, Ct);
+        var recovered = Assert.Single(h.History.Records);
+        Assert.Equal("Store Job Cadence Recovered", recovered.MetricName);
     }
 }

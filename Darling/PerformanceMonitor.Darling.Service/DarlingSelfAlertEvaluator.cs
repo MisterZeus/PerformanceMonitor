@@ -184,6 +184,25 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>Prefixes the fleet-level compression-job alert serverKey so it never parses as a server_id.</summary>
     private const string CompressionKeyPrefix = "compressjob:";
 
+    /* Store Job Over Cadence edge state (#2136). FLEET-level like disk pressure, MULTI-keyed by job_id like
+       the compression machine, but a STANDING condition (the AG Sync Fell Behind idiom): active flag +
+       cooldown re-fire while a job's last run keeps breaching its share of the schedule interval, one
+       "Store Job Cadence Recovered" resolution when a later run comes back under. */
+    private readonly ConcurrentDictionary<string, bool> _activeJobOverCadence = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTime> _lastJobOverCadenceAlert = new(StringComparer.Ordinal);
+
+    /// <summary>The #2136 alert metric name — the Warning and Critical tiers share it (severity carries the
+    /// tier), so the deliverer's per-metric cooldown and the recovery resolution correlate cleanly.</summary>
+    internal const string JobCadenceMetric = "Store Job Over Cadence";
+
+    /// <summary>Prefixes the fleet-level cadence alert serverKey so it never parses as a server_id.</summary>
+    private const string JobCadenceKeyPrefix = "storejob:";
+
+    /// <summary>#2136: the Warning tier's percent-of-cadence threshold, read live through the same
+    /// by-reference settings seam as the AG thresholds (the clamp lives on DarlingAlertSettings).
+    /// The Critical tier is FIXED at 100: a job outrunning its own cadence compounds refresh lag.</summary>
+    private readonly Func<int> _storeJobCadenceWarnPercent;
+
     /* Availability Group edge state (#991), keyed by a COMPOSITE of serverId + the AG grain — an AG condition
        is per replica (ag + replica) or per database (ag + database + replica), not per server, so one server's
        two lagging databases must track (and recover) independently. Only the alert HISTORY is per server: every
@@ -250,7 +269,8 @@ internal sealed class DarlingSelfAlertEvaluator
         Func<bool>? notifyAgHealth = null,
         Func<int>? agLagAlertSeconds = null,
         Func<long>? agRedoQueueAlertKb = null,
-        Func<int>? agDisconnectRefireMinutes = null)
+        Func<int>? agDisconnectRefireMinutes = null,
+        Func<int>? storeJobCadenceWarnPercent = null)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _deliverer = deliverer ?? throw new ArgumentNullException(nameof(deliverer));
@@ -267,6 +287,9 @@ internal sealed class DarlingSelfAlertEvaluator
         _agLagAlertSeconds = agLagAlertSeconds ?? (() => 300);
         _agRedoQueueAlertKb = agRedoQueueAlertKb ?? (() => 0);
         _agDisconnectRefireMinutes = agDisconnectRefireMinutes ?? (() => 0);
+        /* Unsupplied falls back to the V57 DDL default, so an evaluator built without the seam behaves
+           like a store at its shipped defaults (the AG-seam discipline). */
+        _storeJobCadenceWarnPercent = storeJobCadenceWarnPercent ?? (() => 25);
     }
 
     private enum ConnectionState
@@ -1360,6 +1383,102 @@ internal sealed class DarlingSelfAlertEvaluator
         catch (Exception ex)
         {
             _logger?.LogError("Compression-job health self-alert failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// The isolating entry point for the #2136 Store Job Over Cadence check — rides the worker's hourly
+    /// compression-job health sweep (same connection, same Timescale gate). Same failure isolation as
+    /// <see cref="EvaluateCompressionJobsAsync"/>; cancellation still propagates.
+    /// </summary>
+    public async Task EvaluateStoreJobCadenceAsync(
+        IReadOnlyList<StoreJobCadenceReading> jobs, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ApplyStoreJobCadenceAsync(jobs, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Store-job cadence self-alert failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Applies the fleet-level Store Job Over Cadence condition (#2136) from the latest job readings: a
+    /// background job whose last SUCCESSFUL run consumed at least the warning share of its own schedule
+    /// interval is living too close to its ceiling — these runtimes scale SERIALLY with raw volume (the
+    /// finalize hash-aggregate runs in one process), so an onboarding wave moves them first, and a job
+    /// that outgrows its cadence compounds refresh lag silently. Tiers: WARNING at the store-backed knob
+    /// (V57, default 25), CRITICAL fixed at 100 — past 100 the job is still running when its next run is
+    /// due, which is no longer "close to" the ceiling but through it. A STANDING condition (the AG Sync
+    /// Fell Behind idiom): fire once on breach, re-fire only after the alert cooldown while it persists,
+    /// one "Store Job Cadence Recovered" resolution row when a later run comes back under the warning
+    /// threshold. A job with no schedule interval or no completed run yet has no cadence to breach and is
+    /// skipped without touching its standing state (no signal, the agent-status discipline). Gated on the
+    /// master alerts switch. Internal so it pins directly with a recording deliverer + controllable clock.
+    /// </summary>
+    internal async Task ApplyStoreJobCadenceAsync(
+        IReadOnlyList<StoreJobCadenceReading> jobs, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        int warnPercent = _storeJobCadenceWarnPercent();
+
+        foreach (var job in jobs)
+        {
+            if (job.ScheduleIntervalMs <= 0 || job.LastRunDurationMs is not long durationMs)
+            {
+                continue;
+            }
+
+            var key = job.JobId.ToString(CultureInfo.InvariantCulture);
+            double percent = 100.0 * durationMs / job.ScheduleIntervalMs;
+            var label = string.IsNullOrEmpty(job.JobName) ? $"job {key}" : $"{job.JobName} [{key}]";
+
+            if (percent >= warnPercent)
+            {
+                _activeJobOverCadence[key] = true;
+                if (CooldownElapsed(_lastJobOverCadenceAlert, key, now))
+                {
+                    _lastJobOverCadenceAlert[key] = now;
+                    bool critical = percent >= 100.0;
+                    await FireAsync(
+                        JobCadenceKeyPrefix + key, "Monitor Store", JobCadenceMetric,
+                        $"{percent:F0}% of schedule interval", $"{warnPercent}%",
+                        detail: $"Store background {label} last ran for {durationMs / 1000.0:F0}s against a " +
+                            $"{job.ScheduleIntervalMs / 1000.0:F0}s schedule interval ({percent:F0}%). " +
+                            (critical
+                                ? "The job now takes at least as long as its own cadence, so runs back up behind each " +
+                                  "other and everything it maintains (continuous-aggregate freshness, compression, " +
+                                  "retention) falls further behind every cycle. "
+                                : "These runtimes scale with raw data volume, so this is the early warning that the " +
+                                  "store is outgrowing its job schedule — an onboarding wave moves this number first. ") +
+                            "Compare the job's duration series in collect.store_metrics (object_kind = " +
+                            "'background_job') to see the trend, and either reduce raw volume, extend the job's " +
+                            "schedule_interval deliberately, or scale the store host.",
+                        severity: critical ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
+                        shortMessage: $"{label} ran {percent:F0}% of its schedule interval",
+                        numericCurrentValue: Math.Round(percent, 1),
+                        numericThresholdValue: critical ? 100 : warnPercent,
+                        cancellationToken);
+                }
+            }
+            else if (_activeJobOverCadence.TryRemove(key, out var was) && was)
+            {
+                await RecordResolutionAsync(new AlertResolution(
+                    JobCadenceKeyPrefix + key, "Monitor Store", JobCadenceMetric,
+                    "Store Job Cadence Recovered",
+                    $"Monitor Store: {label} is back under {warnPercent}% of its schedule interval"), cancellationToken);
+            }
         }
     }
 

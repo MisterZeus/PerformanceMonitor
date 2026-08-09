@@ -1008,7 +1008,9 @@ public sealed class DarlingWorker : BackgroundService
             notifyAgHealth: () => alertSettings.NotifyAgHealth,
             agLagAlertSeconds: () => alertSettings.AgLagAlertSeconds,
             agRedoQueueAlertKb: () => alertSettings.AgRedoQueueAlertKb,
-            agDisconnectRefireMinutes: () => alertSettings.AgDisconnectRefireMinutes);
+            agDisconnectRefireMinutes: () => alertSettings.AgDisconnectRefireMinutes,
+            /* #2136: the cadence warning threshold, read live like the AG seams (clamped on the property). */
+            storeJobCadenceWarnPercent: () => alertSettings.StoreJobCadenceWarnPercent);
 
         /* #1706: report this start's store runtime upgrade, now that there IS an alert engine to report it
            through. Fired once, here, and never re-evaluated — the store is down while an upgrade runs, so
@@ -2284,6 +2286,15 @@ LIMIT 1", connection);
                 stuckJobs,
                 jobId => TimescaleSupport.TryRearmJobAsync(connection, jobId, _logger, cancellationToken),
                 cancellationToken);
+
+            /* #2136: the Store Job Over Cadence check rides the same connection and hourly cadence — a
+               background job whose last successful run reached the warning share of its own schedule
+               interval is the store outgrowing its job schedule, the number an onboarding wave moves
+               first. Same isolation posture: the evaluator wraps itself, and this whole method's catch
+               is the backstop. */
+            var cadenceReadings = await TimescaleSupport.ReadJobCadenceReadingsAsync(
+                connection, _logger, cancellationToken);
+            await _selfAlerts!.EvaluateStoreJobCadenceAsync(cadenceReadings, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

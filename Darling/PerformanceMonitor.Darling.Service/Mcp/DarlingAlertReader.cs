@@ -143,7 +143,8 @@ LIMIT $2";
         int CollectionFailureThreshold,
         int DiskCriticalFreePercent,
         int DiskCriticalFreeGb,
-        int AnalysisNotifyCooldownMinutes);
+        int AnalysisNotifyCooldownMinutes,
+        int StoreJobCadenceWarnPercent);
 
     /// <summary>The single global alert-settings row (id=1) — the viewer's <c>AlertSettingsSelectSql</c>. The
     /// 47 columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>). This had
@@ -165,7 +166,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        ag_disconnect_refire_minutes, blocking_wait_seconds_threshold, pvs_enabled, pvs_threshold_percent,
        pvs_floor_gb, database_state_enabled,
        self_disk_free_warn_percent, collection_stale_minutes, collection_failure_threshold,
-       disk_critical_free_percent, disk_critical_free_gb, analysis_notify_cooldown_minutes
+       disk_critical_free_percent, disk_critical_free_gb, analysis_notify_cooldown_minutes,
+       store_job_cadence_warn_percent
 FROM config_alert_settings
 WHERE id = 1";
 
@@ -200,8 +202,9 @@ WHERE id = 1";
             reader.GetInt32(42),
             reader.GetBoolean(43), reader.GetInt32(44), reader.GetInt32(45),
             reader.GetBoolean(46),
-            /* #2107 threshold knobs (V55) at 47–52. */
+            /* #2107 threshold knobs (V55) at 47–52; #2136 cadence-warn knob (V57) at 53. */
             reader.GetInt32(47), reader.GetInt32(48), reader.GetInt32(49),
-            reader.GetInt32(50), reader.GetInt32(51), reader.GetInt32(52));
+            reader.GetInt32(50), reader.GetInt32(51), reader.GetInt32(52),
+            reader.GetInt32(53));
     }
 }
