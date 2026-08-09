@@ -186,7 +186,9 @@ public sealed class DarlingMcpAlertTools
         {
             disk_free_warn_percent = s.SelfDiskFreeWarnPercent,
             collection_stale_minutes = s.CollectionStaleMinutes,
-            collection_failure_threshold = s.CollectionFailureThreshold
+            collection_failure_threshold = s.CollectionFailureThreshold,
+            /* #2136: the Store Job Over Cadence warning percent (Critical is fixed at 100). */
+            store_job_cadence_warn_percent = s.StoreJobCadenceWarnPercent
         },
         pvs = new { enabled = s.PvsEnabled, threshold_percent = s.PvsThresholdPercent, floor_gb = s.PvsFloorGb },
         long_running_job = new { enabled = s.LongRunningJobEnabled, multiplier = s.LongRunningJobMultiplier },
@@ -654,6 +656,7 @@ public sealed class DarlingMcpAlertTools
                             case "disk_free_warn_percent": AddInt("self_disk_free_warn_percent", n, "self_alerts.disk_free_warn_percent", 0, 100); break;
                             case "collection_stale_minutes": AddInt("collection_stale_minutes", n, "self_alerts.collection_stale_minutes", 5, 1440); break;
                             case "collection_failure_threshold": AddInt("collection_failure_threshold", n, "self_alerts.collection_failure_threshold", 1, 1000); break;
+                            case "store_job_cadence_warn_percent": AddInt("store_job_cadence_warn_percent", n, "self_alerts.store_job_cadence_warn_percent", 5, 100); break;
                             default: error = $"Unknown field 'self_alerts.{k}'."; break;
                         }
                     });

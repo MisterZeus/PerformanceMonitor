@@ -113,6 +113,7 @@ public static class PgMigrations
         new Migration(54, "plan-dim-gzip", V54Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
         new Migration(55, "self-alert-knobs", V55Sql),
         new Migration(56, "store-metrics-background-jobs", V56Sql),
+        new Migration(57, "store-job-cadence-knob", V57Sql),
     };
 
     /// <summary>
@@ -1109,6 +1110,19 @@ ALTER TABLE collect.store_metrics
     ADD COLUMN IF NOT EXISTS total_runs bigint;
 ALTER TABLE collect.store_metrics
     ADD COLUMN IF NOT EXISTS total_failures bigint;";
+
+    /// <summary>
+    /// V57 — the Store Job Over Cadence warning knob (#2136, the alert half of the V56 job telemetry):
+    /// a background job whose last run reaches this percent of its own schedule interval fires the
+    /// Warning tier of the new self-alert (the Critical tier is fixed at 100 — a job outrunning its
+    /// cadence is compounding refresh lag, which is the failure the telemetry exists to catch).
+    /// Store-backed like the V55 knobs (#2107 pattern): the column is the control plane, the C# default
+    /// remains only the shipped seed. Default 25: the production 52-server store's worst job runs at
+    /// ~7% of cadence, so 25 sits 3.5x above the observed ceiling but far ahead of real compounding.
+    /// </summary>
+    private const string V57Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS store_job_cadence_warn_percent integer NOT NULL DEFAULT 25;";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

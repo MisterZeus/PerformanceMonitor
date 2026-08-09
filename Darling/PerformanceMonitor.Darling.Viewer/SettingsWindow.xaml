@@ -398,6 +398,14 @@
                     <TextBlock Text="straight failures" VerticalAlignment="Center" Margin="2,0,0,0"
                                Foreground="{DynamicResource ForegroundBrush}"/>
                 </StackPanel>
+                <!-- #2136: the store's own background jobs — warn when a run reaches this percent of its cadence. -->
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <TextBlock Text="Store background job runs longer than" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertStoreJobCadenceWarnPercentBox" Width="45" Text="25" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="% of its schedule interval (critical at 100%)" VerticalAlignment="Center" Margin="2,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <CheckBox x:Name="AlertPvsCheckBox" Content="Version store (PVS) over" VerticalAlignment="Center"
                               Foreground="{DynamicResource ForegroundBrush}"/>

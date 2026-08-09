@@ -169,10 +169,11 @@ INSERT INTO config_alert_settings (
     ag_disconnect_refire_minutes, blocking_wait_seconds_threshold, pvs_enabled, pvs_threshold_percent,
     pvs_floor_gb, modified_at, database_state_enabled,
     self_disk_free_warn_percent, collection_stale_minutes, collection_failure_threshold,
-    disk_critical_free_percent, disk_critical_free_gb, analysis_notify_cooldown_minutes)
+    disk_critical_free_percent, disk_critical_free_gb, analysis_notify_cooldown_minutes,
+    store_job_cadence_warn_percent)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
         $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42,
-        $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54)
+        $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55)
 ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(a.Enabled);
         command.Parameters.AddWithValue(a.CpuEnabled);
@@ -238,6 +239,7 @@ ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(a.DiskCriticalFreePercent);
         command.Parameters.AddWithValue(a.DiskCriticalFreeGb);
         command.Parameters.AddWithValue(a.AnalysisNotifyCooldownMinutes);
+        command.Parameters.AddWithValue(a.StoreJobCadenceWarnPercent);
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -385,7 +387,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        ag_disconnect_refire_minutes, blocking_wait_seconds_threshold, pvs_enabled, pvs_threshold_percent,
        pvs_floor_gb, database_state_enabled,
        self_disk_free_warn_percent, collection_stale_minutes, collection_failure_threshold,
-       disk_critical_free_percent, disk_critical_free_gb, analysis_notify_cooldown_minutes
+       disk_critical_free_percent, disk_critical_free_gb, analysis_notify_cooldown_minutes,
+       store_job_cadence_warn_percent
 FROM config_alert_settings WHERE id = 1", connection);
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -467,6 +470,10 @@ FROM config_alert_settings WHERE id = 1", connection);
             DiskCriticalFreePercent = reader.GetInt32(50),
             DiskCriticalFreeGb = reader.GetInt32(51),
             AnalysisNotifyCooldownMinutes = reader.GetInt32(52),
+            /* #2136 cadence-warn knob appended (V57) at ordinal 53; NOT NULL DEFAULT 25, and the same
+               reachability rule as every appended knob above: ApplyToConfig replaces config.Alerts
+               wholesale, so a column missing here would silently reset the knob on every worker start. */
+            StoreJobCadenceWarnPercent = reader.GetInt32(53),
         };
         var analysis = new AnalysisConfig
         {

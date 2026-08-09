@@ -70,6 +70,11 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public int DiskCriticalFreeGb => Math.Max(0, _config.Alerts.DiskCriticalFreeGb);
     public int SelfDiskFreeWarnPercent => Math.Clamp(_config.Alerts.SelfDiskFreeWarnPercent, 0, 100);
     public int CollectionStaleMinutes => Math.Clamp(_config.Alerts.CollectionStaleMinutes, 5, 1440);
+
+    /// <summary>#2136: the Store Job Over Cadence warning percent. Clamped [5, 100] — below 5 would fire
+    /// on healthy jobs (the production worst runs ~7% of cadence), and at 100 the Warning tier merges
+    /// into the fixed Critical tier, so higher values would only disable the warning silently.</summary>
+    public int StoreJobCadenceWarnPercent => Math.Clamp(_config.Alerts.StoreJobCadenceWarnPercent, 5, 100);
     public int CollectionFailureThreshold => Math.Clamp(_config.Alerts.CollectionFailureThreshold, 1, 1000);
 
     /* #1984: percent clamped like low-disk's (0 = off); the GB floor merely floored at 0 — unlike
