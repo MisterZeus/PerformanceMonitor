@@ -198,6 +198,11 @@ public record RcsiInactionFiguresDto(
 /// written before #1882 has no such property and deserializes to null, which is the same thing the
 /// extractor produces for a server that does not attribute replicas — so an old row and a
 /// non-AG row are indistinguishable, as they should be.
+/// <see cref="ParameterSensitivityCoFired"/> (#2138 gap 3) follows the same appended-and-defaulted
+/// discipline — and it MUST be mirrored here, not just on the record: both apps render their
+/// copy-paste command from the DESERIALIZED action, so a flag dropped by this DTO never reaches the
+/// pasted surface at all, and the future auto-force bot reading persisted actions would see false
+/// for every flagged target (review catch on #2140).
 /// </summary>
 public record ForcePlanTargetDto(
     string Database,
@@ -208,7 +213,8 @@ public record ForcePlanTargetDto(
     double LatestCpuPerExecUs,
     double BestCpuPerExecUs,
     double RegressionFactor,
-    string? ReplicaRole = null);
+    string? ReplicaRole = null,
+    bool ParameterSensitivityCoFired = false);
 
 /// <summary>
 /// JSON mirror of <see cref="DbConfigTarget"/>. <see cref="Setting"/> is persisted
@@ -406,7 +412,8 @@ public static class AlertContextSerializer
                 t.LatestCpuPerExecUs,
                 t.BestCpuPerExecUs,
                 t.RegressionFactor,
-                t.ReplicaRole));
+                t.ReplicaRole,
+                t.ParameterSensitivityCoFired));
         }
 
         List<DbConfigTargetDto>? dbConfigTargets = null;
@@ -510,7 +517,8 @@ public static class AlertContextSerializer
                     t.LatestCpuPerExecUs,
                     t.BestCpuPerExecUs,
                     t.RegressionFactor,
-                    t.ReplicaRole));
+                    t.ReplicaRole,
+                    t.ParameterSensitivityCoFired));
             }
         }
 

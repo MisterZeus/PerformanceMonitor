@@ -518,6 +518,32 @@ public sealed class ForcePlanReplicaScopeTests
     }
 
     [Fact]
+    public void PspCoFiredFlag_SurvivesThePersistedActionRoundTrip()
+    {
+        /* Review catch on #2140: the flag existed on ForcePlanTarget but not on its JSON mirror
+           (ForcePlanTargetDto), so SerializeAction dropped it on the FIRST write and every read
+           reconstructed false — and both apps render the copy-paste command from the DESERIALIZED
+           action, so the caution never reached the pasted surface at all, and a future bot reading
+           persisted actions would have seen false for every flagged target. This is the test that
+           was missing: a TRUE flag through the actual persistence path. */
+        var row = Row(queryId: 123, bestPlanId: 99, regressionFactor: 12.0, replicaRole: null);
+        row["parameter_sensitivity_cofired"] = true;
+
+        var action = FactRemediation.BuildAction(PlanRegressionFinding(row));
+        Assert.NotNull(action);
+
+        var json = AlertContextSerializer.SerializeAction(action!);
+        var restored = AlertContextSerializer.DeserializeAction(json);
+
+        Assert.NotNull(restored);
+        Assert.True(Assert.Single(restored!.Targets).ParameterSensitivityCoFired);
+
+        /* And the surface that gets executed renders the caution from the RESTORED action. */
+        var sql = FactRemediation.RenderCopyPasteCommand(restored);
+        Assert.Contains("CAUTION: parameter-sensitive", sql!, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void PspCoFiredTarget_CautionAlsoRidesTheCopyPasteSurface()
     {
         /* The paste surface is the one that gets EXECUTED, so the warning must survive the trip through
