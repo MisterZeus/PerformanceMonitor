@@ -96,15 +96,18 @@ LEFT JOIN LATERAL (
     /// interval_hourly refresh at 96s on a 52-server store), and a job that outgrows its own schedule
     /// interval compounds refresh lag silently. One row per job per sweep makes that a queryable series:
     /// object_name is <c>proc_name</c> plus the hypertable/CAGG it serves (the telemetry job has
-    /// neither), and <c>schedule_interval_ms</c> rides along so "duration vs cadence" — the honest
-    /// tripwire — is one division. $1 metric_time.
+    /// neither) plus a <c>[job_id]</c> suffix — the uniqueness guarantee (review catch): two user-added
+    /// jobs sharing a proc_name, or two hypertable-less jobs, would otherwise collide into one
+    /// object_name and the readers' DISTINCT ON would silently drop one job's telemetry. job_id is
+    /// stable for a job's lifetime, so per-job series continuity holds. <c>schedule_interval_ms</c>
+    /// rides along so "duration vs cadence" — the honest tripwire — is one division. $1 metric_time.
     /// </summary>
     public const string BackgroundJobInsertSql = @"
 INSERT INTO collect.store_metrics
     (metric_time, object_name, object_kind, last_run_duration_ms, schedule_interval_ms, total_runs, total_failures)
 SELECT
     $1,
-    j.proc_name || coalesce(' ' || j.hypertable_name, ''),
+    j.proc_name || coalesce(' ' || j.hypertable_name, '') || ' [' || j.job_id || ']',
     'background_job',
     (EXTRACT(EPOCH FROM js.last_run_duration) * 1000)::bigint,
     (EXTRACT(EPOCH FROM j.schedule_interval) * 1000)::bigint,
