@@ -187,6 +187,43 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     }
 
     /// <summary>
+    /// One plan-cache row for THE regressed query's hash ('0xREGRESSQH'), carrying — or, with a tame
+    /// worker-time spread, deliberately missing — the PARAMETER_SENSITIVITY detector's firing
+    /// signature (#2138 gap 3). Grants flat, no spills: the worker ratio is the only dial.
+    /// </summary>
+    private async Task SeedPlanCacheRowAsync(long minWorkerUs, long maxWorkerUs)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+INSERT INTO query_stats
+    (collection_id, collection_time, server_id, server_name, database_name,
+     query_hash, query_plan_hash, creation_time, execution_count,
+     min_worker_time, max_worker_time, min_grant_kb, max_grant_kb,
+     min_spills, max_spills, query_text, delta_execution_count)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
+        cmd.Parameters.Add(new DuckDBParameter { Value = PeriodEnd.AddMinutes(-5) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerName });
+        cmd.Parameters.Add(new DuckDBParameter { Value = Db });
+        cmd.Parameters.Add(new DuckDBParameter { Value = "0xREGRESSQH" });
+        cmd.Parameters.Add(new DuckDBParameter { Value = BadPlanHash });
+        cmd.Parameters.Add(new DuckDBParameter { Value = PeriodStart.AddDays(-3) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = 100L });
+        cmd.Parameters.Add(new DuckDBParameter { Value = minWorkerUs });
+        cmd.Parameters.Add(new DuckDBParameter { Value = maxWorkerUs });
+        cmd.Parameters.Add(new DuckDBParameter { Value = 1_024L });
+        cmd.Parameters.Add(new DuckDBParameter { Value = 1_024L });
+        cmd.Parameters.Add(new DuckDBParameter { Value = 0L });
+        cmd.Parameters.Add(new DuckDBParameter { Value = 0L });
+        cmd.Parameters.Add(new DuckDBParameter { Value = "SELECT * FROM dbo.Orders WHERE CustomerId = @id" });
+        cmd.Parameters.Add(new DuckDBParameter { Value = 50L });
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
     /// One replica-less query, two plans, CPU and duration controlled INDEPENDENTLY — the seed shape for
     /// the #2138 CPU-primary scoring pins, where which signal moved is the entire test.
     /// </summary>
@@ -372,5 +409,32 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
 
         Assert.Null(await CollectPlanRegressionFactAsync());
         Assert.Empty(await CollectRegressedQueriesDrillDownAsync());
+    }
+
+    [Fact]
+    public async Task RegressedQuery_WithThePlanCachePspSignature_CarriesTheCoFiredFlag()
+    {
+        /* #2138 gap 3: the same query hash regresses in Query Store AND shows the parameter-sensitivity
+           signature in the plan cache (min 15ms, max 300ms — past every detector floor, ratio 20x). The
+           drill-down row must say so, because the force-plan remediation's caution and the future bot's
+           never-auto-force gate both read this flag. */
+        await SeedOneReplicaAsync(role: null, BadCpuUsPrimary, offsetSeconds: 0);
+        await SeedPlanCacheRowAsync(minWorkerUs: 15_000, maxWorkerUs: 300_000);
+
+        var row = Assert.Single(await CollectRegressedQueriesDrillDownAsync());
+        Assert.True(row.GetProperty("parameter_sensitivity_cofired").GetBoolean());
+    }
+
+    [Fact]
+    public async Task RegressedQuery_BelowThePspRatio_FlagStaysFalse()
+    {
+        /* Same floors, but a 2x worker-time spread — ordinary variance, not the >= 10x signature. Pins
+           that the flag uses the PARAMETER_SENSITIVITY detector's own threshold, not mere presence of
+           the hash in the plan cache. */
+        await SeedOneReplicaAsync(role: null, BadCpuUsPrimary, offsetSeconds: 0);
+        await SeedPlanCacheRowAsync(minWorkerUs: 150_000, maxWorkerUs: 300_000);
+
+        var row = Assert.Single(await CollectRegressedQueriesDrillDownAsync());
+        Assert.False(row.GetProperty("parameter_sensitivity_cofired").GetBoolean());
     }
 }

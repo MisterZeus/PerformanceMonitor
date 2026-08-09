@@ -253,6 +253,38 @@ public sealed class QueryStoreReplicaSplitAnalysisLiveTests
                 Assert.Empty(await CollectRegressedQueriesDrillDownAsync(postgres, context));
             }
 
+            /* ── #2138 gap 3: the regressed query's hash ALSO shows the parameter-sensitivity signature
+                  in the plan cache (ratio 20x, past every detector floor) — the drill-down row must
+                  carry the flag, because the force-plan caution and the future bot's never-auto-force
+                  gate both read it. ── */
+            await using (var connection = await OpenWithSearchPathAsync(connectionString!, ct))
+            {
+                await DeleteTestRowsAsync(connection, ct);
+                await SeedReplicaAsync(connection, periodStart, periodEnd, role: null, BadCpuUsPrimary, offsetSeconds: 0, ct);
+                await SeedPlanCacheRowAsync(connection, periodStart, periodEnd, minWorkerUs: 15_000, maxWorkerUs: 300_000, ct);
+            }
+
+            await using (var postgres = NpgsqlDataSource.Create(connectionString!))
+            {
+                var row = Assert.Single(await CollectRegressedQueriesDrillDownAsync(postgres, context));
+                Assert.True(row.GetProperty("parameter_sensitivity_cofired").GetBoolean());
+            }
+
+            /* ── A 2x worker-time spread is ordinary variance, not the >= 10x signature: the flag stays
+                  false. Pins that the flag uses the detector's own threshold, not mere cache presence. ── */
+            await using (var connection = await OpenWithSearchPathAsync(connectionString!, ct))
+            {
+                await DeleteTestRowsAsync(connection, ct);
+                await SeedReplicaAsync(connection, periodStart, periodEnd, role: null, BadCpuUsPrimary, offsetSeconds: 0, ct);
+                await SeedPlanCacheRowAsync(connection, periodStart, periodEnd, minWorkerUs: 150_000, maxWorkerUs: 300_000, ct);
+            }
+
+            await using (var postgres = NpgsqlDataSource.Create(connectionString!))
+            {
+                var row = Assert.Single(await CollectRegressedQueriesDrillDownAsync(postgres, context));
+                Assert.False(row.GetProperty("parameter_sensitivity_cofired").GetBoolean());
+            }
+
             bodySucceeded = true;
         }
         finally
@@ -367,11 +399,59 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $8, $9, $10, $11, $12, $13, '0xRE
         await command.ExecuteNonQueryAsync(ct);
     }
 
+    /// <summary>
+    /// One plan-cache row for THE regressed query's hash ('0xREGRESSQH'), with the worker-time spread
+    /// as the only dial — the #2138 gap-3 PSP-signature seed. Grants flat, no spills.
+    /// </summary>
+    private static async Task SeedPlanCacheRowAsync(
+        NpgsqlConnection connection, DateTime periodStart, DateTime periodEnd,
+        long minWorkerUs, long maxWorkerUs, CancellationToken ct)
+    {
+        const string sql = @"
+INSERT INTO query_stats
+    (collection_id, collection_time, server_id, server_name, database_name,
+     query_hash, query_plan_hash, creation_time, execution_count,
+     min_worker_time, max_worker_time, min_grant_kb, max_grant_kb,
+     min_spills, max_spills, query_text, delta_execution_count)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)";
+
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddWithValue(CollectionIdGenerator.Next());
+        command.Parameters.AddWithValue(periodEnd.AddMinutes(-5));
+        command.Parameters.AddWithValue(TestServerId);
+        command.Parameters.AddWithValue(TestServerName);
+        command.Parameters.AddWithValue(Db);
+        command.Parameters.AddWithValue("0xREGRESSQH");
+        command.Parameters.AddWithValue(BadPlanHash);
+        command.Parameters.AddWithValue(periodStart.AddDays(-3));
+        command.Parameters.AddWithValue(100L);
+        command.Parameters.AddWithValue(minWorkerUs);
+        command.Parameters.AddWithValue(maxWorkerUs);
+        command.Parameters.AddWithValue(1024L);
+        command.Parameters.AddWithValue(1024L);
+        command.Parameters.AddWithValue(0L);
+        command.Parameters.AddWithValue(0L);
+        command.Parameters.AddWithValue("SELECT * FROM dbo.Orders WHERE CustomerId = @id");
+        command.Parameters.AddWithValue(50L);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
     private static async Task DeleteTestRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        await using var command = new NpgsqlCommand(
-            "DELETE FROM query_store_stats WHERE server_id = $1", connection);
-        command.Parameters.AddWithValue(TestServerId);
-        await command.ExecuteNonQueryAsync(ct);
+        /* Two commands, not one multi-statement string: Npgsql does not allow parameters in
+           multi-statement commands. query_stats carries the #2138 gap-3 plan-cache seeds. */
+        await using (var command = new NpgsqlCommand(
+            "DELETE FROM query_store_stats WHERE server_id = $1", connection))
+        {
+            command.Parameters.AddWithValue(TestServerId);
+            await command.ExecuteNonQueryAsync(ct);
+        }
+
+        await using (var command = new NpgsqlCommand(
+            "DELETE FROM query_stats WHERE server_id = $1", connection))
+        {
+            command.Parameters.AddWithValue(TestServerId);
+            await command.ExecuteNonQueryAsync(ct);
+        }
     }
 }
