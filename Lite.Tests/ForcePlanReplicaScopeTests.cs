@@ -468,5 +468,71 @@ public sealed class ForcePlanReplicaScopeTests
         /* A legacy row renders exactly what it always rendered. */
         var sql = FactRemediation.RenderCopyPasteCommand(restored);
         Assert.DoesNotContain("Measured on the", sql!, StringComparison.Ordinal);
+        /* #2138 gap 3: the flag defaults FALSE off legacy JSON, so no caution appears either. */
+        Assert.DoesNotContain("CAUTION", sql!, StringComparison.Ordinal);
+    }
+
+    /* ---------------- #2138 gap 3: the parameter-sensitivity caution ---------------- */
+
+    [Fact]
+    public void PspCoFiredTarget_CarriesTheFlag_AndRendersTheCaution()
+    {
+        var row = Row(queryId: 123, bestPlanId: 99, regressionFactor: 12.0, replicaRole: null);
+        row["parameter_sensitivity_cofired"] = true;
+        var finding = PlanRegressionFinding(row);
+
+        var target = Assert.Single(FactRemediation.ExtractPlanRegressionTargets(finding));
+        Assert.True(target.ParameterSensitivityCoFired);
+
+        var sql = FactRemediation.GenerateForFinding(finding);
+        Assert.NotNull(sql);
+        Assert.Contains("CAUTION: this query also shows the parameter-sensitivity signature", sql!, StringComparison.Ordinal);
+        /* The gentler levers are NAMED — the caution is advice with a next step, not just a wince. */
+        Assert.Contains("update statistics", sql, StringComparison.Ordinal);
+
+        /* The caution is comment-only: the runnable statement is byte-identical to the unflagged one. */
+        var runnableLines = sql!.Split('\n')
+            .Select(line => line.Trim())
+            .Where(line => line.Length > 0 && !line.StartsWith("--", StringComparison.Ordinal));
+        Assert.Contains("EXEC sys.sp_query_store_force_plan @query_id = 123, @plan_id = 99;", runnableLines);
+    }
+
+    [Fact]
+    public void UnflaggedTarget_RendersExactly_WhatItRenderedBeforeTheFlagExisted()
+    {
+        /* An absent key (an old persisted drill-down, the deprecated Dashboard) and an explicit false
+           must render byte-identically — and contain no caution — so the render-stability discipline
+           the #1882 replica disclosure established holds for this flag too. */
+        var absent = PlanRegressionFinding(
+            Row(queryId: 123, bestPlanId: 99, regressionFactor: 12.0, replicaRole: null));
+
+        var flaggedFalse = Row(queryId: 123, bestPlanId: 99, regressionFactor: 12.0, replicaRole: null);
+        flaggedFalse["parameter_sensitivity_cofired"] = false;
+
+        var absentSql = FactRemediation.GenerateForFinding(absent);
+        var falseSql = FactRemediation.GenerateForFinding(PlanRegressionFinding(flaggedFalse));
+
+        Assert.NotNull(absentSql);
+        Assert.Equal(absentSql, falseSql);
+        Assert.DoesNotContain("CAUTION", absentSql!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PspCoFiredTarget_CautionAlsoRidesTheCopyPasteSurface()
+    {
+        /* The paste surface is the one that gets EXECUTED, so the warning must survive the trip through
+           the persisted action — flag into BuildAction, out through RenderCopyPasteCommand — in its
+           compact two-line form, with the runnable statement untouched. */
+        var row = Row(queryId: 123, bestPlanId: 99, regressionFactor: 12.0, replicaRole: null);
+        row["parameter_sensitivity_cofired"] = true;
+
+        var action = FactRemediation.BuildAction(PlanRegressionFinding(row));
+        Assert.NotNull(action);
+        Assert.True(Assert.Single(action!.Targets).ParameterSensitivityCoFired);
+
+        var sql = FactRemediation.RenderCopyPasteCommand(action);
+        Assert.NotNull(sql);
+        Assert.Contains("CAUTION: parameter-sensitive", sql!, StringComparison.Ordinal);
+        Assert.Contains("EXEC sys.sp_query_store_force_plan @query_id = 123, @plan_id = 99;", sql, StringComparison.Ordinal);
     }
 }
