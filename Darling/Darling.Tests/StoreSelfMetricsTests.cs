@@ -7,11 +7,16 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
+using PerformanceMonitor.Notifications;
 using Xunit;
 
 namespace Darling.Tests;
@@ -23,9 +28,9 @@ namespace Darling.Tests;
 /// collector catalog, so that machinery can never recurse onto it (no hypertable conversion, no
 /// compression policy, no catalog-driven purge; its retention is the sweep's own bounded DELETE).
 ///
-/// <para><b>#1776 own-store</b> — the one live test here mints its own scratch database via
-/// ScratchPostgres (it applies compression policies, which the shared fixture must never inherit), so
-/// it cannot race the shared store and serializing it would be pure slowdown.</para>
+/// <para><b>#1776 own-store</b> — the live tests here mint their own scratch databases via
+/// ScratchPostgres (they apply compression policies and drive run_job, which the shared fixture must
+/// never inherit), so they cannot race the shared store and serializing them would be pure slowdown.</para>
 /// </summary>
 public sealed class StoreSelfMetricsTests
 {
@@ -291,5 +296,290 @@ FROM collect.store_metrics", connection);
         var job = latest.FirstOrDefault(r => r.ObjectKind == "background_job");
         Assert.NotNull(job);
         Assert.True(job!.ScheduleIntervalMs is > 0, "the reader dropped the job's schedule interval");
+    }
+
+    /* ---------------- #2136 synthetic scale test ---------------- */
+
+    /// <summary>
+    /// The #2136 capacity claim, proven end to end rather than asserted from one production observation:
+    /// job runtimes scale with raw volume, the V56 telemetry RECORDS that growth, and the #2141 alert
+    /// FIRES from real store readings. One throwaway hypertable with a compression policy that is PARKED
+    /// except when a measurement deliberately arms it (created parked in one transaction — the #1888
+    /// discipline — so no background tick ever races a measurement, the #2143 class), driven at 1x and
+    /// then 4x row volume:
+    /// <list type="number">
+    /// <item>a scheduler-driven run at each scale (arm, poll total_runs, park — foreground run_job does
+    /// NOT update this accounting, CI-proved); job_stats.last_run_duration must be measurable (the
+    /// premise the whole telemetry stands on) and must GROW with volume;</item>
+    /// <item>a self-metrics sweep after each run; the store_metrics series must carry both readings, in
+    /// order, growing — this is the series an operator (and the cadence alert's detail text) trends;</item>
+    /// <item>alter_job shrinks the schedule interval to half the measured 4x duration, and the REAL
+    /// evaluator, fed by the REAL <see cref="TimescaleSupport.ReadJobCadenceReadingsAsync"/> against this
+    /// store, must fire the Critical tier under the storejob: key.</item>
+    /// </list>
+    /// Volumes (50k vs 200k rows in one closed chunk each, after a discarded warm-up run) are chosen so
+    /// the 4x run does strictly more compression work than the 1x run by a margin no runner jitter
+    /// plausibly inverts; the assertion is monotonicity, not a ratio, for exactly that reason.
+    /// Seeds are midday-anchored (#1972) so a run near midnight cannot split a chunk.
+    /// </summary>
+    [Fact]
+    public async Task ScaleTest_JobDurationGrowsWithVolume_TelemetryRecordsIt_AndTheAlertFires_AgainstDevPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #2136 scale test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        const string Table = "tick2136_scale";
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+
+        /* Throwaway hypertable + compression, policy created PARKED in one transaction (#1888): the
+           scheduler is a separate backend and must never see an armed job, or a background run races the
+           deterministic run_job calls below and the durations stop being ours. */
+        await ExecAsync(connection,
+            $"CREATE TABLE collect.{Table} (collection_time timestamp NOT NULL, server_id integer NOT NULL, value bigint)", ct);
+        await ExecAsync(connection, TimescaleSupport.CreateHypertableSql($"collect.{Table}", "collection_time"), ct);
+        await ExecAsync(connection, TimescaleSupport.EnableCompressionSql($"collect.{Table}"), ct);
+        await using (var tx = await connection.BeginTransactionAsync(ct))
+        {
+            await using (var create = new NpgsqlCommand(TimescaleSupport.AddCompressionPolicySql($"collect.{Table}"), connection, tx))
+            {
+                await create.ExecuteNonQueryAsync(ct);
+            }
+            await using (var park = new NpgsqlCommand($@"
+SELECT alter_job(job_id, scheduled => false)
+FROM timescaledb_information.jobs
+WHERE hypertable_schema = 'collect' AND hypertable_name = '{Table}'
+AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", connection, tx))
+            {
+                await park.ExecuteNonQueryAsync(ct);
+            }
+            await tx.CommitAsync(ct);
+        }
+
+        var jobId = Convert.ToInt64((await new NpgsqlCommand($@"
+SELECT job_id
+FROM timescaledb_information.jobs
+WHERE hypertable_schema = 'collect' AND hypertable_name = '{Table}'
+AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", connection).ExecuteScalarAsync(ct))!);
+
+        /* Warm-up: the first run of a policy pays one-time costs (worker spin-up, catalog warm-up) that
+           would inflate d1 and could invert the monotonicity assertion. Run once on a token chunk and
+           discard the measurement. Doubles as the canary that this scratch database HAS a scheduler:
+           if it never runs, the arm-and-poll below fails with its own diagnosis rather than a mystery. */
+        await SeedTickRowsAsync(connection, Table, daysBack: 12, rows: 2_000, ct);
+        await RunJobViaSchedulerAsync(connection, jobId, ct);
+
+        /* 1x: one closed chunk, 50k rows. */
+        await SeedTickRowsAsync(connection, Table, daysBack: 10, rows: 50_000, ct);
+        await RunJobViaSchedulerAsync(connection, jobId, ct);
+        long d1 = await ReadJobDurationMsAsync(connection, jobId, ct);
+        Assert.True(d1 > 0,
+            "a scheduler-driven run left job_stats.last_run_duration unmeasurable — the premise the " +
+            "V56 telemetry and the #2141 alert both stand on. (Foreground run_job is already known " +
+            "not to update this accounting — CI proved that on this test's first version — which is " +
+            "why the runs go through the real scheduler.)");
+        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow, null, ct);
+
+        /* 4x: one closed chunk, 200k rows. */
+        await SeedTickRowsAsync(connection, Table, daysBack: 8, rows: 200_000, ct);
+        await RunJobViaSchedulerAsync(connection, jobId, ct);
+        long d4 = await ReadJobDurationMsAsync(connection, jobId, ct);
+        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow.AddSeconds(2), null, ct);
+
+        /* 1. The capacity claim itself: more volume, longer run. Monotonicity, not a ratio — runner
+           jitter owns the constant factor, the direction is ours. */
+        Assert.True(d4 > d1,
+            $"4x volume did not run longer than 1x (d1={d1}ms, d4={d4}ms) — job runtime is not " +
+            "scaling with volume, which invalidates the #2136 capacity model.");
+
+        /* 2. The telemetry recorded the growth: two series points for this job, in order, growing. */
+        await using (var series = new NpgsqlCommand(@"
+SELECT last_run_duration_ms
+FROM collect.store_metrics
+WHERE object_kind = 'background_job' AND object_name LIKE '%' || $1 || '%'
+ORDER BY metric_time", connection))
+        {
+            series.Parameters.AddWithValue(Table);
+            var points = new List<long>();
+            await using var reader = await series.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                points.Add(reader.GetInt64(0));
+            }
+
+            Assert.Equal(2, points.Count);
+            Assert.Equal(d1, points[0]);
+            Assert.Equal(d4, points[1]);
+        }
+
+        /* 3. The alert fires from REAL readings: shrink the schedule interval to half the measured 4x
+           duration (percent ≈ 200), then run the real reader into the real evaluator. */
+        await ExecAsync(connection, $@"
+SELECT alter_job({jobId}::integer, schedule_interval => (
+    SELECT last_run_duration / 2 FROM timescaledb_information.job_stats WHERE job_id = {jobId}))", ct);
+
+        var readings = await TimescaleSupport.ReadJobCadenceReadingsAsync(connection, null, ct);
+        var tickReading = Assert.Single(readings, r => r.JobId == jobId);
+        Assert.True(tickReading.LastRunDurationMs is > 0 && tickReading.ScheduleIntervalMs > 0,
+            "the cadence reader dropped the duration or interval for the tick job");
+
+        var deliverer = new CadenceRecordingDeliverer();
+        var evaluator = new DarlingSelfAlertEvaluator(
+            new CadenceFakeSettings(), deliverer, new CadenceFakeHistoryStore(), _ => false);
+        await evaluator.EvaluateStoreJobCadenceAsync(new[] { tickReading }, ct);
+
+        var fired = Assert.Single(deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.JobCadenceMetric, fired.MetricName);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        Assert.Equal($"storejob:{jobId}", fired.ServerKey);
+    }
+
+    private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>Seeds one closed, compression-eligible chunk: midday-anchored (#1972) N days back,
+    /// spreading rows across seconds inside the day so they stay in ONE chunk.</summary>
+    private static Task SeedTickRowsAsync(
+        NpgsqlConnection connection, string table, int daysBack, int rows, CancellationToken ct) =>
+        ExecAsync(connection, $@"
+INSERT INTO collect.{table}
+SELECT date_trunc('day', now()::timestamp) - INTERVAL '{daysBack} days' + INTERVAL '12 hours'
+       + ((g % 40000) || ' milliseconds')::interval,
+       {8850},
+       g
+FROM generate_series(1, {rows}) AS g", ct);
+
+    /// <summary>
+    /// Runs the job through the REAL scheduler — arm with <c>next_start => now()</c>, poll
+    /// <c>total_runs</c> until it increments, park again. Foreground <c>run_job</c> deliberately NOT
+    /// used: CI proved it does not update <c>job_stats.last_run_duration</c> (that accounting lives in
+    /// the scheduler path), and the scheduler path is the one production's telemetry actually reads —
+    /// so this is both the working mechanism and the honest one. Parking between measurements keeps
+    /// each run's chunks OURS (the #1888 concern, inverted: armed on purpose, once, per measurement;
+    /// the next background tick is an hour out, far beyond the test's lifetime).
+    /// </summary>
+    private static async Task RunJobViaSchedulerAsync(NpgsqlConnection connection, long jobId, CancellationToken ct)
+    {
+        /* Poll on last_successful_finish, NOT total_runs: total_runs increments when a run STARTS, and
+           job_stats reports last_run_duration as NULL while the run is in flight — CI proved it, by
+           catching the 4x run mid-flight and reading 0ms (the 1x run had merely finished inside one
+           poll tick). last_successful_finish only advances at COMPLETION, so a read after it moves is
+           a read of a finished run's accounting. */
+        var before = await ReadLastSuccessfulFinishAsync(connection, jobId, ct);
+        await ExecAsync(connection, $"SELECT alter_job({jobId}::integer, scheduled => true, next_start => now())", ct);
+
+        var deadline = DateTime.UtcNow.AddSeconds(90);
+        while (await ReadLastSuccessfulFinishAsync(connection, jobId, ct) <= before)
+        {
+            Assert.True(DateTime.UtcNow < deadline,
+                $"the scheduler did not COMPLETE a run of job {jobId} within 90s of next_start => now() — " +
+                "either this scratch database has no scheduler, the cluster is out of background workers " +
+                "(see CiClusterWorkerSizingTests for the sizing this suite depends on), or the run failed " +
+                "(last_successful_finish never advances for a failed run — check job_stats.last_run_status)");
+            await Task.Delay(500, ct);
+        }
+
+        await ExecAsync(connection, $"SELECT alter_job({jobId}::integer, scheduled => false)", ct);
+    }
+
+    private static async Task<DateTime> ReadLastSuccessfulFinishAsync(NpgsqlConnection connection, long jobId, CancellationToken ct)
+    {
+        /* -infinity (never finished) maps to DateTime.MinValue via Npgsql, which orders below every real
+           finish — exactly the "before" baseline a first run needs. */
+        await using var command = new NpgsqlCommand(
+            "SELECT coalesce(last_successful_finish, '-infinity'::timestamptz) FROM timescaledb_information.job_stats WHERE job_id = $1",
+            connection);
+        command.Parameters.AddWithValue(jobId);
+        var value = await command.ExecuteScalarAsync(ct);
+        return value is DateTime finish ? finish : DateTime.MinValue;
+    }
+
+    private static async Task<long> ReadJobDurationMsAsync(NpgsqlConnection connection, long jobId, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            "SELECT (EXTRACT(EPOCH FROM last_run_duration) * 1000)::bigint FROM timescaledb_information.job_stats WHERE job_id = $1",
+            connection);
+        command.Parameters.AddWithValue(jobId);
+        var value = await command.ExecuteScalarAsync(ct);
+        return value is null or DBNull ? 0L : Convert.ToInt64(value);
+    }
+
+    /* Minimal local fakes: only AlertsEnabled + CooldownMinutes matter to the cadence path; the rest
+       satisfy the interface at inert defaults. Local copies rather than sharing DarlingSelfAlertTests'
+       private harness — the coupling worth having is the READING record, not the test scaffolding. */
+
+    private sealed class CadenceRecordingDeliverer : IAlertDeliverer
+    {
+        public List<AlertOutcome> Outcomes { get; } = new();
+
+        public Task DeliverAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
+        {
+            Outcomes.Add(outcome);
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class CadenceFakeHistoryStore : IAlertHistoryStore
+    {
+        public Task RecordAlertAsync(AlertHistoryRecord record) => Task.CompletedTask;
+        public Task<DateTime?> GetLastEmailSentUtcAsync(string serverId, string metricName, string? dedupKey = null) =>
+            Task.FromResult<DateTime?>(null);
+        public Task<DateTime?> GetLastWebhookSentUtcAsync(string serverId, string metricName, string? dedupKey = null) =>
+            Task.FromResult<DateTime?>(null);
+        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName) =>
+            Task.FromResult<DateTime?>(null);
+    }
+
+    private sealed class CadenceFakeSettings : IAlertEngineSettings
+    {
+        public bool AlertsEnabled { get; set; } = true;
+        public bool CpuEnabled { get; set; }
+        public bool BlockingEnabled { get; set; }
+        public bool DeadlockEnabled { get; set; }
+        public bool PoisonWaitEnabled { get; set; }
+        public bool LongRunningQueryEnabled { get; set; }
+        public bool TempDbSpaceEnabled { get; set; }
+        public bool LowDiskEnabled { get; set; }
+        public bool LongRunningJobEnabled { get; set; }
+        public bool FailedJobEnabled { get; set; }
+        public bool PvsEnabled { get; set; }
+        public bool DatabaseStateEnabled { get; set; }
+        public int CpuThresholdPercent { get; set; } = 80;
+        public int BlockingCountThreshold { get; set; } = 1;
+        public int BlockingWaitSecondsThreshold { get; set; }
+        public int DeadlockCountThreshold { get; set; } = 1;
+        public int PoisonWaitThresholdMs { get; set; } = 500;
+        public int LongRunningQueryThresholdMinutes { get; set; } = 30;
+        public int LongRunningQueryMaxResults { get; set; } = 5;
+        public bool LongRunningQueryExcludeSpServerDiagnostics { get; set; } = true;
+        public bool LongRunningQueryExcludeWaitFor { get; set; } = true;
+        public bool LongRunningQueryExcludeBackups { get; set; } = true;
+        public bool LongRunningQueryExcludeMiscWaits { get; set; } = true;
+        public bool LongRunningQueryExcludeCdc { get; set; } = true;
+        public int TempDbSpaceThresholdPercent { get; set; } = 80;
+        public int LowDiskThresholdPercent { get; set; } = 10;
+        public int LowDiskThresholdGb { get; set; } = 5;
+        public int DiskCriticalFreePercent { get; set; } = 3;
+        public int DiskCriticalFreeGb { get; set; } = 2;
+        public int SelfDiskFreeWarnPercent { get; set; } = 10;
+        public int CollectionStaleMinutes { get; set; } = 30;
+        public int CollectionFailureThreshold { get; set; } = 10;
+        public int PvsThresholdPercent { get; set; } = 40;
+        public int PvsFloorGb { get; set; } = 1;
+        public int LongRunningJobMultiplier { get; set; } = 3;
+        public int FailedJobLookbackMinutes { get; set; } = 60;
+        public int CooldownMinutes { get; set; } = 5;
+        public IReadOnlyList<string> ExcludedDatabases { get; } = new List<string>();
+        public CpuAlertMode CpuAlertMode { get; set; } = CpuAlertMode.TotalServer;
     }
 }
