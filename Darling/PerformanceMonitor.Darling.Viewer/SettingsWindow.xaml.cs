@@ -892,6 +892,7 @@ public partial class SettingsWindow : Window
         AlertSelfDiskWarnPercentBox.Text = "10";
         AlertCollectionStaleMinutesBox.Text = "30";
         AlertCollectionFailureThresholdBox.Text = "10";
+        AlertStoreJobCadenceWarnPercentBox.Text = "25";
         AnalysisNotifyCooldownBox.Text = "360";
         AlertPvsThresholdPercentBox.Text = "40";
         AlertPvsFloorGbBox.Text = "1";
@@ -1000,6 +1001,7 @@ public partial class SettingsWindow : Window
         AlertSelfDiskWarnPercentBox.IsEnabled = enabled;
         AlertCollectionStaleMinutesBox.IsEnabled = enabled;
         AlertCollectionFailureThresholdBox.IsEnabled = enabled;
+        AlertStoreJobCadenceWarnPercentBox.IsEnabled = enabled;
         AlertLongRunningJobCheckBox.IsEnabled = enabled;
         AlertLongRunningJobMultiplierBox.IsEnabled = enabled;
         AlertFailedJobCheckBox.IsEnabled = enabled;
