@@ -213,6 +213,27 @@ public sealed class QueryStoreReplicaSplitAnalysisLiveTests
                 var fact = await CollectPlanRegressionFactAsync(postgres, context);
                 Assert.NotNull(fact);
                 Assert.Equal(3.0, fact!.Metadata["worst_regression_factor"], precision: 1);
+                /* A duration-fired row reports the duration dimension. */
+                Assert.Equal(2.0, fact.Metadata["regressed_dimension"]);
+            }
+
+            /* ── #2138 review catch: CPU has PRECEDENCE, so cpu 2.5x with duration 10x (a genuine CPU
+                  regression that also picked up blocking) fires the CPU branch at 2.5 — and must be
+                  LABELED cpu. Comparing raw ratio magnitudes, correct under the old GREATEST, would
+                  call this duration-caused. ── */
+            await using (var connection = await OpenWithSearchPathAsync(connectionString!, ct))
+            {
+                await DeleteTestRowsAsync(connection, ct);
+                await SeedSplitSignalsAsync(connection, periodStart, periodEnd,
+                    goodCpuUs: 100_000, goodDurUs: 100_000, badCpuUs: 250_000, badDurUs: 1_000_000, ct);
+            }
+
+            await using (var postgres = NpgsqlDataSource.Create(connectionString!))
+            {
+                var fact = await CollectPlanRegressionFactAsync(postgres, context);
+                Assert.NotNull(fact);
+                Assert.Equal(2.5, fact!.Metadata["worst_regression_factor"], precision: 1);
+                Assert.Equal(1.0, fact.Metadata["regressed_dimension"]);
             }
 
             /* ── #2138: below the spend floor. A 12x CPU ratio on a query burning 1.2 CPU-seconds across

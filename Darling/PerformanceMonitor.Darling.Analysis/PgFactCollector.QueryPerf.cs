@@ -380,18 +380,18 @@ LIMIT 20";
                 {
                     worstQueryId = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
                     var latestCpu = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
-                    var latestDur = reader.IsDBNull(2) ? 0.0 : Convert.ToDouble(reader.GetValue(2));
                     worstLatestForced = (!reader.IsDBNull(3) && Convert.ToBoolean(reader.GetValue(3))) ? 1 : 0;
                     worstForceFailures = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
                     var bestCpu = reader.IsDBNull(5) ? 0.0 : Convert.ToDouble(reader.GetValue(5));
-                    var bestDur = reader.IsDBNull(6) ? 0.0 : Convert.ToDouble(reader.GetValue(6));
                     worstFactor = reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7));
 
                     worstLatestCpu = latestCpu;
                     worstBestCpu = bestCpu;
+                    // Which CASE branch fired, not which raw ratio is larger (review catch on #2138):
+                    // CPU has PRECEDENCE in the scoring, so a row with cpu 2.5x and duration 10x is a
+                    // CPU-detected regression at 2.5 — comparing magnitudes would mislabel it duration.
                     var cpuRatio = bestCpu > 0 ? latestCpu / bestCpu : 0.0;
-                    var durRatio = bestDur > 0 ? latestDur / bestDur : 0.0;
-                    worstDimension = cpuRatio >= durRatio ? 1 : 2; // 1 = cpu, 2 = duration
+                    worstDimension = cpuRatio >= 2 ? 1 : 2; // 1 = cpu, 2 = duration
                 }
                 offenderCount++;
             }

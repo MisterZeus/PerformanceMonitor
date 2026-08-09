@@ -337,6 +337,26 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
 
         Assert.NotNull(fact);
         Assert.Equal(3.0, fact!.Metadata["worst_regression_factor"], precision: 1);
+        /* A duration-fired row reports the duration dimension. */
+        Assert.Equal(2.0, fact.Metadata["regressed_dimension"]);
+    }
+
+    [Fact]
+    public async Task CpuFiredRow_WithLargerDurationRatio_StillReportsTheCpuDimension()
+    {
+        /* Review catch on #2138: CPU has PRECEDENCE in the scoring, so cpu 2.5x with duration 10x (a
+           genuine CPU regression that also picked up blocking) fires the CPU branch at 2.5 — and must
+           be LABELED cpu. Comparing raw ratio magnitudes, correct under the old GREATEST, would call
+           this duration-caused; a plan-forcing bot reading the dimension would misjudge WHY. */
+        await SeedCpuAndDurationSplitAsync(
+            goodCpuUs: 100_000, goodDurUs: 100_000,
+            badCpuUs: 250_000, badDurUs: 1_000_000);
+
+        var fact = await CollectPlanRegressionFactAsync();
+
+        Assert.NotNull(fact);
+        Assert.Equal(2.5, fact!.Metadata["worst_regression_factor"], precision: 1);
+        Assert.Equal(1.0, fact.Metadata["regressed_dimension"]);
     }
 
     [Fact]
