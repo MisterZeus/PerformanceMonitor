@@ -166,8 +166,14 @@ public sealed class CollectorMemoryKnobTests
         Assert.Equal(DarlingWorker.SweepGateCeiling, gate.CurrentCount + absorbedAtBirth);
 
         /* And the gate can still be widened all the way back to the ceiling later — Release past MAX would
-           throw, so this is what makes "born narrow, widen later" safe rather than a one-way door. */
-        gate.Release(absorbedAtBirth);
+           throw, so this is what makes "born narrow, widen later" safe rather than a one-way door. Guarded
+           because Release(0) also throws: at the ceiling there is nothing absorbed to give back, which is
+           exactly why ReconcileSweepGate's release is behind `toRelease > 0`. */
+        if (absorbedAtBirth > 0)
+        {
+            gate.Release(absorbedAtBirth);
+        }
+
         Assert.Equal(DarlingWorker.SweepGateCeiling, gate.CurrentCount);
     }
 
