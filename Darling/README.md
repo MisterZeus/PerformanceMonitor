@@ -4,7 +4,7 @@ Darling is the headless, centralized edition of Performance Monitor: a 24/7 Wind
 
 It runs the **same monitoring brain as the Lite edition** — one shared codebase, two storage engines:
 
-- `PerformanceMonitor.Collectors` owns all 38 collector definitions: the exact T-SQL sent to monitored servers, the result-row mappings, the delta rules, the default cadences and retention horizons, and the ignored-wait-types list. Lite writes those rows to DuckDB; Darling writes the same rows to PostgreSQL via binary COPY.
+- `PerformanceMonitor.Collectors` owns all 41 collector definitions: the exact T-SQL sent to monitored servers, the result-row mappings, the delta rules, the default cadences and retention horizons, and the ignored-wait-types list. Lite writes those rows to DuckDB; Darling writes the same rows to PostgreSQL via binary COPY.
 - `PerformanceMonitor.Alerting` owns the shared alert engine — the same thresholds, edge-trigger gates, cooldowns, and dedup fingerprints Lite uses.
 - The analysis/recommendations pipeline (the same inference engine behind both apps' Recommendations tabs and the `analyze_server` MCP tool) runs on a schedule inside the service.
 
@@ -474,11 +474,13 @@ There are deliberately **no collection-schedule or retention settings** in `darl
 
 ### The Store
 
-The service migrates the store itself at startup — plain versioned SQL scripts, each applied once inside its own transaction, tracked in `darling_schema_version`, safe under concurrent starters (advisory-locked). Current schema is **v29**:
+The service migrates the store itself at startup — plain versioned SQL scripts, each applied once inside its own transaction, tracked in `darling_schema_version`, safe under concurrent starters (advisory-locked). Current schema is **v59** — `StorageVersion.SchemaVersion` is the source of truth and a test pins it to the highest rung in the ladder.
+
+The notable rungs are below. For the **complete** current schema, read `Darling/Darling.Tests/Fixtures/migration-ladder-*.sql` — the whole ladder as resolved SQL, regenerated per release; it is generated, so don't hand-edit it.
 
 | Version | Contents |
 |---|---|
-| **V1** — collector tables | One table per collector, all 32, generated from the shared collector definitions (column-for-column identical to Lite's DuckDB schema): `wait_stats`, `latch_stats`, `spinlock_stats`, `query_stats`, `procedure_stats`, `query_store_stats`, `query_snapshots`, `plan_cache_stats`, `cpu_utilization_stats`, `cpu_scheduler_stats`, `file_io_stats`, `memory_stats`, `memory_clerks`, `memory_pressure_events`, `tempdb_stats`, `perfmon_stats`, `deadlocks`, `blocked_process_reports`, `dmv_blocking_snapshots`, `memory_grant_stats`, `waiting_tasks`, `session_stats`, `session_summary_stats`, `running_jobs`, `database_size_stats`, `index_object_stats`, `server_properties`, `system_health_events`, and the four config snapshots (`server_config`, `database_config`, `database_scoped_config`, `trace_flags`) |
+| **V1** — collector tables | One table per collector, all 41, generated from the shared collector definitions (column-for-column identical to Lite's DuckDB schema): `wait_stats`, `latch_stats`, `spinlock_stats`, `query_stats`, `procedure_stats`, `query_store_stats`, `query_snapshots`, `plan_cache_stats`, `cpu_utilization_stats`, `cpu_scheduler_stats`, `file_io_stats`, `memory_stats`, `memory_clerks`, `memory_pressure_events`, `tempdb_stats`, `perfmon_stats`, `deadlocks`, `blocked_process_reports`, `dmv_blocking_snapshots`, `memory_grant_stats`, `waiting_tasks`, `session_stats`, `session_summary_stats`, `running_jobs`, `database_size_stats`, `index_object_stats`, `server_properties`, `system_health_events`, and the four config snapshots (`server_config`, `database_config`, `database_scoped_config`, `trace_flags`) |
 | **V2** — observability | `servers` (registry, upserted on every successful connect: identity, display name, engine edition, major version) and `collection_log` (one row per collector run: SUCCESS / PERMISSIONS / ERROR, row count, SQL-phase and storage-phase timings) |
 | **V3** — alerting | `config_alert_log` (one history row per fired alert), `config_edge_trigger_watermarks` (restart-surviving edge-trigger and failed-job watermarks), `config_mute_rules` (alert mute rules; starts empty) |
 | **V4** — analysis | `analysis_findings` (persisted findings incl. the stored remediation action), `analysis_muted` (muted finding patterns), and 17 `v_<table>` passthrough views so the shared analysis SQL runs verbatim against this store |
@@ -571,13 +573,13 @@ timescaledb.max_background_workers = <hypertables> + 2
 max_worker_processes               = 3 + timescaledb.max_background_workers + 8
 ```
 
-Today that is **41** and **52** for 39 hypertables (the 38 collector tables plus `collection_log`). The `+ 2` is not slack — it is exactly TimescaleDB's own two built-in jobs, `policy_telemetry` and `policy_job_stat_history_retention`, so a fully migrated store holds precisely one job per worker:
+Today that is **44** and **55** for 42 hypertables (the 41 collector tables plus `collection_log`). The `+ 2` is not slack — it is exactly TimescaleDB's own two built-in jobs, `policy_telemetry` and `policy_job_stat_history_retention`, so a fully migrated store holds precisely one job per worker:
 
 ```sql
 SELECT proc_name, count(*) FROM timescaledb_information.jobs GROUP BY proc_name;
 ```
 
-Both settings need a **server restart** (`max_worker_processes` is restart-only — a reload leaves the old value serving), and the hypertable count grows as collectors are added, so re-check it after a major upgrade rather than pinning 41/52 forever.
+Both settings need a **server restart** (`max_worker_processes` is restart-only — a reload leaves the old value serving), and the hypertable count grows as collectors are added, so re-check it after a major upgrade rather than pinning 44/55 forever.
 
 **One store per cluster is the assumption.** `timescaledb.max_background_workers` is a **cluster-wide** pool shared by every database, while the derivation above is **per-store**. Managed mode puts one store on one cluster so the two coincide, but if you run **N Darling stores on one PostgreSQL cluster** — or share the cluster with any other TimescaleDB database — multiply both numbers by N. Each database with the extension loaded also permanently holds a scheduler slot out of that same pool, so the sharing starts before any policy fires.
 
