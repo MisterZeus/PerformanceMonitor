@@ -47,7 +47,7 @@ public partial class RemoteCollectorService
     /// <summary>#2148: per-server abandonment guards, the Darling loop's exact shape — keyed by server
     /// id so one wedged server never blocks its neighbors, never pruned (one small object per server
     /// ever monitored).</summary>
-    private readonly ConcurrentDictionary<int, AbandonableStep> _backfillSliceSteps = new();
+    private readonly ConcurrentDictionary<string, AbandonableStep> _backfillSliceSteps = new(StringComparer.Ordinal);
 
     /// <summary>#2148: the hard ceiling ONE server's slice may hold the tick — a healthy slice is one
     /// 30s-capped statement plus DuckDB writes, so this is a defect signal, never jitter. Per SERVER
