@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Models;
 
 namespace PerformanceMonitorLite.Services;
@@ -43,11 +44,23 @@ public partial class RemoteCollectorService
     /// retention default.</summary>
     private const int BackfillFallbackRetentionDays = 30;
 
+    /// <summary>#2148: per-server abandonment guards, the Darling loop's exact shape — keyed by server
+    /// id so one wedged server never blocks its neighbors, never pruned (one small object per server
+    /// ever monitored).</summary>
+    private readonly ConcurrentDictionary<int, AbandonableStep> _backfillSliceSteps = new();
+
+    /// <summary>#2148: the hard ceiling ONE server's slice may hold the tick — a healthy slice is one
+    /// 30s-capped statement plus DuckDB writes, so this is a defect signal, never jitter. Per SERVER
+    /// deliberately (review catch, round 2): a shared tick-level deadline would both stall every
+    /// server's backfill behind one wedge AND false-trip as fleet size grows.</summary>
+    private static readonly TimeSpan BackfillSliceDeadline = TimeSpan.FromSeconds(180);
+
     /// <summary>
     /// Runs AT MOST one backfill slice per enabled server: the first database found with a pending
     /// hole or an undrained first-contact tail gets one byte-budgeted slice; everything else waits
-    /// for a later tick. Per-server failures log and skip — one unreachable server never stalls the
-    /// sweep. Called from CollectionBackgroundService on its own due-cadence.
+    /// for a later tick. Per-server failures log and skip, and per-server WEDGES are abandoned and
+    /// quarantined (#2148) — one stuck server never stalls the sweep in either failure mode. Called
+    /// from CollectionBackgroundService on its own due-cadence.
     /// </summary>
     public async Task RunQueryStoreBackfillTickAsync(CancellationToken cancellationToken)
     {
@@ -58,18 +71,36 @@ public partial class RemoteCollectorService
                 return;
             }
 
-            try
+            var step = _backfillSliceSteps.GetOrAdd(server.Id, static _ => new AbandonableStep());
+            var result = await step.RunAsync(
+                () => RunQueryStoreBackfillSliceAsync(server, cancellationToken),
+                BackfillSliceDeadline, cancellationToken,
+                onLateFault: ex => _logger?.LogError(ex,
+                    "query_store backfill slice on '{Server}' faulted AFTER being abandoned — this is the wedge's own exception (#2148)",
+                    server.DisplayName));
+
+            switch (result.Outcome)
             {
-                await RunQueryStoreBackfillSliceAsync(server, cancellationToken);
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-            catch (Exception ex)
-            {
-                _logger?.LogWarning("query_store backfill slice on '{Server}' failed: {Message}",
-                    server.DisplayName, ex.Message);
+                case AbandonableStepOutcome.Cancelled:
+                    return;
+                case AbandonableStepOutcome.Faulted when result.Exception is OperationCanceledException:
+                    return;
+                case AbandonableStepOutcome.Faulted:
+                    _logger?.LogWarning("query_store backfill slice on '{Server}' failed: {Message}",
+                        server.DisplayName, result.Exception!.Message);
+                    break;
+                case AbandonableStepOutcome.Abandoned:
+                    _logger?.LogError(
+                        "query_store backfill slice on '{Server}' exceeded {Deadline}s and was ABANDONED — " +
+                        "other servers' backfill continues; this server is quarantined until the wedged task " +
+                        "ends. Defect signal: report with this log (#2148).",
+                        server.DisplayName, (int)BackfillSliceDeadline.TotalSeconds);
+                    break;
+                case AbandonableStepOutcome.SkippedStillRunning:
+                    _logger?.LogError(
+                        "query_store backfill slice on '{Server}' skipped — a previously-abandoned slice is still wedged (#2148).",
+                        server.DisplayName);
+                    break;
             }
         }
     }
