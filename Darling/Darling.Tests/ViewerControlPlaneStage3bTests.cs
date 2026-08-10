@@ -217,7 +217,7 @@ public sealed class ViewerServiceConfigSqlTests
     [Fact]
     public void SelectSql_ReadsPausedAndTheViewerOwnedFlags()
     {
-        Assert.Contains("SELECT paused, capture_plans, mcp_enabled, mcp_port, web_enabled, web_port FROM config_service WHERE id = 1",
+        Assert.Contains("SELECT paused, capture_plans, mcp_enabled, mcp_port, web_enabled, web_port, query_store_backfill_enabled FROM config_service WHERE id = 1",
             ViewerDataService.ServiceConfigSelectSql, StringComparison.Ordinal);
     }
 

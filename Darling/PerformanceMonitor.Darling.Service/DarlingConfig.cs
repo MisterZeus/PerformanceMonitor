@@ -54,6 +54,14 @@ public sealed class DarlingConfig
     public bool CapturePlans { get; set; } = true;
 
     /// <summary>
+    /// Whether the query_store backfill loop runs at all (#2167). Store-backed (config_service, V58) and
+    /// read live by the worker's loop, so an operator can stop a runaway drain (a freshly restored catalog
+    /// against a cross-region server) without a restart and without touching plan capture. Default on.
+    /// </summary>
+    [JsonPropertyName("queryStoreBackfillEnabled")]
+    public bool QueryStoreBackfillEnabled { get; set; } = true;
+
+    /// <summary>
     /// Whether the default_trace_events collector records Object:Created/Altered/Deleted schema-change
     /// (DDL) events. Default TRUE (today's behavior). Set false on a noisy or benchmark box where a
     /// create/drop-happy workload floods the viewer's System Events &gt; Default Trace tab — e.g. HammerDB's

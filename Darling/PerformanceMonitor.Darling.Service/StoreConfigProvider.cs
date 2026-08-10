@@ -136,8 +136,8 @@ public sealed class StoreConfigProvider
         /* config_version starts at 0; the four desired-state seed writes below bump it via the trigger,
            so the worker's post-seed baseline read reflects the seeded state and triggers no spurious reload. */
         using var command = new NpgsqlCommand(@"
-INSERT INTO config_service (id, paused, capture_plans, mcp_enabled, mcp_port, web_enabled, web_port, config_version, updated_at, updated_by)
-VALUES (1, FALSE, $1, $2, $3, $4, $5, 0, $6, 'seed')
+INSERT INTO config_service (id, paused, capture_plans, query_store_backfill_enabled, mcp_enabled, mcp_port, web_enabled, web_port, config_version, updated_at, updated_by)
+VALUES (1, FALSE, $1, $7, $2, $3, $4, $5, 0, $6, 'seed')
 ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(config.CapturePlans);
         command.Parameters.AddWithValue(config.Mcp.Enabled);
@@ -145,6 +145,7 @@ ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(config.Web.Enabled);
         command.Parameters.AddWithValue(config.Web.Port);
         command.Parameters.AddWithValue(now);
+        command.Parameters.AddWithValue(config.QueryStoreBackfillEnabled);
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -323,7 +324,7 @@ ON CONFLICT (server_id) DO NOTHING", connection);
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
-            var (paused, capturePlans, mcpEnabled, mcpPort, webEnabled, webPort, configVersion) = await ReadServiceRowAsync(connection, cancellationToken);
+            var (paused, capturePlans, backfillEnabled, mcpEnabled, mcpPort, webEnabled, webPort, configVersion) = await ReadServiceRowAsync(connection, cancellationToken);
             var (alerts, analysis) = await ReadAlertSettingsAsync(connection, cancellationToken);
             var (smtp, webhooks) = await ReadNotificationAsync(connection, cancellationToken);
             var servers = await ReadMonitoredServersAsync(connection, bootstrap, cancellationToken);
@@ -334,6 +335,7 @@ ON CONFLICT (server_id) DO NOTHING", connection);
                 ConfigVersion = configVersion,
                 Paused = paused,
                 CapturePlans = capturePlans,
+                QueryStoreBackfillEnabled = backfillEnabled,
                 McpEnabled = mcpEnabled,
                 McpPort = mcpPort,
                 WebEnabled = webEnabled,
@@ -353,20 +355,20 @@ ON CONFLICT (server_id) DO NOTHING", connection);
         }
     }
 
-    private static async Task<(bool Paused, bool CapturePlans, bool McpEnabled, int McpPort, bool WebEnabled, int WebPort, long ConfigVersion)>
+    private static async Task<(bool Paused, bool CapturePlans, bool QueryStoreBackfillEnabled, bool McpEnabled, int McpPort, bool WebEnabled, int WebPort, long ConfigVersion)>
         ReadServiceRowAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var command = new NpgsqlCommand(
-            "SELECT paused, capture_plans, mcp_enabled, mcp_port, web_enabled, web_port, config_version FROM config_service WHERE id = 1", connection);
+            "SELECT paused, capture_plans, query_store_backfill_enabled, mcp_enabled, mcp_port, web_enabled, web_port, config_version FROM config_service WHERE id = 1", connection);
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
         {
-            /* Row missing (unseeded) — treat as defaults; capture stays on (Darling's SKU default). */
-            return (false, true, false, 5152, false, 5153, 0);
+            /* Row missing (unseeded) — treat as defaults; capture and backfill stay on (Darling's SKU defaults). */
+            return (false, true, true, false, 5152, false, 5153, 0);
         }
 
-        return (reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetInt32(3),
-            reader.GetBoolean(4), reader.GetInt32(5), reader.GetInt64(6));
+        return (reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetInt32(4),
+            reader.GetBoolean(5), reader.GetInt32(6), reader.GetInt64(7));
     }
 
     private static async Task<(AlertsConfig Alerts, AnalysisConfig Analysis)> ReadAlertSettingsAsync(NpgsqlConnection connection, CancellationToken ct)
@@ -636,6 +638,7 @@ ORDER BY name", connection);
         config.Smtp = view.Smtp;
         config.Webhooks = view.Webhooks;
         config.CapturePlans = view.CapturePlans;
+        config.QueryStoreBackfillEnabled = view.QueryStoreBackfillEnabled;
         config.Mcp.Enabled = view.McpEnabled;
         config.Mcp.Port = view.McpPort;
         config.Web.Enabled = view.WebEnabled;
@@ -772,6 +775,10 @@ public sealed class StoreConfigView
     public bool Paused { get; init; }
 
     public bool CapturePlans { get; init; }
+
+    /// <summary>The #2167 backfill off switch (config_service, V58) — worker reads it live each backfill cycle.</summary>
+    public bool QueryStoreBackfillEnabled { get; init; } = true;
+
     public bool McpEnabled { get; init; }
     public int McpPort { get; init; }
     public bool WebEnabled { get; init; }

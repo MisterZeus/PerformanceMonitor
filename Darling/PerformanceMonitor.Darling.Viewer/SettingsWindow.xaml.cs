@@ -118,6 +118,7 @@ public partial class SettingsWindow : Window
         /* Default the global plan-capture flag to the store's default (TRUE) so an unread/unseeded state never
            shows it off — the store read overwrites it, and Save is guarded by _storeLoaded regardless. */
         CapturePlansCheckBox.IsChecked = true;
+        QueryStoreBackfillCheckBox.IsChecked = true;
 
         /* Manage Mute Rules writes the shared Postgres config; needs a live store connection. */
         ManageMuteRulesButton.IsEnabled = _dataService is not null;
@@ -160,6 +161,7 @@ public partial class SettingsWindow : Window
             if (sections.Service is not null)
             {
                 CapturePlansCheckBox.IsChecked = sections.Service.CapturePlans;
+                QueryStoreBackfillCheckBox.IsChecked = sections.Service.QueryStoreBackfillEnabled;
                 McpEnabledCheckBox.IsChecked = sections.Service.McpEnabled;
                 McpPortTextBox.Text = sections.Service.McpPort.ToString(CultureInfo.InvariantCulture);
                 WebEnabledCheckBox.IsChecked = sections.Service.WebEnabled;
@@ -1485,7 +1487,8 @@ public partial class SettingsWindow : Window
             {
                 await _dataService.UpsertAlertSettingsAsync(alertRow);
                 await _dataService.UpsertNotificationAsync(notifyRow);
-                await _dataService.UpdateServiceFlagsAsync(capturePlans, mcpEnabled, mcpPort, webEnabled, webPort);
+                await _dataService.UpdateServiceFlagsAsync(capturePlans, mcpEnabled, mcpPort, webEnabled, webPort,
+                    QueryStoreBackfillCheckBox.IsChecked == true);
             }
             catch (ViewerReadOnlyException ex)
             {

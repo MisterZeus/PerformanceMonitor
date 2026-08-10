@@ -114,6 +114,7 @@ public static class PgMigrations
         new Migration(55, "self-alert-knobs", V55Sql),
         new Migration(56, "store-metrics-background-jobs", V56Sql),
         new Migration(57, "store-job-cadence-knob", V57Sql),
+        new Migration(58, "qs-backfill-switch", V58Sql),
     };
 
     /// <summary>
@@ -1123,6 +1124,18 @@ ALTER TABLE collect.store_metrics
     private const string V57Sql = @"
 ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS store_job_cadence_warn_percent integer NOT NULL DEFAULT 25;";
+
+    /// <summary>
+    /// V58 — the Query Store backfill off switch (#2167): a service-wide toggle the worker's backfill loop
+    /// reads live (store reload, no restart), because the #2058 backfill previously ran unconditionally —
+    /// during the 2026-08-10 consolidation a freshly restored catalog put it into sustained 64MB drains
+    /// against a cross-region production primary with no way to stop it short of gutting plan capture
+    /// fleet-wide. Default TRUE preserves today's behavior; the column rides <c>config_service</c> so the
+    /// existing config_version trigger makes a flip visible to the service's next reload poll.
+    /// </summary>
+    private const string V58Sql = @"
+ALTER TABLE config.config_service
+    ADD COLUMN IF NOT EXISTS query_store_backfill_enabled boolean NOT NULL DEFAULT TRUE;";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:
