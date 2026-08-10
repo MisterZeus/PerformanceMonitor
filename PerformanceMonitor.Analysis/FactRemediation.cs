@@ -927,6 +927,106 @@ public static class FactRemediation
     }
 
     /// <summary>
+    /// THE force-plan policy gate (#2138): the named reasons this target must not be force-planned
+    /// without a human. Fills <see cref="StructuredForcePlanTarget.Blockers"/> on the MCP surfaces
+    /// today, and is the function the Phase 1+ auto-force bot consults before acting — one
+    /// implementation, so what agents inspect is what the bot enforces. Deliberately built ONLY from
+    /// fields the persisted target carries; a gate that re-derives evidence at judgment time can
+    /// disagree with the evidence the finding displayed.
+    /// <list type="bullet">
+    /// <item><b>parameter_sensitivity_cofired</b> — the query's plan-cache history shows the PSP
+    /// signature (#2140); forcing pins ONE shape for every parameter value, so the "best" plan may be
+    /// the wrong plan for the population that preferred the other one.</item>
+    /// <item><b>secondary_replica_evidence</b> — the regression was measured on a non-primary replica,
+    /// but the statement forces on the PRIMARY (#1882's disclosure, as data): acting on it changes the
+    /// primary's write workload on the strength of what a read-only replica did.</item>
+    /// </list>
+    /// </summary>
+    public static IReadOnlyList<string> ForcePlanBlockers(ForcePlanTarget target)
+    {
+        if (target is null)
+        {
+            return Array.Empty<string>();
+        }
+
+        var blockers = new List<string>();
+        if (target.ParameterSensitivityCoFired)
+        {
+            blockers.Add("parameter_sensitivity_cofired");
+        }
+
+        if (IsNonPrimaryReplicaRow(target.ReplicaRole))
+        {
+            blockers.Add("secondary_replica_evidence");
+        }
+
+        return blockers;
+    }
+
+    /// <summary>
+    /// The machine-first remediation projection (#2138) — see <see cref="StructuredRemediation"/> for
+    /// why it exists and why it is built at read time rather than persisted. Null when the action is
+    /// null or carries no force-plan targets (other verbs can gain shapes when a consumer needs them).
+    /// </summary>
+    public static StructuredRemediation? BuildStructuredRemediation(RemediationAction? action)
+    {
+        if (action?.Targets is not { Count: > 0 } targets)
+        {
+            return null;
+        }
+
+        var structured = new List<StructuredForcePlanTarget>(targets.Count);
+        foreach (var t in targets)
+        {
+            var blockers = ForcePlanBlockers(t);
+            structured.Add(new StructuredForcePlanTarget(
+                t.Database,
+                t.QueryId,
+                t.PlanId,
+                t.LatestPlanHash,
+                t.BestPlanHash,
+                string.IsNullOrEmpty(t.ReplicaRole) ? null : t.ReplicaRole,
+                Eligible: blockers.Count == 0,
+                blockers,
+                new StructuredForcePlanEvidence(
+                    t.RegressionFactor,
+                    t.LatestCpuPerExecUs,
+                    t.BestCpuPerExecUs,
+                    t.ParameterSensitivityCoFired),
+                ForceSql: $"USE {QuoteName(t.Database)};{Environment.NewLine}" +
+                    $"EXEC sys.sp_query_store_force_plan @query_id = {t.QueryId}, @plan_id = {t.PlanId};",
+                UnforceSql: $"USE {QuoteName(t.Database)};{Environment.NewLine}" +
+                    $"EXEC sys.sp_query_store_unforce_plan @query_id = {t.QueryId}, @plan_id = {t.PlanId};",
+                VerifySql: BuildForcePlanVerifySql(t)));
+        }
+
+        return new StructuredRemediation(action.FactKey, action.Action, structured);
+    }
+
+    /// <summary>
+    /// The post-force verification an agent (or the future bot's self-review window) runs: did the force
+    /// STICK (<c>is_forced_plan</c>, <c>force_failure_count</c>, and the failure reason when it did not),
+    /// and what has the per-interval cost looked like SINCE — the same two questions the #2141 arc's
+    /// "re-check the spread, not just the average" advice asks, as runnable statements.
+    /// </summary>
+    private static string BuildForcePlanVerifySql(ForcePlanTarget t)
+    {
+        var nl = Environment.NewLine;
+        return
+            $"USE {QuoteName(t.Database)};{nl}" +
+            $"SELECT qsp.plan_id, qsp.is_forced_plan, qsp.force_failure_count, qsp.last_force_failure_reason_desc{nl}" +
+            $"FROM sys.query_store_plan AS qsp{nl}" +
+            $"WHERE qsp.query_id = {t.QueryId};{nl}" +
+            $"{nl}" +
+            $"SELECT TOP (24) rs.plan_id, rs.runtime_stats_interval_id, rs.count_executions, rs.avg_cpu_time, rs.avg_duration, rs.max_cpu_time{nl}" +
+            $"FROM sys.query_store_runtime_stats AS rs{nl}" +
+            $"JOIN sys.query_store_plan AS qsp{nl}" +
+            $"  ON qsp.plan_id = rs.plan_id{nl}" +
+            $"WHERE qsp.query_id = {t.QueryId}{nl}" +
+            $"ORDER BY rs.runtime_stats_interval_id DESC;";
+    }
+
+    /// <summary>
     /// The back-out counterpart of <see cref="AppendSecondaryReplicaDisclosure"/>, emitted for any target
     /// the server attributed to a replica at all — including the primary's own rows, because the trap it
     /// warns about is one an operator hits on a correctly-scoped primary force too.
