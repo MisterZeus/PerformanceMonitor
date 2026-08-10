@@ -1101,7 +1101,12 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
            the ROW COUNT, but a row carries two nvarchar(max) fields (query text + plan XML), so 50k rows
            can still be gigabytes. Accumulate the materialized text size and STOP reading at the budget,
            disposing the reader early, so one database can never balloon the process. */
-        var budget = Instance.PerItemTextByteBudget ?? int.MaxValue;
+        /* #2164: an operator budget override wins over the compile-time default (the host supplies it
+           from the store knob; Lite passes null and keeps the const). Guarded to a positive value so a
+           corrupt/zero setting can never mean "ship nothing" — the clamp lives at the store read, and
+           this is the second line of defense. */
+        var budget = (context.TextByteBudgetOverride is > 0 ? context.TextByteBudgetOverride : Instance.PerItemTextByteBudget)
+            ?? int.MaxValue;
         long textBytes = 0;
 
         /* #1960 boundary-group completion: once the budget trips, rows TIED at the trip row's

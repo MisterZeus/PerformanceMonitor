@@ -115,6 +115,7 @@ public static class PgMigrations
         new Migration(56, "store-metrics-background-jobs", V56Sql),
         new Migration(57, "store-job-cadence-knob", V57Sql),
         new Migration(58, "qs-backfill-switch", V58Sql),
+        new Migration(59, "collector-memory-knobs", V59Sql),
     };
 
     /// <summary>
@@ -1136,6 +1137,24 @@ ALTER TABLE config.config_alert_settings
     private const string V58Sql = @"
 ALTER TABLE config.config_service
     ADD COLUMN IF NOT EXISTS query_store_backfill_enabled boolean NOT NULL DEFAULT TRUE;";
+
+    /// <summary>
+    /// V59 — the two collector memory knobs that were compile-time constants (#2164 + #2170). They ride
+    /// ONE rung deliberately: peak transient memory is approximately
+    /// <c>max_concurrent_sweeps × query_store_text_budget_mb</c>, so an operator who moves one needs the
+    /// other in front of them, and shipping them together keeps the documented product of the two honest.
+    ///
+    /// <para>Defaults reproduce today's hardcoded behavior exactly (64 MB budget from
+    /// QueryStoreCollector.MaxTextBytesPerDatabase, 4-wide sweep from the #1553 gate), so an upgraded
+    /// store changes nothing until someone turns a dial. Both are clamped on READ (budget [4,256] MB,
+    /// sweeps [1,16]) rather than by CHECK constraints, matching the sibling knobs' posture: a bad value
+    /// degrades to a sane one instead of failing the service's config load.</para>
+    /// </summary>
+    private const string V59Sql = @"
+ALTER TABLE config.config_service
+    ADD COLUMN IF NOT EXISTS query_store_text_budget_mb integer NOT NULL DEFAULT 64;
+ALTER TABLE config.config_service
+    ADD COLUMN IF NOT EXISTS max_concurrent_sweeps integer NOT NULL DEFAULT 4;";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

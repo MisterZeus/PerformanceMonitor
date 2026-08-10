@@ -124,7 +124,8 @@ public sealed class ViewerControlPlaneMigration
                    MCP/web settings and must never flip an operator's backfill switch as a side effect. */
                 await dataService.UpdateServiceFlagsAsync(
                     storeService.CapturePlans, _appSettings.McpEnabled, _appSettings.McpPort,
-                    _appSettings.WebEnabled, _appSettings.WebPort, storeService.QueryStoreBackfillEnabled, cancellationToken);
+                    _appSettings.WebEnabled, _appSettings.WebPort, storeService.QueryStoreBackfillEnabled,
+                    storeService.QueryStoreTextBudgetMb, storeService.MaxConcurrentSweeps, cancellationToken);
                 imported++;
             }
         }

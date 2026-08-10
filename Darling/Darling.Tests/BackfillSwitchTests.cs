@@ -48,16 +48,19 @@ public sealed class BackfillSwitchTests
         Assert.Contains("query_store_backfill_enabled", ViewerDataService.ServiceConfigSelectSql, StringComparison.Ordinal);
         Assert.Contains("query_store_backfill_enabled = $6", ViewerDataService.ServiceConfigUpdateFlagsSql, StringComparison.Ordinal);
 
+        /* A store carrying the switch but NOT the later V59 knobs is exactly V58 — stating the newer flag
+           false is what makes this rung's pin survive the next migration instead of silently becoming a
+           test of the newest rung. */
         Assert.Equal(58, ViewerDataService.MapProbedSchemaVersion(
             true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true,
             true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true,
             true, true, true, true, true, true, hasJobMetricsColumns: true, hasJobCadenceKnob: true,
-            hasBackfillSwitch: true));
+            hasBackfillSwitch: true, hasCollectorMemoryKnobs: false));
         Assert.Equal(57, ViewerDataService.MapProbedSchemaVersion(
             true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true,
             true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true,
             true, true, true, true, true, true, hasJobMetricsColumns: true, hasJobCadenceKnob: true,
-            hasBackfillSwitch: false));
+            hasBackfillSwitch: false, hasCollectorMemoryKnobs: false));
     }
 
     [Fact]

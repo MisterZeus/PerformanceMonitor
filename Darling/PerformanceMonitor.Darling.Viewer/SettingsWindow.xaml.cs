@@ -119,6 +119,8 @@ public partial class SettingsWindow : Window
            shows it off — the store read overwrites it, and Save is guarded by _storeLoaded regardless. */
         CapturePlansCheckBox.IsChecked = true;
         QueryStoreBackfillCheckBox.IsChecked = true;
+        QueryStoreTextBudgetMbTextBox.Text = "64";
+        MaxConcurrentSweepsTextBox.Text = "4";
 
         /* Manage Mute Rules writes the shared Postgres config; needs a live store connection. */
         ManageMuteRulesButton.IsEnabled = _dataService is not null;
@@ -162,6 +164,8 @@ public partial class SettingsWindow : Window
             {
                 CapturePlansCheckBox.IsChecked = sections.Service.CapturePlans;
                 QueryStoreBackfillCheckBox.IsChecked = sections.Service.QueryStoreBackfillEnabled;
+                QueryStoreTextBudgetMbTextBox.Text = sections.Service.QueryStoreTextBudgetMb.ToString(CultureInfo.InvariantCulture);
+                MaxConcurrentSweepsTextBox.Text = sections.Service.MaxConcurrentSweeps.ToString(CultureInfo.InvariantCulture);
                 McpEnabledCheckBox.IsChecked = sections.Service.McpEnabled;
                 McpPortTextBox.Text = sections.Service.McpPort.ToString(CultureInfo.InvariantCulture);
                 WebEnabledCheckBox.IsChecked = sections.Service.WebEnabled;
@@ -392,9 +396,12 @@ public partial class SettingsWindow : Window
     /// the <c>config_service</c> write. Returns false when an ENABLED surface has a bad port (a disabled surface
     /// with a bad port keeps its last-known value and does not block the save).</summary>
     private bool TryReadServiceFlags(
-        out bool capturePlans, out bool mcpEnabled, out int mcpPort, out bool webEnabled, out int webPort)
+        out bool capturePlans, out bool mcpEnabled, out int mcpPort, out bool webEnabled, out int webPort,
+        out int textBudgetMb, out int maxSweeps)
     {
         capturePlans = CapturePlansCheckBox.IsChecked == true;
+        textBudgetMb = 64;
+        maxSweeps = 4;
         mcpEnabled = McpEnabledCheckBox.IsChecked == true;
         mcpPort = _appSettings.McpPort;
         webEnabled = WebEnabledCheckBox.IsChecked == true;
@@ -420,6 +427,33 @@ public partial class SettingsWindow : Window
         {
             MessageBox.Show(
                 "Web dashboard port must be between 1024 and 65535.\nPorts 0-1023 are well-known privileged ports reserved by the operating system.",
+                "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
+
+        /* #2164 / #2170 collector memory knobs. Unlike the ports these are always in force (there is no
+           "disabled" state to excuse a bad value), so a bad entry always blocks the save rather than
+           silently keeping a last-known value. The service clamps on read as defense in depth. */
+        if (int.TryParse(QueryStoreTextBudgetMbTextBox.Text, out var parsedBudget) && parsedBudget is >= 4 and <= 256)
+        {
+            textBudgetMb = parsedBudget;
+        }
+        else
+        {
+            MessageBox.Show(
+                "Query Store text budget must be between 4 and 256 MB.",
+                "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
+
+        if (int.TryParse(MaxConcurrentSweepsTextBox.Text, out var parsedSweeps) && parsedSweeps is >= 1 and <= 16)
+        {
+            maxSweeps = parsedSweeps;
+        }
+        else
+        {
+            MessageBox.Show(
+                "Concurrent server sweeps must be between 1 and 16.",
                 "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
         }
@@ -1428,7 +1462,8 @@ public partial class SettingsWindow : Window
     {
         var errors = new List<string>();
         var mcpValid = TryReadServiceFlags(
-            out var capturePlans, out var mcpEnabled, out var mcpPort, out var webEnabled, out var webPort);
+            out var capturePlans, out var mcpEnabled, out var mcpPort, out var webEnabled, out var webPort,
+            out var textBudgetMb, out var maxSweeps);
         var alertRow = BuildAlertRowFromControls(errors);
         SaveViewerLocalAlertFields(errors);
         var notifyRow = BuildNotificationRowFromControls(errors);
@@ -1488,7 +1523,7 @@ public partial class SettingsWindow : Window
                 await _dataService.UpsertAlertSettingsAsync(alertRow);
                 await _dataService.UpsertNotificationAsync(notifyRow);
                 await _dataService.UpdateServiceFlagsAsync(capturePlans, mcpEnabled, mcpPort, webEnabled, webPort,
-                    QueryStoreBackfillCheckBox.IsChecked == true);
+                    QueryStoreBackfillCheckBox.IsChecked == true, textBudgetMb, maxSweeps);
             }
             catch (ViewerReadOnlyException ex)
             {
