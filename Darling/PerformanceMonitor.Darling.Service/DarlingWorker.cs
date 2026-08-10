@@ -1095,14 +1095,28 @@ public sealed class DarlingWorker : BackgroundService
            body detached from the drain list — would otherwise reach its finally { gate.Release() } on a disposed
            SemaphoreSlim and throw ObjectDisposedException, faulting an unobserved Task. A SemaphoreSlim needs no
            deterministic disposal unless its AvailableWaitHandle is used, which it never is here. */
-        /* #2170: the width is now an operator knob, and a SemaphoreSlim cannot be resized — so the gate is
-           built at the CLAMP CEILING and the unused permits are drained immediately. Widening later just
-           Releases them back; narrowing absorbs them as in-flight bodies finish (see ReconcileSweepGate),
-           which converges without ever blocking this loop or interrupting a running collection. */
+        /* #2170: the width is now an operator knob, and a SemaphoreSlim cannot be resized — so the gate's
+           MAX is the clamp ceiling while its INITIAL count is the configured width. Later changes move
+           between the two: widening Releases permits, narrowing absorbs them as in-flight bodies finish
+           (see ReconcileSweepGate), which converges without ever blocking this loop or interrupting a
+           running collection.
+
+           Starting AT the configured width rather than at the ceiling matters (review catch): reconciling
+           down only STARTS the absorber, so a gate born wide would offer ceiling-many permits for the
+           window before it retires them — and a restart with many servers simultaneously due (before the
+           #1581 cold-start stagger spreads them) is exactly when that window would be spent. Born narrow,
+           the window does not exist. */
+        var initialSweepWidth = StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps);
 #pragma warning disable CA2000
-        var serverSweepGate = new SemaphoreSlim(SweepGateCeiling, SweepGateCeiling);
+        var serverSweepGate = new SemaphoreSlim(initialSweepWidth, SweepGateCeiling);
 #pragma warning restore CA2000
-        ReconcileSweepGate(serverSweepGate, StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps), stoppingToken);
+        lock (_gateLock)
+        {
+            /* The permits the gate was never given ARE the absorbed ones — seed both counts so the first
+               reconcile computes its delta from reality instead of re-absorbing what was never issued. */
+            _gateAbsorbed = SweepGateCeiling - initialSweepWidth;
+            _gateDesiredAbsorb = _gateAbsorbed;
+        }
 
         _logger.LogInformation("PerformanceMonitor Darling collection loop started");
 

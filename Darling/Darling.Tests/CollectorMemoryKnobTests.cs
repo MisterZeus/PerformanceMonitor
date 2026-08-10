@@ -147,6 +147,30 @@ public sealed class CollectorMemoryKnobTests
         Assert.Equal(12, gate.CurrentCount);
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    [InlineData(16)]
+    public void SweepGate_IsBornAtTheConfiguredWidth_NotTheCeiling(int configured)
+    {
+        /* Review catch on the startup path: reconciling DOWN only starts the absorber, so a gate born at the
+           ceiling would offer ceiling-many permits until it retired them — and a restart with many servers
+           simultaneously due is exactly when that window gets spent. The worker constructs the gate with the
+           configured width as its INITIAL count and the ceiling as its MAX, so the window cannot exist. This
+           pins that SemaphoreSlim actually supports that shape and that the arithmetic seeding the absorbed
+           count is self-consistent. */
+        using var gate = new SemaphoreSlim(configured, DarlingWorker.SweepGateCeiling);
+        Assert.Equal(configured, gate.CurrentCount);
+
+        var absorbedAtBirth = DarlingWorker.SweepGateCeiling - configured;
+        Assert.Equal(DarlingWorker.SweepGateCeiling, gate.CurrentCount + absorbedAtBirth);
+
+        /* And the gate can still be widened all the way back to the ceiling later — Release past MAX would
+           throw, so this is what makes "born narrow, widen later" safe rather than a one-way door. */
+        gate.Release(absorbedAtBirth);
+        Assert.Equal(DarlingWorker.SweepGateCeiling, gate.CurrentCount);
+    }
+
     [Fact]
     public void ProbeAndGate_KnowTheV59Rung()
     {
