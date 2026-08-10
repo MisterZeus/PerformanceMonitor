@@ -76,8 +76,8 @@
     <PackageReference Include="Hardcodet.NotifyIcon.Wpf" Version="2.0.1" />
 
     <!-- MCP server for LLM tool access -->
-    <PackageReference Include="ModelContextProtocol" Version="2.0.0" />
-    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="2.0.0" />
+    <PackageReference Include="ModelContextProtocol" Version="2.1.0" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="2.1.0" />
     <PackageReference Include="Velopack" Version="1.2.0" />
   </ItemGroup>
 
