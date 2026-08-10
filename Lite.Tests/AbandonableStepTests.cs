@@ -147,6 +147,64 @@ public sealed class AbandonableStepTests
     }
 
     [Fact]
+    public async Task AbandonedThenFaulted_SurfacesTheLateFault_ThroughTheCallback()
+    {
+        /* Review catch: without the callback, the one exception that explains a wedge was observed
+           and DISCARDED — abandoned at the deadline, faulted a minute later, nothing in any log. */
+        var step = new AbandonableStep();
+        var wedge = new TaskCompletionSource();
+        Exception? lateFault = null;
+
+        var result = await step.RunAsync(
+            () => wedge.Task, Deadline, onLateFault: ex => lateFault = ex);
+        Assert.Equal(AbandonableStepOutcome.Abandoned, result.Outcome);
+
+        wedge.SetException(new InvalidOperationException("the wedge's own exception"));
+
+        for (var i = 0; i < 100 && lateFault is null; i++)
+        {
+            await Task.Delay(10);
+        }
+        Assert.IsType<InvalidOperationException>(lateFault);
+        Assert.Equal("the wedge's own exception", lateFault!.Message);
+    }
+
+    [Fact]
+    public async Task FaultWithinDeadline_DoesNotAlsoFireTheLateCallback()
+    {
+        /* The awaited path already returned the exception to the caller — the callback firing too
+           would double-log every ordinary failure. */
+        var step = new AbandonableStep();
+        var fired = false;
+
+        var result = await step.RunAsync(
+            () => Task.FromException(new InvalidOperationException("boom")), Generous,
+            onLateFault: _ => fired = true);
+
+        Assert.Equal(AbandonableStepOutcome.Faulted, result.Outcome);
+        await Task.Delay(50);
+        Assert.False(fired);
+    }
+
+    [Fact]
+    public async Task ThrowingLateFaultCallback_StillReleasesTheGuard()
+    {
+        /* A logging callback that itself throws must not leave the step permanently wedged. */
+        var step = new AbandonableStep();
+        var wedge = new TaskCompletionSource();
+
+        await step.RunAsync(() => wedge.Task, Deadline,
+            onLateFault: _ => throw new InvalidOperationException("logger boom"));
+        wedge.SetException(new InvalidOperationException("late"));
+
+        for (var i = 0; i < 100 && step.IsInFlight; i++)
+        {
+            await Task.Delay(10);
+        }
+        Assert.False(step.IsInFlight);
+    }
+
+    [Fact]
     public async Task CallerCancellation_ReportsCancelled_NotAbandoned()
     {
         /* Shutdown must read as shutdown — an Abandoned logged at ERROR during a clean exit would

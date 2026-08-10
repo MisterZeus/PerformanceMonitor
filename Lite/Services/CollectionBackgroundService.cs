@@ -128,7 +128,9 @@ public class CollectionBackgroundService : BackgroundService
                        refresh that never returns, a network path that swallows packets) must not stop
                        every server's collection. */
                     var check = await _connectionCheckStep.RunAsync(
-                        () => _serverManager.CheckAllConnectionsAsync(), ConnectionCheckDeadline, stoppingToken);
+                        () => _serverManager.CheckAllConnectionsAsync(), ConnectionCheckDeadline, stoppingToken,
+                        onLateFault: ex => _logger?.LogError(ex,
+                            "Connection check faulted AFTER being abandoned — this is the wedge's own exception (#2148)"));
                     LogStepOutcome(check, "Connection check", ConnectionCheckDeadline);
                 }
 
@@ -210,7 +212,9 @@ public class CollectionBackgroundService : BackgroundService
            itself and lets backfill resume the moment the stuck task actually ends. */
         var tick = await _backfillStep.RunAsync(
             () => _collectorService.RunQueryStoreBackfillTickAsync(stoppingToken),
-            BackfillTickDeadline, stoppingToken);
+            BackfillTickDeadline, stoppingToken,
+            onLateFault: ex => _logger?.LogError(ex,
+                "Query Store backfill tick faulted AFTER being abandoned — this is the wedge's own exception (#2148)"));
         LogStepOutcome(tick, "Query Store backfill tick", BackfillTickDeadline);
     }
 

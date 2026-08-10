@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -64,9 +65,16 @@ public sealed class AbandonableStep
     /// <summary>
     /// Runs <paramref name="step"/> unless a prior run is still wedged, waiting at most
     /// <paramref name="timeout"/> before abandoning it and returning control to the loop.
+    /// <paramref name="onLateFault"/> (review catch on the #2148 PR) surfaces an exception thrown by a
+    /// run AFTER it was abandoned — without it that fault would be observed-but-discarded, and the one
+    /// exception that explains a wedge would never reach a log. Invoked only for faults the caller's
+    /// awaited path did NOT already receive; a fault landing in the microseconds between the deadline
+    /// decision and the abandonment flag can be missed (never doubled), which costs one log line, not
+    /// correctness — the caller already logged the abandonment itself.
     /// </summary>
     public async Task<AbandonableStepResult> RunAsync(
-        Func<Task> step, TimeSpan timeout, CancellationToken cancellationToken = default)
+        Func<Task> step, TimeSpan timeout, CancellationToken cancellationToken = default,
+        Action<Exception>? onLateFault = null)
     {
         ArgumentNullException.ThrowIfNull(step);
 
@@ -86,14 +94,31 @@ public sealed class AbandonableStep
             return new AbandonableStepResult(AbandonableStepOutcome.Faulted, ex);
         }
 
+        var abandoned = new StrongBox<bool>(false);
+
         /* The guard clears when the task TRULY ends — completion, fault, or cancellation — never when
-           the deadline merely moves the loop on. Faults on the abandoned path are observed here too, so
-           an abandoned-then-faulted task cannot surface as UnobservedTaskException. */
+           the deadline merely moves the loop on. Faults on the abandoned path are observed here (so an
+           abandoned-then-faulted task cannot surface as UnobservedTaskException) AND handed to
+           onLateFault, because a discarded exception from the wedged run is exactly the diagnostic the
+           field report needs. */
         _ = work.ContinueWith(
-            static (t, state) =>
+            (t, state) =>
             {
-                _ = t.Exception; /* observe */
-                Interlocked.Exchange(ref ((AbandonableStep)state!)._inFlight, 0);
+                var self = (AbandonableStep)state!;
+                var fault = t.Exception; /* observe unconditionally */
+                if (fault is not null && Volatile.Read(ref abandoned.Value))
+                {
+                    try
+                    {
+                        onLateFault?.Invoke(fault.GetBaseException());
+                    }
+                    catch
+                    {
+                        /* A throwing log callback must not take the continuation down. */
+                    }
+                }
+
+                Interlocked.Exchange(ref self._inFlight, 0);
             },
             this,
             CancellationToken.None,
@@ -104,9 +129,13 @@ public sealed class AbandonableStep
 
         if (finished != work)
         {
-            return cancellationToken.IsCancellationRequested
-                ? new AbandonableStepResult(AbandonableStepOutcome.Cancelled)
-                : new AbandonableStepResult(AbandonableStepOutcome.Abandoned);
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return new AbandonableStepResult(AbandonableStepOutcome.Cancelled);
+            }
+
+            Volatile.Write(ref abandoned.Value, true);
+            return new AbandonableStepResult(AbandonableStepOutcome.Abandoned);
         }
 
         try
