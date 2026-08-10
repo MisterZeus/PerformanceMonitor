@@ -920,7 +920,6 @@
         "type": "Project",
         "dependencies": {
           "Microsoft.Data.SqlClient": "[7.0.2, )",
-          "ModelContextProtocol": "[2.1.0, )",
           "PerformanceMonitor.Common": "[1.0.0, )"
         }
       },
