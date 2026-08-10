@@ -1063,7 +1063,7 @@ public sealed class DarlingWorker : BackgroundService
            24h-clamped outage holes — newest-first, byte-budgeted, strictly BELOW the live path's floor, and
            never past the raw tier's horizon. Plan capture reads the same live provider the runner does. */
         var queryStoreBackfill = new QueryStoreBackfill(postgres, runner, deltas, _logger, () => config.CapturePlans);
-        var backfillLoop = RunQueryStoreBackfillLoopAsync(queryStoreBackfill, servers, stoppingToken);
+        var backfillLoop = RunQueryStoreBackfillLoopAsync(queryStoreBackfill, servers, () => config.QueryStoreBackfillEnabled, stoppingToken);
 
         /* The fleet concurrency gate (#1553 D2): at most N=4 per-server collection bodies open a SQL connection
            at once, so one slow or hung server cannot head-of-line-block the fleet the way the old strictly
@@ -1600,8 +1600,11 @@ public sealed class DarlingWorker : BackgroundService
     /// constraint — a backfill slice is read-only against the monitored server and writes on its
     /// own store connection, so running beside a live sweep is safe.
     /// </summary>
-    private async Task RunQueryStoreBackfillLoopAsync(QueryStoreBackfill backfill, List<ServerLoopState> servers, CancellationToken stoppingToken)
+    private async Task RunQueryStoreBackfillLoopAsync(QueryStoreBackfill backfill, List<ServerLoopState> servers, Func<bool> backfillEnabled, CancellationToken stoppingToken)
     {
+        /* #2167: transition-logged so a store-config flip is visible in the log exactly once per state
+           change, not once per idle cycle. */
+        var lastEnabled = true;
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -1611,6 +1614,25 @@ public sealed class DarlingWorker : BackgroundService
             catch (OperationCanceledException)
             {
                 return;
+            }
+
+            /* #2167: the off switch (config_service.query_store_backfill_enabled, V58) — read live each
+               cycle via the store-reload seam, so an operator can stop a runaway drain (a freshly restored
+               catalog on a cross-region server) without a restart and without touching plan capture. The
+               loop keeps ticking while disabled: a re-enable takes effect on the next cycle. */
+            var enabled = backfillEnabled();
+            if (enabled != lastEnabled)
+            {
+                _logger.LogInformation(
+                    enabled
+                        ? "query_store backfill re-enabled via config — resuming on the next cycle"
+                        : "query_store backfill DISABLED via config (config_service.query_store_backfill_enabled) — loop idling, in-flight slices finish and no new ones start");
+                lastEnabled = enabled;
+            }
+
+            if (!enabled)
+            {
+                continue;
             }
 
             List<ServerRuntime> runtimes;
