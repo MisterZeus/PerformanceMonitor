@@ -1629,24 +1629,57 @@ public sealed class DarlingWorker : BackgroundService
                     return;
                 }
 
-                try
+                /* #2148 parity (review catch on the Lite fix): a slice that WEDGES — not throws — used
+                   to hold this foreach forever, stalling backfill for the entire fleet with the
+                   exception armor below intact. Per-SERVER abandonable steps, so one wedged server is
+                   abandoned (loudly) and quarantined until its task actually dies, while every other
+                   server's backfill continues. The deadline is a generous multiple of a healthy slice
+                   (statement timeout 60s + store writes), so an abandonment is a defect signal. */
+                var step = _backfillSliceSteps.GetOrAdd(runtime.ServerId, static _ => new AbandonableStep());
+                var result = await step.RunAsync(
+                    () => backfill.RunServerSliceAsync(runtime, stoppingToken),
+                    BackfillSliceDeadline, stoppingToken,
+                    onLateFault: ex => _logger.LogError(ex,
+                        "query_store backfill slice on '{Server}' faulted AFTER being abandoned — this is the wedge's own exception (#2148)",
+                        runtime.Config.DisplayName));
+
+                switch (result.Outcome)
                 {
-                    await backfill.RunServerSliceAsync(runtime, stoppingToken);
-                }
-                catch (OperationCanceledException)
-                {
-                    return;
-                }
-                catch (Exception ex)
-                {
-                    /* One server's slice failing (unreachable, permissions, a mid-tick disconnect) is
-                       that server's problem for this tick; the loop and the rest of the fleet continue. */
-                    _logger.LogWarning("query_store backfill slice on '{Server}' failed: {Message}",
-                        runtime.Config.DisplayName, ex.Message);
+                    case AbandonableStepOutcome.Cancelled:
+                        return;
+                    case AbandonableStepOutcome.Faulted when result.Exception is OperationCanceledException:
+                        return;
+                    case AbandonableStepOutcome.Faulted:
+                        /* One server's slice failing (unreachable, permissions, a mid-tick disconnect) is
+                           that server's problem for this tick; the loop and the rest of the fleet continue. */
+                        _logger.LogWarning("query_store backfill slice on '{Server}' failed: {Message}",
+                            runtime.Config.DisplayName, result.Exception!.Message);
+                        break;
+                    case AbandonableStepOutcome.Abandoned:
+                        _logger.LogError(
+                            "query_store backfill slice on '{Server}' exceeded {Deadline}s and was ABANDONED — " +
+                            "the fleet's backfill continues; this server's backfill is quarantined until the " +
+                            "wedged task ends. Defect signal: report with this log (#2148).",
+                            runtime.Config.DisplayName, (int)BackfillSliceDeadline.TotalSeconds);
+                        break;
+                    case AbandonableStepOutcome.SkippedStillRunning:
+                        _logger.LogError(
+                            "query_store backfill slice on '{Server}' skipped — a previously-abandoned slice is still wedged (#2148).",
+                            runtime.Config.DisplayName);
+                        break;
                 }
             }
         }
     }
+
+    /// <summary>#2148: per-server abandonment guards for the backfill loop — keyed by ServerId so a
+    /// removed-and-re-added server reuses its guard (harmless), and a wedged server never blocks its
+    /// neighbors. Never pruned: one small object per server ever monitored, bounded by fleet size.</summary>
+    private readonly ConcurrentDictionary<int, AbandonableStep> _backfillSliceSteps = new();
+
+    /// <summary>#2148: the hard ceiling one server's backfill slice may hold the fleet loop — a healthy
+    /// slice is one 60s-capped statement plus store writes.</summary>
+    private static readonly TimeSpan BackfillSliceDeadline = TimeSpan.FromSeconds(300);
 
     /// <summary>
     /// The command plane's poll loop (Stage 2), run concurrently with the collection sweep on its own
