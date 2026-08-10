@@ -137,6 +137,23 @@ public sealed class DarlingWorker : BackgroundService
     private bool _gateAbsorberRunning;
 
     /// <summary>
+    /// The sweep gate's width right now (#2170) — the ceiling minus what has been absorbed. Reported by the
+    /// queued-behind-the-gate diagnostic, which an operator reads while deciding whether to raise the knob,
+    /// so it must never print the compile-time default once the knob has moved. Mid-narrow this reads the
+    /// TARGET rather than the momentarily-larger real count; that is the honest number to act on.
+    /// </summary>
+    internal int EffectiveSweepWidth
+    {
+        get
+        {
+            lock (_gateLock)
+            {
+                return SweepGateCeiling - _gateDesiredAbsorb;
+            }
+        }
+    }
+
+    /// <summary>
     /// Seconds an in-flight collection body may go unresolved before the sweep watchdog surfaces it. One
     /// threshold serves both channels below — what differs is WHICH clock it is measured against.
     /// </summary>
@@ -1267,12 +1284,16 @@ public sealed class DarlingWorker : BackgroundService
                             break;
 
                         /* CAPACITY — still QUEUED behind the gate, so nothing is wrong with this server: the
-                           fleet is simply wider than MaxConcurrentServerSweeps at this moment. Info, once. */
+                           fleet is simply wider than the configured sweep width at this moment. Info, once.
+                           Reports the EFFECTIVE width, not the compile-time default (#2170 review catch):
+                           this line is what an operator reads while deciding whether to raise the knob, so
+                           printing 4 after they raised it to 12 would send them chasing a limit that is no
+                           longer in force. */
                         case SweepEpisodeSignal.Queued:
                             server.QueuedInfoThisEpisode = true;
                             _logger.LogInformation(
                                 "[{Server}] collection body has waited {Elapsed:F0}s for a free slot (fleet concurrency limit {Limit}) — queued, not stalled; it has not started yet",
-                                server.Config.DisplayName, episodeSeconds, MaxConcurrentServerSweeps);
+                                server.Config.DisplayName, episodeSeconds, EffectiveSweepWidth);
                             break;
                     }
 
