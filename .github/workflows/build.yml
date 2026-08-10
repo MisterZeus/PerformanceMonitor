@@ -871,6 +871,6 @@ jobs:
       # GitHub-native SLSA provenance for the released tarball: gh attestation verify <file> -R <repo>.
       - name: Attest the linux tarball (GitHub provenance)
         if: github.event_name == 'release'
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: releases/PerformanceMonitorDarling-linux-x64-*.tar.gz
