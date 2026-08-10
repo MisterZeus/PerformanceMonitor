@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
@@ -57,6 +58,20 @@ public class CollectionBackgroundService : BackgroundService
     /// minutes; the steady state (every tail drained, no holes) costs a candidate query and a few
     /// MIN() lookups per server.</summary>
     private static readonly TimeSpan QueryStoreBackfillInterval = TimeSpan.FromMinutes(5);
+
+    /* ── #2148: the two ladder steps that could HOLD the loop with no bound, made abandonable. ──
+       The field failure: one step wedged on an Azure elastic pool right after the 3.4.0 upgrade and
+       ALL collection stopped permanently — every step's exception armor intact, because armor bounds
+       throws and nothing bounded a hang. Each step now runs under the ladder's own analysis-timeout
+       idiom (deadline + in-flight guard, extracted to AbandonableStep): a wedged run is abandoned
+       and quarantined, the LOOP keeps collecting, and the step resumes when the wedged task truly
+       dies. The deadlines are generous multiples of healthy behavior — a backfill tick is one
+       30s-capped slice per server plus writes; a connection check is bounded by connect timeouts —
+       so an abandonment is always a defect signal, never scheduling jitter, and it logs as ERROR. */
+    private static readonly TimeSpan BackfillTickDeadline = TimeSpan.FromSeconds(180);
+    private static readonly TimeSpan ConnectionCheckDeadline = TimeSpan.FromSeconds(90);
+    private readonly AbandonableStep _backfillStep = new();
+    private readonly AbandonableStep _connectionCheckStep = new();
     private static readonly TimeSpan RetentionInterval = TimeSpan.FromHours(24);
     /* Analysis-findings retention purge — daily, matching the parquet-retention cadence
        above and Darling's daily findings-cleanup horizon. */
@@ -109,14 +124,12 @@ public class CollectionBackgroundService : BackgroundService
                 /* Check all server connections before collecting */
                 if (_serverManager != null)
                 {
-                    try
-                    {
-                        await _serverManager.CheckAllConnectionsAsync();
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger?.LogError(ex, "Connection check failed");
-                    }
+                    /* #2148: abandonable — a connection check wedged on one server (an Azure token
+                       refresh that never returns, a network path that swallows packets) must not stop
+                       every server's collection. */
+                    var check = await _connectionCheckStep.RunAsync(
+                        () => _serverManager.CheckAllConnectionsAsync(), ConnectionCheckDeadline, stoppingToken);
+                    LogStepOutcome(check, "Connection check", ConnectionCheckDeadline);
                 }
 
                 try
@@ -188,13 +201,42 @@ public class CollectionBackgroundService : BackgroundService
         }
 
         _lastQueryStoreBackfill = DateTime.UtcNow;
-        try
+
+        /* #2148: abandonable — the field failure. A backfill slice that wedges (elastic pool, big
+           Query Store, first contact after upgrade) previously held the ENTIRE ladder: exception armor
+           was intact, but nothing bounded a hang, so all collection stopped permanently and the CPU
+           chart going blank was just where the user noticed. The deadline returns the loop to
+           collecting; the in-flight guard keeps the wedged tick from being relaunched on top of
+           itself and lets backfill resume the moment the stuck task actually ends. */
+        var tick = await _backfillStep.RunAsync(
+            () => _collectorService.RunQueryStoreBackfillTickAsync(stoppingToken),
+            BackfillTickDeadline, stoppingToken);
+        LogStepOutcome(tick, "Query Store backfill tick", BackfillTickDeadline);
+    }
+
+    /// <summary>One log vocabulary for every abandonable ladder step (#2148): abandonment and
+    /// still-wedged skips are ERRORS — the deadlines are generous multiples of healthy behavior, so
+    /// either one is a defect signal, and this line is the difference between a diagnosable field
+    /// report and "the charts just stopped".</summary>
+    private void LogStepOutcome(AbandonableStepResult result, string stepName, TimeSpan deadline)
+    {
+        switch (result.Outcome)
         {
-            await _collectorService.RunQueryStoreBackfillTickAsync(stoppingToken);
-        }
-        catch (Exception ex)
-        {
-            _logger?.LogError(ex, "Query Store backfill tick failed");
+            case AbandonableStepOutcome.Faulted:
+                _logger?.LogError(result.Exception, "{Step} failed", stepName);
+                break;
+            case AbandonableStepOutcome.Abandoned:
+                _logger?.LogError(
+                    "{Step} exceeded {Deadline}s and was ABANDONED — collection continues; the step is " +
+                    "quarantined until the wedged task ends. This is a defect signal: please report it " +
+                    "with this log file (#2148).",
+                    stepName, (int)deadline.TotalSeconds);
+                break;
+            case AbandonableStepOutcome.SkippedStillRunning:
+                _logger?.LogError(
+                    "{Step} skipped — a previously-abandoned run is still wedged (#2148).", stepName);
+                break;
+            /* Completed and Cancelled are the quiet outcomes. */
         }
     }
 
