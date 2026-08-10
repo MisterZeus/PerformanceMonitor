@@ -146,6 +146,23 @@ public sealed class CollectorContext
     public IReadOnlyList<string>? PerfmonCounterOverride { get; init; }
 
     /// <summary>
+    /// Host override for the per-item text byte budget (#2164), in BYTES. Null keeps the definition's
+    /// own <see cref="ICollectorDefinition{TRow}.PerItemTextByteBudget"/> — which is what Lite passes,
+    /// so its behavior is unchanged. Darling supplies this from the store's operator knob.
+    ///
+    /// <para>Why a knob at all: the budget's job is bounding memory, and the compile-time 64 MB was
+    /// sized for a same-region client. Over a cross-region link the same 64 MB is a MINUTE of the
+    /// monitored server holding one query open draining to the client (ASYNC_NETWORK_IO), which is
+    /// tenant-visible on small hardware — the 2026-08-10 field case. A smaller budget costs catch-up
+    /// latency, never data, because #1960's boundary-group completion makes every cut resumable.</para>
+    ///
+    /// <para>Composes multiplicatively with the host's fleet sweep width — peak transient is
+    /// approximately (concurrent sweeps) × (this budget) — which is why both are operator knobs on
+    /// the same store rung and why their UI hints name each other (#2170).</para>
+    /// </summary>
+    public int? TextByteBudgetOverride { get; init; }
+
+    /// <summary>
     /// Result of the definition's enumeration probe (see
     /// <c>ICollectorDefinition.BuildEnumerationProbe</c>), set by the host between enumeration
     /// and the per-item loop. Null when the definition declares no probe, the probe failed, or

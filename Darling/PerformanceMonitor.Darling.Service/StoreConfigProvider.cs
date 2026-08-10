@@ -136,8 +136,8 @@ public sealed class StoreConfigProvider
         /* config_version starts at 0; the four desired-state seed writes below bump it via the trigger,
            so the worker's post-seed baseline read reflects the seeded state and triggers no spurious reload. */
         using var command = new NpgsqlCommand(@"
-INSERT INTO config_service (id, paused, capture_plans, query_store_backfill_enabled, mcp_enabled, mcp_port, web_enabled, web_port, config_version, updated_at, updated_by)
-VALUES (1, FALSE, $1, $7, $2, $3, $4, $5, 0, $6, 'seed')
+INSERT INTO config_service (id, paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, mcp_enabled, mcp_port, web_enabled, web_port, config_version, updated_at, updated_by)
+VALUES (1, FALSE, $1, $7, $8, $9, $2, $3, $4, $5, 0, $6, 'seed')
 ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(config.CapturePlans);
         command.Parameters.AddWithValue(config.Mcp.Enabled);
@@ -146,6 +146,8 @@ ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(config.Web.Port);
         command.Parameters.AddWithValue(now);
         command.Parameters.AddWithValue(config.QueryStoreBackfillEnabled);
+        command.Parameters.AddWithValue(config.QueryStoreTextBudgetMb);
+        command.Parameters.AddWithValue(config.MaxConcurrentSweeps);
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -324,7 +326,7 @@ ON CONFLICT (server_id) DO NOTHING", connection);
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
-            var (paused, capturePlans, backfillEnabled, mcpEnabled, mcpPort, webEnabled, webPort, configVersion) = await ReadServiceRowAsync(connection, cancellationToken);
+            var (paused, capturePlans, backfillEnabled, textBudgetMb, maxSweeps, mcpEnabled, mcpPort, webEnabled, webPort, configVersion) = await ReadServiceRowAsync(connection, cancellationToken);
             var (alerts, analysis) = await ReadAlertSettingsAsync(connection, cancellationToken);
             var (smtp, webhooks) = await ReadNotificationAsync(connection, cancellationToken);
             var servers = await ReadMonitoredServersAsync(connection, bootstrap, cancellationToken);
@@ -336,6 +338,8 @@ ON CONFLICT (server_id) DO NOTHING", connection);
                 Paused = paused,
                 CapturePlans = capturePlans,
                 QueryStoreBackfillEnabled = backfillEnabled,
+                QueryStoreTextBudgetMb = textBudgetMb,
+                MaxConcurrentSweeps = maxSweeps,
                 McpEnabled = mcpEnabled,
                 McpPort = mcpPort,
                 WebEnabled = webEnabled,
@@ -355,20 +359,34 @@ ON CONFLICT (server_id) DO NOTHING", connection);
         }
     }
 
-    private static async Task<(bool Paused, bool CapturePlans, bool QueryStoreBackfillEnabled, bool McpEnabled, int McpPort, bool WebEnabled, int WebPort, long ConfigVersion)>
+    /// <summary>The V59 collector-memory knob clamps (#2164/#2170) — a bad stored value degrades to a sane
+    /// one rather than failing the config load, matching the alert knobs' posture.</summary>
+    internal const int MinTextBudgetMb = 4;
+    internal const int MaxTextBudgetMb = 256;
+    internal const int MinConcurrentSweeps = 1;
+    internal const int MaxConcurrentSweepsLimit = 16;
+
+    internal static int ClampTextBudgetMb(int value) => Math.Clamp(value, MinTextBudgetMb, MaxTextBudgetMb);
+
+    internal static int ClampConcurrentSweeps(int value) => Math.Clamp(value, MinConcurrentSweeps, MaxConcurrentSweepsLimit);
+
+    private static async Task<(bool Paused, bool CapturePlans, bool QueryStoreBackfillEnabled, int QueryStoreTextBudgetMb, int MaxConcurrentSweeps, bool McpEnabled, int McpPort, bool WebEnabled, int WebPort, long ConfigVersion)>
         ReadServiceRowAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var command = new NpgsqlCommand(
-            "SELECT paused, capture_plans, query_store_backfill_enabled, mcp_enabled, mcp_port, web_enabled, web_port, config_version FROM config_service WHERE id = 1", connection);
+            "SELECT paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, mcp_enabled, mcp_port, web_enabled, web_port, config_version FROM config_service WHERE id = 1", connection);
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
         {
-            /* Row missing (unseeded) — treat as defaults; capture and backfill stay on (Darling's SKU defaults). */
-            return (false, true, true, false, 5152, false, 5153, 0);
+            /* Row missing (unseeded) — treat as defaults; capture and backfill stay on, and the memory
+               knobs reproduce the pre-V59 compile-time constants (64 MB budget, 4-wide sweep). */
+            return (false, true, true, 64, 4, false, 5152, false, 5153, 0);
         }
 
-        return (reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetInt32(4),
-            reader.GetBoolean(5), reader.GetInt32(6), reader.GetInt64(7));
+        return (reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2),
+            ClampTextBudgetMb(reader.GetInt32(3)), ClampConcurrentSweeps(reader.GetInt32(4)),
+            reader.GetBoolean(5), reader.GetInt32(6),
+            reader.GetBoolean(7), reader.GetInt32(8), reader.GetInt64(9));
     }
 
     private static async Task<(AlertsConfig Alerts, AnalysisConfig Analysis)> ReadAlertSettingsAsync(NpgsqlConnection connection, CancellationToken ct)
@@ -639,6 +657,8 @@ ORDER BY name", connection);
         config.Webhooks = view.Webhooks;
         config.CapturePlans = view.CapturePlans;
         config.QueryStoreBackfillEnabled = view.QueryStoreBackfillEnabled;
+        config.QueryStoreTextBudgetMb = view.QueryStoreTextBudgetMb;
+        config.MaxConcurrentSweeps = view.MaxConcurrentSweeps;
         config.Mcp.Enabled = view.McpEnabled;
         config.Mcp.Port = view.McpPort;
         config.Web.Enabled = view.WebEnabled;
@@ -778,6 +798,12 @@ public sealed class StoreConfigView
 
     /// <summary>The #2167 backfill off switch (config_service, V58) — worker reads it live each backfill cycle.</summary>
     public bool QueryStoreBackfillEnabled { get; init; } = true;
+
+    /// <summary>The #2164 per-database query_store text budget in MB (config_service, V59), already clamped.</summary>
+    public int QueryStoreTextBudgetMb { get; init; } = 64;
+
+    /// <summary>The #2170 fleet sweep width (config_service, V59), already clamped.</summary>
+    public int MaxConcurrentSweeps { get; init; } = 4;
 
     public bool McpEnabled { get; init; }
     public int McpPort { get; init; }

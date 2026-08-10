@@ -87,18 +87,27 @@ public sealed class QueryStoreBackfill
     private readonly ILogger? _logger;
     private readonly Func<bool> _capturePlans;
 
+    /* #2164: the per-database text budget override in MB, read live like _capturePlans. Backfill slices
+       carry the SAME nvarchar(max) query-text/plan-XML payload over the same link as a live tick, so the
+       operator knob has to reach here too — a knob that only bounds the tick would leave the heavier of
+       the two paths at the compile-time 64 MB, which is precisely the drain the knob exists to shorten. */
+    private readonly Func<int> _textBudgetMb;
+
     public QueryStoreBackfill(
         NpgsqlDataSource postgres,
         DarlingCollectorRunner runner,
         CollectorDeltaCalculator deltas,
         ILogger? logger,
-        Func<bool>? capturePlans = null)
+        Func<bool>? capturePlans = null,
+        Func<int>? textBudgetMb = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _runner = runner ?? throw new ArgumentNullException(nameof(runner));
         _deltas = deltas ?? throw new ArgumentNullException(nameof(deltas));
         _logger = logger;
         _capturePlans = capturePlans ?? (() => true);
+        /* Null provider = keep the collector's compile-time budget (tests and any non-Darling host). */
+        _textBudgetMb = textBudgetMb ?? (() => 0);
     }
 
     /// <summary>
@@ -245,6 +254,8 @@ public sealed class QueryStoreBackfill
             Target = server.Target,
             ExcludedDatabases = server.Config.ExcludedDatabases?.ToArray() ?? Array.Empty<string>(),
             CapturePlanXml = _capturePlans(),
+            /* #2164: 0 from the default provider means "no override" — the collector keeps its constant. */
+            TextByteBudgetOverride = _textBudgetMb() > 0 ? _textBudgetMb() * 1024 * 1024 : null,
         };
 
         var timeout = definition.CommandTimeoutSecondsOverride ?? DarlingCollectorRunner.CommandTimeoutSeconds;

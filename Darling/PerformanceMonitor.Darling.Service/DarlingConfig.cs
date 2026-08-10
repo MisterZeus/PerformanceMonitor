@@ -62,6 +62,27 @@ public sealed class DarlingConfig
     public bool QueryStoreBackfillEnabled { get; set; } = true;
 
     /// <summary>
+    /// Per-database text byte budget for the query_store collector, in MEGABYTES (#2164). Store-backed
+    /// (config_service, V59), clamped [4,256] on read, default 64 = the previous compile-time constant.
+    /// Lower it when the monitored fleet is a network hop away: the budget bounds memory, but it also
+    /// sets how long one collector query holds the monitored server open draining to this client, which
+    /// over a cross-region link is the tenant-visible cost. A cut is always resumable (#1960), so a
+    /// smaller budget trades catch-up latency for shorter statements — never data.
+    /// </summary>
+    [JsonPropertyName("queryStoreTextBudgetMb")]
+    public int QueryStoreTextBudgetMb { get; set; } = 64;
+
+    /// <summary>
+    /// How many per-server collection bodies may hold a SQL connection at once (#2170) — the #1553 fleet
+    /// gate, previously hardcoded to 4. Store-backed (config_service, V59), clamped [1,16], default 4.
+    /// Raise it on a host with headroom watching a large fleet, where 4-wide serialization is what makes
+    /// sweeps queue and the Fleet Health screen report staleness while every collector is healthy.
+    /// Peak transient memory is roughly this × <see cref="QueryStoreTextBudgetMb"/>.
+    /// </summary>
+    [JsonPropertyName("maxConcurrentSweeps")]
+    public int MaxConcurrentSweeps { get; set; } = 4;
+
+    /// <summary>
     /// Whether the default_trace_events collector records Object:Created/Altered/Deleted schema-change
     /// (DDL) events. Default TRUE (today's behavior). Set false on a noisy or benchmark box where a
     /// create/drop-happy workload floods the viewer's System Events &gt; Default Trace tab — e.g. HammerDB's

@@ -105,15 +105,53 @@ public sealed class DarlingWorker : BackgroundService
     private const int MaxAnalysisIntervalMinutes = 360;
 
     /// <summary>
-    /// The bounded per-server collection concurrency (the fire-and-track sweep, #1553): at most this many
-    /// servers' collection bodies run at once, each opening at most ONE SQL connection (collectors stay
-    /// sequential within a body — Lite's RemoteCollectorService shape). Hardcoded, no control-plane knob
-    /// (defaults-over-config): 4 clears a 24-server worst case in ~6 waves while the 120s analysis budget stays
-    /// de-clustered by the cadence jitter, so one slow/hung server can never head-of-line-block the fleet the
-    /// way the old strictly-sequential foreach did (the 24-server field incident). Internal so a unit test pins
-    /// the value against this rationale (a cheap drift tripwire — see the plan).
+    /// The DEFAULT bounded per-server collection concurrency (the fire-and-track sweep, #1553): at most this
+    /// many servers' collection bodies run at once, each opening at most ONE SQL connection (collectors stay
+    /// sequential within a body — Lite's RemoteCollectorService shape). 4 clears a 24-server worst case in ~6
+    /// waves while the 120s analysis budget stays de-clustered by the cadence jitter, so one slow/hung server
+    /// can never head-of-line-block the fleet the way the old strictly-sequential foreach did (the 24-server
+    /// field incident).
+    ///
+    /// <para>#2170: no longer the hard ceiling — an operator knob (config_service.max_concurrent_sweeps, V59)
+    /// overrides it, because on a host with headroom watching a large fleet, 4-wide serialization is itself
+    /// what makes sweeps queue and the Fleet Health screen report staleness while every collector is healthy
+    /// (the reporter's 56-server case). This stays the DEFAULT and the seeded value.</para>
     /// </summary>
     internal const int MaxConcurrentServerSweeps = 4;
+
+    /// <summary>
+    /// The gate is constructed at this ceiling and immediately narrowed to the configured width (#2170) —
+    /// a <see cref="SemaphoreSlim"/> cannot be resized, so unused permits are drained rather than the
+    /// semaphore rebuilt (rebuilding would strand in-flight bodies releasing the old instance). Matches
+    /// <see cref="StoreConfigProvider.MaxConcurrentSweepsLimit"/>, the store-read clamp ceiling.
+    /// </summary>
+    internal const int SweepGateCeiling = 16;
+
+    /* Sweep-gate width state (#2170), all under _gateLock: the gate is built at SweepGateCeiling and its
+       effective width is (ceiling - _gateAbsorbed). _gateDesiredAbsorb is where the knob wants that to
+       land; a single absorber task closes the gap as in-flight bodies release permits. Holding the counts
+       (rather than per-call deltas) is what makes a widen landing mid-narrow safe — see ReconcileSweepGate. */
+    private readonly object _gateLock = new();
+    private int _gateAbsorbed;
+    private int _gateDesiredAbsorb;
+    private bool _gateAbsorberRunning;
+
+    /// <summary>
+    /// The sweep gate's width right now (#2170) — the ceiling minus what has been absorbed. Reported by the
+    /// queued-behind-the-gate diagnostic, which an operator reads while deciding whether to raise the knob,
+    /// so it must never print the compile-time default once the knob has moved. Mid-narrow this reads the
+    /// TARGET rather than the momentarily-larger real count; that is the honest number to act on.
+    /// </summary>
+    internal int EffectiveSweepWidth
+    {
+        get
+        {
+            lock (_gateLock)
+            {
+                return SweepGateCeiling - _gateDesiredAbsorb;
+            }
+        }
+    }
 
     /// <summary>
     /// Seconds an in-flight collection body may go unresolved before the sweep watchdog surfaces it. One
@@ -935,7 +973,8 @@ public sealed class DarlingWorker : BackgroundService
            config_service.capture_plans is honored on the next collector cycle without rebuilding.
            CollectSchemaChangeEvents is a file-only knob (darling.json), read the same way for symmetry —
            default true keeps every SKU collecting Object DDL; set false to silence a benchmark box's flood. */
-        var runner = new DarlingCollectorRunner(postgres, deltas, _logger, () => config.CapturePlans, () => config.CollectSchemaChangeEvents);
+        var runner = new DarlingCollectorRunner(postgres, deltas, _logger, () => config.CapturePlans, () => config.CollectSchemaChangeEvents,
+            () => StoreConfigProvider.ClampTextBudgetMb(config.QueryStoreTextBudgetMb));
         var servers = new List<ServerLoopState>();
         /* #1581 cold-start stagger: capture ONE startup instant so every initial server's first-sweep offset is
            measured from the same base — the deterministic per-server ColdStartFirstSweepDue then spreads the
@@ -1062,7 +1101,8 @@ public sealed class DarlingWorker : BackgroundService
            Fills the two windows the live path discards by design — the 60-minute first-contact tail and
            24h-clamped outage holes — newest-first, byte-budgeted, strictly BELOW the live path's floor, and
            never past the raw tier's horizon. Plan capture reads the same live provider the runner does. */
-        var queryStoreBackfill = new QueryStoreBackfill(postgres, runner, deltas, _logger, () => config.CapturePlans);
+        var queryStoreBackfill = new QueryStoreBackfill(postgres, runner, deltas, _logger, () => config.CapturePlans,
+            () => StoreConfigProvider.ClampTextBudgetMb(config.QueryStoreTextBudgetMb));
         var backfillLoop = RunQueryStoreBackfillLoopAsync(queryStoreBackfill, servers, () => config.QueryStoreBackfillEnabled, stoppingToken);
 
         /* The fleet concurrency gate (#1553 D2): at most N=4 per-server collection bodies open a SQL connection
@@ -1072,9 +1112,28 @@ public sealed class DarlingWorker : BackgroundService
            body detached from the drain list — would otherwise reach its finally { gate.Release() } on a disposed
            SemaphoreSlim and throw ObjectDisposedException, faulting an unobserved Task. A SemaphoreSlim needs no
            deterministic disposal unless its AvailableWaitHandle is used, which it never is here. */
+        /* #2170: the width is now an operator knob, and a SemaphoreSlim cannot be resized — so the gate's
+           MAX is the clamp ceiling while its INITIAL count is the configured width. Later changes move
+           between the two: widening Releases permits, narrowing absorbs them as in-flight bodies finish
+           (see ReconcileSweepGate), which converges without ever blocking this loop or interrupting a
+           running collection.
+
+           Starting AT the configured width rather than at the ceiling matters (review catch): reconciling
+           down only STARTS the absorber, so a gate born wide would offer ceiling-many permits for the
+           window before it retires them — and a restart with many servers simultaneously due (before the
+           #1581 cold-start stagger spreads them) is exactly when that window would be spent. Born narrow,
+           the window does not exist. */
+        var initialSweepWidth = StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps);
 #pragma warning disable CA2000
-        var serverSweepGate = new SemaphoreSlim(MaxConcurrentServerSweeps, MaxConcurrentServerSweeps);
+        var serverSweepGate = new SemaphoreSlim(initialSweepWidth, SweepGateCeiling);
 #pragma warning restore CA2000
+        lock (_gateLock)
+        {
+            /* The permits the gate was never given ARE the absorbed ones — seed both counts so the first
+               reconcile computes its delta from reality instead of re-absorbing what was never issued. */
+            _gateAbsorbed = SweepGateCeiling - initialSweepWidth;
+            _gateDesiredAbsorb = _gateAbsorbed;
+        }
 
         _logger.LogInformation("PerformanceMonitor Darling collection loop started");
 
@@ -1090,6 +1149,10 @@ public sealed class DarlingWorker : BackgroundService
             {
                 _lastConfigVersion = configVersion.Value;
                 await ReloadFromStoreAsync(configProvider, config, servers, muteRuleService, stoppingToken);
+
+                /* #2170: the reload swapped the knob into the live config; move the gate to match. Safe here
+                   by construction — top of the sweep, and narrowing never preempts a running body. */
+                ReconcileSweepGate(serverSweepGate, StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps), stoppingToken);
             }
 
             /* Stage 2 pause gate (Lite's IsPaused): while paused, skip ALL collection/alert/analysis/purge
@@ -1221,12 +1284,16 @@ public sealed class DarlingWorker : BackgroundService
                             break;
 
                         /* CAPACITY — still QUEUED behind the gate, so nothing is wrong with this server: the
-                           fleet is simply wider than MaxConcurrentServerSweeps at this moment. Info, once. */
+                           fleet is simply wider than the configured sweep width at this moment. Info, once.
+                           Reports the EFFECTIVE width, not the compile-time default (#2170 review catch):
+                           this line is what an operator reads while deciding whether to raise the knob, so
+                           printing 4 after they raised it to 12 would send them chasing a limit that is no
+                           longer in force. */
                         case SweepEpisodeSignal.Queued:
                             server.QueuedInfoThisEpisode = true;
                             _logger.LogInformation(
                                 "[{Server}] collection body has waited {Elapsed:F0}s for a free slot (fleet concurrency limit {Limit}) — queued, not stalled; it has not started yet",
-                                server.Config.DisplayName, episodeSeconds, MaxConcurrentServerSweeps);
+                                server.Config.DisplayName, episodeSeconds, EffectiveSweepWidth);
                             break;
                     }
 
@@ -1586,6 +1653,113 @@ public sealed class DarlingWorker : BackgroundService
             _logger.LogWarning(
                 "Baseline aggregate backfill could not run — baselines are computed from however much history the aggregates already hold: {Message}",
                 ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Moves the sweep gate to <paramref name="target"/> concurrent servers (#2170). The gate is built at
+    /// <see cref="SweepGateCeiling"/> and its width is expressed as how many permits are held OUT of
+    /// circulation, so narrowing "absorbs" permits and widening gives them back.
+    ///
+    /// <para>State is the absorbed COUNT plus a desired count, both under <see cref="_gateLock"/>, rather
+    /// than a per-call absorb loop: the first cut had a permit-stealing race (review catch) where a
+    /// still-running narrowing task would immediately re-absorb the permit a later widening had just
+    /// released, pinning the gate below the configured width. At most one absorber runs, and it re-reads
+    /// the desired count under the lock before AND after every wait — so a widening mid-absorb makes the
+    /// absorber hand its permit straight back and retire.</para>
+    ///
+    /// <para>Never blocks the caller and never preempts a running collection: narrowing only takes permits
+    /// as in-flight bodies release them, so the effective width converges within about one sweep.</para>
+    /// </summary>
+    private void ReconcileSweepGate(SemaphoreSlim gate, int target, CancellationToken stoppingToken)
+    {
+        int toRelease;
+        bool startAbsorber;
+        lock (_gateLock)
+        {
+            var desired = SweepGateCeiling - target;
+            if (desired == _gateDesiredAbsorb && _gateAbsorbed == desired)
+            {
+                return;
+            }
+
+            _gateDesiredAbsorb = desired;
+            toRelease = _gateAbsorbed > desired ? _gateAbsorbed - desired : 0;
+            _gateAbsorbed -= toRelease;
+            startAbsorber = _gateAbsorbed < desired && !_gateAbsorberRunning;
+            if (startAbsorber)
+            {
+                _gateAbsorberRunning = true;
+            }
+        }
+
+        if (toRelease > 0)
+        {
+            gate.Release(toRelease);
+            _logger.LogInformation("Fleet sweep width widened to {Target} concurrent servers (#2170 knob)", target);
+        }
+
+        if (startAbsorber)
+        {
+            _logger.LogInformation(
+                "Fleet sweep width narrowing to {Target} concurrent servers (#2170 knob) — permits retire as in-flight collections finish",
+                target);
+            _ = Task.Run(() => AbsorbSweepPermitsAsync(gate, stoppingToken), stoppingToken);
+        }
+    }
+
+    /// <summary>
+    /// The single sweep-gate absorber (#2170): takes permits out of circulation until the absorbed count
+    /// reaches the desired count. Re-checks that target around every wait, so a widening that lands while
+    /// it is parked on <see cref="SemaphoreSlim.WaitAsync(CancellationToken)"/> is honored — the permit it
+    /// was granted goes straight back rather than being stolen from the wider gate.
+    /// </summary>
+    private async Task AbsorbSweepPermitsAsync(SemaphoreSlim gate, CancellationToken stoppingToken)
+    {
+        try
+        {
+            while (true)
+            {
+                lock (_gateLock)
+                {
+                    if (_gateAbsorbed >= _gateDesiredAbsorb)
+                    {
+                        _gateAbsorberRunning = false;
+                        return;
+                    }
+                }
+
+                await gate.WaitAsync(stoppingToken).ConfigureAwait(false);
+
+                var giveBack = false;
+                lock (_gateLock)
+                {
+                    if (_gateAbsorbed >= _gateDesiredAbsorb)
+                    {
+                        /* Widened while we waited — this permit is no longer surplus. */
+                        _gateAbsorberRunning = false;
+                        giveBack = true;
+                    }
+                    else
+                    {
+                        _gateAbsorbed++;
+                    }
+                }
+
+                if (giveBack)
+                {
+                    gate.Release();
+                    return;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            /* Shutdown — the gate goes away with the process. */
+            lock (_gateLock)
+            {
+                _gateAbsorberRunning = false;
+            }
         }
     }
 

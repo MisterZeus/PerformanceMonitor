@@ -61,6 +61,12 @@ public sealed class DarlingCollectorRunner
        _capturePlans, so a future live reload is honored on the NEXT cycle without rebuilding. */
     private readonly Func<bool> _collectSchemaChanges;
 
+    /* Feeds CollectorContext.TextByteBudgetOverride on every cycle (#2164) — the query_store collector's
+       per-database text budget in MB (config_service.query_store_text_budget_mb, V59). Provider-read for
+       the same reason as the two above: a store reload takes effect on the NEXT cycle without rebuilding
+       the runner. Lite has no equivalent and keeps the collector's compile-time constant. */
+    private readonly Func<int> _textBudgetMb;
+
     /* Azure SQL DB logins without master access fall back to single-database mode, throttled per
        server so master isn't retried every cycle (#857 — mirrors Lite).
 
@@ -120,12 +126,14 @@ public sealed class DarlingCollectorRunner
     /// behavior). The worker passes <c>() =&gt; config.CollectSchemaChangeEvents</c> so a noisy/benchmark box
     /// can suppress the default-trace Object:Created/Deleted flood; tests pass a constant lambda.
     /// </param>
-    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null)
+    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _deltas = deltas ?? throw new ArgumentNullException(nameof(deltas));
         _logger = logger;
         _capturePlans = capturePlans ?? (() => true);
+        /* Null provider = keep the collector's own compile-time budget (what Lite and every test does). */
+        _textBudgetMb = textBudgetMb ?? (() => 0);
         _collectSchemaChanges = collectSchemaChanges ?? (() => true);
     }
 
@@ -186,6 +194,9 @@ public sealed class DarlingCollectorRunner
             ExcludedDatabases = server.Config.ExcludedDatabases?.ToArray() ?? Array.Empty<string>(),
             PerfmonCounterOverride = null,
             CapturePlanXml = _capturePlans(),
+            /* #2164: 0 from the default provider means "no override" — the collector keeps its own
+               constant. Converted MB -> bytes here so the store knob stays operator-friendly. */
+            TextByteBudgetOverride = _textBudgetMb() > 0 ? _textBudgetMb() * 1024 * 1024 : null,
             CollectSchemaChangeEvents = _collectSchemaChanges(),
         };
 
@@ -848,6 +859,9 @@ public sealed class DarlingCollectorRunner
             ExcludedDatabases = server.Config.ExcludedDatabases?.ToArray() ?? Array.Empty<string>(),
             PerfmonCounterOverride = null,
             CapturePlanXml = _capturePlans(),
+            /* #2164: 0 from the default provider means "no override" — the collector keeps its own
+               constant. Converted MB -> bytes here so the store knob stays operator-friendly. */
+            TextByteBudgetOverride = _textBudgetMb() > 0 ? _textBudgetMb() * 1024 * 1024 : null,
             CollectSchemaChangeEvents = _collectSchemaChanges(),
         };
 
