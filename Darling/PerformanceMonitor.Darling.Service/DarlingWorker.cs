@@ -1616,17 +1616,6 @@ public sealed class DarlingWorker : BackgroundService
     }
 
     /// <summary>
-    /// The #2022 backfill tick: at most one Query Store backfill slice per CONNECTED server per
-    /// interval, sequentially — sequence IS the fleet-wide concurrency bound, so a fleet of slow
-    /// slices stretches the tick instead of stacking connections. Servers are snapshotted under
-    /// the reconcile lock and only their Runtime is carried out of it; a server that disconnects
-    /// mid-tick fails its slice like any other per-server error and is skipped, not fatal.
-    /// Deliberately does NOT touch the per-server CollectionGate: taking it would make backfill
-    /// delay live collection (the sweep skips a held server), which inverts the issue's own
-    /// constraint — a backfill slice is read-only against the monitored server and writes on its
-    /// own store connection, so running beside a live sweep is safe.
-    /// </summary>
-    /// <summary>
     /// Moves the sweep gate's in-circulation permits to <paramref name="target"/> (#2170). Widening Releases
     /// immediately. Narrowing CANNOT preempt a running body, so it absorbs the surplus permits in the
     /// background as they free up — the effective width converges within one sweep without this call ever
@@ -1673,6 +1662,17 @@ public sealed class DarlingWorker : BackgroundService
         }, stoppingToken);
     }
 
+    /// <summary>
+    /// The #2022 backfill tick: at most one Query Store backfill slice per CONNECTED server per
+    /// interval, sequentially — sequence IS the fleet-wide concurrency bound, so a fleet of slow
+    /// slices stretches the tick instead of stacking connections. Servers are snapshotted under
+    /// the reconcile lock and only their Runtime is carried out of it; a server that disconnects
+    /// mid-tick fails its slice like any other per-server error and is skipped, not fatal.
+    /// Deliberately does NOT touch the per-server CollectionGate: taking it would make backfill
+    /// delay live collection (the sweep skips a held server), which inverts the issue's own
+    /// constraint — a backfill slice is read-only against the monitored server and writes on its
+    /// own store connection, so running beside a live sweep is safe.
+    /// </summary>
     private async Task RunQueryStoreBackfillLoopAsync(QueryStoreBackfill backfill, List<ServerLoopState> servers, Func<bool> backfillEnabled, CancellationToken stoppingToken)
     {
         /* #2167: transition-logged so a store-config flip is visible in the log exactly once per state
