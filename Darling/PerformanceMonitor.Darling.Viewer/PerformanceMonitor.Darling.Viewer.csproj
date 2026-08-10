@@ -38,13 +38,13 @@
 
   <ItemGroup>
     <!-- Same package + version as Lite, so both chart hosts pin one ScottPlot. -->
-    <PackageReference Include="ScottPlot.WPF" Version="5.1.59" />
+    <PackageReference Include="ScottPlot.WPF" />
     <!-- System tray icon + balloon toasts (ported from Lite's SystemTrayService). Same package + version
          as Lite so both WPF front ends pin one Hardcodet.NotifyIcon.Wpf. -->
-    <PackageReference Include="Hardcodet.NotifyIcon.Wpf" Version="2.0.1" />
+    <PackageReference Include="Hardcodet.NotifyIcon.Wpf" />
     <!-- Velopack: the remote-seat Setup.exe + in-app self-update (#1555). Same version as Lite and
          Dashboard (keep in sync with the vpk pin in .github/workflows/build.yml + nightly.yml). -->
-    <PackageReference Include="Velopack" Version="1.2.0" />
+    <PackageReference Include="Velopack" />
   </ItemGroup>
 
   <ItemGroup>
