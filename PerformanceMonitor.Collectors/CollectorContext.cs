@@ -185,6 +185,23 @@ public sealed class CollectorContext
     public bool PerItemTextBudgetExceeded { get; set; }
 
     /// <summary>
+    /// Milliseconds spent waiting for <c>ExecuteReaderAsync</c> to return for the item just read (#2164),
+    /// set by the host around the open. Splits a batch's server time into the part the client cannot
+    /// influence and the part it can:
+    ///
+    /// <para>For a multi-statement batch like query_store's staged shape, ADO.NET returns the reader only
+    /// when the first ROWSET is available — so this number spans every preceding non-rowset statement (the
+    /// <c>SELECT … INTO #pm_qs_slice</c> aggregate) plus the final select's time-to-first-row. The
+    /// remaining time, drain, is row streaming the client's byte budget and read loop actually govern.</para>
+    ///
+    /// <para>Why it exists: cutting the byte budget 64 MB → 12 MB on a production server moved bytes 5x and
+    /// the batch clock ~0%, which said the dominant term is upstream of shipping — but the single blended
+    /// <c>sql:</c> number could not prove WHICH statement, so any next fix would have been a guess. Zero
+    /// when the host does not measure it (Lite today), so a zero must never be read as "instant".</para>
+    /// </summary>
+    public long PerItemOpenMs { get; set; }
+
+    /// <summary>
     /// Cumulative text bytes the budgeted read actually materialized for the item just read (#1960),
     /// reset and written alongside <see cref="PerItemTextBudgetExceeded"/>. Read by the host purely
     /// for the bounded-cycle WARNING, so a long catch-up reports how much each cycle shipped rather

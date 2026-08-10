@@ -574,7 +574,18 @@ public sealed class DarlingCollectorRunner
                     {
                         var batch = new List<TRow>();
                         using var itemCommand = CreateCollectorCommand(definition.BuildPerItemQuery(item, context), sqlConnection, itemTimeout);
+                        /* #2164: time the OPEN separately from the drain. ExecuteReaderAsync returns only
+                           when the first rowset is available, so for query_store's staged batch this is the
+                           #pm_qs_slice aggregate plus time-to-first-row — the part no client-side budget can
+                           shorten. Everything after is streaming, which the budget does govern. The blended
+                           sql: number could not tell those apart, which is why a 5x payload cut looked like
+                           it did nothing. */
+                        /* Cleared BEFORE the open so an item whose open faults cannot log the previous
+                           item's split as its own — a stale timing is worse than no timing. */
+                        context.PerItemOpenMs = 0;
+                        var openWatch = Stopwatch.StartNew();
                         using var itemReader = await itemCommand.ExecuteReaderAsync(ct);
+                        context.PerItemOpenMs = openWatch.ElapsedMilliseconds;
                         await definition.ReadItemAsync(item, itemReader, batch, context, ct);
                         return batch;
                     },
@@ -594,8 +605,22 @@ public sealed class DarlingCollectorRunner
                            Query Store's 900s flushes) stay silent. */
                         if (batchCount > 0)
                         {
-                            _logger?.LogInformation("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms, pg:{PgMs}ms)",
-                                server.Config.DisplayName, definition.Name, item, batchCount, itemSqlMs, itemStorageMs);
+                            /* #2164: open vs drain, because they have different fixes. A pass that is nearly
+                               all OPEN is bound by server-side work before the first row (for query_store,
+                               the #pm_qs_slice aggregate) and no client-side budget or payload trimming will
+                               touch it; a pass that is mostly drain is bound by moving rows, where the byte
+                               budget and the link are the levers. Only emitted when the host measured it. */
+                            if (context.PerItemOpenMs > 0)
+                            {
+                                _logger?.LogInformation("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms = open:{OpenMs}ms + drain:{DrainMs}ms, pg:{PgMs}ms)",
+                                    server.Config.DisplayName, definition.Name, item, batchCount, itemSqlMs,
+                                    context.PerItemOpenMs, Math.Max(0, itemSqlMs - context.PerItemOpenMs), itemStorageMs);
+                            }
+                            else
+                            {
+                                _logger?.LogInformation("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms, pg:{PgMs}ms)",
+                                    server.Config.DisplayName, definition.Name, item, batchCount, itemSqlMs, itemStorageMs);
+                            }
                         }
 
                         var capHit = definition.PerItemRowCountWarnThreshold is int cap && batchCount >= cap;
