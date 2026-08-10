@@ -127,8 +127,14 @@ public sealed class DarlingWorker : BackgroundService
     /// </summary>
     internal const int SweepGateCeiling = 16;
 
-    /// <summary>Permits currently in circulation on the sweep gate — the knob's effective value (#2170).</summary>
-    private int _gateEffectiveSweeps;
+    /* Sweep-gate width state (#2170), all under _gateLock: the gate is built at SweepGateCeiling and its
+       effective width is (ceiling - _gateAbsorbed). _gateDesiredAbsorb is where the knob wants that to
+       land; a single absorber task closes the gap as in-flight bodies release permits. Holding the counts
+       (rather than per-call deltas) is what makes a widen landing mid-narrow safe — see ReconcileSweepGate. */
+    private readonly object _gateLock = new();
+    private int _gateAbsorbed;
+    private int _gateDesiredAbsorb;
+    private bool _gateAbsorberRunning;
 
     /// <summary>
     /// Seconds an in-flight collection body may go unresolved before the sweep watchdog surfaces it. One
@@ -1078,7 +1084,8 @@ public sealed class DarlingWorker : BackgroundService
            Fills the two windows the live path discards by design — the 60-minute first-contact tail and
            24h-clamped outage holes — newest-first, byte-budgeted, strictly BELOW the live path's floor, and
            never past the raw tier's horizon. Plan capture reads the same live provider the runner does. */
-        var queryStoreBackfill = new QueryStoreBackfill(postgres, runner, deltas, _logger, () => config.CapturePlans);
+        var queryStoreBackfill = new QueryStoreBackfill(postgres, runner, deltas, _logger, () => config.CapturePlans,
+            () => StoreConfigProvider.ClampTextBudgetMb(config.QueryStoreTextBudgetMb));
         var backfillLoop = RunQueryStoreBackfillLoopAsync(queryStoreBackfill, servers, () => config.QueryStoreBackfillEnabled, stoppingToken);
 
         /* The fleet concurrency gate (#1553 D2): at most N=4 per-server collection bodies open a SQL connection
@@ -1095,7 +1102,6 @@ public sealed class DarlingWorker : BackgroundService
 #pragma warning disable CA2000
         var serverSweepGate = new SemaphoreSlim(SweepGateCeiling, SweepGateCeiling);
 #pragma warning restore CA2000
-        _gateEffectiveSweeps = SweepGateCeiling;
         ReconcileSweepGate(serverSweepGate, StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps), stoppingToken);
 
         _logger.LogInformation("PerformanceMonitor Darling collection loop started");
@@ -1616,50 +1622,110 @@ public sealed class DarlingWorker : BackgroundService
     }
 
     /// <summary>
-    /// Moves the sweep gate's in-circulation permits to <paramref name="target"/> (#2170). Widening Releases
-    /// immediately. Narrowing CANNOT preempt a running body, so it absorbs the surplus permits in the
-    /// background as they free up — the effective width converges within one sweep without this call ever
-    /// blocking the collection loop or cutting a collection short. Idempotent; a no-op when already at target.
+    /// Moves the sweep gate to <paramref name="target"/> concurrent servers (#2170). The gate is built at
+    /// <see cref="SweepGateCeiling"/> and its width is expressed as how many permits are held OUT of
+    /// circulation, so narrowing "absorbs" permits and widening gives them back.
+    ///
+    /// <para>State is the absorbed COUNT plus a desired count, both under <see cref="_gateLock"/>, rather
+    /// than a per-call absorb loop: the first cut had a permit-stealing race (review catch) where a
+    /// still-running narrowing task would immediately re-absorb the permit a later widening had just
+    /// released, pinning the gate below the configured width. At most one absorber runs, and it re-reads
+    /// the desired count under the lock before AND after every wait — so a widening mid-absorb makes the
+    /// absorber hand its permit straight back and retire.</para>
+    ///
+    /// <para>Never blocks the caller and never preempts a running collection: narrowing only takes permits
+    /// as in-flight bodies release them, so the effective width converges within about one sweep.</para>
     /// </summary>
     private void ReconcileSweepGate(SemaphoreSlim gate, int target, CancellationToken stoppingToken)
     {
-        var delta = target - _gateEffectiveSweeps;
-        if (delta == 0)
+        int toRelease;
+        bool startAbsorber;
+        lock (_gateLock)
         {
-            return;
-        }
-
-        _gateEffectiveSweeps = target;
-
-        if (delta > 0)
-        {
-            gate.Release(delta);
-            _logger.LogInformation("Fleet sweep width widened to {Target} concurrent servers (#2170 knob)", target);
-            return;
-        }
-
-        var toAbsorb = -delta;
-        _logger.LogInformation(
-            "Fleet sweep width narrowing to {Target} concurrent servers (#2170 knob) — {Absorb} permit(s) retire as in-flight collections finish",
-            target, toAbsorb);
-
-        /* Fire-and-forget by design: awaiting here would stall the sweep behind whatever is running. The
-           permits are simply never released back, which is what removing them means; a later widening
-           Releases them again because _gateEffectiveSweeps tracks the target, not the absorbed count. */
-        _ = Task.Run(async () =>
-        {
-            try
+            var desired = SweepGateCeiling - target;
+            if (desired == _gateDesiredAbsorb && _gateAbsorbed == desired)
             {
-                for (var i = 0; i < toAbsorb; i++)
+                return;
+            }
+
+            _gateDesiredAbsorb = desired;
+            toRelease = _gateAbsorbed > desired ? _gateAbsorbed - desired : 0;
+            _gateAbsorbed -= toRelease;
+            startAbsorber = _gateAbsorbed < desired && !_gateAbsorberRunning;
+            if (startAbsorber)
+            {
+                _gateAbsorberRunning = true;
+            }
+        }
+
+        if (toRelease > 0)
+        {
+            gate.Release(toRelease);
+            _logger.LogInformation("Fleet sweep width widened to {Target} concurrent servers (#2170 knob)", target);
+        }
+
+        if (startAbsorber)
+        {
+            _logger.LogInformation(
+                "Fleet sweep width narrowing to {Target} concurrent servers (#2170 knob) — permits retire as in-flight collections finish",
+                target);
+            _ = Task.Run(() => AbsorbSweepPermitsAsync(gate, stoppingToken), stoppingToken);
+        }
+    }
+
+    /// <summary>
+    /// The single sweep-gate absorber (#2170): takes permits out of circulation until the absorbed count
+    /// reaches the desired count. Re-checks that target around every wait, so a widening that lands while
+    /// it is parked on <see cref="SemaphoreSlim.WaitAsync(CancellationToken)"/> is honored — the permit it
+    /// was granted goes straight back rather than being stolen from the wider gate.
+    /// </summary>
+    private async Task AbsorbSweepPermitsAsync(SemaphoreSlim gate, CancellationToken stoppingToken)
+    {
+        try
+        {
+            while (true)
+            {
+                lock (_gateLock)
                 {
-                    await gate.WaitAsync(stoppingToken).ConfigureAwait(false);
+                    if (_gateAbsorbed >= _gateDesiredAbsorb)
+                    {
+                        _gateAbsorberRunning = false;
+                        return;
+                    }
+                }
+
+                await gate.WaitAsync(stoppingToken).ConfigureAwait(false);
+
+                var giveBack = false;
+                lock (_gateLock)
+                {
+                    if (_gateAbsorbed >= _gateDesiredAbsorb)
+                    {
+                        /* Widened while we waited — this permit is no longer surplus. */
+                        _gateAbsorberRunning = false;
+                        giveBack = true;
+                    }
+                    else
+                    {
+                        _gateAbsorbed++;
+                    }
+                }
+
+                if (giveBack)
+                {
+                    gate.Release();
+                    return;
                 }
             }
-            catch (OperationCanceledException)
+        }
+        catch (OperationCanceledException)
+        {
+            /* Shutdown — the gate goes away with the process. */
+            lock (_gateLock)
             {
-                /* Shutdown — the gate is going away with the process. */
+                _gateAbsorberRunning = false;
             }
-        }, stoppingToken);
+        }
     }
 
     /// <summary>

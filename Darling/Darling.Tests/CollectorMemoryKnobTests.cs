@@ -8,6 +8,10 @@
 
 using System;
 using System.Linq;
+using System.Reflection;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
@@ -101,6 +105,46 @@ public sealed class CollectorMemoryKnobTests
         Assert.Equal(8 * 1024 * 1024, overridden.TextByteBudgetOverride);
         Assert.True(overridden.TextByteBudgetOverride < QueryStoreCollector.MaxTextBytesPerDatabase,
             "the override must be able to LOWER the budget — that is the entire point of the knob");
+    }
+
+    [Fact]
+    public async Task SweepGate_NarrowThenWiden_LandsAtTheConfiguredWidth_NoPermitStealing()
+    {
+        /* The review catch: the first cut fired a per-call absorb loop, so a still-running NARROWING task
+           would immediately re-take the permit a later WIDENING had just released — pinning the gate below
+           the configured width forever. This drives the real reconcile through that exact sequence with all
+           permits held (nothing to absorb yet), then widens, and asserts the gate actually reaches the new
+           width. Reflection because the gate plumbing is private worker state, and pinning behavior beats
+           making it public just to observe it. */
+        var worker = (DarlingWorker)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(DarlingWorker));
+        var lockField = typeof(DarlingWorker).GetField("_gateLock", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        lockField.SetValue(worker, new object());
+        var loggerField = typeof(DarlingWorker).GetField("_logger", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        loggerField.SetValue(worker, NullLogger<DarlingWorker>.Instance);
+
+        var reconcile = typeof(DarlingWorker).GetMethod("ReconcileSweepGate", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        var absorbed = typeof(DarlingWorker).GetField("_gateAbsorbed", BindingFlags.NonPublic | BindingFlags.Instance)!;
+
+        using var gate = new SemaphoreSlim(DarlingWorker.SweepGateCeiling, DarlingWorker.SweepGateCeiling);
+        /* Every permit checked out, exactly like a fully busy fleet — a narrowing absorber must park. */
+        for (var i = 0; i < DarlingWorker.SweepGateCeiling; i++)
+        {
+            await gate.WaitAsync(TestContext.Current.CancellationToken);
+        }
+
+        reconcile.Invoke(worker, new object[] { gate, 2, TestContext.Current.CancellationToken });   // narrow, absorber parks
+        reconcile.Invoke(worker, new object[] { gate, 12, TestContext.Current.CancellationToken });  // widen while it is parked
+
+        /* Give every permit back: a healthy gate now offers 12, and the parked absorber must NOT keep any. */
+        gate.Release(DarlingWorker.SweepGateCeiling);
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < deadline && (int)absorbed.GetValue(worker)! != DarlingWorker.SweepGateCeiling - 12)
+        {
+            await Task.Delay(25, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(DarlingWorker.SweepGateCeiling - 12, (int)absorbed.GetValue(worker)!);
+        Assert.Equal(12, gate.CurrentCount);
     }
 
     [Fact]
