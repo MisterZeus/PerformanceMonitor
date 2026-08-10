@@ -306,20 +306,23 @@ FROM collect.store_metrics", connection);
     /// FIRES from real store readings. One throwaway hypertable with a compression policy that is PARKED
     /// except when a measurement deliberately arms it (created parked in one transaction — the #1888
     /// discipline — so no background tick ever races a measurement, the #2143 class), driven at 1x and
-    /// then 4x row volume:
+    /// then 10x row volume:
     /// <list type="number">
     /// <item>a scheduler-driven run at each scale (arm, poll total_runs, park — foreground run_job does
     /// NOT update this accounting, CI-proved); job_stats.last_run_duration must be measurable (the
     /// premise the whole telemetry stands on) and must GROW with volume;</item>
     /// <item>a self-metrics sweep after each run; the store_metrics series must carry both readings, in
     /// order, growing — this is the series an operator (and the cadence alert's detail text) trends;</item>
-    /// <item>alter_job shrinks the schedule interval to half the measured 4x duration, and the REAL
+    /// <item>alter_job shrinks the schedule interval to half the measured 10x duration, and the REAL
     /// evaluator, fed by the REAL <see cref="TimescaleSupport.ReadJobCadenceReadingsAsync"/> against this
     /// store, must fire the Critical tier under the storejob: key.</item>
     /// </list>
-    /// Volumes (50k vs 200k rows in one closed chunk each, after a discarded warm-up run) are chosen so
-    /// the 4x run does strictly more compression work than the 1x run by a margin no runner jitter
-    /// plausibly inverts; the assertion is monotonicity, not a ratio, for exactly that reason.
+    /// Volumes (50k vs 500k rows in one closed chunk each, after a discarded warm-up run) are chosen so
+    /// the big run does strictly more compression work than the 1x run by a margin no runner jitter
+    /// plausibly inverts; the assertion is monotonicity, not a ratio, for exactly that reason. The
+    /// margin is a full order of magnitude because 4x was NOT enough (#2160): a fast runner's fixed
+    /// per-run cost plus cache warmth accumulating across the two measured runs inverted 50k-vs-200k
+    /// in the field (d1=279ms, d4=217ms).
     /// Seeds are midday-anchored (#1972) so a run near midnight cannot split a chunk.
     /// </summary>
     [Fact]
@@ -387,16 +390,16 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
             "why the runs go through the real scheduler.)");
         await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow, null, ct);
 
-        /* 4x: one closed chunk, 200k rows. */
-        await SeedTickRowsAsync(connection, Table, daysBack: 8, rows: 200_000, ct);
+        /* 10x: one closed chunk, 500k rows. */
+        await SeedTickRowsAsync(connection, Table, daysBack: 8, rows: 500_000, ct);
         await RunJobViaSchedulerAsync(connection, jobId, ct);
-        long d4 = await ReadJobDurationMsAsync(connection, jobId, ct);
+        long d10 = await ReadJobDurationMsAsync(connection, jobId, ct);
         await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow.AddSeconds(2), null, ct);
 
         /* 1. The capacity claim itself: more volume, longer run. Monotonicity, not a ratio — runner
            jitter owns the constant factor, the direction is ours. */
-        Assert.True(d4 > d1,
-            $"4x volume did not run longer than 1x (d1={d1}ms, d4={d4}ms) — job runtime is not " +
+        Assert.True(d10 > d1,
+            $"10x volume did not run longer than 1x (d1={d1}ms, d10={d10}ms) — job runtime is not " +
             "scaling with volume, which invalidates the #2136 capacity model.");
 
         /* 2. The telemetry recorded the growth: two series points for this job, in order, growing. */
@@ -416,10 +419,10 @@ ORDER BY metric_time", connection))
 
             Assert.Equal(2, points.Count);
             Assert.Equal(d1, points[0]);
-            Assert.Equal(d4, points[1]);
+            Assert.Equal(d10, points[1]);
         }
 
-        /* 3. The alert fires from REAL readings: shrink the schedule interval to half the measured 4x
+        /* 3. The alert fires from REAL readings: shrink the schedule interval to half the measured 10x
            duration (percent ≈ 200), then run the real reader into the real evaluator. */
         await ExecAsync(connection, $@"
 SELECT alter_job({jobId}::integer, schedule_interval => (
@@ -472,7 +475,7 @@ FROM generate_series(1, {rows}) AS g", ct);
     {
         /* Poll on last_successful_finish, NOT total_runs: total_runs increments when a run STARTS, and
            job_stats reports last_run_duration as NULL while the run is in flight — CI proved it, by
-           catching the 4x run mid-flight and reading 0ms (the 1x run had merely finished inside one
+           catching the larger run mid-flight and reading 0ms (the 1x run had merely finished inside one
            poll tick). last_successful_finish only advances at COMPLETION, so a read after it moves is
            a read of a finished run's accounting. */
         var before = await ReadLastSuccessfulFinishAsync(connection, jobId, ct);
