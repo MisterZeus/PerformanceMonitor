@@ -506,6 +506,12 @@ public sealed class DarlingCollectorRunner
                         ? null
                         : async (item, ct) =>
                         {
+                            /* #2164: the driver's per-item stopwatch starts BEFORE this delegate, so the
+                               watermark refresh — a STORE read, plus a store write on the clamp path below —
+                               would otherwise be silently counted as row-streaming time. Measured here so
+                               DrainMsFrom can subtract it; the whole point of the split is that each number
+                               names one real phase. */
+                            var watermarkWatch = Stopwatch.StartNew();
                             var raw = await GetLastCollectedTimeForDatabaseAsync(
                                 server.ServerId, definition.TargetTable, definition.WatermarkColumn!,
                                 definition.PerDatabaseWatermarkColumn!, item, ct);
@@ -569,6 +575,7 @@ public sealed class DarlingCollectorRunner
                             }
 
                             context.Watermark = clamped;
+                            context.PerItemWatermarkMs = watermarkWatch.ElapsedMilliseconds;
                         },
                     readItem: async (item, ct) =>
                     {
@@ -581,7 +588,9 @@ public sealed class DarlingCollectorRunner
                            sql: number could not tell those apart, which is why a 5x payload cut looked like
                            it did nothing. */
                         /* Cleared BEFORE the open so an item whose open faults cannot log the previous
-                           item's split as its own — a stale timing is worse than no timing. */
+                           item's split as its own — a stale timing is worse than no timing. The watermark
+                           phase is NOT cleared here: it ran already, for THIS item, and clearing it would
+                           hand its milliseconds to drain. */
                         context.PerItemOpenMs = 0;
                         var openWatch = Stopwatch.StartNew();
                         using var itemReader = await itemCommand.ExecuteReaderAsync(ct);
@@ -612,9 +621,9 @@ public sealed class DarlingCollectorRunner
                                budget and the link are the levers. Only emitted when the host measured it. */
                             if (context.PerItemOpenMs > 0)
                             {
-                                _logger?.LogInformation("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms = open:{OpenMs}ms + drain:{DrainMs}ms, pg:{PgMs}ms)",
+                                _logger?.LogInformation("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms = wm:{WatermarkMs}ms + open:{OpenMs}ms + drain:{DrainMs}ms, pg:{PgMs}ms)",
                                     server.Config.DisplayName, definition.Name, item, batchCount, itemSqlMs,
-                                    context.PerItemOpenMs, Math.Max(0, itemSqlMs - context.PerItemOpenMs), itemStorageMs);
+                                    context.PerItemWatermarkMs, context.PerItemOpenMs, context.DrainMsFrom(itemSqlMs), itemStorageMs);
                             }
                             else
                             {

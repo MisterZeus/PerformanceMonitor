@@ -41,40 +41,36 @@ public sealed class StatementSplitTimingTests
     [Theory]
     /* An aggregate-bound pass: nearly all the batch is spent before the first row arrives, so no client
        byte budget can shorten it — the query_store shape measured on the field server. */
-    [InlineData(100_000L, 98_000L, 2_000L)]
+    [InlineData(100_000L, 0L, 98_000L, 2_000L)]
     /* A drain-bound pass: rows are cheap to produce and expensive to move, where the budget IS the lever. */
-    [InlineData(100_000L, 3_000L, 97_000L)]
-    /* Degenerate: open exceeding the batch total (clock skew between the two watches) must clamp at zero
+    [InlineData(100_000L, 0L, 3_000L, 97_000L)]
+    /* The watermark phase is a STORE round trip the driver's stopwatch already started before. It must come
+       out of drain, not inflate it — the review catch this arithmetic exists to prevent. */
+    [InlineData(100_000L, 40_000L, 55_000L, 5_000L)]
+    /* Degenerate: phases exceeding the batch total (skew across separate stopwatches) must clamp at zero
        rather than print a negative drain, which would read as a measurement bug in the field. */
-    [InlineData(5_000L, 6_000L, 0L)]
-    public void DrainIsTheRemainder_AndNeverNegative(long sqlMs, long openMs, long expectedDrain)
+    [InlineData(5_000L, 3_000L, 6_000L, 0L)]
+    public void DrainExcludesWatermarkAndOpen_AndNeverGoesNegative(long sqlMs, long watermarkMs, long openMs, long expectedDrain)
     {
         var context = NewContext();
+        context.PerItemWatermarkMs = watermarkMs;
         context.PerItemOpenMs = openMs;
 
-        /* The same arithmetic the runner's log line performs. Pinned here so a refactor of that line cannot
-           silently start reporting negative drain. */
-        var drain = Math.Max(0, sqlMs - context.PerItemOpenMs);
-        Assert.Equal(expectedDrain, drain);
+        /* Calls the SHIPPED arithmetic (CollectorContext.DrainMsFrom) — the log line calls the same method,
+           so this cannot drift into pinning a copy of the formula the way the first cut did. */
+        Assert.Equal(expectedDrain, context.DrainMsFrom(sqlMs));
     }
 
     [Fact]
-    public void OpenMs_IsNotResetByTheQueryStoreRead_SoTheHostsMeasurementSurvivesToTheLog()
+    public void EveryPhaseAccountedFor_ThePartsNeverExceedTheWhole()
     {
-        /* The query_store collector resets its OWN per-item signals at the top of a read. The host sets
-           PerItemOpenMs before calling that read, so the collector must leave it alone — otherwise the
-           split would always log zero and the instrumentation would be silently dead. */
+        /* The split's contract as a reader sees it: wm + open + drain == the sql: total, so nothing is
+           silently unattributed. Holds for any measurement where the phases fit inside the total. */
         var context = NewContext();
-        context.PerItemOpenMs = 4_242;
-        context.PerItemTextBudgetExceeded = true;
-        context.PerItemTextBytesShipped = 999;
+        context.PerItemWatermarkMs = 1_200;
+        context.PerItemOpenMs = 300_000;
+        const long sqlMs = 350_000;
 
-        /* Mirrors the collector's documented reset set — deliberately enumerated rather than invoking the
-           read (which needs a live reader), so this test states the contract the read must honor. */
-        context.PerItemTextBudgetExceeded = false;
-        context.PerItemTextBytesShipped = 0;
-        context.PerItemShippedBoundary = null;
-
-        Assert.Equal(4_242, context.PerItemOpenMs);
+        Assert.Equal(sqlMs, context.PerItemWatermarkMs + context.PerItemOpenMs + context.DrainMsFrom(sqlMs));
     }
 }

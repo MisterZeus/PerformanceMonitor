@@ -202,6 +202,24 @@ public sealed class CollectorContext
     public long PerItemOpenMs { get; set; }
 
     /// <summary>
+    /// Milliseconds the item's watermark refresh took (#2164), set by the host when it runs one. This is NOT
+    /// server think-time or streaming — for query_store it is a STORE read (and on the catch-up/adaptive
+    /// path a store write too), yet the driver's <c>sql:</c> stopwatch starts before it. Measured so it can
+    /// be subtracted rather than silently inflating drain, which would corrupt the one number this
+    /// instrumentation exists to make trustworthy. Zero when the host runs no per-item watermark.
+    /// </summary>
+    public long PerItemWatermarkMs { get; set; }
+
+    /// <summary>
+    /// The item's row-STREAMING time: the driver's blended per-item total minus the phases that are not
+    /// streaming (<see cref="PerItemWatermarkMs"/>, <see cref="PerItemOpenMs"/>). Lives here rather than at
+    /// the log site so the subtraction has exactly one definition and a test can pin the shipped arithmetic
+    /// instead of a copy of it. Clamped at zero: the phases are measured on separate stopwatches, so tiny
+    /// skew must never surface as negative drain.
+    /// </summary>
+    public long DrainMsFrom(long itemSqlMs) => Math.Max(0, itemSqlMs - PerItemOpenMs - PerItemWatermarkMs);
+
+    /// <summary>
     /// Cumulative text bytes the budgeted read actually materialized for the item just read (#1960),
     /// reset and written alongside <see cref="PerItemTextBudgetExceeded"/>. Read by the host purely
     /// for the bounded-cycle WARNING, so a long catch-up reports how much each cycle shipped rather
