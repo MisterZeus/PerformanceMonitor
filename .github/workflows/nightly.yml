@@ -482,6 +482,6 @@ jobs:
       # GitHub-native provenance for the tarball (SLSA): verified with
       #   gh attestation verify PerformanceMonitorDarling-linux-x64-<v>.tar.gz -R erikdarlingdata/PerformanceMonitor
       - name: Attest the linux tarball (GitHub provenance)
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: releases/PerformanceMonitorDarling-linux-x64-*.tar.gz
