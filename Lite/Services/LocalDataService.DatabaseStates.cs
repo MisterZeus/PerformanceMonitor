@@ -26,18 +26,23 @@ public partial class LocalDataService
     /// database-state alert. Fires only when the deviation is present in the TWO most recent collections
     /// (so a restart's RECOVERY_PENDING / RECOVERING transients — and a standby secondary's per-restore
     /// RESTORING flicker — don't page unless the condition actually sticks). First AUTO-SEEDS a baseline
-    /// (the effective state) for any database in the newest snapshot that has none — EXCEPT a critical
-    /// effective state (SUSPECT / RECOVERY_PENDING / EMERGENCY), which is left pending so onboarding a
-    /// server mid-outage doesn't learn the bad state as expected. Also tidies auto-baselines for databases
-    /// that have dropped off the newest snapshot (user overrides are preserved). The base table always
-    /// holds the newest snapshots (archival only moves older rows to parquet), so it is queried directly.
+    /// (the effective state) for any database in the newest snapshot that has none — EXCEPT an integrity or
+    /// transient effective state (<see cref="DatabaseStateTokens.NeverBaselinedSqlList"/>), which is left
+    /// pending so onboarding a server mid-outage or mid-restore doesn't learn that state as expected. Then
+    /// HEALS an auto-baseline that nonetheless records one of those states — written by an older build, or
+    /// by re-baselining a database by hand while it was mid-something — to ONLINE once the database reaches
+    /// ONLINE, so it stops deviating by being healthy (#2189); a user override, and an OFFLINE or STANDBY
+    /// baseline, are never touched. Also tidies auto-baselines for databases that have dropped off the
+    /// newest snapshot (user overrides are preserved). The base table always holds the newest snapshots
+    /// (archival only moves older rows to parquet), so it is queried directly.
     /// </summary>
     public async Task<List<DatabaseStateInfo>> GetDatabaseStateDeviationsAsync(int serverId)
     {
         using var connection = await OpenConnectionAsync();
 
-        /* Seed missing baselines from the latest snapshot (insert-if-absent; effective state; non-critical
-           only — a critical first observation stays pending and alerts via the no-baseline arm below). */
+        /* Seed missing baselines from the latest snapshot (insert-if-absent; effective state). An integrity
+           or transient state is never learned: a critical first observation stays pending and alerts via the
+           no-baseline arm below, and a transient one stays pending SILENTLY until it settles. */
         using (var seed = connection.CreateCommand())
         {
             seed.CommandText = $@"
@@ -47,13 +52,51 @@ FROM database_states ds
 WHERE ds.server_id = $1
 AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
 AND   ds.state_desc IS NOT NULL
-AND   {EffectiveStateSql} NOT IN ('SUSPECT', 'RECOVERY_PENDING', 'EMERGENCY')
+AND   {EffectiveStateSql} NOT IN ({DatabaseStateTokens.NeverBaselinedSqlList})
 AND   NOT EXISTS (
     SELECT 1 FROM config_database_state_expected e
     WHERE e.server_id = $1 AND e.database_name = ds.database_name
 )";
             seed.Parameters.Add(new DuckDBParameter { Value = serverId });
             await seed.ExecuteNonQueryAsync();
+        }
+
+        /* #2189: re-learn an ILLEGITIMATE inferred baseline as ONLINE once the database reaches ONLINE — the
+           seed's own rule applied after the fact. An expectation recording a state the seed would refuse to
+           learn is not a baseline, it is a snapshot of a database mid-something, and left alone it inverts
+           the alert permanently. The widened seed above cannot fix that on its own because it only governs
+           rows that do not exist yet; this heals the ones already written, by the old seed or by "reset to
+           current" pressed during a restore or an outage (that path records whatever it sees, no filter).
+
+           Two gates. is_user_override = false: an operator who declared an expected state meant it, and a
+           database parked at expected OFFLINE must still alert when it comes back ONLINE. And the state list
+           is NOT "anything that is not ONLINE" — OFFLINE and STANDBY are steady states worth learning, and
+           leaving one is real news: a STANDBY secondary that turns up ONLINE has stopped being a secondary
+           (somebody recovered it, log shipping is broken), and an auto-OFFLINE database brought up for an
+           hour and re-parked would come back deviating forever. Both are this bug's own shape.
+
+           The EFFECTIVE state is what is matched, never state_desc — a standby secondary reports
+           state_desc = 'ONLINE' with is_in_standby set, so matching the raw column would re-baseline every
+           log-shipping secondary to ONLINE and then alert it forever for being STANDBY. Uncorrelated
+           IN (...), like the prune below. */
+        using (var heal = connection.CreateCommand())
+        {
+            heal.CommandText = $@"
+UPDATE config_database_state_expected
+SET expected_state = 'ONLINE',
+    updated_at = now()::TIMESTAMP
+WHERE server_id = $1
+AND   is_user_override = false
+AND   expected_state IN ({DatabaseStateTokens.NeverBaselinedSqlList})
+AND   database_name IN (
+    SELECT ds.database_name
+    FROM database_states ds
+    WHERE ds.server_id = $1
+    AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
+    AND   {EffectiveStateSql} = 'ONLINE'
+)";
+            heal.Parameters.Add(new DuckDBParameter { Value = serverId });
+            await heal.ExecuteNonQueryAsync();
         }
 
         /* Tidy auto-baselines for databases no longer in the newest snapshot (dropped/renamed). User
@@ -100,8 +143,8 @@ LEFT JOIN config_database_state_expected e
   ON  e.server_id = $1
   AND e.database_name = l.database_name
 WHERE (e.expected_state IS NULL
-        AND l.eff IN ('SUSPECT', 'RECOVERY_PENDING', 'EMERGENCY')
-        AND p.eff IN ('SUSPECT', 'RECOVERY_PENDING', 'EMERGENCY'))
+        AND l.eff IN ({DatabaseStateTokens.CriticalSqlList})
+        AND p.eff IN ({DatabaseStateTokens.CriticalSqlList}))
    OR (e.expected_state IS NOT NULL AND e.expected_state <> '(ignore)'
         AND l.eff IS DISTINCT FROM e.expected_state
         AND p.eff IS DISTINCT FROM e.expected_state)
