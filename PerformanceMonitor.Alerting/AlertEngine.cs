@@ -1349,7 +1349,12 @@ public sealed class AlertEngine
                string prefix is what keeps a database named 'Foo|Bar' from being swept when 'Foo' recovers. */
             if (recovered.Count > 0)
             {
-                var recoveredSet = new HashSet<string>(recovered, StringComparer.OrdinalIgnoreCase);
+                /* ORDINAL, like `current` and `active` above and for the same reason: per-database keys here
+                   must be case-SENSITIVE to match the stores' case-sensitive expected-state joins. A
+                   case-insensitive set would let recovering `Foo` clear `foo`'s per-state stamps on a
+                   case-sensitive collation where both exist — resetting the only quiet mechanism an integrity
+                   state has, which is the same collision class the tuple key just removed for '|'. */
+                var recoveredSet = new HashSet<string>(recovered, StringComparer.Ordinal);
                 foreach (var stamped in _lastDatabaseStateAlert.Keys)
                 {
                     if (string.Equals(stamped.Server, key, StringComparison.Ordinal)
