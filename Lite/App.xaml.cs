@@ -177,14 +177,6 @@ public partial class App : Application
        (AnalysisNotificationsEnabled). Default ON so the recommendations data exists. */
     public static bool AnalysisEnabled { get; set; } = true;
 
-    /* #2167: the Query Store history backfill (#2058) — fills gaps the live path never takes (a
-       first-contact tail, an outage hole, a freshly restored database's imported catalog) in bounded
-       background slices. Default ON. Turn it off when a heavy catch-up is costing the monitored server
-       more than the history is worth; live collection is unaffected and re-enabling resumes exactly
-       where the watermarks left off, so nothing is lost by pausing it. Darling's equivalent is a store
-       column (V58) because a headless service has no window to click. */
-    public static bool QueryStoreBackfillEnabled { get; set; } = true;
-
     /* Automated analysis notifications (scheduled triage) */
     public static bool AnalysisNotificationsEnabled { get; set; } = false;  // Delivery gate — analysis runs regardless
     public static int AnalysisIntervalMinutes { get; set; } = 30;           // How often scheduled analysis runs
@@ -205,6 +197,14 @@ public partial class App : Application
     }
 
     /* System tray settings */
+    /* #2167: the Query Store history backfill (#2058) — fills gaps the live path never takes (a
+       first-contact tail, an outage hole, a freshly restored database's imported catalog) in bounded
+       background slices. Default ON. Turn it off when a heavy catch-up is costing the monitored server
+       more than the history is worth; live collection is unaffected and re-enabling resumes exactly
+       where the watermarks left off, so nothing is lost by pausing it. Darling's equivalent is a store
+       column (V58) because a headless service has no window to click. */
+    public static bool QueryStoreBackfillEnabled { get; set; } = true;
+
     public static bool MinimizeToTray { get; set; } = true;
 
     /* Time display mode ("ServerTime", "LocalTime", "UTC") */

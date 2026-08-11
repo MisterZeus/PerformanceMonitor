@@ -42,6 +42,7 @@
 
         <!-- Collection Control -->
         <Border Grid.Row="1" Background="{DynamicResource BackgroundLightBrush}" CornerRadius="4" Padding="12" Margin="0,0,0,12">
+            <StackPanel>
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
@@ -58,6 +59,16 @@
                 <Button Grid.Column="1" x:Name="PauseResumeButton" Content="Pause Co_llection"
                         Click="PauseResumeButton_Click" VerticalAlignment="Center"/>
             </Grid>
+            <!-- #2167: a COLLECTION control, so it lives beside Pause Collection rather than under
+                 Automated Analysis where it first landed (review catch) — the analysis engine has
+                 nothing to do with Query Store history. Mirrors where Darling puts it, next to plan
+                 capture in its collection group. -->
+            <CheckBox x:Name="QueryStoreBackfillCheckBox" Content="Fill Query Store history gaps in the background"
+                      Margin="0,10,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
+            <TextBlock Text="Catches up Query Store history the live path never sees: a newly added server's recent tail, gaps left by an outage, and a freshly restored database's imported catalog. Runs in bounded background slices. Turn it off when a heavy catch-up is costing a monitored server more than the history is worth — live collection is unaffected, and re-enabling resumes exactly where it left off."
+                       FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                       Margin="20,2,0,0" TextWrapping="Wrap"/>
+            </StackPanel>
         </Border>
 
         <!-- MCP Server Settings -->
@@ -374,11 +385,6 @@
                            Margin="20,0,0,4" TextWrapping="Wrap"/>
                 <CheckBox x:Name="AnalysisEnabledCheckBox" Content="Enable automated analysis"
                           Margin="20,4,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
-                <CheckBox x:Name="QueryStoreBackfillCheckBox" Content="Fill Query Store history gaps in the background"
-                          Margin="20,4,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
-                <TextBlock Text="Catches up Query Store history the live path never sees: a newly added server's recent tail, gaps left by an outage, and a freshly restored database's imported catalog. Runs in bounded background slices. Turn it off when a heavy catch-up is costing a monitored server more than the history is worth — live collection is unaffected, and re-enabling resumes exactly where it left off."
-                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
-                           Margin="40,0,0,4" TextWrapping="Wrap"/>
                 <CheckBox x:Name="AnalysisNotificationsCheckBox" Content="Send scheduled analysis notifications"
                           Margin="20,4,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
