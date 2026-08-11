@@ -21,6 +21,7 @@ using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Darling.Service.Targets;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
@@ -3528,6 +3529,53 @@ LIMIT 1";
     /// permission error numbers or a "permission was denied" / "does not have permission" message, so the handler
     /// can surface a clear cause instead of a raw exception.
     /// </summary>
+    /// <summary>
+    /// Maps a PostgreSQL fault to a collection_log status plus the sentence an operator needs.
+    /// <para>The store has five statuses and none of them is "this feature is not installed", so the
+    /// non-fatal-degradation bucket (PERMISSIONS) carries those cases and the MESSAGE distinguishes them —
+    /// the same division the Azure service-objective hint already uses. Returning "ERROR" means "let the
+    /// general handler have it", which keeps the genuinely unexpected loud.</para>
+    /// </summary>
+    internal static (string Status, string Explanation) PostgresFaultOutcome(
+        PostgresException ex, string collectorName)
+    {
+        var fault = PostgresTargetProvider.Instance.Classify(
+            ex, CollectorCatalog.YieldsOnLockTimeout(collectorName));
+
+        return fault switch
+        {
+            CollectorTargetFault.Permissions => ("PERMISSIONS",
+                $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the monitoring login lacks a grant this "
+                + "source needs. pg_monitor covers every collector here; check that it is granted."),
+
+            /* 42P01 / 42883: the relation or function is not there. Overwhelmingly an extension that was
+               never created in the connected database rather than anything to do with privileges. */
+            CollectorTargetFault.ObjectMissing => ("PERMISSIONS",
+                $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the source object does not exist on this "
+                + "target. This is NOT a missing grant: it is normally an extension that was never "
+                + "created in the connected database (CREATE EXTENSION pg_stat_statements), so the "
+                + "collector will keep degrading until it is. Recorded as a non-fatal skip rather than an "
+                + "error so it does not fill the log every cycle."),
+
+            /* 0A000 / 55000 / 55006: the server will not do this, permanently or by configuration —
+               pg_stat_wal on Aurora, or an optimized-reads cache that is switched off. */
+            CollectorTargetFault.FeatureDisabled => ("PERMISSIONS",
+                $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — this source is unsupported or disabled on "
+                + "this server. NOT a missing grant. Aurora does not implement some community sources at "
+                + "all, and others are gated by a parameter group. Recorded as a non-fatal skip because it "
+                + "will not change until the platform or the parameter group does."),
+
+            CollectorTargetFault.LockTimeoutYield => ("YIELDED",
+                $"Lock-timeout yield (SQLSTATE {ex.SqlState}): the collector's lock-timeout guard fired "
+                + "rather than waiting in a blocking chain. One sweep skipped; evidence of lock contention "
+                + "on the monitored server, not a monitoring failure."),
+
+            /* Everything else — including a command timeout and a fatal connection error — belongs to the
+               general handler, which logs ERROR and (for ConnectionFatal) forces the reprobe. */
+            _ => ("ERROR", ex.Message),
+        };
+    }
+
     private static bool IsPermissionError(SqlException ex)
     {
         foreach (SqlError error in ex.Errors)
@@ -3634,13 +3682,56 @@ LIMIT 1";
                 _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, 0, message, _logger, cancellationToken);
             return 0;
         }
+        catch (PostgresException ex) when (
+            PostgresFaultOutcome(ex, collectorName) is { Status: not "ERROR" } outcome)
+        {
+            /* PostgreSQL faults classified by SQLSTATE through the same ITargetProvider.Classify the
+               engine seam already exposes, so the runner and the provider cannot disagree about what an
+               error means.
+
+               Without this the general catch below claimed every one of them, and a PERSISTENT condition
+               would log ERROR every single cycle forever: pg_statement_stats against a database where the
+               extension was never created (42P01), a source Aurora does not implement at all (0A000), a
+               feature switched off in the parameter group (55006). Those are the exact PostgreSQL analogue
+               of the 8189 sys.traces denial above, which degrades to PERMISSIONS for the same reason —
+               it is a real, operator-actionable state, not a monitoring fault, and burying it in a
+               once-a-minute error is how it gets ignored.
+
+               The message says WHICH kind it is rather than leaving "PERMISSIONS" to imply a missing
+               GRANT, following the AzureDmvPermissionHint precedent: the status is the store's
+               non-fatal-degradation bucket, the text is where the truth goes. */
+            var (status, explanation) = (outcome.Status, outcome.Explanation);
+
+            if (status == "YIELDED")
+            {
+                _logger.LogInformation("  [{Server}] {Collector} => YIELDED - {Explanation}",
+                    server.Config.DisplayName, collectorName, explanation);
+            }
+            else
+            {
+                _logger.LogWarning("  [{Server}] {Collector} => {Status} ({SqlState}): {Message}",
+                    server.Config.DisplayName, collectorName, status, ex.SqlState, explanation);
+            }
+
+            await DarlingObservability.LogCollectionAsync(
+                _postgres!, runtime, collectorName, status, 0, 0, 0, explanation, _logger, cancellationToken);
+            return 0;
+        }
         catch (Exception ex)
         {
             _logger.LogError("  [{Server}] {Collector} => ERROR: {Message}",
                 server.Config.DisplayName, collectorName, ex.Message);
 
-            /* A dead connection poisons every collector — force a reconnect + reprobe. */
-            if (ex is SqlException sqlEx && (sqlEx.Class >= 20 || sqlEx.Number == -2))
+            /* A dead connection poisons every collector — force a reconnect + reprobe. The Postgres arm
+               matters as much as the SQL Server one and is deliberately NARROWER than "any
+               PostgresException": a statement_timeout (57014) is a slow query, not a dead socket, and
+               dropping the connection over one would turn a tuning problem into a reconnect storm. Only
+               the 08 class and the shutdown/unavailability codes qualify, which is exactly what the
+               provider's ConnectionFatal means. */
+            if ((ex is SqlException sqlEx && (sqlEx.Class >= 20 || sqlEx.Number == -2))
+                || (ex is PostgresException pgEx
+                    && PostgresTargetProvider.Instance.Classify(pgEx, yieldsOnLockTimeout: false)
+                       == CollectorTargetFault.ConnectionFatal))
             {
                 server.Runtime = null;
                 server.NextConnectAttempt = DateTime.UtcNow.AddSeconds(60);
