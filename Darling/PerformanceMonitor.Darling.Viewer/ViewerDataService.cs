@@ -491,10 +491,17 @@ SELECT
     internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false, bool hasAgCollectors = false, bool hasAgAlertKnobs = false, bool hasAgLatencyColumns = false, bool hasAgDisconnectRefire = false, bool hasPayloadDimensions = false, bool hasDimFloorIndexes = false, bool hasBlockingWaitThreshold = false, bool hasQueryStoreIntervalIdentity = false, bool hasPagerDutyWebhook = false, bool hasPagerDutyProxy = false, bool hasCollectorState = false, bool hasPlanCorrection = false, bool hasPvsStats = false, bool hasPvsPressureKnobs = false, bool hasDatabaseStateAlert = false, bool hasServerTagColour = false, bool hasQueryStatsHostObject = false, bool hasFindingDrillDown = false, bool hasStoreMetrics = false, bool hasPlanDimGzip = false, bool hasSelfAlertKnobs = false, bool hasJobMetricsColumns = false, bool hasJobCadenceKnob = false, bool hasBackfillSwitch = false, bool hasCollectorMemoryKnobs = false, bool hasDatabaseStateEdgeMemory = false)
     {
         /* V60 (database-state edge memory, #2166): column-existence sentinel, newest-first arm.
-           config.database_state_expected.last_alerted_state exists only at V60 or later. The viewer NAMES
-           that table's columns in its expected-state editor, so the gate must refuse a V59 store rather
-           than let a Settings read fail 42703, and a fully-migrated V60 store must map to exactly
-           RequiredStoreSchemaVersion. */
+           config.database_state_expected.last_alerted_state exists only at V60 or later.
+
+           Unlike the V59 arm below, the reason to gate here is NOT that the viewer would 42703: the
+           expected-state editor names only expected_state / is_user_override, so nothing in the viewer
+           touches either V60 column. The gate is the standing invariant instead — RequiredStoreSchemaVersion
+           is StorageVersion.SchemaVersion, so a fully-migrated store must map to exactly that or the version
+           banner reports a mismatch on a store that is actually current. The columns are written by the
+           SERVICE (the alert engine's edge memory) and read by its deviation query, so it is the service that
+           would fail on a V59 store, which is precisely why the viewer must not report V59 as good. Stated
+           explicitly because the V59 wording does not transfer, and someone deciding later whether this gate
+           can be relaxed needs the real reason. */
         if (hasDatabaseStateEdgeMemory)
         {
             return 60;

@@ -1513,12 +1513,13 @@ public sealed class AlertEngine
 
     /* ---------------- helpers ---------------- */
 
-    /// <summary>Lite's per-check cooldown test: no prior fire, or the cooldown has elapsed.</summary>
     /// <summary>
-    /// Generic in the KEY type only so a family whose cooldown is scoped by more than one thing can key it
-    /// structurally instead of concatenating a string (#2166). Every existing caller is string-keyed and
+    /// Lite's per-check cooldown test: no prior fire, or the cooldown has elapsed.
+    ///
+    /// <para>Generic in the KEY type only (#2166) so a family whose cooldown is scoped by more than one thing
+    /// can key it structurally instead of concatenating a string. Every existing caller is string-keyed and
     /// infers unchanged; the database-state family keys by (server, database, state), where a string key
-    /// would need a delimiter no <c>sysname</c> can contain — and SQL Server permits <c>|</c>.
+    /// would need a delimiter no <c>sysname</c> can contain — and SQL Server permits <c>|</c>.</para>
     /// </summary>
     private static bool CooldownElapsed<TKey>(
         ConcurrentDictionary<TKey, DateTime> lastFired, TKey key, DateTime now, TimeSpan cooldown)
