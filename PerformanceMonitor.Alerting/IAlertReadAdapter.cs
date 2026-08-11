@@ -172,4 +172,24 @@ public interface IAlertReadAdapter
     /// </summary>
     Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(
         string serverKey, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Forced Query Store plans whose <c>force_failure_count</c> ROSE between the two most recent
+    /// collections that carried the plan (#2157) — i.e. the engine is failing to reproduce that plan now.
+    ///
+    /// <para>The store computes the delta, exactly as <see cref="GetDatabaseStatesAsync"/> returns only
+    /// deviating rows: the engine must never see a level. The counter is cumulative AND travels with a
+    /// restored database, so a level-based read would alert forever about failures that happened on
+    /// hardware the operator may no longer own.</para>
+    ///
+    /// <para>A counter that DROPPED is an unforce/re-force cycle, not a failure, and is omitted (silent
+    /// re-arm). A plan seen for the FIRST time carries no previous sample and is therefore omitted too —
+    /// one cycle of delay, deliberately, because "new" is unknowable from a single observation.</para>
+    ///
+    /// <para>Empty when the store has fewer than two samples for every forced plan. Not freshness-gated,
+    /// for the same reason as database state: a failing force is a standing condition, so a stale snapshot
+    /// keeps it active rather than fabricating a recovery.</para>
+    /// </summary>
+    Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(
+        string serverKey, CancellationToken cancellationToken = default);
 }

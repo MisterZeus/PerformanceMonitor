@@ -2027,6 +2027,9 @@ public sealed class DarlingSelfAlertTests
             Task.FromResult(new AnomalousJobsResult(SnapshotIsFresh: true, new List<AnomalousJobInfo>()));
         public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<DatabaseStateInfo>());
+
+        public Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new List<ForcePlanFailureInfo>());
     }
 
     private sealed class StubStateStore : IAlertStateStore

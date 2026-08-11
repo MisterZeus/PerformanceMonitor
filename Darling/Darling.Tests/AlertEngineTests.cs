@@ -158,6 +158,18 @@ public sealed class AlertEngineTests
             DatabaseStateFetches++;
             return Task.FromResult(new List<DatabaseStateInfo>(DatabaseStates));
         }
+
+        /* #2157: plantable rows + a fetch counter, mirroring the database-state seam above so the
+           forced-plan alert's tests can assert both what fired and that the read happened. */
+        public List<ForcePlanFailureInfo> ForcePlanFailures { get; } = new();
+
+        public int ForcePlanFetches { get; private set; }
+
+        public Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(string serverKey, CancellationToken cancellationToken = default)
+        {
+            ForcePlanFetches++;
+            return Task.FromResult(new List<ForcePlanFailureInfo>(ForcePlanFailures));
+        }
     }
 
     private sealed class FakeStateStore : IAlertStateStore
@@ -1161,6 +1173,9 @@ public sealed class AlertEngineTests
         public Task<AnomalousJobsResult> GetAnomalousJobsAsync(string serverKey, int multiplier, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
         public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("store down");
+
+        public Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(string serverKey, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
     }
 

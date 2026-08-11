@@ -778,6 +778,88 @@ ORDER BY l.database_name";
         return items;
     }
 
+    /// <summary>
+    /// Forced plans whose failure counter ROSE between the two most recent collections that carried the
+    /// plan (#2157). $1 server_id.
+    ///
+    /// <para>Shape notes: query_store_stats holds one row per plan PER INTERVAL per collection, and the
+    /// forcing columns are plan-level attributes repeated across those rows — so the CTE collapses each
+    /// (plan, collection_time) to one value with MAX before any comparison. The two-hour window bounds
+    /// the hypertable scan; a plan not collected within it is by definition not failing right now, and
+    /// Query Store's own flush cadence (900s) means an active plan appears several times inside it.</para>
+    ///
+    /// <para>The <c>&gt;</c> comparison is what makes this a delta read: equal counters are silence, and a
+    /// LOWER counter (unforce/re-force reset) is silence too rather than a negative delta.</para>
+    /// </summary>
+    public const string ForcePlanFailuresSql = @"
+WITH per_collection AS (
+    SELECT
+        qs.database_name,
+        qs.query_id,
+        qs.plan_id,
+        qs.collection_time,
+        MAX(COALESCE(qs.force_failure_count, 0)) AS failures,
+        MAX(CASE WHEN qs.is_forced_plan THEN 1 ELSE 0 END) AS forced,
+        MAX(COALESCE(qs.plan_forcing_type, '')) AS forcing_type,
+        MAX(COALESCE(qs.last_force_failure_reason, '')) AS reason
+    FROM query_store_stats AS qs
+    WHERE qs.server_id = $1
+    AND   qs.collection_time > now() - interval '2 hours'
+    GROUP BY qs.database_name, qs.query_id, qs.plan_id, qs.collection_time
+),
+ranked AS (
+    SELECT
+        pc.*,
+        ROW_NUMBER() OVER (PARTITION BY pc.database_name, pc.query_id, pc.plan_id ORDER BY pc.collection_time DESC) AS rn
+    FROM per_collection AS pc
+)
+SELECT
+    n.database_name,
+    n.query_id,
+    n.plan_id,
+    n.forcing_type,
+    n.reason,
+    n.failures - p.failures AS failure_delta,
+    n.failures AS total_failures
+FROM ranked AS n
+JOIN ranked AS p
+  ON  p.database_name = n.database_name
+  AND p.query_id = n.query_id
+  AND p.plan_id = n.plan_id
+  AND p.rn = 2
+WHERE n.rn = 1
+AND   n.forced = 1
+AND   n.failures > p.failures
+ORDER BY n.database_name, n.query_id, n.plan_id";
+
+    public async Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(
+        string serverKey, CancellationToken cancellationToken = default)
+    {
+        var serverId = ParseServerKey(serverKey);
+
+        var items = new List<ForcePlanFailureInfo>();
+        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        using var command = new NpgsqlCommand(ForcePlanFailuresSql, connection);
+        command.Parameters.AddWithValue(serverId);
+
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            items.Add(new ForcePlanFailureInfo
+            {
+                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                QueryId = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
+                PlanId = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                ForcingType = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                FailureReason = reader.IsDBNull(4) ? "" : reader.GetString(4),
+                FailureDelta = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+                TotalFailures = reader.IsDBNull(6) ? 0 : reader.GetInt64(6)
+            });
+        }
+
+        return items;
+    }
+
     private int ResolveRunningJobsCadence(int serverId) =>
         ResolveCadence(_runningJobsCadenceMinutes, serverId, "running_jobs");
 
