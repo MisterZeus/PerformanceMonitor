@@ -1339,22 +1339,30 @@ public sealed class AlertEngine
         if (active.Count > 0)
         {
             var recovered = active.Where(d => !current.ContainsKey(d)).ToList();
-            foreach (var dbName in recovered)
+
+            /* Every recovered database's clocks are dropped in ONE pass over the cooldown map, not one pass
+               each (#2166). The key is per-state, so a single removal per database would leave its other
+               states' stamps behind to rate-limit a future episode against a cooldown that started before the
+               recovery — but the map holds every server's entries, so scanning it per database made the sweep
+               O(recovered x everything tracked) where the old string key was an O(1) remove. Hoisting it back
+               to one scan keeps the correctness and drops a factor. Matching on two tuple parts rather than a
+               string prefix is what keeps a database named 'Foo|Bar' from being swept when 'Foo' recovers. */
+            if (recovered.Count > 0)
             {
-                active.Remove(dbName);
-                /* Every state's clock for this database, not just one: the key is per-state, so removing a
-                   single entry would leave the other states' stamps behind to rate-limit a future episode
-                   against a cooldown that started before the recovery. Matching on two tuple parts rather
-                   than a string prefix is what keeps a database named 'Foo|Bar' from being swept when 'Foo'
-                   recovers. */
+                var recoveredSet = new HashSet<string>(recovered, StringComparer.OrdinalIgnoreCase);
                 foreach (var stamped in _lastDatabaseStateAlert.Keys)
                 {
                     if (string.Equals(stamped.Server, key, StringComparison.Ordinal)
-                        && string.Equals(stamped.Database, dbName, StringComparison.OrdinalIgnoreCase))
+                        && recoveredSet.Contains(stamped.Database))
                     {
                         _lastDatabaseStateAlert.TryRemove(stamped, out _);
                     }
                 }
+            }
+
+            foreach (var dbName in recovered)
+            {
+                active.Remove(dbName);
 
                 /* #2166 falling edge: forget the announced state as well as the in-memory cooldown, or the
                    edge only ever triggers once per database. Cleared even when suppressed — suppression
