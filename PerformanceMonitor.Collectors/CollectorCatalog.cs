@@ -96,6 +96,19 @@ public static class CollectorCatalog
         definition.TargetEngine == target.Engine && definition.AppliesTo(target);
 
     /// <summary>
+    /// The engine half of the gate alone, by name — for callers that want to drop a foreign-dialect
+    /// collector BEFORE dispatch rather than let it run and report zero rows. Darling's sweep uses
+    /// this so a wrong-engine collector produces no <c>collection_log</c> row at all: a gated run
+    /// would otherwise be recorded as SUCCESS, and with two engines in one catalog that would mean a
+    /// fake success per foreign collector per cycle on every server.
+    /// <para>An unknown name returns <c>true</c> (not filtered), matching
+    /// <see cref="AppliesTo(string, CollectorTargetInfo)"/>, so a typo still surfaces as the dispatch
+    /// switch's "unknown collector" rather than a silent disappearance.</para>
+    /// </summary>
+    public static bool EngineMatches(string collectorName, CollectorTargetInfo target) =>
+        !s_byName.TryGetValue(collectorName, out var definition) || definition.TargetEngine == target.Engine;
+
+    /// <summary>
     /// True when <paramref name="collectorName"/>'s query carries the deliberate short
     /// <c>SET LOCK_TIMEOUT</c> guard, so the runners' catch sites can classify SQL error 1222 as a
     /// <c>YIELDED</c> row by name (#1805) — the flag CONDITION lives on the definition

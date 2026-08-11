@@ -3036,6 +3036,19 @@ LIMIT 1", connection);
                     return;
                 }
 
+                /* Wrong-engine collectors are dropped BEFORE dispatch, not gated inside the runner: a
+                   definition whose dialect the target does not speak must leave no trace at all. The
+                   runner's own CollectorCatalog.AppliesTo check returns 0 rows, which RunOneAsync would
+                   record as SUCCESS — fine for the handful of Azure-gated collectors, but with a second
+                   engine in the catalog every target would log a fake success per foreign collector per
+                   cycle (most are 1-minute), flooding collection_log and feeding phantom successes to the
+                   health bands and analysis, which key on status. This is Darling's equivalent of Lite's
+                   pre-dispatch SKIPPED path: no dispatch, no log row, no NextDue churn. */
+                if (!CollectorCatalog.EngineMatches(name, runtime.Target))
+                {
+                    continue;
+                }
+
                 /* Effective schedule = config_collector_schedules override layered on the code default.
                    A disabled or on-load-only (freq 0) collector is skipped; the frequency the NextDue stamp
                    advances by is the EFFECTIVE one, so an override takes effect immediately. */
