@@ -2249,7 +2249,8 @@ internal sealed class DarlingStoreUpgrade
             else
             {
                 _logger.LogWarning(
-                    "Post-upgrade analyze reported exit {ExitCode} ({Output}). The store is fully usable; autovacuum will build the remaining statistics.",
+                    "Post-upgrade analyze reported exit {ExitCode} ({ExitCodeMeaning}): {Output}. The store is fully usable; autovacuum will build the remaining statistics.",
+                    exitCode,
                     DarlingToolExitCode.Describe(exitCode),
                     DarlingToolExitCode.FormatOutput(output, exitCode));
             }

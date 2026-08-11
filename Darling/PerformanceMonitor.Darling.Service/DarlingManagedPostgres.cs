@@ -792,8 +792,11 @@ public sealed class DarlingManagedPostgres
             }
             else
             {
+                /* {ExitCode} stays the raw int so structured sinks keep a numeric field to filter on;
+                   the decoded meaning rides its own field. */
                 _logger.LogWarning(
-                    "Managed Postgres stop reported exit code {ExitCode}: {Output}",
+                    "Managed Postgres stop reported exit code {ExitCode} ({ExitCodeMeaning}): {Output}",
+                    exitCode,
                     DarlingToolExitCode.Describe(exitCode),
                     DarlingToolExitCode.FormatOutput(output, exitCode));
             }
@@ -2072,7 +2075,8 @@ public sealed class DarlingManagedPostgres
                 if (reloadCode != 0)
                 {
                     _logger.LogCritical(
-                        "pg_ctl reload failed (exit {ExitCode}) after updating pg_hba.conf — the network access change may not be live: {Output}{Diagnosis}",
+                        "pg_ctl reload failed (exit {ExitCode}, {ExitCodeMeaning}) after updating pg_hba.conf — the network access change may not be live: {Output}{Diagnosis}",
+                        reloadCode,
                         DarlingToolExitCode.Describe(reloadCode),
                         DarlingToolExitCode.FormatOutput(reloadOutput, reloadCode),
                         DarlingToolExitCode.Diagnose(reloadCode, reloadPgCtl));

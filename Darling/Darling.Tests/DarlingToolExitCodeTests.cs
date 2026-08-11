@@ -211,10 +211,7 @@ public sealed class DarlingToolExitCodeTests
     [Fact]
     public async Task RunTool_SurfacesAWindowsStatusAsTheSignedFieldValueWithNoOutput()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "cmd.exe carries the Windows status; on other platforms this reports skipped, not vacuously passed.");
 
         var cmd = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
 
