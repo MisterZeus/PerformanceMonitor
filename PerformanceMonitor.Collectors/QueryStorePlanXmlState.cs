@@ -79,6 +79,159 @@ public static class QueryStorePlanXmlState
     public static string KeyFor(string databaseName) => WatermarkKeyPrefix + databaseName;
 
     /// <summary>
+    /// The average plan size assumed for a database with no previous pass to learn from. Deliberately near the
+    /// LARGE end of the measured fleet range (per-quartile averages of 162 / 80 / 39 / 15 KB across 2,166
+    /// budget-cut passes on a 52-server fleet), because the estimate feeds a DIVISOR: over-estimating plan size
+    /// yields a SMALL candidate window, and small is the safe direction. A window that is too small merely
+    /// advances the watermark more slowly; one that is too large decompresses plans it will never ship, which
+    /// is the exact cost the window exists to bound.
+    /// </summary>
+    public const long FirstContactAvgPlanBytes = 160L * 1024L;
+
+    /// <summary>
+    /// Floor on the candidate window, so progress is always possible. Even if the observed average is wildly
+    /// over-stated — one enormous plan in a quiet pass — a database must still be able to walk its catalog.
+    /// </summary>
+    public const int MinCandidateWindow = 32;
+
+    /// <summary>
+    /// Ceiling on the candidate window. The smallest measured quartile average (15 KB) puts a 12 MB budget at
+    /// ~820 plans, so this leaves headroom for genuinely tiny plans while refusing to let a near-zero estimate
+    /// turn the window back into "the whole catalog" — which is the first-contact trap this window exists to
+    /// prevent.
+    /// </summary>
+    public const int MaxCandidateWindow = 2048;
+
+    /// <summary>
+    /// How far past the budget the window reaches, in expected plans. The window is the COARSE bound and the
+    /// running byte total is the exact one, so the margin only has to cover the estimate being wrong in the
+    /// "plans are smaller than expected" direction — where extra plans genuinely fit the budget.
+    ///
+    /// <para>Kept modest at 1.5x because margin is not free: a windowed running total is evaluated over every
+    /// row IN the window, so the server decompresses all K plans to compute it whether the budget is reached at
+    /// plan 5 or plan 500. Margin buys reachability and costs decompression, which is why the estimate errs
+    /// large and the margin stays small.</para>
+    /// </summary>
+    public const double CandidateWindowMargin = 1.5;
+
+    /// <summary>
+    /// The per-database average plan size to carry into the next pass, from a pass's own totals — free, because
+    /// both numbers are already in hand when a pass ends, and no probe can measure plan size without
+    /// decompressing the plans. Zero rows yields null: a quiet pass teaches nothing about plan size and must
+    /// leave the previous estimate standing rather than replace it with a divide-by-zero fallback.
+    /// </summary>
+    public static long? ObservedAvgPlanBytes(long planBytesShipped, int plansShipped) =>
+        plansShipped <= 0 || planBytesShipped <= 0 ? null : planBytesShipped / plansShipped;
+
+    /// <summary>
+    /// How many plans one pass may CONSIDER: enough that the byte budget is the binding constraint, few enough
+    /// that the server never decompresses a catalog to discover which plans fit.
+    ///
+    /// <para>This is the trap mitigation. <c>SUM(DATALENGTH(query_plan)) OVER (ORDER BY plan_id)</c> has to
+    /// materialize the XML to measure it — <c>query_store_plan.query_plan</c> is decompressed BY the TVF on
+    /// access — so an unbounded candidate set pays the whole catalog's decompression to enforce a budget meant
+    /// to prevent exactly that. Bounding the window first on the cheap columns costs nothing and caps it.</para>
+    ///
+    /// <para>Per-database rather than one fleet constant because measured plan size spans 11x (162 KB to 15 KB
+    /// by quartile). A constant sized for the small-plan end (~820) would decompress ~134 MB to ship 12 MB on
+    /// the large-plan end; one sized for the large end would never reach the budget on the small end. No single
+    /// value is both, which is what makes this adaptive rather than tunable.</para>
+    ///
+    /// <para><paramref name="clamped"/> reports that a bound was applied, so the caller can LOG it. A window
+    /// silently pinned at its ceiling looks identical to one that fit, and that is how a cap becomes invisible.</para>
+    /// </summary>
+    public static int CandidateWindow(long? observedAvgPlanBytes, long budgetBytes, out bool clamped)
+    {
+        var avg = observedAvgPlanBytes is long observed && observed > 0 ? observed : FirstContactAvgPlanBytes;
+
+        if (budgetBytes <= 0)
+        {
+            clamped = true;
+            return MinCandidateWindow;
+        }
+
+        /* double for the margin, then one bounds check — the product cannot overflow int at any budget the knob
+           accepts, but the cast is guarded anyway because the budget is operator input. */
+        var wanted = (double)budgetBytes / avg * CandidateWindowMargin;
+        var rounded = wanted >= MaxCandidateWindow ? MaxCandidateWindow : (int)Math.Ceiling(wanted);
+
+        clamped = rounded >= MaxCandidateWindow || rounded <= MinCandidateWindow;
+        return Math.Clamp(rounded, MinCandidateWindow, MaxCandidateWindow);
+    }
+
+    /// <summary>
+    /// The watermark a pass earned, given the plan_ids whose XML actually landed. Under plan_id-ordered
+    /// shipping a budget cut truncates a SUFFIX, so the highest landed id is safe to keep even from a cut pass
+    /// — which is the whole point of the reordering (#2210): the previous design shipped in
+    /// <c>last_execution_time</c> order, where a cut left an arbitrary SUBSET and no value was safe, so the
+    /// watermark could not advance on 97.8% of passes and therefore never advanced at all.
+    ///
+    /// <para>Defensive on the precondition rather than trusting it: a DESCENT anywhere in
+    /// <paramref name="landedPlanIdsInOrder"/> abandons the advance entirely and returns
+    /// <paramref name="standing"/>, which the caller should log. Honouring the leading ascending run instead
+    /// looks safer and is not — given <c>{105, 101}</c> it would advance to 105, and once ordering is broken
+    /// there is no longer any basis for inferring that every SELECTED plan below 105 landed, so a plan whose
+    /// XML never arrived gets suppressed until the refresh horizon. Ordering is what makes a cut a suffix; with
+    /// it gone the pass has earned nothing, and one lost pass of progress is the cheap side of that trade.</para>
+    ///
+    /// <para>Never moves backward: a pass that lands nothing, or only ids at or below the standing watermark,
+    /// returns the standing value. Lowering it would refetch the catalog, and "no new plans this window" is an
+    /// ordinary quiet pass, not a reset — the reset signal lives on the runtime stream, where a plan at or below
+    /// the watermark that the store has never resolved can actually be observed.</para>
+    /// </summary>
+    public static long AdvanceWatermark(long standing, IReadOnlyList<long> landedPlanIdsInOrder)
+    {
+        if (landedPlanIdsInOrder is null || landedPlanIdsInOrder.Count == 0)
+        {
+            return standing;
+        }
+
+        var advanced = standing;
+        var previous = long.MinValue;
+
+        foreach (var planId in landedPlanIdsInOrder)
+        {
+            if (planId < previous)
+            {
+                return standing;
+            }
+
+            previous = planId;
+
+            if (planId > advanced)
+            {
+                advanced = planId;
+            }
+        }
+
+        return advanced;
+    }
+
+    /// <summary>
+    /// Whether a pass's landed plan_ids arrived in the plan_id order the fetch's <c>ORDER BY</c> promises — the
+    /// precondition <see cref="AdvanceWatermark"/> silently refuses to advance without. Exposed separately so
+    /// the caller can LOG the violation instead of quietly observing a watermark that stopped moving, which is
+    /// the failure mode #2164 spent two attempts not noticing.
+    /// </summary>
+    public static bool ArrivedInPlanIdOrder(IReadOnlyList<long> landedPlanIdsInOrder)
+    {
+        if (landedPlanIdsInOrder is null || landedPlanIdsInOrder.Count < 2)
+        {
+            return true;
+        }
+
+        for (var i = 1; i < landedPlanIdsInOrder.Count; i++)
+        {
+            if (landedPlanIdsInOrder[i] < landedPlanIdsInOrder[i - 1])
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// The watermark to apply for one database, or 0 — meaning "fetch every plan's XML" — for an absent,
     /// malformed, EXPIRED or future-stamped one. Zero is the documented conservative path: absent is what a
     /// first run, a restarted host and a broken store all look like, and all three must refetch rather than
