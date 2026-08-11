@@ -128,5 +128,11 @@ public static class CollectorScheduleDefaults
 
         /* Same cadence and horizon as query_stats, its SQL Server counterpart. */
         ["pg_statement_stats"] = new(1, 30),
+
+        /* Freeze headroom moves slowly — autovacuum shifts it in steps, not continuously — so a
+           5-minute read is ample, and 90 days is the horizon that shows an age trend against the
+           table-growth trend that usually explains it. Cheap: a handful of rows from a shared
+           catalog. */
+        ["pg_wraparound_stats"] = new(5, 90),
     };
 }

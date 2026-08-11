@@ -3725,6 +3725,7 @@ LIMIT 1";
            RunDueCollectorsAsync means this lambda is only ever reached for a Postgres target. */
         ["pg_wait_stats"] = (r, s, ct) => r.RunAsync(PgWaitStatsCollector.Instance, s, ct),
         ["pg_statement_stats"] = (r, s, ct) => r.RunAsync(PgStatementStatsCollector.Instance, s, ct),
+        ["pg_wraparound_stats"] = (r, s, ct) => r.RunAsync(PgWraparoundStatsCollector.Instance, s, ct),
     };
 
     /// <summary>

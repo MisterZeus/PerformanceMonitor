@@ -118,6 +118,7 @@ public static class PgMigrations
         new Migration(59, "collector-memory-knobs", V59Sql),
         new Migration(60, "pg-wait-stats", V60Sql),
         new Migration(61, "pg-statement-stats", V61Sql),
+        new Migration(62, "pg-wraparound-stats", V62Sql),
     };
 
     /// <summary>
@@ -1260,6 +1261,43 @@ CREATE TABLE IF NOT EXISTS collect.pg_statement_stats (
 
 CREATE INDEX IF NOT EXISTS idx_pg_statement_stats_time
     ON collect.pg_statement_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V62 — <c>pg_wraparound_stats</c>: transaction id and MultiXact id freeze headroom per database.
+    /// <para>Both counters are stored, because they are independent and each is separately fatal.
+    /// MultiXact exhaustion is the one almost nobody monitors: ids are consumed when a row is locked by
+    /// several transactions at once, so a <c>SELECT FOR UPDATE</c>-heavy or foreign-key-heavy workload
+    /// burns them much faster than plain transaction ids, and a server can look comfortable on XID age
+    /// while being in trouble on MultiXact age.</para>
+    /// <para>The percentages are STORED rather than derived on read because their denominators are
+    /// per-server settings. Recomputing later against whatever <c>autovacuum_freeze_max_age</c> happens
+    /// to be then would silently rewrite history the moment someone tunes it; a stored percentage stays
+    /// true to the configuration in force when it was measured.</para>
+    /// <para>The first PostgreSQL collector table that is not Aurora-specific — it reads only core
+    /// catalog surfaces, so it populates on any PostgreSQL target.</para>
+    /// </summary>
+    private const string V62Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_wraparound_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    frozen_xid_age bigint,
+    min_multixid_age bigint,
+    autovacuum_freeze_max_age bigint,
+    autovacuum_multixact_freeze_max_age bigint,
+    pct_toward_emergency_vacuum double precision,
+    pct_toward_wraparound double precision,
+    pct_toward_multixact_emergency double precision,
+    pct_toward_multixact_wraparound double precision,
+    xids_remaining bigint,
+    multixids_remaining bigint,
+    allows_connections boolean
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_wraparound_stats_time
+    ON collect.pg_wraparound_stats(server_id, collection_time);";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

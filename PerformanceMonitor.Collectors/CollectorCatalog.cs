@@ -68,6 +68,7 @@ public static class CollectorCatalog
            kept honest by the engine gate in AppliesTo(definition, target). */
         PgWaitStatsCollector.Instance,
         PgStatementStatsCollector.Instance,
+        PgWraparoundStatsCollector.Instance,
     };
 
     /// <summary>Name → definition, for the by-name target-gate lookup. Built once from <see cref="All"/>.</summary>
