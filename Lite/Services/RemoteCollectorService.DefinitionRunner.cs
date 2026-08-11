@@ -90,6 +90,21 @@ public partial class RemoteCollectorService
             ? null
             : await GetCollectorStateAsync(serverId, definition.Name, cancellationToken);
 
+        /* #2188: retire the per-database state rows of databases that no longer exist. Lite's backfill
+           worker writes done: and hole: per database and only ever deletes a hole it SERVICES or expires,
+           so a dropped database's markers were kept forever — the same defect as Darling's watermark rows,
+           in Lite's own collector_state. Same trigger and same placement as Darling's, before the state
+           load, so the two hosts cannot drift on when they prune.
+
+           Gated on the SAME AppliesTo that decides whether database_states is collected at all: on Azure
+           SQL DB there is no snapshot by design, so this would otherwise be a guaranteed no-op every cycle
+           and #2191's boundary would be emergent rather than stated. */
+        if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
+            && DatabaseStateCollector.Instance.AppliesTo(target))
+        {
+            await PruneOrphanedQueryStoreDatabaseStateAsync(serverId, cancellationToken);
+        }
+
         var context = new CollectorContext
         {
             ServerId = serverId,
