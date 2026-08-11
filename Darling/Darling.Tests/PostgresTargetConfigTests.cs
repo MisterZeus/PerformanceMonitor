@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
@@ -196,5 +197,75 @@ public class PostgresTargetConfigTests
         // No T-SQL leaked into the Postgres path.
         Assert.DoesNotContain("SERVERPROPERTY", sql, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("@@VERSION", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static DarlingConfig ConfigWith(MonitoredServer server)
+    {
+        var config = new DarlingConfig();
+        config.Postgres.ConnectionString = "Host=localhost;Database=darling;Username=x;Password=y";
+        config.Servers.Add(server);
+        return config;
+    }
+
+    /// <summary>
+    /// The pre-flight has to reject integrated auth on a PostgreSQL target. The connection builder
+    /// throws on it too, but that fires at first connect — for a service, hours after deployment and
+    /// only in a log, where --test-connection would have said so before install.
+    /// </summary>
+    [Fact]
+    public void ValidationRejectsIntegratedAuthOnAPostgresTarget()
+    {
+        var problems = ConfigWith(new MonitoredServer
+        {
+            Name = "aurora-writer",
+            Engine = "postgres",
+            Host = "aurora.cluster-x.us-east-1.rds.amazonaws.com",
+            Auth = "integrated",
+        }).Validate();
+
+        Assert.Contains(problems, p => p.Contains("PostgreSQL target requires auth 'sql'", StringComparison.Ordinal));
+    }
+
+    /// <summary>Integrated auth stays perfectly valid on a SQL Server entry — the new rule is engine-scoped.</summary>
+    [Fact]
+    public void ValidationStillAllowsIntegratedAuthOnASqlServerTarget()
+    {
+        var problems = ConfigWith(new MonitoredServer { Name = "SQL2022", Host = "SQL2022", Auth = "integrated" })
+            .Validate();
+
+        Assert.Empty(problems);
+    }
+
+    /// <summary>A fully specified Postgres entry passes, so the new rules cannot reject a good config.</summary>
+    [Fact]
+    public void ValidationAcceptsAWellFormedPostgresTarget()
+    {
+        var server = PgServer();
+        server.Password = "env:PGPASSWORD";
+        server.Port = 5432;
+
+        Assert.Empty(ConfigWith(server).Validate());
+    }
+
+    /// <summary>
+    /// 0 is the documented "use the driver's default" value and must not be flagged; a real out-of-range
+    /// port must be. Left unvalidated, a typo'd port surfaces as a connect timeout, which reads like a
+    /// firewall problem and gets escalated to the wrong team.
+    /// </summary>
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(5432, false)]
+    [InlineData(65535, false)]
+    [InlineData(-1, true)]
+    [InlineData(65536, true)]
+    public void ValidationRangeChecksTheOptionalPort(int port, bool expectProblem)
+    {
+        var server = PgServer();
+        server.Password = "env:PGPASSWORD";
+        server.Port = port;
+
+        var problems = ConfigWith(server).Validate();
+
+        Assert.Equal(expectProblem, problems.Any(p => p.Contains("port must be between", StringComparison.Ordinal)));
     }
 }

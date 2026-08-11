@@ -55,11 +55,11 @@ public class TargetProviderTests
 
             using var sqlConnection = new SqlConnection("Server=nowhere");
             using var sqlCommand = SqlServerTargetProvider.Instance.CreateCommand(query, sqlConnection, 60);
-            Assert.Equal(1, sqlCommand.Parameters.Count);
+            Assert.Single(sqlCommand.Parameters);
 
             using var pgConnection = new NpgsqlConnection("Host=nowhere");
             using var pgCommand = PostgresTargetProvider.Instance.CreateCommand(query, pgConnection, 60);
-            Assert.Equal(1, pgCommand.Parameters.Count);
+            Assert.Single(pgCommand.Parameters);
         }
 
         static object Value(CollectorParameterType type) => type switch

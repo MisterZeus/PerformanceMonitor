@@ -120,7 +120,7 @@ public class PgXminHorizonCollectorDefinitionTests
         var rows = await PgXminHorizonCollector.Instance.ReadAsync(reader, MakeContext(), CancellationToken.None);
 
         Assert.Equal(3, rows.Count);
-        var winner = Assert.Single(rows.Where(r => r.IsWinner));
+        var winner = Assert.Single(rows, r => r.IsWinner);
         Assert.Equal("replication_slot", winner.Source);
         Assert.Equal(900_000L, winner.XminAge);
     }
@@ -135,7 +135,7 @@ public class PgXminHorizonCollectorDefinitionTests
 
         var rows = await PgXminHorizonCollector.Instance.ReadAsync(reader, MakeContext(), CancellationToken.None);
 
-        Assert.Single(rows.Where(r => r.IsWinner));
+        Assert.Single(rows, r => r.IsWinner);
     }
 
     /// <summary>

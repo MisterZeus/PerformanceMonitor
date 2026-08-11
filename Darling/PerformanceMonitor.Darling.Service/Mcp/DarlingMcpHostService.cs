@@ -488,6 +488,10 @@ public sealed class DarlingMcpHostService : BackgroundService
                 /* get_pg_xmin_horizon — why vacuum reclaims nothing, attributed to one of four causes
                    that are indistinguishable by symptom and need different fixes. */
                 .WithGeminiCompatibleTools<DarlingMcpPgXminTools>()
+                /* get_pg_replication_slots — the other half of the abandoned-slot story. The xmin tool
+                   reports a slot pinning the horizon; this one reports the WAL it is retaining, which is
+                   unbounded by default and fills the volume regardless of what vacuum is doing. */
+                .WithGeminiCompatibleTools<DarlingMcpPgSlotTools>()
                 .WithGeminiCompatibleTools<DarlingMcpMemoryGrantTools>()
                 .WithGeminiCompatibleTools<DarlingMcpPlanCacheSchedulerTools>()
                 .WithGeminiCompatibleTools<DarlingMcpJobTools>()

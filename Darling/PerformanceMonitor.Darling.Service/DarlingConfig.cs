@@ -271,6 +271,23 @@ public sealed class DarlingConfig
             {
                 problems.Add($"{label}: auth must be 'integrated' or 'sql' (got '{server.Auth}').");
             }
+
+            /* Caught here, in the pre-flight, rather than only where the connection string is built.
+               MonitoredServerConnection throws on this too — it has to, since it is what actually
+               knows the driver can't honour it — but that throw happens at first connect, which for a
+               service means the misconfiguration surfaces in a log after deployment instead of in
+               --test-connection before it. */
+            if (server.IsPostgres && !server.UsesSqlAuth)
+            {
+                problems.Add(
+                    $"{label}: a PostgreSQL target requires auth 'sql' with a username and password " +
+                    "(integrated/Kerberos auth is not supported for PostgreSQL targets).");
+            }
+
+            if (server.Port is not 0 && server.Port is < 1 or > 65535)
+            {
+                problems.Add($"{label}: port must be between 1 and 65535 (got {server.Port}).");
+            }
         }
 
         return problems;

@@ -60,8 +60,11 @@ public sealed class PgWaitStatsCollector : PostgresCollectorDefinitionBase<PgWai
 
        Compared with the SQL Server side this is a type-level list, not the per-name
        IgnoredWaitDefaults set, because Postgres wait types partition much more cleanly by intent. */
-    private static readonly IReadOnlySet<string> s_ignoredWaitTypes =
-        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Activity", "Client", "Timeout" };
+    /* Case-insensitive on purpose: Aurora renamed events between majors without changing their ids
+       (AutoVacuumMain on 16.11, AutovacuumMain on 17.7), so an ordinal set would filter on one major
+       and quietly stop filtering on the other. Deltas key on the numeric event_id for the same reason. */
+    private static readonly HashSet<string> s_ignoredWaitTypes =
+        new(StringComparer.OrdinalIgnoreCase) { "Activity", "Client", "Timeout" };
 
     /* Signatures below are VERIFIED against live Aurora 16.11 and 17.7, not taken from the AWS
        reference, which is wrong about one of them:
