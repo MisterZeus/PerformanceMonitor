@@ -182,8 +182,14 @@ public sealed class DarlingCollectorRunner
         /* #2188: retire the per-database state rows of databases that no longer exist, BEFORE the load
            below, so this cycle also works from a cleaned dictionary rather than one carrying names the
            server dropped. Runs for query_store regardless of plan capture, because the backfill worker's
-           per-database keys orphan the same way and are pruned in the same pass. */
-        if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+           per-database keys orphan the same way and are pruned in the same pass.
+
+           Gated on the SAME AppliesTo that decides whether database_states is collected at all, rather than
+           leaning on the statement's own empty-snapshot guard to no-op: on Azure SQL DB there is no snapshot
+           by design, so this would otherwise run three guaranteed-no-op deletes on every cycle forever and
+           #2191's boundary would be emergent rather than stated. */
+        if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
+            && DatabaseStateCollector.Instance.AppliesTo(server.Target))
         {
             await PruneOrphanedQueryStoreDatabaseStateAsync(server.ServerId, cancellationToken);
         }
@@ -1120,6 +1126,25 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     /// anti-join against nothing deletes EVERY row. The subselect always yields one row (MAX over zero rows
     /// is NULL), so the guard is what turns "no snapshot" into "prune nothing" instead of "prune all".</para>
     ///
+    /// <para><b>And guarded on the snapshot being NEWER than the state row</b>
+    /// (<c>s.updated_at &lt; snapshot.newest</c>), which is the stronger of the two and the one that makes
+    /// this correct rather than merely usually-correct. Existing is not the same as CURRENT: if
+    /// database_states stops collecting for a server — a per-server schedule change, a failing collector,
+    /// anything — the newest snapshot freezes, and every database created after that instant is missing from
+    /// it while being perfectly alive. Presence alone would prune such a database's watermark on EVERY cycle
+    /// forever, silently paying a full plan-XML refetch each time: the exact cost #2164 exists to remove,
+    /// with a log line confidently calling a live database dropped. A snapshot cannot judge a row written
+    /// after it was taken. This holds regardless of the two collectors' relative cadences, so nothing here
+    /// depends on database_states being scheduled more often than query_store; both stamps are the SERVICE
+    /// clock's naive UTC (<c>collectionTime</c> and <see cref="SaveCollectorStateAsync"/> both read
+    /// <c>DateTime.UtcNow</c>), never the monitored server's. A genuinely dropped database is still pruned:
+    /// its last state write necessarily precedes any snapshot taken after the drop.</para>
+    ///
+    /// <para>The two guards overlap — <c>&lt;</c> against a NULL newest is already NULL, so the freshness
+    /// test alone would cover the empty snapshot. The explicit NULL check stays anyway: "no snapshot prunes
+    /// nothing" is a promise worth reading off the statement instead of deriving from three-valued
+    /// logic.</para>
+    ///
     /// <para><b>Bounded consequence, either way.</b> Deleting a watermark that should have stayed costs one
     /// full plan-XML refetch for that database and nothing else — the same conservative path an absent or
     /// expired watermark already takes (<see cref="QueryStorePlanXmlState.Resolve"/>), which is why racing
@@ -1144,6 +1169,7 @@ WHERE s.server_id = $1
 AND   s.collector_name = $2
 AND   starts_with(s.state_key, $3)
 AND   snapshot.newest IS NOT NULL
+AND   s.updated_at < snapshot.newest
 AND   NOT EXISTS
       (
           SELECT 1
@@ -1151,53 +1177,49 @@ AND   NOT EXISTS
           WHERE ds.server_id = $1
           AND   ds.collection_time = snapshot.newest
           AND   s.state_key = $3 || ds.database_name
-      )";
+      )
+RETURNING s.state_key";
 
     /// <summary>
-    /// The per-database state owners query_store accumulates, and the key prefixes under each that are
-    /// keyed by database NAME. <see cref="QueryStoreBackfillState.DoneKeyPrefix"/> and
-    /// <see cref="QueryStoreBackfillState.HoleKeyPrefix"/> are pruned beside the watermark because they
-    /// orphan identically: the worker deletes a hole when it SERVICES or expires it, and marks done when it
-    /// drains a tail, but a dropped database will never do either — its hole can never be dug and its tail
-    /// can never drain. A same-name recreate wanting its tail backfilled again is the correct outcome of
-    /// losing the done marker, not a regression.
-    /// </summary>
-    internal static readonly (string Owner, string Prefix)[] QueryStorePerDatabaseStateKeys =
-    {
-        (QueryStorePlanXmlState.StateCollectorName, QueryStorePlanXmlState.WatermarkKeyPrefix),
-        (QueryStoreBackfillState.StateCollectorName, QueryStoreBackfillState.DoneKeyPrefix),
-        (QueryStoreBackfillState.StateCollectorName, QueryStoreBackfillState.HoleKeyPrefix),
-    };
-
-    /// <summary>
-    /// Runs <see cref="PruneOrphanedDatabaseStateKeysSql"/> for every owner/prefix query_store keys by
-    /// database name, once per query_store cycle for one server. Separate statements rather than one
-    /// combined predicate because Npgsql's positional parameters cannot span a multi-statement batch and
-    /// three narrow indexed deletes are cheaper to read than one that ORs three prefixes together.
+    /// Runs <see cref="PruneOrphanedDatabaseStateKeysSql"/> for every owner/prefix in the SHARED
+    /// <see cref="QueryStorePerDatabaseState.PrunableKeys"/> — the same set Lite's DuckDB twin
+    /// (<c>RemoteCollectorService.PruneOrphanedQueryStoreDatabaseStateAsync</c>) iterates, so a prefix
+    /// cannot end up pruned on one SKU and orphaning on the other. Once per query_store cycle for one
+    /// server. Separate statements rather than one combined predicate because Npgsql's positional
+    /// parameters cannot span a multi-statement batch, and three narrow deletes down the primary key are
+    /// easier to read than one that ORs three prefixes together.
     /// </summary>
     internal async Task PruneOrphanedQueryStoreDatabaseStateAsync(int serverId, CancellationToken cancellationToken)
     {
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-            var pruned = 0;
+            var pruned = new List<string>();
 
-            foreach (var (owner, prefix) in QueryStorePerDatabaseStateKeys)
+            foreach (var (owner, prefix) in QueryStorePerDatabaseState.PrunableKeys)
             {
                 using var command = new NpgsqlCommand(PruneOrphanedDatabaseStateKeysSql, connection);
                 command.Parameters.AddWithValue(serverId);
                 command.Parameters.AddWithValue(owner);
                 command.Parameters.AddWithValue(prefix);
-                pruned += await command.ExecuteNonQueryAsync(cancellationToken);
+
+                /* RETURNING rather than a rows-affected count: the only symptom of a WRONG delete here is a
+                   silent refetch, so a bare number would leave nothing to diagnose it with. The keys name
+                   the databases, which is what makes a mistaken prune visible in the log. */
+                using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    pruned.Add(reader.GetString(0));
+                }
             }
 
-            if (pruned > 0)
+            if (pruned.Count > 0)
             {
                 /* Information, like DarlingObservability's orphaned-server sweep: rare, and it names a
                    database lifecycle event the operator may not know the monitor noticed. */
                 _logger?.LogInformation(
-                    "[server_id {ServerId}] pruned {Count} query_store state row(s) for database(s) no longer on the server",
-                    serverId, pruned);
+                    "[server_id {ServerId}] pruned {Count} query_store state row(s) for database(s) no longer on the server: {Keys}",
+                    serverId, pruned.Count, string.Join(", ", pruned));
             }
         }
         catch (Exception ex)

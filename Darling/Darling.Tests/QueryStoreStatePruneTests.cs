@@ -8,16 +8,11 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Threading;
-using System.Threading.Tasks;
-using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
-using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -33,23 +28,20 @@ namespace Darling.Tests;
 /// excluded-database list, a vendor-name screen, <c>HAS_DBACCESS</c>, and a per-database probe that can fail,
 /// so a database absent from one cycle's items is far more often offline or unprobeable than dropped. Pruning
 /// on that absence would delete LIVE watermarks on exactly the servers that have such databases, and because
-/// the consequence is a silent refetch rather than an error, nothing downstream would ever report it. So the
-/// live tests below seed a snapshot containing a database no enumeration would return and assert its state
-/// survives — that assertion, not the delete, is what this change is.</para>
+/// the consequence is a silent refetch rather than an error, nothing downstream would ever report it.
+/// <see cref="QueryStoreStatePruneLivePostgresTests"/> is where that is proven against a real store; this
+/// class holds the policy and the cross-host wiring, which no store can see.</para>
 ///
-/// <para>Darling only, by construction: the write-back is gated on <c>CollectorContext.CapturePlanXml</c>,
-/// Lite never sets it (pinned by <c>QueryStorePlanWatermarkTests.WriteBack_PlanCaptureOff_WritesNothing</c>),
-/// so a Lite store has no such rows to prune. <see cref="LiteWritesNoPerDatabaseQueryStoreState"/> holds that
-/// premise at source so the parity claim cannot rot silently into an un-pruned orphan class.</para>
+/// <para><b>Both SKUs.</b> Lite writes no <c>planwm:</c> (it never sets
+/// <c>CollectorContext.CapturePlanXml</c>) but it DOES write <c>done:</c> and <c>hole:</c> through its own
+/// backfill worker, and it only ever deletes a hole it services or expires — so the orphan class is real on
+/// both sides and the prune is ported, not declared Darling-only.
+/// <see cref="LiteWritesTheBackfillKeysButNeverTheWatermark"/> pins that in both directions, and the key set
+/// itself lives in the shared <see cref="QueryStorePerDatabaseState"/> so a prefix cannot end up pruned on
+/// one SKU and orphaning on the other.</para>
 /// </summary>
-[Collection("live-postgres")]
 public sealed class QueryStoreStatePruneTests
 {
-    /// <summary>Distinctive fake ids — a real server_id is a storage-name hash, never these.</summary>
-    private const int LiveServerId = -218800;
-    private const int NeighborServerId = -218801;
-    private const string ServerName = "PLANWM-PRUNE-SRV";
-
     private static string Planwm(string database) => QueryStorePlanXmlState.WatermarkKeyPrefix + database;
 
     /* ---------------- the design's premise, pinned without a store ---------------- */
@@ -67,17 +59,50 @@ public sealed class QueryStoreStatePruneTests
            against a server that has never collected database_states matches EVERY key and deletes the lot. */
         Assert.Contains("snapshot.newest IS NOT NULL", DarlingCollectorRunner.PruneOrphanedDatabaseStateKeysSql, StringComparison.Ordinal);
 
+        /* The freshness guard, which is the stronger of the two: a snapshot cannot judge a state row written
+           AFTER it was taken. Without it, a server whose database_states collection has stopped prunes every
+           database created since — live ones — on every cycle forever. */
+        Assert.Contains("s.updated_at < snapshot.newest", DarlingCollectorRunner.PruneOrphanedDatabaseStateKeysSql, StringComparison.Ordinal);
+
         /* Newest snapshot only: an older one names databases that have since been dropped, which would make
            the prune permanently unable to retire anything. */
         Assert.Contains("MAX(collection_time)", DarlingCollectorRunner.PruneOrphanedDatabaseStateKeysSql, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void EveryPerDatabaseKeyPrefixQueryStoreOwnsIsPruned()
+    public void LitesTwinCarriesTheSameTwoGuards()
     {
-        /* The drift guard that matters more than the prune itself: a fourth per-database key prefix added to
-           either state class is a new orphan class, and nothing about adding one would fail a test. Derived
-           from the state classes' own consts rather than a hand-written list, so the two cannot disagree. */
+        /* The DuckDB statement is a separate string in a separate project, so nothing but a source pin keeps
+           it honest. Both guards are what stop a hygiene sweep becoming a data event, and Lite is the SKU
+           where a mistake lands on somebody's laptop with no DBA watching a fleet dashboard.
+
+           DuckDB gets the freshness guard for free as the empty-snapshot guard too — `<` against a NULL MAX
+           is NULL — so it carries one predicate where Darling spells out two; what must not drift is that
+           the comparison against the snapshot's own timestamp is THERE. */
+        var root = FindRepoRoot();
+        Assert.True(root is not null, "repo root not found -- the source pin cannot run");
+
+        var liteBackfill = File.ReadAllText(Path.Combine(
+            root!, "Lite", "Services", "RemoteCollectorService.QueryStoreBackfill.cs"));
+
+        Assert.Contains("FROM database_states", liteBackfill, StringComparison.Ordinal);
+        Assert.Contains(
+            "updated_at < (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)",
+            liteBackfill, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EveryPerDatabaseKeyPrefixQueryStoreOwnsIsAccountedFor()
+    {
+        /* The drift guard that matters more than the prune itself: a fourth key prefix added to either state
+           class is a new orphan class if it is per-database, and nothing about adding one would fail a test.
+           Derived from the state classes' own consts rather than a hand-written list, so the two cannot
+           disagree.
+
+           It demands a DECISION rather than an addition. A prefix must appear in exactly one of the two
+           shared lists, because the wrong answer here is not "forgot to prune" — it is adding a
+           SERVER-scoped key to PrunableKeys, whose rows can never equal prefix || databaseName and so would
+           be deleted on every single cycle. The message has to say that, or the obvious fix is the bug. */
         var declared = new[] { typeof(QueryStorePlanXmlState), typeof(QueryStoreBackfillState) }
             .SelectMany(type => type.GetFields(BindingFlags.Public | BindingFlags.Static))
             .Where(field => field.IsLiteral && field.FieldType == typeof(string)
@@ -87,59 +112,120 @@ public sealed class QueryStoreStatePruneTests
 
         Assert.NotEmpty(declared);
 
-        var pruned = DarlingCollectorRunner.QueryStorePerDatabaseStateKeys.Select(pair => pair.Prefix).ToArray();
+        var pruned = QueryStorePerDatabaseState.PrunableKeys.Select(pair => pair.Prefix).ToArray();
 
         foreach (var prefix in declared)
         {
             Assert.True(
-                pruned.Contains(prefix, StringComparer.Ordinal),
-                $"the key prefix '{prefix}' is written per DATABASE but is not in the #2188 prune set, so its "
-                + "rows orphan forever when a database is dropped");
+                pruned.Contains(prefix, StringComparer.Ordinal)
+                    || QueryStorePerDatabaseState.NotKeyedByDatabase.Contains(prefix, StringComparer.Ordinal),
+                $"The query_store state key prefix '{prefix}' is in neither shared list, so #2188 has no "
+                + "verdict on it. Decide which it is:\n"
+                + "  - keyed by DATABASE NAME (the key is prefix + databaseName): add it to "
+                + "QueryStorePerDatabaseState.PrunableKeys with its owning collector_name, and both hosts "
+                + "prune it when the database is dropped.\n"
+                + "  - keyed by anything ELSE (server-scoped, or a compound key): add it to "
+                + "QueryStorePerDatabaseState.NotKeyedByDatabase. Do NOT put it in PrunableKeys to silence "
+                + "this — both prunes test a key by rebuilding it as prefix + databaseName, so a key that "
+                + "is not shaped that way matches no live database and gets DELETED every cycle.");
         }
 
-        /* Owners paired correctly: a prefix pruned under the wrong collector_name silently deletes nothing,
-           which looks exactly like "there was nothing to prune". */
+        /* Owner and prefix must travel together: a prefix pruned under the wrong collector_name silently
+           deletes nothing, which looks exactly like "there was nothing to prune". */
         Assert.Contains(
             (QueryStorePlanXmlState.StateCollectorName, QueryStorePlanXmlState.WatermarkKeyPrefix),
-            DarlingCollectorRunner.QueryStorePerDatabaseStateKeys);
+            QueryStorePerDatabaseState.PrunableKeys);
+        Assert.Contains(
+            (QueryStoreBackfillState.StateCollectorName, QueryStoreBackfillState.HoleKeyPrefix),
+            QueryStorePerDatabaseState.PrunableKeys);
     }
 
     [Fact]
-    public void TheRunnerPrunesOnTheQueryStoreCycle()
+    public void BothHostsPruneOnTheQueryStoreCycle()
     {
-        /* Wiring invisible to everything else here: delete the call and every assertion in this file still
-           passes, because they drive the prune directly. The rows would simply never be pruned in production.
-           Source-pinned for the same reason CollectorStateContractTests pins the state save. */
+        /* Wiring invisible to everything else here: delete either call and every assertion in this file
+           still passes, because they drive the prunes directly. The rows would simply never be pruned in
+           production. Source-pinned in BOTH hosts together, for the reason CollectorStateContractTests
+           gives — a fix applied to one host and not the other is the drift this product keeps paying for.
+
+           The GATE is pinned, not just the call: an ungated prune would run for all 38 collectors, and
+           since it deletes by collector_name that would be 37 harmless no-ops hiding one real behaviour
+           change nobody chose. */
         var root = FindRepoRoot();
         Assert.True(root is not null, "repo root not found -- the source pin cannot run");
 
-        var source = File.ReadAllText(Path.Combine(
-            root!, "Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs"));
+        var hosts = new[]
+        {
+            Path.Combine(root!, "Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs"),
+            Path.Combine(root!, "Lite", "Services", "RemoteCollectorService.DefinitionRunner.cs"),
+        };
 
-        Assert.Contains("await PruneOrphanedQueryStoreDatabaseStateAsync(server.ServerId, cancellationToken);",
-            source, StringComparison.Ordinal);
+        foreach (var host in hosts)
+        {
+            var source = File.ReadAllText(host);
+            var name = Path.GetFileName(host);
+
+            var call = source.IndexOf("await PruneOrphanedQueryStoreDatabaseStateAsync(", StringComparison.Ordinal);
+            Assert.True(call >= 0, $"{name} must prune orphaned per-database query_store state");
+
+            /* The 400 characters immediately BEFORE the call — the `if` that guards it. Checking the whole
+               file would be vacuous: DarlingCollectorRunner already tests definition.Name against
+               query_store in five other places for unrelated reasons, so a file-wide Contains would pass
+               for an ungated prune. */
+            var guard = source.Substring(Math.Max(0, call - 400), Math.Min(400, call));
+
+            Assert.Contains(
+                "string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)",
+                guard, StringComparison.Ordinal);
+
+            /* And on the collector that supplies the snapshot: without this the prune runs three guaranteed
+               no-op deletes per cycle forever on Azure SQL DB, and #2191's boundary is emergent rather than
+               declared. */
+            Assert.Contains("DatabaseStateCollector.Instance.AppliesTo(", guard, StringComparison.Ordinal);
+        }
     }
 
     [Fact]
-    public void LiteWritesNoPerDatabaseQueryStoreState()
+    public void LiteWritesTheBackfillKeysButNeverTheWatermark()
     {
-        /* The parity premise. Lite runs the SAME query_store definition, so if it ever set CapturePlanXml it
-           would start writing planwm rows into its own collector_state with no prune on that side — and
-           Darling's prune reads database_states in Postgres, which does not port. This pins the premise at
-           its source rather than restating it in a comment: Lite's context construction must keep leaving
-           the flag at its false default. */
+        /* The parity FACT, which the first cut of this change got wrong: Lite writes no planwm: (it never
+           sets CapturePlanXml) but it DOES write done: and hole: through its own backfill worker, and it
+           only ever deletes a hole it services or expires. So the orphan class is real on both SKUs and the
+           prune had to be ported, not declared Darling-only.
+
+           Pinned at source in both directions so neither half can rot: if Lite ever starts capturing plans
+           it inherits a planwm: prune that is already there (the shared PrunableKeys carries the watermark
+           on both hosts precisely so that day needs no code change), and if Lite ever stops writing the
+           backfill keys this test says so rather than leaving a prune nobody needs. */
         var root = FindRepoRoot();
         Assert.True(root is not null, "repo root not found -- the source pin cannot run");
 
         var liteRunner = File.ReadAllText(Path.Combine(
             root!, "Lite", "Services", "RemoteCollectorService.DefinitionRunner.cs"));
+        var liteBackfill = File.ReadAllText(Path.Combine(
+            root!, "Lite", "Services", "RemoteCollectorService.QueryStoreBackfill.cs"));
 
         Assert.False(
             liteRunner.Contains("CapturePlanXml", StringComparison.Ordinal),
-            "Lite's definition runner now sets CapturePlanXml, so Lite has started writing per-database "
-            + "query_store state (planwm:) into its own collector_state — and #2188's prune is Darling-only, "
-            + "because it anti-joins against database_states in Postgres. Port the prune to DuckDB before "
-            + "shipping plan capture in Lite, or those rows orphan forever with nothing to retire them.");
+            "Lite's definition runner now sets CapturePlanXml, so Lite writes planwm: rows too. The shared "
+            + "PrunableKeys already covers that prefix on both hosts, so the prune needs no change — but "
+            + "QueryStorePlanWatermarkTests.WriteBack_PlanCaptureOff_WritesNothing and this file's prose "
+            + "both describe Lite as never writing them, and that is now wrong.");
+
+        foreach (var prefix in new[] { "DoneKeyPrefix", "HoleKeyPrefix" })
+        {
+            /* The per-database KEY SHAPE, not merely a mention of the prefix: `prefix + databaseName` is
+               exactly what makes these rows orphan when the database goes away, and it is what both prunes
+               reconstruct to test a key against the live database list. A worker that started keying these
+               some other way would leave the prune matching nothing while every "is the prefix used?" check
+               still passed. */
+            Assert.True(
+                liteBackfill.Contains(
+                    $"QueryStoreBackfillState.{prefix} + databaseName", StringComparison.Ordinal),
+                $"Lite's backfill worker no longer keys QueryStoreBackfillState.{prefix} by database name. "
+                + "The #2188 prune rebuilds keys as prefix + databaseName to test them against the newest "
+                + "sys.databases snapshot, so it now matches nothing for this prefix — revisit both.");
+        }
     }
 
     /// <summary>
@@ -178,294 +264,6 @@ public sealed class QueryStoreStatePruneTests
         /* A pruned row is simply absent, and absent is the conservative full-fetch path — so a recreate that
            happens after an observed drop inherits nothing at all. */
         Assert.Equal(0, QueryStorePlanXmlState.Resolve(new Dictionary<string, string>(StringComparer.Ordinal), "Recreated", now));
-    }
-
-    /* ---------------- gated: the real statement against a real store ---------------- */
-
-    /// <summary>
-    /// One live pass over every case that separates a correct prune from a destructive one. It drives
-    /// <see cref="DarlingCollectorRunner.PruneOrphanedQueryStoreDatabaseStateAsync"/> — the production method,
-    /// on a real store — because the statement's whole risk is in how PostgreSQL evaluates the anti-join and
-    /// the guard together, which no source pin can speak to.
-    /// </summary>
-    [Fact]
-    public async Task Prune_RetiresOnlyDroppedDatabases_AgainstDevPostgres()
-    {
-        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string to run the live query_store state prune test.");
-
-        var ct = TestContext.Current.CancellationToken;
-        using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync(ct);
-        await PgMigrations.MigrateAsync(connection, ct);
-        await DeleteLiveRowsAsync(connection, ct);
-
-        await using var postgres = NpgsqlDataSource.Create(connectionString!);
-        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
-
-        var bodySucceeded = false;
-        try
-        {
-            var newest = new DateTime(2026, 8, 11, 9, 0, 0, DateTimeKind.Unspecified);
-
-            /* The snapshot: what sys.databases still holds. "Parked" is the case the whole design turns on —
-               a database that EXISTS but that query_store's enumeration would never return (it screens
-               state_desc = ONLINE), so a prune keyed on the enumeration deletes it and a prune keyed on
-               sys.databases keeps it. */
-            await SnapshotAsync(connection, ct, newest, "Live", "Parked");
-
-            /* An OLDER snapshot still naming the dropped database. If the prune read any snapshot but the
-               newest, "Dropped" would look present forever and nothing would ever be retired. */
-            await SnapshotAsync(connection, ct, newest.AddMinutes(-15), "Live", "Parked", "Dropped");
-
-            await StateAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Live"), "900000:1786449600");
-            await StateAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Parked"), "800000:1786449600");
-            await StateAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Dropped"), "700000:1786449600");
-
-            /* The backfill worker's per-database keys, which orphan identically. */
-            await StateAsync(connection, ct, LiveServerId, QueryStoreBackfillState.StateCollectorName,
-                QueryStoreBackfillState.DoneKeyPrefix + "Live", "2026-08-11T09:00:00.0000000Z");
-            await StateAsync(connection, ct, LiveServerId, QueryStoreBackfillState.StateCollectorName,
-                QueryStoreBackfillState.DoneKeyPrefix + "Dropped", "2026-08-11T09:00:00.0000000Z");
-            await StateAsync(connection, ct, LiveServerId, QueryStoreBackfillState.StateCollectorName,
-                QueryStoreBackfillState.HoleKeyPrefix + "Dropped", QueryStoreBackfillState.EncodeHole(
-                    new DateTime(2026, 8, 10, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 8, 10, 6, 0, 0, DateTimeKind.Utc)));
-
-            /* A key under the SAME owner that is not database-keyed. The prefix filter is what protects it;
-               a prune written as "every key of this collector" would take it. */
-            await StateAsync(connection, ct, LiveServerId, QueryStoreBackfillState.StateCollectorName,
-                "unrelated-bookkeeping", "keep me");
-
-            /* Another collector's state entirely, and a NEIGHBOUR SERVER whose database really was dropped
-               here — server scoping is the difference between pruning one server and pruning the fleet. */
-            await StateAsync(connection, ct, LiveServerId, DefaultTraceEventsCollector.Instance.Name,
-                DefaultTraceEventsCollector.LastTraceFilePathStateKey, @"S:\MSSQL\Log\log_766.trc");
-            await StateAsync(connection, ct, NeighborServerId, QueryStorePlanXmlState.StateCollectorName,
-                Planwm("Dropped"), "600000:1786449600");
-
-            await runner.PruneOrphanedQueryStoreDatabaseStateAsync(LiveServerId, ct);
-
-            /* Retired: the database is gone from the newest snapshot, on every prefix it could have left. */
-            Assert.Null(await ValueAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Dropped")));
-            Assert.Null(await ValueAsync(connection, ct, LiveServerId, QueryStoreBackfillState.StateCollectorName,
-                QueryStoreBackfillState.DoneKeyPrefix + "Dropped"));
-            Assert.Null(await ValueAsync(connection, ct, LiveServerId, QueryStoreBackfillState.StateCollectorName,
-                QueryStoreBackfillState.HoleKeyPrefix + "Dropped"));
-
-            /* Kept: still collected. */
-            Assert.Equal("900000:1786449600",
-                await ValueAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Live")));
-            Assert.Equal("2026-08-11T09:00:00.0000000Z",
-                await ValueAsync(connection, ct, LiveServerId, QueryStoreBackfillState.StateCollectorName,
-                    QueryStoreBackfillState.DoneKeyPrefix + "Live"));
-
-            /* Kept, and this is the assertion the change exists for: present in sys.databases, absent from
-               every enumeration query_store runs. Pruning it costs a full plan-XML refetch of a database that
-               never went anywhere, on precisely the servers that keep databases parked. */
-            Assert.Equal("800000:1786449600",
-                await ValueAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Parked")));
-
-            /* Kept: not database-keyed, not this collector, not this server. */
-            Assert.Equal("keep me",
-                await ValueAsync(connection, ct, LiveServerId, QueryStoreBackfillState.StateCollectorName, "unrelated-bookkeeping"));
-            Assert.Equal(@"S:\MSSQL\Log\log_766.trc",
-                await ValueAsync(connection, ct, LiveServerId, DefaultTraceEventsCollector.Instance.Name,
-                    DefaultTraceEventsCollector.LastTraceFilePathStateKey));
-            Assert.Equal("600000:1786449600",
-                await ValueAsync(connection, ct, NeighborServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Dropped")));
-
-            /* Idempotent — it runs on every query_store cycle of every server, so a second pass over a clean
-               store must touch nothing. Five survivors: planwm for Live and Parked, done for Live, the
-               non-database-keyed bookkeeping row, and the other collector's key. */
-            await runner.PruneOrphanedQueryStoreDatabaseStateAsync(LiveServerId, ct);
-            Assert.Equal(5, await CountAsync(connection, ct, LiveServerId));
-
-            bodySucceeded = true;
-        }
-        finally
-        {
-            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
-                await DeleteLiveRowsAsync(cleanup, cleanupCt));
-        }
-    }
-
-    /// <summary>
-    /// The guard, isolated. A server with NO database_states snapshot must lose nothing — this is the case
-    /// that turns a hygiene sweep into a fleet-wide data event, and it is reached by ordinary configurations:
-    /// Azure SQL DB never collects database_states at all (<c>DatabaseStateCollector.AppliesTo</c>), and any
-    /// server whose database_states rows have aged out of the raw retention tier looks identical.
-    /// </summary>
-    [Fact]
-    public async Task Prune_WithNoDatabaseSnapshot_RetiresNothing_AgainstDevPostgres()
-    {
-        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string to run the live prune guard test.");
-
-        var ct = TestContext.Current.CancellationToken;
-        using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync(ct);
-        await PgMigrations.MigrateAsync(connection, ct);
-        await DeleteLiveRowsAsync(connection, ct);
-
-        await using var postgres = NpgsqlDataSource.Create(connectionString!);
-        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
-
-        var bodySucceeded = false;
-        try
-        {
-            /* No snapshot for THIS server. A neighbour's snapshot exists and names none of these databases,
-               so a prune that forgot to scope the snapshot read by server would wipe every row here. */
-            await SnapshotAsync(connection, ct, new DateTime(2026, 8, 11, 9, 0, 0, DateTimeKind.Unspecified),
-                NeighborServerId, "SomeOtherServersDatabase");
-
-            await StateAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Alpha"), "1:1786449600");
-            await StateAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Beta"), "2:1786449600");
-
-            await runner.PruneOrphanedQueryStoreDatabaseStateAsync(LiveServerId, ct);
-
-            Assert.Equal("1:1786449600",
-                await ValueAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Alpha")));
-            Assert.Equal("2:1786449600",
-                await ValueAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Beta")));
-
-            bodySucceeded = true;
-        }
-        finally
-        {
-            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
-                await DeleteLiveRowsAsync(cleanup, cleanupCt));
-        }
-    }
-
-    /// <summary>
-    /// The race the issue asks about, driven in the order that would lose data if the write-back were not an
-    /// upsert: a cycle loads state, the prune deletes that key underneath it, and the cycle then persists what
-    /// it observed. The row must come back.
-    ///
-    /// <para>The prune cannot actually target a live database — its predicate is absence from the newest
-    /// sys.databases snapshot — so this drives the adversarial case DELIBERATELY, by pruning while the name is
-    /// missing from the snapshot. That is what makes the consequence a measured fact instead of an argument:
-    /// even a prune that fires on a database it should not have costs one refetch and never a lost row.</para>
-    /// </summary>
-    [Fact]
-    public async Task Prune_RacingAnInFlightCycle_CannotLoseTheWatermark_AgainstDevPostgres()
-    {
-        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string to run the live prune race test.");
-
-        var ct = TestContext.Current.CancellationToken;
-        using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync(ct);
-        await PgMigrations.MigrateAsync(connection, ct);
-        await DeleteLiveRowsAsync(connection, ct);
-
-        await using var postgres = NpgsqlDataSource.Create(connectionString!);
-        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
-
-        var bodySucceeded = false;
-        try
-        {
-            /* A snapshot that does NOT name Racer — the adversarial setup. */
-            await SnapshotAsync(connection, ct, new DateTime(2026, 8, 11, 9, 0, 0, DateTimeKind.Unspecified), "Live");
-            await StateAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Racer"), "900000:1786449600");
-
-            /* Cycle start: the collection pass reads its state. */
-            var loaded = await runner.GetCollectorStateAsync(LiveServerId, QueryStorePlanXmlState.StateCollectorName, ct);
-            Assert.Equal("900000:1786449600", Assert.Contains(Planwm("Racer"), loaded));
-
-            /* Mid-flight: the prune fires and takes the row this cycle is still working from. */
-            await runner.PruneOrphanedQueryStoreDatabaseStateAsync(LiveServerId, ct);
-            Assert.Null(await ValueAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Racer")));
-
-            /* Cycle end: the write-back is an INSERT ... ON CONFLICT, so it restores rather than failing on a
-               row that is no longer there. The database keeps collecting; the delete cost nothing. */
-            await runner.SaveCollectorStateAsync(
-                LiveServerId, QueryStorePlanXmlState.StateCollectorName,
-                new Dictionary<string, string>(StringComparer.Ordinal) { [Planwm("Racer")] = "950000:1786449600" },
-                ct);
-
-            Assert.Equal("950000:1786449600",
-                await ValueAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Racer")));
-
-            bodySucceeded = true;
-        }
-        finally
-        {
-            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
-                await DeleteLiveRowsAsync(cleanup, cleanupCt));
-        }
-    }
-
-    /* ---------------- helpers ---------------- */
-
-    private static Task SnapshotAsync(
-        NpgsqlConnection connection, CancellationToken ct, DateTime at, params string[] databases)
-        => SnapshotAsync(connection, ct, at, LiveServerId, databases);
-
-    private static async Task SnapshotAsync(
-        NpgsqlConnection connection, CancellationToken ct, DateTime at, int serverId, params string[] databases)
-    {
-        foreach (var database in databases)
-        {
-            /* state_desc is deliberately never read by the prune — existence is the only question — so these
-               rows carry ONLINE uniformly except where a case needs otherwise. */
-            using var command = new NpgsqlCommand(@"
-INSERT INTO collect.database_states (collection_id, collection_time, server_id, server_name, database_name, database_id, state_desc, is_in_standby)
-VALUES (0, $1, $2, $3, $4, 5, $5, false)", connection);
-            command.Parameters.AddWithValue(at);
-            command.Parameters.AddWithValue(serverId);
-            command.Parameters.AddWithValue(ServerName);
-            command.Parameters.AddWithValue(database);
-            command.Parameters.AddWithValue(string.Equals(database, "Parked", StringComparison.Ordinal) ? "OFFLINE" : "ONLINE");
-            await command.ExecuteNonQueryAsync(ct);
-        }
-    }
-
-    private static async Task StateAsync(
-        NpgsqlConnection connection, CancellationToken ct, int serverId, string owner, string key, string value)
-    {
-        using var command = new NpgsqlCommand(@"
-INSERT INTO collect.collector_state (server_id, collector_name, state_key, state_value, updated_at)
-VALUES ($1, $2, $3, $4, (now() AT TIME ZONE 'UTC'))", connection);
-        command.Parameters.AddWithValue(serverId);
-        command.Parameters.AddWithValue(owner);
-        command.Parameters.AddWithValue(key);
-        command.Parameters.AddWithValue(value);
-        await command.ExecuteNonQueryAsync(ct);
-    }
-
-    private static async Task<string?> ValueAsync(
-        NpgsqlConnection connection, CancellationToken ct, int serverId, string owner, string key)
-    {
-        using var command = new NpgsqlCommand(
-            "SELECT state_value FROM collect.collector_state WHERE server_id = $1 AND collector_name = $2 AND state_key = $3",
-            connection);
-        command.Parameters.AddWithValue(serverId);
-        command.Parameters.AddWithValue(owner);
-        command.Parameters.AddWithValue(key);
-        var value = await command.ExecuteScalarAsync(ct);
-        return value is DBNull or null ? null : (string)value;
-    }
-
-    private static async Task<long> CountAsync(NpgsqlConnection connection, CancellationToken ct, int serverId)
-    {
-        using var command = new NpgsqlCommand(
-            "SELECT COUNT(*) FROM collect.collector_state WHERE server_id = $1", connection);
-        command.Parameters.AddWithValue(serverId);
-        return (long)(await command.ExecuteScalarAsync(ct))!;
-    }
-
-    private static async Task DeleteLiveRowsAsync(NpgsqlConnection connection, CancellationToken ct)
-    {
-        var live = LiveServerId.ToString(CultureInfo.InvariantCulture);
-        var neighbor = NeighborServerId.ToString(CultureInfo.InvariantCulture);
-        using var cleanup = new NpgsqlCommand(
-            $"DELETE FROM collect.collector_state WHERE server_id IN ({live}, {neighbor});" +
-            $"DELETE FROM collect.database_states WHERE server_id IN ({live}, {neighbor});", connection);
-        await cleanup.ExecuteNonQueryAsync(ct);
     }
 
     /// <summary>
