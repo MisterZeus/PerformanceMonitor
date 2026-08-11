@@ -374,6 +374,7 @@ public sealed class DarlingWorker : BackgroundService
        self-alerts inherit its delivery/cooldown/restart-replay. Held as a field because the connection
        edge fires from TryConnectAsync and the reconcile drops per-server state through it. */
     private DarlingSelfAlertEvaluator? _selfAlerts;
+    private IAlertDeliverer? _alertDeliverer;
 
     /* #1560: the live MCP enable/port seam — published to the MCP host's supervisor at startup and on
        every control-plane reload, so the viewer's Settings toggle takes effect without a restart. */
@@ -1031,6 +1032,12 @@ public sealed class DarlingWorker : BackgroundService
                 }
             });
         var engine = BuildAlertEngine(config, servers, alertSettings, historyStore, muteRuleService, deliverer);
+
+        /* Held for the PostgreSQL predictors, which deliver alongside the shared engine rather than
+           through it (see EvaluatePostgresAlertsAsync). Same deliverer instance, so a PostgreSQL alert
+           lands in the same history and obeys the same mute rules as an engine-emitted one — the point
+           of reusing it rather than building a second delivery path. */
+        _alertDeliverer = deliverer;
 
         /* Stage 4: the service self-alerts, over the SAME deliverer + history + mute check the engine uses.
            collection-stopped / capture-down are polled from collection_log on the alert cadence below;
@@ -2377,6 +2384,16 @@ public sealed class DarlingWorker : BackgroundService
                 Suppressed: false);
 
             await engine.EvaluateServerAsync(snapshot, cancellationToken);
+
+            /* PostgreSQL predictors ride alongside rather than inside the shared engine — see
+               IPostgresAlertReadAdapter for why the read contract is separate. Gated on the probed engine,
+               so a SQL Server target does not pay for a read it can never satisfy, and Lite never sees any
+               of it. Awaited AFTER the shared sweep so an existing SQL Server alert is never delayed by a
+               PostgreSQL read. */
+            if (runtime.Target.Engine == CollectorTargetEngine.PostgreSql)
+            {
+                await EvaluatePostgresAlertsAsync(runtime, snapshot, cancellationToken);
+            }
         }
         catch (OperationCanceledException)
         {
@@ -2385,6 +2402,60 @@ public sealed class DarlingWorker : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError("[{Server}] Alert sweep failed: {Message}", server.Config.DisplayName, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Evaluates the three PostgreSQL Tier 0 outage predictors and delivers whatever fired.
+    /// <para>Failure-isolated from the shared sweep on purpose: these are additive signals, and a broken
+    /// PostgreSQL read must not cost a server its CPU or blocking alerts. Recording and mute handling stay
+    /// with the deliverer, exactly as for an engine-emitted alert, so a PostgreSQL alert lands in the same
+    /// history and obeys the same mute rules as every other one.</para>
+    /// </summary>
+    private async Task EvaluatePostgresAlertsAsync(
+        ServerRuntime runtime, AlertServerSnapshot snapshot, CancellationToken cancellationToken)
+    {
+        if (_postgres is null || _alertDeliverer is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var adapter = new DarlingPostgresAlertReadAdapter(_postgres);
+
+            var findings = PostgresAlertEvaluator.Evaluate(
+                await adapter.GetWraparoundRiskAsync(runtime.ServerId, cancellationToken),
+                await adapter.GetXminHorizonAsync(runtime.ServerId, cancellationToken),
+                await adapter.GetReplicationSlotRiskAsync(runtime.ServerId, cancellationToken));
+
+            foreach (var finding in findings)
+            {
+                await _alertDeliverer.DeliverAsync(
+                    new AlertOutcome(
+                        snapshot.ServerKey,
+                        snapshot.ServerName,
+                        finding.MetricName,
+                        finding.CurrentValue,
+                        finding.ThresholdValue,
+                        Context: null,
+                        DetailText: null,
+                        finding.NumericCurrentValue,
+                        finding.NumericThresholdValue,
+                        Muted: false,
+                        finding.Severity,
+                        finding.ShortMessage),
+                    cancellationToken);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError("[{Server}] PostgreSQL alert evaluation failed: {Message}",
+                runtime.Config.DisplayName, ex.Message);
         }
     }
 

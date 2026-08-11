@@ -1,12 +1,16 @@
 # PostgreSQL alerting — scoping note
 
-Status: **design decision needed before implementation.** Not started.
+Status: **decided (Option B) and implemented.** Kept for the reasoning; see the header notes on
+`IPostgresAlertReadAdapter` and `PostgresAlertEvaluator` for what shipped.
 
-The three Tier 0 outage predictors (`pg_wraparound_stats`, `pg_xmin_horizon`, `pg_replication_slots`) are
-collected, stored and readable through MCP. Nothing pages anyone about them. That is the largest remaining
-gap for a monitoring replacement — each names a condition that stops the server outright, and each is
-silent until it is nearly too late, which is exactly the profile that needs an alert rather than a
-dashboard.
+What is NOT done: the thresholds are constants in the evaluator rather than configurable, so there are no
+new `config_alert_settings` columns, no migration and no Settings-window work. Each constant is derived
+from PostgreSQL's own mechanics (see the evaluator) rather than picked, which is why this is a defensible
+first cut rather than a shortcut — but the moment someone wants a different number, that is the work.
+
+The three Tier 0 outage predictors (`pg_wraparound_stats`, `pg_xmin_horizon`, `pg_replication_slots`) each
+name a condition that stops the server outright, and each is silent until it is nearly too late — exactly
+the profile that needs an alert rather than a dashboard. They now have one.
 
 ## Why this is not another vertical slice
 
@@ -19,7 +23,7 @@ A single new alert touches:
 
 | Surface | File | Note |
 |---|---|---|
-| Read contract | `PerformanceMonitor.Alerting/IAlertReadAdapter.cs` | **the decision point — see below** |
+| Read contract | `IAlertReadAdapter` vs a new `IPostgresAlertReadAdapter` | **was the decision point — B chosen** |
 | Lite implementation | `Lite/Services/LiteAlertReadAdapter.cs` | Lite has no PostgreSQL target |
 | Darling implementation | `Darling/.../DarlingAlertReadAdapter.cs` | the real one |
 | Info record | `PerformanceMonitor.Alerting/<X>Info.cs` | per signal |
@@ -46,12 +50,16 @@ grow PostgreSQL support.
 Keeps Lite untouched and makes the engine gate explicit, mirroring how `CollectorCatalog.AppliesTo` already
 gates collection by engine. Cost: two read contracts, and `AlertEngine` grows an engine branch.
 
-**Recommendation: B**, for the same reason the collector seam gates by engine rather than having every
-definition claim every target — the alternative puts empty stubs in a shipping SKU to satisfy a contract
-it has no stake in. But this is an architecture call on the shared brain, and per house rules that is
-Erik's, not mine.
+**Chosen: B**, for the same reason the collector seam gates by engine rather than having every definition
+claim every target — the alternative puts empty stubs in a shipping SKU to satisfy a contract it has no
+stake in.
 
-## What the thresholds should be, once the seam exists
+What B actually cost, now that it is built, is less than the table above implies: `AlertEngine` was NOT
+touched at all. The evaluator is a pure function beside it, and the host calls it after the shared sweep
+behind an engine check. So Lite, `IAlertReadAdapter`, `IAlertEngineSettings` and all four existing test
+files are untouched — the blast radius collapsed to new files plus one gated call site.
+
+## The thresholds, as implemented
 
 Not arbitrary — these come from what the collectors already measure:
 
@@ -66,8 +74,9 @@ Not arbitrary — these come from what the collectors already measure:
   distinction `get_pg_replication_slots` already computes. `lost`/`unreserved` are critical on their face;
   `extended` + inactive + growing is the disk-fill emergency; `extended` alone is a warning.
 
-Each of those maps to a severity the read surface already computes, so the engine's job is threshold +
-edge-trigger + dedup, not re-deriving the finding.
+Each maps to a severity the read surface already computes, so the evaluator's job is the threshold, not
+re-deriving the finding. Edge-triggering and dedup stay with the host's deliverer, which is why the
+evaluator emits a `Subject` per finding — two databases breaching at once must not collapse into one alert.
 
 ## Also worth knowing
 
