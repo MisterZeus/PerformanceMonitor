@@ -31,11 +31,11 @@ public sealed class PgSchemaGeneratorTests
            Availability Group collectors (#991) = 38, plus plan_correction (#1952 automatic plan
            correction) = 39, plus pvs_stats (#1951 ADR version store) = 40, plus database_states
            (baseline-deviation database-state alert) = 41, plus pg_wait_stats (the first PostgreSQL
-           collector) = 42, plus pg_statement_stats = 43, plus pg_wraparound_stats = 44. The catalog is deliberately engine-mixed: the schema generator walks it to
+           collector) = 42, plus pg_statement_stats = 43, plus pg_wraparound_stats = 44, plus pg_xmin_horizon = 45. The catalog is deliberately engine-mixed: the schema generator walks it to
            create tables and one store can hold both engines' data, so splitting it per engine would
            fragment DDL generation. Dispatch is gated separately, by engine, in
            CollectorCatalog.AppliesTo(definition, target). */
-        Assert.Equal(44, CollectorCatalog.All.Count);
+        Assert.Equal(45, CollectorCatalog.All.Count);
         Assert.Equal(43, CollectorCatalog.All.Select(s => s.TargetTable).Distinct().Count());
         Assert.Equal(43, CollectorCatalog.All.Select(s => s.Name).Distinct().Count());
     }
@@ -562,7 +562,7 @@ public sealed class PgSchemaGeneratorTests
         var script = PgSchemaGenerator.GenerateFullSchema();
 
         var tableCount = CollectorCatalog.All.Count(s => script.Contains($"CREATE TABLE IF NOT EXISTS {s.TargetTable} (", StringComparison.Ordinal));
-        Assert.Equal(44, tableCount);
+        Assert.Equal(45, tableCount);
 
         /* 41 tables minus the two index-less config tables (server_config, database_config) = 39 indexes
            (database_states is a time-series collector and gets the default retrieval index). */

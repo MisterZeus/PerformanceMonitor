@@ -69,6 +69,7 @@ public static class CollectorCatalog
         PgWaitStatsCollector.Instance,
         PgStatementStatsCollector.Instance,
         PgWraparoundStatsCollector.Instance,
+        PgXminHorizonCollector.Instance,
     };
 
     /// <summary>Name → definition, for the by-name target-gate lookup. Built once from <see cref="All"/>.</summary>

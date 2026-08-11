@@ -119,6 +119,7 @@ public static class PgMigrations
         new Migration(60, "pg-wait-stats", V60Sql),
         new Migration(61, "pg-statement-stats", V61Sql),
         new Migration(62, "pg-wraparound-stats", V62Sql),
+        new Migration(63, "pg-xmin-horizon", V63Sql),
     };
 
     /// <summary>
@@ -1298,6 +1299,37 @@ CREATE TABLE IF NOT EXISTS collect.pg_wraparound_stats (
 
 CREATE INDEX IF NOT EXISTS idx_pg_wraparound_stats_time
     ON collect.pg_wraparound_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V63 — <c>pg_xmin_horizon</c>: what is holding back the xmin horizon, attributed by cause.
+    /// <para>Four unrelated causes produce an identical picture — dead tuples accumulate, autovacuum
+    /// runs and reports success, nothing shrinks — and the fix differs completely for each: kill a
+    /// session, drop a replication slot, disable standby feedback, or resolve an orphaned prepared
+    /// transaction. That is why this table stores one row per SOURCE with the oldest holder for that
+    /// source, plus an <c>is_winner</c> flag, rather than a single horizon age. Attribution is the whole
+    /// value; an aggregate would leave a reader exactly where they started.</para>
+    /// <para><c>is_winner</c> is stamped at collection rather than derived on read, so a stored row names
+    /// the winner as of the moment it was measured — deriving it later would depend on which rows a
+    /// query happened to select, and a filtered read could crown a holder that never held the horizon.</para>
+    /// <para>Zero rows is the HEALTHY state and must never be read as a collection failure. Note also
+    /// that <c>standby_feedback</c> is expected to be absent on Aurora, whose replicas read the same
+    /// storage volume instead of streaming WAL.</para>
+    /// </summary>
+    private const string V63Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_xmin_horizon (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    source text,
+    xmin_age bigint,
+    holder text,
+    detail text,
+    is_winner boolean
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_xmin_horizon_time
+    ON collect.pg_xmin_horizon(server_id, collection_time);";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

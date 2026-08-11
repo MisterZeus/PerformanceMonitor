@@ -134,5 +134,11 @@ public static class CollectorScheduleDefaults
            table-growth trend that usually explains it. Cheap: a handful of rows from a shared
            catalog. */
         ["pg_wraparound_stats"] = new(5, 90),
+
+        /* Per-minute, unlike its wraparound sibling: an xmin holder is the FAST-moving leading
+           indicator, and the thing an operator wants is the session or slot that appeared minutes
+           ago, before it has cost anything. At most five rows a cycle. 30 days matches the other
+           per-minute health series. */
+        ["pg_xmin_horizon"] = new(1, 30),
     };
 }
