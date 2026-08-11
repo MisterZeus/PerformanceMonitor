@@ -122,6 +122,7 @@ public static class PgMigrations
         new Migration(63, "pg-xmin-horizon", V63Sql),
         new Migration(64, "pg-replication-slots", V64Sql),
         new Migration(65, "pg-autovacuum-stats", V65Sql),
+        new Migration(66, "pg-io-stats", V66Sql),
     };
 
     /// <summary>
@@ -1423,6 +1424,48 @@ CREATE TABLE IF NOT EXISTS collect.pg_autovacuum_stats (
 
 CREATE INDEX IF NOT EXISTS idx_pg_autovacuum_stats_time
     ON collect.pg_autovacuum_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V66 — <c>collect.pg_io_stats</c>, I/O attributed to a (backend_type, object, context) triple rather
+    /// than to a file, from <c>pg_stat_io</c> (PostgreSQL 16+).
+    /// <para>Every counter column is NULLABLE and that is load-bearing, not incidental. PostgreSQL uses
+    /// NULL for "this counter does not apply to this combination" — the checkpointer performs no reads,
+    /// <c>bulkread</c> never extends, the <c>normal</c> context has no ring buffer to reuse — and on Aurora
+    /// the entire write side is NULL because backends there do not write data files. A NOT NULL column with
+    /// a 0 default would claim measurements that were never taken, and a consumer averaging write latency
+    /// would divide by them.</para>
+    /// <para>Cumulative counters stored raw, with the windowed change computed at read time. Additive and
+    /// view-less exactly like V60-V65: a fresh store gets the table from V1's generated schema, and this
+    /// rung is what an already-existing store gets.</para>
+    /// </summary>
+    private const string V66Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_io_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    backend_type text,
+    object_type text,
+    context text,
+    reads bigint,
+    read_time_ms double precision,
+    writes bigint,
+    write_time_ms double precision,
+    writebacks bigint,
+    writeback_time_ms double precision,
+    extends bigint,
+    extend_time_ms double precision,
+    op_bytes bigint,
+    hits bigint,
+    evictions bigint,
+    reuses bigint,
+    fsyncs bigint,
+    fsync_time_ms double precision,
+    stats_reset timestamp
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_io_stats_time
+    ON collect.pg_io_stats(server_id, collection_time);";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

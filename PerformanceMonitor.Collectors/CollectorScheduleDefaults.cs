@@ -153,5 +153,11 @@ public static class CollectorScheduleDefaults
            the scale of minutes to hours, so a per-minute read would mostly re-record the same state.
            90 days matches database_size_stats: the useful reading is a bloat trend, not a spot check. */
         ["pg_autovacuum_stats"] = new(60, 90),
+
+        /* Back to per-minute: pg_stat_io is cluster-wide (one connection, no fan-out) and returned
+           25-37 rows per snapshot on the fleet, so the cost is the same order as pg_wait_stats. 30 days
+           matches the other rate collectors — the value here is correlating an I/O shift against a
+           deployment, which is a days-to-weeks question, not a quarterly one. */
+        ["pg_io_stats"] = new(1, 30),
     };
 }

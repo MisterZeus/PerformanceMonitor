@@ -56,9 +56,9 @@ There is **no DI container for collectors**. A new definition is wired up by add
 
 | Concern | File | Shape |
 | --- | --- | --- |
-| Schema catalog — drives DDL generation | [`CollectorCatalog.cs`](../PerformanceMonitor.Collectors/CollectorCatalog.cs) | `IReadOnlyList<ICollectorSchemaInfo> All` — 47 `XCollector.Instance` entries (41 SQL Server + 6 PostgreSQL) |
-| Cadence, retention, default-enabled | [`CollectorScheduleDefaults.cs`](../PerformanceMonitor.Collectors/CollectorScheduleDefaults.cs) | `record Entry(int FrequencyMinutes, int RetentionDays, bool DefaultEnabled = true)` — 47 entries |
-| Runtime dispatch (Darling) | [`DarlingWorker.cs`](../Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs) | `s_dispatch` — 47 typed lambdas |
+| Schema catalog — drives DDL generation | [`CollectorCatalog.cs`](../PerformanceMonitor.Collectors/CollectorCatalog.cs) | `IReadOnlyList<ICollectorSchemaInfo> All` — 48 `XCollector.Instance` entries (41 SQL Server + 7 PostgreSQL) |
+| Cadence, retention, default-enabled | [`CollectorScheduleDefaults.cs`](../PerformanceMonitor.Collectors/CollectorScheduleDefaults.cs) | `record Entry(int FrequencyMinutes, int RetentionDays, bool DefaultEnabled = true)` — 48 entries |
+| Runtime dispatch (Darling) | [`DarlingWorker.cs`](../Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs) | `s_dispatch` — 48 typed lambdas |
 
 The catalog is deliberately **engine-mixed**: the schema generator walks it to create tables and one
 store can hold both engines' data, so splitting it per engine would fragment DDL generation. What keeps

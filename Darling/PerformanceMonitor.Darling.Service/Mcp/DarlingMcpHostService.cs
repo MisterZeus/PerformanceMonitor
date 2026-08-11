@@ -497,6 +497,10 @@ public sealed class DarlingMcpHostService : BackgroundService
                    dead-tuple count is not comparable between a 50-million-row table and a 10,000-row
                    one, and the threshold is what makes it so. */
                 .WithGeminiCompatibleTools<DarlingMcpPgAutovacuumTools>()
+                /* get_pg_io_stats — I/O attributed to who/what/why rather than to a file. The context
+                   dimension has no SQL Server counterpart and is what separates a buffer-pool miss that
+                   more memory would fix from a ring-buffered sequential scan that it would not. */
+                .WithGeminiCompatibleTools<DarlingMcpPgIoTools>()
                 .WithGeminiCompatibleTools<DarlingMcpMemoryGrantTools>()
                 .WithGeminiCompatibleTools<DarlingMcpPlanCacheSchedulerTools>()
                 .WithGeminiCompatibleTools<DarlingMcpJobTools>()
