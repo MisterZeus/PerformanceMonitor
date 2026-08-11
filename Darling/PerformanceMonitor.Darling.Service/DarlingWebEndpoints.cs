@@ -1114,6 +1114,7 @@ public static class DarlingWebEndpoints
             ["get_tempdb_trend"] = R(CatData, "tempdb space usage over time.", PServer(), PHours(24)),
             ["get_top_procedures_by_cpu"] = R(CatData, "Top stored procedures by CPU.", PServer(), PHours(24), PTop(20), PText("database_name")),
             ["get_top_queries_by_cpu"] = R(CatData, "Top queries by CPU, optionally parallel-only / min-DOP.", PServer(), PHours(24), PTop(20), PText("database_name"), PBool("parallel_only", false), PInt("min_dop", 0)),
+            ["get_pg_top_queries"] = R(CatData, "Top PostgreSQL query shapes by total execution time (Aurora targets).", PServer(), PHours(24), PLimit(20)),
             ["get_pg_wait_stats"] = R(CatData, "Top PostgreSQL wait events in the window (Aurora targets).", PServer(), PHours(24), PLimit(20)),
             ["get_wait_stats"] = R(CatData, "Top wait statistics in the window.", PServer(), PHours(24), PLimit(20)),
             ["get_wait_trend"] = R(CatData, "One wait type's totals over time (requires wait_type).", PReqText("wait_type"), PServer(), PHours(24)),
@@ -1542,6 +1543,7 @@ public static class DarlingWebEndpoints
             ["get_tempdb_trend"] = (c, pg, an) => DarlingMcpDataTools.GetTempDbTrend(pg, Server(c), Hours(c, 24)),
             ["get_top_procedures_by_cpu"] = (c, pg, an) => DarlingMcpDataTools.GetTopProceduresByCpu(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name")),
             ["get_top_queries_by_cpu"] = (c, pg, an) => DarlingMcpDataTools.GetTopQueriesByCpu(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), QueryBool(c, "parallel_only", false), QueryInt(c, "min_dop", null, 0)),
+            ["get_pg_top_queries"] = (c, pg, an) => DarlingMcpPgStatementTools.GetPgTopQueries(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20)),
             ["get_pg_wait_stats"] = (c, pg, an) => DarlingMcpPgWaitTools.GetPgWaitStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20)),
             ["get_wait_stats"] = (c, pg, an) => DarlingMcpDataTools.GetWaitStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20)),
             ["get_wait_trend"] = (c, pg, an) => RequireText(c, "wait_type", out var waitType)

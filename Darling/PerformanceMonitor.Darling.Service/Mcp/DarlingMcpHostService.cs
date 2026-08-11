@@ -478,6 +478,10 @@ public sealed class DarlingMcpHostService : BackgroundService
                    concept, reported in microseconds, so the two engines cannot share a result shape
                    without lying about a unit or emitting mostly-null columns. */
                 .WithGeminiCompatibleTools<DarlingMcpPgWaitTools>()
+                /* get_pg_top_queries — PostgreSQL query shapes by total time, paired with the
+                   pg_statement_stats collector. Carries Aurora's I/O source split and per-statement
+                   peak memory, neither of which the SQL Server tools have an equivalent for. */
+                .WithGeminiCompatibleTools<DarlingMcpPgStatementTools>()
                 .WithGeminiCompatibleTools<DarlingMcpMemoryGrantTools>()
                 .WithGeminiCompatibleTools<DarlingMcpPlanCacheSchedulerTools>()
                 .WithGeminiCompatibleTools<DarlingMcpJobTools>()
