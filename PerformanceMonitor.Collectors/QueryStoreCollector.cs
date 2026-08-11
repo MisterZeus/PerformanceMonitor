@@ -476,7 +476,7 @@ END;
     /// comparison — the #1960 invariant, mirror-imaged. Everything else (columns, slice aggregation,
     /// version gates) is byte-identical, so the reader contract cannot drift between live and backfill.</para>
     /// </summary>
-    internal static string BuildPayloadBody(CollectorContext context, bool backfill = false)
+    internal static string BuildPayloadBody(CollectorContext context, bool backfill = false, string? databaseName = null)
     {
         /* Detect server version for version-gated columns.
            isNew = true for SQL Server 2017+ (product version > 13) or Azure SQL DB/MI.
@@ -653,8 +653,39 @@ END;
            plans live, and Darling's stored-plan readers all guard `query_plan_text IS NOT NULL`. Not
            mirrored into the Dashboard proc: its "Download Plan" reads by exact collection_id, where
            per-row NULLs would break a real reader. */
+        /* #2164: skip the XML for plans the store already holds. 97% of the plan XML shipped in a
+           three-hour fleet window was for plans held over an hour — the ROW_NUMBER gate ships each plan once
+           per PASS but re-ships it every pass forever, and since drain is 94-97% of a pass and is per-row LOB
+           cost, NOT fetching is worth far more than fetching less. The watermark is the highest plan_id whose
+           XML was actually STORED for this database; plan_id is monotonic within a database, so a higher id
+           is a plan we have never stored. Inlined as a parsed long (never operator input) because the body
+           nests inside sp_executesql on three paths and threading another parameter through all of them buys
+           nothing. Zero — absent, malformed, or expired — renders no predicate, so the conservative path is
+           byte-identical to the pre-#2164 query.
+
+           NEVER on the backfill path. The watermark tracks the plans the LIVE window has stored, and backfill
+           digs the other way — into intervals older than anything collected, whose rows reference plans
+           compiled long ago and therefore numbered BELOW the live watermark. Applying it there would suppress
+           essentially every plan the backfill exists to fetch, silently: the slices would still ship runtime
+           stats, so a filled range would look complete while carrying no plan XML at all.
+
+           KNOWN GAP, bounded by QueryStorePlanXmlState.RefreshAfter: plan_id is monotonic in COMPILE order, which is
+           not the same as "we have stored it". A plan compiled before monitoring began, dormant through every
+           collected window, then executed again, arrives with an id below the watermark and has its XML
+           suppressed until the refresh horizon expires. Bounding it is the reason that horizon exists. The
+           exact fix is a store-DERIVED watermark (the host asking its own plan dimension for the lowest
+           plan_id missing XML) rather than this collector-derived one; that needs host plumbing on both
+           products and is tracked separately. */
+        var watermarkDb = backfill ? null : databaseName ?? context.CurrentDatabaseName;
+        var planWatermark = string.IsNullOrEmpty(watermarkDb)
+            ? 0L
+            : QueryStorePlanXmlState.Resolve(context.State, watermarkDb!, context.CollectionTime);
+        var watermarkPredicate = planWatermark > 0
+            ? " AND qsp.plan_id > " + planWatermark.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            : string.Empty;
+
         string planTextCol = context.CapturePlanXml
-            ? "query_plan_text = CASE WHEN ROW_NUMBER() OVER (PARTITION BY qsp.plan_id ORDER BY qsrs.last_execution_time DESC) = 1 THEN CONVERT(nvarchar(max), qsp.query_plan) ELSE CONVERT(nvarchar(max), NULL) END,"
+            ? "query_plan_text = CASE WHEN ROW_NUMBER() OVER (PARTITION BY qsp.plan_id ORDER BY qsrs.last_execution_time DESC) = 1" + watermarkPredicate + " THEN CONVERT(nvarchar(max), qsp.query_plan) ELSE CONVERT(nvarchar(max), NULL) END,"
             : "query_plan_text = CONVERT(nvarchar(1), NULL),";
 
         /* The replica-attribution column + its join (see hasReplicaAttribution above). Selected after every
@@ -1014,7 +1045,7 @@ OPTION(RECOMPILE);";
     public override CollectorQuery BuildPerItemQuery(string item, CollectorContext context)
     {
         /* Double single quotes so the body survives nesting inside [db].sys.sp_executesql N'...' */
-        var escapedBody = BuildPayloadBody(context).Replace("'", "''", StringComparison.Ordinal);
+        var escapedBody = BuildPayloadBody(context, databaseName: item).Replace("'", "''", StringComparison.Ordinal);
         var escapedDbName = item.Replace("]", "]]", StringComparison.Ordinal);
 
         var text = $@"
@@ -1118,6 +1149,12 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
         var budgetSpent = false;
         DateTime? cutBoundary = null;
 
+        /* #2164 watermark bookkeeping: counts ONLY plans whose XML actually landed in this batch, so a
+           budget-cut pass cannot claim coverage it does not have. Plans observed but not stored are
+           deliberately not tracked — see QueryStorePlanXmlState.RefreshAfter for why the observed maximum cannot be
+           used to detect a Query Store reset. */
+        long maxStoredPlanId = 0;
+
         while (await reader.ReadAsync(cancellationToken))
         {
             var row = new Row
@@ -1212,6 +1249,12 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
                everything past the cut stays ahead of the watermark and next cycle resumes exactly there:
                a bounded cycle costs latency, never data. */
             textBytes += ((long)(row.QueryText?.Length ?? 0) + (row.QueryPlanText?.Length ?? 0)) * 2L;
+
+            if (row.QueryPlanText is not null && row.PlanId > maxStoredPlanId)
+            {
+                maxStoredPlanId = row.PlanId;
+            }
+
             if (!budgetSpent && textBytes >= budget)
             {
                 budgetSpent = true;
@@ -1222,7 +1265,41 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
 
         context.PerItemTextBytesShipped = textBytes;
         context.PerItemShippedBoundary = rows.Count > 0 ? rows[^1].LastExecutionTime : null;
+
+        /* #2164: persist the plan-XML watermark for this database.
+           - Advance to the highest plan_id whose XML actually stored, never past it.
+           - Never move BACKWARD: a window whose newest-executing plan is older than the newest-COMPILED one
+             is an ordinary quiet window, not a reset, and lowering the watermark there would refetch the
+             whole catalog next cycle. (Treating it as a reset is the trap documented on
+             QueryStorePlanXmlState.RefreshAfter — it holds in most steady-state windows.)
+           - Never advance AT ALL on a budget-cut pass. Rows ship ordered by last_execution_time, NOT by
+             plan_id, so the cut drops an arbitrary set of plan_ids from the tail of the window — including
+             ids BELOW the highest one that did store. Advancing past them would suppress their XML on every
+             later pass (the ids no longer clear the watermark) even though it never shipped once. The cut is
+             already resumable on the time watermark, so declining to advance costs one repeated fetch and
+             nothing else. */
+        if (context.CapturePlanXml && !string.IsNullOrEmpty(databaseName) && !budgetSpent && maxStoredPlanId > 0)
+        {
+            var standing = QueryStorePlanXmlState.Resolve(context.State, databaseName, context.CollectionTime);
+
+            if (maxStoredPlanId > standing)
+            {
+                /* The stamp dates the last FULL fetch, and is carried FORWARD across advances rather than
+                   renewed on each one. Re-stamping here would push the refresh horizon out every time a new
+                   plan compiled, so on any database that keeps compiling — the busy ones, where a stale plan
+                   is most likely to matter — the horizon would never fire and the watermark would effectively
+                   be permanent. A standing watermark of 0 means this pass WAS the full fetch (absent or just
+                   expired), so that is the one case that stamps now. */
+                var stamp = standing > 0
+                    ? QueryStorePlanXmlState.ResolveStamp(context.State, databaseName) ?? context.CollectionTime
+                    : context.CollectionTime;
+
+                context.PendingState[QueryStorePlanXmlState.KeyFor(databaseName)] =
+                    QueryStorePlanXmlState.Format(maxStoredPlanId, stamp);
+            }
+        }
     }
+
 
     /// <summary>
     /// Reads a nullable int64, converting float/decimal Query Store values to long.
