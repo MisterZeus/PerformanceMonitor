@@ -1250,7 +1250,14 @@ public sealed class AlertEngine
         foreach (var (dbName, db) in current)
         {
             active.Add(dbName);
-            var cooldownKey = DatabaseStateCooldownKey(key, dbName);
+            /* Keyed per database AND per STATE (#2166). It used to be per database, which was survivable when
+               every deviation re-fired every cooldown: a transition suppressed by the previous state's
+               cooldown re-announced on the next tick anyway. Now that a chosen state goes quiet
+               indefinitely, that suppression would be permanent for the length of a cooldown window — so a
+               database going OFFLINE and then SUSPECT inside one window could have its SUSPECT transition
+               swallowed, which is precisely the integrity case this alert must never go quiet about. Each
+               state now rate-limits itself and cannot borrow another's clock. */
+            var cooldownKey = DatabaseStateCooldownKey(key, dbName, db.StateDesc);
             /* #2166: for the states an operator usually CHOSE (a parked OFFLINE, a secondary flickering
                RESTORING), repetition is noise — alert on the transition and stay quiet until the state
                changes. Compared against the PERSISTED last-alerted state, so a service restart cannot
@@ -1328,7 +1335,17 @@ public sealed class AlertEngine
             foreach (var dbName in recovered)
             {
                 active.Remove(dbName);
-                _lastDatabaseStateAlert.TryRemove(DatabaseStateCooldownKey(key, dbName), out _);
+                /* Every state's clock for this database, not just one: the key is now per-state, so a single
+                   TryRemove would leave the other states' stamps behind to rate-limit a future episode
+                   against a cooldown that started before the recovery. */
+                var cooldownPrefix = DatabaseStateCooldownKey(key, dbName, string.Empty);
+                foreach (var stamped in _lastDatabaseStateAlert.Keys)
+                {
+                    if (stamped.StartsWith(cooldownPrefix, StringComparison.Ordinal))
+                    {
+                        _lastDatabaseStateAlert.TryRemove(stamped, out _);
+                    }
+                }
 
                 /* #2166 falling edge: forget the announced state as well as the in-memory cooldown, or the
                    edge only ever triggers once per database. Cleared even when suppressed — suppression
@@ -1348,12 +1365,21 @@ public sealed class AlertEngine
     }
 
     /// <summary>
-    /// Per-database cooldown key. The serverKey is always a digit-only int (see the adapters'
+    /// Per-database, per-STATE cooldown key. The serverKey is always a digit-only int (see the adapters'
     /// ParseServerKey), so the first '|' unambiguously ends it regardless of what the database name
     /// contains — no collision between e.g. (server 1, db "23") and (server 12, db "3").
+    ///
+    /// <para>The trailing state segment is what stops one state's cooldown from rate-limiting a transition
+    /// to a DIFFERENT state (#2166): a chosen state now goes quiet indefinitely rather than re-firing every
+    /// cooldown, so borrowing another state's clock is no longer a delay but a silence. Passing an empty
+    /// state yields the per-database PREFIX, which is how recovery clears every state's clock at once.</para>
+    ///
+    /// <para>That prefix sweep would also match a database literally named <c>Foo|Bar</c> when clearing
+    /// <c>Foo</c>, which is why it is worth stating that the consequence is bounded and in the safe
+    /// direction: a wrongly-cleared cooldown stamp costs at most one extra alert, never a missed one.</para>
     /// </summary>
-    private static string DatabaseStateCooldownKey(string serverKey, string dbName) =>
-        serverKey + "|" + dbName;
+    private static string DatabaseStateCooldownKey(string serverKey, string dbName, string stateDesc) =>
+        serverKey + "|" + dbName + "|" + stateDesc;
 
     /// <summary>
     /// Forced Query Store plans the engine is currently failing to reproduce (#2157). The adapter returns

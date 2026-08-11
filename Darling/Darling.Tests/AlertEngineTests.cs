@@ -1386,6 +1386,53 @@ public sealed class AlertEngineTests
     }
 
     [Fact]
+    public async Task DatabaseState_TransitionToADifferentState_IsNotSuppressedByThePriorStatesCooldown()
+    {
+        /* The safety property, tested where it actually breaks. Both evaluations happen inside one cooldown
+           window (they run back to back, so no wall-clock time passes), which is exactly the case the old
+           per-database cooldown key swallowed: OFFLINE fires and stamps the database's only clock, then the
+           flip to SUSPECT finds that clock still running and goes silent — permanently, now that a chosen
+           state no longer re-fires every cooldown. SUSPECT is the state this alert must never lose. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Archive", StateDesc = "OFFLINE", ExpectedState = "ONLINE", LastAlertedState = "" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Same database, still deviating, but a DIFFERENT state — and the memory now says OFFLINE, which is
+           what makes alreadyAnnounced false while the OFFLINE cooldown is still warm. */
+        h.Deliverer.Outcomes.Clear();
+        h.Adapter.DatabaseStates.Clear();
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Archive", StateDesc = "SUSPECT", ExpectedState = "ONLINE", LastAlertedState = "OFFLINE" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(PerformanceMonitor.Notifications.AlertSeverityLevel.Critical, fired.Severity);
+    }
+
+    [Fact]
+    public async Task DatabaseState_SameState_StillRateLimitsItself_WithinOneCooldown()
+    {
+        /* The other side of keying by state: it must not have turned the cooldown off. An integrity state
+           repeats deliberately (RepeatsAreNoise is false for SUSPECT), so the only thing standing between it
+           and an alert per evaluation is its own cooldown — which must still hold inside one window. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Payments", StateDesc = "SUSPECT", ExpectedState = "ONLINE", LastAlertedState = "SUSPECT" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Deliverer.Outcomes.Clear();
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
     public async Task DatabaseState_RepeatEpisode_OfTheSameState_FiresAgainAfterRecovery()
     {
         /* The falling-edge property, driven as a full round trip through the store's MEMORY rather than
