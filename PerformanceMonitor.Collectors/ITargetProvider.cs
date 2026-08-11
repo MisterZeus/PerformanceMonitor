@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Data.Common;
 
 namespace PerformanceMonitor.Collectors;
@@ -51,4 +52,28 @@ public interface ITargetProvider
     /// definition that deliberately sets a short lock timeout may treat one as a yield.</para>
     /// </summary>
     CollectorTargetFault Classify(Exception exception, bool yieldsOnLockTimeout);
+
+    /// <summary>
+    /// Rewrites <paramref name="connectionString"/> to point at a different database on the same
+    /// server, leaving every other setting alone.
+    /// <para>This is what makes per-database fan-out possible on PostgreSQL at all. SQL Server has two
+    /// ways to reach another database — switch the connection's catalog, or stay put and prefix the
+    /// query (<c>EXECUTE [db].sys.sp_executesql</c>) — and the shared runner uses the first. PostgreSQL
+    /// has only the first: a connection is bound to one database for its lifetime and there is no
+    /// cross-database query at all. So the one shape both engines support is the one exposed here.</para>
+    /// </summary>
+    string WithDatabase(string connectionString, string databaseName);
+
+    /// <summary>
+    /// Where to ask for the fan-out database list, and what to ask. Returns the connection string the
+    /// enumeration should run on plus the query to run — one decision, because the two are coupled: SQL
+    /// Server reads <c>sys.databases</c> from <c>master</c>, while PostgreSQL reads <c>pg_database</c>,
+    /// which is a shared catalog readable from whichever database is already connected.
+    /// <para>What to do when enumeration FAILS is deliberately not here. On Azure SQL DB an
+    /// inaccessible master has a meaningful fallback (collect from the one connected database) and a
+    /// re-probe throttle; on PostgreSQL a login that cannot read <c>pg_database</c> cannot monitor the
+    /// server at all, so there is nothing to fall back to. That policy stays with the runner.</para>
+    /// </summary>
+    (string ConnectionString, CollectorQuery Query) BuildDatabaseListPlan(
+        string connectionString, IReadOnlyList<string>? excludedDatabases);
 }

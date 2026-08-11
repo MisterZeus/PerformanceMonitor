@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Data.Common;
 using Npgsql;
 using NpgsqlTypes;
@@ -115,5 +116,33 @@ public sealed class PostgresTargetProvider : ITargetProvider
             "57014" => CollectorTargetFault.CommandTimeout,
             _ => CollectorTargetFault.Unclassified,
         };
+    }
+
+    public string WithDatabase(string connectionString, string databaseName)
+        => new NpgsqlConnectionStringBuilder(connectionString) { Database = databaseName }.ConnectionString;
+
+    /// <summary>
+    /// Enumerates from wherever the service is already connected — <c>pg_database</c> is a shared
+    /// catalog, so unlike SQL Server there is no equivalent of hopping to <c>master</c> first.
+    /// <para>Both filters are load-bearing. <c>datistemplate</c> excludes <c>template0</c> and
+    /// <c>template1</c>; <c>template0</c> in particular is frozen and rejects connections outright, so
+    /// including it would guarantee one failed connection per collection cycle forever. <c>datallowconn</c>
+    /// excludes any database an administrator has deliberately closed — most often one mid-restore or
+    /// being retired, exactly the databases where an extra connection attempt is least welcome.</para>
+    /// </summary>
+    public (string ConnectionString, CollectorQuery Query) BuildDatabaseListPlan(
+        string connectionString, IReadOnlyList<string>? excludedDatabases)
+    {
+        var (exclusionClause, exclusionParameters) = DatabaseExclusionFilter.Build(excludedDatabases, "datname");
+
+        return (connectionString, new CollectorQuery(
+            $@"
+SELECT datname
+FROM pg_database
+WHERE datallowconn
+AND   NOT datistemplate
+{exclusionClause}
+ORDER BY datname",
+            exclusionParameters));
     }
 }

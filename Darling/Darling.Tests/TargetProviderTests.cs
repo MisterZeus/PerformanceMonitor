@@ -166,4 +166,125 @@ public class TargetProviderTests
             CollectorTargetFault.CommandTimeout,
             PostgresTargetProvider.Instance.Classify(new TimeoutException(), false));
     }
+
+    /// <summary>
+    /// Per-database fan-out must change ONLY the database. Every other setting — credentials, timeouts,
+    /// TLS posture — has to survive, or a per-database collector would silently connect on different terms
+    /// than the collector that probed the server.
+    /// </summary>
+    [Fact]
+    public void WithDatabase_ChangesOnlyTheDatabase()
+    {
+        var sql = SqlServerTargetProvider.Instance.WithDatabase(
+            "Server=sql1;Initial Catalog=master;User ID=mon;Password=p;Encrypt=Strict;Connect Timeout=15", "AdventureWorks");
+        var sqlBuilder = new SqlConnectionStringBuilder(sql);
+
+        Assert.Equal("AdventureWorks", sqlBuilder.InitialCatalog);
+        Assert.Equal("sql1", sqlBuilder.DataSource);
+        Assert.Equal("mon", sqlBuilder.UserID);
+        Assert.Equal(SqlConnectionEncryptOption.Strict, sqlBuilder.Encrypt);
+        Assert.Equal(15, sqlBuilder.ConnectTimeout);
+
+        var pg = PostgresTargetProvider.Instance.WithDatabase(
+            "Host=aurora;Database=postgres;Username=mon;Password=p;SSL Mode=VerifyFull;Timeout=15", "appdb");
+        var pgBuilder = new NpgsqlConnectionStringBuilder(pg);
+
+        Assert.Equal("appdb", pgBuilder.Database);
+        Assert.Equal("aurora", pgBuilder.Host);
+        Assert.Equal("mon", pgBuilder.Username);
+        Assert.Equal(SslMode.VerifyFull, pgBuilder.SslMode);
+        Assert.Equal(15, pgBuilder.Timeout);
+    }
+
+    /// <summary>
+    /// SQL Server enumerates from master — on an Azure SQL DB logical server the configured entry points
+    /// at one user database, where sys.databases lists only itself. PostgreSQL enumerates from wherever it
+    /// already is, because pg_database is a shared catalog.
+    /// </summary>
+    [Fact]
+    public void DatabaseListPlan_EnumeratesFromTheRightPlacePerEngine()
+    {
+        var (sqlConnectionString, sqlQuery) = SqlServerTargetProvider.Instance.BuildDatabaseListPlan(
+            "Server=sql1;Initial Catalog=CustomerDb;User ID=mon;Password=p", null);
+
+        Assert.Equal("master", new SqlConnectionStringBuilder(sqlConnectionString).InitialCatalog);
+        Assert.Contains("sys.databases", sqlQuery.Text, StringComparison.Ordinal);
+
+        const string pgConnectionString = "Host=aurora;Database=postgres;Username=mon;Password=p";
+        var (pgConnection, pgQuery) = PostgresTargetProvider.Instance.BuildDatabaseListPlan(pgConnectionString, null);
+
+        Assert.Equal(pgConnectionString, pgConnection);
+        Assert.Contains("pg_database", pgQuery.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Both filters keep the fan-out from attempting connections that cannot succeed. template0 is frozen
+    /// and refuses connections outright, so including it would guarantee one failed connection per cycle
+    /// forever; datallowconn = false is a database an administrator has deliberately closed.
+    /// </summary>
+    [Fact]
+    public void PostgresDatabaseList_SkipsTemplatesAndClosedDatabases()
+    {
+        var (_, query) = PostgresTargetProvider.Instance.BuildDatabaseListPlan("Host=aurora;Database=postgres", null);
+
+        Assert.Contains("datallowconn", query.Text, StringComparison.Ordinal);
+        Assert.Contains("NOT datistemplate", query.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The exclusion list has to reach the right column name on each engine, parameterized rather than
+    /// interpolated — a database named with a quote must not be able to alter the enumeration query.
+    /// </summary>
+    [Fact]
+    public void DatabaseListPlan_AppliesTheExclusionListPerEngineColumn()
+    {
+        var excluded = new[] { "tempdb_clone", "scratch" };
+
+        var (_, sqlQuery) = SqlServerTargetProvider.Instance.BuildDatabaseListPlan("Server=sql1", excluded);
+        Assert.Contains("name NOT IN (@excl_db_0, @excl_db_1)", sqlQuery.Text, StringComparison.Ordinal);
+        Assert.Equal(2, sqlQuery.Parameters.Count);
+
+        var (_, pgQuery) = PostgresTargetProvider.Instance.BuildDatabaseListPlan("Host=aurora", excluded);
+        Assert.Contains("datname NOT IN (@excl_db_0, @excl_db_1)", pgQuery.Text, StringComparison.Ordinal);
+        Assert.Equal(2, pgQuery.Parameters.Count);
+
+        /* Values travel as parameters, never as text in the query. */
+        Assert.DoesNotContain("scratch", pgQuery.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("scratch", sqlQuery.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>An empty exclusion list must produce no clause and no parameters, not a dangling AND.</summary>
+    [Fact]
+    public void DatabaseListPlan_WithNoExclusionsIsCleanOnBothEngines()
+    {
+        foreach (CollectorTargetEngine engine in Enum.GetValues<CollectorTargetEngine>())
+        {
+            var (_, query) = TargetProviders.For(engine).BuildDatabaseListPlan("Server=x;Host=x", Array.Empty<string>());
+
+            Assert.Empty(query.Parameters);
+            Assert.DoesNotContain("NOT IN", query.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain("@excl_db_", query.Text, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// The enumeration query has to be executable through each provider's own command factory — the same
+    /// parameter mapping every collector query goes through, so an exclusion parameter cannot be mapped
+    /// one way here and another way there.
+    /// </summary>
+    [Fact]
+    public void DatabaseListPlan_ParametersMapThroughTheProvidersOwnCommandFactory()
+    {
+        var excluded = new[] { "scratch" };
+
+        var (_, sqlQuery) = SqlServerTargetProvider.Instance.BuildDatabaseListPlan("Server=sql1", excluded);
+        using var sqlConnection = new SqlConnection("Server=nowhere");
+        using var sqlCommand = SqlServerTargetProvider.Instance.CreateCommand(sqlQuery, sqlConnection, 60);
+        Assert.Single(sqlCommand.Parameters);
+
+        var (_, pgQuery) = PostgresTargetProvider.Instance.BuildDatabaseListPlan("Host=aurora", excluded);
+        using var pgConnection = new NpgsqlConnection("Host=nowhere");
+        using var pgCommand = PostgresTargetProvider.Instance.CreateCommand(pgQuery, pgConnection, 60);
+        Assert.Single(pgCommand.Parameters);
+    }
 }

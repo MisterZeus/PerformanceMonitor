@@ -492,6 +492,11 @@ public sealed class DarlingMcpHostService : BackgroundService
                    reports a slot pinning the horizon; this one reports the WAL it is retaining, which is
                    unbounded by default and fills the volume regardless of what vacuum is doing. */
                 .WithGeminiCompatibleTools<DarlingMcpPgSlotTools>()
+                /* get_pg_autovacuum_health — which tables autovacuum is not keeping up with, ranked by
+                   how far past each table's OWN threshold it is. The ratio is the whole tool: a
+                   dead-tuple count is not comparable between a 50-million-row table and a 10,000-row
+                   one, and the threshold is what makes it so. */
+                .WithGeminiCompatibleTools<DarlingMcpPgAutovacuumTools>()
                 .WithGeminiCompatibleTools<DarlingMcpMemoryGrantTools>()
                 .WithGeminiCompatibleTools<DarlingMcpPlanCacheSchedulerTools>()
                 .WithGeminiCompatibleTools<DarlingMcpJobTools>()

@@ -121,6 +121,7 @@ public static class PgMigrations
         new Migration(62, "pg-wraparound-stats", V62Sql),
         new Migration(63, "pg-xmin-horizon", V63Sql),
         new Migration(64, "pg-replication-slots", V64Sql),
+        new Migration(65, "pg-autovacuum-stats", V65Sql),
     };
 
     /// <summary>
@@ -1373,6 +1374,55 @@ CREATE TABLE IF NOT EXISTS collect.pg_replication_slots (
 
 CREATE INDEX IF NOT EXISTS idx_pg_replication_slots_time
     ON collect.pg_replication_slots(server_id, collection_time);";
+
+    /// <summary>
+    /// V65 — <c>collect.pg_autovacuum_stats</c>, per-table autovacuum state, and the first PostgreSQL
+    /// collector on the per-database fan-out path.
+    /// <para>The threshold columns are what make the table worth having. Dead-tuple counts alone are not
+    /// actionable — autovacuum fires at <c>autovacuum_vacuum_threshold + scale_factor * reltuples</c>, so
+    /// the same count is routine on a large table and urgent on a small one. The collector computes each
+    /// table's OWN threshold, honouring per-table <c>reloptions</c> overrides rather than only the GUCs,
+    /// because those overrides are common on exactly the big hot tables where the global default is
+    /// wrong.</para>
+    /// <para><c>inserts_since_vacuum</c> / <c>insert_vacuum_threshold</c> are PostgreSQL 13+ and carry
+    /// <c>-1</c> on older majors so the table shape stays constant across a mixed-version fleet. They
+    /// cover the append-only case, which has no dead tuples at all and is therefore invisible to the
+    /// dead-tuple rule — and an append-only table that is never vacuumed is never frozen either.</para>
+    /// <para><c>database_name</c> comes from the per-database loop's connection rather than the result
+    /// set: <c>pg_stat_user_tables</c> shows only the connected database, so the connection IS the
+    /// authoritative answer. Additive and view-less exactly like V60–V64 — a fresh store gets the table
+    /// from V1's generated schema, and this rung is what an already-existing store gets.</para>
+    /// </summary>
+    private const string V65Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_autovacuum_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    schema_name text,
+    table_name text,
+    live_tuples bigint,
+    dead_tuples bigint,
+    mods_since_analyze bigint,
+    inserts_since_vacuum bigint,
+    vacuum_threshold bigint,
+    insert_vacuum_threshold bigint,
+    analyze_threshold bigint,
+    autovacuum_disabled boolean,
+    total_bytes bigint,
+    last_vacuum timestamp,
+    last_autovacuum timestamp,
+    last_analyze timestamp,
+    last_autoanalyze timestamp,
+    vacuum_count bigint,
+    autovacuum_count bigint,
+    analyze_count bigint,
+    autoanalyze_count bigint
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_autovacuum_stats_time
+    ON collect.pg_autovacuum_stats(server_id, collection_time);";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

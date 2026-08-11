@@ -237,7 +237,16 @@ public sealed class DarlingCollectorRunner
                 ? definition.BuildQuery(context)
                 : null;
             var perDbTimeout = definition.CommandTimeoutSecondsOverride ?? CommandTimeoutSeconds;
-            var databases = await GetAzureDatabaseListAsync(server, cancellationToken);
+            var perDbProvider = TargetProviders.For(server.Target);
+
+            /* Two enumeration paths because the FAILURE semantics genuinely differ, not the SQL. On
+               Azure SQL DB an inaccessible master has a real fallback (collect the one connected
+               database) and a re-probe throttle to stop hammering it; on PostgreSQL a login that
+               cannot read pg_database cannot monitor the server at all, so inventing a fallback would
+               turn a permissions problem into a silent one-database collection. */
+            var databases = server.Target.Engine == CollectorTargetEngine.PostgreSql
+                ? await GetPostgresDatabaseListAsync(server, cancellationToken)
+                : await GetAzureDatabaseListAsync(server, cancellationToken);
 
             var attempted = 0;
             var failed = 0;
@@ -340,8 +349,8 @@ public sealed class DarlingCollectorRunner
 
                     var sqlSlice = Stopwatch.StartNew();
                     List<TRow> batch;
-                    using (var dbConnection = await OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken))
-                    using (var dbCommand = CreateCollectorCommand(dbPlan, dbConnection, perDbTimeout))
+                    using (var dbConnection = await OpenDatabaseConnectionAsync(perDbProvider, server, databaseName, cancellationToken))
+                    using (var dbCommand = CreateCollectorCommand(perDbProvider, dbPlan, dbConnection, perDbTimeout))
                     using (var dbReader = await dbCommand.ExecuteReaderAsync(cancellationToken))
                     {
                         batch = await definition.ReadAsync(dbReader, context, cancellationToken);
@@ -1209,13 +1218,11 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
             return FallbackDatabaseList(server, targetDb, reason: "master previously inaccessible", quiet: true);
         }
 
-        var masterConnectionString = new SqlConnectionStringBuilder(server.ConnectionString)
-        {
-            InitialCatalog = "master",
-        }.ConnectionString;
-
-        var (exclusionClause, exclusionParameters) = DatabaseExclusionFilter.Build(
-            server.Config.ExcludedDatabases, "name");
+        /* The query and the hop to master both come from the provider, so the enumeration set is defined
+           in exactly one place per engine. What stays here is the failure policy below, which is the
+           part that is genuinely Azure-specific. */
+        var (masterConnectionString, enumerationQuery) = SqlServerTargetProvider.Instance.BuildDatabaseListPlan(
+            server.ConnectionString, server.Config.ExcludedDatabases);
 
         var databases = new List<string>();
         try
@@ -1224,12 +1231,7 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
             await connection.OpenAsync(cancellationToken);
             /* Azure master enumeration is SQL-Server-only, but it goes through the same parameter
                mapping as every other command so a type cannot be mapped two ways. */
-            using var command = CreateCollectorCommand(
-                new CollectorQuery(
-                    $"SELECT name FROM sys.databases WHERE state_desc = N'ONLINE' AND database_id > 0 {exclusionClause} ORDER BY name;",
-                    exclusionParameters),
-                connection,
-                CommandTimeoutSeconds);
+            using var command = CreateCollectorCommand(enumerationQuery, connection, CommandTimeoutSeconds);
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -1305,15 +1307,64 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     }
 
     internal async Task<SqlConnection> OpenAzureDatabaseConnectionAsync(ServerRuntime server, string databaseName, CancellationToken cancellationToken)
-    {
-        var connectionString = new SqlConnectionStringBuilder(server.ConnectionString)
-        {
-            InitialCatalog = databaseName,
-        }.ConnectionString;
+        => (SqlConnection)await OpenDatabaseConnectionAsync(
+            SqlServerTargetProvider.Instance, server, databaseName, cancellationToken);
 
-        var connection = new SqlConnection(connectionString);
+    /// <summary>
+    /// The engine-neutral per-database connection: same monitored server, one specific database.
+    /// <para>PostgreSQL has no alternative to this. A SQL Server collector can reach another database
+    /// without reconnecting (<c>EXECUTE [db].sys.sp_executesql</c>), but a PostgreSQL connection is
+    /// bound to one database for its lifetime, so a per-database collector there is necessarily one
+    /// connection per database per cycle. That is the cost of reading <c>pg_stat_user_tables</c> and
+    /// friends at all, and it is why per-database PostgreSQL collectors get slow cadences.</para>
+    /// </summary>
+    internal static async Task<DbConnection> OpenDatabaseConnectionAsync(
+        ITargetProvider provider, ServerRuntime server, string databaseName, CancellationToken cancellationToken)
+    {
+        var connection = provider.CreateConnection(
+            provider.WithDatabase(server.ConnectionString, databaseName));
+
+        try
+        {
+            await connection.OpenAsync(cancellationToken);
+            return connection;
+        }
+        catch
+        {
+            /* The caller only disposes what it receives, so a connection that fails to open must be
+               disposed HERE or it leaks — once per database per cycle, on exactly the unreachable
+               database the per-database loop is designed to skip and keep going past. */
+            await connection.DisposeAsync();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Lists the databases to fan out over on a PostgreSQL target.
+    /// <para>No master-inaccessible fallback and no re-probe throttle, unlike the Azure twin, because
+    /// neither has a meaning here: <c>pg_database</c> is a shared catalog readable from the connected
+    /// database, so a failure means the login or the server is broken rather than that one catalog is
+    /// out of reach. Falling back to the connected database would convert a permissions problem into a
+    /// quiet partial collection, which is the failure mode that fallback exists to avoid elsewhere.</para>
+    /// </summary>
+    internal async Task<List<string>> GetPostgresDatabaseListAsync(ServerRuntime server, CancellationToken cancellationToken)
+    {
+        var provider = TargetProviders.For(server.Target);
+        var (connectionString, query) = provider.BuildDatabaseListPlan(
+            server.ConnectionString, server.Config.ExcludedDatabases);
+
+        var databases = new List<string>();
+
+        using var connection = provider.CreateConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-        return connection;
+        using var command = CreateCollectorCommand(provider, query, connection, CommandTimeoutSeconds);
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            databases.Add(reader.GetString(0));
+        }
+
+        return databases;
     }
 
     private static List<string> SingleDbOrEmpty(string? targetDb)

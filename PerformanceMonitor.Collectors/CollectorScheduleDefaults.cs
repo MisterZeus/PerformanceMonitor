@@ -146,5 +146,12 @@ public static class CollectorScheduleDefaults
            the question after an incident is "how long was that slot orphaned", and that answer has to
            outlive the incident. A handful of rows a cycle. */
         ["pg_replication_slots"] = new(1, 90),
+
+        /* Hourly, unlike every other PostgreSQL collector, because this one is a per-database
+           fan-out and on PostgreSQL that means one CONNECTION per database per cycle — a database
+           count that is fine hourly would be a connection storm per minute. Autovacuum also works on
+           the scale of minutes to hours, so a per-minute read would mostly re-record the same state.
+           90 days matches database_size_stats: the useful reading is a bloat trend, not a spot check. */
+        ["pg_autovacuum_stats"] = new(60, 90),
     };
 }

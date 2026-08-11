@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
 using Microsoft.Data.SqlClient;
@@ -109,5 +110,29 @@ public sealed class SqlServerTargetProvider : ITargetProvider
         }
 
         return CollectorTargetFault.Unclassified;
+    }
+
+    public string WithDatabase(string connectionString, string databaseName)
+        => new SqlConnectionStringBuilder(connectionString) { InitialCatalog = databaseName }.ConnectionString;
+
+    /// <summary>
+    /// Enumeration runs against <c>master</c>, which is why the plan carries its own connection string:
+    /// on an Azure SQL DB logical server the configured entry points at one user database, and
+    /// <c>sys.databases</c> there lists only itself.
+    /// <para><c>database_id &gt; 0</c> drops the resource database and <c>state_desc = 'ONLINE'</c> drops
+    /// anything a per-database connection would fail on anyway (restoring, offline, recovery pending).
+    /// This is the query Lite has always used, kept identical so both editions fan out over the same
+    /// set — a difference here would show up as one edition silently monitoring fewer databases.</para>
+    /// </summary>
+    public (string ConnectionString, CollectorQuery Query) BuildDatabaseListPlan(
+        string connectionString, IReadOnlyList<string>? excludedDatabases)
+    {
+        var (exclusionClause, exclusionParameters) = DatabaseExclusionFilter.Build(excludedDatabases, "name");
+
+        return (
+            WithDatabase(connectionString, "master"),
+            new CollectorQuery(
+                $"SELECT name FROM sys.databases WHERE state_desc = N'ONLINE' AND database_id > 0 {exclusionClause} ORDER BY name;",
+                exclusionParameters));
     }
 }

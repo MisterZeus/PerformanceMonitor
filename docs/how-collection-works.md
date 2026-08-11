@@ -56,9 +56,15 @@ There is **no DI container for collectors**. A new definition is wired up by add
 
 | Concern | File | Shape |
 | --- | --- | --- |
-| Schema catalog — drives DDL generation | [`CollectorCatalog.cs`](../PerformanceMonitor.Collectors/CollectorCatalog.cs) | `IReadOnlyList<ICollectorSchemaInfo> All` — 41 `XCollector.Instance` entries |
-| Cadence, retention, default-enabled | [`CollectorScheduleDefaults.cs`](../PerformanceMonitor.Collectors/CollectorScheduleDefaults.cs) | `record Entry(int FrequencyMinutes, int RetentionDays, bool DefaultEnabled = true)` — 41 entries |
-| Runtime dispatch (Darling) | [`DarlingWorker.cs`](../Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs) | `s_dispatch` — 41 typed lambdas |
+| Schema catalog — drives DDL generation | [`CollectorCatalog.cs`](../PerformanceMonitor.Collectors/CollectorCatalog.cs) | `IReadOnlyList<ICollectorSchemaInfo> All` — 47 `XCollector.Instance` entries (41 SQL Server + 6 PostgreSQL) |
+| Cadence, retention, default-enabled | [`CollectorScheduleDefaults.cs`](../PerformanceMonitor.Collectors/CollectorScheduleDefaults.cs) | `record Entry(int FrequencyMinutes, int RetentionDays, bool DefaultEnabled = true)` — 47 entries |
+| Runtime dispatch (Darling) | [`DarlingWorker.cs`](../Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs) | `s_dispatch` — 47 typed lambdas |
+
+The catalog is deliberately **engine-mixed**: the schema generator walks it to create tables and one
+store can hold both engines' data, so splitting it per engine would fragment DDL generation. What keeps
+dispatch honest is a separate gate — each definition declares a `TargetEngine`, and both SKUs drop
+wrong-engine collectors before dispatch, so a PostgreSQL definition is never sent to a SQL Server target
+or the reverse.
 
 `FrequencyMinutes = 0` means **collect once on connect** — used for config snapshots (`server_config`, `database_config`, `database_scoped_config`, `trace_flags`, `server_properties`) that only change across restarts. `DefaultEnabled: false` ships a collector off; only `long_query_completions` does, because enabling it creates an Extended Events session on the target.
 

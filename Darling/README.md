@@ -4,7 +4,7 @@ Darling is the headless, centralized edition of Performance Monitor: a 24/7 Wind
 
 It runs the **same monitoring brain as the Lite edition** — one shared codebase, two storage engines:
 
-- `PerformanceMonitor.Collectors` owns all 46 collector definitions — 41 for SQL Server and 5 for PostgreSQL: the exact query sent to monitored servers, the result-row mappings, the delta rules, the default cadences and retention horizons, and the ignored-wait-types list. Lite writes those rows to DuckDB; Darling writes the same rows to PostgreSQL via binary COPY. Each definition declares which engine it targets, and a collector never runs against the other one — see [PostgreSQL targets](#postgresql-targets).
+- `PerformanceMonitor.Collectors` owns all 47 collector definitions — 41 for SQL Server and 6 for PostgreSQL: the exact query sent to monitored servers, the result-row mappings, the delta rules, the default cadences and retention horizons, and the ignored-wait-types list. Lite writes those rows to DuckDB; Darling writes the same rows to PostgreSQL via binary COPY. Each definition declares which engine it targets, and a collector never runs against the other one — see [PostgreSQL targets](#postgresql-targets).
 - `PerformanceMonitor.Alerting` owns the shared alert engine — the same thresholds, edge-trigger gates, cooldowns, and dedup fingerprints Lite uses.
 - The analysis/recommendations pipeline (the same inference engine behind both apps' Recommendations tabs and the `analyze_server` MCP tool) runs on a schedule inside the service.
 
@@ -414,9 +414,10 @@ The embedded MCP server, over Streamable HTTP bound to `localhost` by default (s
 
   The Dashboard's per-class latch `severity` / `description` / `recommendation`, spinlock `description`, plan-cache `bloat_level`, and CPU-scheduler `pressure_level` / `recommendation` are the Dashboard / reporting-view CASE derivations (not collected columns), reproduced service-side so the full result shape is served. Darling's delta collectors store no `sample_interval_seconds`, so per-second latch/spinlock rates are derived from the collection interval, and the Dashboard's `get_resource_semaphore` `sample_interval_seconds` is not emitted for the same reason (`max_target_memory_mb`, the workspace-memory ceiling, is added since the store carries it).
 
-- **Five PostgreSQL data-read tools** — the read surface for a PostgreSQL target's collectors, each a stored read (see [PostgreSQL targets](#postgresql-targets)):
+- **Six PostgreSQL data-read tools** — the read surface for a PostgreSQL target's collectors, each a stored read (see [PostgreSQL targets](#postgresql-targets)):
   - *Waits and queries* — `get_pg_wait_stats` (top wait events in the window, decoded to type + event name), `get_pg_top_queries` (query shapes by total execution time, carrying Aurora's storage-vs-cache I/O split and per-statement peak memory).
   - *Outage predictors* — `get_pg_wraparound_risk` (XID and MultiXact freeze headroom per database), `get_pg_xmin_horizon` (why vacuum is reclaiming nothing, attributed to the specific holder), `get_pg_replication_slots` (slot health, including whether retained WAL is still growing).
+  - *Maintenance* — `get_pg_autovacuum_health` (tables behind on vacuum or analyze, ranked by how far past each table's OWN trigger threshold it is — the ratio, not the dead-tuple count, because the same count is routine on a large table and urgent on a small one).
 
   These are separate tools rather than widened SQL Server ones. PostgreSQL's waits are a two-level type/event taxonomy with no signal-wait concept reported in microseconds, and the wraparound / horizon / slot signals have no SQL Server counterpart at all — sharing a result shape would mean lying about a unit or emitting mostly-null columns. The three outage predictors are the ones worth wiring to a pager: each names a condition that stops the server outright, and each is silent until it is nearly too late.
 
@@ -510,7 +511,7 @@ GRANT pg_monitor TO darling_monitor;
 
 `pg_monitor` is the standard PostgreSQL monitoring role — it bundles `pg_read_all_stats`, `pg_read_all_settings`, and `pg_stat_scan_tables`. Without it the statistics views still return rows, but only for the connecting user's own backends, which silently turns fleet monitoring into self-monitoring. On Amazon Aurora and RDS the same grant works: `GRANT pg_monitor TO darling_monitor;` as an `rds_superuser`. No superuser is needed, and nothing is created on the monitored server — unlike a SQL Server target, there are no Extended Events sessions to provision and no server setting to bootstrap.
 
-`pg_stat_statements` must be present for `pg_statement_stats`, which means the extension in `shared_preload_libraries` (a restart, or a parameter-group change plus reboot on Aurora/RDS) and `CREATE EXTENSION pg_stat_statements;` in the database Darling connects to. The extension tracks **all** databases in the cluster keyed by `dbid`, so one installation in the connect database covers the whole instance. The other four collectors need nothing installed — they read core catalogs and Aurora's built-in functions.
+`pg_stat_statements` must be present for `pg_statement_stats`, which means the extension in `shared_preload_libraries` (a restart, or a parameter-group change plus reboot on Aurora/RDS) and `CREATE EXTENSION pg_stat_statements;` in the database Darling connects to. The extension tracks **all** databases in the cluster keyed by `dbid`, so one installation in the connect database covers the whole instance. The other five collectors need nothing installed — they read core catalogs and Aurora's built-in functions.
 
 ### What gets collected
 
@@ -521,16 +522,19 @@ GRANT pg_monitor TO darling_monitor;
 | `pg_wraparound_stats` | `pg_database`, `pg_class` | 5 min / 90 d | XID and MultiXact freeze headroom per database. The highest-consequence signal PostgreSQL has and one with no SQL Server counterpart: run out of transaction IDs and the server stops accepting writes. Freeze headroom moves in autovacuum-sized steps rather than continuously, so 5 minutes is ample and 90 days shows the age trend against the actual freeze threshold |
 | `pg_xmin_horizon` | `pg_stat_activity`, `pg_replication_slots`, `pg_stat_replication`, `pg_prepared_xacts` | 1 min / 30 d | Why vacuum is reclaiming nothing. Four unrelated causes produce an identical symptom and need completely different fixes, so this attributes the specific holder instead of reporting the number. Per-minute because a holder is the fast-moving leading indicator — the useful answer is which session or slot appeared minutes ago |
 | `pg_replication_slots` | `pg_replication_slots` | 1 min / 90 d | Slot health and retained WAL. An abandoned slot retains WAL without bound by default, filling the volume and stopping the server, and it grows at whatever rate the server writes WAL — hours on a busy writer, not days |
+| `pg_autovacuum_stats` | `pg_stat_user_tables`, `pg_class` | 60 min / 90 d | Per-table autovacuum state, **per database**. Stores each table's own computed trigger threshold beside its dead-tuple count, honouring per-table `reloptions` overrides rather than only the GUCs — without the threshold a dead-tuple count is not actionable, since the same count is routine on a large table and urgent on a small one |
 
-The two Aurora-only collectors are gated on Aurora detection, not on configuration: the connect probe looks for `aurora_version()` and the gate follows what it finds. Point Darling at self-managed PostgreSQL and the three core-catalog collectors run while those two sit out.
+The two Aurora-only collectors are gated on Aurora detection, not on configuration: the connect probe looks for `aurora_version()` and the gate follows what it finds. Point Darling at self-managed PostgreSQL and the four core-catalog collectors run while those two sit out.
 
 Cadences and retention are the shared defaults, with no knobs, exactly as for SQL Server.
 
-Three of the five are outage predictors rather than performance metrics, which is deliberate: PostgreSQL's most damaging failures are quiet, slow, and fully predictable days ahead, and nothing in the engine raises its hand about them. The read surface for each is an MCP tool — see [the tool list](#mcp).
+Three of the six are outage predictors rather than performance metrics, which is deliberate: PostgreSQL's most damaging failures are quiet, slow, and fully predictable days ahead, and nothing in the engine raises its hand about them. The read surface for each is an MCP tool — see [the tool list](#mcp).
 
 ### What it does not do yet
 
-Per-database fan-out (autovacuum progress, `pg_stat_io`), plan capture, and the blocking-chain reads have no PostgreSQL equivalent in the store yet. Alerting and scheduled analysis are still SQL-Server-shaped, so a PostgreSQL target collects and is readable through MCP and the viewer, but does not yet raise alerts or produce analysis findings.
+`pg_stat_io`, plan capture, and the blocking-chain reads have no PostgreSQL equivalent in the store yet. Alerting and scheduled analysis are still SQL-Server-shaped, so a PostgreSQL target collects and is readable through MCP and the viewer, but does not yet raise alerts or produce analysis findings.
+
+The per-database fan-out itself is done — `pg_autovacuum_stats` is the collector that exercises it. Worth knowing what it costs: a SQL Server collector can reach another database without reconnecting (`EXECUTE [db].sys.sp_executesql`), while a PostgreSQL connection is bound to one database for its lifetime, so a per-database PostgreSQL collector is necessarily one connection per database per cycle. That is why its cadence is hourly and why new per-database collectors should be added deliberately rather than by default.
 
 ---
 
@@ -538,13 +542,13 @@ Per-database fan-out (autovacuum progress, `pg_stat_io`), plan capture, and the 
 
 ### The Store
 
-The service migrates the store itself at startup — plain versioned SQL scripts, each applied once inside its own transaction, tracked in `darling_schema_version`, safe under concurrent starters (advisory-locked). Current schema is **v64** — `StorageVersion.SchemaVersion` is the source of truth and a test pins it to the highest rung in the ladder.
+The service migrates the store itself at startup — plain versioned SQL scripts, each applied once inside its own transaction, tracked in `darling_schema_version`, safe under concurrent starters (advisory-locked). Current schema is **v65** — `StorageVersion.SchemaVersion` is the source of truth and a test pins it to the highest rung in the ladder.
 
 The notable rungs are below. For the **complete** current schema, read `Darling/Darling.Tests/Fixtures/migration-ladder-*.sql` — the whole ladder as resolved SQL, regenerated per release; it is generated, so don't hand-edit it.
 
 | Version | Contents |
 |---|---|
-| **V1** — collector tables | One table per collector, all 46, generated from the shared collector definitions (column-for-column identical to Lite's DuckDB schema): `wait_stats`, `latch_stats`, `spinlock_stats`, `query_stats`, `procedure_stats`, `query_store_stats`, `query_snapshots`, `plan_cache_stats`, `cpu_utilization_stats`, `cpu_scheduler_stats`, `file_io_stats`, `memory_stats`, `memory_clerks`, `memory_pressure_events`, `tempdb_stats`, `perfmon_stats`, `deadlocks`, `blocked_process_reports`, `dmv_blocking_snapshots`, `memory_grant_stats`, `waiting_tasks`, `session_stats`, `session_summary_stats`, `running_jobs`, `database_size_stats`, `index_object_stats`, `server_properties`, `system_health_events`, the four config snapshots (`server_config`, `database_config`, `database_scoped_config`, `trace_flags`), and the five PostgreSQL tables listed under V60–V64 below |
+| **V1** — collector tables | One table per collector, all 47, generated from the shared collector definitions (column-for-column identical to Lite's DuckDB schema): `wait_stats`, `latch_stats`, `spinlock_stats`, `query_stats`, `procedure_stats`, `query_store_stats`, `query_snapshots`, `plan_cache_stats`, `cpu_utilization_stats`, `cpu_scheduler_stats`, `file_io_stats`, `memory_stats`, `memory_clerks`, `memory_pressure_events`, `tempdb_stats`, `perfmon_stats`, `deadlocks`, `blocked_process_reports`, `dmv_blocking_snapshots`, `memory_grant_stats`, `waiting_tasks`, `session_stats`, `session_summary_stats`, `running_jobs`, `database_size_stats`, `index_object_stats`, `server_properties`, `system_health_events`, the four config snapshots (`server_config`, `database_config`, `database_scoped_config`, `trace_flags`), and the six PostgreSQL tables listed under V60–V65 below |
 | **V2** — observability | `servers` (registry, upserted on every successful connect: identity, display name, engine edition, major version) and `collection_log` (one row per collector run: SUCCESS / PERMISSIONS / ERROR, row count, SQL-phase and storage-phase timings) |
 | **V3** — alerting | `config_alert_log` (one history row per fired alert), `config_edge_trigger_watermarks` (restart-surviving edge-trigger and failed-job watermarks), `config_mute_rules` (alert mute rules; starts empty) |
 | **V4** — analysis | `analysis_findings` (persisted findings incl. the stored remediation action), `analysis_muted` (muted finding patterns), and 17 `v_<table>` passthrough views so the shared analysis SQL runs verbatim against this store |
@@ -576,7 +580,7 @@ The notable rungs are below. For the **complete** current schema, read `Darling/
 | **V30** — web dashboard config | `config_service.web_enabled` + `web_port` — the read-only web dashboard's live enable/port toggle, the twin of `mcp_enabled`/`mcp_port` (#1562) |
 | **V46** — automatic plan correction | `collect.plan_correction` + its index — the #1952 collector's store table (FORCE_LAST_GOOD_PLAN enablement plus the engine's live recommendation set). Additive and view-less, so a fresh store gets it from V1's generated schema and V46 is what an already-existing store gets |
 | **V47** — ADR persistent version store | `collect.pvs_stats` + its index + the `v_pvs_stats` passthrough view — the #1951 ADR version-store collector's store table. A fresh store gets the table from V1's generated schema; V47 is what an already-existing store gets, and the view is what keeps the Darling viewer's FinOps read byte-identical to Lite's |
-| **V60–V64** — PostgreSQL collector tables | `collect.pg_wait_stats`, `collect.pg_statement_stats`, `collect.pg_wraparound_stats`, `collect.pg_xmin_horizon`, and `collect.pg_replication_slots`, each with its time index — one rung per PostgreSQL collector. Additive and view-less, exactly like V46/V47: a fresh store gets all five from V1's generated schema, and these rungs are what an already-existing store gets. They add tables only, so a store that monitors no PostgreSQL target carries five empty tables and nothing else changes |
+| **V60–V65** — PostgreSQL collector tables | `collect.pg_wait_stats`, `collect.pg_statement_stats`, `collect.pg_wraparound_stats`, `collect.pg_xmin_horizon`, `collect.pg_replication_slots`, and `collect.pg_autovacuum_stats`, each with its time index — one rung per PostgreSQL collector. Additive and view-less, exactly like V46/V47: a fresh store gets all five from V1's generated schema, and these rungs are what an already-existing store gets. They add tables only, so a store that monitors no PostgreSQL target carries six empty tables and nothing else changes |
 
 All timestamps in the store are **naive-UTC** `timestamp` columns — the product-wide cross-store contract (Lite's DuckDB does the same).
 
@@ -638,13 +642,13 @@ timescaledb.max_background_workers = <hypertables> + 2
 max_worker_processes               = 3 + timescaledb.max_background_workers + 8
 ```
 
-Today that is **49** and **60** for 47 hypertables (the 46 collector tables plus `collection_log`). The `+ 2` is not slack — it is exactly TimescaleDB's own two built-in jobs, `policy_telemetry` and `policy_job_stat_history_retention`, so a fully migrated store holds precisely one job per worker:
+Today that is **50** and **61** for 48 hypertables (the 47 collector tables plus `collection_log`). The `+ 2` is not slack — it is exactly TimescaleDB's own two built-in jobs, `policy_telemetry` and `policy_job_stat_history_retention`, so a fully migrated store holds precisely one job per worker:
 
 ```sql
 SELECT proc_name, count(*) FROM timescaledb_information.jobs GROUP BY proc_name;
 ```
 
-Both settings need a **server restart** (`max_worker_processes` is restart-only — a reload leaves the old value serving), and the hypertable count grows as collectors are added, so re-check it after a major upgrade rather than pinning 49/60 forever.
+Both settings need a **server restart** (`max_worker_processes` is restart-only — a reload leaves the old value serving), and the hypertable count grows as collectors are added, so re-check it after a major upgrade rather than pinning 50/61 forever.
 
 **One store per cluster is the assumption.** `timescaledb.max_background_workers` is a **cluster-wide** pool shared by every database, while the derivation above is **per-store**. Managed mode puts one store on one cluster so the two coincide, but if you run **N Darling stores on one PostgreSQL cluster** — or share the cluster with any other TimescaleDB database — multiply both numbers by N. Each database with the extension loaded also permanently holds a scheduler slot out of that same pool, so the sharing starts before any policy fires.
 
