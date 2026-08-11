@@ -485,6 +485,9 @@ public sealed class DarlingMcpHostService : BackgroundService
                 /* get_pg_wraparound_risk — XID/MultiXact freeze headroom, the highest-consequence
                    PostgreSQL signal and one with no SQL Server counterpart. Not Aurora-gated. */
                 .WithGeminiCompatibleTools<DarlingMcpPgWraparoundTools>()
+                /* get_pg_xmin_horizon — why vacuum reclaims nothing, attributed to one of four causes
+                   that are indistinguishable by symptom and need different fixes. */
+                .WithGeminiCompatibleTools<DarlingMcpPgXminTools>()
                 .WithGeminiCompatibleTools<DarlingMcpMemoryGrantTools>()
                 .WithGeminiCompatibleTools<DarlingMcpPlanCacheSchedulerTools>()
                 .WithGeminiCompatibleTools<DarlingMcpJobTools>()
