@@ -12,6 +12,7 @@ using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Text.Json;
+using PerformanceMonitor.Collectors;
 using System.Text.Json.Serialization;
 using PerformanceMonitor.Notifications;
 
@@ -1038,8 +1039,28 @@ public sealed class MonitoredServer
     [JsonPropertyName("name")]
     public string Name { get; set; } = "";
 
+    /// <summary>
+    /// Which database engine this target runs: <c>"sqlserver"</c> (default) or <c>"postgres"</c>
+    /// (accepted spellings: postgres, postgresql, pg, aurora-postgresql).
+    /// <para>This is configuration rather than something probed, because it has to be known BEFORE
+    /// connecting — it decides which driver builds the connection string and which detection query
+    /// runs. An omitted or unrecognized value means SQL Server, so every existing darling.json keeps
+    /// its exact present behaviour.</para>
+    /// </summary>
+    [JsonPropertyName("engine")]
+    public string Engine { get; set; } = "sqlserver";
+
     [JsonPropertyName("host")]
     public string Host { get; set; } = "";
+
+    /// <summary>
+    /// TCP port, for PostgreSQL targets on a non-default port. <c>0</c> (the default) means "use the
+    /// driver's default", which is 5432.
+    /// <para>Unused for SQL Server, which carries a non-default port in the host itself as
+    /// <c>host,1433</c> — that convention is left alone rather than migrated.</para>
+    /// </summary>
+    [JsonPropertyName("port")]
+    public int Port { get; set; }
 
     /// <summary>Azure SQL Database: the one database this entry monitors (feeds the storage-name identity).</summary>
     [JsonPropertyName("database")]
@@ -1099,6 +1120,23 @@ public sealed class MonitoredServer
 
     [JsonIgnore]
     public bool UsesSqlAuth => string.Equals(Auth, "sql", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// <see cref="Engine"/> parsed. Anything unrecognized resolves to
+    /// <see cref="CollectorTargetEngine.SqlServer"/> rather than throwing: a typo in one server entry
+    /// must not stop the service from starting and monitoring everything else. The mismatch surfaces
+    /// immediately anyway — the SQL Server detection query fails against a Postgres target.
+    /// </summary>
+    [JsonIgnore]
+    public CollectorTargetEngine TargetEngine => Engine?.Trim().ToLowerInvariant() switch
+    {
+        "postgres" or "postgresql" or "pg" or "aurora-postgresql" or "aurora" => CollectorTargetEngine.PostgreSql,
+        _ => CollectorTargetEngine.SqlServer,
+    };
+
+    /// <summary>True when this entry targets PostgreSQL, so the SQL Server-only config is inapplicable.</summary>
+    [JsonIgnore]
+    public bool IsPostgres => TargetEngine == CollectorTargetEngine.PostgreSql;
 
     /// <summary>Display name falls back to the host.</summary>
     [JsonIgnore]
