@@ -111,7 +111,7 @@ internal static class DarlingToolExitCode
             StatusKind.Loader => LoaderDiagnosis(toolName, exePath),
             StatusKind.Crash =>
                 $"\n{toolName} started and then crashed — Windows ended it, so anything it had to say may be truncated or missing entirely. " +
-                "This is not a configuration problem and restarting will not clear it: capture the matching entry from Event Viewer > Windows Logs > Application " +
+                "A crash is not a configuration problem and restarting is unlikely to clear it: capture the matching entry from Event Viewer > Windows Logs > Application " +
                 "(Application Error / Windows Error Reporting) together with the store's pg.log, and report it.",
             _ =>
                 $"\nWindows ended {toolName} rather than the tool exiting on its own, so its output may be empty or truncated and this is not a PostgreSQL error. " +
