@@ -116,6 +116,7 @@ public static class PgMigrations
         new Migration(57, "store-job-cadence-knob", V57Sql),
         new Migration(58, "qs-backfill-switch", V58Sql),
         new Migration(59, "collector-memory-knobs", V59Sql),
+        new Migration(60, "database-state-edge-memory", V60Sql),
     };
 
     /// <summary>
@@ -1155,6 +1156,24 @@ ALTER TABLE config.config_service
     ADD COLUMN IF NOT EXISTS query_store_text_budget_mb integer NOT NULL DEFAULT 64;
 ALTER TABLE config.config_service
     ADD COLUMN IF NOT EXISTS max_concurrent_sweeps integer NOT NULL DEFAULT 4;";
+
+    /// <summary>
+    /// V60 — restart-surviving edge memory for the database-state alert (#2166). Two nullable columns on
+    /// <c>config.database_state_expected</c>, which is already keyed per (server, database) and already
+    /// exists for this alert, so the memory lives beside the config it belongs with rather than in a new
+    /// table or smuggled into <c>config_edge_trigger_watermarks</c>' metric_name (that column feeds alert
+    /// history and mute matching; a compound key hidden in a label is a trap).
+    ///
+    /// <para>Why it must persist: the reporter's case is a database deliberately parked OFFLINE for a
+    /// month. Edge-triggering on in-memory state would re-fire every parked database on every service
+    /// restart — worse than the cooldown-repeat it replaces. NULL means never alerted, so an upgraded
+    /// store's first evaluation fires once per deviating database and then goes quiet.</para>
+    /// </summary>
+    private const string V60Sql = @"
+ALTER TABLE config.database_state_expected
+    ADD COLUMN IF NOT EXISTS last_alerted_state text;
+ALTER TABLE config.database_state_expected
+    ADD COLUMN IF NOT EXISTS last_alerted_at timestamp;";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

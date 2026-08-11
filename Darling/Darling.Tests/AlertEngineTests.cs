@@ -8,7 +8,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
@@ -197,6 +199,33 @@ public sealed class AlertEngineTests
         {
             FailedJobWatermarks[serverKey] = watermark;
             SavedFailedJob.Add((serverKey, watermark));
+            return Task.CompletedTask;
+        }
+
+        /* #2166 */
+        public List<(string Server, string Db, string State)> DatabaseStateAlerted { get; } = new();
+
+        public Task SaveDatabaseStateAlertedAsync(string serverKey, string databaseName, string effectiveState)
+        {
+            DatabaseStateAlerted.Add((serverKey, databaseName, effectiveState));
+            Memory[databaseName] = effectiveState;
+            return Task.CompletedTask;
+        }
+
+        public List<(string Server, string Db)> DatabaseStateCleared { get; } = new();
+
+        /// <summary>
+        /// What the store would HOLD, not merely which calls arrived. The engine's edge trigger is a
+        /// round trip — write on fire, read back through the adapter next cycle — and a stub that only
+        /// counts calls cannot fail when one direction of that trip is missing. A test can feed this
+        /// back in as LastAlertedState to exercise the real composition.
+        /// </summary>
+        public Dictionary<string, string> Memory { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        public Task ClearDatabaseStateAlertedAsync(string serverKey, string databaseName)
+        {
+            DatabaseStateCleared.Add((serverKey, databaseName));
+            Memory.Remove(databaseName);
             return Task.CompletedTask;
         }
     }
@@ -1288,6 +1317,259 @@ public sealed class AlertEngineTests
         await engine.EvaluateServerAsync(Harness.Snapshot());
 
         Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task DatabaseState_ChosenState_AlreadyAnnounced_StaysQuiet()
+    {
+        /* #2166: the reporter's case — a database parked OFFLINE for a month generated hundreds of
+           identical alerts. With the state already recorded as announced, a fresh evaluation must be
+           SILENT even though the deviation is still present and no cooldown is in play. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Archive", StateDesc = "OFFLINE", ExpectedState = "ONLINE", LastAlertedState = "OFFLINE" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task DatabaseState_ChosenState_FirstObservation_FiresAndRecordsIt()
+    {
+        /* The transition still alerts — edge-triggered, not silenced — and the state is recorded so the
+           NEXT evaluation is the quiet one. Recording is what makes the silence survive a restart. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Archive", StateDesc = "OFFLINE", ExpectedState = "ONLINE", LastAlertedState = "" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains(h.StateStore.DatabaseStateAlerted, r => r.Db == "Archive" && r.State == "OFFLINE");
+    }
+
+    [Fact]
+    public async Task DatabaseState_IntegrityState_StillRepeats_EvenWhenAlreadyAnnounced()
+    {
+        /* Nobody parks a database in SUSPECT, so continued repetition IS the signal there. An already-
+           announced integrity state must keep firing on the cooldown — if this ever goes quiet, a real
+           corruption stops nagging, which is the failure mode worth protecting against. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Payments", StateDesc = "SUSPECT", ExpectedState = "ONLINE", LastAlertedState = "SUSPECT" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(PerformanceMonitor.Notifications.AlertSeverityLevel.Critical, fired.Severity);
+    }
+
+    [Fact]
+    public async Task DatabaseState_ChosenState_ChangingToADifferentState_FiresAgain()
+    {
+        /* The composition property the reporter identified: going quiet for a parked state must NOT mean
+           going blind. A database announced as OFFLINE that turns SUSPECT is a different state, so it
+           alerts — and at Critical, not inheriting the quiet treatment of the state it left. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Archive", StateDesc = "SUSPECT", ExpectedState = "ONLINE", LastAlertedState = "OFFLINE" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(PerformanceMonitor.Notifications.AlertSeverityLevel.Critical, fired.Severity);
+    }
+
+    [Fact]
+    public async Task DatabaseState_TransitionToADifferentState_IsNotSuppressedByThePriorStatesCooldown()
+    {
+        /* The safety property, tested where it actually breaks. Both evaluations happen inside one cooldown
+           window (they run back to back, so no wall-clock time passes), which is exactly the case the old
+           per-database cooldown key swallowed: OFFLINE fires and stamps the database's only clock, then the
+           flip to SUSPECT finds that clock still running and goes silent — permanently, now that a chosen
+           state no longer re-fires every cooldown. SUSPECT is the state this alert must never lose. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Archive", StateDesc = "OFFLINE", ExpectedState = "ONLINE", LastAlertedState = "" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Same database, still deviating, but a DIFFERENT state — and the memory now says OFFLINE, which is
+           what makes alreadyAnnounced false while the OFFLINE cooldown is still warm. */
+        h.Deliverer.Outcomes.Clear();
+        h.Adapter.DatabaseStates.Clear();
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Archive", StateDesc = "SUSPECT", ExpectedState = "ONLINE", LastAlertedState = "OFFLINE" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(PerformanceMonitor.Notifications.AlertSeverityLevel.Critical, fired.Severity);
+    }
+
+    [Fact]
+    public async Task DatabaseState_MutedFire_DoesNotRecordItAsAnnounced_SoUnmutingStillNotifies()
+    {
+        /* A mute must be reversible. The four edge-triggered states gate ALL future firing on the announced
+           memory, so stamping it under a mute made the mute permanent: mute a parked database, remove the
+           mute, and the alert never came back for as long as the state held. Muting suppresses delivery, not
+           the engine's honesty about whether anyone was actually told. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Muted = true;
+        var engine = h.Build();
+
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Archive", StateDesc = "OFFLINE", ExpectedState = "ONLINE", LastAlertedState = "" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var muted = Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(muted.Muted, "the fire itself must still be marked muted");
+        Assert.DoesNotContain(h.StateStore.DatabaseStateAlerted, r => r.Db == "Archive");
+        Assert.False(h.StateStore.Memory.ContainsKey("Archive"),
+            "a muted fire must not record the state as announced — nobody was told");
+
+        /* Mute removed, cooldown elapsed, same state still deviating. The adapter reports what the store
+           holds, which is still nothing — so this must notify for real. */
+        h.Muted = false;
+        h.Now = h.Now.AddDays(1);
+        h.Deliverer.Outcomes.Clear();
+        h.Adapter.DatabaseStates.Clear();
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo
+        {
+            DatabaseName = "Archive",
+            StateDesc = "OFFLINE",
+            ExpectedState = "ONLINE",
+            LastAlertedState = h.StateStore.Memory.TryGetValue("Archive", out var remembered) ? remembered : "",
+        });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var announced = Assert.Single(h.Deliverer.Outcomes);
+        Assert.False(announced.Muted, "unmuting must produce a real, deliverable alert");
+        Assert.Contains(h.StateStore.DatabaseStateAlerted, r => r.Db == "Archive" && r.State == "OFFLINE");
+    }
+
+    [Fact]
+    public async Task DatabaseState_RecoveryDoesNotClearACooldown_ForADatabaseWhoseNameContainsTheOldDelimiter()
+    {
+        /* SQL Server permits '|' in a database name, so while the cooldown key was a delimited STRING,
+           recovering "Foo" prefix-matched and wiped "Foo|Bar"'s clock as well. Keying by tuple removes the
+           bug class rather than documenting it.
+
+           Observable via an integrity state: SUSPECT is not edge-suppressed (RepeatsAreNoise is false), so
+           its cooldown is the ONLY thing keeping it quiet on the second evaluation. If the recovery sweep
+           wrongly cleared it, "Foo|Bar" fires again here. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Foo", StateDesc = "OFFLINE", ExpectedState = "ONLINE", LastAlertedState = "" });
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Foo|Bar", StateDesc = "SUSPECT", ExpectedState = "ONLINE", LastAlertedState = "" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* Foo returns to expected and drops out; Foo|Bar is untouched and still SUSPECT. */
+        h.Deliverer.Outcomes.Clear();
+        h.Adapter.DatabaseStates.Clear();
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Foo|Bar", StateDesc = "SUSPECT", ExpectedState = "ONLINE", LastAlertedState = "SUSPECT" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.DoesNotContain(h.StateStore.DatabaseStateCleared, r => r.Db == "Foo|Bar");
+    }
+
+    [Fact]
+    public async Task DatabaseState_SameState_StillRateLimitsItself_WithinOneCooldown()
+    {
+        /* The other side of keying by state: it must not have turned the cooldown off. An integrity state
+           repeats deliberately (RepeatsAreNoise is false for SUSPECT), so the only thing standing between it
+           and an alert per evaluation is its own cooldown — which must still hold inside one window. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Payments", StateDesc = "SUSPECT", ExpectedState = "ONLINE", LastAlertedState = "SUSPECT" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Deliverer.Outcomes.Clear();
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task DatabaseState_RepeatEpisode_OfTheSameState_FiresAgainAfterRecovery()
+    {
+        /* The falling-edge property, driven as a full round trip through the store's MEMORY rather than
+           through call counting — the decoupling that let the first cut of #2166 ship with a permanent
+           memory. Park, recover, park again in the SAME state: the repeat soft-delete workflow this alert
+           exists for. If recovery does not clear what firing recorded, evaluation 3 reads OFFLINE ==
+           OFFLINE, judges itself already-announced, and the second parking is swallowed for good. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        var engine = h.Build();
+
+        /* Episode 1: parked. No memory yet, so it announces and records. */
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Archive", StateDesc = "OFFLINE", ExpectedState = "ONLINE", LastAlertedState = "" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("OFFLINE", h.StateStore.Memory["Archive"]);
+
+        /* Recovery: back to expected, so it stops deviating and drops out of the adapter's results. */
+        h.Adapter.DatabaseStates.Clear();
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Contains(h.StateStore.DatabaseStateCleared, r => r.Db == "Archive");
+        Assert.False(h.StateStore.Memory.ContainsKey("Archive"),
+            "recovery must forget the announced state, or the edge can never trigger a second time");
+
+        /* Episode 2: parked again, same state. The adapter reports whatever the store now holds — which is
+           the whole point — so this fires only if the clear above actually happened. */
+        h.Deliverer.Outcomes.Clear();
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo
+        {
+            DatabaseName = "Archive",
+            StateDesc = "OFFLINE",
+            ExpectedState = "ONLINE",
+            LastAlertedState = h.StateStore.Memory.TryGetValue("Archive", out var remembered) ? remembered : "",
+        });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public void DatabaseState_AlertedStamp_IsAnUpdate_NeverAnInsert()
+    {
+        /* A row is only absent when the database was first observed in an integrity state, which the seed
+           logic deliberately refuses to baseline. An INSERT here must supply expected_state (NOT NULL) and
+           the only value on hand is the state being alerted ON — so inserting would baseline a SUSPECT
+           database as "expected SUSPECT", stop it deviating, report it RECOVERED while still corrupt, and
+           silence it permanently. Strictly worse than the repetition being fixed, so it is pinned. */
+        var source = ReadStateStoreSource();
+        var method = source[source.IndexOf("public async Task SaveDatabaseStateAlertedAsync", StringComparison.Ordinal)..];
+        var body = method[..method.IndexOf("public async Task ClearDatabaseStateAlertedAsync", StringComparison.Ordinal)];
+
+        Assert.Contains("UPDATE config.database_state_expected", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("INSERT INTO config.database_state_expected", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("ON CONFLICT", body, StringComparison.Ordinal);
+    }
+
+    private static string ReadStateStoreSource([CallerFilePath] string thisFile = "")
+    {
+        var relative = Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "PgAlertStateStore.cs");
+        var dir = Path.GetDirectoryName(thisFile)!;
+        while (dir is not null && !File.Exists(Path.Combine(dir, relative)))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return File.ReadAllText(Path.Combine(dir!, relative));
     }
 
     [Fact]

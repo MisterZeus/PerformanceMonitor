@@ -93,6 +93,22 @@ public sealed class LiteAlertStateStore : IAlertStateStore
         return Task.Run(() => _store.SaveFailedJobWatermarkAsync(serverId, watermark));
     }
 
+    /// <summary>
+    /// #2166: not persisted in Lite yet. Deliberately a no-op rather than a throw or a silent in-memory
+    /// cache — with no memory the engine sees every deviation as new, which IS Lite's pre-#2166 behavior
+    /// (fire on the cooldown). An in-memory cache would be worse than nothing here: it would go quiet
+    /// until the next app restart and then re-fire every parked database, which is the exact failure the
+    /// persistence requirement exists to prevent. Lite parity follows in its own change.
+    /// </summary>
+    public Task SaveDatabaseStateAlertedAsync(string serverKey, string databaseName, string effectiveState) =>
+        Task.CompletedTask;
+
+    /// <summary>
+    /// #2166: nothing is stored, so nothing needs clearing. No-op for the same reason as its sibling above.
+    /// </summary>
+    public Task ClearDatabaseStateAlertedAsync(string serverKey, string databaseName) =>
+        Task.CompletedTask;
+
     private static int ParseServerKey(string serverKey) =>
         int.Parse(serverKey, CultureInfo.InvariantCulture);
 }

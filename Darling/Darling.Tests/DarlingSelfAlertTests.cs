@@ -2039,6 +2039,8 @@ public sealed class DarlingSelfAlertTests
         public Task SaveEdgeTriggerWatermarkAsync(string serverKey, string metricName, int watermark) => Task.CompletedTask;
         public Task<DateTime?> LoadFailedJobWatermarkAsync(string serverKey) => Task.FromResult<DateTime?>(null);
         public Task SaveFailedJobWatermarkAsync(string serverKey, DateTime watermark) => Task.CompletedTask;
+        public Task SaveDatabaseStateAlertedAsync(string serverKey, string databaseName, string effectiveState) => Task.CompletedTask;
+        public Task ClearDatabaseStateAlertedAsync(string serverKey, string databaseName) => Task.CompletedTask;
     }
 
     /* ---------------- live collection_log reads (gated on DARLING_TEST_PG) ---------------- */
