@@ -15,6 +15,17 @@ namespace PerformanceMonitor.Collectors;
 /// </summary>
 public sealed class CollectorTargetInfo
 {
+    /// <summary>
+    /// Which database engine this target actually is. Defaults to
+    /// <see cref="CollectorTargetEngine.SqlServer"/>, so every target the probes classify today —
+    /// and every bare <c>new CollectorTargetInfo()</c> in a test — keeps its present behaviour.
+    /// <para>A definition is only dispatched when its <see cref="ICollectorSchemaInfo.TargetEngine"/>
+    /// matches this; see <see cref="CollectorCatalog.AppliesTo(ICollectorSchemaInfo, CollectorTargetInfo)"/>.
+    /// The SQL Server hosting flags below (<see cref="IsAzureSqlDb"/> and friends) are meaningful
+    /// only when this is <see cref="CollectorTargetEngine.SqlServer"/>.</para>
+    /// </summary>
+    public CollectorTargetEngine Engine { get; init; } = CollectorTargetEngine.SqlServer;
+
     /// <summary>True when the target is Azure SQL Database (engine edition 5).</summary>
     public bool IsAzureSqlDb { get; init; }
 

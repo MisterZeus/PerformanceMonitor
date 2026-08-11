@@ -78,7 +78,22 @@ public static class CollectorCatalog
     /// gated) so a typo surfaces as the dispatch switch's "Unknown collector" rather than a silent skip.
     /// </summary>
     public static bool AppliesTo(string collectorName, CollectorTargetInfo target) =>
-        s_byName.TryGetValue(collectorName, out var definition) ? definition.AppliesTo(target) : true;
+        s_byName.TryGetValue(collectorName, out var definition) ? AppliesTo(definition, target) : true;
+
+    /// <summary>
+    /// The full dispatch gate: a definition runs only when its
+    /// <see cref="ICollectorSchemaInfo.TargetEngine"/> matches the target's
+    /// <see cref="CollectorTargetInfo.Engine"/> AND its own
+    /// <see cref="ICollectorDefinition{TRow}.AppliesTo"/> gate passes. Both runners call this rather
+    /// than <c>AppliesTo</c> directly, so a definition written in one engine's dialect can never be
+    /// sent to the other — the individual definitions stay free to reason only about the hosting
+    /// flavour and version floors within their own engine.
+    /// <para>Both defaults are <see cref="CollectorTargetEngine.SqlServer"/>, so this is behaviour-
+    /// identical to the previous direct <c>AppliesTo</c> call for every definition and target that
+    /// exists today.</para>
+    /// </summary>
+    public static bool AppliesTo(ICollectorSchemaInfo definition, CollectorTargetInfo target) =>
+        definition.TargetEngine == target.Engine && definition.AppliesTo(target);
 
     /// <summary>
     /// True when <paramref name="collectorName"/>'s query carries the deliberate short

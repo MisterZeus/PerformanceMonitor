@@ -145,8 +145,10 @@ public sealed class DarlingCollectorRunner
         var collectionTime = DateTime.UtcNow;
 
         /* Some collectors don't exist on some targets (e.g. ring buffers on Azure SQL DB) —
-           skip the cycle entirely, matching Lite. */
-        if (!definition.AppliesTo(server.Target))
+           skip the cycle entirely, matching Lite. CollectorCatalog.AppliesTo composes the
+           engine-dialect check over the definition's own gate, so a T-SQL definition can never be
+           dispatched at a non-SQL-Server target. */
+        if (!CollectorCatalog.AppliesTo(definition, server.Target))
         {
             return new CollectorRunResult(0, 0, 0);
         }
@@ -874,7 +876,7 @@ public sealed class DarlingCollectorRunner
         int commandTimeoutSeconds,
         CancellationToken cancellationToken)
     {
-        if (!definition.AppliesTo(server.Target))
+        if (!CollectorCatalog.AppliesTo(definition, server.Target))
         {
             return new List<TRow>();
         }
