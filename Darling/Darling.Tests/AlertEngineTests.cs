@@ -1559,9 +1559,63 @@ public sealed class AlertEngineTests
         Assert.DoesNotContain("ON CONFLICT", body, StringComparison.Ordinal);
     }
 
-    private static string ReadStateStoreSource([CallerFilePath] string thisFile = "")
+    [Fact]
+    public void DatabaseState_TheNeverBaselinedList_IsWiderThanTheCriticalOne()
     {
-        var relative = Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "PgAlertStateStore.cs");
+        /* #2189. Two lists that look interchangeable and are not, which is exactly why they are worth
+           pinning: one answers "bad enough to page about with no baseline to compare against", the other
+           "must never be LEARNED as this database's normal". A transient state belongs only in the second.
+
+           Collapsing them either way is a shipped bug. Widen the critical list and every restore in progress
+           pages. Narrow the never-baselined list and a database observed mid-restore learns RESTORING as
+           expected, then alerts forever for being ONLINE — the reported bug, 636 fires in 24 hours. */
+        Assert.Contains(DatabaseStateTokens.Suspect, DatabaseStateTokens.CriticalSqlList, StringComparison.Ordinal);
+        Assert.Contains(DatabaseStateTokens.RecoveryPending, DatabaseStateTokens.CriticalSqlList, StringComparison.Ordinal);
+        Assert.Contains(DatabaseStateTokens.Emergency, DatabaseStateTokens.CriticalSqlList, StringComparison.Ordinal);
+
+        /* A pending database in a transient state must stay SILENT, so these must not reach the critical arm. */
+        Assert.DoesNotContain(DatabaseStateTokens.Restoring, DatabaseStateTokens.CriticalSqlList, StringComparison.Ordinal);
+        Assert.DoesNotContain(DatabaseStateTokens.Recovering, DatabaseStateTokens.CriticalSqlList, StringComparison.Ordinal);
+
+        Assert.StartsWith(DatabaseStateTokens.CriticalSqlList, DatabaseStateTokens.NeverBaselinedSqlList, StringComparison.Ordinal);
+        Assert.Contains($"'{DatabaseStateTokens.Restoring}'", DatabaseStateTokens.NeverBaselinedSqlList, StringComparison.Ordinal);
+        Assert.Contains($"'{DatabaseStateTokens.Recovering}'", DatabaseStateTokens.NeverBaselinedSqlList, StringComparison.Ordinal);
+
+        /* STANDBY is synthetic and stable by construction — the whole reason it exists is to give a
+           log-shipping secondary one steady token instead of the RESTORING flicker underneath it. Refusing to
+           learn it would leave every standby secondary permanently pending for no benefit. */
+        Assert.DoesNotContain(DatabaseStateTokens.Standby, DatabaseStateTokens.NeverBaselinedSqlList, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DatabaseState_BothDarlingSeedSites_ShareTheOneStateList()
+    {
+        /* The viewer's editor seeds and heals baselines with its own copy of this SQL because that project
+           cannot reference the service's. Two hand-kept copies of "what must never be learned" is the drift
+           that lets the editor write a baseline the alert refuses to — silently, and only for operators who
+           happen to open the editor mid-restore. Both sites interpolate the shared constant instead, and
+           BOTH statements use it: the seed to refuse those states, the heal to un-write them (#2189). A copy
+           that widened only one of the two would be the subtler half of the same bug. */
+        var viewer = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.DatabaseStates.cs"));
+        var service = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingAlertReadAdapter.cs"));
+
+        foreach (var source in new[] { viewer, service })
+        {
+            Assert.Contains("NOT IN ({DatabaseStateTokens.NeverBaselinedSqlList})", source, StringComparison.Ordinal);
+            Assert.Contains("expected_state IN ({DatabaseStateTokens.NeverBaselinedSqlList})", source, StringComparison.Ordinal);
+            Assert.DoesNotContain($"NOT IN ('{DatabaseStateTokens.Suspect}'", source, StringComparison.Ordinal);
+
+            /* The heal must never be reachable for a state somebody DECLARED, in either copy. */
+            Assert.Contains("is_user_override = false", source, StringComparison.Ordinal);
+        }
+    }
+
+    private static string ReadStateStoreSource() =>
+        ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "PgAlertStateStore.cs"));
+
+    /// <summary>Reads a repo-relative source file, walking up from this test file to find the repo root.</summary>
+    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
+    {
         var dir = Path.GetDirectoryName(thisFile)!;
         while (dir is not null && !File.Exists(Path.Combine(dir, relative)))
         {

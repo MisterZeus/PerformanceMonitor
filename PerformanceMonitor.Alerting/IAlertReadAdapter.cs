@@ -156,12 +156,19 @@ public interface IAlertReadAdapter
     /// returns the rows where <c>current != expected</c> in both samples and <c>expected</c> is not the
     /// <see cref="DatabaseStateTokens.Ignore"/> sentinel, each carrying both the current and expected state.
     /// <para>
-    /// CONTRACT — the read also AUTO-SEEDS and PRUNES: any database in the latest snapshot with no
+    /// CONTRACT — the read also AUTO-SEEDS, HEALS and PRUNES: any database in the latest snapshot with no
     /// expected-state row yet gets its current effective state recorded as the first-observation baseline,
-    /// EXCEPT a critical effective state (SUSPECT / RECOVERY_PENDING / EMERGENCY), which is left pending so
-    /// it alerts rather than learning the bad state as expected. Auto-baselines for databases that have
-    /// dropped off the newest snapshot are pruned (user overrides preserved). Seeding is idempotent
-    /// (insert-if-absent) and never overwrites a user override or an existing baseline.
+    /// EXCEPT the states in <see cref="DatabaseStateTokens.NeverBaselinedSqlList"/> — the integrity ones
+    /// (which stay pending so they alert rather than learning the bad state as expected) and the transient
+    /// ones (RESTORING / RECOVERING, which stay pending SILENTLY until the database settles, so onboarding
+    /// mid-restore cannot learn a state nobody chose). An AUTO-seeded baseline that nonetheless records one
+    /// of those states — written by an older build, or by re-baselining a database by hand while it was
+    /// mid-something — is HEALED to ONLINE once the database's effective state reaches ONLINE, since such a
+    /// row is not a baseline anyone chose and would otherwise make the database deviate by being healthy
+    /// (#2189). The heal never touches a user override, and never touches an OFFLINE or STANDBY baseline:
+    /// those are steady states, and departing one is a real deviation that must still fire. Auto-baselines
+    /// for databases that have dropped off the newest snapshot are pruned (user overrides preserved).
+    /// Seeding is idempotent (insert-if-absent) and never overwrites a user override or an existing baseline.
     /// </para>
     /// <para>
     /// Empty when the store has no snapshot for this server. Unlike the anomalous-jobs read this is
