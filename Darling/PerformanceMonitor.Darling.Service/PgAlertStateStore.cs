@@ -171,8 +171,8 @@ ON CONFLICT (server_id, metric_name) DO UPDATE SET
     /// the only value available is the state being alerted ON — so a database first observed SUSPECT would
     /// get SUSPECT written as its accepted baseline. It would then stop deviating, drop out of the deviation
     /// query, be read as RECOVERED (firing a false "resolved" on a still-corrupt database), and never alert
-    /// again. The seed logic refuses to baseline SUSPECT/RECOVERY_PENDING/EMERGENCY for exactly this reason;
-    /// this write must not do behind its back what it declines to do in front.</para>
+    /// again. The seed logic refuses to baseline any of <see cref="DatabaseStateTokens.NeverBaselinedSqlList"/>
+    /// for exactly this reason; this write must not do behind its back what it declines to do in front.</para>
     ///
     /// <para>Nothing is lost by skipping the no-row case: a database with no baseline row was first observed
     /// in an integrity state, and those states are never edge-suppressed (RepeatsAreNoise is false for them),
