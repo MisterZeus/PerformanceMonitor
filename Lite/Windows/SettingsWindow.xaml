@@ -374,6 +374,11 @@
                            Margin="20,0,0,4" TextWrapping="Wrap"/>
                 <CheckBox x:Name="AnalysisEnabledCheckBox" Content="Enable automated analysis"
                           Margin="20,4,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
+                <CheckBox x:Name="QueryStoreBackfillCheckBox" Content="Fill Query Store history gaps in the background"
+                          Margin="20,4,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
+                <TextBlock Text="Catches up Query Store history the live path never sees: a newly added server's recent tail, gaps left by an outage, and a freshly restored database's imported catalog. Runs in bounded background slices. Turn it off when a heavy catch-up is costing a monitored server more than the history is worth — live collection is unaffected, and re-enabling resumes exactly where it left off."
+                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                           Margin="40,0,0,4" TextWrapping="Wrap"/>
                 <CheckBox x:Name="AnalysisNotificationsCheckBox" Content="Send scheduled analysis notifications"
                           Margin="20,4,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">

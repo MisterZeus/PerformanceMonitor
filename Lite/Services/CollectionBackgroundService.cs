@@ -42,6 +42,11 @@ public class CollectionBackgroundService : BackgroundService
     /* #2058: the Query Store backfill tick — one byte-budgeted slice per server per due-tick, on
        Lite's IfDue ladder (the archival/retention/analysis idiom) rather than a separate loop. */
     private DateTime _lastQueryStoreBackfill = DateTime.MinValue;
+
+    /* #2167: last observed state of the backfill switch, so the log records each TRANSITION once instead of
+       once per idle tick. Starts true to match the setting's default — a deployment that never touches the
+       switch therefore logs nothing about it. */
+    private bool _queryStoreBackfillWasEnabled = true;
     private DateTime _lastRetentionTime = DateTime.UtcNow;
     private DateTime _lastAnalysisTime = DateTime.UtcNow;
     private DateTime _lastFindingsCleanupTime = DateTime.UtcNow;
@@ -194,6 +199,27 @@ public class CollectionBackgroundService : BackgroundService
     /// RemoteCollectorService.QueryStoreBackfill for the worker itself.</summary>
     private async Task RunQueryStoreBackfillIfDueAsync(CancellationToken stoppingToken)
     {
+        /* #2167: the off switch, checked BEFORE the due-time stamp so a disabled backfill does not quietly
+           consume its own schedule — flipping it back on runs on the next due tick rather than waiting out
+           an interval that elapsed while it was off. Read live from the setting (not captured), so the
+           Settings window takes effect without restarting Lite, matching Darling's store-reload behavior. */
+        if (!App.QueryStoreBackfillEnabled)
+        {
+            if (_queryStoreBackfillWasEnabled)
+            {
+                _queryStoreBackfillWasEnabled = false;
+                _logger?.LogInformation("Query Store backfill disabled in settings — idling; in-flight slices finish and no new ones start");
+            }
+
+            return;
+        }
+
+        if (!_queryStoreBackfillWasEnabled)
+        {
+            _queryStoreBackfillWasEnabled = true;
+            _logger?.LogInformation("Query Store backfill re-enabled in settings — resuming from the stored watermarks");
+        }
+
         if (DateTime.UtcNow - _lastQueryStoreBackfill < QueryStoreBackfillInterval)
         {
             return;
