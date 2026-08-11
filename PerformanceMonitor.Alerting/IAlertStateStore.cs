@@ -65,4 +65,19 @@ public interface IAlertStateStore
     /// only — when a failed-job alert actually fires.
     /// </summary>
     Task SaveFailedJobWatermarkAsync(string serverKey, DateTime watermark);
+
+    /// <summary>
+    /// Records the effective state a database was just alerted about (#2166), so the next evaluation can
+    /// tell a NEW deviation from the same one it already reported. Called on-fire only, which makes it a
+    /// low-frequency write like the watermarks above.
+    ///
+    /// <para>Persistence is the requirement, not an optimization: the case this exists for is a database
+    /// deliberately parked OFFLINE for weeks. In-memory edge state would re-fire every parked database on
+    /// every service restart, which is worse than the cooldown-repeat being replaced.</para>
+    ///
+    /// <para>A host that does not persist it may no-op; the engine then sees no memory, every deviation
+    /// reads as new, and behavior is exactly the pre-#2166 cooldown-repeat. That is the intended fallback
+    /// rather than a broken state.</para>
+    /// </summary>
+    Task SaveDatabaseStateAlertedAsync(string serverKey, string databaseName, string effectiveState);
 }

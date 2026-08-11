@@ -725,7 +725,7 @@ previous AS (
     FROM database_states ds
     WHERE ds.server_id = $1 AND ds.collection_time = (SELECT t FROM prev)
 )
-SELECT l.database_name, l.eff, COALESCE(e.expected_state, '')
+SELECT l.database_name, l.eff, COALESCE(e.expected_state, ''), COALESCE(e.last_alerted_state, '')
 FROM latest l
 JOIN previous p
   ON p.database_name = l.database_name
@@ -770,7 +770,8 @@ ORDER BY l.database_name";
                 {
                     DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
                     StateDesc = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                    ExpectedState = reader.IsDBNull(2) ? "" : reader.GetString(2)
+                    ExpectedState = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                    LastAlertedState = reader.IsDBNull(3) ? "" : reader.GetString(3)
                 });
             }
         }

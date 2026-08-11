@@ -59,6 +59,27 @@ public static class DatabaseStateTokens
             _ => AlertSeverityLevel.Warning
         };
 
+    /// <summary>
+    /// Whether repetition carries information for this state (#2166).
+    ///
+    /// <para>OFFLINE and RESTORING are usually states somebody CHOSE — routine maintenance, a soft-delete
+    /// park, a log-shipping secondary flickering through restores. Re-firing for weeks tells the operator
+    /// nothing they did not already know, and the reporter's case (#2166) generated hundreds of identical
+    /// alerts for one intended action. Those get edge semantics: alert on the transition, then stay quiet
+    /// until the state changes.
+    ///
+    /// <para>The integrity states are never chosen — nobody parks a database in SUSPECT — so continued
+    /// repetition IS the signal, and they keep re-firing on the cooldown. The engine already applies this
+    /// discipline to Server Unreachable/Restored; this extends it to the database states that behave the
+    /// same way.</para>
+    /// </summary>
+    public static bool RepeatsAreNoise(string? stateDesc) =>
+        (stateDesc?.Trim().ToUpperInvariant()) switch
+        {
+            Offline or Restoring or Recovering or Standby => true,
+            _ => false
+        };
+
     /// <summary>A human-friendly rendering of a state token (RECOVERY_PENDING → "RECOVERY PENDING").</summary>
     public static string Humanize(string? stateDesc) =>
         string.IsNullOrWhiteSpace(stateDesc) ? "UNKNOWN" : stateDesc.Trim().Replace('_', ' ');

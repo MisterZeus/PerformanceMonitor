@@ -199,6 +199,15 @@ public sealed class AlertEngineTests
             SavedFailedJob.Add((serverKey, watermark));
             return Task.CompletedTask;
         }
+
+        /* #2166 */
+        public List<(string Server, string Db, string State)> DatabaseStateAlerted { get; } = new();
+
+        public Task SaveDatabaseStateAlertedAsync(string serverKey, string databaseName, string effectiveState)
+        {
+            DatabaseStateAlerted.Add((serverKey, databaseName, effectiveState));
+            return Task.CompletedTask;
+        }
     }
 
     private sealed class RecordingDeliverer : IAlertDeliverer
@@ -1288,6 +1297,72 @@ public sealed class AlertEngineTests
         await engine.EvaluateServerAsync(Harness.Snapshot());
 
         Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task DatabaseState_ChosenState_AlreadyAnnounced_StaysQuiet()
+    {
+        /* #2166: the reporter's case — a database parked OFFLINE for a month generated hundreds of
+           identical alerts. With the state already recorded as announced, a fresh evaluation must be
+           SILENT even though the deviation is still present and no cooldown is in play. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Archive", StateDesc = "OFFLINE", ExpectedState = "ONLINE", LastAlertedState = "OFFLINE" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task DatabaseState_ChosenState_FirstObservation_FiresAndRecordsIt()
+    {
+        /* The transition still alerts — edge-triggered, not silenced — and the state is recorded so the
+           NEXT evaluation is the quiet one. Recording is what makes the silence survive a restart. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Archive", StateDesc = "OFFLINE", ExpectedState = "ONLINE", LastAlertedState = "" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains(h.StateStore.DatabaseStateAlerted, r => r.Db == "Archive" && r.State == "OFFLINE");
+    }
+
+    [Fact]
+    public async Task DatabaseState_IntegrityState_StillRepeats_EvenWhenAlreadyAnnounced()
+    {
+        /* Nobody parks a database in SUSPECT, so continued repetition IS the signal there. An already-
+           announced integrity state must keep firing on the cooldown — if this ever goes quiet, a real
+           corruption stops nagging, which is the failure mode worth protecting against. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Payments", StateDesc = "SUSPECT", ExpectedState = "ONLINE", LastAlertedState = "SUSPECT" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(PerformanceMonitor.Notifications.AlertSeverityLevel.Critical, fired.Severity);
+    }
+
+    [Fact]
+    public async Task DatabaseState_ChosenState_ChangingToADifferentState_FiresAgain()
+    {
+        /* The composition property the reporter identified: going quiet for a parked state must NOT mean
+           going blind. A database announced as OFFLINE that turns SUSPECT is a different state, so it
+           alerts — and at Critical, not inheriting the quiet treatment of the state it left. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Archive", StateDesc = "SUSPECT", ExpectedState = "ONLINE", LastAlertedState = "OFFLINE" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(PerformanceMonitor.Notifications.AlertSeverityLevel.Critical, fired.Severity);
     }
 
     [Fact]

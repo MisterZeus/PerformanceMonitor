@@ -1251,7 +1251,19 @@ public sealed class AlertEngine
         {
             active.Add(dbName);
             var cooldownKey = DatabaseStateCooldownKey(key, dbName);
-            if (!suppressed && CooldownElapsed(_lastDatabaseStateAlert, cooldownKey, now, alertCooldown))
+            /* #2166: for the states an operator usually CHOSE (a parked OFFLINE, a secondary flickering
+               RESTORING), repetition is noise — alert on the transition and stay quiet until the state
+               changes. Compared against the PERSISTED last-alerted state, so a service restart cannot
+               re-announce every parked database. The integrity states skip this entirely: nobody parks a
+               database in SUSPECT, so their repetition is the signal and the cooldown still governs.
+
+               A host that does not persist the memory (Lite today) reports empty here, every deviation
+               reads as new, and behavior is exactly as it was before this change. */
+            var alreadyAnnounced =
+                DatabaseStateTokens.RepeatsAreNoise(db.StateDesc)
+                && string.Equals(db.LastAlertedState, db.StateDesc, StringComparison.OrdinalIgnoreCase);
+
+            if (!suppressed && !alreadyAnnounced && CooldownElapsed(_lastDatabaseStateAlert, cooldownKey, now, alertCooldown))
             {
                 var severity = DatabaseStateTokens.SeverityFor(db.StateDesc);
                 var stateText = DatabaseStateTokens.Humanize(db.StateDesc);
@@ -1298,6 +1310,11 @@ public sealed class AlertEngine
                     NumericCurrentValue: null, NumericThresholdValue: null,
                     Muted: isMuted, Severity: severity,
                     ShortMessage: shortMessage), ct);
+
+                /* Stamped AFTER delivery so a failed fire is retried next cycle rather than silenced.
+                   Written for every state, not just the edge-triggered ones, so that flipping a state's
+                   classification later has correct history to work from. */
+                await _stateStore.SaveDatabaseStateAlertedAsync(key, dbName, db.StateDesc);
             }
         }
 

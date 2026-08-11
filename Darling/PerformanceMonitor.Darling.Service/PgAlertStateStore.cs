@@ -162,6 +162,37 @@ ON CONFLICT (server_id, metric_name) DO UPDATE SET
             _logger?.LogError("Could not persist failed-job watermark: {Message}", ex.Message);
         }
     }
+    /// <summary>
+    /// #2166: stamps the alerted state onto the database's row in <c>config.database_state_expected</c>,
+    /// the table that already holds this alert's per-database config. Upsert rather than update, because a
+    /// database can be alerted on its very first observation (a critical state with no accepted baseline)
+    /// and therefore may have no row yet; the baseline column takes the current state in that case, which
+    /// the seed logic would have written anyway on the next healthy observation.
+    /// </summary>
+    public async Task SaveDatabaseStateAlertedAsync(string serverKey, string databaseName, string effectiveState)
+    {
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync();
+            using var command = new NpgsqlCommand(@"
+INSERT INTO config.database_state_expected (server_id, database_name, expected_state, is_user_override, updated_at, last_alerted_state, last_alerted_at)
+VALUES ($1, $2, $3, false, (now() AT TIME ZONE 'UTC'), $3, (now() AT TIME ZONE 'UTC'))
+ON CONFLICT (server_id, database_name) DO UPDATE SET
+    last_alerted_state = EXCLUDED.last_alerted_state,
+    last_alerted_at = EXCLUDED.last_alerted_at", connection);
+            command.Parameters.AddWithValue(ParseServerKey(serverKey));
+            command.Parameters.AddWithValue(databaseName);
+            command.Parameters.AddWithValue(effectiveState);
+            await command.ExecuteNonQueryAsync();
+        }
+        catch (Exception ex)
+        {
+            /* Same posture as the watermark writes: a failed stamp costs a duplicate alert next cycle,
+               never a missed one, so it logs and continues rather than failing the sweep. */
+            _logger?.LogWarning("Could not record the alerted database state for {Database}: {Message}", databaseName, ex.Message);
+        }
+    }
+
 
     /// <summary>Naive-UTC now, Kind-Unspecified — the product's PG timestamp discipline.</summary>
     private static DateTime NaiveUtcNow() =>
