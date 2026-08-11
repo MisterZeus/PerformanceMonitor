@@ -2417,7 +2417,6 @@ public sealed class DarlingManagedPostgres
     }
 
     /// <summary>
-    /// <summary>
     /// Applies the optional per-invocation environment and working directory shared by both process
     /// runners. Values are ADDED to the inherited environment rather than replacing it — a PG tool still
     /// needs PATH, TEMP and the rest — and an existing name is overwritten so a caller's PGPASSFILE always
