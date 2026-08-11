@@ -472,6 +472,12 @@ public sealed class DarlingMcpHostService : BackgroundService
                    is served; Darling's delta collectors store no sample_interval_seconds, so per-second rates are
                    derived from the LAG interval. */
                 .WithGeminiCompatibleTools<DarlingMcpLatchSpinlockTools>()
+                /* get_pg_wait_stats — PostgreSQL wait events for an Aurora target, paired with the
+                   pg_wait_stats collector. A separate tool from get_wait_stats rather than a widened
+                   one: PostgreSQL's waits are a two-level type/event taxonomy with no signal-wait
+                   concept, reported in microseconds, so the two engines cannot share a result shape
+                   without lying about a unit or emitting mostly-null columns. */
+                .WithGeminiCompatibleTools<DarlingMcpPgWaitTools>()
                 .WithGeminiCompatibleTools<DarlingMcpMemoryGrantTools>()
                 .WithGeminiCompatibleTools<DarlingMcpPlanCacheSchedulerTools>()
                 .WithGeminiCompatibleTools<DarlingMcpJobTools>()
