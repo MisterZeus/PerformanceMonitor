@@ -204,6 +204,84 @@ public sealed class ViewerSettingsTests
 
         var ex = Assert.Throws<InvalidDataException>(() => ViewerSettings.Parse(json));
         Assert.Contains("service", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Start the PerformanceMonitor Darling service once", ex.Message, StringComparison.Ordinal);
+        /* #2197: even the first-run voice carries the one sentence for the operator who HAS already
+           started it — this string is what the main window shows, so it cannot be a dead end either. */
+        Assert.Contains("ALREADY started it", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #2197, the viewer half of the CLI's DarlingStoreBootstrapEvidence. This message is rendered by the
+    /// main window, so it reaches the same operator with the same absence — and before this it gave the
+    /// same first-run advice to a store whose bootstrap had already failed.
+    /// </summary>
+    [Fact]
+    public void Parse_ManagedMode_MissingCredentialAfterAFailedBootstrap_PointsAtTheServiceLogInstead()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-viewer-failedboot-");
+        try
+        {
+            /* The #2185 shape: the service wrote the store's own credential immediately before initdb, and
+               initdb died — so the admin role credential the viewer wants was never provisioned. */
+            var dataDirectory = Path.Combine(root.FullName, "store", "pg");
+            Directory.CreateDirectory(Path.Combine(root.FullName, "store"));
+            var storeCredential = PerformanceMonitor.Darling.Service.DarlingManagedPostgres.CredentialPathFor(dataDirectory);
+            File.WriteAllText(storeCredential, "not-a-real-credential");
+
+            var json = $$"""{ "postgres": { "managed": true, "dataDirectory": {{JsonSerializer.Serialize(dataDirectory)}} } }""";
+            var ex = Assert.Throws<InvalidDataException>(() => ViewerSettings.Parse(json));
+
+            Assert.DoesNotContain("Start the PerformanceMonitor Darling service once", ex.Message, StringComparison.Ordinal);
+            Assert.Contains("NOT a first run", ex.Message, StringComparison.Ordinal);
+            Assert.Contains(storeCredential, ex.Message, StringComparison.Ordinal);
+            Assert.Contains("darling-service_yyyyMMdd.log", ex.Message, StringComparison.Ordinal);
+            Assert.Contains("Nothing in darling.json produces this", ex.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// The viewer does not reference the Service project, so the file names it probes for bootstrap evidence
+    /// are DUPLICATED under the file's sliver rule — the same rule the DPAPI entropy and the role/credential
+    /// names already live under. Pin them, or a rename on the service side silently turns the viewer's
+    /// sharper branch off and nothing fails.
+    /// </summary>
+    [Fact]
+    public void ManagedDerivation_BootstrapEvidenceFileNames_MatchTheServiceConstants()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-viewer-sliver-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "store", "pg");
+            var storeFolder = Path.Combine(root.FullName, "store");
+            Directory.CreateDirectory(storeFolder);
+
+            /* Each service-side name, one at a time, must be the one the viewer's probe recognises. */
+            foreach (var evidenceFile in new[]
+                     {
+                         PerformanceMonitor.Darling.Service.DarlingManagedPostgres.CredentialFileName,
+                         PerformanceMonitor.Darling.Service.DarlingManagedPostgres.McpCredentialFileName,
+                         PerformanceMonitor.Darling.Service.DarlingManagedPostgres.ServerLogFileName,
+                     })
+            {
+                var path = Path.Combine(storeFolder, evidenceFile);
+                File.WriteAllText(path, "x");
+
+                var json = $$"""{ "postgres": { "managed": true, "dataDirectory": {{JsonSerializer.Serialize(dataDirectory)}} } }""";
+                var ex = Assert.Throws<InvalidDataException>(() => ViewerSettings.Parse(json));
+                Assert.Contains("NOT a first run", ex.Message, StringComparison.Ordinal);
+                Assert.Contains(path, ex.Message, StringComparison.Ordinal);
+
+                File.Delete(path);
+            }
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
     }
 
     [Fact]
