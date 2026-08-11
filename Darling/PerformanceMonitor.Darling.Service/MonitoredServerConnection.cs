@@ -8,6 +8,7 @@
 
 using System;
 using Microsoft.Data.SqlClient;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -37,6 +38,9 @@ public static class MonitoredServerConnection
             MultipleActiveResultSets = true,
             ApplicationIntent = server.ReadOnlyIntent ? ApplicationIntent.ReadOnly : ApplicationIntent.ReadWrite,
             MultiSubnetFailover = server.MultiSubnetFailover,
+            /* #2164: fewer, larger TDS packets for the plan-XML/query-text payloads the heavy
+               collectors read. See CollectorTdsTuning for the measurement that motivated it. */
+            PacketSize = CollectorTdsTuning.MonitoredServerPacketSize,
         };
 
         /* Encrypt fail-closed: unknown/blank modes get Mandatory, matching Lite. */
