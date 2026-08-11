@@ -10,6 +10,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Data;
+using System.Data.Common;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
@@ -18,6 +19,7 @@ using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service.Targets;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -903,9 +905,12 @@ public sealed class DarlingCollectorRunner
 
         var plan = definition.BuildQuery(context);
 
-        using var connection = new SqlConnection(server.ConnectionString);
+        /* Engine-neutral: a Postgres target gets an NpgsqlConnection here and the definition's
+           ReadAsync never knows the difference — it reads a DbDataReader either way. */
+        var provider = TargetProviders.For(server.Target);
+        using var connection = provider.CreateConnection(server.ConnectionString);
         await connection.OpenAsync(cancellationToken);
-        using var command = CreateCollectorCommand(plan, connection, commandTimeoutSeconds);
+        using var command = CreateCollectorCommand(provider, plan, connection, commandTimeoutSeconds);
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         return await definition.ReadAsync(reader, context, cancellationToken);
     }
@@ -1217,14 +1222,14 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
         {
             using var connection = new SqlConnection(masterConnectionString);
             await connection.OpenAsync(cancellationToken);
-            using var command = new SqlCommand(
-                $"SELECT name FROM sys.databases WHERE state_desc = N'ONLINE' AND database_id > 0 {exclusionClause} ORDER BY name;",
-                connection)
-            { CommandTimeout = CommandTimeoutSeconds };
-            foreach (var parameter in exclusionParameters)
-            {
-                command.Parameters.Add(ToSqlParameter(parameter));
-            }
+            /* Azure master enumeration is SQL-Server-only, but it goes through the same parameter
+               mapping as every other command so a type cannot be mapped two ways. */
+            using var command = CreateCollectorCommand(
+                new CollectorQuery(
+                    $"SELECT name FROM sys.databases WHERE state_desc = N'ONLINE' AND database_id > 0 {exclusionClause} ORDER BY name;",
+                    exclusionParameters),
+                connection,
+                CommandTimeoutSeconds);
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -1334,26 +1339,20 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
         SqlErrorClassification.ShouldFallBackToSingleDatabase(errorNumber);
 
     /* Internal, not private: QueryStoreBackfill (#2022) builds its slice commands through the same
-       parameter mapping so the two paths cannot drift on a type. */
+       parameter mapping so the two paths cannot drift on a type.
+
+       Still SqlCommand-typed and still SQL-Server-only, because every caller of THIS overload is:
+       Query Store backfill and the Azure per-database/master paths are SQL Server features by
+       definition. The engine-neutral path goes through CreateCollectorCommand(ITargetProvider, ...)
+       below, and both end up in the same parameter mapping inside SqlServerTargetProvider, so a
+       parameter type cannot be mapped two ways. */
     internal static SqlCommand CreateCollectorCommand(CollectorQuery plan, SqlConnection connection, int commandTimeoutSeconds)
-    {
-        var command = new SqlCommand(plan.Text, connection) { CommandTimeout = commandTimeoutSeconds };
+        => (SqlCommand)SqlServerTargetProvider.Instance.CreateCommand(plan, connection, commandTimeoutSeconds);
 
-        foreach (var parameter in plan.Parameters)
-        {
-            command.Parameters.Add(ToSqlParameter(parameter));
-        }
-
-        return command;
-    }
-
-    private static SqlParameter ToSqlParameter(CollectorParameter parameter) => parameter.Type switch
-    {
-        CollectorParameterType.DateTime2 => new SqlParameter(parameter.Name, SqlDbType.DateTime2) { Value = parameter.Value ?? DBNull.Value },
-        CollectorParameterType.NVarChar128 => new SqlParameter(parameter.Name, SqlDbType.NVarChar, 128) { Value = parameter.Value ?? DBNull.Value },
-        CollectorParameterType.NVarChar260 => new SqlParameter(parameter.Name, SqlDbType.NVarChar, 260) { Value = parameter.Value ?? DBNull.Value },
-        CollectorParameterType.Int32 => new SqlParameter(parameter.Name, SqlDbType.Int) { Value = parameter.Value ?? DBNull.Value },
-        CollectorParameterType.BigInt => new SqlParameter(parameter.Name, SqlDbType.BigInt) { Value = parameter.Value ?? DBNull.Value },
-        _ => throw new ArgumentOutOfRangeException(nameof(parameter), parameter.Type, "Unmapped collector parameter type"),
-    };
+    /// <summary>
+    /// The engine-neutral command factory: same collector query, whichever engine the target is.
+    /// </summary>
+    private static DbCommand CreateCollectorCommand(
+        ITargetProvider provider, CollectorQuery plan, DbConnection connection, int commandTimeoutSeconds)
+        => provider.CreateCommand(plan, connection, commandTimeoutSeconds);
 }
