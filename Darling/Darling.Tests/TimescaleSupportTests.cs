@@ -1570,6 +1570,11 @@ LIMIT 1", connection))
         var observed = await ReadObservedJobIdsAsync(connection, ct);
         Assert.Contains(jobId, observed);
 
+        /* Deliberately tautological, and kept for what it documents rather than what it can catch: `healthy` is
+           the snapshot the wait already found clean, so this cannot fail today. It states the property leg (1)
+           exists to assert, at the place a reader looks for it, and it fails loudly if the helper is ever
+           changed to return something other than the satisfying poll's own result. The load-bearing check is
+           the wait's bounded loop, which fails carrying the detector's reason string. */
         Assert.DoesNotContain(healthy, s => s.JobId == jobId);
 
         /* (2) The #1586 REGRESSION GUARD: the production re-arm runs the real alter_job against TimescaleDB and
