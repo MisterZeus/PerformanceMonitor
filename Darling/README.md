@@ -513,6 +513,42 @@ The service migrates the store itself at startup — plain versioned SQL scripts
 
 All timestamps in the store are **naive-UTC** `timestamp` columns — the product-wide cross-store contract (Lite's DuckDB does the same).
 
+### Reading the store directly (plan XML is compressed)
+
+The store is deliberately queryable — it is documented PostgreSQL with named tables, and people build
+panels and reports straight off it. One thing will surprise you if you do that: **execution-plan XML is
+stored gzip-compressed**, and has been since v3.4.0.
+
+`collect.query_plan_dim` holds plan content once, keyed by a content digest, in one of two columns:
+
+| Column | Meaning |
+|---|---|
+| `query_plan_gz` (`bytea`) | The plan XML, **gzip-compressed** (magic bytes `1f 8b`). This is where new plans go. |
+| `query_plan_xml` (`text`) | Uncompressed plan XML. Nullable since v3.4.0; only rows written by older builds still carry it. |
+
+So a consumer that reads only `query_plan_xml` silently returns nothing for anything collected by a
+current build. **`query_plan_xml IS NULL` does not mean "no plan" — it means look at `query_plan_gz`.**
+
+Both apps and every MCP tool decompress client-side, so nothing in the product is affected; this note
+exists because the change altered the contract for direct SQL consumers and the v3.4.0 release notes did
+not say so. That omission is on us.
+
+**Getting the XML back.** PostgreSQL has no built-in gunzip for arbitrary `bytea`, so a plain-SQL
+consumer cannot decompress in the database without an extension. Practical options, in the order most
+people should try them:
+
+1. **Ask the product for the plan** rather than the store — `get_plan_xml` over MCP, or the Viewer's
+   plan surfaces. Both hand back decompressed XML and neither cares how it is stored.
+2. **Decompress in your client.** Any language's gzip library reads the bytes directly. Python:
+   `gzip.decompress(row['query_plan_gz']).decode('utf-8')`. PowerShell: a `GZipStream` over a
+   `MemoryStream` of the bytes. C#: the same, which is exactly what the apps do.
+3. **Ship a UDF into your own store** if your tooling is SQL-only (Grafana, a reporting view). A
+   `plpython3u` function works and has been used in the field, at the cost of an untrusted-language
+   extension in a monitoring database — weigh that against how much you need it.
+
+Why compressed at all: plan XML dominates store size, and gzip took a production dim table from 885 GB
+of raw text to 64 GB — a 14x reduction. That is the tradeoff being made on your behalf.
+
 ### TimescaleDB (Optional, Auto-Adopted)
 
 At startup, right after migration, the service attempts `CREATE EXTENSION IF NOT EXISTS timescaledb` and checks `pg_extension`:
