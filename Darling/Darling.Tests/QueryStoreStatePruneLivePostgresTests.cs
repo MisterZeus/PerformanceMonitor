@@ -69,7 +69,8 @@ public sealed class QueryStoreStatePruneLivePostgresTests
         await DeleteLiveRowsAsync(connection, ct);
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
-        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+        var logger = new CapturingTestLogger();
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator(), logger);
 
         var bodySucceeded = false;
         try
@@ -148,6 +149,14 @@ public sealed class QueryStoreStatePruneLivePostgresTests
                     DefaultTraceEventsCollector.LastTraceFilePathStateKey));
             Assert.Equal("600000:1786449600",
                 await ValueAsync(connection, ct, NeighborServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Dropped")));
+
+            /* The DIAGNOSTIC, which is the only thing that could ever make a wrong delete visible — the other
+               symptom is a silent refetch. It comes from the statement's RETURNING clause, so if that ever
+               stopped yielding rows the deletes would still happen and the log would simply go quiet: no
+               assertion on the store's contents can see that, which is why it is asserted on the log. */
+            Assert.Contains("Dropped", logger.Joined, StringComparison.Ordinal);
+            Assert.Contains("AppArchive", logger.Joined, StringComparison.Ordinal);
+            Assert.DoesNotContain("Parked", logger.Joined, StringComparison.Ordinal);
 
             /* Idempotent — it runs on every query_store cycle of every server, so a second pass over a clean
                store must touch nothing. Seven survivors: planwm for Live, Parked and App; done and hole for

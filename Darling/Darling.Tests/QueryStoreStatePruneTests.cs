@@ -103,7 +103,19 @@ public sealed class QueryStoreStatePruneTests
            shared lists, because the wrong answer here is not "forgot to prune" — it is adding a
            SERVER-scoped key to PrunableKeys, whose rows can never equal prefix || databaseName and so would
            be deleted on every single cycle. The message has to say that, or the obvious fix is the bug. */
-        var declared = new[] { typeof(QueryStorePlanXmlState), typeof(QueryStoreBackfillState) }
+        /* Every query_store state class in the collectors assembly, discovered rather than listed: a
+           hand-written pair would have made a THIRD state class invisible to this guard, which is the same
+           silent-omission shape the guard exists to catch. */
+        var stateClasses = typeof(QueryStorePlanXmlState).Assembly.GetTypes()
+            .Where(type => type.IsClass && type.IsAbstract && type.IsSealed  /* static */
+                && type.Name.StartsWith("QueryStore", StringComparison.Ordinal)
+                && type.Name.EndsWith("State", StringComparison.Ordinal))
+            .ToArray();
+
+        Assert.Contains(typeof(QueryStorePlanXmlState), stateClasses);
+        Assert.Contains(typeof(QueryStoreBackfillState), stateClasses);
+
+        var declared = stateClasses
             .SelectMany(type => type.GetFields(BindingFlags.Public | BindingFlags.Static))
             .Where(field => field.IsLiteral && field.FieldType == typeof(string)
                 && field.Name.EndsWith("KeyPrefix", StringComparison.Ordinal))
