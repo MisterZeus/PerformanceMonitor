@@ -32,9 +32,10 @@ public partial class LocalDataService
     /// HEALS an auto-baseline that nonetheless records one of those states — written by an older build, or
     /// by re-baselining a database by hand while it was mid-something — to ONLINE once the database reaches
     /// ONLINE, so it stops deviating by being healthy (#2189); a user override, and an OFFLINE or STANDBY
-    /// baseline, are never touched. Also tidies auto-baselines for databases that have dropped off the
-    /// newest snapshot (user overrides are preserved). The base table always holds the newest snapshots
-    /// (archival only moves older rows to parquet), so it is queried directly.
+    /// baseline, are never touched. Then FORGETS the recorded alerted-state of any database now back at its
+    /// expected state (#2203), so a second episode can announce. Also tidies auto-baselines for databases
+    /// that have dropped off the newest snapshot (user overrides are preserved). The base table always
+    /// holds the newest snapshots (archival only moves older rows to parquet), so it is queried directly.
     /// </summary>
     public async Task<List<DatabaseStateInfo>> GetDatabaseStateDeviationsAsync(int serverId)
     {
@@ -99,6 +100,40 @@ AND   database_name IN (
             await heal.ExecuteNonQueryAsync();
         }
 
+        /* #2203: forget the announced-state for any database the store now shows back AT its expected state, so
+           this cycle judges against a healed memory. Darling learned why this must be store-derived rather than
+           engine-derived (#2166): the engine also clears on the falling edge it witnesses, but that path is
+           reachable only through an in-memory active set that empties on every restart, so a restart landing
+           between an alert and the recovery left the memory sticky FOREVER and silently swallowed the next
+           episode. Asking the store cannot have that gap. One sample at expected is enough where the deviation
+           rule needs two: clearing can only cause an extra alert, never a missed one, and a flap cannot exploit
+           it because a flap never survives the two-sample test to alert at all.
+
+           Placed AFTER the #2189 heal, not before the seed, because the heal REWRITES expected_state: a database
+           whose illegitimate RESTORING baseline was just healed to ONLINE is, from this statement's point of
+           view, a database that has arrived back at its expected state, and its memory is about a deviation that
+           no longer exists. Running first would leave that dead memory for a cycle. Ordering against the seed is
+           immaterial either way — a row the seed just inserted has a NULL memory, which this skips. */
+        using (var clearRecovered = connection.CreateCommand())
+        {
+            clearRecovered.CommandText = $@"
+UPDATE config_database_state_expected AS e
+SET last_alerted_state = NULL,
+    last_alerted_at = NULL
+WHERE e.server_id = $1
+AND   e.last_alerted_state IS NOT NULL
+AND   (e.expected_state = '{DatabaseStateTokens.Ignore}'
+       OR EXISTS (
+           SELECT 1 FROM database_states ds
+           WHERE ds.server_id = $1
+           AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
+           AND   ds.database_name = e.database_name
+           AND   {EffectiveStateSql} = e.expected_state
+       ))";
+            clearRecovered.Parameters.Add(new DuckDBParameter { Value = serverId });
+            await clearRecovered.ExecuteNonQueryAsync();
+        }
+
         /* Tidy auto-baselines for databases no longer in the newest snapshot (dropped/renamed). User
            overrides are kept — an operator's intent shouldn't vanish because a database is briefly gone. */
         using (var prune = connection.CreateCommand())
@@ -135,7 +170,7 @@ previous AS (
     FROM database_states ds
     WHERE ds.server_id = $1 AND ds.collection_time = (SELECT t FROM prev)
 )
-SELECT l.database_name, l.eff, COALESCE(e.expected_state, '')
+SELECT l.database_name, l.eff, COALESCE(e.expected_state, ''), COALESCE(e.last_alerted_state, '')
 FROM latest l
 JOIN previous p
   ON p.database_name = l.database_name
@@ -159,7 +194,10 @@ ORDER BY l.database_name";
             {
                 DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 StateDesc = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                ExpectedState = reader.IsDBNull(2) ? "" : reader.GetString(2)
+                ExpectedState = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                /* #2203: what the engine last TOLD an operator about, so alreadyAnnounced can be true in
+                   Lite the way it already is in Darling. Empty means never announced. */
+                LastAlertedState = reader.IsDBNull(3) ? "" : reader.GetString(3)
             });
         }
 

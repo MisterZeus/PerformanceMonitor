@@ -94,20 +94,41 @@ public sealed class LiteAlertStateStore : IAlertStateStore
     }
 
     /// <summary>
-    /// #2166: not persisted in Lite yet. Deliberately a no-op rather than a throw or a silent in-memory
-    /// cache — with no memory the engine sees every deviation as new, which IS Lite's pre-#2166 behavior
-    /// (fire on the cooldown). An in-memory cache would be worse than nothing here: it would go quiet
-    /// until the next app restart and then re-fire every parked database, which is the exact failure the
-    /// persistence requirement exists to prevent. Lite parity follows in its own change.
+    /// #2203: records the state a database was just alerted about, so the next evaluation can tell a NEW
+    /// deviation from the one it already reported. This is the Lite half of #2166 — until it existed,
+    /// <c>alreadyAnnounced</c> was always false here and a database parked OFFLINE for a month alerted every
+    /// cooldown forever, which is the complaint #2166 was filed about.
+    ///
+    /// <para>UPDATE, never upsert, for the reason #2166 established on the Darling side: an INSERT would have
+    /// to invent <c>expected_state</c> (NOT NULL), and the only value available is the state being alerted ON
+    /// — so a database first observed SUSPECT would get SUSPECT written as its accepted baseline, stop
+    /// deviating, be read as recovered while still corrupt, and never alert again. Nothing is lost by
+    /// skipping the no-row case: a database with no baseline was first observed in an integrity state, and
+    /// those are never edge-suppressed, so this memory is never consulted for them.</para>
     /// </summary>
-    public Task SaveDatabaseStateAlertedAsync(string serverKey, string databaseName, string effectiveState) =>
-        Task.CompletedTask;
+    public Task SaveDatabaseStateAlertedAsync(string serverKey, string databaseName, string effectiveState)
+    {
+        var serverId = ParseServerKey(serverKey);
+        return Task.Run(() => _store.SaveDatabaseStateAlertedAsync(serverId, databaseName, effectiveState));
+    }
 
     /// <summary>
-    /// #2166: nothing is stored, so nothing needs clearing. No-op for the same reason as its sibling above.
+    /// #2203: forgets what <see cref="SaveDatabaseStateAlertedAsync"/> recorded, on the falling edge. Without
+    /// it the memory is permanent and each database can only ever announce once: park a database OFFLINE,
+    /// restore it, park it again weeks later, and the stale memory swallows the second parking — the repeat
+    /// soft-delete workflow this alert exists for.
+    ///
+    /// <para>This is the IMMEDIATE path only. It runs off the engine's in-memory active set, which empties on
+    /// restart, so it cannot be the whole answer — the store-derived clear in
+    /// <c>LocalDataService.GetDatabaseStateDeviationsAsync</c> is what owns the invariant across restarts.
+    /// Both exist for the same reason they do in Darling: a recovery inside one process should not wait for
+    /// the next cycle's sweep.</para>
     /// </summary>
-    public Task ClearDatabaseStateAlertedAsync(string serverKey, string databaseName) =>
-        Task.CompletedTask;
+    public Task ClearDatabaseStateAlertedAsync(string serverKey, string databaseName)
+    {
+        var serverId = ParseServerKey(serverKey);
+        return Task.Run(() => _store.ClearDatabaseStateAlertedAsync(serverId, databaseName));
+    }
 
     private static int ParseServerKey(string serverKey) =>
         int.Parse(serverKey, CultureInfo.InvariantCulture);

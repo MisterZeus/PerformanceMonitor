@@ -155,6 +155,11 @@ CREATE TABLE IF NOT EXISTS config_database_state_expected (
     expected_state VARCHAR NOT NULL,
     is_user_override BOOLEAN NOT NULL DEFAULT false,
     updated_at TIMESTAMP NOT NULL DEFAULT current_timestamp,
+    /* #2203: the edge-trigger memory, Darling's V60 pair ported. Nullable because NULL means never
+       announced -- which is what a first observation, a fresh store and a recovered database all look
+       like, and all three must be free to alert. */
+    last_alerted_state VARCHAR,
+    last_alerted_at TIMESTAMP,
     PRIMARY KEY (server_id, database_name)
 )";
 
