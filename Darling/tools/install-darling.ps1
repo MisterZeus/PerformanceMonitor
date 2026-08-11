@@ -162,6 +162,13 @@ if (-not (Test-Path $serviceExe)) {
 # keeps whatever the profile gave it. Fixing the tree's ACLs instead of refusing was considered and
 # rejected in #2187 - it means the product starts silently ACLing directories inside somebody's profile.
 #
+# The residual, seen and accepted rather than discovered later: C:\Users\Public sits under the profile root
+# and is refused, but an install there would actually WORK - it grants NT AUTHORITY\SERVICE:(OI)(CI)(IO)(M,DC),
+# which every service account holds. It is deliberately not carved out. Nobody installs a Windows service
+# into the shared documents profile, a carve-out would amount to documenting it as a reasonable place to
+# install, and the refusal is not a dead end - it names C:\PerformanceMonitorDarling. One rule, no
+# exceptions, and the one location it costs is one nobody wants.
+#
 # This runs BEFORE the pre-flight, the Event Log source, and service creation, so a doomed location costs
 # nothing and leaves nothing behind.
 $existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
