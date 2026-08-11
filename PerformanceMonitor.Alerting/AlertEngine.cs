@@ -1325,10 +1325,23 @@ public sealed class AlertEngine
                     Muted: isMuted, Severity: severity,
                     ShortMessage: shortMessage), ct);
 
-                /* Stamped AFTER delivery so a failed fire is retried next cycle rather than silenced.
-                   Written for every state, not just the edge-triggered ones, so that flipping a state's
-                   classification later has correct history to work from. */
-                await _stateStore.SaveDatabaseStateAlertedAsync(key, dbName, db.StateDesc);
+                /* Stamped AFTER delivery so a failed fire is retried next cycle rather than silenced, and
+                   written for every state rather than only the edge-triggered ones, so that reclassifying a
+                   state later has correct history to work from.
+
+                   NOT stamped when MUTED, which is the one place this memory and the cooldown beside it must
+                   disagree. The cooldown is rate limiting and applies whether or not anyone was told; this
+                   memory means "the operator has been told about this state", and under a mute they have not.
+                   Stamping it anyway made a mute permanent: the four edge-triggered states gate all future
+                   firing on this value, so muting a parked database, then REMOVING the mute, left
+                   LastAlertedState equal to the current state forever and the alert never returned — the
+                   operator's mute silently became irreversible for as long as the state held. Skipping the
+                   stamp costs a repeat inside the mute (invisible by definition, and exactly the pre-#2166
+                   cooldown behavior) and keeps unmuting meaningful. */
+                if (!isMuted)
+                {
+                    await _stateStore.SaveDatabaseStateAlertedAsync(key, dbName, db.StateDesc);
+                }
             }
         }
 

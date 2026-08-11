@@ -1413,6 +1413,47 @@ public sealed class AlertEngineTests
     }
 
     [Fact]
+    public async Task DatabaseState_MutedFire_DoesNotRecordItAsAnnounced_SoUnmutingStillNotifies()
+    {
+        /* A mute must be reversible. The four edge-triggered states gate ALL future firing on the announced
+           memory, so stamping it under a mute made the mute permanent: mute a parked database, remove the
+           mute, and the alert never came back for as long as the state held. Muting suppresses delivery, not
+           the engine's honesty about whether anyone was actually told. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Muted = true;
+        var engine = h.Build();
+
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Archive", StateDesc = "OFFLINE", ExpectedState = "ONLINE", LastAlertedState = "" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var muted = Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(muted.Muted, "the fire itself must still be marked muted");
+        Assert.DoesNotContain(h.StateStore.DatabaseStateAlerted, r => r.Db == "Archive");
+        Assert.False(h.StateStore.Memory.ContainsKey("Archive"),
+            "a muted fire must not record the state as announced — nobody was told");
+
+        /* Mute removed, cooldown elapsed, same state still deviating. The adapter reports what the store
+           holds, which is still nothing — so this must notify for real. */
+        h.Muted = false;
+        h.Now = h.Now.AddDays(1);
+        h.Deliverer.Outcomes.Clear();
+        h.Adapter.DatabaseStates.Clear();
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo
+        {
+            DatabaseName = "Archive",
+            StateDesc = "OFFLINE",
+            ExpectedState = "ONLINE",
+            LastAlertedState = h.StateStore.Memory.TryGetValue("Archive", out var remembered) ? remembered : "",
+        });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var announced = Assert.Single(h.Deliverer.Outcomes);
+        Assert.False(announced.Muted, "unmuting must produce a real, deliverable alert");
+        Assert.Contains(h.StateStore.DatabaseStateAlerted, r => r.Db == "Archive" && r.State == "OFFLINE");
+    }
+
+    [Fact]
     public async Task DatabaseState_RecoveryDoesNotClearACooldown_ForADatabaseWhoseNameContainsTheOldDelimiter()
     {
         /* SQL Server permits '|' in a database name, so while the cooldown key was a delimited STRING,
