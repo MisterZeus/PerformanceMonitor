@@ -71,6 +71,7 @@ public sealed class AlertStoredValueTests
         public bool FailedJobEnabled { get; set; }
         public bool PvsEnabled { get; set; }
         public bool DatabaseStateEnabled { get; set; }
+        public bool ForcePlanFailureEnabled { get; set; } = true;
         public int CpuThresholdPercent { get; set; } = 80;
         public int BlockingCountThreshold { get; set; } = 1;
         public int BlockingWaitSecondsThreshold { get; set; }

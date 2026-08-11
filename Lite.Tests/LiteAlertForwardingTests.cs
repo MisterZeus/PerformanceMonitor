@@ -152,6 +152,12 @@ public class LiteAlertForwardingTests : IDisposable
 
         public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<DatabaseStateInfo>(DatabaseStates));
+
+        /* #2157: settable so a forwarding test can plant a risen-counter row. */
+        public List<ForcePlanFailureInfo> ForcePlanFailures { get; } = new();
+
+        public Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new List<ForcePlanFailureInfo>(ForcePlanFailures));
     }
 
     private sealed class InMemoryStateStore : IAlertStateStore

@@ -55,6 +55,7 @@ public sealed class DarlingSelfAlertTests
         public bool FailedJobEnabled { get; set; }
         public bool PvsEnabled { get; set; }
         public bool DatabaseStateEnabled { get; set; }
+        public bool ForcePlanFailureEnabled { get; set; } = true;
         public int CpuThresholdPercent { get; set; } = 80;
         public int BlockingCountThreshold { get; set; } = 1;
         public int BlockingWaitSecondsThreshold { get; set; }
@@ -2027,6 +2028,9 @@ public sealed class DarlingSelfAlertTests
             Task.FromResult(new AnomalousJobsResult(SnapshotIsFresh: true, new List<AnomalousJobInfo>()));
         public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<DatabaseStateInfo>());
+
+        public Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new List<ForcePlanFailureInfo>());
     }
 
     private sealed class StubStateStore : IAlertStateStore

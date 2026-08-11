@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -139,6 +140,14 @@ public sealed class AlertEngine
     private readonly ConcurrentDictionary<string, HashSet<string>> _activeDatabaseStateAlerts = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastDatabaseStateAlert = new();
 
+    /* #2157: per-PLAN active set and cooldowns. The alerting unit is one forced plan, not one server —
+       two plans failing on the same database are independent conditions that resolve independently.
+       Keyed by the internal plan key but VALUED with the plan's identity, because the resolution has to
+       name the plan in an operator-readable way: a bare key set left the recovery message reading
+       'forceplan:Sales:11:22 no longer failing to force' in every email and webhook (review catch). */
+    private readonly ConcurrentDictionary<string, Dictionary<string, ForcePlanFailureInfo>> _activeForcePlanAlerts = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastForcePlanAlert = new();
+
     /// <param name="settings">Live threshold surface — read every sweep, never cached.</param>
     /// <param name="readAdapter">The collected alert feeds (slice B seam).</param>
     /// <param name="stateStore">Restart-surviving watermark persistence (#1145).</param>
@@ -236,6 +245,7 @@ public sealed class AlertEngine
         await CheckAnomalousJobsAsync(key, serverName, now, alertCooldown, suppressed, ct);
         bool failedJobConditionPresent = await CheckFailedJobsAsync(snapshot, key, serverName, now, alertCooldown, suppressed, ct);
         await CheckDatabaseStateAsync(key, serverName, now, alertCooldown, suppressed, ct);
+        await CheckForcePlanFailuresAsync(key, serverName, now, alertCooldown, suppressed, ct);
 
         return new AlertSweepResult(true, lowDiskConditionPresent, failedJobConditionPresent);
     }
@@ -1320,6 +1330,144 @@ public sealed class AlertEngine
     /// </summary>
     private static string DatabaseStateCooldownKey(string serverKey, string dbName) =>
         serverKey + "|" + dbName;
+
+    /// <summary>
+    /// Forced Query Store plans the engine is currently failing to reproduce (#2157). The adapter returns
+    /// only plans whose <c>force_failure_count</c> ROSE since the previous collection, so every row here is
+    /// a live failure rather than accumulated history — see
+    /// <see cref="IAlertReadAdapter.GetForcePlanFailuresAsync"/> for why a level would be wrong.
+    ///
+    /// <para>Why it deserves an alert at all: when a force fails, the query keeps running on whatever plan
+    /// the optimizer picks. Nothing else in the product witnesses that — the operator's mitigation is
+    /// silently not in effect, and the only trace is a counter climbing inside Query Store.</para>
+    ///
+    /// <para>Standing condition with per-plan resolution, mirroring the database-state family: while a plan
+    /// keeps failing it re-fires on the cooldown, and when it stops appearing it announces a recovery.</para>
+    /// </summary>
+    private async Task CheckForcePlanFailuresAsync(
+        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+    {
+        if (!_settings.ForcePlanFailureEnabled)
+        {
+            return;
+        }
+
+        List<ForcePlanFailureInfo> failures;
+        try
+        {
+            failures = await _readAdapter.GetForcePlanFailuresAsync(key, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* Log-and-skip, like every other collected read: never resolve an active plan on a failed
+               fetch (that would fabricate a recovery), and never fire on absent evidence. */
+            _logger?.LogError("Failed to check forced-plan failures for {Server}: {Message}", serverName, ex.Message);
+            return;
+        }
+
+        var excluded = _settings.ExcludedDatabases;
+
+        /* Per-PLAN keys are ORDINAL for the same reason the database-state family's are: the stores compare
+           database names case-sensitively, so a plan must not key differently here than it does there. The
+           excluded-databases list stays case-insensitive, matching how every alert treats that user list. */
+        var current = new Dictionary<string, ForcePlanFailureInfo>(StringComparer.Ordinal);
+        foreach (var failure in failures)
+        {
+            if (string.IsNullOrWhiteSpace(failure.DatabaseName) || failure.PlanId <= 0)
+            {
+                continue;
+            }
+
+            if (excluded.Count > 0 && excluded.Any(e => string.Equals(e, failure.DatabaseName, StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
+            current[ForcePlanTokens.PlanKey(failure.DatabaseName, failure.QueryId, failure.PlanId)] = failure;
+        }
+
+        var active = _activeForcePlanAlerts.GetOrAdd(key, _ => new Dictionary<string, ForcePlanFailureInfo>(StringComparer.Ordinal));
+
+        foreach (var (planKey, failure) in current)
+        {
+            active[planKey] = failure;
+            var cooldownKey = key + "|" + planKey;
+            if (!suppressed && CooldownElapsed(_lastForcePlanAlert, cooldownKey, now, alertCooldown))
+            {
+                var reasonText = ForcePlanTokens.HumanizeReason(failure.FailureReason);
+                var forcingText = string.IsNullOrWhiteSpace(failure.ForcingType) ? "unknown" : failure.ForcingType.Trim();
+                var muteCtx = new AlertMuteContext
+                {
+                    ServerName = serverName,
+                    MetricName = ForcePlanTokens.MetricName,
+                    DatabaseName = failure.DatabaseName
+                };
+                bool isMuted = _isAlertMuted(muteCtx);
+                _lastForcePlanAlert[cooldownKey] = now; /* stamped even when muted, like the others */
+
+                var detailText =
+                    $"  Database: {failure.DatabaseName}\n" +
+                    $"  Query / Plan: {failure.QueryId} / {failure.PlanId}\n" +
+                    $"  Forcing: {forcingText}\n" +
+                    $"  Reason: {reasonText}\n" +
+                    $"  New failures since last collection: {failure.FailureDelta} (total {failure.TotalFailures})\n" +
+                    "  The query is running on the optimizer's plan, not the forced one.";
+
+                /* #2109 discipline: the same facts the prose carries, as discrete fields, so a consumer
+                   never has to parse the title to learn which plan this is about. */
+                var context = new AlertContext();
+                context.Details.Add(new AlertDetailItem
+                {
+                    Heading = $"{failure.DatabaseName} query {failure.QueryId} plan {failure.PlanId}",
+                    Fields = new()
+                    {
+                        ("Database", failure.DatabaseName),
+                        ("Query ID", failure.QueryId.ToString(CultureInfo.InvariantCulture)),
+                        ("Plan ID", failure.PlanId.ToString(CultureInfo.InvariantCulture)),
+                        ("Forcing Type", forcingText),
+                        ("Failure Reason", reasonText),
+                        ("New Failures", failure.FailureDelta.ToString(CultureInfo.InvariantCulture)),
+                        ("Total Failures", failure.TotalFailures.ToString(CultureInfo.InvariantCulture))
+                    }
+                });
+
+                await FireAsync(new AlertOutcome(
+                    key, serverName, ForcePlanTokens.MetricName,
+                    $"{failure.DatabaseName}: plan {failure.PlanId} failing to force ({reasonText})",
+                    reasonText,
+                    Context: context, DetailText: detailText,
+                    NumericCurrentValue: failure.FailureDelta, NumericThresholdValue: null,
+                    Muted: isMuted, Severity: ForcePlanTokens.SeverityFor(failure),
+                    ShortMessage: $"{failure.DatabaseName} plan {failure.PlanId} failed to force {failure.FailureDelta}x ({reasonText})"), ct);
+            }
+        }
+
+        /* Plans that were alerting and no longer are: the counter stopped rising, because the force was
+           removed, the plan became reproducible again, or the query stopped running. All three mean "no
+           longer failing", which is what the recovery says — deliberately not claiming it was fixed. */
+        if (active.Count > 0)
+        {
+            var recovered = active.Where(p => !current.ContainsKey(p.Key)).ToList();
+            foreach (var (planKey, lastSeen) in recovered)
+            {
+                active.Remove(planKey);
+                _lastForcePlanAlert.TryRemove(key + "|" + planKey, out _);
+                if (!suppressed)
+                {
+                    /* Named from the identity we stored when it fired, never from the internal key: an
+                       operator reads this in a toast, an email and a history row. */
+                    await NotifyResolutionAsync(new AlertResolution(
+                        key, serverName, ForcePlanTokens.MetricName,
+                        "Forced Plan Failing Resolved",
+                        $"{serverName}: {lastSeen.DatabaseName} query {lastSeen.QueryId} plan {lastSeen.PlanId} no longer failing to force"), ct);
+                }
+            }
+        }
+    }
 
     /* ---------------- helpers ---------------- */
 
