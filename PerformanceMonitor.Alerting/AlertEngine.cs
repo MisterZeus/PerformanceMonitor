@@ -138,7 +138,14 @@ public sealed class AlertEngine
        is keyed per database (serverKey + "|" + dbName) so each database throttles independently, and
        an entry is removed when its database recovers. In-memory only, like the other family state. */
     private readonly ConcurrentDictionary<string, HashSet<string>> _activeDatabaseStateAlerts = new();
-    private readonly ConcurrentDictionary<string, DateTime> _lastDatabaseStateAlert = new();
+
+    /* #2166: keyed per (server, database, STATE) as a tuple rather than a delimited string. Per-state
+       because a chosen state now goes quiet indefinitely, so letting one state's clock rate-limit a
+       transition to a DIFFERENT state is a silence rather than a delay — and the state it would silence is
+       SUSPECT. Structural rather than concatenated because clearing a database's clocks means matching on
+       two of the three parts, and a string key makes that a prefix match: SQL Server permits '|' in a
+       database name, so `Foo|Bar` would collide with `Foo` under any delimiter a sysname can contain. */
+    private readonly ConcurrentDictionary<(string Server, string Database, string State), DateTime> _lastDatabaseStateAlert = new();
 
     /* #2157: per-PLAN active set and cooldowns. The alerting unit is one forced plan, not one server —
        two plans failing on the same database are independent conditions that resolve independently.
@@ -1257,7 +1264,7 @@ public sealed class AlertEngine
                database going OFFLINE and then SUSPECT inside one window could have its SUSPECT transition
                swallowed, which is precisely the integrity case this alert must never go quiet about. Each
                state now rate-limits itself and cannot borrow another's clock. */
-            var cooldownKey = DatabaseStateCooldownKey(key, dbName, db.StateDesc);
+            var cooldownKey = (Server: key, Database: dbName, State: db.StateDesc);
             /* #2166: for the states an operator usually CHOSE (a parked OFFLINE, a secondary flickering
                RESTORING), repetition is noise — alert on the transition and stay quiet until the state
                changes. Compared against the PERSISTED last-alerted state, so a service restart cannot
@@ -1335,13 +1342,15 @@ public sealed class AlertEngine
             foreach (var dbName in recovered)
             {
                 active.Remove(dbName);
-                /* Every state's clock for this database, not just one: the key is now per-state, so a single
-                   TryRemove would leave the other states' stamps behind to rate-limit a future episode
-                   against a cooldown that started before the recovery. */
-                var cooldownPrefix = DatabaseStateCooldownKey(key, dbName, string.Empty);
+                /* Every state's clock for this database, not just one: the key is per-state, so removing a
+                   single entry would leave the other states' stamps behind to rate-limit a future episode
+                   against a cooldown that started before the recovery. Matching on two tuple parts rather
+                   than a string prefix is what keeps a database named 'Foo|Bar' from being swept when 'Foo'
+                   recovers. */
                 foreach (var stamped in _lastDatabaseStateAlert.Keys)
                 {
-                    if (stamped.StartsWith(cooldownPrefix, StringComparison.Ordinal))
+                    if (string.Equals(stamped.Server, key, StringComparison.Ordinal)
+                        && string.Equals(stamped.Database, dbName, StringComparison.OrdinalIgnoreCase))
                     {
                         _lastDatabaseStateAlert.TryRemove(stamped, out _);
                     }
@@ -1363,23 +1372,6 @@ public sealed class AlertEngine
             }
         }
     }
-
-    /// <summary>
-    /// Per-database, per-STATE cooldown key. The serverKey is always a digit-only int (see the adapters'
-    /// ParseServerKey), so the first '|' unambiguously ends it regardless of what the database name
-    /// contains — no collision between e.g. (server 1, db "23") and (server 12, db "3").
-    ///
-    /// <para>The trailing state segment is what stops one state's cooldown from rate-limiting a transition
-    /// to a DIFFERENT state (#2166): a chosen state now goes quiet indefinitely rather than re-firing every
-    /// cooldown, so borrowing another state's clock is no longer a delay but a silence. Passing an empty
-    /// state yields the per-database PREFIX, which is how recovery clears every state's clock at once.</para>
-    ///
-    /// <para>That prefix sweep would also match a database literally named <c>Foo|Bar</c> when clearing
-    /// <c>Foo</c>, which is why it is worth stating that the consequence is bounded and in the safe
-    /// direction: a wrongly-cleared cooldown stamp costs at most one extra alert, never a missed one.</para>
-    /// </summary>
-    private static string DatabaseStateCooldownKey(string serverKey, string dbName, string stateDesc) =>
-        serverKey + "|" + dbName + "|" + stateDesc;
 
     /// <summary>
     /// Forced Query Store plans the engine is currently failing to reproduce (#2157). The adapter returns
@@ -1522,8 +1514,15 @@ public sealed class AlertEngine
     /* ---------------- helpers ---------------- */
 
     /// <summary>Lite's per-check cooldown test: no prior fire, or the cooldown has elapsed.</summary>
-    private static bool CooldownElapsed(
-        ConcurrentDictionary<string, DateTime> lastFired, string key, DateTime now, TimeSpan cooldown) =>
+    /// <summary>
+    /// Generic in the KEY type only so a family whose cooldown is scoped by more than one thing can key it
+    /// structurally instead of concatenating a string (#2166). Every existing caller is string-keyed and
+    /// infers unchanged; the database-state family keys by (server, database, state), where a string key
+    /// would need a delimiter no <c>sysname</c> can contain — and SQL Server permits <c>|</c>.
+    /// </summary>
+    private static bool CooldownElapsed<TKey>(
+        ConcurrentDictionary<TKey, DateTime> lastFired, TKey key, DateTime now, TimeSpan cooldown)
+        where TKey : notnull =>
         !lastFired.TryGetValue(key, out var last) || now - last >= cooldown;
 
     /// <summary>

@@ -1413,6 +1413,35 @@ public sealed class AlertEngineTests
     }
 
     [Fact]
+    public async Task DatabaseState_RecoveryDoesNotClearACooldown_ForADatabaseWhoseNameContainsTheOldDelimiter()
+    {
+        /* SQL Server permits '|' in a database name, so while the cooldown key was a delimited STRING,
+           recovering "Foo" prefix-matched and wiped "Foo|Bar"'s clock as well. Keying by tuple removes the
+           bug class rather than documenting it.
+
+           Observable via an integrity state: SUSPECT is not edge-suppressed (RepeatsAreNoise is false), so
+           its cooldown is the ONLY thing keeping it quiet on the second evaluation. If the recovery sweep
+           wrongly cleared it, "Foo|Bar" fires again here. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Foo", StateDesc = "OFFLINE", ExpectedState = "ONLINE", LastAlertedState = "" });
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Foo|Bar", StateDesc = "SUSPECT", ExpectedState = "ONLINE", LastAlertedState = "" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* Foo returns to expected and drops out; Foo|Bar is untouched and still SUSPECT. */
+        h.Deliverer.Outcomes.Clear();
+        h.Adapter.DatabaseStates.Clear();
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Foo|Bar", StateDesc = "SUSPECT", ExpectedState = "ONLINE", LastAlertedState = "SUSPECT" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.DoesNotContain(h.StateStore.DatabaseStateCleared, r => r.Db == "Foo|Bar");
+    }
+
+    [Fact]
     public async Task DatabaseState_SameState_StillRateLimitsItself_WithinOneCooldown()
     {
         /* The other side of keying by state: it must not have turned the cooldown off. An integrity state
