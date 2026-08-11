@@ -97,7 +97,17 @@ Before installing the service, check that `darling.json` is well-formed and that
 PerformanceMonitor.Darling.Service.exe --test-connection
 ```
 
-(`--validate-config` is an alias.) It validates the file, then connects to and probes each server, printing a `[PASS]`/`[FAIL]` line per server (SQL major version, engine edition, and whether the account has msdb access for failed-job alerts). It exits `0` only when the file is valid **and** every server is reachable, so it doubles as a deployment gate. Add an explicit config path as a second argument if `darling.json` is not next to the exe and `DARLING_CONFIG` is not set. This is the same probe the Viewer's **Test Connection** button runs through the service.
+(`--validate-config` is an alias.) It validates the file, then connects to and probes each server, printing a `[PASS]`/`[FAIL]` line per server (SQL major version, engine edition, and whether the account has msdb access for failed-job alerts). It exits `0` only when the file is valid **and** every server is reachable, so it doubles as a deployment gate.
+
+A PostgreSQL target reports what matters there instead — version, writer or reader, Aurora or not, and **how many of the PostgreSQL collectors will actually run against it**, naming the ones that will not:
+
+```
+  [PASS] aurora-writer: PostgreSQL 17 (server_version_num 170007), writer, Aurora — all 7 PostgreSQL collectors apply
+  [PASS] aurora-reader: PostgreSQL 17 (server_version_num 170007), reader (in recovery), Aurora — 6 of 7 PostgreSQL collectors apply (skipped: pg_autovacuum_stats)
+  [PASS] selfhosted:    PostgreSQL 15 (server_version_num 150012), reader (in recovery), not Aurora — 3 of 7 PostgreSQL collectors apply (skipped: pg_autovacuum_stats, pg_io_stats, pg_statement_stats, pg_wait_stats)
+```
+
+That count comes from the same [engine and version gate](#postgresql-targets) the collector runner uses, not a separate list, so it is the real answer rather than an estimate — and it is the answer at *pre-flight*, before an empty table has to be explained weeks later. Add an explicit config path as a second argument if `darling.json` is not next to the exe and `DARLING_CONFIG` is not set. This is the same probe the Viewer's **Test Connection** button runs through the service.
 
 One identity caveat: the verb connects as **you**, the console user — not as the service account. For `"auth": "integrated"` servers a `[PASS]` proves the server is reachable and the config is well-formed, but the grants that matter at runtime are the *service account's*: the per-server connect lines in the service log are the real proof (see [Run the service as a domain account or gMSA](#run-the-service-as-a-domain-account-or-gmsa)).
 

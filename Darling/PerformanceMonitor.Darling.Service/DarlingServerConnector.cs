@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
@@ -263,16 +264,25 @@ SELECT
         try
         {
             var runtime = await ConnectAsync(config, logger, cancellationToken);
+            var isPostgres = runtime.Target.Engine == CollectorTargetEngine.PostgreSql;
             return new ConnectionProbeResult(
                 Success: true,
                 MajorVersion: runtime.Target.SqlMajorVersion,
                 EngineEdition: runtime.EngineEdition,
-                EngineEditionDescription: DescribeEngineEdition(runtime.EngineEdition),
+                /* No edition on a PostgreSQL target, and DescribeEngineEdition(0) would say
+                   "Unknown (0)" — which reads as a probe that half-failed rather than one that
+                   succeeded against a different engine. */
+                EngineEditionDescription: isPostgres ? null : DescribeEngineEdition(runtime.EngineEdition),
                 IsAzureSqlDb: runtime.Target.IsAzureSqlDb,
                 IsAzureManagedInstance: runtime.Target.IsAzureManagedInstance,
                 IsAwsRds: runtime.IsAwsRds,
                 HasMsdbAccess: runtime.HasMsdbAccess,
-                Error: null);
+                Error: null,
+                Engine: runtime.Target.Engine,
+                PostgresMajorVersion: runtime.Target.PostgresMajorVersion,
+                PostgresVersionNum: runtime.Target.PostgresVersionNum,
+                IsAurora: runtime.Target.IsAurora,
+                IsInRecovery: runtime.Target.IsInRecovery);
         }
         catch (OperationCanceledException)
         {
@@ -291,6 +301,51 @@ SELECT
                 HasMsdbAccess: false,
                 Error: ex.Message);
         }
+    }
+
+    /// <summary>
+    /// The probed facts for a REACHABLE target, as one clause — shared by the <c>--test-connection</c>
+    /// PASS line (<c>DarlingCliCommands.FormatProbeLine</c>) and the <c>add_servers</c> MCP tool's detail
+    /// text, which previously each formatted their own and could drift.
+    /// <para>The engine decides what is worth saying. A SQL Server target reports version, edition and
+    /// msdb access, because msdb access gates three collectors. A PostgreSQL target has none of those,
+    /// so it reports version, writer-vs-reader, Aurora-vs-not — and then the number that actually
+    /// answers "will this target give me what I expect", which is how many of the PostgreSQL collectors
+    /// clear the gate. A stock-PostgreSQL reader clears three of seven, and finding that out at
+    /// pre-flight is the point of the verb.</para>
+    /// </summary>
+    public static string DescribeProbeFacts(ConnectionProbeResult probe)
+    {
+        ArgumentNullException.ThrowIfNull(probe);
+
+        if (probe.Engine != CollectorTargetEngine.PostgreSql)
+        {
+            var edition = string.IsNullOrEmpty(probe.EngineEditionDescription)
+                ? DescribeEngineEdition(probe.EngineEdition)
+                : probe.EngineEditionDescription;
+            var msdb = probe.HasMsdbAccess ? "msdb access: yes" : "msdb access: NO (failed-job alerts unavailable)";
+            return $"SQL major version {probe.MajorVersion}, {edition}, {msdb}";
+        }
+
+        var target = probe.ToTargetInfo();
+        var postgresDefinitions = CollectorCatalog.All
+            .Where(d => d.TargetEngine == CollectorTargetEngine.PostgreSql)
+            .ToList();
+        var skipped = postgresDefinitions
+            .Where(d => !CollectorCatalog.AppliesTo(d, target))
+            .Select(d => d.Name)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToList();
+
+        var role = probe.IsInRecovery ? "reader (in recovery)" : "writer";
+        var flavour = probe.IsAurora ? "Aurora" : "not Aurora";
+        var applies = skipped.Count == 0
+            ? $"all {postgresDefinitions.Count} PostgreSQL collectors apply"
+            : $"{postgresDefinitions.Count - skipped.Count} of {postgresDefinitions.Count} PostgreSQL collectors apply " +
+              $"(skipped: {string.Join(", ", skipped)})";
+
+        return $"PostgreSQL {probe.PostgresMajorVersion} (server_version_num {probe.PostgresVersionNum}), " +
+            $"{role}, {flavour} — {applies}";
     }
 
     /// <summary>Human-readable SERVERPROPERTY('EngineEdition') description for the probe result.</summary>
@@ -313,6 +368,11 @@ SELECT
 /// The outcome of a connect-and-probe attempt (<see cref="DarlingServerConnector.ProbeAsync"/>): the
 /// success flag plus the probed target facts, or the error message on failure. Deliberately carries NO
 /// credentials so it is safe to serialize into <c>config_command.result_json</c> and print from the CLI.
+/// <para>The SQL Server facts come first because they came first; the PostgreSQL ones are trailing
+/// optional parameters so every existing construction site — including the tests — keeps compiling and
+/// keeps meaning "a SQL Server target". <see cref="Engine"/> is what a reader should branch on: on a
+/// PostgreSQL target <see cref="MajorVersion"/> and <see cref="EngineEdition"/> are 0 and
+/// <see cref="HasMsdbAccess"/> is meaningless, so reporting them would be worse than silence.</para>
 /// </summary>
 public sealed record ConnectionProbeResult(
     bool Success,
@@ -323,4 +383,29 @@ public sealed record ConnectionProbeResult(
     bool IsAzureManagedInstance,
     bool IsAwsRds,
     bool HasMsdbAccess,
-    string? Error);
+    string? Error,
+    CollectorTargetEngine Engine = CollectorTargetEngine.SqlServer,
+    int PostgresMajorVersion = 0,
+    int PostgresVersionNum = 0,
+    bool IsAurora = false,
+    bool IsInRecovery = false)
+{
+    /// <summary>
+    /// Rebuilds the gate's-eye view of this target, so a caller can ask which collectors would actually
+    /// run against it. These are the same fields <see cref="CollectorCatalog.AppliesTo(ICollectorSchemaInfo, CollectorTargetInfo)"/>
+    /// reads, which is why a count derived from this is a real answer and not an estimate.
+    /// </summary>
+    public CollectorTargetInfo ToTargetInfo() => new()
+    {
+        Engine = Engine,
+        IsAzureSqlDb = IsAzureSqlDb,
+        IsAzureManagedInstance = IsAzureManagedInstance,
+        IsAwsRds = IsAwsRds,
+        SqlMajorVersion = MajorVersion,
+        HasMsdbAccess = HasMsdbAccess,
+        PostgresMajorVersion = PostgresMajorVersion,
+        PostgresVersionNum = PostgresVersionNum,
+        IsAurora = IsAurora,
+        IsInRecovery = IsInRecovery,
+    };
+}

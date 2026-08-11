@@ -508,16 +508,11 @@ ON CONFLICT (server_id) DO NOTHING";
         }, McpHelpers.JsonOptions);
     }
 
-    /// <summary>The probed facts for an <c>added</c> server — edition / major version / msdb access, mirroring the
-    /// <c>--test-connection</c> CLI line (<c>DarlingCliCommands.FormatProbeLine</c>).</summary>
-    private static string DescribeProbe(ConnectionProbeResult probe)
-    {
-        var edition = string.IsNullOrEmpty(probe.EngineEditionDescription)
-            ? DarlingServerConnector.DescribeEngineEdition(probe.EngineEdition)
-            : probe.EngineEditionDescription;
-        var msdb = probe.HasMsdbAccess ? "msdb access: yes" : "msdb access: NO (SQL Agent job data unavailable)";
-        return $"Connected — SQL major version {probe.MajorVersion}, {edition}, {msdb}.";
-    }
+    /// <summary>The probed facts for an <c>added</c> server, from the same describer the
+    /// <c>--test-connection</c> CLI line uses (<see cref="DarlingServerConnector.DescribeProbeFacts"/>), so the
+    /// two cannot drift and a PostgreSQL target reads as one here too.</summary>
+    private static string DescribeProbe(ConnectionProbeResult probe) =>
+        $"Connected — {DarlingServerConnector.DescribeProbeFacts(probe)}.";
 
     /// <summary>Validates the optional <c>encrypt_mode</c> ("Optional"/"Mandatory"/"Strict"); absent → the
     /// fail-closed "Mandatory" default (matching <see cref="MonitoredServer.EncryptMode"/> + the connection builder).</summary>
