@@ -13,9 +13,9 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// Pins the read side of pg_statement_stats: rate columns come from deltas, cumulative-only columns
-/// are read as the latest reading rather than summed, and the grouping matches the collector's
-/// identity.
+/// Pins the read side of pg_statement_stats: every counter covers the WINDOW — the rate columns from
+/// stored deltas, the block/WAL columns differenced here — the difference is reset-safe, and the
+/// grouping matches the collector's identity.
 /// </summary>
 public class DarlingPgStatementReaderTests
 {
@@ -39,23 +39,88 @@ public class DarlingPgStatementReaderTests
     }
 
     /// <summary>
-    /// The block, WAL and peak-memory columns have no deltas in the store, so they are read as MAX —
-    /// the latest cumulative reading, which is at least a true number. Summing them across snapshots
-    /// would be arithmetically meaningless, and this is the specific mistake most likely to be made
-    /// when someone extends this query later.
+    /// The block and WAL columns keep no stored deltas, so they are differenced HERE rather than read as
+    /// the window's MAX. Reading them as MAX put a lifetime cumulative figure in the same row as a
+    /// windowed one, which a consumer cannot see and cannot correct for: it reads total_exec_time_ms for
+    /// the last hour beside shared_blks_read since the last counter reset, and any per-call ratio it
+    /// derives from the pair is nonsense.
+    /// </summary>
+    [Theory]
+    [InlineData("shared_blks_hit")]
+    [InlineData("shared_blks_read")]
+    [InlineData("storage_blks_read")]
+    [InlineData("orcache_blks_hit")]
+    [InlineData("temp_blks_read")]
+    [InlineData("temp_blks_written")]
+    [InlineData("wal_bytes")]
+    public void DifferencesTheCumulativeColumnsAcrossTheWindow(string column)
+    {
+        Assert.Contains($"LAG({column})", Sql, StringComparison.Ordinal);
+        Assert.Contains($"SUM(d_{column})", Sql, StringComparison.Ordinal);
+
+        /* The lifetime reading must not survive anywhere in the projection. */
+        Assert.DoesNotContain($"MAX({column})", Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain($"SUM({column})", Sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// GREATEST(..., 0) is what makes the differencing safe. A counter reset — an explicit
+    /// pg_stat_statements_reset(), an eviction and re-entry, or a major-version upgrade (queryid is not
+    /// stable across majors) — makes one interval negative, and an unclamped difference would report
+    /// that as a large negative figure. Clamping drops the reset interval and keeps the rest, the same
+    /// rule the stored delta machinery applies.
     /// </summary>
     [Fact]
-    public void ReadsCumulativeOnlyColumnsAsLatestNotAsSum()
+    public void ClampsEachIntervalAtZeroSoACounterResetCannotGoNegative()
     {
-        foreach (var column in new[]
-                 {
-                     "shared_blks_hit", "shared_blks_read", "storage_blks_read", "orcache_blks_hit",
-                     "temp_blks_read", "temp_blks_written", "wal_bytes", "max_exec_peakmem_bytes",
-                 })
-        {
-            Assert.Contains($"MAX({column})", Sql, StringComparison.Ordinal);
-            Assert.DoesNotContain($"SUM({column})", Sql, StringComparison.Ordinal);
-        }
+        var clamped = Sql.Split("GREATEST(").Length - 1;
+
+        /* One per differenced column — seven of them, all clamped, none left bare. */
+        Assert.Equal(7, clamped);
+        Assert.Equal(7, Sql.Split("OVER series, 0)").Length - 1);
+    }
+
+    /// <summary>
+    /// The LAG partition must be the FULL series identity, matching how the stored deltas are keyed. The
+    /// same normalized statement run by another user or against another database is a separate
+    /// pg_stat_statements entry with its own counters, so differencing across those would interleave
+    /// unrelated series and produce garbage intervals.
+    /// </summary>
+    [Fact]
+    public void DifferencesWithinTheFullSeriesIdentityNotJustTheQueryId()
+    {
+        Assert.Contains("PARTITION BY queryid, database_id, user_id, toplevel", Sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY collection_time", Sql, StringComparison.Ordinal);
+
+        /* Rolled up to the coarser grain a "top queries" answer wants, AFTER the differencing. */
+        var windowAt = Sql.IndexOf("WINDOW series AS", StringComparison.Ordinal);
+        var groupAt = Sql.IndexOf("GROUP BY queryid, database_id", StringComparison.Ordinal);
+        Assert.True(windowAt < groupAt);
+    }
+
+    /// <summary>
+    /// A series with one sample in the window has no measurable interval — its increment happened before
+    /// the window began — so it must report 0, not its lifetime total. coalesce on the SUM, never on the
+    /// cumulative column.
+    /// </summary>
+    [Fact]
+    public void ASingleSampleSeriesReportsZeroRatherThanItsLifetimeTotal()
+    {
+        Assert.Contains("coalesce(SUM(d_shared_blks_read), 0)", Sql, StringComparison.Ordinal);
+        Assert.Contains("coalesce(SUM(d_wal_bytes), 0)", Sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The two high-water marks are NOT counters and must stay MAX — differencing a high-water mark is
+    /// meaningless, and summing one would invent a total that never occurred.
+    /// </summary>
+    [Fact]
+    public void HighWaterMarksStayMax()
+    {
+        Assert.Contains("MAX(max_exec_time_ms)", Sql, StringComparison.Ordinal);
+        Assert.Contains("MAX(max_exec_peakmem_bytes)", Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LAG(max_exec_peakmem_bytes)", Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LAG(max_exec_time_ms)", Sql, StringComparison.Ordinal);
     }
 
     /// <summary>

@@ -96,10 +96,13 @@ public sealed class DarlingMcpPgStatementTools
                 server = resolved.ServerName,
                 hours_back,
                 total_exec_time_ms = totalTimeMs,
-                /* Said plainly so a caller does not read a cumulative number as a windowed one: only
-                   calls, total time, and rows have per-interval deltas in the store. */
-                note = "calls, total_exec_time_ms and rows_returned are windowed deltas; block, WAL and "
-                     + "peak-memory figures are the latest cumulative readings since the counters were reset.",
+                /* Every counter here covers the window, so a caller can safely divide one by another.
+                   Only the two high-water marks are not counters, and saying which is cheaper than
+                   letting someone assume max_exec_time_ms is a windowed total. */
+                note = "All counters cover the requested window: calls, total_exec_time_ms and "
+                     + "rows_returned from stored per-interval deltas, and the block and WAL figures "
+                     + "differenced across the window's snapshots. max_exec_time_ms and "
+                     + "max_exec_peakmem_bytes are high-water marks, not windowed totals.",
                 queries = result,
             }, McpHelpers.JsonOptions);
         }

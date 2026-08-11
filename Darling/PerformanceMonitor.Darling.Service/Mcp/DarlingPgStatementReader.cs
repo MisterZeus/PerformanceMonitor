@@ -43,16 +43,57 @@ public static class DarlingPgStatementReader
         long MaxPeakMemBytes);
 
     /// <summary>
-    /// Aggregated from the DELTA columns. Summing the cumulative counters instead would multiply each
-    /// query's entire lifetime history by the number of snapshots in the window.
-    /// <para>The block and WAL columns are cumulative-only in the store — no deltas are kept for them —
-    /// so they are reported as the window's MAX rather than a sum: the max is the latest cumulative
-    /// reading, which is at least a true number, where a sum across snapshots would be meaningless.
-    /// That is a real limitation of this first cut and the reason the ratio below is computed from
-    /// maxima consistently rather than mixing a delta numerator with a cumulative denominator.</para>
+    /// Every counter is reported for the WINDOW, never as a lifetime total. Summing the cumulative
+    /// counters directly would multiply each query's whole history by the number of snapshots in the
+    /// window, so the time/call/row figures come from the stored delta columns and the block/WAL figures
+    /// are differenced here.
+    /// <para>The block and WAL columns keep no stored deltas, and reporting them as the window's MAX —
+    /// which is what this read used to do — put a lifetime cumulative figure in the same row as a
+    /// windowed one. A consumer has no way to see that: it reads <c>total_exec_time_ms</c> for the last
+    /// hour beside <c>shared_blks_read</c> since the last <c>pg_stat_statements_reset()</c>, possibly
+    /// weeks earlier, and any per-call ratio it derives is nonsense. So the difference is computed at
+    /// read time instead, per series, which needs no new stored state.</para>
+    /// <para><c>GREATEST(value - LAG(value), 0)</c> is what makes that safe. A counter reset — an
+    /// explicit <c>pg_stat_statements_reset()</c>, an eviction and re-entry, or a major-version upgrade
+    /// (queryid is not stable across majors) — makes one difference negative, and a plain
+    /// last-minus-first would report that as a large negative or silently wrong figure. Clamping each
+    /// interval at zero drops exactly the reset interval and keeps the rest, which is the same rule the
+    /// stored delta machinery applies.</para>
+    /// <para>The LAG partition is the FULL series identity (queryid, database_id, user_id, toplevel),
+    /// matching how the stored deltas are keyed: the same normalized statement run by another user or
+    /// against another database is a separate pg_stat_statements entry with its own counters, so
+    /// differencing across those would interleave series. The outer aggregation then rolls up to
+    /// (queryid, database_id), which is the grain a "top queries" answer wants.</para>
+    /// <para><c>max_exec_peakmem_bytes</c> and <c>max_exec_time_ms</c> stay MAX — they are high-water
+    /// marks, not counters, and differencing a high-water mark would be meaningless.</para>
     /// <para>$1 server_id, $2/$3 window (naive UTC).</para>
     /// </summary>
     public const string PgTopQueriesSql = """
+        WITH differenced AS (
+            SELECT
+                queryid,
+                database_id,
+                delta_calls,
+                delta_total_exec_time_ms,
+                delta_rows,
+                max_exec_time_ms,
+                max_exec_peakmem_bytes,
+                GREATEST(shared_blks_hit    - LAG(shared_blks_hit)    OVER series, 0) AS d_shared_blks_hit,
+                GREATEST(shared_blks_read   - LAG(shared_blks_read)   OVER series, 0) AS d_shared_blks_read,
+                GREATEST(storage_blks_read  - LAG(storage_blks_read)  OVER series, 0) AS d_storage_blks_read,
+                GREATEST(orcache_blks_hit   - LAG(orcache_blks_hit)   OVER series, 0) AS d_orcache_blks_hit,
+                GREATEST(temp_blks_read     - LAG(temp_blks_read)     OVER series, 0) AS d_temp_blks_read,
+                GREATEST(temp_blks_written  - LAG(temp_blks_written)  OVER series, 0) AS d_temp_blks_written,
+                GREATEST(wal_bytes          - LAG(wal_bytes)          OVER series, 0) AS d_wal_bytes
+            FROM pg_statement_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            WINDOW series AS (
+                PARTITION BY queryid, database_id, user_id, toplevel
+                ORDER BY collection_time
+            )
+        )
         SELECT
             queryid,
             database_id,
@@ -60,18 +101,17 @@ public static class DarlingPgStatementReader
             CAST(SUM(delta_total_exec_time_ms) AS bigint) AS total_exec_time_ms,
             CAST(SUM(delta_rows) AS bigint) AS rows_returned,
             MAX(max_exec_time_ms) AS max_exec_time_ms,
-            CAST(MAX(shared_blks_hit) AS bigint) AS shared_blks_hit,
-            CAST(MAX(shared_blks_read) AS bigint) AS shared_blks_read,
-            CAST(MAX(storage_blks_read) AS bigint) AS storage_blks_read,
-            CAST(MAX(orcache_blks_hit) AS bigint) AS orcache_blks_hit,
-            CAST(MAX(temp_blks_read) AS bigint) AS temp_blks_read,
-            CAST(MAX(temp_blks_written) AS bigint) AS temp_blks_written,
-            CAST(MAX(wal_bytes) AS bigint) AS wal_bytes,
+            /* coalesce to 0, not to the cumulative value: a series with a single sample in the window
+               has no measurable interval, and its increment happened before the window began. */
+            CAST(coalesce(SUM(d_shared_blks_hit), 0) AS bigint) AS shared_blks_hit,
+            CAST(coalesce(SUM(d_shared_blks_read), 0) AS bigint) AS shared_blks_read,
+            CAST(coalesce(SUM(d_storage_blks_read), 0) AS bigint) AS storage_blks_read,
+            CAST(coalesce(SUM(d_orcache_blks_hit), 0) AS bigint) AS orcache_blks_hit,
+            CAST(coalesce(SUM(d_temp_blks_read), 0) AS bigint) AS temp_blks_read,
+            CAST(coalesce(SUM(d_temp_blks_written), 0) AS bigint) AS temp_blks_written,
+            CAST(coalesce(SUM(d_wal_bytes), 0) AS bigint) AS wal_bytes,
             CAST(MAX(max_exec_peakmem_bytes) AS bigint) AS max_exec_peakmem_bytes
-        FROM pg_statement_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
+        FROM differenced
         GROUP BY queryid, database_id
         HAVING SUM(delta_total_exec_time_ms) > 0
         ORDER BY SUM(delta_total_exec_time_ms) DESC
