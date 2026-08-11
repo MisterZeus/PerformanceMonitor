@@ -120,6 +120,7 @@ public static class PgMigrations
         new Migration(61, "pg-statement-stats", V61Sql),
         new Migration(62, "pg-wraparound-stats", V62Sql),
         new Migration(63, "pg-xmin-horizon", V63Sql),
+        new Migration(64, "pg-replication-slots", V64Sql),
     };
 
     /// <summary>
@@ -1330,6 +1331,48 @@ CREATE TABLE IF NOT EXISTS collect.pg_xmin_horizon (
 
 CREATE INDEX IF NOT EXISTS idx_pg_xmin_horizon_time
     ON collect.pg_xmin_horizon(server_id, collection_time);";
+
+    /// <summary>
+    /// V64 — <c>pg_replication_slots</c>: slot state, including the two independent ways an abandoned
+    /// slot can take a server down.
+    /// <para><c>retained_wal_bytes</c> is the disk-exhaustion measure and is COMPUTED rather than read,
+    /// because the column that would answer it directly — <c>safe_wal_size</c> — is NULL whenever
+    /// <c>max_slot_wal_keep_size</c> is <c>-1</c>, which is the default. Reading only that column would
+    /// mean reporting nothing on a stock server, exactly where retention is unbounded. <c>-1</c> is
+    /// stored as the not-applicable sentinel so a consumer cannot mistake "no limit configured" for "no
+    /// data collected".</para>
+    /// <para><c>inactive_since</c> and <c>invalidation_reason</c> are PostgreSQL 17+ and
+    /// <c>conflicting</c> is 16+; on older majors the collector substitutes NULL/false so the table shape
+    /// stays constant across a mixed-version fleet and a chart does not change shape at an upgrade.
+    /// <c>inactive_since</c> is the column that distinguishes a consumer between polls from a slot
+    /// orphaned three weeks ago.</para>
+    /// </summary>
+    private const string V64Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_replication_slots (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    slot_name text,
+    slot_type text,
+    plugin text,
+    database_name text,
+    is_active boolean,
+    active_pid bigint,
+    is_temporary boolean,
+    two_phase boolean,
+    wal_status text,
+    safe_wal_size_bytes bigint,
+    retained_wal_bytes bigint,
+    xmin_age bigint,
+    catalog_xmin_age bigint,
+    inactive_since timestamp,
+    invalidation_reason text,
+    conflicting boolean
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_replication_slots_time
+    ON collect.pg_replication_slots(server_id, collection_time);";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

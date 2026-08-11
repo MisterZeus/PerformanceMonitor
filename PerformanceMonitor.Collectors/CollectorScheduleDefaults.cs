@@ -140,5 +140,11 @@ public static class CollectorScheduleDefaults
            ago, before it has cost anything. At most five rows a cycle. 30 days matches the other
            per-minute health series. */
         ["pg_xmin_horizon"] = new(1, 30),
+
+        /* Per-minute: retained WAL on an abandoned slot grows at whatever rate the server generates
+           WAL, which on a busy writer fills a volume in hours, not days. 90 days of retention because
+           the question after an incident is "how long was that slot orphaned", and that answer has to
+           outlive the incident. A handful of rows a cycle. */
+        ["pg_replication_slots"] = new(1, 90),
     };
 }

@@ -70,6 +70,7 @@ public static class CollectorCatalog
         PgStatementStatsCollector.Instance,
         PgWraparoundStatsCollector.Instance,
         PgXminHorizonCollector.Instance,
+        PgReplicationSlotsCollector.Instance,
     };
 
     /// <summary>Name → definition, for the by-name target-gate lookup. Built once from <see cref="All"/>.</summary>
