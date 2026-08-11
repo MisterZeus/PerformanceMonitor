@@ -134,7 +134,12 @@ public sealed class QueryStoreStatePruneTests
         var liteRunner = File.ReadAllText(Path.Combine(
             root!, "Lite", "Services", "RemoteCollectorService.DefinitionRunner.cs"));
 
-        Assert.DoesNotContain("CapturePlanXml", liteRunner, StringComparison.Ordinal);
+        Assert.False(
+            liteRunner.Contains("CapturePlanXml", StringComparison.Ordinal),
+            "Lite's definition runner now sets CapturePlanXml, so Lite has started writing per-database "
+            + "query_store state (planwm:) into its own collector_state — and #2188's prune is Darling-only, "
+            + "because it anti-joins against database_states in Postgres. Port the prune to DuckDB before "
+            + "shipping plan capture in Lite, or those rows orphan forever with nothing to retire them.");
     }
 
     /// <summary>
