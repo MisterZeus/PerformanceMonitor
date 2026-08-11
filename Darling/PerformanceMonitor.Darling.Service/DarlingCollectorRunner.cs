@@ -179,6 +179,20 @@ public sealed class DarlingCollectorRunner
             ? null
             : await GetCollectorStateAsync(server.ServerId, definition.Name, cancellationToken);
 
+        /* #2164: the per-database plan-XML watermarks, owned by the HOST under its own state collector name
+           rather than declared by the definition — the QueryStoreBackfillState seam. The definition cannot
+           declare these: the keys are one per DATABASE and only known at runtime, and declaring a prefix
+           would make query_store a second state-declaring collector, which is a two-host contract change
+           (CollectorStateContractTests) rather than the local one this is. Loaded only when plan capture is
+           on, because that is the only case where anything reads or writes them. */
+        if (collectorState is null
+            && string.Equals(definition.Name, "query_store", StringComparison.Ordinal)
+            && _capturePlans())
+        {
+            collectorState = await GetCollectorStateAsync(
+                server.ServerId, QueryStorePlanXmlState.StateCollectorName, cancellationToken);
+        }
+
         var context = new CollectorContext
         {
             ServerId = server.ServerId,
@@ -723,7 +737,15 @@ public sealed class DarlingCollectorRunner
            path. Outside the storage-phase timer: this is host bookkeeping, not collected data. */
         if (context.PendingState.Count > 0)
         {
-            await SaveCollectorStateAsync(server.ServerId, definition.Name, context.PendingState, cancellationToken);
+            /* #2164: query_store's pending state is the plan-XML watermark set, which belongs to the host's
+               own state owner, NOT to the definition's name — the definition declares no state keys, so a row
+               written under "query_store" would never be read back and the watermark would silently never
+               apply. Everything else keeps writing under its definition. */
+            var stateOwner = string.Equals(definition.Name, "query_store", StringComparison.Ordinal)
+                ? QueryStorePlanXmlState.StateCollectorName
+                : definition.Name;
+
+            await SaveCollectorStateAsync(server.ServerId, stateOwner, context.PendingState, cancellationToken);
         }
 
         _logger?.LogDebug("Collected {RowCount} {Collector} rows for server '{Server}'",

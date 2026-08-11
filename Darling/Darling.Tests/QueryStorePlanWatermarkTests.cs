@@ -68,7 +68,7 @@ public class QueryStorePlanWatermarkTests
     {
         /* Anything unparseable degrades to a full fetch. Trusting a partially parsed value would suppress
            plan XML based on a number nobody wrote. */
-        var state = new Dictionary<string, string> { [QueryStoreCollector.PlanWatermarkStateKeyPrefix + Db] = raw };
+        var state = new Dictionary<string, string> { [QueryStorePlanXmlState.WatermarkKeyPrefix + Db] = raw };
         var sql = LiveSql(Context(capturePlanXml: true, state: state));
 
         Assert.DoesNotContain("qsp.plan_id > ", sql, StringComparison.Ordinal);
@@ -80,7 +80,7 @@ public class QueryStorePlanWatermarkTests
         /* Bounded staleness is why the stamp is stored beside the id. Query Store can rewrite a plan's XML in
            place (memory grant feedback and friends) without issuing a new plan_id, and a permanent watermark
            would never look again. It also bounds the documented dormant-plan gap. */
-        var stampedLongAgo = Now - QueryStoreCollector.PlanWatermarkRefreshAfter - TimeSpan.FromMinutes(1);
+        var stampedLongAgo = Now - QueryStorePlanXmlState.RefreshAfter - TimeSpan.FromMinutes(1);
 
         var expired = LiveSql(Context(capturePlanXml: true, state: Stored(900_000, stampedLongAgo)));
         var stillFresh = LiveSql(Context(capturePlanXml: true, state: Stored(900_000, Now - TimeSpan.FromMinutes(1))));
@@ -105,7 +105,7 @@ public class QueryStorePlanWatermarkTests
            must never be read for another. */
         var state = new Dictionary<string, string>
         {
-            [QueryStoreCollector.PlanWatermarkStateKeyPrefix + "alpha"] = "900000:" + Unix(Now),
+            [QueryStorePlanXmlState.WatermarkKeyPrefix + "alpha"] = "900000:" + Unix(Now),
         };
         var context = Context(capturePlanXml: true, state: state);
 
@@ -116,12 +116,21 @@ public class QueryStorePlanWatermarkTests
     }
 
     [Fact]
-    public void StateKeys_IsNonEmpty_OrTheHostNeverLoadsTheWatermark()
+    public void TheDefinitionDeclaresNoStateKeys_TheHostOwnsThisState()
     {
-        /* The real keys are dynamic (one per database), so the declared key is the PREFIX. It has to be
-           non-empty regardless: a definition declaring no state keys gets no state loaded, and the watermark
-           would read absent forever — a silent no-op rather than a visible failure. */
-        Assert.Contains(QueryStoreCollector.PlanWatermarkStateKeyPrefix, QueryStoreCollector.Instance.StateKeys);
+        /* The watermark keys are one per DATABASE and only known at runtime, so the definition could not
+           declare them even if it wanted to. More importantly it MUST NOT: a state-declaring definition is a
+           two-host contract (CollectorStateContractTests pins default_trace_events as the only one), while
+           this is host bookkeeping. The QueryStoreBackfillState seam — a separate state owner name — is what
+           lets the host persist per-database state without the definition claiming any.
+
+           The failure mode if this ever flips is silent, which is why it is pinned from both ends: a row
+           written under the DEFINITION's name is never read back, so the watermark would resolve absent
+           forever and collection would quietly keep paying full price. */
+        Assert.Empty(QueryStoreCollector.Instance.StateKeys);
+        Assert.NotEqual(QueryStorePlanXmlState.StateCollectorName, QueryStoreCollector.Instance.Name);
+        Assert.Equal("query_store_plan_xml", QueryStorePlanXmlState.StateCollectorName);
+        Assert.Equal("planwm:", QueryStorePlanXmlState.WatermarkKeyPrefix);
     }
 
     /* ---------- placement, which is the whole risk in the SQL change ---------- */
@@ -242,7 +251,7 @@ public class QueryStorePlanWatermarkTests
         /* The other half of the same rule: an expired watermark means THIS pass refetched everything, so it
            is the one case that legitimately re-dates the horizon. Without this the stamp would never move and
            every pass after the first expiry would be a full fetch. */
-        var longAgo = Now - QueryStoreCollector.PlanWatermarkRefreshAfter - TimeSpan.FromHours(1);
+        var longAgo = Now - QueryStorePlanXmlState.RefreshAfter - TimeSpan.FromHours(1);
         var context = Context(capturePlanXml: true, state: Stored(900_000, longAgo));
 
         await Read(context, Plan(950_000, xml: true));
@@ -266,7 +275,7 @@ public class QueryStorePlanWatermarkTests
     private static Dictionary<string, string> Stored(long planId, DateTime stampedAt) =>
         new()
         {
-            [QueryStoreCollector.PlanWatermarkStateKeyPrefix + Db] =
+            [QueryStorePlanXmlState.WatermarkKeyPrefix + Db] =
                 planId.ToString(CultureInfo.InvariantCulture) + ":" + Unix(stampedAt),
         };
 
@@ -275,7 +284,7 @@ public class QueryStorePlanWatermarkTests
             .ToString(CultureInfo.InvariantCulture);
 
     private static string? Written(CollectorContext context) =>
-        context.PendingState.TryGetValue(QueryStoreCollector.PlanWatermarkStateKeyPrefix + Db, out var value)
+        context.PendingState.TryGetValue(QueryStorePlanXmlState.WatermarkKeyPrefix + Db, out var value)
             ? value
             : null;
 
