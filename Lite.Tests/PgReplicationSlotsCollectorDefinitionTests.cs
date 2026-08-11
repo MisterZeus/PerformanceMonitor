@@ -123,6 +123,26 @@ public class PgReplicationSlotsCollectorDefinitionTests
             pg16.Split(" AS ").Length);
     }
 
+    /// <summary>
+    /// inactive_since is `timestamp with time zone`, and selecting it bare is a runtime failure, not a
+    /// style issue: Npgsql maps a timestamptz read to DateTime with Kind=Utc and refuses to write that
+    /// into the store's `timestamp without time zone` column, so collection would break on any PG17
+    /// target with a slot that has ever gone inactive — the exact servers this collector exists for.
+    /// `::timestamp` would be correctly typed but timezone-dependent, so neither shortcut is acceptable.
+    /// </summary>
+    [Fact]
+    public void ConvertsInactiveSinceWithAnExplicitUtcZone()
+    {
+        var sql = PgReplicationSlotsCollector.Instance.BuildQuery(MakeContext(17)).Text;
+
+        Assert.Contains("(s.inactive_since AT TIME ZONE 'UTC')", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("s.inactive_since::timestamp", sql, StringComparison.Ordinal);
+
+        /* The substituted branch was always correctly typed; both branches must stay `timestamp`. */
+        var pg16 = PgReplicationSlotsCollector.Instance.BuildQuery(MakeContext(16)).Text;
+        Assert.Contains("NULL::timestamp", pg16, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void PayloadColumns_CountAndKeyTypes_Pinned()
     {

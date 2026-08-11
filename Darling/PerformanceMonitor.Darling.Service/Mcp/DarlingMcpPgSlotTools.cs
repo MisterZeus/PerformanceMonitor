@@ -62,7 +62,10 @@ public sealed class DarlingMcpPgSlotTools
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
 
             /* No slots is the common, healthy case on most servers — say so rather than returning an
-               "unavailable" envelope that reads like a collection problem. */
+               "unavailable" envelope that reads like a collection problem.
+               The scope caveat is not hedging. Replication slots live on the WRITER, so an empty result
+               read from a replica says nothing about its cluster, and a caller that treats "no slots" as
+               a cluster-wide all-clear would be drawing the one conclusion this result cannot support. */
             if (rows.Count == 0)
             {
                 return JsonSerializer.Serialize(new
@@ -70,8 +73,10 @@ public sealed class DarlingMcpPgSlotTools
                     server = resolved.ServerName,
                     hours_back,
                     status = "no_slots",
-                    finding = "This server has no replication slots in the window, so neither unbounded WAL "
-                            + "retention nor slot-pinned vacuum is possible here.",
+                    finding = "This instance has no replication slots in the window, so it is not itself "
+                            + "retaining WAL or pinning vacuum through one.",
+                    scope = "Per-instance. Slots live on the writer, so if this target is a replica, check "
+                          + "the cluster's writer before concluding the cluster has no abandoned slot.",
                 }, McpHelpers.JsonOptions);
             }
 

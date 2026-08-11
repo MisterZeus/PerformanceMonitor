@@ -75,7 +75,12 @@ public sealed class PgAutovacuumStatsCollector : PostgresCollectorDefinitionBase
 
        reltuples is -1, not 0, on a table that has never been analyzed (PG14+ distinguishes "empty"
        from "unknown"). GREATEST(...,0) keeps that from producing a NEGATIVE threshold, which would
-       make a never-analyzed table look permanently overdue. */
+       make a never-analyzed table look permanently overdue.
+       All four maintenance timestamps are `timestamp with time zone` and are converted with
+       AT TIME ZONE 'UTC' rather than ::timestamp. The cast form renders the instant in the SESSION's
+       TimeZone before dropping the offset, so it agrees with UTC only while every parameter group says
+       UTC — true across this fleet today, which is exactly what makes the bug invisible until it is not.
+       The store contract is naive UTC product-wide, so the conversion has to be explicit. */
     private static string BuildQueryText(int postgresMajorVersion)
     {
         var supportsInsertThreshold = postgresMajorVersion >= 13;
@@ -138,10 +143,10 @@ SELECT
         (SELECT lower(option_value) = 'false' FROM pg_options_to_table(c.reloptions)
          WHERE option_name = 'autovacuum_enabled'), false)           AS autovacuum_disabled,
     pg_total_relation_size(t.relid)::bigint                          AS total_bytes,
-    t.last_vacuum::timestamp                                         AS last_vacuum,
-    t.last_autovacuum::timestamp                                     AS last_autovacuum,
-    t.last_analyze::timestamp                                        AS last_analyze,
-    t.last_autoanalyze::timestamp                                    AS last_autoanalyze,
+    (t.last_vacuum AT TIME ZONE 'UTC')                               AS last_vacuum,
+    (t.last_autovacuum AT TIME ZONE 'UTC')                           AS last_autovacuum,
+    (t.last_analyze AT TIME ZONE 'UTC')                              AS last_analyze,
+    (t.last_autoanalyze AT TIME ZONE 'UTC')                          AS last_autoanalyze,
     t.vacuum_count::bigint                                           AS vacuum_count,
     t.autovacuum_count::bigint                                       AS autovacuum_count,
     t.analyze_count::bigint                                          AS analyze_count,
@@ -163,8 +168,19 @@ ORDER BY t.n_dead_tup DESC";
 
     public override string TargetTable => "pg_autovacuum_stats";
 
-    /// <summary>Core statistics views only — any PostgreSQL target, Aurora or not.</summary>
-    public override bool AppliesTo(CollectorTargetInfo target) => true;
+    /// <summary>
+    /// Writers only. This is not a permissions or availability gate — the view is perfectly readable on a
+    /// standby — it is that on a standby every counter it reports is ZERO.
+    /// <para>Measured on Aurora PostgreSQL 17.7, same cluster, same database, same 15 tables: the writer
+    /// reported 13,654,458 dead tuples and 150,790,506 live tuples, while the reader reported 0 for
+    /// n_dead_tup, n_mod_since_analyze, n_ins_since_vacuum AND n_live_tup. These are the writer's stats
+    /// collector's numbers and they are not replicated.</para>
+    /// <para>Left ungated, a reader target would produce zero rows, the activity filter would read that as
+    /// "no table has pending work", and the tool would report perfect autovacuum health for a cluster
+    /// 13 million dead tuples behind. A confidently wrong healthy answer is worse than no answer, which is
+    /// why this gates rather than collecting and hoping the consumer notices.</para>
+    /// </summary>
+    public override bool AppliesTo(CollectorTargetInfo target) => !target.IsInRecovery;
 
     /// <summary>
     /// <c>pg_stat_user_tables</c> is scoped to the connected database and PostgreSQL has no

@@ -50,12 +50,39 @@ public class PgAutovacuumStatsCollectorDefinitionTests
     }
 
     [Fact]
-    public void AppliesToAnyPostgresTargetButNeverSqlServer()
+    public void AppliesToAnyPostgresWriterButNeverSqlServer()
     {
         Assert.True(PgAutovacuumStatsCollector.Instance.AppliesTo(
             new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql, IsAurora = false }));
         Assert.False(CollectorCatalog.AppliesTo(
             PgAutovacuumStatsCollector.Instance, new CollectorTargetInfo()));
+    }
+
+    /// <summary>
+    /// Writers only, and NOT because the view is unreadable on a standby — it reads fine and reports all
+    /// zeros. Measured on Aurora 17.7, same cluster and database and 15 tables: the writer reported
+    /// 13,654,458 dead tuples and 150,790,506 live tuples where the reader reported 0 for every one of
+    /// n_dead_tup, n_mod_since_analyze, n_ins_since_vacuum and n_live_tup.
+    /// <para>Ungated, a reader would yield zero rows, the activity filter would read that as "nothing has
+    /// pending work", and the tool would report perfect autovacuum health for a cluster 13 million dead
+    /// tuples behind. That false negative is the reason this gate exists.</para>
+    /// </summary>
+    [Fact]
+    public void DoesNotRunOnAStandbyWhereEveryCounterReadsZero()
+    {
+        var reader = new CollectorTargetInfo
+        {
+            Engine = CollectorTargetEngine.PostgreSql,
+            IsAurora = true,
+            IsInRecovery = true,
+        };
+
+        Assert.False(PgAutovacuumStatsCollector.Instance.AppliesTo(reader));
+        Assert.False(CollectorCatalog.AppliesTo(PgAutovacuumStatsCollector.Instance, reader));
+
+        /* The engine gate is a separate concern and must still agree it is a Postgres collector — a
+           reader is skipped for the RECOVERY reason, not because it stopped being PostgreSQL. */
+        Assert.True(CollectorCatalog.EngineMatches(PgAutovacuumStatsCollector.Instance.Name, reader));
     }
 
     /// <summary>
@@ -162,6 +189,25 @@ public class PgAutovacuumStatsCollectorDefinitionTests
         Assert.DoesNotContain("OR t.n_ins_since_vacuum", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("OR  OR", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("( OR", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The maintenance timestamps are `timestamp with time zone` and must be converted with
+    /// AT TIME ZONE 'UTC', never `::timestamp`. The cast form renders the instant in the SESSION's
+    /// TimeZone before dropping the offset, so it agrees with UTC only while every server's timezone GUC
+    /// says UTC — true across the fleet today, which is precisely what would keep the bug hidden. The
+    /// store contract is naive UTC product-wide.
+    /// </summary>
+    [Fact]
+    public void ConvertsTimestamptzColumnsWithAnExplicitUtcZoneNotACast()
+    {
+        var sql = PgAutovacuumStatsCollector.Instance.BuildQuery(MakeContext()).Text;
+
+        foreach (var column in new[] { "last_vacuum", "last_autovacuum", "last_analyze", "last_autoanalyze" })
+        {
+            Assert.Contains($"(t.{column} AT TIME ZONE 'UTC')", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain($"t.{column}::timestamp", sql, StringComparison.Ordinal);
+        }
     }
 
     [Fact]

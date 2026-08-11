@@ -76,7 +76,20 @@ public sealed class PgReplicationSlotsCollector : PostgresCollectorDefinitionBas
     private static string BuildQueryText(int postgresMajorVersion)
     {
         var conflicting = postgresMajorVersion >= 16 ? "s.conflicting" : "false";
-        var inactiveSince = postgresMajorVersion >= 17 ? "s.inactive_since" : "NULL::timestamp";
+        /* AT TIME ZONE 'UTC', not a bare select and not ::timestamp. inactive_since is
+           `timestamp with time zone`, and two things go wrong if that is not converted HERE:
+
+             * Npgsql maps a timestamptz read to DateTime with Kind=Utc, and refuses to write a Kind=Utc
+               DateTime into the store's `timestamp without time zone` column — so a bare select fails at
+               COPY time on any PG17 target with a slot that has ever been inactive.
+             * `::timestamp` would convert, but it renders the instant in the SESSION's TimeZone before
+               dropping the offset. The fleet's parameter groups all say UTC today, so it would agree
+               today and silently shift the moment one of them did not.
+
+           AT TIME ZONE 'UTC' is the only form that is both correctly typed and timezone-independent. */
+        var inactiveSince = postgresMajorVersion >= 17
+            ? "(s.inactive_since AT TIME ZONE 'UTC')"
+            : "NULL::timestamp";
         var invalidationReason = postgresMajorVersion >= 17 ? "s.invalidation_reason" : "NULL::text";
 
         return $@"
