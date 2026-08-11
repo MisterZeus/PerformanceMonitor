@@ -125,5 +125,8 @@ public static class CollectorScheduleDefaults
            and on non-Aurora PostgreSQL its own AppliesTo returns false. It only ever runs where
            there is something to read. */
         ["pg_wait_stats"] = new(1, 30),
+
+        /* Same cadence and horizon as query_stats, its SQL Server counterpart. */
+        ["pg_statement_stats"] = new(1, 30),
     };
 }

@@ -117,6 +117,7 @@ public static class PgMigrations
         new Migration(58, "qs-backfill-switch", V58Sql),
         new Migration(59, "collector-memory-knobs", V59Sql),
         new Migration(60, "pg-wait-stats", V60Sql),
+        new Migration(61, "pg-statement-stats", V61Sql),
     };
 
     /// <summary>
@@ -1196,6 +1197,69 @@ CREATE TABLE IF NOT EXISTS collect.pg_wait_stats (
 
 CREATE INDEX IF NOT EXISTS idx_pg_wait_stats_time
     ON collect.pg_wait_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V61 — <c>pg_statement_stats</c>, per-query-shape execution statistics from Aurora's extended
+    /// <c>aurora_stat_statements()</c>: the Postgres counterpart of <c>query_stats</c>.
+    /// <para>Two column groups exist nowhere on the SQL Server side. The Aurora I/O source split
+    /// (<c>storage_blks_read</c> / <c>orcache_blks_hit</c> and their times) decomposes what is otherwise
+    /// an opaque block read into "came from the storage volume" versus "hit the local NVMe tier" — which
+    /// is why a cache-hit ratio computed the community way is arithmetically misleading on Aurora. And
+    /// <c>total_exec_peakmem_bytes</c> / <c>max_exec_peakmem_bytes</c> are the nearest thing PostgreSQL
+    /// has to memory-grant data, which core PostgreSQL has no concept of at all. Per-query
+    /// <c>wal_bytes</c> likewise has no SQL Server DMV equivalent.</para>
+    /// <para><b>No query text column, deliberately.</b> Text belongs in the shared
+    /// <c>query_text_dim</c> rather than inline — inline payload was 94% of a 250 GB field store — but
+    /// registering a new dim-feeding table cannot be done from a rung this late: V38 is GENERATED from
+    /// <c>PayloadDimensions.All</c>, so adding an entry makes V38 emit
+    /// <c>ALTER TABLE pg_statement_stats ADD COLUMN query_text_digest</c>, and on an upgraded store V38
+    /// runs long before this rung creates the table — the ALTER would hit a nonexistent table and fail
+    /// the entire migration. Retrofitting a dim-feeding table therefore needs either a
+    /// existence-guarded V38 or a rung-aware dimension registry, which is a design change and not a
+    /// drive-by. Until then <c>queryid</c> is the identity, which is the join key anyway, and text
+    /// arrives with a dedicated low-cadence text collector that stores each statement once instead of
+    /// once per snapshot.</para>
+    /// </summary>
+    private const string V61Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_statement_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    queryid bigint,
+    database_id bigint,
+    user_id bigint,
+    toplevel boolean,
+    calls bigint,
+    total_exec_time_ms double precision,
+    min_exec_time_ms double precision,
+    max_exec_time_ms double precision,
+    mean_exec_time_ms double precision,
+    rows_returned bigint,
+    shared_blks_hit bigint,
+    shared_blks_read bigint,
+    shared_blks_dirtied bigint,
+    shared_blks_written bigint,
+    temp_blks_read bigint,
+    temp_blks_written bigint,
+    blk_read_time_ms double precision,
+    blk_write_time_ms double precision,
+    storage_blks_read bigint,
+    orcache_blks_hit bigint,
+    storage_blk_read_time_ms double precision,
+    orcache_blk_read_time_ms double precision,
+    wal_records bigint,
+    wal_fpi bigint,
+    wal_bytes bigint,
+    total_exec_peakmem_bytes bigint,
+    max_exec_peakmem_bytes bigint,
+    delta_calls bigint,
+    delta_total_exec_time_ms bigint,
+    delta_rows bigint
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_statement_stats_time
+    ON collect.pg_statement_stats(server_id, collection_time);";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

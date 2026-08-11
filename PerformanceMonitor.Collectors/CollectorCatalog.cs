@@ -67,6 +67,7 @@ public static class CollectorCatalog
            engines, so splitting the catalog per engine would fragment DDL generation. Dispatch is
            kept honest by the engine gate in AppliesTo(definition, target). */
         PgWaitStatsCollector.Instance,
+        PgStatementStatsCollector.Instance,
     };
 
     /// <summary>Name → definition, for the by-name target-gate lookup. Built once from <see cref="All"/>.</summary>
