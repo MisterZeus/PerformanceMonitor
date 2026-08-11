@@ -196,7 +196,7 @@ public partial class App : Application
         return System.Globalization.CultureInfo.CurrentCulture.NumberFormat.NumberDecimalSeparator == "," ? ";" : ",";
     }
 
-    /* System tray settings */
+    /* Collection settings */
     /* #2167: the Query Store history backfill (#2058) — fills gaps the live path never takes (a
        first-contact tail, an outage hole, a freshly restored database's imported catalog) in bounded
        background slices. Default ON. Turn it off when a heavy catch-up is costing the monitored server
@@ -205,6 +205,7 @@ public partial class App : Application
        column (V58) because a headless service has no window to click. */
     public static bool QueryStoreBackfillEnabled { get; set; } = true;
 
+    /* System tray settings */
     public static bool MinimizeToTray { get; set; } = true;
 
     /* Time display mode ("ServerTime", "LocalTime", "UTC") */
