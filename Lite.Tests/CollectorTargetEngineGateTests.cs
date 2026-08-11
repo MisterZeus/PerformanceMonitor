@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Data.Common;
 using System.Linq;
@@ -24,23 +25,45 @@ namespace Lite.Tests;
 public class CollectorTargetEngineGateTests
 {
     /// <summary>
-    /// Every shipped definition is T-SQL today. This is the drift guard: if a Postgres definition is
-    /// added without deriving from <see cref="PostgresCollectorDefinitionBase{TRow}"/>, it would
-    /// silently advertise itself as SQL Server and be dispatched at SQL Server targets, where every
-    /// cycle would fail. The failure message names the offender.
+    /// The drift guard, keyed on the naming convention rather than on a count: a definition whose name
+    /// starts with <c>pg_</c> must declare itself PostgreSQL, and everything else must declare SQL
+    /// Server.
+    /// <para>The failure this prevents is silent. <see cref="ICollectorSchemaInfo.TargetEngine"/>
+    /// defaults to SQL Server so the existing definitions needed no edit, which means a new Postgres
+    /// definition that forgot to derive from <see cref="PostgresCollectorDefinitionBase{TRow}"/> would
+    /// be advertised as T-SQL and dispatched at SQL Server targets, failing every cycle. The reverse
+    /// mistake — a T-SQL definition marked PostgreSql — would make it disappear from every target
+    /// instead, which is quieter still.</para>
     /// </summary>
     [Fact]
-    public void EveryCatalogDefinitionDeclaresAnEngine()
+    public void EveryCatalogDefinitionDeclaresTheEngineItsNameImplies()
     {
-        var wrong = CollectorCatalog.All
-            .Where(d => d.TargetEngine != CollectorTargetEngine.SqlServer)
-            .Select(d => $"{d.Name} => {d.TargetEngine}")
+        var mismatched = CollectorCatalog.All
+            .Where(d => d.TargetEngine != ExpectedEngine(d.Name))
+            .Select(d => $"{d.Name} declares {d.TargetEngine} but its name implies {ExpectedEngine(d.Name)}")
             .ToList();
 
         Assert.True(
-            wrong.Count == 0,
-            "These catalog definitions are not SQL Server. If that is intentional, update this test "
-            + "and confirm they derive from PostgresCollectorDefinitionBase: " + string.Join(", ", wrong));
+            mismatched.Count == 0,
+            "Engine declaration does not match the naming convention. A pg_-prefixed collector must "
+            + "derive from PostgresCollectorDefinitionBase; anything else must not: "
+            + string.Join("; ", mismatched));
+
+        static CollectorTargetEngine ExpectedEngine(string name) =>
+            name.StartsWith("pg_", StringComparison.Ordinal)
+                ? CollectorTargetEngine.PostgreSql
+                : CollectorTargetEngine.SqlServer;
+    }
+
+    /// <summary>
+    /// Both engines are actually represented in the catalog. Without this, the convention check above
+    /// would still pass on a catalog that had lost every Postgres definition.
+    /// </summary>
+    [Fact]
+    public void CatalogContainsBothEngines()
+    {
+        Assert.Contains(CollectorCatalog.All, d => d.TargetEngine == CollectorTargetEngine.SqlServer);
+        Assert.Contains(CollectorCatalog.All, d => d.TargetEngine == CollectorTargetEngine.PostgreSql);
     }
 
     /// <summary>A target with no engine specified is SQL Server, so nothing existing changes.</summary>

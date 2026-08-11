@@ -116,6 +116,7 @@ public static class PgMigrations
         new Migration(57, "store-job-cadence-knob", V57Sql),
         new Migration(58, "qs-backfill-switch", V58Sql),
         new Migration(59, "collector-memory-knobs", V59Sql),
+        new Migration(60, "pg-wait-stats", V60Sql),
     };
 
     /// <summary>
@@ -1155,6 +1156,46 @@ ALTER TABLE config.config_service
     ADD COLUMN IF NOT EXISTS query_store_text_budget_mb integer NOT NULL DEFAULT 64;
 ALTER TABLE config.config_service
     ADD COLUMN IF NOT EXISTS max_concurrent_sweeps integer NOT NULL DEFAULT 4;";
+
+    /// <summary>
+    /// V60 — <c>pg_wait_stats</c>, the first PostgreSQL collector table: cumulative Aurora wait
+    /// counters with deltas computed on write, the Postgres counterpart of <c>wait_stats</c>.
+    /// <para>Columns are spelled out here in the generator's exact emission order (the four standard
+    /// prefix columns, then <see cref="PerformanceMonitor.Collectors.PgWaitStatsCollector"/>'s payload
+    /// in its declared order) so a fresh store — where V1 generates this from the catalog — and an
+    /// upgraded store, where this rung creates it, end up with an identical physical column order for
+    /// the binary COPY. No PRIMARY KEY, and the <c>(server_id, collection_time)</c> index, per the
+    /// convention every collector table follows.</para>
+    /// <para><c>wait_time_us</c> is MICROSECONDS. The AWS documentation contradicts itself on the unit
+    /// — microseconds for <c>aurora_stat_system_waits</c>, milliseconds for
+    /// <c>aurora_stat_backend_waits</c> — so it was settled by measurement instead: read as
+    /// milliseconds, the observed totals imply tens of thousands of concurrently waiting sessions
+    /// against a <c>max_connections</c> of 5,000, which is impossible. The name carries the unit so a
+    /// reader never has to relitigate it.</para>
+    /// <para>Both the numeric id and the decoded name are stored. The name is what an operator reads,
+    /// but the id is the stable key: wait-event name casing differs between Aurora majors
+    /// (<c>AutoVacuumMain</c> on 16.11 versus <c>AutovacuumMain</c> on 17.7), so anything keyed on the
+    /// name breaks its own history across an upgrade. Nullable because the type/event lookups are LEFT
+    /// JOINed — an event Aurora reports but does not name is still recorded.</para>
+    /// </summary>
+    private const string V60Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_wait_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    wait_type_id integer,
+    wait_event_id bigint,
+    wait_type text,
+    wait_event text,
+    waits bigint,
+    wait_time_us bigint,
+    delta_waits bigint,
+    delta_wait_time_us bigint
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_wait_stats_time
+    ON collect.pg_wait_stats(server_id, collection_time);";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

@@ -115,5 +115,15 @@ public static class CollectorScheduleDefaults
            this collector adds is the slow CONSEQUENCE, and 90 days is the window that shows a PVS
            trend against the database-growth trend it explains. */
         ["pvs_stats"] = new(60, 90),
+
+        /* PostgreSQL. Same cadence and horizon as wait_stats, deliberately: it is the same kind of
+           signal (cumulative counters, delta-on-write) read at the same resolution, and matching the
+           two means a mixed-engine store shows one time axis without resampling.
+
+           Enabled by default despite being Aurora-only, because the cost of it being wrong is
+           nothing: on a SQL Server target the engine gate drops it before dispatch with no log row,
+           and on non-Aurora PostgreSQL its own AppliesTo returns false. It only ever runs where
+           there is something to read. */
+        ["pg_wait_stats"] = new(1, 30),
     };
 }

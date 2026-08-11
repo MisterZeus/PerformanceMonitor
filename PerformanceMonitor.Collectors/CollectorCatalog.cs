@@ -62,6 +62,11 @@ public static class CollectorCatalog
         AgDatabaseReplicaStatesCollector.Instance,
         PlanCorrectionCollector.Instance,
         PvsStatsCollector.Instance,
+        /* PostgreSQL definitions. They live in the same catalog as the T-SQL ones on purpose: the
+           schema generator walks this list to create tables, and one store can hold data from both
+           engines, so splitting the catalog per engine would fragment DDL generation. Dispatch is
+           kept honest by the engine gate in AppliesTo(definition, target). */
+        PgWaitStatsCollector.Instance,
     };
 
     /// <summary>Name → definition, for the by-name target-gate lookup. Built once from <see cref="All"/>.</summary>
