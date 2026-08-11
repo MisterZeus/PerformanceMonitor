@@ -545,12 +545,13 @@ WHERE server_id = $1
 AND   collector_name = $2
 AND   starts_with(state_key, $3)
 AND   updated_at < (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
-AND   state_key NOT IN
+AND   NOT EXISTS
       (
-          SELECT $3 || ds.database_name
+          SELECT 1
           FROM database_states ds
           WHERE ds.server_id = $1
           AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
+          AND   collector_state.state_key = $3 || ds.database_name
       )";
 
     /// <summary>

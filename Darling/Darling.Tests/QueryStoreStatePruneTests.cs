@@ -89,6 +89,15 @@ public sealed class QueryStoreStatePruneTests
         Assert.Contains(
             "updated_at < (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)",
             liteBackfill, StringComparison.Ordinal);
+
+        /* And the anti-join is NOT EXISTS on both sides, not NOT IN. They are not equivalent: a single NULL
+           anywhere in a NOT IN list makes the whole predicate NULL, so the prune would silently stop
+           retiring anything. Fail-safe, and therefore exactly the kind of divergence that would sit
+           undetected for a release — the two statements answer the same question the same way or the SKUs
+           have quietly forked. */
+        Assert.Contains("AND   NOT EXISTS", liteBackfill, StringComparison.Ordinal);
+        Assert.DoesNotContain("NOT IN", liteBackfill, StringComparison.Ordinal);
+        Assert.Contains("AND   NOT EXISTS", DarlingCollectorRunner.PruneOrphanedDatabaseStateKeysSql, StringComparison.Ordinal);
     }
 
     [Fact]
