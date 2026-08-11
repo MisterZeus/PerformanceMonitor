@@ -1262,7 +1262,16 @@ public sealed class AlertEngineTests
         h.Adapter.ForcePlanFailures.Clear();
         await engine.EvaluateServerAsync(Harness.Snapshot());
         Assert.Single(h.Deliverer.Outcomes);
-        Assert.Contains(h.Resolutions, r => r.MetricName == "Forced Plan Failing" && r.Message.Contains("22"));
+
+        var resolution = Assert.Single(h.Resolutions, r => r.MetricName == "Forced Plan Failing");
+        /* The recovery text is read by a human in a toast, an email and a history row, so it must name
+           the plan the way the firing message did — NOT the internal key. The first version of this
+           test only asserted the message contained "22", which the leaked key 'forceplan:Sales:11:22'
+           satisfied, so it passed while operators would have seen gibberish (review catch). */
+        Assert.DoesNotContain(ForcePlanTokens.KeyPrefix, resolution.Message, StringComparison.Ordinal);
+        Assert.Contains("Sales", resolution.Message, StringComparison.Ordinal);
+        Assert.Contains("query 11", resolution.Message, StringComparison.Ordinal);
+        Assert.Contains("plan 22", resolution.Message, StringComparison.Ordinal);
     }
 
     [Fact]

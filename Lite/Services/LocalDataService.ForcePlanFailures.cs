@@ -46,7 +46,7 @@ WITH per_collection AS (
         MAX(COALESCE(qs.last_force_failure_reason, '')) AS reason
     FROM v_query_store_stats AS qs
     WHERE qs.server_id = $1
-    AND   qs.collection_time > now() - INTERVAL 2 HOUR
+    AND   qs.collection_time > now() - INTERVAL '2 hours'
     GROUP BY qs.database_name, qs.query_id, qs.plan_id, qs.collection_time
 ),
 ranked AS (

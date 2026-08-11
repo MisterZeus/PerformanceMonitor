@@ -141,8 +141,11 @@ public sealed class AlertEngine
     private readonly ConcurrentDictionary<string, DateTime> _lastDatabaseStateAlert = new();
 
     /* #2157: per-PLAN active set and cooldowns. The alerting unit is one forced plan, not one server —
-       two plans failing on the same database are independent conditions that resolve independently. */
-    private readonly ConcurrentDictionary<string, HashSet<string>> _activeForcePlanAlerts = new();
+       two plans failing on the same database are independent conditions that resolve independently.
+       Keyed by the internal plan key but VALUED with the plan's identity, because the resolution has to
+       name the plan in an operator-readable way: a bare key set left the recovery message reading
+       'forceplan:Sales:11:22 no longer failing to force' in every email and webhook (review catch). */
+    private readonly ConcurrentDictionary<string, Dictionary<string, ForcePlanFailureInfo>> _activeForcePlanAlerts = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastForcePlanAlert = new();
 
     /// <param name="settings">Live threshold surface — read every sweep, never cached.</param>
@@ -1387,11 +1390,11 @@ public sealed class AlertEngine
             current[ForcePlanTokens.PlanKey(failure.DatabaseName, failure.QueryId, failure.PlanId)] = failure;
         }
 
-        var active = _activeForcePlanAlerts.GetOrAdd(key, _ => new HashSet<string>(StringComparer.Ordinal));
+        var active = _activeForcePlanAlerts.GetOrAdd(key, _ => new Dictionary<string, ForcePlanFailureInfo>(StringComparer.Ordinal));
 
         foreach (var (planKey, failure) in current)
         {
-            active.Add(planKey);
+            active[planKey] = failure;
             var cooldownKey = key + "|" + planKey;
             if (!suppressed && CooldownElapsed(_lastForcePlanAlert, cooldownKey, now, alertCooldown))
             {
@@ -1448,17 +1451,19 @@ public sealed class AlertEngine
            longer failing", which is what the recovery says — deliberately not claiming it was fixed. */
         if (active.Count > 0)
         {
-            var recovered = active.Where(p => !current.ContainsKey(p)).ToList();
-            foreach (var planKey in recovered)
+            var recovered = active.Where(p => !current.ContainsKey(p.Key)).ToList();
+            foreach (var (planKey, lastSeen) in recovered)
             {
                 active.Remove(planKey);
                 _lastForcePlanAlert.TryRemove(key + "|" + planKey, out _);
                 if (!suppressed)
                 {
+                    /* Named from the identity we stored when it fired, never from the internal key: an
+                       operator reads this in a toast, an email and a history row. */
                     await NotifyResolutionAsync(new AlertResolution(
                         key, serverName, ForcePlanTokens.MetricName,
                         "Forced Plan Failing Resolved",
-                        $"{serverName}: {planKey} no longer failing to force"), ct);
+                        $"{serverName}: {lastSeen.DatabaseName} query {lastSeen.QueryId} plan {lastSeen.PlanId} no longer failing to force"), ct);
                 }
             }
         }
