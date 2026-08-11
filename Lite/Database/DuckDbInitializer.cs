@@ -98,7 +98,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 52;
+    internal const int CurrentSchemaVersion = 53;
 
     private readonly string _archivePath;
 
@@ -1193,6 +1193,25 @@ public class DuckDbInitializer
             try
             {
                 await ExecuteNonQueryAsync(connection, "ALTER TABLE query_stats ADD COLUMN IF NOT EXISTS host_object_name VARCHAR");
+            }
+            catch
+            {
+                /* Table doesn't exist yet — will be created with the full schema below */
+            }
+        }
+
+        if (fromVersion < 53)
+        {
+            /* v53 (#2203): the database-state alert's edge-trigger memory, porting Darling's V60 pair.
+               Without it Lite's alreadyAnnounced is always false, so a database parked OFFLINE for a month
+               alerts every cooldown forever - the original #2166 complaint, still live in Lite after the
+               Darling half shipped. Nullable on purpose: NULL means "never announced", which is what a
+               first observation, a fresh store and a recovered database all look like. */
+            _logger?.LogInformation("Running migration to v53: adding the alerted-state memory to config_database_state_expected");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE config_database_state_expected ADD COLUMN IF NOT EXISTS last_alerted_state VARCHAR");
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE config_database_state_expected ADD COLUMN IF NOT EXISTS last_alerted_at TIMESTAMP");
             }
             catch
             {

@@ -464,6 +464,98 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
     }
 
     [Fact]
+    public async Task AlertedState_RoundTripsToTheDeviationRead_SoTheEdgeTriggerCanEngage()
+    {
+        // #2203: until Lite persisted this, `alreadyAnnounced` was always false here and a database parked
+        // OFFLINE for a month alerted every cooldown forever — the original #2166 complaint, still live in
+        // Lite after the Darling half shipped. The whole feature depends on this value surviving the round
+        // trip, so pin the trip rather than the write.
+        var service = new LocalDataService(_duckDb);
+        await DriveAppToStableStateAsync(service, "OFFLINE");
+
+        var before = Assert.Single(await service.GetDatabaseStateDeviationsAsync(ServerId));
+        Assert.Equal("", before.LastAlertedState); // never announced yet
+
+        var store = new DuckDbAlertHistoryStore(_duckDb);
+        await store.SaveDatabaseStateAlertedAsync(ServerId, "App", "OFFLINE");
+
+        var after = Assert.Single(await service.GetDatabaseStateDeviationsAsync(ServerId));
+        Assert.Equal("OFFLINE", after.LastAlertedState);
+        Assert.Equal("OFFLINE", after.StateDesc); // still deviating — the engine is what goes quiet, not the read
+    }
+
+    [Fact]
+    public async Task RecoveredDatabase_HasItsAlertedStateClearedByTheStore_NotJustByTheEngine()
+    {
+        // The restart-gap invariant, and the reason this clear is store-derived rather than engine-derived.
+        // The engine also clears on the falling edge it witnesses, but that path runs off an in-memory active
+        // set that empties on restart — so a restart landing between an alert and the recovery would leave the
+        // memory sticky forever and swallow the next parking entirely. Nothing is held in memory here: the
+        // deviation read alone must heal it.
+        var service = new LocalDataService(_duckDb);
+        await DriveAppToStableStateAsync(service, "OFFLINE");
+        await service.GetDatabaseStateDeviationsAsync(ServerId);
+
+        var store = new DuckDbAlertHistoryStore(_duckDb);
+        await store.SaveDatabaseStateAlertedAsync(ServerId, "App", "OFFLINE");
+        Assert.Equal("OFFLINE", (await service.GetDatabaseStateDeviationsAsync(ServerId)).Single().LastAlertedState);
+
+        // Operator brings it back. It stops deviating, so it drops out of the read entirely...
+        await SeedSnapshotAsync(T0.AddMinutes(3), ("App", "ONLINE", false));
+        Assert.Empty(await service.GetDatabaseStateDeviationsAsync(ServerId));
+
+        // ...and the memory must be gone, or a second parking weeks later reads as already-announced.
+        Assert.Null(await AlertedStateAsync("App"));
+    }
+
+    [Fact]
+    public async Task IgnoredDatabase_AlsoHasItsAlertedStateCleared()
+    {
+        // An operator silencing a database should not leave a memory behind that outlives the silence.
+        var service = new LocalDataService(_duckDb);
+        await DriveAppToStableStateAsync(service, "OFFLINE");
+        await service.GetDatabaseStateDeviationsAsync(ServerId);
+
+        var store = new DuckDbAlertHistoryStore(_duckDb);
+        await store.SaveDatabaseStateAlertedAsync(ServerId, "App", "OFFLINE");
+        await service.SetDatabaseStateExpectedAsync(ServerId, "App", PerformanceMonitor.Alerting.DatabaseStateTokens.Ignore);
+
+        Assert.Empty(await service.GetDatabaseStateDeviationsAsync(ServerId));
+        Assert.Null(await AlertedStateAsync("App"));
+    }
+
+    [Fact]
+    public async Task ClearAlertedState_IsTheImmediatePath_AndLeavesTheBaselineIntact()
+    {
+        // The engine's own falling-edge call. It must forget the announcement WITHOUT disturbing the baseline —
+        // clearing the expected state instead would re-baseline the database and silence a real deviation.
+        var service = new LocalDataService(_duckDb);
+        await DriveAppToStableStateAsync(service, "OFFLINE");
+        await service.GetDatabaseStateDeviationsAsync(ServerId);
+
+        var store = new DuckDbAlertHistoryStore(_duckDb);
+        await store.SaveDatabaseStateAlertedAsync(ServerId, "App", "OFFLINE");
+        await store.ClearDatabaseStateAlertedAsync(ServerId, "App");
+
+        Assert.Null(await AlertedStateAsync("App"));
+        var row = Assert.Single(await service.GetDatabaseStateExpectationsAsync(ServerId));
+        Assert.Equal("ONLINE", row.ExpectedState); // baseline untouched
+    }
+
+    /// <summary>Reads the raw memory column, so a test can distinguish "cleared" from "never set".</summary>
+    private async Task<string?> AlertedStateAsync(string database)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT last_alerted_state FROM config_database_state_expected WHERE server_id = $1 AND database_name = $2";
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = database });
+        var value = await cmd.ExecuteScalarAsync();
+        return value is null or DBNull ? null : (string)value;
+    }
+
+    [Fact]
     public async Task StandbySecondary_BaselinesAsStandby_AndDoesNotChurnOnLogRestores()
     {
         // A standby log-shipping secondary: is_in_standby stays 1 while state_desc flickers ONLINE/RESTORING
