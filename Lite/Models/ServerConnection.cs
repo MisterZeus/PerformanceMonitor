@@ -391,7 +391,10 @@ public class ServerConnection : INotifyPropertyChanged
             TrustServerCertificate = TrustServerCertificate,
             MultipleActiveResultSets = true,
             ApplicationIntent = ReadOnlyIntent ? ApplicationIntent.ReadOnly : ApplicationIntent.ReadWrite,
-            MultiSubnetFailover = MultiSubnetFailover
+            MultiSubnetFailover = MultiSubnetFailover,
+            /* #2164: fewer, larger TDS packets for the plan-XML/query-text payloads the heavy
+               collectors read. Shared constant so Lite and Darling cannot drift. */
+            PacketSize = PerformanceMonitor.Common.CollectorTdsTuning.MonitoredServerPacketSize
         };
 
         // Set encryption mode
