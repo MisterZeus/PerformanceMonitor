@@ -49,6 +49,10 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public bool PvsEnabled => _config.Alerts.PvsEnabled;
     public bool DatabaseStateEnabled => _config.Alerts.DatabaseStateEnabled;
 
+    /* #2157: ON with no store column yet — see AppAlertEngineSettings for the reasoning, including why a
+       darling.json-only flag would not survive a store reload (ApplyToConfig swaps Alerts wholesale). */
+    public bool ForcePlanFailureEnabled => true;
+
     public int CpuThresholdPercent => _config.Alerts.CpuThresholdPercent;
     public int BlockingCountThreshold => _config.Alerts.BlockingCountThreshold;
 

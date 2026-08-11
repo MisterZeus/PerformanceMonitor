@@ -46,6 +46,7 @@ public sealed class AlertEngineTests
         public bool FailedJobEnabled { get; set; }
         public bool PvsEnabled { get; set; }
         public bool DatabaseStateEnabled { get; set; }
+        public bool ForcePlanFailureEnabled { get; set; } = true;
         public int CpuThresholdPercent { get; set; } = 80;
         public int BlockingCountThreshold { get; set; } = 1;
         /* #1839: 0 = off, the shipped default — a test must opt in for the wait gate to run at all. */
@@ -1196,6 +1197,89 @@ public sealed class AlertEngineTests
     }
 
     /* ---------------- database state (baseline deviation) ---------------- */
+
+    [Fact]
+    public async Task ForcePlanFailure_Disabled_DoesNotFetch()
+    {
+        var h = new Harness();
+        h.Settings.ForcePlanFailureEnabled = false;
+        h.Adapter.ForcePlanFailures.Add(new ForcePlanFailureInfo { DatabaseName = "Sales", QueryId = 11, PlanId = 22, ForcingType = "MANUAL", FailureReason = "NO_INDEX", FailureDelta = 3, TotalFailures = 3 });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        /* The gate must skip the READ, not just the fire — a disabled alert should cost nothing. */
+        Assert.Equal(0, h.Adapter.ForcePlanFetches);
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task ForcePlanFailure_FiresPerPlan_CarryingReasonForcingTypeAndDelta()
+    {
+        /* Two plans in the SAME database are two independent conditions — if the alert keyed per server or
+           per database, the second would be swallowed by the first's cooldown and an operator would never
+           learn about it. */
+        var h = new Harness();
+        h.Settings.ForcePlanFailureEnabled = true;
+        h.Adapter.ForcePlanFailures.Add(new ForcePlanFailureInfo { DatabaseName = "Sales", QueryId = 11, PlanId = 22, ForcingType = "MANUAL", FailureReason = "NO_INDEX", FailureDelta = 4, TotalFailures = 9 });
+        h.Adapter.ForcePlanFailures.Add(new ForcePlanFailureInfo { DatabaseName = "Sales", QueryId = 33, PlanId = 44, ForcingType = "AUTO", FailureReason = "NO_PLAN", FailureDelta = 1, TotalFailures = 1 });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.All(h.Deliverer.Outcomes, o => Assert.Equal("Forced Plan Failing", o.MetricName));
+        /* Warning for every rise — no Critical tier exists yet, on purpose (ForcePlanTokens). */
+        Assert.All(h.Deliverer.Outcomes, o => Assert.Equal(PerformanceMonitor.Notifications.AlertSeverityLevel.Warning, o.Severity));
+
+        var manual = h.Deliverer.Outcomes.Single(o => o.CurrentValue.Contains("plan 22"));
+        Assert.Contains("NO INDEX", manual.DetailText, StringComparison.Ordinal);
+        Assert.Contains("MANUAL", manual.DetailText, StringComparison.Ordinal);
+        /* The delta, not the total, is what says 'happening now'. */
+        Assert.Contains("4", manual.DetailText, StringComparison.Ordinal);
+
+        var auto = h.Deliverer.Outcomes.Single(o => o.CurrentValue.Contains("plan 44"));
+        Assert.Contains("AUTO", auto.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ForcePlanFailure_CooldownSuppressesSecondFire_ThenResolvesWhenTheCounterStops()
+    {
+        var h = new Harness();
+        h.Settings.ForcePlanFailureEnabled = true;
+        h.Adapter.ForcePlanFailures.Add(new ForcePlanFailureInfo { DatabaseName = "Sales", QueryId = 11, PlanId = 22, ForcingType = "MANUAL", FailureReason = "NO_INDEX", FailureDelta = 2, TotalFailures = 2 });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Still failing next sweep, inside the cooldown — one alert, not two. */
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The adapter stops returning it: the counter stopped rising. That covers unforced, reproducible
+           again, and query-no-longer-running alike — hence 'no longer failing' rather than 'fixed'. */
+        h.Adapter.ForcePlanFailures.Clear();
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains(h.Resolutions, r => r.MetricName == "Forced Plan Failing" && r.Message.Contains("22"));
+    }
+
+    [Fact]
+    public async Task ForcePlanFailure_ExcludedDatabase_IsNeverAlerted()
+    {
+        /* Parity with every other database-scoped family: the shared exclusion list wins, case-insensitively.
+           A monitored-but-excluded database must not produce alerts an operator cannot mute per-database. */
+        var h = new Harness();
+        h.Settings.ForcePlanFailureEnabled = true;
+        h.Settings.ExcludedDatabasesList.Add("sAlEs");
+        h.Adapter.ForcePlanFailures.Add(new ForcePlanFailureInfo { DatabaseName = "Sales", QueryId = 11, PlanId = 22, ForcingType = "MANUAL", FailureReason = "NO_INDEX", FailureDelta = 5, TotalFailures = 5 });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
 
     [Fact]
     public async Task DatabaseState_Disabled_DoesNotFetch()

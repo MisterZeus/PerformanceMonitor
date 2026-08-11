@@ -75,6 +75,14 @@ public interface IAlertEngineSettings
     bool PvsEnabled { get; }
     bool DatabaseStateEnabled { get; }
 
+    /// <summary>
+    /// The forced-plan-failure alert (#2157). Default ON in both apps: it fires only on a counter that ROSE
+    /// since the previous collection, so a quiet fleet is silent by construction rather than by threshold —
+    /// which is what makes it safe to enable without asking. Deliberately NOT a store column yet; if
+    /// operators need per-deployment control it becomes one, with the full migration ladder that implies.
+    /// </summary>
+    bool ForcePlanFailureEnabled { get; }
+
     /* Thresholds. */
 
     /// <summary>Fire when the selected CPU metric (see <see cref="CpuAlertMode"/>) is at/above this %.</summary>
