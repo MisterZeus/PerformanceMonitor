@@ -699,6 +699,42 @@ AND   NOT EXISTS (
 )";
 
     /// <summary>
+    /// #2166: clears the alerted-state memory for any database the store now shows back AT its expected
+    /// state. Runs beside the seed and the prune, on the same connection, for the same reason they do — it
+    /// is store maintenance derived from what the store holds, not from anything a process observed.
+    ///
+    /// <para>That distinction is the whole point. The engine also clears on the falling edge it witnesses,
+    /// but that path is reachable only through its in-memory active set, which empties on every restart. A
+    /// service restart landing between an alert and the recovery therefore left the persisted
+    /// <c>last_alerted_state</c> sticky forever: the database was never in <c>active</c> to be noticed as
+    /// recovered, so the next parking read as already-announced and was swallowed. This statement cannot
+    /// have that gap, because it asks the store rather than remembering. The engine's clear stays as the
+    /// immediate path — a recovery inside one process should not wait for the next cycle's sweep — and this
+    /// is what actually owns the invariant.</para>
+    ///
+    /// <para>One sample at expected is enough, deliberately, where the DEVIATION rule needs two: clearing is
+    /// the safe direction (it can only cause an extra alert, never a missed one), and a flap cannot exploit
+    /// it because a flap does not survive the two-sample deviation test to alert in the first place. The
+    /// "(ignore)" sentinel clears too — an operator silencing a database should not leave a memory behind
+    /// that outlives the silence. $1 server_id.</para>
+    /// </summary>
+    public const string ClearRecoveredDatabaseStateAlertsSql = @"
+UPDATE config.database_state_expected e
+SET last_alerted_state = NULL,
+    last_alerted_at = NULL
+WHERE e.server_id = $1
+AND   e.last_alerted_state IS NOT NULL
+AND   (e.expected_state = '(ignore)'
+       OR EXISTS (
+           SELECT 1
+           FROM database_states ds
+           WHERE ds.server_id = $1
+           AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
+           AND   ds.database_name = e.database_name
+           AND   (CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END) = e.expected_state
+       ))";
+
+    /// <summary>
     /// The databases whose state deviates from their expected state in BOTH of the two most recent
     /// collections (a two-sample rule that absorbs restart transients — RECOVERY_PENDING / RECOVERING — and
     /// a standby secondary's per-restore RESTORING flicker), plus databases with no baseline yet whose
@@ -758,6 +794,16 @@ ORDER BY l.database_name";
         {
             prune.Parameters.AddWithValue(serverId);
             await prune.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        /* Before the read, so this cycle judges against a memory the store has already healed rather than
+           one carried over from a restart (#2166). A database cleared here is one that is back at its
+           expected state, so it cannot appear in the deviation read below either way — the ordering matters
+           for the NEXT deviation, not this one. */
+        using (var clearRecovered = new NpgsqlCommand(ClearRecoveredDatabaseStateAlertsSql, connection))
+        {
+            clearRecovered.Parameters.AddWithValue(serverId);
+            await clearRecovered.ExecuteNonQueryAsync(cancellationToken);
         }
 
         using (var command = new NpgsqlCommand(DatabaseStateDeviationsSql, connection))
