@@ -1151,6 +1151,12 @@ ALTER TABLE config.config_service
     /// sweeps [1,16]) rather than by CHECK constraints, matching the sibling knobs' posture: a bad value
     /// degrades to a sane one instead of failing the service's config load.</para>
     /// </summary>
+    private const string V59Sql = @"
+ALTER TABLE config.config_service
+    ADD COLUMN IF NOT EXISTS query_store_text_budget_mb integer NOT NULL DEFAULT 64;
+ALTER TABLE config.config_service
+    ADD COLUMN IF NOT EXISTS max_concurrent_sweeps integer NOT NULL DEFAULT 4;";
+
     /// <summary>
     /// V60 — restart-surviving edge memory for the database-state alert (#2166). Two nullable columns on
     /// <c>config.database_state_expected</c>, which is already keyed per (server, database) and already
@@ -1168,12 +1174,6 @@ ALTER TABLE config.database_state_expected
     ADD COLUMN IF NOT EXISTS last_alerted_state text;
 ALTER TABLE config.database_state_expected
     ADD COLUMN IF NOT EXISTS last_alerted_at timestamp;";
-
-    private const string V59Sql = @"
-ALTER TABLE config.config_service
-    ADD COLUMN IF NOT EXISTS query_store_text_budget_mb integer NOT NULL DEFAULT 64;
-ALTER TABLE config.config_service
-    ADD COLUMN IF NOT EXISTS max_concurrent_sweeps integer NOT NULL DEFAULT 4;";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:
