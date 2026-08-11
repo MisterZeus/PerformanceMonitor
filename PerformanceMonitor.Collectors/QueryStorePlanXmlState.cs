@@ -13,6 +13,18 @@ using System.Globalization;
 namespace PerformanceMonitor.Collectors;
 
 /// <summary>
+/// What one plan-fetch pass earned: the watermark to persist, and whether the pass's rows actually arrived in
+/// the plan_id order its <c>ORDER BY</c> promises (#2210). One value rather than two calls so a caller cannot
+/// take the watermark without being handed the reason it may not have moved — the ordering guard is only
+/// useful if the violation gets LOGGED, and a signal a caller can forget to ask for is one that eventually
+/// nobody asks for.
+/// </summary>
+/// <param name="Watermark">The plan_id to persist; the standing value when the pass earned no advance.</param>
+/// <param name="ArrivedInPlanIdOrder">False when a descent was seen, meaning the advance was abandoned and the
+/// caller should log a precondition violation rather than treat a static watermark as a quiet pass.</param>
+public readonly record struct PlanWatermarkAdvance(long Watermark, bool ArrivedInPlanIdOrder);
+
+/// <summary>
 /// The persisted per-database plan-XML watermark (#2164) — the highest <c>plan_id</c> whose execution-plan
 /// XML has actually been stored for a database, so collection stops re-shipping plans the store already
 /// holds. 97% of the plan XML shipped in a three-hour fleet window was for plans held for over an hour, and
@@ -92,7 +104,7 @@ public static class QueryStorePlanXmlState
     /// Floor on the candidate window, so progress is always possible. Even if the observed average is wildly
     /// over-stated — one enormous plan in a quiet pass — a database must still be able to walk its catalog.
     /// </summary>
-    public const int MinCandidateWindow = 32;
+    public const int MinCandidatePlans = 32;
 
     /// <summary>
     /// Ceiling on the candidate window. The smallest measured quartile average (15 KB) puts a 12 MB budget at
@@ -100,7 +112,7 @@ public static class QueryStorePlanXmlState
     /// turn the window back into "the whole catalog" — which is the first-contact trap this window exists to
     /// prevent.
     /// </summary>
-    public const int MaxCandidateWindow = 2048;
+    public const int MaxCandidatePlans = 2048;
 
     /// <summary>
     /// How far past the budget the window reaches, in expected plans. The window is the COARSE bound and the
@@ -112,7 +124,7 @@ public static class QueryStorePlanXmlState
     /// plan 5 or plan 500. Margin buys reachability and costs decompression, which is why the estimate errs
     /// large and the margin stays small.</para>
     /// </summary>
-    public const double CandidateWindowMargin = 1.5;
+    public const double CandidatePlanMargin = 1.5;
 
     /// <summary>
     /// The per-database average plan size to carry into the next pass, from a pass's own totals — free, because
@@ -140,23 +152,23 @@ public static class QueryStorePlanXmlState
     /// <para><paramref name="clamped"/> reports that a bound was applied, so the caller can LOG it. A window
     /// silently pinned at its ceiling looks identical to one that fit, and that is how a cap becomes invisible.</para>
     /// </summary>
-    public static int CandidateWindow(long? observedAvgPlanBytes, long budgetBytes, out bool clamped)
+    public static int CandidatePlanCount(long? observedAvgPlanBytes, long budgetBytes, out bool clamped)
     {
         var avg = observedAvgPlanBytes is long observed && observed > 0 ? observed : FirstContactAvgPlanBytes;
 
         if (budgetBytes <= 0)
         {
             clamped = true;
-            return MinCandidateWindow;
+            return MinCandidatePlans;
         }
 
         /* double for the margin, then one bounds check — the product cannot overflow int at any budget the knob
            accepts, but the cast is guarded anyway because the budget is operator input. */
-        var wanted = (double)budgetBytes / avg * CandidateWindowMargin;
-        var rounded = wanted >= MaxCandidateWindow ? MaxCandidateWindow : (int)Math.Ceiling(wanted);
+        var wanted = (double)budgetBytes / avg * CandidatePlanMargin;
+        var rounded = wanted >= MaxCandidatePlans ? MaxCandidatePlans : (int)Math.Ceiling(wanted);
 
-        clamped = rounded >= MaxCandidateWindow || rounded <= MinCandidateWindow;
-        return Math.Clamp(rounded, MinCandidateWindow, MaxCandidateWindow);
+        clamped = rounded >= MaxCandidatePlans || rounded <= MinCandidatePlans;
+        return Math.Clamp(rounded, MinCandidatePlans, MaxCandidatePlans);
     }
 
     /// <summary>
@@ -167,23 +179,28 @@ public static class QueryStorePlanXmlState
     /// watermark could not advance on 97.8% of passes and therefore never advanced at all.
     ///
     /// <para>Defensive on the precondition rather than trusting it: a DESCENT anywhere in
-    /// <paramref name="landedPlanIdsInOrder"/> abandons the advance entirely and returns
-    /// <paramref name="standing"/>, which the caller should log. Honouring the leading ascending run instead
+    /// <paramref name="landedPlanIdsInOrder"/> abandons the advance entirely and reports itself through
+    /// <see cref="PlanWatermarkAdvance.ArrivedInPlanIdOrder"/>. Honouring the leading ascending run instead
     /// looks safer and is not — given <c>{105, 101}</c> it would advance to 105, and once ordering is broken
     /// there is no longer any basis for inferring that every SELECTED plan below 105 landed, so a plan whose
     /// XML never arrived gets suppressed until the refresh horizon. Ordering is what makes a cut a suffix; with
     /// it gone the pass has earned nothing, and one lost pass of progress is the cheap side of that trade.</para>
+    ///
+    /// <para>The verdict and the signal come back TOGETHER, in one value, deliberately. Two separate functions
+    /// would let a caller take the watermark and never ask whether ordering held — a watermark that quietly
+    /// stops moving with nothing logged, which is precisely the failure this whole redesign exists to correct
+    /// and would be a poor thing to reintroduce one level up.</para>
     ///
     /// <para>Never moves backward: a pass that lands nothing, or only ids at or below the standing watermark,
     /// returns the standing value. Lowering it would refetch the catalog, and "no new plans this window" is an
     /// ordinary quiet pass, not a reset — the reset signal lives on the runtime stream, where a plan at or below
     /// the watermark that the store has never resolved can actually be observed.</para>
     /// </summary>
-    public static long AdvanceWatermark(long standing, IReadOnlyList<long> landedPlanIdsInOrder)
+    public static PlanWatermarkAdvance AdvanceWatermark(long standing, IReadOnlyList<long> landedPlanIdsInOrder)
     {
         if (landedPlanIdsInOrder is null || landedPlanIdsInOrder.Count == 0)
         {
-            return standing;
+            return new PlanWatermarkAdvance(standing, true);
         }
 
         var advanced = standing;
@@ -193,7 +210,7 @@ public static class QueryStorePlanXmlState
         {
             if (planId < previous)
             {
-                return standing;
+                return new PlanWatermarkAdvance(standing, false);
             }
 
             previous = planId;
@@ -204,31 +221,7 @@ public static class QueryStorePlanXmlState
             }
         }
 
-        return advanced;
-    }
-
-    /// <summary>
-    /// Whether a pass's landed plan_ids arrived in the plan_id order the fetch's <c>ORDER BY</c> promises — the
-    /// precondition <see cref="AdvanceWatermark"/> silently refuses to advance without. Exposed separately so
-    /// the caller can LOG the violation instead of quietly observing a watermark that stopped moving, which is
-    /// the failure mode #2164 spent two attempts not noticing.
-    /// </summary>
-    public static bool ArrivedInPlanIdOrder(IReadOnlyList<long> landedPlanIdsInOrder)
-    {
-        if (landedPlanIdsInOrder is null || landedPlanIdsInOrder.Count < 2)
-        {
-            return true;
-        }
-
-        for (var i = 1; i < landedPlanIdsInOrder.Count; i++)
-        {
-            if (landedPlanIdsInOrder[i] < landedPlanIdsInOrder[i - 1])
-            {
-                return false;
-            }
-        }
-
-        return true;
+        return new PlanWatermarkAdvance(advanced, true);
     }
 
     /// <summary>

@@ -392,18 +392,18 @@ public class QueryStorePlanWatermarkTests
 
     /// <summary>
     /// The candidate window sits just past what the budget can actually ship, at every plan size the fleet
-       /// ACTUALLY exhibits — per-quartile averages of 162 / 80 / 39 / 15 KB measured across 2,166 budget-cut
-       /// passes. The point of the pin is that none of these clamp: if a real fleet plan size hit a bound, the
-       /// bound would be doing the sizing instead of the measurement.
+    /// ACTUALLY exhibits — per-quartile averages of 162 / 80 / 39 / 15 KB measured across 2,166 budget-cut
+    /// passes. The point of the pin is that none of these clamp: if a real fleet plan size hit a bound, the
+    /// bound would be doing the sizing instead of the measurement.
     /// </summary>
     [Theory]
     [InlineData(162, 114)]
     [InlineData(80, 231)]
     [InlineData(39, 473)]
     [InlineData(15, 1229)]
-    public void CandidateWindow_SitsJustPastTheBudget_AtEveryMeasuredFleetPlanSize(int avgKb, int expected)
+    public void CandidatePlanCount_SitsJustPastTheBudget_AtEveryMeasuredFleetPlanSize(int avgKb, int expected)
     {
-        var k = QueryStorePlanXmlState.CandidateWindow(avgKb * 1024L, 12L * 1024 * 1024, out var clamped);
+        var k = QueryStorePlanXmlState.CandidatePlanCount(avgKb * 1024L, 12L * 1024 * 1024, out var clamped);
 
         Assert.Equal(expected, k);
         Assert.False(clamped, "a plan size the fleet actually shows must not hit a bound");
@@ -416,14 +416,14 @@ public class QueryStorePlanWatermarkTests
 
     /// <summary>
     /// First contact assumes LARGE plans on purpose. The estimate is a divisor, so over-stating plan size
-       /// yields a small window — and small is the safe direction: it only slows the watermark down, where too
-       /// large decompresses a catalog to discover what fits, which is the trap the window exists to prevent.
+    /// yields a small window — and small is the safe direction: it only slows the watermark down, where too
+    /// large decompresses a catalog to discover what fits, which is the trap the window exists to prevent.
     /// </summary>
     [Fact]
-    public void CandidateWindow_WithNoPreviousPass_IsConservativelySmall()
+    public void CandidatePlanCount_WithNoPreviousPass_IsConservativelySmall()
     {
-        var seed = QueryStorePlanXmlState.CandidateWindow(null, 12L * 1024 * 1024, out var clamped);
-        var atLargestMeasured = QueryStorePlanXmlState.CandidateWindow(162 * 1024L, 12L * 1024 * 1024, out _);
+        var seed = QueryStorePlanXmlState.CandidatePlanCount(null, 12L * 1024 * 1024, out var clamped);
+        var atLargestMeasured = QueryStorePlanXmlState.CandidatePlanCount(162 * 1024L, 12L * 1024 * 1024, out _);
 
         Assert.False(clamped);
         Assert.InRange(seed, atLargestMeasured - 10, atLargestMeasured + 10);
@@ -432,11 +432,11 @@ public class QueryStorePlanWatermarkTests
     /// <summary>Bounds hold, and every clamp REPORTS itself — a window silently pinned at its ceiling reads
     /// exactly like one that fit, which is how a cap becomes invisible.</summary>
     [Theory]
-    [InlineData(1, 12L * 1024 * 1024, QueryStorePlanXmlState.MaxCandidateWindow)]
-    [InlineData(64 * 1024, 12L * 1024 * 1024, QueryStorePlanXmlState.MinCandidateWindow)]
-    public void CandidateWindow_ClampsAndSaysSo(long avgKb, long budget, int expected)
+    [InlineData(1, 12L * 1024 * 1024, QueryStorePlanXmlState.MaxCandidatePlans)]
+    [InlineData(64 * 1024, 12L * 1024 * 1024, QueryStorePlanXmlState.MinCandidatePlans)]
+    public void CandidatePlanCount_ClampsAndSaysSo(long avgKb, long budget, int expected)
     {
-        var k = QueryStorePlanXmlState.CandidateWindow(avgKb * 1024L, budget, out var clamped);
+        var k = QueryStorePlanXmlState.CandidatePlanCount(avgKb * 1024L, budget, out var clamped);
 
         Assert.Equal(expected, k);
         Assert.True(clamped, "a clamped window must be reportable so the caller can log it");
@@ -444,17 +444,17 @@ public class QueryStorePlanWatermarkTests
 
     /// <summary>A misconfigured budget floors the window rather than producing zero or a negative one.</summary>
     [Fact]
-    public void CandidateWindow_WithNonPositiveBudget_FloorsAndReportsClamped()
+    public void CandidatePlanCount_WithNonPositiveBudget_FloorsAndReportsClamped()
     {
-        var k = QueryStorePlanXmlState.CandidateWindow(160 * 1024L, 0, out var clamped);
+        var k = QueryStorePlanXmlState.CandidatePlanCount(160 * 1024L, 0, out var clamped);
 
-        Assert.Equal(QueryStorePlanXmlState.MinCandidateWindow, k);
+        Assert.Equal(QueryStorePlanXmlState.MinCandidatePlans, k);
         Assert.True(clamped);
     }
 
     /// <summary>
     /// The estimator reproduces the measured fleet numbers from the same two inputs a pass already has, which
-       /// is the whole reason no probe is needed: 12.1 MB over 78 plans is the q1 average, 12.3 MB over 828 is q4.
+    /// is the whole reason no probe is needed: 12.1 MB over 78 plans is the q1 average, 12.3 MB over 828 is q4.
     /// </summary>
     [Theory]
     [InlineData(12.1, 78, 158)]
@@ -478,14 +478,17 @@ public class QueryStorePlanWatermarkTests
 
     /// <summary>
     /// THE POINT OF THE WHOLE REDESIGN: a budget-cut pass still advances. Under plan_id-ordered shipping a cut
-       /// truncates a SUFFIX, so the highest landed id is safe. The previous design shipped in
-       /// last_execution_time order, where a cut left an arbitrary subset, no value was safe, and the guard that
-       /// followed meant the watermark could not advance on 97.8% of passes.
+    /// truncates a SUFFIX, so the highest landed id is safe. The previous design shipped in
+    /// last_execution_time order, where a cut left an arbitrary subset, no value was safe, and the guard that
+    /// followed meant the watermark could not advance on 97.8% of passes.
     /// </summary>
     [Fact]
     public void AdvanceWatermark_OnABudgetCutPass_StillAdvances()
     {
-        Assert.Equal(102, QueryStorePlanXmlState.AdvanceWatermark(100, new long[] { 101, 102 }));
+        var cut = QueryStorePlanXmlState.AdvanceWatermark(100, new long[] { 101, 102 });
+
+        Assert.Equal(102, cut.Watermark);
+        Assert.True(cut.ArrivedInPlanIdOrder);
     }
 
     /// <summary>Never backward, and a quiet pass earns nothing: lowering the watermark refetches the catalog,
@@ -497,33 +500,35 @@ public class QueryStorePlanWatermarkTests
     [InlineData(new[] { 101L, 101L, 102L }, 102L)]
     public void AdvanceWatermark_NeverMovesBackward(long[] landed, long expected)
     {
-        Assert.Equal(expected, QueryStorePlanXmlState.AdvanceWatermark(100, landed));
+        Assert.Equal(expected, QueryStorePlanXmlState.AdvanceWatermark(100, landed).Watermark);
     }
 
     /// <summary>
     /// A descent ABANDONS the advance rather than honouring the leading ascending run. Honouring it looks
-       /// safer and is not: given {105, 101} it would advance to 105, and with ordering broken there is no basis
-       /// for inferring that every SELECTED plan below 105 landed — so a plan whose XML never arrived would be
-       /// suppressed until the refresh horizon. One lost pass of progress is the cheap side of that trade.
+    /// safer and is not: given {105, 101} it would advance to 105, and with ordering broken there is no basis
+    /// for inferring that every SELECTED plan below 105 landed — so a plan whose XML never arrived would be
+    /// suppressed until the refresh horizon. One lost pass of progress is the cheap side of that trade.
     /// </summary>
     [Theory]
     [InlineData(new[] { 101L, 102L, 99L, 105L })]
     [InlineData(new[] { 105L, 101L })]
     public void AdvanceWatermark_WhenOrderingIsViolated_RefusesToAdvance(long[] landed)
     {
-        Assert.Equal(100, QueryStorePlanXmlState.AdvanceWatermark(100, landed));
-        Assert.False(QueryStorePlanXmlState.ArrivedInPlanIdOrder(landed),
+        var refused = QueryStorePlanXmlState.AdvanceWatermark(100, landed);
+
+        Assert.Equal(100, refused.Watermark);
+        Assert.False(refused.ArrivedInPlanIdOrder,
             "the caller needs this to LOG the violation instead of just watching the watermark stop");
     }
 
-    /// <summary>The order check agrees with the advance on the cases that are fine.</summary>
+    /// <summary>The ordering verdict rides along with the advance on the cases that are fine.</summary>
     [Theory]
     [InlineData(new[] { 101L, 102L, 103L })]
     [InlineData(new[] { 101L, 101L, 102L })]
     [InlineData(new[] { 7L })]
     [InlineData(new long[0])]
-    public void ArrivedInPlanIdOrder_AcceptsNonDescending(long[] landed)
+    public void AdvanceWatermark_AcceptsNonDescendingArrival(long[] landed)
     {
-        Assert.True(QueryStorePlanXmlState.ArrivedInPlanIdOrder(landed));
+        Assert.True(QueryStorePlanXmlState.AdvanceWatermark(100, landed).ArrivedInPlanIdOrder);
     }
 }
