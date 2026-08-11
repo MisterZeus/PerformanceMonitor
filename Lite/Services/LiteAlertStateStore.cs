@@ -92,6 +92,7 @@ public sealed class LiteAlertStateStore : IAlertStateStore
         var serverId = ParseServerKey(serverKey);
         return Task.Run(() => _store.SaveFailedJobWatermarkAsync(serverId, watermark));
     }
+
     /// <summary>
     /// #2166: not persisted in Lite yet. Deliberately a no-op rather than a throw or a silent in-memory
     /// cache — with no memory the engine sees every deviation as new, which IS Lite's pre-#2166 behavior
@@ -107,7 +108,6 @@ public sealed class LiteAlertStateStore : IAlertStateStore
     /// </summary>
     public Task ClearDatabaseStateAlertedAsync(string serverKey, string databaseName) =>
         Task.CompletedTask;
-
 
     private static int ParseServerKey(string serverKey) =>
         int.Parse(serverKey, CultureInfo.InvariantCulture);

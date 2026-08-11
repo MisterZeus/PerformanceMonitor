@@ -162,6 +162,7 @@ ON CONFLICT (server_id, metric_name) DO UPDATE SET
             _logger?.LogError("Could not persist failed-job watermark: {Message}", ex.Message);
         }
     }
+
     /// <summary>
     /// #2166: stamps the alerted state onto the database's row in <c>config.database_state_expected</c>,
     /// the table that already holds this alert's per-database config.
@@ -232,7 +233,6 @@ AND   database_name = $2", connection);
             _logger?.LogWarning("Could not clear the alerted database state for {Database}: {Message}", databaseName, ex.Message);
         }
     }
-
 
     /// <summary>Naive-UTC now, Kind-Unspecified — the product's PG timestamp discipline.</summary>
     private static DateTime NaiveUtcNow() =>
