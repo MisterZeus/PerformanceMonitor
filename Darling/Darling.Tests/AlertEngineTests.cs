@@ -8,7 +8,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
@@ -206,6 +208,24 @@ public sealed class AlertEngineTests
         public Task SaveDatabaseStateAlertedAsync(string serverKey, string databaseName, string effectiveState)
         {
             DatabaseStateAlerted.Add((serverKey, databaseName, effectiveState));
+            Memory[databaseName] = effectiveState;
+            return Task.CompletedTask;
+        }
+
+        public List<(string Server, string Db)> DatabaseStateCleared { get; } = new();
+
+        /// <summary>
+        /// What the store would HOLD, not merely which calls arrived. The engine's edge trigger is a
+        /// round trip — write on fire, read back through the adapter next cycle — and a stub that only
+        /// counts calls cannot fail when one direction of that trip is missing. A test can feed this
+        /// back in as LastAlertedState to exercise the real composition.
+        /// </summary>
+        public Dictionary<string, string> Memory { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        public Task ClearDatabaseStateAlertedAsync(string serverKey, string databaseName)
+        {
+            DatabaseStateCleared.Add((serverKey, databaseName));
+            Memory.Remove(databaseName);
             return Task.CompletedTask;
         }
     }
@@ -1363,6 +1383,76 @@ public sealed class AlertEngineTests
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal(PerformanceMonitor.Notifications.AlertSeverityLevel.Critical, fired.Severity);
+    }
+
+    [Fact]
+    public async Task DatabaseState_RepeatEpisode_OfTheSameState_FiresAgainAfterRecovery()
+    {
+        /* The falling-edge property, driven as a full round trip through the store's MEMORY rather than
+           through call counting — the decoupling that let the first cut of #2166 ship with a permanent
+           memory. Park, recover, park again in the SAME state: the repeat soft-delete workflow this alert
+           exists for. If recovery does not clear what firing recorded, evaluation 3 reads OFFLINE ==
+           OFFLINE, judges itself already-announced, and the second parking is swallowed for good. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        var engine = h.Build();
+
+        /* Episode 1: parked. No memory yet, so it announces and records. */
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Archive", StateDesc = "OFFLINE", ExpectedState = "ONLINE", LastAlertedState = "" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("OFFLINE", h.StateStore.Memory["Archive"]);
+
+        /* Recovery: back to expected, so it stops deviating and drops out of the adapter's results. */
+        h.Adapter.DatabaseStates.Clear();
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Contains(h.StateStore.DatabaseStateCleared, r => r.Db == "Archive");
+        Assert.False(h.StateStore.Memory.ContainsKey("Archive"),
+            "recovery must forget the announced state, or the edge can never trigger a second time");
+
+        /* Episode 2: parked again, same state. The adapter reports whatever the store now holds — which is
+           the whole point — so this fires only if the clear above actually happened. */
+        h.Deliverer.Outcomes.Clear();
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo
+        {
+            DatabaseName = "Archive",
+            StateDesc = "OFFLINE",
+            ExpectedState = "ONLINE",
+            LastAlertedState = h.StateStore.Memory.TryGetValue("Archive", out var remembered) ? remembered : "",
+        });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public void DatabaseState_AlertedStamp_IsAnUpdate_NeverAnInsert()
+    {
+        /* A row is only absent when the database was first observed in an integrity state, which the seed
+           logic deliberately refuses to baseline. An INSERT here must supply expected_state (NOT NULL) and
+           the only value on hand is the state being alerted ON — so inserting would baseline a SUSPECT
+           database as "expected SUSPECT", stop it deviating, report it RECOVERED while still corrupt, and
+           silence it permanently. Strictly worse than the repetition being fixed, so it is pinned. */
+        var source = ReadStateStoreSource();
+        var method = source[source.IndexOf("public async Task SaveDatabaseStateAlertedAsync", StringComparison.Ordinal)..];
+        var body = method[..method.IndexOf("public async Task ClearDatabaseStateAlertedAsync", StringComparison.Ordinal)];
+
+        Assert.Contains("UPDATE config.database_state_expected", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("INSERT INTO config.database_state_expected", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("ON CONFLICT", body, StringComparison.Ordinal);
+    }
+
+    private static string ReadStateStoreSource([CallerFilePath] string thisFile = "")
+    {
+        var relative = Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "PgAlertStateStore.cs");
+        var dir = Path.GetDirectoryName(thisFile)!;
+        while (dir is not null && !File.Exists(Path.Combine(dir, relative)))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return File.ReadAllText(Path.Combine(dir!, relative));
     }
 
     [Fact]

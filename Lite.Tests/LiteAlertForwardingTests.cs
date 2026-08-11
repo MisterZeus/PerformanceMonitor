@@ -193,6 +193,14 @@ public class LiteAlertForwardingTests : IDisposable
             DatabaseStateAlerted.Add((serverKey, databaseName, effectiveState));
             return Task.CompletedTask;
         }
+
+        public List<(string Server, string Db)> DatabaseStateCleared { get; } = new();
+
+        public Task ClearDatabaseStateAlertedAsync(string serverKey, string databaseName)
+        {
+            DatabaseStateCleared.Add((serverKey, databaseName));
+            return Task.CompletedTask;
+        }
     }
 
     private sealed class RecordingDeliverer : IAlertDeliverer

@@ -1329,6 +1329,13 @@ public sealed class AlertEngine
             {
                 active.Remove(dbName);
                 _lastDatabaseStateAlert.TryRemove(DatabaseStateCooldownKey(key, dbName), out _);
+
+                /* #2166 falling edge: forget the announced state as well as the in-memory cooldown, or the
+                   edge only ever triggers once per database. Cleared even when suppressed — suppression
+                   governs whether operators are TOLD about a transition, never whether the engine keeps
+                   accurate state, and leaving a stale memory behind would swallow the next real episode. */
+                await _stateStore.ClearDatabaseStateAlertedAsync(key, dbName);
+
                 if (!suppressed)
                 {
                     await NotifyResolutionAsync(new AlertResolution(

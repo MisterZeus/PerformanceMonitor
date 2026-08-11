@@ -80,4 +80,15 @@ public interface IAlertStateStore
     /// rather than a broken state.</para>
     /// </summary>
     Task SaveDatabaseStateAlertedAsync(string serverKey, string databaseName, string effectiveState);
+
+    /// <summary>
+    /// Forgets what <see cref="SaveDatabaseStateAlertedAsync"/> recorded, called when a database returns to
+    /// its expected state (#2166). The falling edge of an edge trigger: without it the memory is permanent
+    /// and each database can only ever announce once, so a second parking of the same database in the same
+    /// state — the repeat soft-delete workflow this alert is FOR — would be silently swallowed.
+    ///
+    /// <para>Same no-op fallback as its sibling for hosts that do not persist: no memory to clear means
+    /// nothing to go stale.</para>
+    /// </summary>
+    Task ClearDatabaseStateAlertedAsync(string serverKey, string databaseName);
 }

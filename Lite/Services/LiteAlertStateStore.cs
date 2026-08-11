@@ -102,6 +102,12 @@ public sealed class LiteAlertStateStore : IAlertStateStore
     public Task SaveDatabaseStateAlertedAsync(string serverKey, string databaseName, string effectiveState) =>
         Task.CompletedTask;
 
+    /// <summary>
+    /// #2166: nothing is stored, so nothing needs clearing. No-op for the same reason as its sibling above.
+    /// </summary>
+    public Task ClearDatabaseStateAlertedAsync(string serverKey, string databaseName) =>
+        Task.CompletedTask;
+
 
     private static int ParseServerKey(string serverKey) =>
         int.Parse(serverKey, CultureInfo.InvariantCulture);

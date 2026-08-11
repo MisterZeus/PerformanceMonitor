@@ -164,10 +164,19 @@ ON CONFLICT (server_id, metric_name) DO UPDATE SET
     }
     /// <summary>
     /// #2166: stamps the alerted state onto the database's row in <c>config.database_state_expected</c>,
-    /// the table that already holds this alert's per-database config. Upsert rather than update, because a
-    /// database can be alerted on its very first observation (a critical state with no accepted baseline)
-    /// and therefore may have no row yet; the baseline column takes the current state in that case, which
-    /// the seed logic would have written anyway on the next healthy observation.
+    /// the table that already holds this alert's per-database config.
+    ///
+    /// <para>UPDATE, never upsert. An INSERT here would have to supply <c>expected_state</c> (NOT NULL), and
+    /// the only value available is the state being alerted ON — so a database first observed SUSPECT would
+    /// get SUSPECT written as its accepted baseline. It would then stop deviating, drop out of the deviation
+    /// query, be read as RECOVERED (firing a false "resolved" on a still-corrupt database), and never alert
+    /// again. The seed logic refuses to baseline SUSPECT/RECOVERY_PENDING/EMERGENCY for exactly this reason;
+    /// this write must not do behind its back what it declines to do in front.</para>
+    ///
+    /// <para>Nothing is lost by skipping the no-row case: a database with no baseline row was first observed
+    /// in an integrity state, and those states are never edge-suppressed (RepeatsAreNoise is false for them),
+    /// so the memory this writes is never consulted for them. The parked-database case that NEEDS the memory
+    /// always has a row — it was baselined when the database was still healthy.</para>
     /// </summary>
     public async Task SaveDatabaseStateAlertedAsync(string serverKey, string databaseName, string effectiveState)
     {
@@ -175,11 +184,11 @@ ON CONFLICT (server_id, metric_name) DO UPDATE SET
         {
             await using var connection = await _postgres.OpenConnectionAsync();
             using var command = new NpgsqlCommand(@"
-INSERT INTO config.database_state_expected (server_id, database_name, expected_state, is_user_override, updated_at, last_alerted_state, last_alerted_at)
-VALUES ($1, $2, $3, false, (now() AT TIME ZONE 'UTC'), $3, (now() AT TIME ZONE 'UTC'))
-ON CONFLICT (server_id, database_name) DO UPDATE SET
-    last_alerted_state = EXCLUDED.last_alerted_state,
-    last_alerted_at = EXCLUDED.last_alerted_at", connection);
+UPDATE config.database_state_expected
+SET last_alerted_state = $3,
+    last_alerted_at = (now() AT TIME ZONE 'UTC')
+WHERE server_id = $1
+AND   database_name = $2", connection);
             command.Parameters.AddWithValue(ParseServerKey(serverKey));
             command.Parameters.AddWithValue(databaseName);
             command.Parameters.AddWithValue(effectiveState);
@@ -190,6 +199,37 @@ ON CONFLICT (server_id, database_name) DO UPDATE SET
             /* Same posture as the watermark writes: a failed stamp costs a duplicate alert next cycle,
                never a missed one, so it logs and continues rather than failing the sweep. */
             _logger?.LogWarning("Could not record the alerted database state for {Database}: {Message}", databaseName, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// #2166: forgets the alerted state when a database returns to its expected one, so the NEXT episode is
+    /// a fresh transition. Without this the memory is permanent: park a database OFFLINE (alerts), bring it
+    /// back (resolves), park it OFFLINE again weeks later — the stale <c>last_alerted_state</c> still reads
+    /// OFFLINE, the repeat is judged already-announced, and the second parking never alerts at all. Edge
+    /// triggering has to reset on the falling edge or it only ever fires once per database, forever.
+    /// </summary>
+    public async Task ClearDatabaseStateAlertedAsync(string serverKey, string databaseName)
+    {
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync();
+            using var command = new NpgsqlCommand(@"
+UPDATE config.database_state_expected
+SET last_alerted_state = NULL,
+    last_alerted_at = NULL
+WHERE server_id = $1
+AND   database_name = $2", connection);
+            command.Parameters.AddWithValue(ParseServerKey(serverKey));
+            command.Parameters.AddWithValue(databaseName);
+            await command.ExecuteNonQueryAsync();
+        }
+        catch (Exception ex)
+        {
+            /* A failed clear costs a MISSED alert on the next episode rather than a duplicate, so it is the
+               more consequential of the two failures — logged at warning with the database named, same as
+               its sibling, because the sweep must still finish for every other database. */
+            _logger?.LogWarning("Could not clear the alerted database state for {Database}: {Message}", databaseName, ex.Message);
         }
     }
 
