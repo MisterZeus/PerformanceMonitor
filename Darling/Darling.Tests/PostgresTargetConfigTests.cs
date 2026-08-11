@@ -11,6 +11,8 @@ using System.Linq;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -267,5 +269,110 @@ public class PostgresTargetConfigTests
         var problems = ConfigWith(server).Validate();
 
         Assert.Equal(expectProblem, problems.Any(p => p.Contains("port must be between", StringComparison.Ordinal)));
+    }
+
+    /* ─────────────── the store round-trip: darling.json is NOT the live source of truth ─────────────── */
+
+    /// <summary>
+    /// Every connection-affecting <see cref="MonitoredServer"/> property must have a column in
+    /// <c>config.config_monitored_servers</c>, because that registry — not darling.json — is what the worker
+    /// reads once the store has been seeded.
+    /// <para>This test exists because <c>Engine</c> and <c>Port</c> did not have columns. A PostgreSQL entry
+    /// was therefore written to the store without its engine, read back as the <c>"sqlserver"</c> property
+    /// default, and connected to with <c>SqlConnection</c> — on the FIRST start, since the seed is immediately
+    /// followed by the load that replaces the file's list. Nothing failed to compile and no test covered it;
+    /// the whole PostgreSQL feature simply did not survive its own registration. A property-driven check is
+    /// the only kind that catches the NEXT one.</para>
+    /// </summary>
+    [Fact]
+    public void EveryRoundTripCriticalServerPropertyHasAStoreColumn()
+    {
+        /* Property name -> column name. Deliberately explicit rather than a PascalCase-to-snake_case
+           convention, because the mapping is the thing under test: a convention would "prove" a column
+           exists by deriving its name from the property. */
+        var mustRoundTrip = new (string Property, string Column)[]
+        {
+            ("Name", "name"),
+            ("Engine", "engine"),
+            ("Host", "host"),
+            ("Port", "port"),
+            ("Database", "database"),
+            ("Auth", "auth"),
+            ("Username", "username"),
+            ("EncryptedPassword", "encrypted_password"),
+            ("ReadOnlyIntent", "read_only_intent"),
+            ("TrustServerCertificate", "trust_server_certificate"),
+            ("EncryptMode", "encrypt_mode"),
+            ("MultiSubnetFailover", "multi_subnet_failover"),
+            ("ExcludedDatabases", "excluded_databases"),
+            ("MonthlyCostUsd", "monthly_cost_usd"),
+            ("AlertDeliveryModeOverride", "alert_delivery_mode_override"),
+        };
+
+        /* Password is the deliberate exception: a plaintext dev password is never persisted, and is
+           backfilled from the in-memory bootstrap config at read time instead. */
+        var properties = typeof(MonitoredServer).GetProperties()
+            .Where(p => p.CanWrite)
+            .Select(p => p.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        var accountedFor = mustRoundTrip.Select(m => m.Property).Append("Password").ToHashSet(StringComparer.Ordinal);
+
+        Assert.Empty(properties.Except(accountedFor));
+
+        /* The columns, as the ladder actually leaves them: the CREATE plus every later ADD COLUMN. */
+        var ladder = string.Join("\n", PgMigrations.Scripts.Select(s => s.Sql));
+        foreach (var (property, column) in mustRoundTrip)
+        {
+            Assert.True(
+                ladder.Contains($"    {column} ", StringComparison.Ordinal)
+                || ladder.Contains($"ADD COLUMN IF NOT EXISTS {column} ", StringComparison.Ordinal),
+                $"MonitoredServer.{property} has no '{column}' column in config_monitored_servers — it will not " +
+                "survive the store round-trip, and the store is authoritative once seeded.");
+        }
+    }
+
+    /// <summary>
+    /// The two write paths into the registry must both carry the engine. The seed covers a fresh install; the
+    /// <c>add_servers</c> tool covers every install after the first seed, which is the ONLY path there — a
+    /// darling.json edit does not add a server to an already-seeded store.
+    /// </summary>
+    [Fact]
+    public void TheOnboardingToolPersistsTheEngineAndPort()
+    {
+        Assert.Contains("engine", DarlingMcpServerAdminTools.InsertServerSql, StringComparison.Ordinal);
+        Assert.Contains("port", DarlingMcpServerAdminTools.InsertServerSql, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(null, "sqlserver")]
+    [InlineData("", "sqlserver")]
+    [InlineData("sqlserver", "sqlserver")]
+    [InlineData("postgres", "postgres")]
+    [InlineData("POSTGRESQL", "postgres")]
+    [InlineData("  aurora  ", "postgres")]
+    public void OnboardingNormalizesTheEngine(string? raw, string expected)
+    {
+        var (engine, error) = DarlingMcpServerAdminTools.ResolveEngine(raw);
+
+        Assert.Null(error);
+        Assert.Equal(expected, engine);
+    }
+
+    /// <summary>
+    /// A typo must be REFUSED here, not silently resolved to SQL Server the way the file parser does. The
+    /// parser's leniency protects a whole fleet from one bad line at startup; onboarding is a single
+    /// deliberate act, and "postgress" quietly becoming a SQL Server target yields a connection failure
+    /// against port 5432 with nothing pointing at the real mistake.
+    /// </summary>
+    [Theory]
+    [InlineData("postgress")]
+    [InlineData("mysql")]
+    [InlineData("cockroach")]
+    public void OnboardingRefusesAnUnrecognizedEngineRatherThanDefaultingIt(string raw)
+    {
+        var (_, error) = DarlingMcpServerAdminTools.ResolveEngine(raw);
+
+        Assert.NotNull(error);
+        Assert.Contains("postgres", error, StringComparison.Ordinal);
     }
 }

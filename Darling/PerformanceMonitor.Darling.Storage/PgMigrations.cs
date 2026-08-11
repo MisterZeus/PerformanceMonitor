@@ -123,6 +123,7 @@ public static class PgMigrations
         new Migration(64, "pg-replication-slots", V64Sql),
         new Migration(65, "pg-autovacuum-stats", V65Sql),
         new Migration(66, "pg-io-stats", V66Sql),
+        new Migration(67, "monitored-server-engine", V67Sql),
     };
 
     /// <summary>
@@ -1466,6 +1467,28 @@ CREATE TABLE IF NOT EXISTS collect.pg_io_stats (
 
 CREATE INDEX IF NOT EXISTS idx_pg_io_stats_time
     ON collect.pg_io_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V67 — <c>config.config_monitored_servers.engine</c> and <c>.port</c>, the two columns without which a
+    /// PostgreSQL target cannot survive its own registration.
+    /// <para>The registry is store-authoritative after the first seed: darling.json seeds it once, and from
+    /// then on the worker's server list comes from this table. Every other <c>MonitoredServer</c> field had a
+    /// column here; these two did not, so a PostgreSQL entry round-tripped through the store as
+    /// <c>"sqlserver"</c> on the driver's default port (both property defaults) and the service then opened a
+    /// <c>SqlConnection</c> to it. That happens on the FIRST start, not a later one, because the seed is
+    /// immediately followed by the load that replaces the file's list with the store's.</para>
+    /// <para>Both defaults are what make this safe on an existing store. Every row already there is a SQL
+    /// Server target, and <c>port</c> is consumed only by the PostgreSQL connection builder (the SQL Server
+    /// path carries a port in the host string), so <c>0</c> means "the driver's default" exactly as the
+    /// property does. The SQL-Server-only writers — the Viewer's Add / Manage Servers dialogs — keep
+    /// inserting without naming either column and keep meaning the same thing.</para>
+    /// </summary>
+    private const string V67Sql = @"
+ALTER TABLE config.config_monitored_servers
+    ADD COLUMN IF NOT EXISTS engine text NOT NULL DEFAULT 'sqlserver';
+
+ALTER TABLE config.config_monitored_servers
+    ADD COLUMN IF NOT EXISTS port integer NOT NULL DEFAULT 0;";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

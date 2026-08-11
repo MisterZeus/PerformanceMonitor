@@ -38,8 +38,14 @@ public sealed class PgSchemaGeneratorTests
            fragment DDL generation. Dispatch is gated separately, by engine, in
            CollectorCatalog.AppliesTo(definition, target). */
         Assert.Equal(48, CollectorCatalog.All.Count);
-        Assert.Equal(45, CollectorCatalog.All.Select(s => s.TargetTable).Distinct().Count());
-        Assert.Equal(45, CollectorCatalog.All.Select(s => s.Name).Distinct().Count());
+
+        /* Uniqueness is asserted AGAINST THE COUNT rather than against a second literal. The literals here
+           had drifted to 45 while the real figure tracked the count, so the test that exists to catch a
+           duplicate table or name was itself failing for an unrelated reason — and could not say so, because
+           this project does not execute on the machine the collectors were written on. Two collectors sharing
+           a TargetTable would still fail this, which is the point. */
+        Assert.Equal(CollectorCatalog.All.Count, CollectorCatalog.All.Select(s => s.TargetTable).Distinct().Count());
+        Assert.Equal(CollectorCatalog.All.Count, CollectorCatalog.All.Select(s => s.Name).Distinct().Count());
     }
 
     [Fact]
@@ -563,13 +569,17 @@ public sealed class PgSchemaGeneratorTests
     {
         var script = PgSchemaGenerator.GenerateFullSchema();
 
+        /* EVERY table, asserted against the catalog count rather than a literal — the test's name is the
+           invariant, and a literal here silently became a subset check (it read 46 of 48) the moment the
+           catalog grew. A collector whose table the generator skips still fails this. */
         var tableCount = CollectorCatalog.All.Count(s => script.Contains($"CREATE TABLE IF NOT EXISTS {s.TargetTable} (", StringComparison.Ordinal));
-        Assert.Equal(46, tableCount);
+        Assert.Equal(CollectorCatalog.All.Count, tableCount);
 
-        /* 41 tables minus the two index-less config tables (server_config, database_config) = 39 indexes
-           (database_states is a time-series collector and gets the default retrieval index). */
+        /* Every table gets a retrieval index except the two index-less config tables (server_config,
+           database_config), which CreateIndex returns null for — so this tracks the catalog minus exactly
+           those two, not a literal that has to be remembered per collector. */
         var indexCount = script.Split("CREATE INDEX IF NOT EXISTS").Length - 1;
-        Assert.Equal(39, indexCount);
+        Assert.Equal(CollectorCatalog.All.Count - 2, indexCount);
 
         /* The precision guard can never regress silently. */
         Assert.DoesNotContain("numeric(0,0)", script, StringComparison.Ordinal);

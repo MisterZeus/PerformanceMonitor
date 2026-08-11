@@ -40,8 +40,8 @@ public sealed class StoreSelfMetricsTests
         var v53 = PgMigrations.Scripts.Single(m => m.Version == 53);
 
         Assert.Equal("store-self-metrics", v53.Name);
-        Assert.Equal(59, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(59, StorageVersion.SchemaVersion);
+        Assert.Equal(67, PgMigrations.Scripts[^1].Version);
+        Assert.Equal(67, StorageVersion.SchemaVersion);
 
         /* collect.-qualified like V44/V47/V49, and idempotent so a re-run is a no-op. */
         Assert.Contains("CREATE TABLE IF NOT EXISTS collect.store_metrics (", v53.Sql, StringComparison.Ordinal);

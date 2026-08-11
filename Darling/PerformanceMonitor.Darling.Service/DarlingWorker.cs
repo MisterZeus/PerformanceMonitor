@@ -374,7 +374,10 @@ public sealed class DarlingWorker : BackgroundService
        self-alerts inherit its delivery/cooldown/restart-replay. Held as a field because the connection
        edge fires from TryConnectAsync and the reconcile drops per-server state through it. */
     private DarlingSelfAlertEvaluator? _selfAlerts;
-    private IAlertDeliverer? _alertDeliverer;
+    /* Concrete rather than IAlertDeliverer: there is exactly one implementation here and it is constructed
+       a few lines from where this is assigned, so the interface bought an indirection per delivered alert
+       and no seam (CA1859). */
+    private DarlingAlertDeliverer? _alertDeliverer;
 
     /* #1560: the live MCP enable/port seam — published to the MCP host's supervisor at startup and on
        every control-plane reload, so the viewer's Settings toggle takes effect without a restart. */

@@ -492,7 +492,9 @@ There are deliberately **no collection-schedule or retention settings** in `darl
 
 ## PostgreSQL Targets
 
-Darling monitors PostgreSQL alongside SQL Server. Add `"engine": "postgres"` to a `servers` entry and that target is collected by the PostgreSQL collectors instead of the T-SQL ones:
+Darling monitors PostgreSQL alongside SQL Server. For the ordered procedure with a proof point at each step, see [**the first-target runbook**](../docs/postgres-first-target-runbook.md); this section is the reference for what each piece does.
+
+Add `"engine": "postgres"` to a `servers` entry and that target is collected by the PostgreSQL collectors instead of the T-SQL ones:
 
 ```json
 {
@@ -505,7 +507,9 @@ Darling monitors PostgreSQL alongside SQL Server. Add `"engine": "postgres"` to 
 }
 ```
 
-`auth` must be `"sql"` — PostgreSQL has no integrated-authentication path here, and an entry asking for it fails [`--test-connection`](#validate-the-config-pre-flight) rather than waiting to fail at first connect. Password handling is identical to a SQL Server entry: `--encrypt-password` produces the DPAPI blob, and the `env:NAME` / `file:/path` references work the same way. TLS defaults to full certificate verification (`SslMode=VerifyFull`); `trustServerCertificate` relaxes it to `Require`, which is the setting Aurora usually needs since it presents an RDS CA a stock trust store does not know, and `"encryptMode": "Optional"` relaxes it further to `Prefer`.
+**Which path registers a target depends on the store, not the file.** `darling.json` seeds `config.config_monitored_servers` once, when it is empty; after that the registry is authoritative and a darling.json edit adds nothing. So a fresh install declares its PostgreSQL targets in the file, and an existing one adds them with the [`add_servers`](#mcp) tool (or the Viewer's Add Server dialog), which takes effect within one collection sweep without a restart. The registry carries `engine` and `port` per row, so a target keeps its engine across restarts and reloads.
+
+`auth` must be `"sql"` — PostgreSQL has no integrated-authentication path here, and an entry asking for it fails [`--test-connection`](#validate-the-config-pre-flight) rather than waiting to fail at first connect. `add_servers` enforces the same rule, and unlike the file parser it REFUSES an unrecognized `engine` rather than resolving it to SQL Server: the file's leniency keeps one bad line from stopping the whole fleet at startup, while onboarding is a single deliberate act where a silent fallback would surface as a connection failure against the wrong port. Password handling is identical to a SQL Server entry: `--encrypt-password` produces the DPAPI blob, and the `env:NAME` / `file:/path` references work the same way. TLS defaults to full certificate verification (`SslMode=VerifyFull`); `trustServerCertificate` relaxes it to `Require`, which is the setting Aurora usually needs since it presents an RDS CA a stock trust store does not know, and `"encryptMode": "Optional"` relaxes it further to `Prefer`.
 
 **One store, both engines.** The PostgreSQL collectors write to the same store as the SQL Server ones, into their own tables, on the same naive-UTC contract and the same `server_id` identity. Nothing is partitioned by engine — a mixed fleet is one store, one viewer, one MCP endpoint.
 

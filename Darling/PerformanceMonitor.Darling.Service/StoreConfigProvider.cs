@@ -282,8 +282,8 @@ ON CONFLICT (id) DO NOTHING", connection);
 INSERT INTO config_monitored_servers (
     server_id, name, host, database, auth, username, encrypted_password, encrypt_mode,
     trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
-    monthly_cost_usd, capture_plans, alert_delivery_mode_override, is_enabled, created_at, modified_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, $14, TRUE, $15, $15)
+    monthly_cost_usd, capture_plans, alert_delivery_mode_override, engine, port, is_enabled, created_at, modified_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, $14, $16, $17, TRUE, $15, $15)
 ON CONFLICT (server_id) DO NOTHING", connection);
             command.Parameters.AddWithValue(ServerIdHelper.GetDeterministicHashCode(server.StorageName));
             command.Parameters.AddWithValue(server.DisplayName);
@@ -303,6 +303,14 @@ ON CONFLICT (server_id) DO NOTHING", connection);
             /* Per-server delivery override (#1236): the enum name or NULL = "inherit the global". */
             AddNullableText(command, server.AlertDeliveryModeOverride?.ToString());
             command.Parameters.AddWithValue(now);
+            /* V67: the engine, persisted as the raw darling.json string rather than the parsed enum, so the
+               store round-trips exactly what the operator wrote — including an alias like "aurora" — and the
+               single parse in MonitoredServer.TargetEngine stays the only place that interprets it. */
+            command.Parameters.AddWithValue(server.Engine);
+            /* V67: the port, PostgreSQL-only (0 = the driver's default). Persisted for the same reason as the
+               engine — a non-default port dropped here would connect to 5432 and fail with an error naming
+               the right host. */
+            command.Parameters.AddWithValue(server.Port);
             await command.ExecuteNonQueryAsync(ct);
         }
     }
@@ -553,7 +561,8 @@ FROM config_notification WHERE id = 1", connection);
         var servers = new List<MonitoredServer>();
         using var command = new NpgsqlCommand(@"
 SELECT name, host, database, auth, username, encrypted_password, encrypt_mode, trust_server_certificate,
-       read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, alert_delivery_mode_override
+       read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, alert_delivery_mode_override,
+       engine, port
 FROM config_monitored_servers WHERE is_enabled = TRUE
 ORDER BY name", connection);
         using var reader = await command.ExecuteReaderAsync(ct);
@@ -593,6 +602,12 @@ ORDER BY name", connection);
             MonthlyCostUsd = reader.GetDecimal(11),
             /* #1236: the per-server delivery override (null = inherit the global), available at delivery time. */
             AlertDeliveryModeOverride = ParseDeliveryOverride(reader.IsDBNull(12) ? null : reader.GetString(12)),
+            /* V67. Without this the registry — which is authoritative once seeded — silently downgraded every
+               PostgreSQL target to the "sqlserver" property default, and the service opened a SqlConnection to
+               port 5432. NOT NULL DEFAULT in both columns means the DBNull guards are belt-and-braces for a
+               store mid-migration, not an expected path. */
+            Engine = reader.IsDBNull(13) ? "sqlserver" : reader.GetString(13),
+            Port = reader.IsDBNull(14) ? 0 : reader.GetInt32(14),
         };
 
         if (server.UsesSqlAuth && string.IsNullOrWhiteSpace(server.EncryptedPassword))
