@@ -42,7 +42,7 @@ public sealed class DarlingMcpPgWaitTools
         {
             var now = DateTime.UtcNow;
             var rows = await DarlingPgWaitReader.GetPgWaitStatsAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit);
 
             /* An empty result is genuinely ambiguous here in a way it is not for SQL Server: it means
                either no data in the window, or that this server is not a PostgreSQL target at all. Say
@@ -58,7 +58,8 @@ public sealed class DarlingMcpPgWaitTools
 
             var totalWaitMs = rows.Sum(r => r.TotalWaitTimeMs);
 
-            var result = rows.Take(limit).Select(r => new
+            /* No Take(limit) — the SQL now applies the cap, so the rows returned ARE the rows asked for. */
+            var result = rows.Select(r => new
             {
                 wait_type = r.WaitType,
                 wait_event = r.WaitEvent,

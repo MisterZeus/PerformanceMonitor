@@ -674,7 +674,7 @@ jobs:
       # unrecognizably different ways and could not be reproduced locally at all.
       #
       # The values are the product's own derivation from the live hypertable count
-      # (TimescaleSupport.HypertableCount = the 41-collector catalog + collection_log = 42):
+      # (TimescaleSupport.HypertableCount = the 48-collector catalog + collection_log = 49):
       #   timescaledb.max_background_workers = HypertableCount + 2       = 51
       #   max_worker_processes = 3 + (HypertableCount + 2) + 8           = 62
       # Hard-coded here because a workflow cannot call into the product — so
