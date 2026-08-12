@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
@@ -165,7 +166,23 @@ public sealed class DuckDbSchemaGeneratorTests
     [Fact]
     public void Generated_EmitsEveryCatalogTable_AndThirtyNineIndexes()
     {
-        Assert.Equal(DuckDbSchemaGenerator.StoredCollectors.Count(), DuckDbSchemaGenerator.CreateTableStatements().Count());
+        /* Counting the filtered sequence against itself could not fail. What matters is WHICH tables are
+           emitted, so the names are compared as sets — and that no PostgreSQL table leaks into Lite's DuckDB,
+           which is the actual invariant this file now guards. */
+        var emitted = DuckDbSchemaGenerator.CreateTableStatements()
+            .Select(s => Regex.Match(s, @"CREATE TABLE IF NOT EXISTS (\w+)").Groups[1].Value)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+        var expected = DuckDbSchemaGenerator.StoredCollectors
+            .Select(c => c.TargetTable)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(expected, emitted);
+        Assert.DoesNotContain(emitted, n => n.StartsWith("pg_", StringComparison.Ordinal));
+        Assert.All(
+            CollectorCatalog.All.Where(c => c.TargetEngine == CollectorTargetEngine.PostgreSql),
+            c => Assert.DoesNotContain(c.TargetTable, emitted));
 
         /* The stored collectors minus the two index-less config tables (database_states is a
            time-series collector and gets the default retrieval index). */

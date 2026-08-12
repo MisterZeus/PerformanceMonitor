@@ -142,9 +142,15 @@ public sealed class CollectorGateSurfacePinTests
         {
             foreach (var target in AllTargets)
             {
-                Assert.Equal(
-                    CollectorCatalog.AppliesTo(definition, target),
-                    CollectorCatalog.AppliesTo(definition.Name, target));
+                /* The expectation is SPELLED OUT rather than delegated to the other overload. Comparing
+                   AppliesTo(definition, t) against AppliesTo(name, t) is nearly circular — the by-name
+                   overload just looks the name up and calls the by-definition one, so only a corrupt
+                   name->definition map could fail it, and a bug in the composed rule itself would pass.
+                   Stating the rule independently means BOTH the lookup and the composition are pinned. */
+                var expected = definition.TargetEngine == target.Engine && definition.AppliesTo(target);
+
+                Assert.Equal(expected, CollectorCatalog.AppliesTo(definition, target));
+                Assert.Equal(expected, CollectorCatalog.AppliesTo(definition.Name, target));
             }
         }
     }
