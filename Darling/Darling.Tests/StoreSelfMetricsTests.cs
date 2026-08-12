@@ -142,7 +142,7 @@ public sealed class StoreSelfMetricsTests
     {
         /* The trap a StorageVersion bump sets: a probe that cannot SEE the newest migration maps every
            healthy store below RequiredStoreSchemaVersion and the connect-time gate refuses it permanently. */
-        Assert.Equal(60, ViewerDataService.RequiredStoreSchemaVersion);
+        Assert.Equal(68, ViewerDataService.RequiredStoreSchemaVersion);
         Assert.Contains("table_name = 'store_metrics'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         /* The V53 arm: store_metrics present (and everything below it, but NOT V54's gz column —
