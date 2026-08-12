@@ -84,4 +84,59 @@ public sealed class DarlingDimensionGcBoundTests
             Assert.Contains($"WHERE {predicate}", v39, StringComparison.Ordinal);
         }
     }
+
+    /// <summary>
+    /// #2210: the DIMENSION must outlive the MAP, expressed the way it actually matters — as cutoff DATES from
+    /// the two real code paths, not as the margin constants they happen to be derived from. An earlier cutoff
+    /// deletes fewer rows, so the dim's cutoff has to be strictly earlier than the map's.
+    ///
+    /// <para>The asymmetry is the reason this is pinned. A pruned map row whose dim row survives renders a plan
+    /// as "not collected" and leaves some bytes unreclaimed until the dim's own horizon passes — visible and
+    /// self-correcting. A pruned DIM row whose map row survives is a reader resolving a live fact to absent
+    /// content, silently, weeks after the cause. Only one of those is recoverable, and the margin ordering is
+    /// what makes it the only reachable one.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(7)]
+    [InlineData(30)]
+    [InlineData(90)]
+    public void DimensionOutlivesTheMap_AtEveryFactRetention(int factRetentionDays)
+    {
+        var dimCutoff = DarlingRetention.ComputeDimensionCutoff(Now, factRetentionDays, oldestSurvivingDigestFact: null);
+        var mapCutoff = Now.AddDays(-(factRetentionDays + QueryStorePlanMap.PruneMarginDays));
+
+        Assert.True(dimCutoff < mapCutoff,
+            $"the dim GC would take content the map still points at: dim cutoff {dimCutoff:o} is not earlier " +
+            $"than map cutoff {mapCutoff:o} at {factRetentionDays}d retention");
+    }
+
+    /// <summary>
+    /// The invariant's own guard, and the direction it fails in. <see cref="TimescaleSupport.ChunkIntervalDays"/>
+    /// is where the dim's margin comes from, so shrinking it is the realistic way somebody inverts this without
+    /// touching either margin deliberately — at 0 the two margins meet and the ordering is gone.
+    /// </summary>
+    [Fact]
+    public void MarginOrdering_HoldsAtTheLiveChunkInterval_AndFailsWhenTheMarginsMeet()
+    {
+        Assert.True(QueryStorePlanMap.MarginOrderingHolds(TimescaleSupport.ChunkIntervalDays));
+        Assert.False(QueryStorePlanMap.MarginOrderingHolds(0));
+    }
+
+    /// <summary>
+    /// The measured clamp cannot protect Query Store digests, which is why the batch-touch refresh is the whole
+    /// protection (#2210). The clamp reads the oldest surviving DIGEST-CARRYING fact, and the digest-carrying
+    /// fact tables are exactly the two in <see cref="PayloadDimensions.All"/> — Query Store is deliberately not
+    /// among them, because its facts resolve through the map instead of carrying a digest column.
+    ///
+    /// <para>Pinned so that adding a query_store entry to <c>All</c> — the tempting way to "fix" the blindness —
+    /// fails here and sends the reader to the comment explaining that the entry would describe a column that
+    /// does not exist.</para>
+    /// </summary>
+    [Fact]
+    public void TheMeasuredClamp_IsBlindToQueryStoreFacts_ByConstruction()
+    {
+        Assert.DoesNotContain("query_store_stats", PayloadDimensions.All.Select(d => d.TargetTable));
+        Assert.DoesNotContain("query_store_stats", PayloadDimensions.DigestPredicateByTable.Keys);
+    }
 }
