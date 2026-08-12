@@ -69,6 +69,12 @@ public static class PgTableTuning
         "ALTER TABLE collect.procedure_stats SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)",
         "ALTER TABLE collect.query_stats SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)",
         "ALTER TABLE collect.query_store_stats SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)",
+        /* pg_statement_stats is query_stats' per-minute PostgreSQL twin — same shape, same cadence, same
+           pure-insert hypertable chunks — so the identical reasoning applies: the stock 0.2 scale factor
+           leaves the day's hot chunk stale before the TimescaleDB rollover and the Index Only Scan degrades
+           to heap fetches. It was simply missed when the PostgreSQL collectors landed, since this list is
+           hand-maintained rather than derived from the catalog. */
+        "ALTER TABLE collect.pg_statement_stats SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)",
     };
 
     /// <summary>
