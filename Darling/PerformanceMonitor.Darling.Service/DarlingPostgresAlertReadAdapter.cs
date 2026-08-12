@@ -54,11 +54,21 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
         """;
 
     /// <summary>
-    /// The current winning holder, plus how persistently it has won across the window.
+    /// The current winning holder, plus how persistently THAT HOLDER has won across the window.
     /// <para>Persistence is computed here rather than left to the evaluator because it needs the whole
     /// window, and one pass over the store is cheaper than shipping every row up to be counted. The
     /// observation total counts DISTINCT collection times, not rows: several sources are recorded per
     /// collection, so counting rows would inflate the denominator and make every holder look transient.</para>
+    /// <para><b>Held is counted per (source, holder), not per source.</b> Counting by source alone answered a
+    /// different question than the alert asks: sixty different sessions each winning once rendered as "pid X
+    /// held the horizon 60/60 observations", which is the exact shape of a chronic holder and the opposite of
+    /// the truth — sixty short transactions are normal, one that will not end is the incident. The alert names
+    /// a specific pid or slot, so persistence has to be that thing's persistence.</para>
+    /// <para>The denominator counts collections that recorded ANY holder. The collector emits no rows when the
+    /// horizon is unheld, so counting only holder-bearing collections is what makes the ratio mean "of the
+    /// times something held it, how often was it this one" — which is the question. Note this became reachable
+    /// only once the collector stopped attributing its own backend: while Darling's own snapshot was always a
+    /// session holder, every collection had a holder and the distinction was invisible.</para>
     /// </summary>
     internal const string XminSql = """
         WITH latest AS (
@@ -74,7 +84,9 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
             SELECT
                 COUNT(DISTINCT collection_time) AS observations_total,
                 COUNT(DISTINCT collection_time) FILTER (
-                    WHERE is_winner AND source = (SELECT source FROM latest)
+                    WHERE is_winner
+                    AND   source = (SELECT source FROM latest)
+                    AND   holder IS NOT DISTINCT FROM (SELECT holder FROM latest)
                 ) AS observations_held
             FROM pg_xmin_horizon
             WHERE server_id = $1

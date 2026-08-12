@@ -379,6 +379,17 @@ public sealed class DarlingWorker : BackgroundService
        and no seam (CA1859). */
     private DarlingAlertDeliverer? _alertDeliverer;
 
+    /* The mute check and the cooldown stamps for the PostgreSQL predictors. These ride alongside the shared
+       AlertEngine rather than inside it, which is deliberate — but "alongside" was taken to mean "without",
+       and the PG path shipped with Muted hardcoded false and no cooldown at all. Every AlertEngine family
+       gates on both; a 30-second sweep without them writes ~2,880 history rows a day per breaching subject
+       and emails through a mute rule that says not to. */
+    private Func<AlertMuteContext, bool>? _isAlertMuted;
+
+    private readonly ConcurrentDictionary<string, DateTime> _lastPostgresAlert = new(StringComparer.Ordinal);
+
+    private int _alertCooldownMinutes = 15;
+
     /* #1560: the live MCP enable/port seam — published to the MCP host's supervisor at startup and on
        every control-plane reload, so the viewer's Settings toggle takes effect without a restart. */
     private readonly McpRuntimeState _mcpState;
@@ -1041,6 +1052,10 @@ public sealed class DarlingWorker : BackgroundService
            lands in the same history and obeys the same mute rules as an engine-emitted one — the point
            of reusing it rather than building a second delivery path. */
         _alertDeliverer = deliverer;
+        /* Same instance the engine binds, so a mute-rule reload mutes the PostgreSQL predictors on the next
+           sweep exactly as it mutes every SQL Server family. */
+        _isAlertMuted = muteRuleService.IsAlertMuted;
+        _alertCooldownMinutes = alertSettings.CooldownMinutes;
 
         /* Stage 4: the service self-alerts, over the SAME deliverer + history + mute check the engine uses.
            collection-stopped / capture-down are polled from collection_log on the alert cadence below;
@@ -2432,8 +2447,35 @@ public sealed class DarlingWorker : BackgroundService
                 await adapter.GetXminHorizonAsync(runtime.ServerId, cancellationToken),
                 await adapter.GetReplicationSlotRiskAsync(runtime.ServerId, cancellationToken));
 
+            var now = DateTime.UtcNow;
+            var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));
+
             foreach (var finding in findings)
             {
+                /* Cooldown keyed per SUBJECT, not per metric. Two databases past the wraparound line are two
+                   incidents; a metric-level key would have let the first one's stamp suppress the second. */
+                var cooldownKey = string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{snapshot.ServerKey}|{finding.MetricName}|{finding.Subject}");
+
+                if (_lastPostgresAlert.TryGetValue(cooldownKey, out var last) && now - last < cooldown)
+                {
+                    continue;
+                }
+
+                /* Stamped even when muted, mirroring AlertEngine: a muted alert still consumes its cooldown,
+                   so unmuting does not produce a backlog. */
+                _lastPostgresAlert[cooldownKey] = now;
+
+                var muted = _isAlertMuted?.Invoke(new AlertMuteContext
+                {
+                    ServerName = snapshot.ServerName,
+                    MetricName = finding.MetricName,
+                    /* The subject is the database for wraparound and the slot/holder for the others, which is
+                       what a DatabaseName mute rule is written against. */
+                    DatabaseName = finding.Subject,
+                }) ?? false;
+
                 await _alertDeliverer.DeliverAsync(
                     new AlertOutcome(
                         snapshot.ServerKey,
@@ -2441,11 +2483,24 @@ public sealed class DarlingWorker : BackgroundService
                         finding.MetricName,
                         finding.CurrentValue,
                         finding.ThresholdValue,
-                        Context: null,
+                        /* The subject reaches the deliverer as a #1140 incident fingerprint. It was computed
+                           by the evaluator and then thrown away (Context: null), so the send-side
+                           IncidentCooldown fell back to its metric-level key: two databases past the
+                           wraparound line, or two bad slots, collapsed into one incident and the second was
+                           silently suppressed for the whole cooldown window. The DedupKey is identity only —
+                           no ages or byte counts — so a recurrence of the SAME subject collapses while a
+                           different subject does not. */
+                        Context: new AlertContext
+                        {
+                            Incidents = new List<AlertIncident>
+                            {
+                                new(finding.Subject, new[] { finding.Subject }),
+                            },
+                        },
                         DetailText: null,
                         finding.NumericCurrentValue,
                         finding.NumericThresholdValue,
-                        Muted: false,
+                        Muted: muted,
                         finding.Severity,
                         finding.ShortMessage),
                     cancellationToken);
@@ -3830,8 +3885,13 @@ LIMIT 1";
                the 08 class and the shutdown/unavailability codes qualify, which is exactly what the
                provider's ConnectionFatal means. */
             if ((ex is SqlException sqlEx && (sqlEx.Class >= 20 || sqlEx.Number == -2))
-                || (ex is PostgresException pgEx
-                    && PostgresTargetProvider.Instance.Classify(pgEx, yieldsOnLockTimeout: false)
+                /* ANY exception on a PostgreSQL target, not just a PostgresException. The pre-filter was the
+                   bug: a dead socket surfaces as a plain NpgsqlException with no SQLSTATE — the provider
+                   already classifies that as ConnectionFatal, and the call site could not reach it. So the
+                   runtime stayed "connected", Server Unreachable never fired, and every collector errored
+                   forever. Asymmetric with the SqlClient arm, which does reach its own classifier. */
+                || (server.Runtime?.Target.Engine == CollectorTargetEngine.PostgreSql
+                    && PostgresTargetProvider.Instance.Classify(ex, yieldsOnLockTimeout: false)
                        == CollectorTargetFault.ConnectionFatal))
             {
                 server.Runtime = null;

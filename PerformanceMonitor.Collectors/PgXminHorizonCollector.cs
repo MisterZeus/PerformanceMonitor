@@ -67,14 +67,28 @@ WITH holders AS
 (
     SELECT
         'session'::text                                       AS source,
-        age(a.backend_xmin)::bigint                            AS xmin_age,
+        /* The GREATER of the two ages. An idle-in-transaction writer under READ COMMITTED has RELEASED its
+           snapshot — backend_xmin is NULL — while still holding backend_xid, which pins the horizon just as
+           hard. Reading only backend_xmin made this collector blind to idle-in-transaction, which is its
+           single most-cited cause and the one the read surface leads with. */
+        GREATEST(
+            coalesce(age(a.backend_xmin), 0),
+            coalesce(age(a.backend_xid), 0))::bigint            AS xmin_age,
         a.pid::text                                            AS holder,
         'state=' || coalesce(a.state, '(none)')
             || ' application=' || coalesce(a.application_name, '(none)')
-            || ' xact_start=' || coalesce(a.xact_start::text, '(none)')
-            || ' query_start=' || coalesce(a.query_start::text, '(none)') AS detail
+            /* AT TIME ZONE 'UTC', not ::text. These are timestamptz, so ::text renders in the SESSION
+               TimeZone — invisible on a UTC server, wrong everywhere else. The store's contract is naive UTC
+               and this detail string was the one place on the branch still breaking it. */
+            || ' xact_start=' || coalesce((a.xact_start AT TIME ZONE 'UTC')::text, '(none)')
+            || ' query_start=' || coalesce((a.query_start AT TIME ZONE 'UTC')::text, '(none)') AS detail
     FROM pg_stat_activity AS a
-    WHERE a.backend_xmin IS NOT NULL
+    WHERE (a.backend_xmin IS NOT NULL OR a.backend_xid IS NOT NULL)
+    /* Never attribute the horizon to the collector's own snapshot. Darling's read sits in
+       pg_stat_activity with a backend_xmin like any other session, so without this it is a PERMANENT
+       'session' holder: zero-rows-when-healthy becomes unreachable, and it silently pads the persistence
+       denominator so a real transient holder reads as chronic. */
+    AND   a.pid <> pg_backend_pid()
 
     UNION ALL
 
@@ -117,7 +131,7 @@ WITH holders AS
         'prepared_transaction'::text,
         age(p.transaction)::bigint,
         p.gid,
-        'prepared=' || coalesce(p.prepared::text, '(none)')
+        'prepared=' || coalesce((p.prepared AT TIME ZONE 'UTC')::text, '(none)')
             || ' owner=' || coalesce(p.owner, '(none)')
             || ' database=' || coalesce(p.database, '(none)')
     FROM pg_prepared_xacts AS p

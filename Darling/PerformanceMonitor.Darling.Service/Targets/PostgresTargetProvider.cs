@@ -87,7 +87,14 @@ public sealed class PostgresTargetProvider : ITargetProvider
     /// </summary>
     public CollectorTargetFault Classify(Exception exception, bool yieldsOnLockTimeout)
     {
-        if (exception is TimeoutException)
+        /* Unwrapped OR wrapped. Npgsql surfaces a command timeout as an NpgsqlException whose INNER
+           exception is the TimeoutException — the bare shape is what a test constructs, not what the driver
+           throws. Checking only the outer type sent every real command timeout down the NpgsqlException arm
+           below and classified it ConnectionFatal, so a slow query forced a reconnect: precisely the
+           reconnect storm the SQLSTATE arm is careful to avoid. */
+        if (exception is TimeoutException
+            || exception.InnerException is TimeoutException
+            || (exception is NpgsqlException && exception.GetBaseException() is TimeoutException))
         {
             return CollectorTargetFault.CommandTimeout;
         }
