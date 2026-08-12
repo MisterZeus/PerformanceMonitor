@@ -122,6 +122,74 @@ public sealed class IncidentOccurrenceAccumulatorTests
     }
 
     [Fact]
+    public void ObservingOnlyAtDeliveryTime_Undercounts_WhichIsWhyTheEngineObservesEverySweep()
+    {
+        /* PR #2221's review found this: with observation only at delivery time, an event the window RETIRES
+           during a cooldown cancels an arrival in the gauge and the arrival becomes invisible.
+
+           Delivery A sees 10. Before delivery B, three age out (window 7) and four arrive (window 11). Seen
+           only at the two deliveries, the rise from 10 to 11 counts ONE — the correct answer is four. Seen on
+           the sweeps in between, both movements are observed and the total is exact.
+
+           This is the pin on the reason the engine calls Accumulate on every sweep rather than inside the
+           Fire branch. The pure function was always capable of the right answer; the first cut of the wiring
+           did not call it often enough to get it. */
+        var deliveryA = Accumulate(new[] { Incident(KeyA, 10) }, persisted: null, T0);
+
+        var deliveryOnly = Accumulate(new[] { Incident(KeyA, 11) }, deliveryA.States, T0.AddMinutes(5));
+        Assert.Equal(11L, deliveryOnly.Incidents[0].TotalOccurrences);
+
+        var sweep1 = Accumulate(new[] { Incident(KeyA, 7) }, deliveryA.States, T0.AddMinutes(2));
+        var sweep2 = Accumulate(new[] { Incident(KeyA, 11) }, sweep1.States, T0.AddMinutes(4));
+        Assert.Equal(14L, sweep2.Incidents[0].TotalOccurrences);
+
+        /* One incident throughout, either way. */
+        Assert.Equal(T0, sweep2.Incidents[0].IncidentStartedUtc);
+    }
+
+    [Fact]
+    public void ObservingEverySweep_DoesNotMeanWritingEverySweep()
+    {
+        /* Per-sweep observation would otherwise put a store round trip on every metric of every server on
+           every sweep. A flat gauge is not a write; a moved total is; and the heartbeat fires at half the
+           horizon so a live incident whose gauge never moves cannot sit long enough to judge ITSELF stale. */
+        var seeded = Accumulate(new[] { Incident(KeyA, 4) }, persisted: null, T0);
+        Assert.True(seeded.Changed);
+
+        Assert.False(Accumulate(new[] { Incident(KeyA, 4) }, seeded.States, T0.AddMinutes(1)).Changed);
+        Assert.True(Accumulate(new[] { Incident(KeyA, 6) }, seeded.States, T0.AddMinutes(1)).Changed);
+
+        /* Half of the one-hour horizon. */
+        Assert.True(Accumulate(new[] { Incident(KeyA, 4) }, seeded.States, T0.AddMinutes(31)).Changed);
+
+        /* A fingerprint leaving the window is a write even when the survivor held steady — the replace-the-set
+           contract has to record the removal. */
+        var two = Accumulate(new[] { Incident(KeyA, 4), Incident(KeyB, 2) }, persisted: null, T0);
+        Assert.True(Accumulate(new[] { Incident(KeyA, 4) }, two.States, T0.AddMinutes(1)).Changed);
+    }
+
+    [Fact]
+    public void EveryFingerprintKeepsState_NotJustTheOnesTheAlertRenders()
+    {
+        /* The other half of PR #2221's review: the blocking context renders at most 10 incidents, and when
+           the accumulation rode inside that capped list, an 11th concurrent fingerprint had its row dropped
+           by the replace-the-set write and restarted from scratch the next time it surfaced. The engine now
+           accumulates over the UNCAPPED grouping, so the render budget cannot evict occurrence state. */
+        var many = new List<AlertIncident>();
+        for (int n = 0; n < 14; n++)
+        {
+            many.Add(Incident($"fp{n:00}", 1));
+        }
+
+        var first = Accumulate(many, persisted: null, T0);
+        Assert.Equal(14, first.States.Count);
+
+        var second = Accumulate(many, first.States, T0.AddMinutes(1));
+        Assert.Equal(T0, second.Incidents[13].IncidentStartedUtc);
+        Assert.Equal(1L, second.Incidents[13].TotalOccurrences);
+    }
+
+    [Fact]
     public void DistinctFingerprints_KeepSeparateTotals()
     {
         /* Why the key is the fingerprint and not (server, metric): a deadlock on one object set and a

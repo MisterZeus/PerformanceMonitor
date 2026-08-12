@@ -848,6 +848,32 @@ public sealed class AlertEngineTests
     }
 
     [Fact]
+    public async Task Deadlock_OccurrencesAreObservedOnSweepsThatDeliverNothing()
+    {
+        /* PR #2221's review: with the accumulation inside the Fire branch, no sweep between two deliveries
+           observed anything, so an event the window retired during the cooldown cancelled an arrival and the
+           arrival was never counted. The observation now runs on every sweep that fetched rows. */
+        var h = new Harness();
+        h.Settings.DeadlockEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Two more deadlocks INSIDE the cooldown — no delivery, but the count must still be observed. */
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        h.Now = h.Now.AddMinutes(1);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Single(h.Deliverer.Outcomes);   /* the cooldown suppressed the delivery */
+
+        var persisted = h.StateStore.Occurrences[(Key, AlertEngine.DeadlockWatermarkMetric)];
+        Assert.Equal(3L, Assert.Single(persisted).Value.TotalOccurrences);
+    }
+
+    [Fact]
     public async Task Deadlock_OccurrenceStateSeededFromStore_ContinuesTheIncidentAcrossARestart()
     {
         /* The reason the counter is persisted at all: a total that reset on every service restart would be a

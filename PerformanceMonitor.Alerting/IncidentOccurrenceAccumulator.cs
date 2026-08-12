@@ -66,13 +66,26 @@ public readonly record struct IncidentOccurrenceState(
 /// <para>
 /// EXACTNESS BOUND, stated plainly because a counter that quietly undercounts is worse than a gauge
 /// that is honestly a gauge: this is a lower bound on occurrences, exact whenever the read window
-/// outlives the gap between observations. The groupers read a one-hour window and the accumulator
-/// runs on every delivery, so an occurrence that arrives while a cooldown is suppressing delivery is
-/// still in the window when the next delivery observes it — the case #2216 is about is exact. What
-/// cannot be recovered is an occurrence that both arrives AND ages out between two observations,
-/// which needs the gap between deliveries to approach the window itself (a cooldown configured near
-/// or above an hour). No arrangement of a window gauge can recover those; counting them would take
-/// an event-identity watermark at the collector, which is a different feature.
+/// outlives the gap between OBSERVATIONS. The precise loss is one occurrence per event that ages out
+/// of the window between two observations — a retirement and an arrival cancel in the gauge, so the
+/// arrival is invisible.
+/// </para>
+///
+/// <para>
+/// That is why the caller must observe on every SWEEP, not on every delivery. With a one-hour window
+/// and a sweep measured in seconds, an event can only be missed if it arrives and ages out inside a
+/// single sweep interval, which cannot happen for a window this long — so per-sweep observation is
+/// exact in practice. Observing only at delivery time is NOT: any event the window retires during a
+/// cooldown masks an arrival, so a long incident under sustained load undercounts by roughly the
+/// number of events that aged out while the cooldown was suppressing delivery. That was the shipped
+/// behavior in the first cut of #2216 and it made this class's own contract false; the review of
+/// PR #2221 caught it.
+/// </para>
+///
+/// <para>
+/// What no arrangement of a window gauge can recover is an occurrence that both arrives AND ages out
+/// between two observations. Counting those would take an event-identity watermark at the collector,
+/// which is a different feature.
 /// </para>
 ///
 /// <para>
@@ -115,12 +128,18 @@ public static class IncidentOccurrenceAccumulator
     /// upsert-each-row.
     /// </param>
     /// <param name="Changed">
-    /// True when there is anything to write — incidents to record, or persisted rows to clear. False
-    /// only for the nothing-here-nothing-stored case, where the caller can skip the store entirely.
-    /// Note this is NOT a substantive-difference test: every observation refreshes
-    /// <see cref="IncidentOccurrenceState.LastObservedUtc"/>, and that refresh is exactly what keeps
-    /// a live incident from being judged stale, so a delivery with incidents always has a write. The
-    /// writes are cooldown-gated by construction — one per delivered alert — so this is cheap.
+    /// True when the caller should write. The accumulator observes every SWEEP, not only the sweeps that
+    /// deliver an alert (that is what makes the arithmetic exact), so a naive "always write" would put a
+    /// store round trip on every metric of every server on every sweep — on a 52-server fleet at a 30-second
+    /// cadence, thousands of writes an hour to record nothing.
+    ///
+    /// <para>So this is true when something SUBSTANTIVE moved (a total, a mark, a fingerprint appearing or
+    /// disappearing) — and additionally on a HEARTBEAT, when the oldest surviving row has not been touched
+    /// for half the staleness horizon. The heartbeat is not an optimization detail: staleness is judged from
+    /// <see cref="IncidentOccurrenceState.LastObservedUtc"/>, so an incident whose gauge sits perfectly flat
+    /// for longer than the horizon would be judged stale and reset ITSELF. Half the horizon means a live
+    /// incident is always refreshed at least once before it could expire, at two writes per horizon rather
+    /// than one per sweep.</para>
     /// </param>
     public readonly record struct Result(
         IReadOnlyList<AlertIncident> Incidents,
@@ -171,6 +190,8 @@ public static class IncidentOccurrenceAccumulator
 
         var states = new Dictionary<string, IncidentOccurrenceState>(incidents.Count, StringComparer.Ordinal);
         var accumulated = new List<AlertIncident>(incidents.Count);
+        bool substantive = false;
+        bool heartbeatDue = false;
 
         foreach (var incident in incidents)
         {
@@ -217,19 +238,53 @@ public static class IncidentOccurrenceAccumulator
                 started = nowUtc;
             }
 
-            states[incident.DedupKey] = new IncidentOccurrenceState(total, observed, started, nowUtc);
-
             accumulated.Add(incident with
             {
                 TotalOccurrences = total,
                 IncidentStartedUtc = started,
             });
+
+            if (!substantive)
+            {
+                /* A fingerprint the store has never seen, or one whose numbers moved. The touch timestamp is
+                   deliberately NOT part of this comparison — it moves on every sweep, and treating that as a
+                   change is exactly the always-write behavior the heartbeat exists to avoid. */
+                substantive = !usable
+                    || total != prior.TotalOccurrences
+                    || observed != prior.ObservedWindowCount
+                    || started != prior.IncidentStartedUtc;
+            }
+
+            if (!heartbeatDue && usable && staleAfter > TimeSpan.Zero
+                && nowUtc - prior.LastObservedUtc >= HeartbeatFraction(staleAfter))
+            {
+                heartbeatDue = true;
+            }
+
+            states[incident.DedupKey] = new IncidentOccurrenceState(total, observed, started, nowUtc);
         }
 
-        /* Incidents present means state to write (the touch timestamp alone is worth the write — see
-           the Changed remarks); no keyable incidents means a write only if there is state to clear. */
-        return new Result(accumulated, states, Changed: states.Count > 0 || persistedCount > 0);
+        /* A fingerprint that was persisted and is no longer in the window is a finished incident — its
+           removal is substantive even when every surviving fingerprint held steady. */
+        if (!substantive && persistedCount != states.Count)
+        {
+            substantive = true;
+        }
+
+        /* No keyable incidents at all: a write only if there is persisted state to clear. */
+        if (states.Count == 0)
+        {
+            return new Result(accumulated, states, Changed: persistedCount > 0);
+        }
+
+        return new Result(accumulated, states, Changed: substantive || heartbeatDue);
     }
+
+    /* Half the staleness horizon. A live incident is refreshed at least once before it could expire, and a
+       flat gauge costs two writes per horizon instead of one per sweep. Anything closer to the horizon risks
+       a sweep landing after expiry; anything much shorter gives the writes back. */
+    private static TimeSpan HeartbeatFraction(TimeSpan staleAfter) =>
+        TimeSpan.FromTicks(staleAfter.Ticks / 2);
 
     /* A row untouched for longer than the horizon is describing events that have left the window, so
        it cannot inform this observation. Rows stamped in the FUTURE are trusted rather than
