@@ -367,6 +367,140 @@ VALUES ($1, $2, $3, $4)";
         }
     }
 
+    /// <summary>
+    /// Loads the per-fingerprint occurrence accounting for one server/metric (#2216) —
+    /// (dedup_key, total, observed window count, incident start, last observed) per row.
+    ///
+    /// <para>Returns an EMPTY list on failure rather than the rows it managed to read. A partial read is the
+    /// worst outcome available: the fingerprints that made it keep accumulating while the ones that did not
+    /// silently restart mid-incident, so one alert reports some totals continuing and others reset. Empty is
+    /// at least uniform — every fingerprint reads as new and its total equals the window count, which is
+    /// the pre-#2216 information.</para>
+    /// </summary>
+    public async Task<List<(string DedupKey, long TotalOccurrences, int ObservedWindowCount, DateTime IncidentStartedUtc, DateTime LastObservedUtc)>>
+        LoadIncidentOccurrencesAsync(int serverId, string metricName)
+    {
+        var result = new List<(string, long, int, DateTime, DateTime)>();
+        try
+        {
+            var duckDb = _duckDb;
+            if (duckDb == null)
+            {
+                var dbPath = App.DatabasePath;
+                if (string.IsNullOrEmpty(dbPath)) return result;
+                duckDb = new DuckDbInitializer(dbPath);
+            }
+
+            using var readLock = duckDb.AcquireReadLock();
+            using var connection = duckDb.CreateConnection();
+            await connection.OpenAsync();
+
+            using var command = connection.CreateCommand();
+            command.CommandText = @"
+SELECT dedup_key, total_occurrences, observed_window_count, incident_started_at, last_observed_at
+FROM config_incident_occurrences
+WHERE server_id = $1
+AND   metric_name = $2";
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
+
+            using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                result.Add((
+                    reader.GetString(0),
+                    Convert.ToInt64(reader.GetValue(1)),
+                    Convert.ToInt32(reader.GetValue(2)),
+                    Convert.ToDateTime(reader.GetValue(3)),
+                    Convert.ToDateTime(reader.GetValue(4))));
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Alerts", $"Could not load incident occurrences ({metricName}): {ex.Message}");
+            return new List<(string, long, int, DateTime, DateTime)>();
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// REPLACES the persisted occurrence set for one server/metric (#2216): the rows passed in become the
+    /// metric's complete state, and anything the store held for it that is not in the list is removed. An
+    /// empty list therefore clears the metric, which is how the falling edge is recorded — there is no
+    /// separate clear method to forget to call.
+    ///
+    /// <para>Delete-then-insert inside ONE transaction rather than an INSERT OR REPLACE per row, because
+    /// absence carries meaning: a fingerprint with no events left in the window has a FINISHED incident, and
+    /// leaving its row behind would make that fingerprint's next incident read as a continuation of the old
+    /// one — an undercount reported under a stale start time. Upserting only the live rows cannot express
+    /// that, and splitting the delete from the insert would let a crash between them zero live counters.</para>
+    ///
+    /// <para>Called once per delivered alert (cooldown-gated by construction), so it is a low-frequency
+    /// write like the watermarks above.</para>
+    /// </summary>
+    public async Task SaveIncidentOccurrencesAsync(
+        int serverId,
+        string metricName,
+        IReadOnlyList<(string DedupKey, long TotalOccurrences, int ObservedWindowCount, DateTime IncidentStartedUtc, DateTime LastObservedUtc)> states)
+    {
+        if (states == null) return;
+
+        try
+        {
+            var duckDb = _duckDb;
+            if (duckDb == null)
+            {
+                var dbPath = App.DatabasePath;
+                if (string.IsNullOrEmpty(dbPath)) return;
+                duckDb = new DuckDbInitializer(dbPath);
+            }
+
+            using var writeLock = duckDb.AcquireWriteLock();
+            using var connection = duckDb.CreateConnection();
+            await connection.OpenAsync();
+            using var transaction = connection.BeginTransaction();
+
+            using (var prune = connection.CreateCommand())
+            {
+                prune.Transaction = transaction;
+                prune.CommandText = @"
+DELETE FROM config_incident_occurrences
+WHERE server_id = $1
+AND   metric_name = $2";
+                prune.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                prune.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
+                await prune.ExecuteNonQueryAsync();
+            }
+
+            foreach (var state in states)
+            {
+                using var insert = connection.CreateCommand();
+                insert.Transaction = transaction;
+                insert.CommandText = @"
+INSERT INTO config_incident_occurrences
+    (server_id, metric_name, dedup_key, total_occurrences, observed_window_count, incident_started_at, last_observed_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7)";
+                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
+                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = state.DedupKey });
+                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = state.TotalOccurrences });
+                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = state.ObservedWindowCount });
+                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = state.IncidentStartedUtc });
+                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = state.LastObservedUtc });
+                await insert.ExecuteNonQueryAsync();
+            }
+
+            transaction.Commit();
+        }
+        catch (Exception ex)
+        {
+            /* A dropped write costs accuracy on the NEXT delivery's total — the fingerprint reads as new and
+               restarts, with a fresh start time saying so — never a missed or duplicated alert, which the
+               gate has already decided by this point. */
+            AppLogger.Error("Alerts", $"Could not persist incident occurrences ({metricName}): {ex.Message}");
+        }
+    }
+
     /* The failed-Agent-job watermark shares the edge-trigger table but is time-based, not a count:
        it holds the newest already-alerted failure's server-local run time (stored in watermark_time,
        not the INTEGER watermark column). One reserved metric_name row per server. */

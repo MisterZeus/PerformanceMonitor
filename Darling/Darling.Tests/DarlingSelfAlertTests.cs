@@ -2041,6 +2041,14 @@ public sealed class DarlingSelfAlertTests
         public Task SaveFailedJobWatermarkAsync(string serverKey, DateTime watermark) => Task.CompletedTask;
         public Task SaveDatabaseStateAlertedAsync(string serverKey, string databaseName, string effectiveState) => Task.CompletedTask;
         public Task ClearDatabaseStateAlertedAsync(string serverKey, string databaseName) => Task.CompletedTask;
+
+        /* #2216: the self-alert paths carry no fingerprintable incidents, so the engine never accumulates
+           against this stub — it exists to satisfy the seam. */
+        public Task<IReadOnlyDictionary<string, IncidentOccurrenceState>> LoadIncidentOccurrencesAsync(string serverKey, string metricName) =>
+            Task.FromResult<IReadOnlyDictionary<string, IncidentOccurrenceState>>(
+                new Dictionary<string, IncidentOccurrenceState>(StringComparer.Ordinal));
+
+        public Task SaveIncidentOccurrencesAsync(string serverKey, string metricName, IReadOnlyDictionary<string, IncidentOccurrenceState> states) => Task.CompletedTask;
     }
 
     /* ---------------- live collection_log reads (gated on DARLING_TEST_PG) ---------------- */

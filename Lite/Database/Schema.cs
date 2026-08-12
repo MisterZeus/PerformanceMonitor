@@ -97,6 +97,36 @@ CREATE TABLE IF NOT EXISTS config_edge_trigger_watermarks (
     PRIMARY KEY (server_id, metric_name)
 )";
 
+    /* Monotonic per-fingerprint occurrence counters for the alert engine's incidents (#2216), the twin of
+       Darling's config.incident_occurrences (PgMigrations V61) — same columns, same key. The count that
+       rides on an alert incident is a rolling-window GAUGE: it rises as events arrive and falls as they age
+       out, so a consumer that only sees throttled deliveries (one per #1154 per-fingerprint cooldown) cannot
+       tell nothing-happened from three-happened-while-three-aged-out. This table is the accumulator's
+       memory across deliveries and across restarts.
+
+       A SEPARATE table rather than columns on config_edge_trigger_watermarks, for two reasons that hold
+       independently. The key is wrong: watermarks are per (server, metric), occurrences are per
+       (server, metric, dedup_key) — two deadlocks on different tables are different incidents with
+       different totals. And that row is written with INSERT OR REPLACE over a PARTIAL column list, which
+       resets every unlisted column to its default: a counter living there would zero itself on every fired
+       alert, i.e. exactly when it is read.
+
+       last_observed_at is not display data — it is what makes a row's staleness decidable. Rows are deleted
+       when the incident ends, but a crash mid-incident strands one, and a stranded row trusted on that
+       fingerprint's NEXT incident would decay its already-counted mark to the new window count and report
+       the recurrence as nothing new. */
+    public const string CreateIncidentOccurrencesTable = @"
+CREATE TABLE IF NOT EXISTS config_incident_occurrences (
+    server_id INTEGER NOT NULL,
+    metric_name VARCHAR NOT NULL,
+    dedup_key VARCHAR NOT NULL,
+    total_occurrences BIGINT NOT NULL,
+    observed_window_count INTEGER NOT NULL,
+    incident_started_at TIMESTAMP NOT NULL,
+    last_observed_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (server_id, metric_name, dedup_key)
+)";
+
     /* Per-server collector state that is NOT derivable from the collected rows, so it cannot be a MAX()
        over the collector's own table the way the event_time / instance_id watermarks are (#1962). Today
        one collector declares state: default_trace_events stores the trace FILE it read, and compares it
@@ -204,6 +234,7 @@ CREATE TABLE IF NOT EXISTS server_tag_map (
         yield return CreateCollectionLogTable;
         yield return CreateAlertLogTable;
         yield return CreateEdgeTriggerWatermarksTable;
+        yield return CreateIncidentOccurrencesTable;
         yield return CreateCollectorStateTable;
         yield return CreateMuteRulesTable;
         yield return CreateDismissedArchiveAlertsTable;
