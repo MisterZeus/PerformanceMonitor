@@ -800,28 +800,23 @@ public sealed class QueryStoreCollectorDefinitionTests
     }
 
     [Fact]
-    public void BuildPerItemQuery_PlanCapture_OffEmitsNullPlaceholder_OnMirrorsDashboard()
+    public void BuildPerItemQuery_PlanCapture_AlwaysEmitsNullPlaceholder_RegardlessOfCapturePlanXml()
     {
-        /* Lite parity (default off): query_plan_text is the nvarchar(1) NULL placeholder,
-           byte-identical to the no-plan form. Darling (on): CONVERT(nvarchar(max), qsp.query_plan)
-           from sys.query_store_plan — install/09_collect_query_store.sql's @collect_plan path. */
+        /* #2210: the runtime-stats query no longer carries plan XML at all, in EITHER capture mode — the
+           ROW_NUMBER-gated CASE and its watermark predicate are DELETED, not reworked.
+           BuildPlanFetchQuery is the only thing that reads plan XML now (it fetches plans in plan_id
+           order under a byte budget and is Darling-only), so CapturePlanXml gates that separate fetch
+           rather than this query. Lite's off path and Darling's on path are therefore byte-identical
+           here — there is no longer a Darling-only branch of this query to pin. */
         var off = QueryStoreCollector.Instance.BuildPerItemQuery("SO", MakeContext());
-        Assert.Contains("query_plan_text = CONVERT(nvarchar(1), NULL),", off.Text, StringComparison.Ordinal);
-        Assert.DoesNotContain("qsp.query_plan,", off.Text, StringComparison.Ordinal);
-
-        /* #1556 plan-text dedupe (ON branch): the plan lands once per plan_id per cycle — on the newest
-           runtime-stats interval (rn = 1) — and NULL on the older intervals, instead of the full plan XML
-           repeating on every interval row. */
         var on = QueryStoreCollector.Instance.BuildPerItemQuery("SO", MakeContext(capturePlanXml: true));
-        Assert.Contains(
-            "query_plan_text = CASE WHEN ROW_NUMBER() OVER (PARTITION BY qsp.plan_id ORDER BY qsrs.last_execution_time DESC) = 1 THEN CONVERT(nvarchar(max), qsp.query_plan) ELSE CONVERT(nvarchar(max), NULL) END,",
-            on.Text,
-            StringComparison.Ordinal);
 
-        /* Scoped to query_plan_text rather than the bare placeholder: replica_role shares the same
-           nvarchar(1) NULL idiom on a pre-2022 target (this context's probe defaults to 13), so an
-           unqualified DoesNotContain would assert on an unrelated column. */
-        Assert.DoesNotContain("query_plan_text = CONVERT(nvarchar(1), NULL)", on.Text, StringComparison.Ordinal);
+        Assert.Contains("query_plan_text = CONVERT(nvarchar(1), NULL),", off.Text, StringComparison.Ordinal);
+        Assert.Contains("query_plan_text = CONVERT(nvarchar(1), NULL),", on.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("qsp.query_plan,", off.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("qsp.query_plan,", on.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("ROW_NUMBER()", on.Text, StringComparison.Ordinal);
+        Assert.True(string.Equals(off.Text, on.Text, StringComparison.Ordinal), "CapturePlanXml must no longer change this query's text");
     }
 
     [Fact]

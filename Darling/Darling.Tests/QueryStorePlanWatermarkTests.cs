@@ -35,24 +35,30 @@ public class QueryStorePlanWatermarkTests
     private const string Db = "probedb";
     private static readonly DateTime Now = new(2026, 8, 11, 12, 0, 0, DateTimeKind.Utc);
 
-    /* ---------- the stored format, and what the query does with it ---------- */
+    /* ---------- #2210: the SQL-side narrowing is gone; QueryStorePlanXmlState.Resolve is what remains ----------
+       The ROW_NUMBER-gated CASE and its in-stream `AND qsp.plan_id > ` predicate are DELETED, not reworked —
+       BuildPlanFetchQuery is the only thing that reads plan XML now, and its `watermark` parameter is resolved
+       by the host calling Resolve directly rather than derived inline in this query. These tests used to drive
+       that predicate through the live SQL; they now drive Resolve directly, which is exactly what the host
+       still calls to get BuildPlanFetchQuery's watermark argument, so the state-format/malformed/expired/
+       future-stamp/per-database coverage stays live even though the SQL it used to narrow does not exist. */
 
     [Fact]
-    public void Watermark_Fresh_NarrowsThePlanTextCase()
+    public void Resolve_Fresh_ReturnsTheStoredPlanId()
     {
-        var sql = LiveSql(Context(capturePlanXml: true, state: Stored(900_000, Now)));
+        var resolved = QueryStorePlanXmlState.Resolve(Stored(900_000, Now), Db, Now);
 
-        Assert.Contains("AND qsp.plan_id > 900000", sql, StringComparison.Ordinal);
+        Assert.Equal(900_000, resolved);
     }
 
     [Fact]
-    public void Watermark_Absent_RendersTheUnchangedQuery()
+    public void Resolve_Absent_ReturnsZero()
     {
         /* Absent is what a first run, a restarted host and a broken store all look like, and all three must
-           refetch rather than skip. The conservative path has to be byte-identical to the pre-change query. */
-        var sql = LiveSql(Context(capturePlanXml: true, state: new Dictionary<string, string>()));
+           resolve to "fetch everything" rather than skip. */
+        var resolved = QueryStorePlanXmlState.Resolve(new Dictionary<string, string>(), Db, Now);
 
-        Assert.DoesNotContain("qsp.plan_id > ", sql, StringComparison.Ordinal);
+        Assert.Equal(0, resolved);
     }
 
     [Theory]
@@ -65,42 +71,41 @@ public class QueryStorePlanWatermarkTests
     [InlineData("900000:1786449600:extra")]
     [InlineData("0:1786449600")]            /* plan_id 0 is not a plan */
     [InlineData("-5:1786449600")]
-    public void Watermark_Malformed_RendersTheUnchangedQuery(string raw)
+    public void Resolve_Malformed_ReturnsZero(string raw)
     {
         /* Anything unparseable degrades to a full fetch. Trusting a partially parsed value would suppress
            plan XML based on a number nobody wrote. */
         var state = new Dictionary<string, string> { [QueryStorePlanXmlState.WatermarkKeyPrefix + Db] = raw };
-        var sql = LiveSql(Context(capturePlanXml: true, state: state));
 
-        Assert.DoesNotContain("qsp.plan_id > ", sql, StringComparison.Ordinal);
+        Assert.Equal(0, QueryStorePlanXmlState.Resolve(state, Db, Now));
     }
 
     [Fact]
-    public void Watermark_Expired_RendersTheUnchangedQuery()
+    public void Resolve_Expired_ReturnsZero_ButStillFreshReturnsTheStoredPlanId()
     {
         /* Bounded staleness is why the stamp is stored beside the id. Query Store can rewrite a plan's XML in
            place (memory grant feedback and friends) without issuing a new plan_id, and a permanent watermark
            would never look again. It also bounds the documented dormant-plan gap. */
         var stampedLongAgo = Now - QueryStorePlanXmlState.RefreshAfter - TimeSpan.FromMinutes(1);
 
-        var expired = LiveSql(Context(capturePlanXml: true, state: Stored(900_000, stampedLongAgo)));
-        var stillFresh = LiveSql(Context(capturePlanXml: true, state: Stored(900_000, Now - TimeSpan.FromMinutes(1))));
+        var expired = QueryStorePlanXmlState.Resolve(Stored(900_000, stampedLongAgo), Db, Now);
+        var stillFresh = QueryStorePlanXmlState.Resolve(Stored(900_000, Now - TimeSpan.FromMinutes(1)), Db, Now);
 
-        Assert.DoesNotContain("qsp.plan_id > ", expired, StringComparison.Ordinal);
-        Assert.Contains("AND qsp.plan_id > 900000", stillFresh, StringComparison.Ordinal);
+        Assert.Equal(0, expired);
+        Assert.Equal(900_000, stillFresh);
     }
 
     [Fact]
-    public void Watermark_StampedInTheFuture_RendersTheUnchangedQuery()
+    public void Resolve_StampedInTheFuture_ReturnsZero()
     {
         /* A clock that moved backwards would otherwise pin the watermark for as long as the skew lasts. */
-        var sql = LiveSql(Context(capturePlanXml: true, state: Stored(900_000, Now.AddDays(3))));
+        var resolved = QueryStorePlanXmlState.Resolve(Stored(900_000, Now.AddDays(3)), Db, Now);
 
-        Assert.DoesNotContain("qsp.plan_id > ", sql, StringComparison.Ordinal);
+        Assert.Equal(0, resolved);
     }
 
     [Fact]
-    public void Watermark_IsKeyedPerDatabase()
+    public void Resolve_IsKeyedPerDatabase()
     {
         /* plan_id is monotonic WITHIN a database and means nothing across them, so one database's watermark
            must never be read for another. */
@@ -108,12 +113,9 @@ public class QueryStorePlanWatermarkTests
         {
             [QueryStorePlanXmlState.WatermarkKeyPrefix + "alpha"] = "900000:" + Unix(Now),
         };
-        var context = Context(capturePlanXml: true, state: state);
 
-        Assert.Contains("AND qsp.plan_id > 900000",
-            QueryStoreCollector.Instance.BuildPerItemQuery("alpha", context).Text, StringComparison.Ordinal);
-        Assert.DoesNotContain("qsp.plan_id > ",
-            QueryStoreCollector.Instance.BuildPerItemQuery("beta", context).Text, StringComparison.Ordinal);
+        Assert.Equal(900_000, QueryStorePlanXmlState.Resolve(state, "alpha", Now));
+        Assert.Equal(0, QueryStorePlanXmlState.Resolve(state, "beta", Now));
     }
 
     [Fact]
@@ -134,49 +136,35 @@ public class QueryStorePlanWatermarkTests
         Assert.Equal("planwm:", QueryStorePlanXmlState.WatermarkKeyPrefix);
     }
 
-    /* ---------- placement, which is the whole risk in the SQL change ---------- */
+    /* ---------- #2210: the runtime-stats query itself, now flag-independent ---------- */
 
     [Fact]
-    public void Watermark_SplicesInsideTheRowNumberGate_BeforeTHEN()
+    public void LiveQuery_NeverCarriesThePlanIdPredicateOrTheRowNumberGate_RegardlessOfWatermarkState()
     {
-        /* Inside the CASE's WHEN it narrows which plan gets its XML. Outside the CASE it would filter ROWS
-           instead, deleting the runtime stats for every plan at or below the watermark. */
-        var sql = LiveSql(Context(capturePlanXml: true, state: Stored(900_000, Now)));
+        /* The predicate and the CASE it used to narrow are gone from the query entirely, not just from the
+           conservative path — there is no live watermark state under which either can reappear. */
+        var withState = LiveSql(Context(capturePlanXml: true, state: Stored(900_000, Now)));
+        var withoutState = LiveSql(Context(capturePlanXml: true, state: new Dictionary<string, string>()));
 
-        var when = sql.IndexOf("query_plan_text = CASE WHEN ROW_NUMBER()", StringComparison.Ordinal);
-        var predicate = sql.IndexOf("AND qsp.plan_id > 900000", StringComparison.Ordinal);
-        var then = sql.IndexOf("THEN CONVERT(nvarchar(max), qsp.query_plan)", StringComparison.Ordinal);
-
-        Assert.True(when >= 0, "the plan-text CASE must still be there");
-        Assert.True(predicate > when, "the predicate must be inside the CASE, not before it");
-        Assert.True(predicate < then, "the predicate must be part of the WHEN, not the THEN");
+        Assert.DoesNotContain("qsp.plan_id > ", withState, StringComparison.Ordinal);
+        Assert.DoesNotContain("qsp.plan_id > ", withoutState, StringComparison.Ordinal);
+        Assert.DoesNotContain("ROW_NUMBER()", withState, StringComparison.Ordinal);
+        Assert.DoesNotContain("query_plan_text = CASE", withState, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Watermark_NeverAppliesToBackfill()
+    public void LiveQuery_EmitsThePlaceholder_RegardlessOfCapturePlanXml()
     {
-        /* The regression this pins was live in the first cut. The watermark tracks what the LIVE window has
-           stored; backfill digs the other way, into intervals older than anything collected, whose rows
-           reference plans compiled long ago and numbered BELOW the watermark. Applying it there suppresses
-           essentially every plan the backfill exists to fetch — and silently, because runtime stats still
-           ship, so a filled range looks complete while carrying no plan XML at all. */
-        var context = Context(capturePlanXml: true, state: Stored(900_000, Now));
+        /* #2210: both branches of the old ternary now emit the same nvarchar(1) NULL placeholder — the
+           runtime query carries no plan XML in either mode, so CapturePlanXml no longer changes this query's
+           text at all. Darling (on) and Lite (off) get byte-identical SQL here; the only thing CapturePlanXml
+           still gates is the separate BuildPlanFetchQuery fetch. */
+        var on = LiveSql(Context(capturePlanXml: true, state: new Dictionary<string, string>()));
+        var off = LiveSql(Context(capturePlanXml: false, state: new Dictionary<string, string>()));
 
-        var sql = QueryStoreCollector.Instance
-            .BuildBackfillPerItemQuery(Db, context, Now.AddDays(-7), Now.AddDays(-1)).Text;
-
-        Assert.DoesNotContain("qsp.plan_id > ", sql, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void Watermark_NeverAppliesWhenPlanCaptureIsOff()
-    {
-        /* Lite's shape. With no plan XML selected there is nothing to suppress, and the placeholder column
-           must stay byte-identical to the no-plan form. */
-        var sql = LiveSql(Context(capturePlanXml: false, state: Stored(900_000, Now)));
-
-        Assert.DoesNotContain("qsp.plan_id > ", sql, StringComparison.Ordinal);
-        Assert.Contains("query_plan_text = CONVERT(nvarchar(1), NULL),", sql, StringComparison.Ordinal);
+        Assert.Contains("query_plan_text = CONVERT(nvarchar(1), NULL),", on, StringComparison.Ordinal);
+        Assert.Contains("query_plan_text = CONVERT(nvarchar(1), NULL),", off, StringComparison.Ordinal);
+        Assert.True(string.Equals(on, off, StringComparison.Ordinal), "CapturePlanXml must no longer change this query's text");
     }
 
     /* ---------- write-back, driven through the real read loop ---------- */
@@ -202,29 +190,12 @@ public class QueryStorePlanWatermarkTests
         Assert.Equal("10:" + Unix(Now), Written(context));
     }
 
-    [Fact]
-    public async Task WriteBack_BudgetCutPass_DoesNotAdvanceAtAll()
-    {
-        /* The second regression this pins. Rows ship ordered by last_execution_time, NOT plan_id, so a budget
-           cut drops an arbitrary set of plan_ids off the tail of the window — including ids BELOW the highest
-           one that stored. Advancing past them would suppress their XML on every later pass even though it
-           never shipped once. The cut is already resumable on the time watermark, so declining to advance
-           costs one repeated fetch and nothing else.
-
-           THIS PINS A KNOWN-BROKEN BEHAVIOUR AS A BASELINE, NOT AS A DESIGN. Declining to advance is correct
-           GIVEN time-ordered shipping, but 97.8% of production passes are budget-cut, so "does not advance at
-           all" means the watermark never advances and the whole optimization is a measured no-op (#2210). The
-           plan_id-ordered fetch removes the premise — a cut then truncates a suffix, making the advance safe —
-           and this test is expected to be REPLACED at that point, not kept passing. Read it as a record of why
-           the old shape could not work, and delete it with the shape. */
-        var context = Context(capturePlanXml: true, state: new Dictionary<string, string>(), budgetOverride: 16);
-
-        await Read(context, Plan(10, xml: true), Plan(20, xml: true), Plan(30, xml: true));
-
-        Assert.True(context.PerItemTextBudgetExceeded,
-            "the budget must actually have been cut, or this test proves nothing");
-        Assert.Null(Written(context));
-    }
+    /* WriteBack_BudgetCutPass_DoesNotAdvanceAtAll (#2164) deleted with the shape it pinned: its own comment
+       said it recorded known-broken behaviour under the last_execution_time-ordered fetch — the watermark
+       could never advance on a budget cut because a cut left an arbitrary SUBSET of plan_ids. #2210's
+       plan_id-ordered fetch removes that premise; the replacement is
+       AdvanceWatermark_OnABudgetCutPass_StillAdvances below, which pins the new behaviour directly against
+       QueryStorePlanXmlState.AdvanceWatermark. */
 
     [Fact]
     public async Task WriteBack_QuietWindow_NeverMovesTheWatermarkBackward()

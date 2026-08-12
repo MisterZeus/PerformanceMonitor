@@ -676,17 +676,22 @@ END;
            exact fix is a store-DERIVED watermark (the host asking its own plan dimension for the lowest
            plan_id missing XML) rather than this collector-derived one; that needs host plumbing on both
            products and is tracked separately. */
-        var watermarkDb = backfill ? null : databaseName ?? context.CurrentDatabaseName;
-        var planWatermark = string.IsNullOrEmpty(watermarkDb)
-            ? 0L
-            : QueryStorePlanXmlState.Resolve(context.State, watermarkDb!, context.CollectionTime);
-        var watermarkPredicate = planWatermark > 0
-            ? " AND qsp.plan_id > " + planWatermark.ToString(System.Globalization.CultureInfo.InvariantCulture)
-            : string.Empty;
+        /* #2210: the watermark now belongs to BuildPlanFetchQuery (the `watermark` parameter there,
+           resolved by the host via QueryStorePlanXmlState.Resolve). It no longer narrows anything in
+           this runtime-stats query, so there is nothing to compute here. */
 
-        string planTextCol = context.CapturePlanXml
-            ? "query_plan_text = CASE WHEN ROW_NUMBER() OVER (PARTITION BY qsp.plan_id ORDER BY qsrs.last_execution_time DESC) = 1" + watermarkPredicate + " THEN CONVERT(nvarchar(max), qsp.query_plan) ELSE CONVERT(nvarchar(max), NULL) END,"
-            : "query_plan_text = CONVERT(nvarchar(1), NULL),";
+        /* #2210: this runtime-stats query no longer carries plan XML at all — the ROW_NUMBER-gated
+           CASE and its in-stream watermark predicate are DELETED, not reworked. BuildPlanFetchQuery is
+           the only thing that reads plan XML now: it fetches plans in plan_id order under a byte
+           budget and lands each plan ONCE per database LIFETIME instead of once per PASS. The shape
+           being replaced re-shipped every plan on every pass forever — measured at 5.0x redundancy
+           (871,196 plan-XML rows against 175,328 distinct database/plan pairs in a day, on a 33 GB
+           table). Both branches below now emit the same placeholder, so the payload is byte-identical
+           to Lite's regardless of the flag, and CapturePlanXml gates the separate BuildPlanFetchQuery
+           fetch rather than this query. Existing inline rows are NOT migrated by this change and stay
+           readable via the reader's existing NULL-guarded fallback; dropping the query_plan_text column
+           itself is a separate, later migration. */
+        const string planTextCol = "query_plan_text = CONVERT(nvarchar(1), NULL),";
 
         /* The replica-attribution column + its join (see hasReplicaAttribution above). Selected after every
            version-gated column, so pre-2022 targets read the nvarchar(1) NULL placeholder at the same
