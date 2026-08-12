@@ -1093,6 +1093,15 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
     /// above and for the same reason: the body nests inside <c>sp_executesql</c>, and the values are host-computed
     /// longs that never touch operator input.</para>
     ///
+    /// <para>A NULL <c>query_plan</c> — a plan too large to persist, or certain forced-plan-failure paths —
+    /// counts as ZERO bytes and STILL SHIPS, as a row with NULL text. Letting the NULL propagate through the
+    /// arithmetic instead would make the budget predicate NULL and filter the row out, and a window whose plans
+    /// are all NULL would then return nothing, hold the watermark, and re-select the same plans forever: the
+    /// same permanent stall as the oversized-plan case, reached through a different mechanism. Shipping the row
+    /// lets the watermark advance past a plan whose XML will never exist, which is correct — the store's readers
+    /// already guard <c>query_plan_text IS NOT NULL</c> because the runtime path has always been able to write
+    /// per-row NULLs there.</para>
+    ///
     /// <para>NEVER on the backfill path, for the reason the watermark itself is not: backfill reads intervals
     /// older than anything collected, whose plans are numbered BELOW the watermark, so a plan_id-ascending fetch
     /// above the watermark would return nothing the backfill needs. Backfill plan XML stays on its own rows.</para>
@@ -1107,6 +1116,21 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
     /// </summary>
     public CollectorQuery BuildPlanFetchQuery(string item, CollectorContext context, long watermark, int candidatePlans, long budgetBytes)
     {
+        /* The invariant the doc comment spends a paragraph on, actually enforced rather than left to the caller:
+           this query exists only to fetch plan XML, so building it with plan capture off is a caller bug, not a
+           no-op to swallow. Cheap, and it makes CapturePlanXml the single gate for the whole feature — the
+           runtime query's plan-text CASE already reads the same flag. */
+        if (context is null)
+        {
+            throw new ArgumentNullException(nameof(context));
+        }
+
+        if (!context.CapturePlanXml)
+        {
+            throw new InvalidOperationException(
+                "BuildPlanFetchQuery requires CapturePlanXml; a host that does not capture plan XML must not issue the plan fetch.");
+        }
+
         var escapedDbName = item.Replace("]", "]]", StringComparison.Ordinal);
         var k = candidatePlans.ToString(System.Globalization.CultureInfo.InvariantCulture);
         var budget = budgetBytes.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -1115,20 +1139,24 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
         /* ROWS UNBOUNDED PRECEDING, not the RANGE default: RANGE would tie-group peers and, more to the point,
            forces a spool. The frame is per-row precisely because the cut has to fall between two plans. */
         var body = $@"WITH candidates AS (
-    SELECT TOP ({k}) qsp.plan_id, CONVERT(nvarchar(max), qsp.query_plan) AS query_plan_text
+    SELECT TOP ({k})
+        plan_id = qsp.plan_id,
+        query_plan_text = CONVERT(nvarchar(max), qsp.query_plan)
     FROM sys.query_store_plan AS qsp
     WHERE qsp.plan_id > {floor}
     ORDER BY qsp.plan_id
 ),
 budgeted AS (
-    SELECT c.plan_id,
-           c.query_plan_text,
-           DATALENGTH(c.query_plan_text) AS plan_bytes,
-           SUM(DATALENGTH(c.query_plan_text)) OVER (ORDER BY c.plan_id ROWS UNBOUNDED PRECEDING) AS running_bytes
+    SELECT
+        plan_id = c.plan_id,
+        query_plan_text = c.query_plan_text,
+        plan_bytes = COALESCE(DATALENGTH(c.query_plan_text), 0),
+        running_bytes = SUM(COALESCE(DATALENGTH(c.query_plan_text), 0)) OVER (ORDER BY c.plan_id ROWS UNBOUNDED PRECEDING)
     FROM candidates AS c
 )
-SELECT b.plan_id,
-       b.query_plan_text
+SELECT
+    plan_id = b.plan_id,
+    query_plan_text = b.query_plan_text
 FROM budgeted AS b
 WHERE b.running_bytes - b.plan_bytes < {budget}
 ORDER BY b.plan_id;";

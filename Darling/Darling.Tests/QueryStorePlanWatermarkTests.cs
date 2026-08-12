@@ -574,8 +574,14 @@ public class QueryStorePlanWatermarkTests
            plan is decompressed once. Measured on a 73,163-plan production catalog: this shape 133ms against
            274ms for measuring DATALENGTH(qsp.query_plan) in the window and joining back for the text, same 114
            rows and 1.7MB out of both. Plan-id-only with no XML was 114ms. */
-        Assert.Contains("SELECT TOP (114) qsp.plan_id, CONVERT(nvarchar(max), qsp.query_plan)", sql, StringComparison.Ordinal);
+        Assert.Contains("query_plan_text = CONVERT(nvarchar(max), qsp.query_plan)", sql, StringComparison.Ordinal);
+        Assert.Contains("SELECT TOP (114)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("JOIN sys.query_store_plan", sql, StringComparison.Ordinal);
+
+        /* A NULL query_plan counts as zero bytes and still ships. Letting NULL propagate would make the budget
+           predicate NULL, filter the row out, and a window of all-NULL plans would then hold the watermark and
+           re-select forever — the oversized-plan stall by another route. */
+        Assert.Contains("COALESCE(DATALENGTH(c.query_plan_text), 0)", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE qsp.plan_id > 900000", sql, StringComparison.Ordinal);
         Assert.Contains("ROWS UNBOUNDED PRECEDING", sql, StringComparison.Ordinal);
     }
