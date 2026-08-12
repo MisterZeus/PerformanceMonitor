@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Globalization;
 
 namespace PerformanceMonitor.Darling.Storage;
@@ -172,6 +173,69 @@ LEFT JOIN collect.query_store_plan_map AS m
 WHERE m.plan_id IS NULL
   AND batch.plan_id <= $5::bigint
 ORDER BY batch.plan_id";
+
+    /// <summary>
+    /// The map rows a re-verify cursor slice needs to judge, for one database over a bounded
+    /// <c>plan_id</c> range: what content the store believes each plan has.
+    ///
+    /// <para>Returns <c>plan_id</c> and <c>plan_hash</c> only — never the digest, never content. The caller
+    /// pairs this against the same id range read from <c>sys.query_store_plan</c> (also hash-only, which reads
+    /// without decompressing) and re-fetches XML for exactly three cases: a hash that DIFFERS (the plan was
+    /// rewritten in place while keeping its id), a map row that is ABSENT (a plan dormant through every
+    /// collected window, so the watermark passed it without its content ever landing), and a stored
+    /// <c>plan_hash</c> that is NULL (written by a build before the hash column existed — re-verify once, then
+    /// it self-heals).</para>
+    ///
+    /// <para>This is the whole reason the horizon stopped being a full refetch. The old expiry dropped the
+    /// watermark to zero and re-walked every plan's XML, which the walk-cost measurement showed cannot even
+    /// complete inside a day on the larger catalogs (2.2-15.1 GB of plan XML per catalog; 15.9 to 107.5 hours at
+    /// a 12 MB budget and 5-minute cadence), so those catalogs restarted forever and never reached their own
+    /// newest plans. A hash-only sweep over the same id range is bounded by ROW count instead of BYTE volume —
+    /// 77k ids at ~270 per pass — and re-fetches only what actually changed, which across a day of fleet data
+    /// was 0 of 38,420 plans.</para>
+    /// </summary>
+    public const string CursorSliceSql = @"SELECT m.plan_id, m.plan_hash
+FROM collect.query_store_plan_map AS m
+WHERE m.server_id = $1
+  AND m.database_name = $2
+  AND m.plan_id > $3
+  AND m.plan_id <= $4
+ORDER BY m.plan_id";
+
+    /// <summary>
+    /// The cursor's slice width for one pass: the id range divided by how many passes fit in the sweep period.
+    /// <paramref name="refreshAfter"/> is no longer an expiry — it is the target period for ONE full
+    /// re-verification sweep — and this is where that meaning is applied.
+    ///
+    /// <para>Floored at one so a cursor always makes progress, and floored again by
+    /// <paramref name="minimumSlice"/> so a tiny catalog does not crawl an id at a time. Bounded by the range
+    /// itself, so a sweep never claims to cover ids that do not exist.</para>
+    /// </summary>
+    public static long CursorSliceWidth(long watermark, TimeSpan refreshAfter, TimeSpan cadence, long minimumSlice = 64)
+    {
+        if (watermark <= 0)
+        {
+            return 0;
+        }
+
+        var passes = cadence > TimeSpan.Zero ? refreshAfter.Ticks / cadence.Ticks : 1;
+        if (passes < 1)
+        {
+            passes = 1;
+        }
+
+        /* CEILING, not floor. Truncating divides a sweep that never completes: Redstone's 77,176 ids over 288
+           five-minute passes floors to 267, and 267 * 288 = 76,896 — 280 ids short, every sweep, forever. The
+           cursor would walk almost the whole catalog and then restart, which is a quieter version of the exact
+           failure this design replaced. */
+        var slice = (watermark + passes - 1) / passes;
+        if (slice < minimumSlice)
+        {
+            slice = minimumSlice;
+        }
+
+        return slice > watermark ? watermark : slice;
+    }
 
     /// <summary>
     /// Days of margin the map prune adds past the fact-retention horizon. **Strictly less than the dimension

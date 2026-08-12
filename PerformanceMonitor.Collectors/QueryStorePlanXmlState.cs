@@ -57,11 +57,37 @@ public static class QueryStorePlanXmlState
     public const string WatermarkKeyPrefix = "planwm:";
 
     /// <summary>
-    /// How long a watermark may stand before one pass ignores it and refetches every plan's XML. The stamp it
-    /// is measured against dates the last FULL fetch, not the last advance (see <see cref="Format"/>), so
-    /// this really is one expensive pass per database per horizon.
+    /// The target period for ONE FULL RE-VERIFICATION SWEEP of a database's plans — not an expiry, and
+    /// emphatically not a refetch trigger. <c>QueryStorePlanMap.CursorSliceWidth</c> derives the cursor's
+    /// per-pass id slice from it, so this constant sets the PACE of re-verification rather than a deadline
+    /// anything has to beat.
     ///
-    /// <para>It carries three guarantees, which is why a permanent watermark is wrong:</para>
+    /// <para>It used to mean "after this long, drop the watermark to zero and refetch every plan's XML", and
+    /// that was measured to be unreachable on the catalogs it mattered most for: 2.2-15.1 GB of plan XML per
+    /// catalog on the production fleet, which at a 12 MB budget and 5-minute cadence is 15.9 to 107.5 HOURS of
+    /// walking — so a 1-day expiry meant the biggest catalogs restarted from their lowest plan_id forever and
+    /// never once reached their newest plans. The optimization could not converge on exactly the databases it
+    /// existed for. Raising the number does not fix that shape; the sweep has to stop being a byte-volume walk.
+    /// It now is one: hash-only, bounded by ROW count (77k ids at ~270 per pass), re-fetching XML solely where
+    /// something actually changed.</para>
+    ///
+    /// <para>THREE MECHANISMS, each owning one failure, none of them this constant on its own:</para>
+    ///
+    /// <para>• <b>A Query Store reset</b> — the map's absent-content signal on the runtime stream
+    /// (<c>TouchSql</c>), recovering in one cycle. The ONLY thing permitted to zero a watermark.<br/>
+    /// • <b>Dormant plans</b> — the cursor finds a map row ABSENT at an id the watermark already passed, and
+    /// fetches it. No heuristic separates dormancy from a reset, because it does not have to: mass absence is
+    /// caught wholesale by the reset arm within a cycle.<br/>
+    /// • <b>In-place XML rewrites</b> — the cursor finds a stored <c>plan_hash</c> that DIFFERS from the live
+    /// one and re-fetches that plan alone. Across a day of fleet data this was 0 of 38,420 plan_ids, which is
+    /// why paying for it with a full walk was the wrong trade.</para>
+    ///
+    /// <para>ONE DAY remains the right pace for a hash-only sweep, for the reason the old value was chosen and
+    /// for a new one: the redundancy removed is per-pass, and a sweep bounded by rows rather than bytes finishes
+    /// comfortably inside a day on every catalog measured.</para>
+    ///
+    /// <para>Historical note on the three guarantees the old expiry claimed, kept because the reasoning still
+    /// explains why each mechanism above exists:</para>
     ///
     /// <para>1. In-place XML rewrites. plan_id is monotonic and a plan's identity is stable (0 of 38,420
     /// plan_ids changed their plan hash in a day of fleet data), but nothing guarantees a feature like
@@ -69,20 +95,14 @@ public static class QueryStorePlanXmlState
     /// expiry means that question does not have to be load-bearing.</para>
     ///
     /// <para>2. A Query Store RESET. Clearing Query Store restarts plan_id at 1, so every new plan sorts
-    /// below a stale watermark and its XML would be suppressed. This horizon is the recovery mechanism TODAY,
-    /// because the tempting detection test — "the highest plan_id seen this pass is below the standing
-    /// watermark" — is TRUE in any ordinary window where no new plan compiled, which on a steady workload is
-    /// most of them, so it would drop the watermark constantly and defeat the optimization. Exact detection
-    /// needs to distinguish "no new plans" from "the plans restarted", which this collector's payload cannot
-    /// do on its own.</para>
-    ///
-    /// <para>Not permanently, though, and this comment should not be read as arguing the horizon is the only
-    /// possible answer — <see cref="AdvanceWatermark"/> describes the signal that replaces it. Once the plan
-    /// XML moves to its own fetch (#2210), the runtime stream carries an ABSENT-CONTENT signal the payload
-    /// alone never could: a plan_id at or below the watermark whose content the store has never resolved is a
-    /// plan that was renumbered, which "no new plans this window" never produces. That cuts reset blackout from
-    /// up to a day down to one cycle, and this horizon reverts to covering only the two speculative cases
-    /// either side of this paragraph. It is NOT implemented yet; the wiring adds it.</para>
+    /// below a stale watermark and its XML would be suppressed. This is NOT what covers that any more — the
+    /// tempting detection test ("the highest plan_id seen this pass is below the standing watermark") is TRUE in
+    /// any ordinary quiet window, so it would drop the watermark constantly; but the map gives the payload a
+    /// signal it never had on its own. A plan_id at or below the watermark whose content the store has never
+    /// resolved is a RENUMBERED plan, which "no new plans this window" cannot produce, and
+    /// <c>QueryStorePlanMap.TouchSql</c> surfaces exactly those rows from the batch join it already performs.
+    /// That is the reset mechanism, it recovers in ONE CYCLE, and it is the only thing permitted to zero the
+    /// watermark.</para>
     ///
     /// <para>3. The dormant-plan gap: plan_id is monotonic in COMPILE order, which is not the same as "we
     /// have stored it", so a plan compiled before monitoring began and dormant through every collected

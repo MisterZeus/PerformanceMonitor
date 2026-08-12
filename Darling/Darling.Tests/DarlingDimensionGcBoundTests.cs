@@ -86,6 +86,33 @@ public sealed class DarlingDimensionGcBoundTests
     }
 
     /// <summary>
+    /// #2210: the re-verify cursor paces itself off <c>RefreshAfter</c> and NEVER touches the watermark. The
+    /// slice is a row count over an id range, which is the whole point — the old expiry walked BYTES and could
+    /// not finish inside a day on the catalogs that mattered (15.9 to 107.5 hours measured), so those restarted
+    /// forever. Redstone's 77k ids at a 5-minute cadence over a 1-day sweep is ~267 ids per pass.
+    /// </summary>
+    [Fact]
+    public void CursorSlice_PacesASweepWithinTheRefreshPeriod_AndNeverReturnsZeroForALiveCatalog()
+    {
+        var day = TimeSpan.FromDays(1);
+        var cadence = TimeSpan.FromMinutes(5);
+
+        var redstone = QueryStorePlanMap.CursorSliceWidth(77_176, day, cadence);
+        Assert.InRange(redstone, 200, 350);
+
+        /* A sweep must actually cover the range within the period: slice * passes >= watermark. */
+        var passes = day.Ticks / cadence.Ticks;
+        Assert.True(redstone * passes >= 77_176, "the sweep must cover the id range inside one refresh period");
+
+        /* Never zero for a live catalog, and never wider than the range itself. */
+        Assert.True(QueryStorePlanMap.CursorSliceWidth(10, day, cadence) > 0);
+        Assert.Equal(10, QueryStorePlanMap.CursorSliceWidth(10, day, cadence));
+
+        /* A fresh database has no watermark to re-verify, so there is nothing to slice. */
+        Assert.Equal(0, QueryStorePlanMap.CursorSliceWidth(0, day, cadence));
+    }
+
+    /// <summary>
     /// #2210: the DIMENSION must outlive the MAP, expressed the way it actually matters — as cutoff DATES from
     /// the two real code paths, not as the margin constants they happen to be derived from. An earlier cutoff
     /// deletes fewer rows, so the dim's cutoff has to be strictly earlier than the map's.
