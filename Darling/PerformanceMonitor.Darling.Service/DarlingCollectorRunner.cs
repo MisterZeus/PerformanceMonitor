@@ -1479,14 +1479,6 @@ RETURNING s.state_key";
             SqlServerTargetProvider.Instance, server, databaseName, cancellationToken);
 
     /// <summary>
-    /// The engine-neutral per-database connection: same monitored server, one specific database.
-    /// <para>PostgreSQL has no alternative to this. A SQL Server collector can reach another database
-    /// without reconnecting (<c>EXECUTE [db].sys.sp_executesql</c>), but a PostgreSQL connection is
-    /// bound to one database for its lifetime, so a per-database collector there is necessarily one
-    /// connection per database per cycle. That is the cost of reading <c>pg_stat_user_tables</c> and
-    /// friends at all, and it is why per-database PostgreSQL collectors get slow cadences.</para>
-    /// </summary>
-    /// <summary>
     /// The connection for a collector that reads the server as a whole — engine-resolved from the probed
     /// target, never constructed directly.
     /// <para>Extracted so it can be PINNED by test. This is the exact seam that broke: the non-per-database
@@ -1503,6 +1495,14 @@ RETURNING s.state_key";
         return TargetProviders.For(server.Target).CreateConnection(server.ConnectionString);
     }
 
+    /// <summary>
+    /// The engine-neutral per-database connection: same monitored server, one specific database.
+    /// <para>PostgreSQL has no alternative to this. A SQL Server collector can reach another database
+    /// without reconnecting (<c>EXECUTE [db].sys.sp_executesql</c>), but a PostgreSQL connection is
+    /// bound to one database for its lifetime, so a per-database collector there is necessarily one
+    /// connection per database per cycle. That is the cost of reading <c>pg_stat_user_tables</c> and
+    /// friends at all, and it is why per-database PostgreSQL collectors get slow cadences.</para>
+    /// </summary>
     internal static async Task<DbConnection> OpenDatabaseConnectionAsync(
         ITargetProvider provider, ServerRuntime server, string databaseName, CancellationToken cancellationToken)
     {
