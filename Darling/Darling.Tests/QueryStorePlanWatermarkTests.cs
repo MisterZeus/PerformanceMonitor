@@ -544,6 +544,37 @@ public class QueryStorePlanWatermarkTests
             "the caller needs this to LOG the violation instead of just watching the watermark stop");
     }
 
+    /// <summary>
+    /// #2210: the plan fetch admits a plan when the total BEFORE it was under budget, never on the cumulative
+    /// total alone. The naive <c>running_bytes &lt;= budget</c> is a per-database STALL — a plan bigger than the
+    /// whole budget exceeds it on its own row, so it is excluded, every later row is excluded too, the pass ships
+    /// nothing, the watermark holds, and the next pass re-selects the same plan forever. One 13 MB plan against
+    /// the 12 MB default does it.
+    ///
+    /// <para>A SHAPE pin, and worth being clear about its limit: it asserts the predicate the SQL carries, not
+    /// what SQL Server does with it. The two behavioural cases the reviewer asked for — an oversized plan ships
+    /// alone and advances the watermark, and an oversized plan mid-window cuts AFTER it rather than dropping it —
+    /// need a real Query Store to execute and belong to the measurement session before this leaves draft. What
+    /// this catches is the regression that reintroduces the naive form, which is the cheap half and the half a
+    /// future editor is most likely to trip.</para>
+    /// </summary>
+    [Fact]
+    public void PlanFetch_AdmitsAPlanOnTheTotalBeforeIt_SoOneOversizedPlanCannotStall()
+    {
+        var sql = QueryStoreCollector.Instance.BuildPlanFetchQuery(
+            Db, Context(capturePlanXml: true, state: new Dictionary<string, string>()),
+            watermark: 900_000, candidatePlans: 114, budgetBytes: 12L * 1024 * 1024).Text;
+
+        Assert.Contains("b.running_bytes - b.plan_bytes < 12582912", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("b.running_bytes <= ", sql, StringComparison.Ordinal);
+
+        /* The coarse bound sorts and filters on plan_id alone — no XML touched — which is what caps the
+           decompression the exact bound would otherwise pay across a whole catalog. */
+        Assert.Contains("SELECT TOP (114) qsp.plan_id, DATALENGTH(qsp.query_plan)", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE qsp.plan_id > 900000", sql, StringComparison.Ordinal);
+        Assert.Contains("ROWS UNBOUNDED PRECEDING", sql, StringComparison.Ordinal);
+    }
+
     /// <summary>The ordering verdict rides along with the advance on the cases that are fine.</summary>
     [Theory]
     [InlineData(new[] { 101L, 102L, 103L })]

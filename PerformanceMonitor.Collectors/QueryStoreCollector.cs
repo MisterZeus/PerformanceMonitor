@@ -1075,6 +1075,20 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
     /// filter — so the decompression is capped at K, sized per database by
     /// <see cref="QueryStorePlanXmlState.CandidatePlanCount"/> from the previous pass's own bytes-per-plan.</para>
     ///
+    /// <para>The budget test is <c>running_bytes - plan_bytes &lt; budget</c>, i.e. admit a plan when the total
+    /// BEFORE it was still under. The obvious <c>running_bytes &lt;= budget</c> is a per-database STALL: a single
+    /// plan larger than the whole budget has a running total that already exceeds it on its own row, so it is
+    /// excluded, every later row is excluded too (the total is monotonic), the pass ships nothing, the watermark
+    /// holds, and the next pass re-selects the same plan first — forever. One 13 MB plan against the 12 MB
+    /// default is enough, and it is the same never-advances failure this change exists to end, reached through
+    /// plan SIZE instead of cut ordering. Admitting the offender ships it alone, cuts after it, and moves the
+    /// watermark past it.</para>
+    ///
+    /// <para>The honest cost of that: worst-case bytes for one pass are <c>budget + largest single plan</c>,
+    /// not <c>budget</c>. The runtime-stats budget a few hundred lines up pays exactly the same price for the
+    /// same reason (measured: 19.6 MB shipped against a 12 MB budget when one very large plan carried a pass
+    /// past it), so "12 MB" is a floor on ship volume in both paths rather than a cap.</para>
+    ///
     /// <para>Both bounds are inlined as parsed integers rather than parameters, matching the watermark predicate
     /// above and for the same reason: the body nests inside <c>sp_executesql</c>, and the values are host-computed
     /// longs that never touch operator input.</para>
@@ -1107,6 +1121,7 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
 ),
 budgeted AS (
     SELECT c.plan_id,
+           c.plan_bytes,
            SUM(c.plan_bytes) OVER (ORDER BY c.plan_id ROWS UNBOUNDED PRECEDING) AS running_bytes
     FROM candidates AS c
 )
@@ -1115,7 +1130,7 @@ SELECT b.plan_id,
 FROM budgeted AS b
 JOIN sys.query_store_plan AS qsp
   ON qsp.plan_id = b.plan_id
-WHERE b.running_bytes <= {budget}
+WHERE b.running_bytes - b.plan_bytes < {budget}
 ORDER BY b.plan_id;";
 
         var escapedBody = body.Replace("'", "''", StringComparison.Ordinal);
