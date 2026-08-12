@@ -38,17 +38,37 @@ public class DarlingPgAutovacuumReaderTests
     /// The ranking crux. Ordering by raw dead_tuples would put the biggest tables on top permanently —
     /// they always have the most dead tuples and are usually fine — and bury the small hot table that is
     /// fifty times past its line. Dividing by the table's own threshold is what makes them comparable.
+    /// <para>Asserted by STRUCTURE rather than by an exact substring: the previous version matched
+    /// <c>"l.dead_tuples::numeric / NULLIF(l.vacuum_threshold, 0) DESC"</c> verbatim and broke on a
+    /// reformat that left the behaviour intact, which is a test failing for the wrong reason. The ordering
+    /// SEMANTICS are what matter and they are checked against a live store by
+    /// <c>RanksInsertOnlyTablesAlongsideDeadTupleTables</c> below.</para>
     /// </summary>
     [Fact]
     public void RanksByThresholdRatioNotRawDeadTupleCount()
     {
-        Assert.Contains("l.dead_tuples::numeric / NULLIF(l.vacuum_threshold, 0) DESC", Sql, StringComparison.Ordinal);
+        var orderAt = Sql.IndexOf("ORDER BY", StringComparison.Ordinal);
+        Assert.True(orderAt > 0, "the read must have an ORDER BY at all");
 
-        /* The ratio must come BEFORE the raw count in the ORDER BY, or the count decides the ranking. */
-        var ratioAt = Sql.IndexOf("dead_tuples::numeric / NULLIF", StringComparison.Ordinal);
-        var orderAt = Sql.IndexOf("ORDER BY\n", StringComparison.Ordinal);
-        var rawCountAt = Sql.LastIndexOf("l.dead_tuples DESC", StringComparison.Ordinal);
-        Assert.True(orderAt < ratioAt && ratioAt < rawCountAt);
+        var orderClause = Sql[orderAt..];
+
+        /* Both ratios divide by the table's OWN threshold, which is what makes tables comparable. */
+        Assert.Contains("l.dead_tuples::numeric", orderClause, StringComparison.Ordinal);
+        Assert.Contains("NULLIF(l.vacuum_threshold, 0)", orderClause, StringComparison.Ordinal);
+        Assert.Contains("l.inserts_since_vacuum::numeric", orderClause, StringComparison.Ordinal);
+        Assert.Contains("l.insert_vacuum_threshold", orderClause, StringComparison.Ordinal);
+
+        /* Both ratios must be considered TOGETHER — the worse one decides — rather than one after the other,
+           which would let a table with zero dead tuples sort below every table that has any. */
+        Assert.Contains("GREATEST(", orderClause, StringComparison.Ordinal);
+
+        /* The disabled flag outranks everything, then the ratio, then the raw counts as a tie-break. */
+        var disabledAt = orderClause.IndexOf("l.autovacuum_disabled DESC", StringComparison.Ordinal);
+        var ratioAt = orderClause.IndexOf("l.dead_tuples::numeric", StringComparison.Ordinal);
+        var rawAt = orderClause.LastIndexOf("GREATEST(l.dead_tuples, l.inserts_since_vacuum) DESC", StringComparison.Ordinal);
+        Assert.True(
+            disabledAt >= 0 && ratioAt > disabledAt && rawAt > ratioAt,
+            $"ORDER BY must be disabled, then ratio, then raw counts (got {disabledAt}/{ratioAt}/{rawAt})");
     }
 
     /// <summary>
