@@ -115,6 +115,11 @@ Three things go wrong here and each has a specific symptom:
 - **`trustServerCertificate: true` is usually needed on Aurora.** The default is full certificate
   verification (`SslMode=VerifyFull`) and Aurora presents an RDS CA a stock trust store does not know.
   Without it, connect fails on certificate validation — which reads like a network problem and is not.
+- **A target with TLS switched off entirely needs `"encryptMode": "optional"`.** `trustServerCertificate`
+  relaxes *verification*, not the requirement — so a stock self-hosted PostgreSQL running `ssl = off`, which is
+  the normal shape for a local or lab instance, is **unreachable** until `encryptMode` is `optional`
+  (`SslMode=Prefer`). Found the hard way on the first real run of this runbook: fail-closed TLS is correct, and
+  the failure gives no hint that the fix is a different setting than the one you already tried.
 - **`name` is the storage identity.** It derives `server_id`, so renaming an existing entry orphans its
   history under the old id rather than moving it.
 - **`engine` typos behave differently by path, on purpose.** In `darling.json` an unrecognized engine
@@ -180,6 +185,10 @@ today the numbers are 51 and 62, and both need a server restart. Managed mode do
 ```
 Darling\PerformanceMonitor.Darling.Service\bin\Release\net10.0\PerformanceMonitor.Darling.Service.exe
 ```
+
+There is no `--console` flag — the bare executable **is** console mode, and the Windows-service lifetime is a
+no-op when there is no service host. Worth stating because looking for the flag and not finding it reads like
+a missing feature.
 
 **Proof — three lines, in order.** The store migrated (the applied count is however many rungs this store
 was behind — on a fresh store it is all of them):

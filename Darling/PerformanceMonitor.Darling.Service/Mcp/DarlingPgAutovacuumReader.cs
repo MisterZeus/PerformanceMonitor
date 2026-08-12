@@ -105,11 +105,29 @@ public static class DarlingPgAutovacuumReader
           AND e.table_name    IS NOT DISTINCT FROM l.table_name
         /* Ratio, not raw count — and a table with autovacuum switched off sorts to the top regardless,
            because that is a configuration finding rather than a workload one. NULLIF guards the
-           never-analyzed case, where the threshold can be 0. */
+           never-analyzed case, where the threshold can be 0.
+
+           The ratio is the WORSE of the two, dead-tuple and insert-only. Ranking on dead tuples alone buried
+           append-only tables at ratio 0, below the LIMIT — and those are the classic wraparound route the
+           collector gathers inserts_since_vacuum for in the first place: never vacuumed means relfrozenxid
+           never advances. A table taking 10x its insert threshold with zero dead tuples is a finding, and it
+           used to be invisible here.
+
+           insert_vacuum_threshold carries -1 as the not-applicable sentinel on a major that has no
+           autovacuum_vacuum_insert_threshold, so the CASE keeps that out of the arithmetic rather than
+           producing a negative ratio. GREATEST ignores NULLs (verified on live Aurora), so a NULL dead ratio
+           does not swallow a real insert ratio. */
         ORDER BY
             l.autovacuum_disabled DESC,
-            l.dead_tuples::numeric / NULLIF(l.vacuum_threshold, 0) DESC NULLS LAST,
-            l.dead_tuples DESC
+            GREATEST(
+                l.dead_tuples::numeric / NULLIF(l.vacuum_threshold, 0),
+                CASE
+                    WHEN l.insert_vacuum_threshold > 0
+                        THEN l.inserts_since_vacuum::numeric / l.insert_vacuum_threshold
+                    ELSE 0
+                END
+            ) DESC NULLS LAST,
+            GREATEST(l.dead_tuples, l.inserts_since_vacuum) DESC
         LIMIT $4
         """;
 

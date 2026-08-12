@@ -27,7 +27,30 @@ public sealed class DarlingMcpPgWraparoundTools
     /// Severity from the documented escalation ladder rather than from a round number. Each boundary is
     /// a real PostgreSQL behaviour change, which is what makes the label actionable instead of decorative.
     /// </summary>
-    internal static string Classify(double pctTowardWraparound, double pctTowardEmergencyVacuum) =>
+    internal static string Classify(
+        double pctTowardWraparound,
+        double pctTowardEmergencyVacuum,
+        double pctTowardMultixactWraparound = 0,
+        double pctTowardMultixactEmergency = 0)
+    {
+        /* BOTH counters, graded on the same ladder and the worse label winning. This used to take the XID
+           percentage only, so a database at 80% on MultiXacts and 3% on XIDs was labelled "ok" — while the
+           tool's own description promises "a server can look fine on transaction IDs and be in trouble on
+           MultiXacts". MultiXact exhaustion stops writes exactly as XID exhaustion does, and is burned much
+           faster by SELECT FOR UPDATE and foreign-key-heavy workloads, which is precisely the workload that
+           gets there first. */
+        var xid = Grade(pctTowardWraparound, pctTowardEmergencyVacuum);
+        var multi = Grade(pctTowardMultixactWraparound, pctTowardMultixactEmergency);
+
+        /* Rank by how bad the label is, not by which counter it came from. */
+        var worst = Rank(multi) > Rank(xid) ? multi : xid;
+
+        /* Name the counter when MultiXacts are the reason, because the remedy differs and the reader would
+           otherwise go looking at transaction IDs. */
+        return worst != "ok" && Rank(multi) > Rank(xid) ? worst + "_multixact" : worst;
+    }
+
+    private static string Grade(double pctTowardWraparound, double pctTowardEmergencyVacuum) =>
         pctTowardWraparound switch
         {
             /* ~40M ids left. PostgreSQL starts emitting "must be vacuumed within N transactions". */
@@ -37,6 +60,15 @@ public sealed class DarlingMcpPgWraparoundTools
             >= 50.0 => "warning",
             _ => pctTowardEmergencyVacuum >= 100.0 ? "info_anti_wraparound_vacuum_expected" : "ok",
         };
+
+    private static int Rank(string label) => label switch
+    {
+        "critical_wraparound_imminent" => 4,
+        "critical_failsafe_range" => 3,
+        "warning" => 2,
+        "info_anti_wraparound_vacuum_expected" => 1,
+        _ => 0,
+    };
 
     [McpServerTool(Name = "get_pg_wraparound_risk"), Description("Gets PostgreSQL transaction ID and MultiXact ID freeze headroom per database - how close the server is to a write outage. This is the highest-consequence PostgreSQL signal and has no SQL Server equivalent. PostgreSQL transaction IDs are 32-bit and wrap; if the oldest unfrozen ID gets too old the server stops accepting new write transactions entirely, and no failover helps because every replica shares the condition. Reports two independent counters, because MultiXact IDs exhaust separately and are burned much faster by SELECT FOR UPDATE and foreign-key-heavy workloads - a server can look fine on transaction IDs and be in trouble on MultiXacts. Also reports whether autovacuum is winning: compare the current age against the window peak. Works on any PostgreSQL target, not only Aurora.")]
     public static async Task<string> GetPgWraparoundRisk(
@@ -69,7 +101,11 @@ public sealed class DarlingMcpPgWraparoundTools
                 .Select(r => new
                 {
                     database_name = r.DatabaseName,
-                    severity = Classify(r.PctTowardWraparound, r.PctTowardEmergencyVacuum),
+                    severity = Classify(
+                        r.PctTowardWraparound,
+                        r.PctTowardEmergencyVacuum,
+                        r.PctTowardMultixactWraparound,
+                        r.PctTowardMultixactEmergency),
                     measured_at = r.MeasuredAt,
                     /* Transaction IDs. */
                     frozen_xid_age = r.FrozenXidAge,
