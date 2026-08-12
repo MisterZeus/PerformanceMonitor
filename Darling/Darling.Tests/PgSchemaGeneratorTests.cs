@@ -32,7 +32,7 @@ public sealed class PgSchemaGeneratorTests
            correction) = 39, plus pvs_stats (#1951 ADR version store) = 40, plus database_states
            (baseline-deviation database-state alert) = 41, plus pg_wait_stats (the first PostgreSQL
            collector) = 42, plus pg_statement_stats = 43, plus pg_wraparound_stats = 44, plus pg_xmin_horizon = 45,
-           plus pg_replication_slots = 46, plus pg_autovacuum_stats (the first per-database PostgreSQL
+           plus pg_replication_slot_stats = 46, plus pg_autovacuum_stats (the first per-database PostgreSQL
            collector) = 47, plus pg_io_stats = 48. The catalog is deliberately engine-mixed: the schema generator walks it to
            create tables and one store can hold both engines' data, so splitting it per engine would
            fragment DDL generation. Dispatch is gated separately, by engine, in

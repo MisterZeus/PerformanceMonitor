@@ -120,7 +120,21 @@ ORDER BY s.slot_name";
 
     public override string Name => "pg_replication_slots";
 
-    public override string TargetTable => "pg_replication_slots";
+    /// <summary>
+    /// NOT <c>pg_replication_slots</c> — that name is taken by <c>pg_catalog.pg_replication_slots</c>, the
+    /// system view this collector READS, and a store table cannot share it.
+    /// <para><c>pg_catalog</c> is searched implicitly and FIRST, ahead of every entry in <c>search_path</c>,
+    /// so an unqualified reference to that name resolves to the system view no matter what the store
+    /// contains. It fails loudly in one place — <c>CREATE INDEX</c> on a view is 42809, which aborted the
+    /// whole migration and left the store unusable — and SILENTLY everywhere else: a reader's
+    /// <c>FROM pg_replication_slots</c> would have returned the MONITORING STORE's own (empty) slot list
+    /// instead of collected history, so the tool would always report no slots and the retention alert would
+    /// never fire. A muted outage predictor is worse than none, which is why the name changes rather than
+    /// every reference being schema-qualified and hoped over.</para>
+    /// <para>Name and TargetTable differing is established practice here (query_store → query_store_stats,
+    /// cpu_utilization → cpu_utilization_stats, and two more), so the collector keeps naming its source.</para>
+    /// </summary>
+    public override string TargetTable => "pg_replication_slot_stats";
 
     /// <summary>Core catalog only — any PostgreSQL target.</summary>
     public override bool AppliesTo(CollectorTargetInfo target) => true;

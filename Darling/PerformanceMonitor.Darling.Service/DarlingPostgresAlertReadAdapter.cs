@@ -99,7 +99,7 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
         WITH latest AS (
             SELECT DISTINCT ON (slot_name)
                 slot_name, wal_status, is_active, retained_wal_bytes, inactive_since
-            FROM pg_replication_slots
+            FROM collect.pg_replication_slot_stats
             WHERE server_id = $1
             AND   collection_time >= $2
             ORDER BY slot_name, collection_time DESC
@@ -107,7 +107,7 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
         earliest AS (
             SELECT DISTINCT ON (slot_name)
                 slot_name, retained_wal_bytes AS first_retained
-            FROM pg_replication_slots
+            FROM collect.pg_replication_slot_stats
             WHERE server_id = $1
             AND   collection_time >= $2
             ORDER BY slot_name, collection_time ASC

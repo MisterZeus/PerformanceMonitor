@@ -1355,7 +1355,7 @@ CREATE INDEX IF NOT EXISTS idx_pg_xmin_horizon_time
     ON collect.pg_xmin_horizon(server_id, collection_time);";
 
     /// <summary>
-    /// V65 — <c>pg_replication_slots</c>: slot state, including the two independent ways an abandoned
+    /// V65 — <c>collect.pg_replication_slot_stats</c>: slot state, including the two independent ways an abandoned
     /// slot can take a server down.
     /// <para><c>retained_wal_bytes</c> is the disk-exhaustion measure and is COMPUTED rather than read,
     /// because the column that would answer it directly — <c>safe_wal_size</c> — is NULL whenever
@@ -1370,7 +1370,7 @@ CREATE INDEX IF NOT EXISTS idx_pg_xmin_horizon_time
     /// orphaned three weeks ago.</para>
     /// </summary>
     private const string V65Sql = @"
-CREATE TABLE IF NOT EXISTS collect.pg_replication_slots (
+CREATE TABLE IF NOT EXISTS collect.pg_replication_slot_stats (
     collection_id bigint NOT NULL,
     collection_time timestamp NOT NULL,
     server_id integer NOT NULL,
@@ -1393,8 +1393,8 @@ CREATE TABLE IF NOT EXISTS collect.pg_replication_slots (
     conflicting boolean
 );
 
-CREATE INDEX IF NOT EXISTS idx_pg_replication_slots_time
-    ON collect.pg_replication_slots(server_id, collection_time);";
+CREATE INDEX IF NOT EXISTS idx_pg_replication_slot_stats_time
+    ON collect.pg_replication_slot_stats(server_id, collection_time);";
 
     /// <summary>
     /// V66 — <c>collect.pg_autovacuum_stats</c>, per-table autovacuum state, and the first PostgreSQL

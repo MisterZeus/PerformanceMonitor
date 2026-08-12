@@ -43,7 +43,10 @@ public class PgReplicationSlotsCollectorDefinitionTests
     public void Identity_Pinned()
     {
         Assert.Equal("pg_replication_slots", PgReplicationSlotsCollector.Instance.Name);
-        Assert.Equal("pg_replication_slots", PgReplicationSlotsCollector.Instance.TargetTable);
+        /* NOT pg_replication_slots: that is pg_catalog's view, which resolves ahead of anything in
+           search_path, so a store table of that name breaks CREATE INDEX loudly and every unqualified read
+           silently. Name and TargetTable differing is established practice (query_store -> query_store_stats). */
+        Assert.Equal("pg_replication_slot_stats", PgReplicationSlotsCollector.Instance.TargetTable);
         Assert.Equal(CollectorTargetEngine.PostgreSql, PgReplicationSlotsCollector.Instance.TargetEngine);
     }
 

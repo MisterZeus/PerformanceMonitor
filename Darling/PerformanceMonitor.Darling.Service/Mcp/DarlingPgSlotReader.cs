@@ -52,7 +52,7 @@ public static class DarlingPgSlotReader
                 slot_name, collection_time, slot_type, plugin, database_name, is_active,
                 wal_status, retained_wal_bytes, safe_wal_size_bytes, xmin_age, catalog_xmin_age,
                 inactive_since, invalidation_reason, conflicting
-            FROM pg_replication_slots
+            FROM collect.pg_replication_slot_stats
             WHERE server_id = $1
             AND   collection_time >= $2
             AND   collection_time <= $3
@@ -63,7 +63,7 @@ public static class DarlingPgSlotReader
                 slot_name,
                 retained_wal_bytes AS first_retained_wal_bytes,
                 collection_time AS first_seen_at
-            FROM pg_replication_slots
+            FROM collect.pg_replication_slot_stats
             WHERE server_id = $1
             AND   collection_time >= $2
             AND   collection_time <= $3

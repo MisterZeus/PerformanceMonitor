@@ -9,6 +9,8 @@
 using System;
 using System.Globalization;
 using System.IO;
+using System.Linq;
+using System.Reflection;
 using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows.Media;
@@ -621,10 +623,28 @@ public sealed class ViewerSchemaVersionGateTests
         /* Pin: a fully-migrated store (all sentinels present) must map to exactly the required version. If a
            future migration bumps StorageVersion, this fails until a matching sentinel + map arm is added —
            the guard against the probe silently under-reporting a newer store as skewed, which would make
-           the connect-time gate refuse to open the viewer against a perfectly healthy store. */
+           the connect-time gate refuse to open the viewer against a perfectly healthy store.
+
+           The argument list is built from the method's OWN ARITY rather than hand-counted literals, because
+           hand-counted literals are how this broke: a new sentinel was appended, this call still passed the
+           old count, the missing one defaulted to false, and "a fully-migrated store" quietly came to mean
+           "one rung short". The assertion then failed on the version number and pointed at the migration
+           instead of at this line. Reflection cannot drift from the signature. */
+        var allSentinelsTrue = Enumerable
+            .Repeat<object>(true, typeof(ViewerDataService)
+                .GetMethod(
+                    nameof(ViewerDataService.MapProbedSchemaVersion),
+                    BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)!
+                .GetParameters().Length)
+            .ToArray();
+
         Assert.Equal(
             ViewerDataService.RequiredStoreSchemaVersion,
-            ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+            (int)typeof(ViewerDataService)
+                .GetMethod(
+                    nameof(ViewerDataService.MapProbedSchemaVersion),
+                    BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)!
+                .Invoke(null, allSentinelsTrue)!);
     }
 }
 

@@ -68,7 +68,12 @@ public class DarlingPgSlotReaderTests
     [Fact]
     public void ReadsTheReplicationSlotsTable()
     {
-        Assert.Contains("FROM pg_replication_slots", Sql, StringComparison.Ordinal);
+        /* The STORE table, which is deliberately NOT named pg_replication_slots: that name belongs to
+           pg_catalog's view, which pg_catalog resolves first, so this read would have silently returned the
+           monitoring store's own (empty) slot list. Schema-qualified as well, to say which PostgreSQL the
+           query is aimed at. */
+        Assert.Contains("FROM collect.pg_replication_slot_stats", Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("FROM pg_replication_slots", Sql, StringComparison.Ordinal);
     }
 
     /// <summary>

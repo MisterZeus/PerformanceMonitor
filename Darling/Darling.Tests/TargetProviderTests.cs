@@ -253,17 +253,37 @@ public class TargetProviderTests
         Assert.DoesNotContain("scratch", sqlQuery.Text, StringComparison.Ordinal);
     }
 
-    /// <summary>An empty exclusion list must produce no clause and no parameters, not a dangling AND.</summary>
+    /// <summary>
+    /// An empty exclusion list must produce no clause and no parameters, not a dangling AND.
+    /// <para>Each engine gets a connection string in ITS OWN dialect. A single string for both looks tidier
+    /// and does not work: <c>BuildDatabaseListPlan</c> hops to another database via the provider's
+    /// <c>WithDatabase</c>, which parses through that engine's real builder — so
+    /// <c>SqlConnectionStringBuilder</c> rejects <c>Host=</c> outright ("Keyword not supported"), and the
+    /// test fails on its own fixture rather than on the thing it is checking.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(CollectorTargetEngine.SqlServer, "Server=sql1;Database=master;Integrated Security=true")]
+    [InlineData(CollectorTargetEngine.PostgreSql, "Host=pg1;Database=postgres;Username=monitor")]
+    public void DatabaseListPlan_WithNoExclusionsIsClean(CollectorTargetEngine engine, string connectionString)
+    {
+        var (_, query) = TargetProviders.For(engine).BuildDatabaseListPlan(connectionString, Array.Empty<string>());
+
+        Assert.Empty(query.Parameters);
+        Assert.DoesNotContain("NOT IN", query.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("@excl_db_", query.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Every engine in the enum has a provider. Split out from the case above, which needs an
+    /// engine-specific connection string and so cannot loop the enum — this is the part that genuinely
+    /// must cover all of them, and it fails when a new engine is added without one.
+    /// </summary>
     [Fact]
-    public void DatabaseListPlan_WithNoExclusionsIsCleanOnBothEngines()
+    public void EveryEngineHasAProvider()
     {
         foreach (CollectorTargetEngine engine in Enum.GetValues<CollectorTargetEngine>())
         {
-            var (_, query) = TargetProviders.For(engine).BuildDatabaseListPlan("Server=x;Host=x", Array.Empty<string>());
-
-            Assert.Empty(query.Parameters);
-            Assert.DoesNotContain("NOT IN", query.Text, StringComparison.Ordinal);
-            Assert.DoesNotContain("@excl_db_", query.Text, StringComparison.Ordinal);
+            Assert.NotNull(TargetProviders.For(engine));
         }
     }
 
