@@ -208,7 +208,14 @@ public class QueryStorePlanWatermarkTests
            cut drops an arbitrary set of plan_ids off the tail of the window — including ids BELOW the highest
            one that stored. Advancing past them would suppress their XML on every later pass even though it
            never shipped once. The cut is already resumable on the time watermark, so declining to advance
-           costs one repeated fetch and nothing else. */
+           costs one repeated fetch and nothing else.
+
+           THIS PINS A KNOWN-BROKEN BEHAVIOUR AS A BASELINE, NOT AS A DESIGN. Declining to advance is correct
+           GIVEN time-ordered shipping, but 97.8% of production passes are budget-cut, so "does not advance at
+           all" means the watermark never advances and the whole optimization is a measured no-op (#2210). The
+           plan_id-ordered fetch removes the premise — a cut then truncates a suffix, making the advance safe —
+           and this test is expected to be REPLACED at that point, not kept passing. Read it as a record of why
+           the old shape could not work, and delete it with the shape. */
         var context = Context(capturePlanXml: true, state: new Dictionary<string, string>(), budgetOverride: 16);
 
         await Read(context, Plan(10, xml: true), Plan(20, xml: true), Plan(30, xml: true));
@@ -440,6 +447,22 @@ public class QueryStorePlanWatermarkTests
 
         Assert.Equal(expected, k);
         Assert.True(clamped, "a clamped window must be reportable so the caller can log it");
+    }
+
+    /// <summary>
+    /// `clamped` means a bound CHANGED the answer, not that the answer equals one. A window whose measured size
+    /// lands naturally on a bound was sized by the measurement and needs no log line; reporting it as clamped is
+    /// a false positive, and a caller that logs on it trains its reader to ignore the message.
+    /// </summary>
+    [Fact]
+    public void CandidatePlanCount_LandingNaturallyOnABound_IsNotReportedAsClamped()
+    {
+        /* Budget chosen so budget/avg*margin is exactly MinCandidatePlans: 32 / 1.5 = 21.33 plans of 1 byte. */
+        var exactlyTheFloor = (long)(QueryStorePlanXmlState.MinCandidatePlans / QueryStorePlanXmlState.CandidatePlanMargin);
+        var k = QueryStorePlanXmlState.CandidatePlanCount(1, exactlyTheFloor, out var clamped);
+
+        Assert.Equal(QueryStorePlanXmlState.MinCandidatePlans, k);
+        Assert.False(clamped, "the measurement produced this value; no bound changed it");
     }
 
     /// <summary>A misconfigured budget floors the window rather than producing zero or a negative one.</summary>

@@ -69,12 +69,20 @@ public static class QueryStorePlanXmlState
     /// expiry means that question does not have to be load-bearing.</para>
     ///
     /// <para>2. A Query Store RESET. Clearing Query Store restarts plan_id at 1, so every new plan sorts
-    /// below a stale watermark and its XML would be suppressed. This horizon is the whole recovery
-    /// mechanism, because there is deliberately no reset DETECTION: the tempting test — "the highest plan_id
-    /// seen this pass is below the standing watermark" — is TRUE in any ordinary window where no new plan
-    /// compiled, which on a steady workload is most of them, so it would drop the watermark constantly and
-    /// defeat the optimization. Exact detection needs the server's live MAX(plan_id), which the payload does
-    /// not carry.</para>
+    /// below a stale watermark and its XML would be suppressed. This horizon is the recovery mechanism TODAY,
+    /// because the tempting detection test — "the highest plan_id seen this pass is below the standing
+    /// watermark" — is TRUE in any ordinary window where no new plan compiled, which on a steady workload is
+    /// most of them, so it would drop the watermark constantly and defeat the optimization. Exact detection
+    /// needs to distinguish "no new plans" from "the plans restarted", which this collector's payload cannot
+    /// do on its own.</para>
+    ///
+    /// <para>Not permanently, though, and this comment should not be read as arguing the horizon is the only
+    /// possible answer — <see cref="AdvanceWatermark"/> describes the signal that replaces it. Once the plan
+    /// XML moves to its own fetch (#2210), the runtime stream carries an ABSENT-CONTENT signal the payload
+    /// alone never could: a plan_id at or below the watermark whose content the store has never resolved is a
+    /// plan that was renumbered, which "no new plans this window" never produces. That cuts reset blackout from
+    /// up to a day down to one cycle, and this horizon reverts to covering only the two speculative cases
+    /// either side of this paragraph. It is NOT implemented yet; the wiring adds it.</para>
     ///
     /// <para>3. The dormant-plan gap: plan_id is monotonic in COMPILE order, which is not the same as "we
     /// have stored it", so a plan compiled before monitoring began and dormant through every collected
@@ -84,6 +92,15 @@ public static class QueryStorePlanXmlState
     /// ~96 times a day), so a daily full fetch already eliminates ~99% of it and a weekly one adds almost
     /// nothing — while buying 7x the exposure on all three guarantees above, including a reset blackout
     /// measured in days.</para>
+    ///
+    /// <para>That trade omits a term, named here because it is the one that will move this number: expiry
+    /// resets the watermark to zero, so "one expensive pass" is really a full budgeted catalog WALK. At a 12 MB
+    /// ship budget an 82k-plan catalog spends most of a day walking, which means the largest catalogs — the ones
+    /// this optimization matters most for — are close to continuously refetching, and shortening the horizon
+    /// makes that worse rather than safer. Once the stream signal above covers resets, the walk buys only the
+    /// in-place-rewrite case (speculative: 0 of 38,420 plan_ids changed hash in a day of fleet data) and dormant
+    /// plans (real, small), and a longer horizon is likely correct. Measure the walk cost on the worst catalog
+    /// before changing it.</para>
     /// </summary>
     public static readonly TimeSpan RefreshAfter = TimeSpan.FromDays(1);
 
@@ -162,13 +179,20 @@ public static class QueryStorePlanXmlState
             return MinCandidatePlans;
         }
 
-        /* double for the margin, then one bounds check — the product cannot overflow int at any budget the knob
-           accepts, but the cast is guarded anyway because the budget is operator input. */
+        /* double for the margin, then ONE cap before the cast — at int.MaxValue rather than at
+           MaxCandidatePlans, deliberately. Capping at the bound here would pre-clamp the value and leave the
+           comparison below unable to tell a clamp from a natural landing, which is the false positive this
+           reports on. int.MaxValue only guards the cast itself, since the budget is operator input. */
         var wanted = (double)budgetBytes / avg * CandidatePlanMargin;
-        var rounded = wanted >= MaxCandidatePlans ? MaxCandidatePlans : (int)Math.Ceiling(wanted);
+        var unclamped = wanted >= int.MaxValue ? int.MaxValue : (int)Math.Ceiling(wanted);
+        var bounded = Math.Clamp(unclamped, MinCandidatePlans, MaxCandidatePlans);
 
-        clamped = rounded >= MaxCandidatePlans || rounded <= MinCandidatePlans;
-        return Math.Clamp(rounded, MinCandidatePlans, MaxCandidatePlans);
+        /* Reports that a bound CHANGED the answer, not that the answer happens to equal one. A window whose
+           measured size lands naturally on 32 or 2048 was sized by the measurement and needs no log line; saying
+           "clamped" there is a false positive against this contract, and a caller that logs on it teaches its
+           reader to ignore the message. */
+        clamped = bounded != unclamped;
+        return bounded;
     }
 
     /// <summary>

@@ -57,8 +57,13 @@ public static class QueryStorePlanMap
     last_seen timestamp NOT NULL,
     PRIMARY KEY (server_id, database_name, plan_id)
 );
-CREATE INDEX IF NOT EXISTS idx_query_store_plan_map_last_seen ON collect.query_store_plan_map(last_seen);
-CREATE INDEX IF NOT EXISTS idx_query_store_plan_map_digest ON collect.query_store_plan_map(digest);";
+CREATE INDEX IF NOT EXISTS idx_query_store_plan_map_last_seen ON collect.query_store_plan_map(last_seen);";
+
+    /* Deliberately NO index on digest. Nothing reads this table by digest: readers resolve
+       (server_id, database_name, plan_id) -> digest through the primary key, the liveness touch joins on that
+       same key, and the dimension GC sweeps its OWN last_seen rather than asking who references a digest. An
+       index nothing queries is pure write tax on a table every plan fetch upserts into. If a reverse lookup
+       ("which plans share this content") is ever wanted, add it with the query that needs it. */
 
     /// <summary>
     /// Records what the plan fetch landed: one row per plan, carrying the digest of the content written to
@@ -81,7 +86,7 @@ ORDER BY server_id, database_name, plan_id
 ON CONFLICT (server_id, database_name, plan_id) DO UPDATE SET
     digest = EXCLUDED.digest,
     last_seen = EXCLUDED.last_seen
-WHERE query_store_plan_map.last_seen IS NULL OR EXCLUDED.last_seen >= query_store_plan_map.last_seen";
+WHERE EXCLUDED.last_seen >= query_store_plan_map.last_seen";
 
     /// <summary>
     /// The liveness assertion, and the reason this whole design is safe: for the distinct
