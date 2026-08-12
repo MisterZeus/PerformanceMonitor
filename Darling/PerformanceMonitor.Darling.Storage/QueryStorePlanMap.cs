@@ -54,6 +54,7 @@ public static class QueryStorePlanMap
     database_name text NOT NULL,
     plan_id bigint NOT NULL,
     digest bytea NOT NULL,
+    plan_hash text,
     last_seen timestamp NOT NULL,
     PRIMARY KEY (server_id, database_name, plan_id)
 );
@@ -72,19 +73,28 @@ CREATE INDEX IF NOT EXISTS idx_query_store_plan_map_last_seen ON collect.query_s
     /// case the watermark's refresh horizon exists to catch, and this is where the corrected content gets
     /// pointed at.
     ///
+    /// <para><c>plan_hash</c> is what makes re-verification cheap, and it is why it is stored here rather than
+    /// derived: <c>sys.query_store_plan.query_plan_hash</c> reads WITHOUT decompressing the plan, so the
+    /// re-verify cursor can walk <c>[0..watermark]</c> comparing hashes on cheap columns alone and re-fetch XML
+    /// only where a hash DIFFERS or a map row is ABSENT. That turns in-place rewrites from a full catalog walk
+    /// per horizon into per-changed-plan work — 0 of 38,420 plan_ids changed hash across a day of fleet data —
+    /// and dormant plans fall out of the same pass with no heuristic to separate them from a reset, because mass
+    /// absence is caught wholesale by the runtime stream's reset arm within one cycle.</para>
+    ///
     /// <para>Ordered by the conflict key. Same reason as <see cref="DarlingModuleMap.RefreshSql"/>: concurrent
     /// batch upserts that take row locks in different relative orders deadlock (#1801), and a plan fetch runs
     /// per database against a fleet of servers. Checked, not assumed — do not drop the ORDER BY on the belief
     /// that a single-row-per-plan insert cannot conflict with anything.</para>
     /// </summary>
     public const string UpsertSql = @"INSERT INTO collect.query_store_plan_map
-    (server_id, database_name, plan_id, digest, last_seen)
-SELECT server_id, database_name, plan_id, digest, stamped
-FROM unnest($1::integer[], $2::text[], $3::bigint[], $4::bytea[], $5::timestamp[])
-     AS batch(server_id, database_name, plan_id, digest, stamped)
+    (server_id, database_name, plan_id, digest, plan_hash, last_seen)
+SELECT server_id, database_name, plan_id, digest, plan_hash, stamped
+FROM unnest($1::integer[], $2::text[], $3::bigint[], $4::bytea[], $5::text[], $6::timestamp[])
+     AS batch(server_id, database_name, plan_id, digest, plan_hash, stamped)
 ORDER BY server_id, database_name, plan_id
 ON CONFLICT (server_id, database_name, plan_id) DO UPDATE SET
     digest = EXCLUDED.digest,
+    plan_hash = EXCLUDED.plan_hash,
     last_seen = EXCLUDED.last_seen
 WHERE EXCLUDED.last_seen >= query_store_plan_map.last_seen";
 

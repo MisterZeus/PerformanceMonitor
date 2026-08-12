@@ -170,8 +170,29 @@ public static class QueryStorePlanXmlState
     /// silently pinned at its ceiling looks identical to one that fit, and that is how a cap becomes invisible.</para>
     /// </summary>
     public static int CandidatePlanCount(long? observedAvgPlanBytes, long budgetBytes, out bool clamped)
+        => CandidatePlanCount(observedAvgPlanBytes, budgetBytes, catchUpInProgress: false, out clamped);
+
+    /// <summary>
+    /// As above, with the catch-up guard: while <paramref name="catchUpInProgress"/> — the watermark still below
+    /// the server's newest plan_id — the observed average is FLOORED at
+    /// <see cref="FirstContactAvgPlanBytes"/> rather than trusted.
+    ///
+    /// <para>The estimator is biased during exactly that window, and measurably so: the average is computed over
+    /// the plans a pass actually shipped, which under plan_id-ascending shipping are the OLDEST ids in the
+    /// catalog. On one production catalog the plans the fetch shipped averaged 15 KB while the newest 300 plans
+    /// in the same catalog averaged 46 KB — a 3x under-estimate, which inflates K threefold and decompresses
+    /// that much more than the budget can ship. Flooring at the seed applies the same over-estimate-is-safe
+    /// logic the seed itself rests on, for the one window where the sample is known to be unrepresentative.
+    /// Once the first walk has converged the sample spans the catalog and the observed average is trusted.</para>
+    /// </summary>
+    public static int CandidatePlanCount(long? observedAvgPlanBytes, long budgetBytes, bool catchUpInProgress, out bool clamped)
     {
         var avg = observedAvgPlanBytes is long observed && observed > 0 ? observed : FirstContactAvgPlanBytes;
+
+        if (catchUpInProgress && avg < FirstContactAvgPlanBytes)
+        {
+            avg = FirstContactAvgPlanBytes;
+        }
 
         if (budgetBytes <= 0)
         {

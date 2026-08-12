@@ -465,6 +465,33 @@ public class QueryStorePlanWatermarkTests
         Assert.False(clamped, "the measurement produced this value; no bound changed it");
     }
 
+    /// <summary>
+    /// While catch-up is in progress the observed average is floored at the seed, because the sample is biased
+    /// then and measurably so: on one production catalog the plans the fetch shipped averaged 15 KB while the
+    /// newest 300 in the same catalog averaged 46 KB. Trusting the low figure inflates K threefold and
+    /// decompresses that much more than the budget can ship. After convergence the observed value is trusted.
+    /// </summary>
+    [Fact]
+    public void CandidatePlanCount_DuringCatchUp_FloorsTheEstimateAtTheSeed()
+    {
+        const long budget = 12L * 1024 * 1024;
+        var biased = 15 * 1024L;
+
+        var duringCatchUp = QueryStorePlanXmlState.CandidatePlanCount(biased, budget, catchUpInProgress: true, out _);
+        var converged = QueryStorePlanXmlState.CandidatePlanCount(biased, budget, catchUpInProgress: false, out _);
+        var seeded = QueryStorePlanXmlState.CandidatePlanCount(null, budget, out _);
+
+        Assert.Equal(seeded, duringCatchUp);
+        Assert.True(converged > duringCatchUp, "the un-floored estimate must still be trusted once converged");
+
+        /* A large observed average is NOT raised by the floor — over-estimating plan size is the safe direction
+           and the floor only ever makes the window smaller. */
+        var large = 200 * 1024L;
+        Assert.Equal(
+            QueryStorePlanXmlState.CandidatePlanCount(large, budget, catchUpInProgress: false, out _),
+            QueryStorePlanXmlState.CandidatePlanCount(large, budget, catchUpInProgress: true, out _));
+    }
+
     /// <summary>A misconfigured budget floors the window rather than producing zero or a negative one.</summary>
     [Fact]
     public void CandidatePlanCount_WithNonPositiveBudget_FloorsAndReportsClamped()
