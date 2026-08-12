@@ -39,12 +39,28 @@ public partial class LocalDataService
     /// </summary>
     public async Task<List<DatabaseStateInfo>> GetDatabaseStateDeviationsAsync(int serverId)
     {
-        using var connection = await OpenConnectionAsync();
+        /* #2208: the four statements below INSERT, UPDATE and DELETE, so they run under the WRITE lock — which
+           is what its own contract asks for ("operations that must not race with archival or compaction"). They
+           used the READ lock, which was wrong twice over: the writes could interleave with archival, and holding
+           a read lock across four statements starves writers, because a ReaderWriterLockSlim writer waits for
+           every reader to drain and OpenWriteConnectionAsync gives up after 5 seconds. That is how this
+           surfaced — an unrelated server-tags test timed out acquiring the write lock while this method held the
+           read lock, on a static lock shared by the whole process.
+
+           BEST-EFFORT, and deliberately separate from the read below. If archival is mid-flight the maintenance
+           is skipped for this cycle and the deviation read still runs under its read lock exactly as before: a
+           cycle without seeding is a cycle where a brand-new database has no baseline yet, which the no-baseline
+           arm already handles. The alternative — letting the timeout escape — would either crash the sweep or,
+           if swallowed into an empty result, read as "every database recovered" and clear the alert memory for
+           all of them. Skipping maintenance is the only failure mode here that loses nothing. */
+        try
+        {
+            using var maintenance = await OpenWriteConnectionAsync();
 
         /* Seed missing baselines from the latest snapshot (insert-if-absent; effective state). An integrity
            or transient state is never learned: a critical first observation stays pending and alerts via the
            no-baseline arm below, and a transient one stays pending SILENTLY until it settles. */
-        using (var seed = connection.CreateCommand())
+        using (var seed = maintenance.CreateCommand())
         {
             seed.CommandText = $@"
 INSERT INTO config_database_state_expected (server_id, database_name, expected_state, is_user_override, updated_at)
@@ -80,7 +96,7 @@ AND   NOT EXISTS (
            state_desc = 'ONLINE' with is_in_standby set, so matching the raw column would re-baseline every
            log-shipping secondary to ONLINE and then alert it forever for being STANDBY. Uncorrelated
            IN (...), like the prune below. */
-        using (var heal = connection.CreateCommand())
+        using (var heal = maintenance.CreateCommand())
         {
             heal.CommandText = $@"
 UPDATE config_database_state_expected
@@ -114,7 +130,7 @@ AND   database_name IN (
            view, a database that has arrived back at its expected state, and its memory is about a deviation that
            no longer exists. Running first would leave that dead memory for a cycle. Ordering against the seed is
            immaterial either way — a row the seed just inserted has a NULL memory, which this skips. */
-        using (var clearRecovered = connection.CreateCommand())
+        using (var clearRecovered = maintenance.CreateCommand())
         {
             clearRecovered.CommandText = $@"
 UPDATE config_database_state_expected AS e
@@ -136,7 +152,7 @@ AND   (e.expected_state = '{DatabaseStateTokens.Ignore}'
 
         /* Tidy auto-baselines for databases no longer in the newest snapshot (dropped/renamed). User
            overrides are kept — an operator's intent shouldn't vanish because a database is briefly gone. */
-        using (var prune = connection.CreateCommand())
+        using (var prune = maintenance.CreateCommand())
         {
             prune.CommandText = @"
 DELETE FROM config_database_state_expected
@@ -150,7 +166,14 @@ AND   database_name NOT IN (
             prune.Parameters.Add(new DuckDBParameter { Value = serverId });
             await prune.ExecuteNonQueryAsync();
         }
+        }
+        catch (TimeoutException)
+        {
+            /* Archival or compaction holds the write lock. Skip this cycle's maintenance and read anyway —
+               see the block comment at the top of the method for why skipping is the only lossless option. */
+        }
 
+        using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         command.CommandText = $@"
 WITH newest AS (
@@ -259,7 +282,11 @@ ORDER BY l.database_name";
     /// </summary>
     public async Task SetDatabaseStateExpectedAsync(int serverId, string databaseName, string expectedState)
     {
-        using var connection = await OpenConnectionAsync();
+        /* #2208: an upsert, so the WRITE lock. Unlike the deviation read's maintenance prologue this one does
+           NOT swallow a timeout: it is a user action, and TimeoutException's message ("try again in a few
+           moments") is written to be shown. Silently dropping an operator's declared expected state would be
+           the worst outcome available here. */
+        using var connection = await OpenWriteConnectionAsync();
         using var command = connection.CreateCommand();
         /* now()::TIMESTAMP, not a bare current_timestamp: DuckDB resolves a bare current_timestamp against
            the table's columns (and errors) inside a VALUES row and an ON CONFLICT DO UPDATE SET, so the
@@ -282,7 +309,9 @@ DO UPDATE SET expected_state = EXCLUDED.expected_state, is_user_override = true,
     /// </summary>
     public async Task ResetDatabaseStateExpectedToCurrentAsync(int serverId, string databaseName)
     {
-        using var connection = await OpenConnectionAsync();
+        /* #2208: an upsert, so the WRITE lock, and the timeout surfaces for the same reason as the override
+           write above — this is the operator pressing a button. */
+        using var connection = await OpenWriteConnectionAsync();
         using var command = connection.CreateCommand();
         command.CommandText = $@"
 INSERT INTO config_database_state_expected (server_id, database_name, expected_state, is_user_override, updated_at)
