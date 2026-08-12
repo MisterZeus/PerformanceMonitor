@@ -49,12 +49,32 @@ public class AlertContext
 /// never part of <see cref="DedupKey"/> — only the identity members hashed by
 /// <see cref="AlertFingerprint"/>.
 /// </summary>
+/// <param name="OccurrenceCount">
+/// How many events with this fingerprint are in the CURRENT read window (the rolling hour the
+/// groupers counted). A gauge, not a total: it rises as events arrive and falls as they age out.
+/// </param>
+/// <param name="TotalOccurrences">
+/// #2216: occurrences of this fingerprint accumulated across the whole incident — monotonic for as
+/// long as the incident lasts, so a consumer that only sees throttled deliveries can still recover
+/// how many events actually happened between two of them. <c>null</c> on any path with no
+/// accumulator behind it (a host that does not persist occurrence state, or an alert whose incidents
+/// are built outside the engine), which reads as "no total available" rather than a false zero.
+/// Accumulated by <c>IncidentOccurrenceAccumulator</c>; see its remarks for the exactness bound.
+/// </param>
+/// <param name="IncidentStartedUtc">
+/// #2216: when this fingerprint's current incident was first observed. The incident identity that
+/// makes <paramref name="TotalOccurrences"/> interpretable — a consumer seeing the total go
+/// backwards can tell a genuine new incident (this moved) from a service restart or a dropped
+/// store (this did not).
+/// </param>
 public sealed record AlertIncident(
     string DedupKey,
     IReadOnlyList<string> InvolvedObjects,
     int OccurrenceCount = 1,
     string? WaitRange = null,
-    IReadOnlyList<AlertIncidentField>? DetailFields = null);
+    IReadOnlyList<AlertIncidentField>? DetailFields = null,
+    long? TotalOccurrences = null,
+    DateTime? IncidentStartedUtc = null);
 
 /// <summary>
 /// A forensic label/value pair carried on an <see cref="AlertIncident"/> for #1141 Per-event delivery
@@ -116,8 +136,19 @@ public record FieldDto(string Label, string Value);
 /// JSON mirror of <see cref="AlertIncident"/> (#1140). The trailing optional <c>Incidents</c>
 /// member on <see cref="AlertContextDto"/> keeps the round-trip backward-compatible: legacy
 /// contextJson written before this field existed deserializes <c>Incidents</c> to null.
+/// <para>
+/// #2216's two members are trailing and nullable for the same reason: a history row written before
+/// they existed rehydrates them as null, which is exactly "this alert carried no total" rather than
+/// a fabricated zero. <see cref="AlertIncident.DetailFields"/> remains unpersisted.
+/// </para>
 /// </summary>
-public record AlertIncidentDto(string DedupKey, List<string> InvolvedObjects, int OccurrenceCount = 1, string? WaitRange = null);
+public record AlertIncidentDto(
+    string DedupKey,
+    List<string> InvolvedObjects,
+    int OccurrenceCount = 1,
+    string? WaitRange = null,
+    long? TotalOccurrences = null,
+    DateTime? IncidentStartedUtc = null);
 
 /// <summary>
 /// JSON mirror of <see cref="RemediationAction"/> / <see cref="ForcePlanTarget"/>
@@ -304,7 +335,9 @@ public static class AlertContextSerializer
                 i.DedupKey,
                 new List<string>(i.InvolvedObjects),
                 i.OccurrenceCount,
-                i.WaitRange)));
+                i.WaitRange,
+                i.TotalOccurrences,
+                i.IncidentStartedUtc)));
         return JsonSerializer.Serialize(dto);
     }
 
@@ -384,7 +417,9 @@ public static class AlertContextSerializer
                         i.DedupKey ?? string.Empty,
                         i.InvolvedObjects ?? new List<string>(),
                         i.OccurrenceCount,
-                        i.WaitRange));
+                        i.WaitRange,
+                        TotalOccurrences: i.TotalOccurrences,
+                        IncidentStartedUtc: i.IncidentStartedUtc));
                 }
             }
             return true;
