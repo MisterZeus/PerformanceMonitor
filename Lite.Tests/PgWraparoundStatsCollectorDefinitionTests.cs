@@ -96,15 +96,29 @@ public class PgWraparoundStatsCollectorDefinitionTests
         Assert.DoesNotContain("txid_current()", sql, StringComparison.Ordinal);
     }
 
-    /// <summary>Reads the shared catalog, so no per-database fan-out is needed.</summary>
+    /// <summary>
+    /// Reads the SHARED catalog and INCLUDES templates — the opposite of the per-database fan-out, and the
+    /// contrast is the point.
+    /// <para>The cluster-wide stop limit derives from the oldest <c>datfrozenxid</c> anywhere in
+    /// <c>pg_database</c>, so excluding template0/template1 would understate cluster risk by exactly the
+    /// amount that matters; template0 aging without ever being vacuumed is a documented route there, usually
+    /// after a major upgrade. This query needs no connection — <c>pg_database</c> is shared, and template0's
+    /// row reads fine despite <c>datallowconn = false</c> (verified on live Aurora 17.7).</para>
+    /// <para>The per-database enumeration in <c>ITargetProvider.BuildDatabaseListPlan</c> DOES exclude
+    /// templates, and must: it opens a connection per database and template0 refuses them. Two queries, two
+    /// correct answers — so do NOT "fix" the inconsistency by aligning them. That counterpart is pinned by
+    /// <c>Darling.Tests.TargetProviderTests.PostgresDatabaseList_SkipsTemplatesAndClosedDatabases</c>;
+    /// it cannot be asserted here because the provider lives in the Darling service project.</para>
+    /// </summary>
     [Fact]
-    public void ReadsTheSharedCatalogAndSkipsTemplates()
+    public void ReadsTheSharedCatalogAndIncludesTemplates()
     {
         var sql = PgWraparoundStatsCollector.Instance.BuildQuery(MakeContext()).Text;
 
         Assert.Contains("FROM pg_database", sql, StringComparison.Ordinal);
-        Assert.Contains("NOT d.datistemplate", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("NOT d.datistemplate", sql, StringComparison.Ordinal);
         Assert.False(PgWraparoundStatsCollector.Instance.RunsPerDatabase(MakeContext().Target));
+
     }
 
     [Fact]

@@ -11,6 +11,8 @@ using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
 
+using System;
+
 namespace PerformanceMonitor.Collectors;
 
 /// <summary>
@@ -57,6 +59,14 @@ public sealed class PgWraparoundStatsCollector : PostgresCollectorDefinitionBase
     /// </summary>
     public const long WraparoundCeiling = 2_147_483_648L;
 
+    /// <summary>
+    /// The ids PostgreSQL holds back: it stops accepting new write transactions with roughly this many still
+    /// unconsumed, rather than running the counter to the wall. So the useful "how much runway is left"
+    /// figure is <see cref="WraparoundCeiling"/> minus this minus the age — which is also what makes the
+    /// MCP tool's 99.86%-of-space writes-stop point agree with the stored column.
+    /// </summary>
+    public const long StopMargin = 3_000_000L;
+
     /* Reads pg_database, which is a SHARED catalog: one connection sees every database, so this needs
        no per-database fan-out. Verified readable under pg_monitor on our fleet.
 
@@ -78,7 +88,16 @@ SELECT
     current_setting('autovacuum_multixact_freeze_max_age')::bigint   AS autovacuum_multixact_freeze_max_age,
     d.datallowconn                                                   AS allows_connections
 FROM pg_database AS d
-WHERE NOT d.datistemplate
+/* EVERY database, templates included. The cluster-wide stop limit derives from the oldest datfrozenxid in
+   pg_database, so excluding template0/template1 could understate cluster risk by exactly the amount that
+   matters — and template0 aging without ever being vacuumed is a real, documented way to get there, typically
+   after a major upgrade.
+
+   The per-database autovacuum collector DOES exclude templates, and that is not inconsistent: it needs a
+   CONNECTION per database and template0 refuses them (datallowconn = false). This read needs no connection at
+   all — pg_database is a SHARED catalog, verified on live Aurora 17.7 where template0's datfrozenxid reads
+   fine despite datallowconn = false. allows_connections is already stored, so a consumer can still tell a
+   template row apart. */
 ORDER BY age(d.datfrozenxid) DESC";
 
     public override string Name => "pg_wraparound_stats";
@@ -144,8 +163,12 @@ ORDER BY age(d.datfrozenxid) DESC";
             .Value(Pct(row.FrozenXidAge, WraparoundCeiling))
             .Value(Pct(row.MinMultiXidAge, row.AutovacuumMultixactFreezeMaxAge))
             .Value(Pct(row.MinMultiXidAge, WraparoundCeiling))
-            .Value(WraparoundCeiling - row.FrozenXidAge)
-            .Value(WraparoundCeiling - row.MinMultiXidAge)
+            /* To where writes STOP, not to the raw 2^31. PostgreSQL refuses new transactions with about
+               3,000,000 ids still on the clock, so counting to the ceiling overstated the runway by that
+               margin — and disagreed with the MCP tool's own 99.86% figure, which already accounts for it.
+               Clamped at 0 so a database past the stop point reports "none left" rather than a negative. */
+            .Value(Math.Max(0, WraparoundCeiling - StopMargin - row.FrozenXidAge))
+            .Value(Math.Max(0, WraparoundCeiling - StopMargin - row.MinMultiXidAge))
             .Value(row.AllowsConnections);
     }
 
