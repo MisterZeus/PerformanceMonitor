@@ -86,6 +86,37 @@ public sealed class DarlingDimensionGcBoundTests
     }
 
     /// <summary>
+    /// #2210, the both-orders race: whichever order the two prunes run in, there must be no reachable state
+    /// where a surviving map row resolves to an absent digest.
+    ///
+    /// <para>Driven off the real cutoffs rather than a narrative. Plant a (map row, dim row) pair sharing one
+    /// stale <c>last_seen</c>, then ask both cutoffs about it. Because the map's cutoff is strictly LATER, the
+    /// only orderings available are "map goes, dim stays" (a plan renders as not-collected, self-correcting) or
+    /// "both go" — never "dim goes, map stays", which is the reader-resolves-to-nothing case. Order of execution
+    /// cannot produce the bad state because the eligibility windows themselves are nested.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(30)]
+    [InlineData(7)]
+    public void NeitherPruneOrder_CanLeaveAMapRowResolvingToAnAbsentDigest(int factRetentionDays)
+    {
+        var dimCutoff = DarlingRetention.ComputeDimensionCutoff(Now, factRetentionDays, oldestSurvivingDigestFact: null);
+        var mapCutoff = Now.AddDays(-(factRetentionDays + QueryStorePlanMap.PruneMarginDays));
+
+        /* Every last_seen from well inside retention to well past both horizons. */
+        for (var age = 0; age <= factRetentionDays + TimescaleSupport.ChunkIntervalDays + 4; age++)
+        {
+            var lastSeen = Now.AddDays(-age);
+            var mapEligible = lastSeen < mapCutoff;
+            var dimEligible = lastSeen < dimCutoff;
+
+            /* The forbidden combination: the dim row is takeable while the map row that points at it is not. */
+            Assert.False(dimEligible && !mapEligible,
+                $"at {age}d the dim row is prunable while its map row survives — a live fact would resolve to absent content");
+        }
+    }
+
+    /// <summary>
     /// #2210: the re-verify cursor paces itself off <c>RefreshAfter</c> and NEVER touches the watermark. The
     /// slice is a row count over an id range, which is the whole point — the old expiry walked BYTES and could
     /// not finish inside a day on the catalogs that mattered (15.9 to 107.5 hours measured), so those restarted

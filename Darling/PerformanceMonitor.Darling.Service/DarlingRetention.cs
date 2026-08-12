@@ -376,6 +376,30 @@ public static class DarlingRetention
                     logger?.LogInformation("dimension GC bounded by surviving facts: dimension content newer than the oldest digest-carrying fact row is retained");
                 }
 
+                /* #2210: the Query Store plan map goes FIRST, and its cutoff is deliberately LATER than the
+                   dimension's — it prunes more aggressively, so the dim always outlives the map it points into.
+                   The two bad end-states are not symmetric. A pruned map row whose dim row survives renders a
+                   plan as "not collected" and leaves bytes unreclaimed until the dim's own horizon passes:
+                   visible, self-correcting, no wrong answers. A pruned DIM row whose map row survives is a
+                   reader resolving a live fact to absent content, silently, weeks after the cause. Ordering the
+                   cutoffs makes the recoverable end-state the only reachable one, and
+                   QueryStorePlanMap.MarginOrderingHolds is pinned against ChunkIntervalDays so shrinking that
+                   constant cannot invert it unnoticed. */
+                var mapCutoff = utcNow.AddDays(-(widestFactRetentionDays + QueryStorePlanMap.PruneMarginDays));
+                var mapDeleted = await PurgeOneAsync(
+                    postgres, QueryStorePlanMap.TableName,
+                    QueryStorePlanMap.PruneSql(TimescaleSupport.ChunkIntervalDays),
+                    mapCutoff, logger, cancellationToken);
+                if (mapDeleted is not null)
+                {
+                    tablesPurged++;
+                    totalRowsDeleted += mapDeleted.Value;
+                }
+                else
+                {
+                    tablesFailed++;
+                }
+
                 foreach (var dimTable in PayloadDimensions.DimTables)
                 {
                     var dimDeleted = await PurgeOneAsync(
