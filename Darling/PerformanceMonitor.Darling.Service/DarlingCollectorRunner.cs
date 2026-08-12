@@ -60,6 +60,7 @@ public sealed class DarlingCollectorRunner
        collecting Object DDL. Read through a provider (not a captured bool) for symmetry with
        _capturePlans, so a future live reload is honored on the NEXT cycle without rebuilding. */
     private readonly Func<bool> _collectSchemaChanges;
+    private readonly Func<bool> _compressPlanContent;
 
     /* Feeds CollectorContext.TextByteBudgetOverride on every cycle (#2164) — the query_store collector's
        per-database text budget in MB (config_service.query_store_text_budget_mb, V59). Provider-read for
@@ -126,7 +127,7 @@ public sealed class DarlingCollectorRunner
     /// behavior). The worker passes <c>() =&gt; config.CollectSchemaChangeEvents</c> so a noisy/benchmark box
     /// can suppress the default-trace Object:Created/Deleted flood; tests pass a constant lambda.
     /// </param>
-    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null)
+    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _deltas = deltas ?? throw new ArgumentNullException(nameof(deltas));
@@ -135,6 +136,10 @@ public sealed class DarlingCollectorRunner
         /* Null provider = keep the collector's own compile-time budget (what Lite and every test does). */
         _textBudgetMb = textBudgetMb ?? (() => 0);
         _collectSchemaChanges = collectSchemaChanges ?? (() => true);
+        /* #2171: plan_xml_compression provider — true = gzip into query_plan_gz (the default),
+           false = 'none': plain text into query_plan_xml so direct-SQL consumers read it bare.
+           The worker passes () => config.PlanXmlCompression == "gzip"; tests pass a constant. */
+        _compressPlanContent = compressPlanContent ?? (() => true);
     }
 
     public async Task<CollectorRunResult> RunAsync<TRow>(
@@ -884,7 +889,8 @@ public sealed class DarlingCollectorRunner
         if (transaction is not null)
         {
             await PayloadDimensionWriter.FlushAsync(
-                pgConnection, transaction, dimensions, storedCollectionTime, cancellationToken);
+                pgConnection, transaction, dimensions, storedCollectionTime, cancellationToken,
+                compressPlanContent: _compressPlanContent());
             await transaction.CommitAsync(cancellationToken);
         }
 

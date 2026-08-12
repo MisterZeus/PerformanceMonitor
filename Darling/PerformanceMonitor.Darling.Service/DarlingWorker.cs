@@ -974,7 +974,10 @@ public sealed class DarlingWorker : BackgroundService
            CollectSchemaChangeEvents is a file-only knob (darling.json), read the same way for symmetry —
            default true keeps every SKU collecting Object DDL; set false to silence a benchmark box's flood. */
         var runner = new DarlingCollectorRunner(postgres, deltas, _logger, () => config.CapturePlans, () => config.CollectSchemaChangeEvents,
-            () => StoreConfigProvider.ClampTextBudgetMb(config.QueryStoreTextBudgetMb));
+            () => StoreConfigProvider.ClampTextBudgetMb(config.QueryStoreTextBudgetMb),
+            /* #2171: live provider like its siblings — a store reload flipping plan_xml_compression
+               takes effect on the next write batch, no restart. */
+            compressPlanContent: () => !string.Equals(config.PlanXmlCompression, "none", StringComparison.OrdinalIgnoreCase));
         var servers = new List<ServerLoopState>();
         /* #1581 cold-start stagger: capture ONE startup instant so every initial server's first-sweep offset is
            measured from the same base — the deterministic per-server ColdStartFirstSweepDue then spreads the

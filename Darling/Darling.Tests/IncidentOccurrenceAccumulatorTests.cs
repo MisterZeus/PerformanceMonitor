@@ -396,8 +396,9 @@ public sealed class IncidentOccurrenceAccumulatorTests
         var v61 = PgMigrations.Scripts.Single(m => m.Version == 61);
 
         Assert.Equal("incident-occurrence-counters", v61.Name);
-        Assert.Equal(61, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(61, StorageVersion.SchemaVersion);
+        /* Invariant form, no literal to go stale: the build's schema version IS the newest
+           registered rung (the recurring in-flight-branch failure; converted on the V62 merge). */
+        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
 
         /* config.-qualified per the V17 rule — an unqualified CREATE resolves into collect (first on the
            migrate session's search_path), which is the wrong schema and the wrong ACL. */
@@ -418,7 +419,7 @@ public sealed class IncidentOccurrenceAccumulatorTests
     {
         /* The trap a StorageVersion bump sets: a probe that cannot SEE the newest migration maps every
            healthy store below RequiredStoreSchemaVersion and the connect-time gate refuses it permanently. */
-        Assert.Equal(61, ViewerDataService.RequiredStoreSchemaVersion);
+        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
         Assert.Contains("table_name = 'incident_occurrences'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
     }
 
