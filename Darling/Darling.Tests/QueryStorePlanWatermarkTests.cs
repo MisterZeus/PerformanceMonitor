@@ -14,6 +14,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -490,6 +491,48 @@ public class QueryStorePlanWatermarkTests
         Assert.Equal(
             QueryStorePlanXmlState.CandidatePlanCount(large, budget, catchUpInProgress: false, out _),
             QueryStorePlanXmlState.CandidatePlanCount(large, budget, catchUpInProgress: true, out _));
+    }
+
+    /// <summary>
+    /// #2210, ruling item 4: a FULL cursor sweep over a healthy catalog leaves the watermark byte-identical.
+    /// Only the reset arm may ever zero it.
+    ///
+    /// <para>Simulated through the real functions rather than mocked, because the property is about them: a
+    /// healthy catalog means every slice the cursor walks finds its stored hash matching the live one, so
+    /// nothing is re-fetched and the pass lands no plan ids. The sweep is then <c>ceil(range / slice)</c> calls
+    /// to <see cref="QueryStorePlanXmlState.AdvanceWatermark"/> with nothing landed, and the persisted string
+    /// has to come out the same at the end — including its stamp, since re-stamping on a no-op sweep would push
+    /// the refresh period out forever on any database the cursor keeps visiting.</para>
+    /// </summary>
+    [Fact]
+    public void AFullCursorSweepOverAHealthyCatalog_LeavesTheWatermarkByteIdentical()
+    {
+        const long watermark = 77_176;
+        var stamp = Now;
+        var before = QueryStorePlanXmlState.Format(watermark, stamp);
+
+        var slice = QueryStorePlanMap.CursorSliceWidth(watermark, QueryStorePlanXmlState.RefreshAfter, TimeSpan.FromMinutes(5));
+        Assert.True(slice > 0);
+
+        var standing = watermark;
+        var passes = 0;
+        for (var floor = 0L; floor < watermark; floor += slice)
+        {
+            /* Healthy: hashes match across the slice, so nothing is re-fetched and nothing lands. */
+            var advance = QueryStorePlanXmlState.AdvanceWatermark(standing, Array.Empty<long>());
+
+            Assert.True(advance.ArrivedInPlanIdOrder);
+            Assert.Equal(standing, advance.Watermark);
+            standing = advance.Watermark;
+            passes++;
+        }
+
+        Assert.Equal(watermark, standing);
+        Assert.Equal(before, QueryStorePlanXmlState.Format(standing, stamp));
+
+        /* And the sweep genuinely covered the range in one refresh period rather than needing a second. */
+        Assert.True((long)passes * slice >= watermark);
+        Assert.True(passes <= QueryStorePlanXmlState.RefreshAfter.Ticks / TimeSpan.FromMinutes(5).Ticks);
     }
 
     /// <summary>A misconfigured budget floors the window rather than producing zero or a negative one.</summary>
