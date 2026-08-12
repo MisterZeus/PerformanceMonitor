@@ -148,7 +148,11 @@ ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(config.QueryStoreBackfillEnabled);
         command.Parameters.AddWithValue(config.QueryStoreTextBudgetMb);
         command.Parameters.AddWithValue(config.MaxConcurrentSweeps);
-        command.Parameters.AddWithValue(config.PlanXmlCompression);
+        /* Normalized at the WRITE too, not just the read: the V62 CHECK is case-sensitive by design
+           (it mirrors this normalizer's output), so seeding the raw file value would turn
+           "planXmlCompression": "GZIP" in darling.json into a CHECK violation during store bring-up —
+           the seed is the last step of first contact, and a cosmetic casing choice must not fail it. */
+        command.Parameters.AddWithValue(NormalizePlanXmlCompression(config.PlanXmlCompression));
         await command.ExecuteNonQueryAsync(ct);
     }
 
