@@ -24,13 +24,40 @@ public sealed record PostgresWraparoundAlertInfo(
     string DatabaseName,
     long XidAge,
     long MultiXactAge,
-    long AutovacuumFreezeMaxAge)
+    long AutovacuumFreezeMaxAge,
+    long AutovacuumMultixactFreezeMaxAge)
 {
-    /// <summary>The worse of the two ages — either one reaching the wall stops writes.</summary>
-    public long WorstAge => Math.Max(XidAge, MultiXactAge);
+    /* WorstAge/WorstCounter used to pick by raw age and the evaluator graded the winner against
+       autovacuum_freeze_max_age whichever counter it was. That is wrong: the two counters have DIFFERENT
+       governing settings — 200,000,000 versus 400,000,000 by default — so a MultiXact age was graded against
+       a threshold half the size of its own and warned 2.2x premature, while the alert body printed
+       "autovacuum_freeze_max_age N" next to a WorstCounter saying MultiXact. Each counter is now graded
+       against its own setting and the worse RELATIVE breach wins, which is the only comparison that means
+       anything when the denominators differ. */
 
-    /// <summary>Which counter is the worse one, for a message that names the right remedy.</summary>
-    public string WorstCounter => MultiXactAge > XidAge ? "MultiXact" : "XID";
+    /// <summary>How far this database's XID age has gone toward its own freeze threshold, as a fraction.</summary>
+    public double XidFractionOfSetting =>
+        AutovacuumFreezeMaxAge > 0 ? (double)XidAge / AutovacuumFreezeMaxAge : 0;
+
+    /// <summary>The same for MultiXacts, against <c>autovacuum_multixact_freeze_max_age</c>.</summary>
+    public double MultiXactFractionOfSetting =>
+        AutovacuumMultixactFreezeMaxAge > 0 ? (double)MultiXactAge / AutovacuumMultixactFreezeMaxAge : 0;
+
+    /// <summary>Which counter is in the worse position RELATIVE to its own governing setting.</summary>
+    public bool MultiXactIsWorse => MultiXactFractionOfSetting > XidFractionOfSetting;
+
+    /// <summary>The age of whichever counter is relatively worse.</summary>
+    public long WorstAge => MultiXactIsWorse ? MultiXactAge : XidAge;
+
+    /// <summary>Which counter that is, so the message names the right remedy.</summary>
+    public string WorstCounter => MultiXactIsWorse ? "MultiXact" : "XID";
+
+    /// <summary>The setting that governs the relatively-worse counter — the one the message must quote.</summary>
+    public long WorstSetting => MultiXactIsWorse ? AutovacuumMultixactFreezeMaxAge : AutovacuumFreezeMaxAge;
+
+    /// <summary>The name of that setting, so the body cannot contradict itself.</summary>
+    public string WorstSettingName =>
+        MultiXactIsWorse ? "autovacuum_multixact_freeze_max_age" : "autovacuum_freeze_max_age";
 }
 
 /// <summary>

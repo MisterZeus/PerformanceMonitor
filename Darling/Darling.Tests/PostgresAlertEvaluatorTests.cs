@@ -23,8 +23,16 @@ public class PostgresAlertEvaluatorTests
 {
     private const long StockFreezeMaxAge = 200_000_000;
 
-    private static PostgresWraparoundAlertInfo Wrap(long xid, long multi = 0, long freezeMax = StockFreezeMaxAge)
-        => new("appdb", xid, multi, freezeMax);
+    /// <summary>PostgreSQL's own default for the MultiXact counter — TWICE the XID default, which is the
+    /// whole reason grading one against the other's setting was wrong.</summary>
+    private const long StockMultixactFreezeMaxAge = 400_000_000;
+
+    private static PostgresWraparoundAlertInfo Wrap(
+        long xid,
+        long multi = 0,
+        long freezeMax = StockFreezeMaxAge,
+        long multixactFreezeMax = StockMultixactFreezeMaxAge)
+        => new("appdb", xid, multi, freezeMax, multixactFreezeMax);
 
     /// <summary>
     /// Thresholds scale to the SERVER's own autovacuum_freeze_max_age, not to a constant. A cluster tuned to
@@ -72,8 +80,73 @@ public class PostgresAlertEvaluatorTests
         var finding = PostgresAlertEvaluator.EvaluateWraparound(Wrap(1_000, multi: 500_000_000));
 
         Assert.NotNull(finding);
+        Assert.Contains("MultiXact", finding!.CurrentValue, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Each counter is graded against ITS OWN setting. This assertion changed with the fix and the change is
+    /// the point: 500M MultiXacts used to grade Critical because it was measured against
+    /// autovacuum_freeze_max_age (200M, so 2.5x), when the governing setting is
+    /// autovacuum_multixact_freeze_max_age — 400M by default, making 500M a 1.25x Warning. The old behaviour
+    /// fired Critical 2.2x premature on every MultiXact-heavy workload.
+    /// </summary>
+    [Fact]
+    public void MultiXactIsGradedAgainstItsOwnSettingNotTheXidOne()
+    {
+        var finding = PostgresAlertEvaluator.EvaluateWraparound(Wrap(1_000, multi: 500_000_000));
+
+        Assert.Equal(AlertSeverityLevel.Warning, finding!.Severity);
+
+        /* And the body must quote the setting it actually judged against — it used to print
+           "autovacuum_freeze_max_age N" beside a counter name saying MultiXact, contradicting itself. */
+        Assert.Contains("autovacuum_multixact_freeze_max_age", finding.ThresholdValue, StringComparison.Ordinal);
+        Assert.Contains("400,000,000", finding.ThresholdValue, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Crossing twice the MultiXact setting IS Critical — the fix moves the line, it does not remove it.
+    /// </summary>
+    [Fact]
+    public void MultiXactGoesCriticalAtTwiceItsOwnSetting()
+    {
+        Assert.Equal(
+            AlertSeverityLevel.Critical,
+            PostgresAlertEvaluator.EvaluateWraparound(Wrap(1_000, multi: 800_000_000))!.Severity);
+    }
+
+    /// <summary>
+    /// The absolute arm. On a cluster tuned near the top of the range, <c>2 x setting</c> lands BEYOND the
+    /// 2^31 wall, so the relative Critical was unreachable — on exactly the clusters closest to a write
+    /// outage. vacuum_failsafe_age (~74.5% of the space) is the floor that makes it reachable.
+    /// </summary>
+    [Fact]
+    public void CriticalIsReachableOnAClusterTunedPastHalfTheWall()
+    {
+        const long Tuned = 1_500_000_000;
+
+        /* Relative critical would be 3B — past the 2^31 wall, i.e. unreachable. */
+        Assert.True(Tuned * 2 > PostgresAlertEvaluator.WraparoundCeiling);
+
+        /* 1.7B is 79% of the space and past vacuum_failsafe_age, so it must be Critical anyway. */
+        var finding = PostgresAlertEvaluator.EvaluateWraparound(Wrap(1_700_000_000, freezeMax: Tuned));
+
         Assert.Equal(AlertSeverityLevel.Critical, finding!.Severity);
-        Assert.Contains("MultiXact", finding.CurrentValue, StringComparison.Ordinal);
+        Assert.Contains("wraparound space", finding.ThresholdValue, StringComparison.Ordinal);
+        Assert.Contains("vacuum_failsafe_age", finding.ShortMessage, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// One counter having an unusable setting must not silence the other. A server can have a sane
+    /// autovacuum_freeze_max_age and a nonsensical multixact one.
+    /// </summary>
+    [Fact]
+    public void AnUnjudgeableCounterDoesNotSilenceTheJudgeableOne()
+    {
+        var finding = PostgresAlertEvaluator.EvaluateWraparound(
+            Wrap(190_000_000, multi: 900_000_000, multixactFreezeMax: 0));
+
+        Assert.NotNull(finding);
+        Assert.Contains("XID", finding!.CurrentValue, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -85,7 +158,9 @@ public class PostgresAlertEvaluatorTests
     [InlineData(-1L)]
     public void AMissingFreezeMaxAgeSettingSilencesRatherThanFiringOnEverything(long freezeMax)
     {
-        Assert.Null(PostgresAlertEvaluator.EvaluateWraparound(Wrap(1_000_000_000, freezeMax: freezeMax)));
+        /* Both settings unusable = cannot judge either counter = silence. */
+        Assert.Null(PostgresAlertEvaluator.EvaluateWraparound(
+            Wrap(1_000_000_000, freezeMax: freezeMax, multixactFreezeMax: freezeMax)));
     }
 
     /// <summary>
@@ -239,8 +314,8 @@ public class PostgresAlertEvaluatorTests
     public void EveryFindingIdentifiesItsSubject()
     {
         var findings = PostgresAlertEvaluator.Evaluate(
-            new[] { new PostgresWraparoundAlertInfo("db_a", 500_000_000, 0, StockFreezeMaxAge),
-                    new PostgresWraparoundAlertInfo("db_b", 500_000_000, 0, StockFreezeMaxAge) },
+            new[] { new PostgresWraparoundAlertInfo("db_a", 500_000_000, 0, StockFreezeMaxAge, StockMultixactFreezeMaxAge),
+                    new PostgresWraparoundAlertInfo("db_b", 500_000_000, 0, StockFreezeMaxAge, StockMultixactFreezeMaxAge) },
             null,
             null);
 

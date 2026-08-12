@@ -246,6 +246,16 @@ public sealed class DarlingCollectorRunner
            items WERE found and merely some of their probes failed. Lite's twin is _lastCollectionNote. */
         string? collectionNote = null;
 
+        /* The engine's provider, resolved ONCE for both branches. It used to be resolved only inside the
+           per-database branch, and the branch below opened a hardcoded SqlConnection — so every collector
+           that does NOT fan out per database was handed a SQL Server connection whatever the target was.
+           Six of the seven PostgreSQL collectors take that path (only pg_autovacuum_stats fans out), and
+           SqlClient rejects Npgsql's keywords while parsing the connection string, before any query runs:
+           "Keyword not supported: 'host'". Worse, an ArgumentException is neither SqlException nor
+           PostgresException, so it missed BOTH classification arms in DarlingWorker and recorded a raw
+           ERROR every sweep forever — including for all three Tier 0 outage predictors. */
+        var targetProvider = TargetProviders.For(server.Target);
+
         if (definition.RunsPerDatabase(context.Target))
         {
             /* Azure SQL DB scopes some DMVs to the connected database — run the query once per
@@ -266,7 +276,7 @@ public sealed class DarlingCollectorRunner
                 ? definition.BuildQuery(context)
                 : null;
             var perDbTimeout = definition.CommandTimeoutSecondsOverride ?? CommandTimeoutSeconds;
-            var perDbProvider = TargetProviders.For(server.Target);
+            var perDbProvider = targetProvider;
 
             /* Two enumeration paths because the FAILURE semantics genuinely differ, not the SQL. On
                Azure SQL DB an inaccessible master has a real fallback (collect the one connected
@@ -475,8 +485,8 @@ public sealed class DarlingCollectorRunner
         }
         else
         {
-            using var sqlConnection = new SqlConnection(server.ConnectionString);
-            await sqlConnection.OpenAsync(cancellationToken);
+            using var targetConnection = CreateTargetConnection(server);
+            await targetConnection.OpenAsync(cancellationToken);
 
             var enumerationPlan = definition.BuildEnumerationQuery(context);
             if (enumerationPlan is not null)
@@ -486,7 +496,7 @@ public sealed class DarlingCollectorRunner
                    with a warning, matching Lite. */
                 var listSlice = Stopwatch.StartNew();
                 EnumerationOutcome enumeration;
-                using (var enumerationCommand = CreateCollectorCommand(enumerationPlan, sqlConnection, CommandTimeoutSeconds))
+                using (var enumerationCommand = CreateCollectorCommand(targetProvider, enumerationPlan, targetConnection, CommandTimeoutSeconds))
                 using (var enumerationReader = await enumerationCommand.ExecuteReaderAsync(cancellationToken))
                 {
                     /* Shared read (#1837): the item list, then the OPTIONAL second result set of items the
@@ -517,7 +527,7 @@ public sealed class DarlingCollectorRunner
                 {
                     try
                     {
-                        using var probeCommand = CreateCollectorCommand(probePlan, sqlConnection, 10);
+                        using var probeCommand = CreateCollectorCommand(targetProvider, probePlan, targetConnection, 10);
                         var probeResult = await probeCommand.ExecuteScalarAsync(cancellationToken);
                         if (probeResult is not null && probeResult != DBNull.Value)
                         {
@@ -622,7 +632,7 @@ public sealed class DarlingCollectorRunner
                     readItem: async (item, ct) =>
                     {
                         var batch = new List<TRow>();
-                        using var itemCommand = CreateCollectorCommand(definition.BuildPerItemQuery(item, context), sqlConnection, itemTimeout);
+                        using var itemCommand = CreateCollectorCommand(targetProvider, definition.BuildPerItemQuery(item, context), targetConnection, itemTimeout);
                         /* #2164: time the OPEN separately from the drain. ExecuteReaderAsync returns only
                            when the first rowset is available, so for query_store's staged batch this is the
                            #pm_qs_slice aggregate plus time-to-first-row — the part no client-side budget can
@@ -712,7 +722,7 @@ public sealed class DarlingCollectorRunner
                 var sqlSlice = Stopwatch.StartNew();
                 var plan = definition.BuildQuery(context);
                 List<TRow> rows;
-                using (var command = CreateCollectorCommand(plan, sqlConnection, definition.CommandTimeoutSecondsOverride ?? CommandTimeoutSeconds))
+                using (var command = CreateCollectorCommand(targetProvider, plan, targetConnection, definition.CommandTimeoutSecondsOverride ?? CommandTimeoutSeconds))
                 using (var reader = await command.ExecuteReaderAsync(cancellationToken))
                 {
                     rows = await definition.ReadAsync(reader, context, cancellationToken);
@@ -741,7 +751,7 @@ public sealed class DarlingCollectorRunner
                 {
                     try
                     {
-                        using var supplementalCommand = CreateCollectorCommand(supplementalPlan, sqlConnection, CommandTimeoutSeconds);
+                        using var supplementalCommand = CreateCollectorCommand(targetProvider, supplementalPlan, targetConnection, CommandTimeoutSeconds);
                         using var supplementalReader = await supplementalCommand.ExecuteReaderAsync(cancellationToken);
                         await definition.ApplySupplementalAsync(rows, supplementalReader, context, cancellationToken);
                     }
@@ -1476,6 +1486,23 @@ RETURNING s.state_key";
     /// connection per database per cycle. That is the cost of reading <c>pg_stat_user_tables</c> and
     /// friends at all, and it is why per-database PostgreSQL collectors get slow cadences.</para>
     /// </summary>
+    /// <summary>
+    /// The connection for a collector that reads the server as a whole — engine-resolved from the probed
+    /// target, never constructed directly.
+    /// <para>Extracted so it can be PINNED by test. This is the exact seam that broke: the non-per-database
+    /// branch built a <c>SqlConnection</c> literally, so six of the seven PostgreSQL collectors got a SQL
+    /// Server connection and failed in the connection-string parser before running a query. Both engines'
+    /// providers were already correct and individually tested — nothing asserted that the RUNNER asked them.
+    /// A test that opens nothing and only checks the returned TYPE is enough to catch it, which is why it is
+    /// worth having.</para>
+    /// </summary>
+    internal static DbConnection CreateTargetConnection(ServerRuntime server)
+    {
+        ArgumentNullException.ThrowIfNull(server);
+
+        return TargetProviders.For(server.Target).CreateConnection(server.ConnectionString);
+    }
+
     internal static async Task<DbConnection> OpenDatabaseConnectionAsync(
         ITargetProvider provider, ServerRuntime server, string databaseName, CancellationToken cancellationToken)
     {

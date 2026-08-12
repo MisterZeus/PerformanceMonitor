@@ -1,0 +1,133 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System.Data.Common;
+using System.IO;
+using System.Linq;
+using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
+using Microsoft.Data.SqlClient;
+using Npgsql;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// THE MISSING ASSERTION. The collector runner must get its connection from the target's own provider, for
+/// every collector, not only the ones that fan out per database.
+///
+/// <para><b>What this exists to catch.</b> The runner had two paths: the per-database branch resolved
+/// <c>TargetProviders.For(target)</c> correctly, and the branch serving everything else did
+/// <c>new SqlConnection(server.ConnectionString)</c> literally. Six of the seven PostgreSQL collectors take
+/// the second path — only <c>pg_autovacuum_stats</c> fans out — so they were handed a SQL Server connection.
+/// SqlClient rejects Npgsql's keywords while PARSING the connection string, before any query runs
+/// ("Keyword not supported: 'host'"), and the resulting <c>ArgumentException</c> is neither
+/// <c>SqlException</c> nor <c>PostgresException</c>, so it missed both fault-classification arms and recorded
+/// a raw ERROR every sweep, forever, including for all three Tier 0 outage predictors.</para>
+///
+/// <para>Both providers were correct and both were individually tested. Every test on both sides passed.
+/// Nothing asserted that the RUNNER asked the provider — the seam itself was untested, and a passing suite
+/// plus green CI reported a feature that could not collect a single row from a PostgreSQL target. It took
+/// pointing the service at a live target to find it.</para>
+/// </summary>
+public sealed class CollectorRunnerConnectionEngineTests
+{
+    private static ServerRuntime Runtime(CollectorTargetEngine engine, string connectionString) => new()
+    {
+        Config = new MonitoredServer { Name = "t", Host = "h" },
+        ConnectionString = connectionString,
+        Target = new CollectorTargetInfo { Engine = engine },
+        StorageName = "h",
+        ServerId = 1,
+    };
+
+    /// <summary>
+    /// The pin. Nothing is opened — the TYPE is the whole assertion, and it is enough: a connection of the
+    /// wrong type cannot even parse the other engine's connection string.
+    /// </summary>
+    [Fact]
+    public void PostgresTarget_GetsAnNpgsqlConnection()
+    {
+        using var connection = DarlingCollectorRunner.CreateTargetConnection(
+            Runtime(CollectorTargetEngine.PostgreSql, "Host=pg1;Database=postgres;Username=monitor"));
+
+        Assert.IsType<NpgsqlConnection>(connection);
+    }
+
+    [Fact]
+    public void SqlServerTarget_StillGetsASqlConnection()
+    {
+        using var connection = DarlingCollectorRunner.CreateTargetConnection(
+            Runtime(CollectorTargetEngine.SqlServer, "Server=sql1;Integrated Security=true"));
+
+        Assert.IsType<SqlConnection>(connection);
+    }
+
+    /// <summary>
+    /// The failure mode itself, pinned: handing a PostgreSQL connection string to SqlClient throws while
+    /// PARSING it. Stated as a test so the reason the type matters is not just prose — and so nobody
+    /// "simplifies" the provider indirection away believing the driver would cope.
+    /// </summary>
+    [Fact]
+    public void ASqlConnectionCannotEvenParseAPostgresConnectionString()
+    {
+        var ex = Assert.ThrowsAny<System.Exception>(
+            () => new SqlConnection("Host=pg1;Database=postgres;Username=monitor"));
+
+        Assert.Contains("Keyword not supported", ex.Message, System.StringComparison.Ordinal);
+
+        /* And this is why it evaded classification: not a SqlException, so DarlingWorker's SqlException arm
+           never saw it, and not a PostgresException either. */
+        Assert.IsNotType<SqlException>(ex);
+        Assert.IsNotType<PostgresException>(ex);
+    }
+
+    /// <summary>
+    /// Belt and braces over the helper: the runner must not construct an engine-specific connection directly
+    /// anywhere in its collector paths. A future edit that bypasses
+    /// <see cref="DarlingCollectorRunner.CreateTargetConnection"/> would pass the type tests above while
+    /// reintroducing the bug, so the source is scanned too — the same idiom the viewer-coverage and
+    /// alert-wiring pins already use in this suite.
+    /// </summary>
+    [Fact]
+    public void TheRunnerNeverConstructsAnEngineSpecificConnectionDirectly()
+    {
+        var source = File.ReadAllText(RunnerSourcePath());
+
+        /* The precise hazard is not "constructs a connection" — it is "constructs a connection from
+           server.ConnectionString", the engine-AMBIGUOUS value, which is exactly what the bug did. A
+           connection built from a string an explicitly SQL-Server-only plan produced is fine and must stay
+           allowed: the Azure SQL master hop calls SqlServerTargetProvider.Instance.BuildDatabaseListPlan and
+           then opens its own SqlConnection, because per-database enumeration on Azure SQL DB is a SQL Server
+           feature by definition. A blunter "no constructions at all" rule flags that and teaches the next
+           person to suppress the test rather than read it. */
+        var ambiguous = Regex.Matches(
+                source,
+                @"new\s+(?:SqlConnection|NpgsqlConnection)\s*\(\s*server\.ConnectionString\s*\)")
+            .Select(m => m.Value)
+            .ToArray();
+
+        Assert.True(
+            ambiguous.Length == 0,
+            "DarlingCollectorRunner constructs an engine-specific connection from server.ConnectionString: "
+            + string.Join(", ", ambiguous)
+            + ". That value's engine is whatever the target is — route it through "
+            + "CreateTargetConnection/TargetProviders.For(server.Target). A hardcoded SqlConnection here is "
+            + "what made six of seven PostgreSQL collectors fail in the connection-string parser, every "
+            + "sweep, with an ArgumentException that missed both fault-classification arms.");
+    }
+
+    private static string RunnerSourcePath([CallerFilePath] string thisFile = "")
+    {
+        var testsDir = Path.GetDirectoryName(thisFile)!;
+        return Path.Combine(
+            testsDir, "..", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
+    }
+}

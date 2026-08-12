@@ -2920,7 +2920,13 @@ LIMIT 1", connection);
                     && string.Equals(r.ServerId.ToString(CultureInfo.InvariantCulture), serverKey, StringComparison.Ordinal));
         }
 
-        if (runtime is null || runtime.Target.IsAzureSqlDb)
+        /* Engine first: msdb, SQL Agent and the whole FailedJobsQuery are SQL Server concepts, and this
+           opens a SqlConnection below. On a PostgreSQL target it threw "Keyword not supported: 'host'" once
+           per alert cycle. The IsAzureSqlDb arm stays for the same reason it always did — Azure SQL DB has
+           no msdb either. */
+        if (runtime is null
+            || runtime.Target.Engine != CollectorTargetEngine.SqlServer
+            || runtime.Target.IsAzureSqlDb)
         {
             return new List<FailedJobInfo>();
         }
@@ -3015,7 +3021,15 @@ LIMIT 1", connection);
 
             await DarlingObservability.UpsertServerAsync(_postgres!, runtime, _logger, cancellationToken);
 
-            await DarlingXeSessions.EnsureAllAsync(runtime, runner, _logger, cancellationToken);
+            /* Extended Events are a SQL Server feature. Ungated, this ran SqlClient against a PostgreSQL
+               target on every connect and logged "Failed to ensure XE sessions: Keyword not supported:
+               'host'. - deadlock/blocked-process collection will read zero rows until resolved" — a warning
+               that is both alarming and meaningless on an engine that has no XE, on a target whose deadlock
+               collectors are engine-gated off anyway. Confirmed on a live PostgreSQL target. */
+            if (runtime.Target.Engine == CollectorTargetEngine.SqlServer)
+            {
+                await DarlingXeSessions.EnsureAllAsync(runtime, runner, _logger, cancellationToken);
+            }
 
             /* On-load config snapshots (effective FrequencyMinutes 0) run once per connect, then every
                scheduled collector becomes immediately due — mirrors Lite's server-open behavior. The
@@ -3038,6 +3052,19 @@ LIMIT 1", connection);
             var watermarks = await ReadCollectorWatermarksAsync(_postgres!, serverId, _logger, cancellationToken);
             foreach (var name in CollectorScheduleDefaults.All.Keys)
             {
+                /* The SAME pre-dispatch engine gate the scheduled sweep applies (see RunDueCollectorsAsync),
+                   which this loop never got. Without it, the on-load pass dispatches every foreign-engine
+                   collector once per connect: a PostgreSQL target ran server_config, database_config,
+                   database_scoped_config, trace_flags and server_properties as T-SQL and logged five fake
+                   SUCCESS rows with zero rows collected — confirmed on a live PostgreSQL target. Those rows
+                   feed the health bands and analysis, which key on status, so a fake success is worse than an
+                   error. Re-read from server.Runtime because a preceding RunOneAsync in this loop can have
+                   nulled it on a connection-level failure. */
+                if (server.Runtime is null || !CollectorCatalog.EngineMatches(name, server.Runtime.Target))
+                {
+                    continue;
+                }
+
                 /* Captured serverId, not server.Runtime.ServerId: an earlier on-load RunOneAsync in this loop
                    can null server.Runtime on a connection-level failure, which would otherwise NRE here. */
                 var effective = StoreConfigProvider.ResolveSchedule(name, serverId, _scheduleOverrides);

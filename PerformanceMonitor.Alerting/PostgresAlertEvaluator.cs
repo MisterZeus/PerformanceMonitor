@@ -40,6 +40,23 @@ public static class PostgresAlertEvaluator
     public const double WraparoundWarningFractionOfFreezeMaxAge = 0.9;
     public const double WraparoundCriticalMultipleOfFreezeMaxAge = 2.0;
 
+    /// <summary>
+    /// The 32-bit comparison space both counters age within — the same denominator the collector stores its
+    /// percentages against, so the alert and <c>pct_toward_wraparound</c> can never disagree.
+    /// </summary>
+    public const long WraparoundCeiling = 2_147_483_648L;
+
+    /// <summary>
+    /// The absolute Critical arm, as a fraction of <see cref="WraparoundCeiling"/>: PostgreSQL's own
+    /// <c>vacuum_failsafe_age</c> (1.6B by default) is ~74.5% of the space, and past it the engine abandons
+    /// cost limits and skips index cleanup to catch up. Matching the ladder
+    /// <c>DarlingMcpPgWraparoundTools</c> already classifies against.
+    /// <para>This exists because the RELATIVE arm alone leaves Critical unreachable on exactly the clusters
+    /// most at risk: <c>criticalAt = 2 x setting</c> exceeds the 2^31 wall once the setting passes ~1.07B, and
+    /// the setting is tunable to 2B. A tuned cluster would have warned and then never escalated.</para>
+    /// </summary>
+    public const double WraparoundCriticalFractionOfCeiling = 0.745;
+
     /* xmin horizon. 50 million transactions of held-back horizon is roughly where bloat becomes visible
        rather than theoretical on a busy database. The persistence gate is what makes it actionable: a
        holder seen in a majority of the window's observations is chronic, while one seen once is a query
@@ -127,40 +144,94 @@ public static class PostgresAlertEvaluator
 
     public static Finding? EvaluateWraparound(PostgresWraparoundAlertInfo db)
     {
-        /* A non-positive setting would make every threshold zero and fire on every database forever, so a
-           missing or nonsensical value means "cannot judge" rather than "everything is critical". */
-        if (db.AutovacuumFreezeMaxAge <= 0)
+        ArgumentNullException.ThrowIfNull(db);
+
+        /* A non-positive setting would make every derived threshold zero and fire on every database forever,
+           so a missing or nonsensical value means "cannot judge" rather than "everything is critical". Judged
+           per counter now: a server can have a sane autovacuum_freeze_max_age and a broken multixact one. */
+        var xidJudgeable = db.AutovacuumFreezeMaxAge > 0;
+        var multiJudgeable = db.AutovacuumMultixactFreezeMaxAge > 0;
+        if (!xidJudgeable && !multiJudgeable)
         {
             return null;
         }
 
-        var warnAt = (long)(db.AutovacuumFreezeMaxAge * WraparoundWarningFractionOfFreezeMaxAge);
-        var criticalAt = (long)(db.AutovacuumFreezeMaxAge * WraparoundCriticalMultipleOfFreezeMaxAge);
-        var age = db.WorstAge;
+        /* Each counter against ITS OWN governing setting. Defaults differ by 2x (200M vs 400M), so grading
+           MultiXact age against the XID setting warned 2.2x premature. */
+        var xid = xidJudgeable ? Grade(db.XidAge, db.AutovacuumFreezeMaxAge) : null;
+        var multi = multiJudgeable ? Grade(db.MultiXactAge, db.AutovacuumMultixactFreezeMaxAge) : null;
 
-        if (age < warnAt)
+        /* The worse breach wins, and "worse" is the relative position, not the raw age — the only comparison
+           that means anything when the denominators differ. Severity first so a Critical MultiXact cannot be
+           hidden behind a merely-warning XID that happens to have a bigger number. */
+        var multiWins = multi is not null
+            && (xid is null
+                || multi.Value.Severity > xid.Value.Severity
+                || (multi.Value.Severity == xid.Value.Severity
+                    && db.MultiXactFractionOfSetting > db.XidFractionOfSetting));
+
+        var winner = multiWins ? multi : xid;
+        if (winner is null)
         {
             return null;
         }
 
-        var critical = age >= criticalAt;
-        var breached = critical ? criticalAt : warnAt;
+        var counter = multiWins ? "MultiXact" : "XID";
+        var setting = multiWins ? db.AutovacuumMultixactFreezeMaxAge : db.AutovacuumFreezeMaxAge;
+        var settingName = multiWins ? "autovacuum_multixact_freeze_max_age" : "autovacuum_freeze_max_age";
+        var age = multiWins ? db.MultiXactAge : db.XidAge;
+        var (severity, breached, viaCeiling) = winner.Value;
+        var critical = severity == AlertSeverityLevel.Critical;
+        var pctOfCeiling = 100.0 * age / WraparoundCeiling;
 
         return new Finding(
             WraparoundMetric,
-            critical ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
+            severity,
             db.DatabaseName,
-            $"{db.WorstCounter} age {age:N0} in [{db.DatabaseName}]",
-            $"{breached:N0} ({(critical ? "2x" : "90% of")} autovacuum_freeze_max_age {db.AutovacuumFreezeMaxAge:N0})",
+            $"{counter} age {age:N0} in [{db.DatabaseName}]",
+            viaCeiling
+                ? $"{breached:N0} ({WraparoundCriticalFractionOfCeiling * 100:0.#}% of the 2^31 wraparound space)"
+                : $"{breached:N0} ({(critical ? "2x" : "90% of")} {settingName} {setting:N0})",
             critical
-                ? $"[{db.DatabaseName}] {db.WorstCounter} age {age:N0} is past twice autovacuum_freeze_max_age "
-                  + $"({db.AutovacuumFreezeMaxAge:N0}) — autovacuum's own wraparound defence is not keeping up. "
-                  + "At 2 billion the server stops accepting writes, and the remedy is hours of vacuuming, so act now."
-                : $"[{db.DatabaseName}] {db.WorstCounter} age {age:N0} is approaching autovacuum_freeze_max_age "
-                  + $"({db.AutovacuumFreezeMaxAge:N0}), where autovacuum will force a wraparound-prevention vacuum. "
-                  + "Vacuum on your schedule now rather than on its schedule later.",
+                ? $"[{db.DatabaseName}] {counter} age {age:N0} is {pctOfCeiling:0.#}% of the way to the "
+                  + $"wraparound wall"
+                  + (viaCeiling
+                      ? " — past vacuum_failsafe_age, where PostgreSQL abandons its cost limits and skips "
+                        + "index cleanup trying to catch up."
+                      : $" and past twice {settingName} ({setting:N0}) — autovacuum's own wraparound defence "
+                        + "is not keeping up.")
+                  + " At the wall the server stops accepting writes, and the remedy is hours of vacuuming, so act now."
+                : $"[{db.DatabaseName}] {counter} age {age:N0} is approaching {settingName} ({setting:N0}), "
+                  + "where autovacuum will force a wraparound-prevention vacuum. Vacuum on your schedule now "
+                  + "rather than on its schedule later.",
             age,
             breached);
+    }
+
+    /// <summary>
+    /// Grades one counter against its own setting, then OR-s in the absolute arm. Returns the severity, the
+    /// threshold actually breached, and whether it was the absolute one — so the message can say which.
+    /// </summary>
+    private static (AlertSeverityLevel Severity, long Breached, bool ViaCeiling)? Grade(long age, long setting)
+    {
+        var warnAt = (long)(setting * WraparoundWarningFractionOfFreezeMaxAge);
+        var criticalAt = (long)(setting * WraparoundCriticalMultipleOfFreezeMaxAge);
+        var ceilingCriticalAt = (long)(WraparoundCeiling * WraparoundCriticalFractionOfCeiling);
+
+        /* The absolute arm is checked FIRST and independently: on a cluster tuned past ~1.07B the relative
+           criticalAt sits beyond the wall and can never be reached, which is precisely where an alert is
+           needed most. */
+        if (age >= ceilingCriticalAt)
+        {
+            return (AlertSeverityLevel.Critical, ceilingCriticalAt, true);
+        }
+
+        if (age >= criticalAt)
+        {
+            return (AlertSeverityLevel.Critical, criticalAt, false);
+        }
+
+        return age >= warnAt ? (AlertSeverityLevel.Warning, warnAt, false) : null;
     }
 
     public static Finding? EvaluateXmin(PostgresXminHorizonAlertInfo? xmin)

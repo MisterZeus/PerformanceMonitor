@@ -45,7 +45,8 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
             database_name,
             frozen_xid_age,
             min_multixid_age,
-            autovacuum_freeze_max_age
+            autovacuum_freeze_max_age,
+            autovacuum_multixact_freeze_max_age
         FROM pg_wraparound_stats
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -137,7 +138,12 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
                 reader.IsDBNull(0) ? "(unknown)" : reader.GetString(0),
                 reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
                 reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                reader.IsDBNull(3) ? 0 : reader.GetInt64(3)));
+                reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                /* ordinal 4: autovacuum_multixact_freeze_max_age. The collector has stored it since V63 and
+                   this adapter simply never selected it, so the evaluator graded MultiXact age against the
+                   XID setting — half the size by default, hence warnings at 2.2x premature. 0 reads as
+                   "cannot judge that counter", which is the correct fail-quiet. */
+                reader.IsDBNull(4) ? 0 : reader.GetInt64(4)));
         }
 
         return rows;
