@@ -3249,6 +3249,30 @@ public static class DarlingCliCommands
     }
 
     /// <summary>
+    /// #2171: whether the store's plan_xml_compression setting is 'none' — the mode where the live
+    /// writer stores plans as plain text and recompression would fight it forever. Reads defensively:
+    /// the column arrives at V62, and the verb must keep working against the older stores it exists
+    /// to convert, so a missing column (42703) is "no mode to conflict with". Public-for-tests via
+    /// the live suite; the verb is its only production caller.
+    /// </summary>
+    internal static async Task<bool> StoreIsSetToPlainTextPlansAsync(
+        NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var codec = new NpgsqlCommand(
+                "SELECT plan_xml_compression FROM config_service WHERE id = 1", connection);
+            return await codec.ExecuteScalarAsync(cancellationToken) is string mode
+                && string.Equals(mode.Trim(), "none", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (PostgresException ex) when (ex.SqlState == "42703")
+        {
+            /* Pre-V62 store: no column, no mode to conflict with — proceed. */
+            return false;
+        }
+    }
+
+    /// <summary>
     /// <c>--recompress-plan-dim</c> (#2076): convert the plan dimension's pre-V54 text rows to the gzip form
     /// V54's write path produces (#2069), in bounded batches, while the service keeps running.
     ///
@@ -3324,6 +3348,20 @@ public static class DarlingCliCommands
         output.WriteLine();
         output.WriteLine("PerformanceMonitor Darling — plan-dimension recompression (--recompress-plan-dim)");
         output.WriteLine();
+
+        /* #2171: a store configured plan_xml_compression = 'none' WANTS text rows — the operator chose
+           direct-SQL readability, and this verb would convert exactly the rows the live writer keeps
+           producing, the two fighting forever. Refuse with the way out rather than silently churning. */
+        if (await StoreIsSetToPlainTextPlansAsync(connection, cancellationToken))
+        {
+            error.WriteLine(
+                "This store is configured plan_xml_compression = 'none' (plans deliberately stored as " +
+                "plain text for direct-SQL consumers, #2171). Recompressing would convert rows the live " +
+                "writer keeps producing as text - the two would fight forever. If you want gzip storage " +
+                "back, set plan_xml_compression = 'gzip' in the store's service settings first, then " +
+                "re-run this verb.");
+            return 1;
+        }
 
         PlanDimRecompression.Survey survey;
         try

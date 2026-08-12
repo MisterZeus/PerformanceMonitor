@@ -117,6 +117,7 @@ public static class PgMigrations
         new Migration(58, "qs-backfill-switch", V58Sql),
         new Migration(59, "collector-memory-knobs", V59Sql),
         new Migration(60, "database-state-edge-memory", V60Sql),
+        new Migration(62, "plan-xml-compression-knob", V62Sql),
     };
 
     /// <summary>
@@ -1174,6 +1175,32 @@ ALTER TABLE config.database_state_expected
     ADD COLUMN IF NOT EXISTS last_alerted_state text;
 ALTER TABLE config.database_state_expected
     ADD COLUMN IF NOT EXISTS last_alerted_at timestamp;";
+
+    /// <summary>
+    /// V62 — the #2171 plan-XML codec knob for direct-SQL store consumers. 'gzip' (default) keeps
+    /// today's write path; 'none' makes the dim writer store plain text in query_plan_xml (lz4 TOAST
+    /// compresses, ~8.9x measured vs gzip's 14.0x) so Grafana-class readers get plans back with plain
+    /// SQL — PostgreSQL exposes no inflate, so gzip bytes are unreadable without an untrusted-language
+    /// UDF, which is the contract failure #2171 reports. Rides config_service like V58/V59 so the
+    /// config_version trigger makes a flip visible to the next reload poll. The CHECK mirrors the
+    /// provider's normalization; both fail toward 'gzip'. V61 is #2210's plan-map rung on its own
+    /// branch — this rung deliberately does not renumber into the hole (ascent-only applier; the PR
+    /// carrying this rung is gated to merge after V61 lands).
+    /// </summary>
+    private const string V62Sql = @"
+ALTER TABLE config.config_service
+    ADD COLUMN IF NOT EXISTS plan_xml_compression text NOT NULL DEFAULT 'gzip';
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'config_service_plan_xml_compression_check'
+    ) THEN
+        ALTER TABLE config.config_service
+            ADD CONSTRAINT config_service_plan_xml_compression_check
+            CHECK (plan_xml_compression IN ('gzip', 'none'));
+    END IF;
+END $$;";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:
