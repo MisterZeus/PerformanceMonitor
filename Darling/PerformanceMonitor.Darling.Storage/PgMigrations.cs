@@ -117,6 +117,7 @@ public static class PgMigrations
         new Migration(58, "qs-backfill-switch", V58Sql),
         new Migration(59, "collector-memory-knobs", V59Sql),
         new Migration(60, "database-state-edge-memory", V60Sql),
+        new Migration(69, "query-store-plan-map", V69Sql),
     };
 
     /// <summary>
@@ -1174,6 +1175,37 @@ ALTER TABLE config.database_state_expected
     ADD COLUMN IF NOT EXISTS last_alerted_state text;
 ALTER TABLE config.database_state_expected
     ADD COLUMN IF NOT EXISTS last_alerted_at timestamp;";
+
+    /// <summary>
+    /// V69 — the Query Store plan map (#2210): <c>(server_id, database_name, plan_id) → digest</c>, so Query
+    /// Store facts can reference plan XML they no longer carry once the cutover moves that content into the
+    /// shared <c>query_plan_dim</c>. Plan XML was stored INLINE on <c>query_store_stats</c> at roughly 5x
+    /// redundancy — the same plans re-shipped pass after pass — which is what this replaces.
+    ///
+    /// <para><c>plan_hash</c> is the re-verification key and is nullable on purpose: rows written before it
+    /// existed re-verify once and self-heal. <c>last_seen</c> is the liveness column the map prune sweeps and
+    /// the batch touch refreshes — load-bearing, because the dimension GC decides what to collect from
+    /// <c>last_seen</c> rather than by counting references, and ending the re-shipping ends the signal that
+    /// used to keep those dim rows alive.</para>
+    ///
+    /// <para>NUMBERED 69, not 61, and deliberately gapped: PR #2213 (PostgreSQL/Aurora target monitoring)
+    /// claims V61-V68 and moves <c>StorageVersion.SchemaVersion</c> to 68. The gap costs nothing — the runner
+    /// skips any rung at or below the store's current version and stamps what it applies — while a COLLIDING
+    /// number would be silently skipped rather than rejected, and a map table that never got created reads as
+    /// "plan not yet collected" on every lookup. The cutover would look healthy and hold nothing.</para>
+    /// </summary>
+    private const string V69Sql = @"
+CREATE TABLE IF NOT EXISTS collect.query_store_plan_map (
+    server_id integer NOT NULL,
+    database_name text NOT NULL,
+    plan_id bigint NOT NULL,
+    digest bytea NOT NULL,
+    plan_hash text,
+    last_seen timestamp NOT NULL,
+    PRIMARY KEY (server_id, database_name, plan_id)
+);
+CREATE INDEX IF NOT EXISTS idx_query_store_plan_map_last_seen
+    ON collect.query_store_plan_map(last_seen);";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:
