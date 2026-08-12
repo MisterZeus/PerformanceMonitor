@@ -1058,6 +1058,76 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
     }
 
     /// <summary>
+    /// The plan-XML fetch for one database (#2210): plans above the watermark, in <c>plan_id</c> order, bounded
+    /// twice — coarsely by <paramref name="candidatePlans"/> and exactly by a running byte total.
+    ///
+    /// <para>SEPARATE from the runtime-stats query on purpose, and that separation is the fix rather than a
+    /// refactor. The runtime query ships <c>ORDER BY qsrs.last_execution_time</c>, so a budget cut truncates it
+    /// in TIME order and the plans whose XML landed are an arbitrary SUBSET of plan_ids — against which no
+    /// watermark value is safe, because receiving plan 500 while missing 300 skips 300 forever. That is why the
+    /// previous shape could not advance on a cut, and 97.8% of production passes are cut. Here rows arrive in
+    /// plan_id order, so a cut truncates a SUFFIX and the highest landed id is safe by construction.</para>
+    ///
+    /// <para>The two bounds are not redundant. The running total is exact but expensive to compute: it needs
+    /// <c>DATALENGTH</c>, and <c>sys.query_store_plan.query_plan</c> is decompressed BY the view on access, so an
+    /// unbounded candidate set pays a whole catalog's decompression to enforce a budget meant to prevent exactly
+    /// that. <c>TOP (@candidate_plans)</c> is evaluated on <c>plan_id</c> alone — no XML touched to sort or
+    /// filter — so the decompression is capped at K, sized per database by
+    /// <see cref="QueryStorePlanXmlState.CandidatePlanCount"/> from the previous pass's own bytes-per-plan.</para>
+    ///
+    /// <para>Both bounds are inlined as parsed integers rather than parameters, matching the watermark predicate
+    /// above and for the same reason: the body nests inside <c>sp_executesql</c>, and the values are host-computed
+    /// longs that never touch operator input.</para>
+    ///
+    /// <para>NEVER on the backfill path, for the reason the watermark itself is not: backfill reads intervals
+    /// older than anything collected, whose plans are numbered BELOW the watermark, so a plan_id-ascending fetch
+    /// above the watermark would return nothing the backfill needs. Backfill plan XML stays on its own rows.</para>
+    ///
+    /// <para>UNMEASURED, and the PR must not leave draft until it is: the final join back to
+    /// <c>sys.query_store_plan</c> means a SHIPPED plan is decompressed twice — once for its
+    /// <c>DATALENGTH</c> inside the window, once for its <c>CONVERT</c>. Carrying the converted text through the
+    /// CTE instead would decompress once IF the plan spools it, and twice-plus if it re-evaluates. Which shape
+    /// wins is a question for a real catalog, not for reasoning: measure both against the worst database before
+    /// this ships, and record the numbers on #2164.</para>
+    /// </summary>
+    public CollectorQuery BuildPlanFetchQuery(string item, CollectorContext context, long watermark, int candidatePlans, long budgetBytes)
+    {
+        var escapedDbName = item.Replace("]", "]]", StringComparison.Ordinal);
+        var k = candidatePlans.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var budget = budgetBytes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var floor = watermark.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        /* ROWS UNBOUNDED PRECEDING, not the RANGE default: RANGE would tie-group peers and, more to the point,
+           forces a spool. The frame is per-row precisely because the cut has to fall between two plans. */
+        var body = $@"WITH candidates AS (
+    SELECT TOP ({k}) qsp.plan_id, DATALENGTH(qsp.query_plan) AS plan_bytes
+    FROM sys.query_store_plan AS qsp
+    WHERE qsp.plan_id > {floor}
+    ORDER BY qsp.plan_id
+),
+budgeted AS (
+    SELECT c.plan_id,
+           SUM(c.plan_bytes) OVER (ORDER BY c.plan_id ROWS UNBOUNDED PRECEDING) AS running_bytes
+    FROM candidates AS c
+)
+SELECT b.plan_id,
+       CONVERT(nvarchar(max), qsp.query_plan) AS query_plan_text
+FROM budgeted AS b
+JOIN sys.query_store_plan AS qsp
+  ON qsp.plan_id = b.plan_id
+WHERE b.running_bytes <= {budget}
+ORDER BY b.plan_id;";
+
+        var escapedBody = body.Replace("'", "''", StringComparison.Ordinal);
+
+        var text = $@"
+EXECUTE [{escapedDbName}].sys.sp_executesql
+    N'{escapedBody}';";
+
+        return new CollectorQuery(text, new List<CollectorParameter>());
+    }
+
+    /// <summary>
     /// The #2022 phase-2 backfill slice for one on-prem/RDS/MI database: <see cref="BuildPayloadBody"/>
     /// in its backfill shape (newest-first DESC inside the two-sided window) nested in the same
     /// <c>[db].sys.sp_executesql</c> wrapper as <see cref="BuildPerItemQuery"/>. The window is
