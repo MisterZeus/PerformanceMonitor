@@ -117,6 +117,7 @@ public static class PgMigrations
         new Migration(58, "qs-backfill-switch", V58Sql),
         new Migration(59, "collector-memory-knobs", V59Sql),
         new Migration(60, "database-state-edge-memory", V60Sql),
+        new Migration(61, "incident-occurrence-counters", V61Sql),
         new Migration(62, "plan-xml-compression-knob", V62Sql),
     };
 
@@ -1177,15 +1178,61 @@ ALTER TABLE config.database_state_expected
     ADD COLUMN IF NOT EXISTS last_alerted_at timestamp;";
 
     /// <summary>
+    /// V61 — the monotonic per-fingerprint occurrence counters (#2216). The rolling-window count that rides
+    /// on an alert incident is a GAUGE: it rises as events arrive and falls as they age out of the groupers'
+    /// read window, so a consumer that only sees throttled deliveries (one per #1154 per-fingerprint
+    /// cooldown) cannot recover how many events actually happened between two of them. This table is the
+    /// accumulator's memory, keyed by the #1140 dedup fingerprint.
+    ///
+    /// <para>A NEW table rather than columns on <c>config_edge_trigger_watermarks</c>, for two independent
+    /// reasons. The key is wrong: watermarks are per (server, metric) while occurrences are per (server,
+    /// metric, FINGERPRINT) — a deadlock on one table and a deadlock on another are separate incidents with
+    /// separate totals, and folding them into one row would report their sum under both. And the cross-store
+    /// twin cannot take the columns: Lite writes that same row with <c>INSERT OR REPLACE</c> and a PARTIAL
+    /// column list, so any column added there is silently reset to its default every time an alert fires —
+    /// the counter would zero itself precisely when it was being read.</para>
+    ///
+    /// <para><c>config</c> schema because it joins the alert-coordination family (the V8 remarks put the
+    /// edge-trigger watermarks there for the same reason): service-written, operator-visible, keyed by
+    /// server. Schema-qualified per the V17 rule — the migrate session's search_path would otherwise resolve
+    /// a bare name into <c>collect</c>. No per-table grant (provisioning re-runs
+    /// <c>GRANT … ON ALL TABLES IN SCHEMA config</c> after the migration pass) and no
+    /// <c>ViewerRestrictedConfigTables</c> carve: the only identity stored is the fingerprint HASH, never
+    /// the involved object names it was computed from, so there is nothing here for the network-reachable
+    /// <c>mcp</c> role to read that it should not.</para>
+    ///
+    /// <para>NO <c>config_bump_version</c> trigger, per the V32 precedent: this is the service's own
+    /// coordination state, written on the alert path, and nothing reloads on it. A beacon bump would make
+    /// every delivered alert trigger a needless fleet reconcile.</para>
+    ///
+    /// <para><c>last_observed_at</c> is not display data — it is what makes a row's staleness decidable. The
+    /// service deletes a fingerprint's row when its incident ends, but a host that dies mid-incident leaves
+    /// one behind, and a stranded row trusted on the fingerprint's NEXT incident would decay its
+    /// already-counted mark to the new window count, read the recurrence as nothing new, and report a stale
+    /// total under a stale start time. The accumulator therefore ignores rows older than its read window.
+    /// Row growth needs no separate GC: each delivery REPLACES the set for its (server, metric), so the
+    /// table holds the live fingerprints plus whatever a crash stranded until that metric next fires.</para>
+    /// </summary>
+    private const string V61Sql = @"
+CREATE TABLE IF NOT EXISTS config.incident_occurrences (
+    server_id integer NOT NULL,
+    metric_name text NOT NULL,
+    dedup_key text NOT NULL,
+    total_occurrences bigint NOT NULL,
+    observed_window_count integer NOT NULL,
+    incident_started_at timestamp NOT NULL,
+    last_observed_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
+    PRIMARY KEY (server_id, metric_name, dedup_key)
+);";
     /// V62 — the #2171 plan-XML codec knob for direct-SQL store consumers. 'gzip' (default) keeps
     /// today's write path; 'none' makes the dim writer store plain text in query_plan_xml (lz4 TOAST
     /// compresses, ~8.9x measured vs gzip's 14.0x) so Grafana-class readers get plans back with plain
     /// SQL — PostgreSQL exposes no inflate, so gzip bytes are unreadable without an untrusted-language
     /// UDF, which is the contract failure #2171 reports. Rides config_service like V58/V59 so the
     /// config_version trigger makes a flip visible to the next reload poll. The CHECK mirrors the
-    /// provider's normalization; both fail toward 'gzip'. V61 is #2210's plan-map rung on its own
-    /// branch — this rung deliberately does not renumber into the hole (ascent-only applier; the PR
-    /// carrying this rung is gated to merge after V61 lands).
+    /// provider's normalization; both fail toward 'gzip'. Rides directly above #2216's V61 — the
+    /// merge-order gate this PR carried (never land 62 over a vacant 61; ascent-only applier) was
+    /// satisfied when that rung merged; the #2227 density pin now enforces the rule mechanically.
     /// </summary>
     private const string V62Sql = @"
 ALTER TABLE config.config_service

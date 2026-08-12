@@ -202,6 +202,30 @@ public sealed class AlertEngineTests
             return Task.CompletedTask;
         }
 
+        /* #2216: real per-fingerprint occurrence state, so the engine tests can assert what the accumulator
+           wrote AND seed a prior incident to accumulate against. */
+        public Dictionary<(string Key, string Metric), Dictionary<string, IncidentOccurrenceState>> Occurrences { get; } = new();
+        public List<(string Key, string Metric, int Count)> SavedOccurrences { get; } = new();
+
+        public Task<IReadOnlyDictionary<string, IncidentOccurrenceState>> LoadIncidentOccurrencesAsync(string serverKey, string metricName) =>
+            Task.FromResult<IReadOnlyDictionary<string, IncidentOccurrenceState>>(
+                Occurrences.TryGetValue((serverKey, metricName), out var states)
+                    ? states
+                    : new Dictionary<string, IncidentOccurrenceState>(StringComparer.Ordinal));
+
+        public Task SaveIncidentOccurrencesAsync(string serverKey, string metricName, IReadOnlyDictionary<string, IncidentOccurrenceState> states)
+        {
+            /* Replace-the-set, exactly like both real stores: whatever arrives IS the metric's state, so an
+               empty map clears it. A fake that merged instead would hide the falling-edge bug class. */
+            Occurrences[(serverKey, metricName)] = new Dictionary<string, IncidentOccurrenceState>(StringComparer.Ordinal);
+            foreach (var entry in states)
+            {
+                Occurrences[(serverKey, metricName)][entry.Key] = entry.Value;
+            }
+            SavedOccurrences.Add((serverKey, metricName, states.Count));
+            return Task.CompletedTask;
+        }
+
         /* #2166 */
         public List<(string Server, string Db, string State)> DatabaseStateAlerted { get; } = new();
 
@@ -780,6 +804,151 @@ public sealed class AlertEngineTests
         h.Adapter.Deadlocks.Add(DeadlockRow());
         await h.Build().EvaluateServerAsync(Harness.Snapshot());
         Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task Deadlock_TotalOccurrences_AccumulateAcrossThrottledDeliveries()
+    {
+        /* #2216 end to end. Delivery one carries one deadlock; two more happen before the next eligible
+           delivery. The window gauge reads 3 and the monotonic total reads 3 — the number a consumer that
+           missed the middle of the incident needs, and the number the gauge alone cannot give it (a reading
+           of 3 could equally mean "three new" or "one new, two aged out"). */
+        var h = new Harness();
+        h.Settings.DeadlockEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var first = Assert.Single(h.Deliverer.Outcomes);
+        var firstIncident = Assert.Single(first.Context!.Incidents!);
+        Assert.Equal(1, firstIncident.OccurrenceCount);
+        Assert.Equal(1L, firstIncident.TotalOccurrences);
+        Assert.Equal(h.Now, firstIncident.IncidentStartedUtc);
+
+        /* Same fingerprint (identical graphs), so this is the same incident continuing. */
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        var openedAt = h.Now;
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        var second = h.Deliverer.Outcomes[1];
+        var secondIncident = Assert.Single(second.Context!.Incidents!);
+        Assert.Equal(3, secondIncident.OccurrenceCount);
+        Assert.Equal(3L, secondIncident.TotalOccurrences);
+
+        /* The start time did NOT move — that is how the consumer tells a continuation from a new incident
+           that happens to read 3. */
+        Assert.Equal(openedAt, secondIncident.IncidentStartedUtc);
+
+        var persisted = h.StateStore.Occurrences[(Key, AlertEngine.DeadlockWatermarkMetric)];
+        Assert.Equal(3L, persisted[secondIncident.DedupKey].TotalOccurrences);
+    }
+
+    [Fact]
+    public async Task Deadlock_OccurrencesAreObservedOnSweepsThatDeliverNothing()
+    {
+        /* PR #2221's review: with the accumulation inside the Fire branch, no sweep between two deliveries
+           observed anything, so an event the window retired during the cooldown cancelled an arrival and the
+           arrival was never counted. The observation now runs on every sweep that fetched rows. */
+        var h = new Harness();
+        h.Settings.DeadlockEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Two more deadlocks INSIDE the cooldown — no delivery, but the count must still be observed. */
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        h.Now = h.Now.AddMinutes(1);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Single(h.Deliverer.Outcomes);   /* the cooldown suppressed the delivery */
+
+        var persisted = h.StateStore.Occurrences[(Key, AlertEngine.DeadlockWatermarkMetric)];
+        Assert.Equal(3L, Assert.Single(persisted).Value.TotalOccurrences);
+    }
+
+    [Fact]
+    public async Task Deadlock_OccurrenceStateSeededFromStore_ContinuesTheIncidentAcrossARestart()
+    {
+        /* The reason the counter is persisted at all: a total that reset on every service restart would be a
+           second gauge wearing a total's name. A fresh engine (new in-memory state, as after a restart)
+           seeded from the store must keep counting the incident it finds there. */
+        var discovery = new Harness();
+        discovery.Settings.DeadlockEnabled = true;
+        discovery.Adapter.Deadlocks.Add(DeadlockRow());
+        await discovery.Build().EvaluateServerAsync(Harness.Snapshot());
+        var dedupKey = Assert.Single(Assert.Single(discovery.Deliverer.Outcomes).Context!.Incidents!).DedupKey;
+
+        var restarted = new Harness();
+        restarted.Settings.DeadlockEnabled = true;
+        var openedAt = restarted.Now.AddMinutes(-20);
+        restarted.StateStore.Occurrences[(Key, AlertEngine.DeadlockWatermarkMetric)] =
+            new Dictionary<string, IncidentOccurrenceState>(StringComparer.Ordinal)
+            {
+                [dedupKey] = new(
+                    TotalOccurrences: 9,
+                    ObservedWindowCount: 2,
+                    IncidentStartedUtc: openedAt,
+                    LastObservedUtc: restarted.Now.AddMinutes(-5)),
+            };
+
+        restarted.Adapter.Deadlocks.Add(DeadlockRow());
+        restarted.Adapter.Deadlocks.Add(DeadlockRow());
+        restarted.Adapter.Deadlocks.Add(DeadlockRow());
+        await restarted.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var incident = Assert.Single(Assert.Single(restarted.Deliverer.Outcomes).Context!.Incidents!);
+
+        /* 9 already counted, the window rose from 2 to 3, so one new occurrence: 10. */
+        Assert.Equal(10L, incident.TotalOccurrences);
+        Assert.Equal(openedAt, incident.IncidentStartedUtc);
+    }
+
+    [Fact]
+    public async Task Deadlock_FallingEdge_ClearsTheOccurrenceState()
+    {
+        /* When the condition clears, the incident is over and its counters go with it — otherwise the next
+           incident on the same fingerprint reads as a continuation of this one, reporting an undercount
+           under a start time that points at an incident the user already saw resolve. */
+        var h = new Harness();
+        h.Settings.DeadlockEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.NotEmpty(h.StateStore.Occurrences[(Key, AlertEngine.DeadlockWatermarkMetric)]);
+
+        h.Adapter.Deadlocks.Clear();
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Contains(h.Resolutions, r => r.MetricName == "Deadlocks Detected");
+        Assert.Empty(h.StateStore.Occurrences[(Key, AlertEngine.DeadlockWatermarkMetric)]);
+    }
+
+    [Fact]
+    public async Task Blocking_TotalOccurrences_RideOnTheBlockingIncidentsToo()
+    {
+        /* Both count gates go through the same accumulator — the blocking half is not an afterthought, it is
+           the other half of the reported feature. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.Blocking.Add(BlockingRow(55));
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        var incident = Assert.Single(fired.Context!.Incidents!);
+        Assert.Equal(1L, incident.TotalOccurrences);
+        Assert.Equal(h.Now, incident.IncidentStartedUtc);
+        Assert.Contains((Key, AlertEngine.BlockingWatermarkMetric, 1), h.StateStore.SavedOccurrences);
     }
 
     [Fact]
