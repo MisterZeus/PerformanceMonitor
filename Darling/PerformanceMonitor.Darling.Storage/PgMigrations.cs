@@ -125,6 +125,7 @@ public static class PgMigrations
         new Migration(66, "pg-autovacuum-stats", V66Sql),
         new Migration(67, "pg-io-stats", V67Sql),
         new Migration(68, "monitored-server-engine", V68Sql),
+        new Migration(69, "pg-blocking-edges", V69Sql),
     };
 
     /// <summary>
@@ -1508,6 +1509,60 @@ ALTER TABLE config.config_monitored_servers
 
 ALTER TABLE config.config_monitored_servers
     ADD COLUMN IF NOT EXISTS port integer NOT NULL DEFAULT 0;";
+
+    /// <summary>
+    /// V69 — <c>collect.pg_blocking_edges</c>: who is blocked, by whom, and what state each side was in.
+    /// <para>An EDGE LIST, which is why the table is named for edges rather than for chains. One row per
+    /// (blocked, blocking) pair, so a chain of four is four rows and a blocker with thirty victims is thirty.
+    /// Storing a rendered tree instead would bake in one traversal and make root-blocker, depth, and fan-out
+    /// queries string work; from edges they are ordinary SQL.</para>
+    /// <para>Both sides carry their own state because the remedy depends on it: a chain rooted in
+    /// <c>idle in transaction</c> is an application defect, one rooted in a long-running query is a tuning
+    /// problem, and the pid alone does not distinguish them. That doubling of columns is the point of the
+    /// table.</para>
+    /// <para><b>Reader beware — sparse by design.</b> This table is empty on a healthy instance, and unlike
+    /// SQL Server's <c>blocked_process_report</c> there is no engine-side recorder behind it: PostgreSQL
+    /// materialises nothing unless something asks, so a gap means "not sampled", not "not blocked". A count
+    /// over this table measures how often blocking was CAUGHT.</para>
+    /// <para>Additive and view-less exactly like V61-V67: a fresh store gets the table from V1's generated
+    /// schema, and this rung is what an already-existing store gets.</para>
+    /// </summary>
+    private const string V69Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_blocking_edges (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    blocked_backend_id bigint,
+    blocked_pid integer,
+    blocking_backend_id bigint,
+    blocking_pid integer,
+    database_name text,
+    blocked_username text,
+    blocked_application_name text,
+    blocked_client_addr text,
+    blocked_state text,
+    blocked_wait_event_type text,
+    blocked_wait_event text,
+    blocked_query text,
+    blocked_xact_duration_ms bigint,
+    blocked_query_duration_ms bigint,
+    blocking_username text,
+    blocking_application_name text,
+    blocking_client_addr text,
+    blocking_state text,
+    blocking_wait_event_type text,
+    blocking_wait_event text,
+    blocking_query text,
+    blocking_xact_duration_ms bigint,
+    blocking_query_duration_ms bigint,
+    blocked_pid_count integer,
+    blocking_is_idle_in_transaction boolean,
+    query_text_may_be_truncated boolean
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_blocking_edges_time
+    ON collect.pg_blocking_edges(server_id, collection_time);";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

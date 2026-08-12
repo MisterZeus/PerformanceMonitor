@@ -78,3 +78,63 @@ Ladder-generator diff for the rung; `probe_collector_sql_live.py` against stage 
 genuinely needs the live run — `pg_blocking_pids()` behaviour and the `<insufficient privilege>` degradation
 are both things to see rather than assume); `probe_validate_reader_sql.py` with a synthetic edge list that
 includes a two-level chain, a fan-out root, and an `idle in transaction` root.
+
+---
+
+## What building it changed — 2026-08-12
+
+Shipped as `pg_blocking` → `collect.pg_blocking_edges`, rung **V69**, `SchemaVersion` 69. Seven of the eight
+decisions above survived contact unchanged. What the live runs changed is recorded here rather than edited
+into the decisions above, because the corrections are the useful part.
+
+**Three defects the C# suite could not have caught, all found by running the real strings on real Aurora.**
+
+1. **`current_setting('track_activity_query_size')::int` throws.** `current_setting()` renders a memory GUC
+   *with its unit* — the value comes back `'8kB'` on stage Aurora 17.7 and `'4kB'` on 16.11 (both instances
+   are set well above the 1 kB default). The cast raises an invalid-input-syntax error, which fails the
+   **whole collection**, every cycle, not just the one column. Fixed with
+   `pg_size_bytes(current_setting(...))`, which parses every unit form. Pinned by
+   `ReadsTheQuerySizeGucThroughPgSizeBytes_NotAnIntCast`.
+
+2. **The reader's chain query needed `WITH RECURSIVE`, not `WITH`.** PostgreSQL scopes `RECURSIVE` to the
+   entire `WITH` clause, not to the CTE that self-references, so the query failed with
+   `relation "chain" does not exist` — a forward reference it will not resolve. A runtime error on the first
+   `get_pg_blocking` call and invisible at build time.
+
+3. **Three output columns had no alias** and came back all named `coalesce`. Harmless to the positional C#
+   reader, and exactly the kind of thing that makes a query nobody can debug in psql. Every output column of
+   both reads is now aliased.
+
+**The eighth decision, which the design note did not anticipate: a sampled cycle was invisible.**
+`chains` identifies a root by absence — a backend that blocks something and is not itself blocked. In a lock
+cycle every participant is blocked, so there is no root, so the entire cyclic component was silently dropped:
+**0 rows from a capture that recorded real blocking.** For a collector whose whole premise is that an empty
+answer must never be mistaken for "nothing happened", that was the one place the read did precisely that.
+
+Cycles are rare but genuinely reachable — PostgreSQL's deadlock detector resolves them, but only after
+`deadlock_timeout` (1 s by default), and a capture can land inside that window. When it does, the stored
+edges are the only evidence that will ever exist, because the engine kills a participant a moment later.
+
+Fixed with a second read, `PgBlockingCyclesSql`, which finds participants by **reachability from
+themselves** rather than by "this capture has no root" — the latter would miss a cycle sharing a capture with
+an ordinary chain. `get_pg_blocking` reports `cycles` alongside `chains`, always present so its absence can
+never read as "not checked", and has a dedicated `cycles_only` status for a window that captured nothing else.
+
+**Verification actually run** (all PASS on stage Aurora **16.11** and **17.7**):
+
+- `laddercheck` — new harness, and it diffs **all eight** PostgreSQL rungs against `PgSchemaGenerator`, not
+  just the new one. Nobody had checked this before: the suite asserted the generator emits every table and
+  that each rung is well-formed, never that the two said the *same thing*. Now also a real test,
+  `EveryPostgresRung_IsIdenticalToTheGeneratedSchema`.
+- `probe_blocking_collector_live.py` — runs the **shipped** collector string against a **real two-deep
+  blocking chain**, built with **advisory locks**. That is what keeps the probe strictly read-only while
+  still producing genuine lock-manager blocking: `pg_blocking_pids()` reports advisory waiters and their
+  `wait_event_type` is `Lock`, identical to a row or table lock, but nothing is written and every lock is
+  released on disconnect. A syntax-only check would have exercised none of the parts that can be wrong,
+  because a healthy instance returns zero rows. 17 checks, including that the synthetic backend id is
+  *recomputable* from `backend_start` + pid rather than merely present.
+- `probe_blocking_reader_sql.py` — the reader text over synthetic edge sets with known answers: a 3-deep
+  chain (depth 3, 1 direct victim, 3 total), a wide fan-out (depth 1, 3 direct), recurrence across two
+  captures for one backend id, and the cycle. 21 checks, including that neither acyclic scenario is
+  *mis*-reported as a cycle — a false deadlock claim is worse than a missed one, because it prescribes lock
+  ordering as the fix when that is not the fix.

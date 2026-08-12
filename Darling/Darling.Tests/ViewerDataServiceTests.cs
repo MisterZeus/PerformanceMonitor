@@ -646,6 +646,47 @@ public sealed class ViewerSchemaVersionGateTests
                     BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)!
                 .Invoke(null, allSentinelsTrue)!);
     }
+
+    /// <summary>
+    /// The probe SQL's column count must equal <see cref="ViewerDataService.MapProbedSchemaVersion"/>'s
+    /// parameter count, because <c>GetStoreSchemaVersionAsync</c> reads them positionally.
+    ///
+    /// <para><b>Nothing else catches this.</b> Add a sentinel to the SQL and forget the parameter and the
+    /// last column is silently ignored — a fully-migrated store reports one rung short and the viewer refuses
+    /// a healthy store. Add the parameter and forget the SQL column and
+    /// <c>reader.GetBoolean(n)</c> throws IndexOutOfRange at connect time. Both are runtime-only against a
+    /// live store, both are invisible to every other test here (the arity test above builds its arguments
+    /// from the signature, so it agrees with itself either way), and the second one is the same class of
+    /// ordinal-drift defect that a live-target review had to find by hand.</para>
+    ///
+    /// <para>Top-level select items are counted by paren depth rather than by counting the string
+    /// <c>EXISTS</c>: the V22/V23 composite column contains two nested <c>EXISTS</c> of its own, so a naive
+    /// substring count reads 46 where the select list has 45.</para>
+    /// </summary>
+    [Fact]
+    public void StoreSchemaProbe_ColumnCount_MatchesTheMapArity()
+    {
+        var sql = ViewerDataService.StoreSchemaProbeSql;
+        var selectAt = sql.IndexOf("SELECT", StringComparison.Ordinal);
+        Assert.True(selectAt >= 0, "the probe must be a SELECT");
+
+        var depth = 0;
+        var columns = 1;
+        foreach (var c in sql.AsSpan(selectAt + "SELECT".Length))
+        {
+            if (c == '(') depth++;
+            else if (c == ')') depth--;
+            else if (c == ',' && depth == 0) columns++;
+        }
+
+        var parameters = typeof(ViewerDataService)
+            .GetMethod(
+                nameof(ViewerDataService.MapProbedSchemaVersion),
+                BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)!
+            .GetParameters().Length;
+
+        Assert.Equal(parameters, columns);
+    }
 }
 
 /// <summary>

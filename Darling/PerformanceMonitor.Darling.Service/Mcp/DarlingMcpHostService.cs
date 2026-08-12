@@ -501,6 +501,12 @@ public sealed class DarlingMcpHostService : BackgroundService
                    dimension has no SQL Server counterpart and is what separates a buffer-pool miss that
                    more memory would fix from a ring-buffered sequential scan that it would not. */
                 .WithGeminiCompatibleTools<DarlingMcpPgIoTools>()
+                /* get_pg_blocking — who is blocked by whom, assembled from the stored edge list into chains
+                   with the ROOT attributed. The one PostgreSQL read whose caveat has to travel WITH the
+                   answer: SQL Server's blocked-process report is engine-recorded, this is periodically
+                   sampled, so "no blocking" here means "none was sampled" and the tool reports its own
+                   capture count so that distinction cannot be lost. */
+                .WithGeminiCompatibleTools<DarlingMcpPgBlockingTools>()
                 .WithGeminiCompatibleTools<DarlingMcpMemoryGrantTools>()
                 .WithGeminiCompatibleTools<DarlingMcpPlanCacheSchedulerTools>()
                 .WithGeminiCompatibleTools<DarlingMcpJobTools>()

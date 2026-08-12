@@ -1625,7 +1625,8 @@ public sealed class DarlingWorker : BackgroundService
                                 + "does not populate. This is not \"still collecting\" — use the PostgreSQL MCP "
                                 + "reads (get_pg_wait_stats, get_pg_top_queries, get_pg_autovacuum_health, "
                                 + "get_pg_wraparound_risk, get_pg_xmin_horizon, get_pg_replication_slots, "
-                                + "get_pg_io_stats) and the three outage-predictor alerts instead.",
+                                + "get_pg_io_stats, get_pg_blocking) and the three outage-predictor alerts "
+                                + "instead.",
                             _logger,
                             stoppingToken);
                     }
@@ -4046,6 +4047,7 @@ LIMIT 1";
         ["pg_replication_slots"] = (r, s, ct) => r.RunAsync(PgReplicationSlotsCollector.Instance, s, ct),
         ["pg_autovacuum_stats"] = (r, s, ct) => r.RunAsync(PgAutovacuumStatsCollector.Instance, s, ct),
         ["pg_io_stats"] = (r, s, ct) => r.RunAsync(PgIoStatsCollector.Instance, s, ct),
+        ["pg_blocking"] = (r, s, ct) => r.RunAsync(PgBlockingCollector.Instance, s, ct),
     };
 
     /// <summary>

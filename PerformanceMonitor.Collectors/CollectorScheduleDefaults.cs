@@ -159,5 +159,15 @@ public static class CollectorScheduleDefaults
            matches the other rate collectors — the value here is correlating an I/O shift against a
            deployment, which is a days-to-weeks question, not a quarterly one. */
         ["pg_io_stats"] = new(1, 30),
+
+        /* Per-minute, and the cadence IS the limitation. Unlike SQL Server's blocked-process report —
+           where the engine itself records an event when blocking crosses a threshold, so evidence exists
+           whether or not anyone looked — PostgreSQL records nothing. This is a sample, so blocking shorter
+           than one minute is simply not seen. A minute is the floor worth paying for:
+           pg_blocking_pids() takes ShareLock on the lock manager partitions per call, and the whole
+           point of a blocking monitor is to not become the contention it reports. 30 days matches the
+           other per-minute series, and is the horizon that answers "is this the same chain every
+           Monday at open" — the question that turns a one-off into a pattern. */
+        ["pg_blocking"] = new(1, 30),
     };
 }
