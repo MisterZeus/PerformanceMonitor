@@ -570,7 +570,12 @@ public class QueryStorePlanWatermarkTests
 
         /* The coarse bound sorts and filters on plan_id alone — no XML touched — which is what caps the
            decompression the exact bound would otherwise pay across a whole catalog. */
-        Assert.Contains("SELECT TOP (114) qsp.plan_id, DATALENGTH(qsp.query_plan)", sql, StringComparison.Ordinal);
+        /* The CONVERT sits INSIDE the window and the running total measures the converted text, so a shipped
+           plan is decompressed once. Measured on a 73,163-plan production catalog: this shape 133ms against
+           274ms for measuring DATALENGTH(qsp.query_plan) in the window and joining back for the text, same 114
+           rows and 1.7MB out of both. Plan-id-only with no XML was 114ms. */
+        Assert.Contains("SELECT TOP (114) qsp.plan_id, CONVERT(nvarchar(max), qsp.query_plan)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("JOIN sys.query_store_plan", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE qsp.plan_id > 900000", sql, StringComparison.Ordinal);
         Assert.Contains("ROWS UNBOUNDED PRECEDING", sql, StringComparison.Ordinal);
     }
