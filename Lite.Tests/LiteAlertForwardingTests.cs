@@ -184,6 +184,23 @@ public class LiteAlertForwardingTests : IDisposable
             FailedJobWatermarks[serverKey] = watermark;
             return Task.CompletedTask;
         }
+
+        /* #2166 */
+        public List<(string Server, string Db, string State)> DatabaseStateAlerted { get; } = new();
+
+        public Task SaveDatabaseStateAlertedAsync(string serverKey, string databaseName, string effectiveState)
+        {
+            DatabaseStateAlerted.Add((serverKey, databaseName, effectiveState));
+            return Task.CompletedTask;
+        }
+
+        public List<(string Server, string Db)> DatabaseStateCleared { get; } = new();
+
+        public Task ClearDatabaseStateAlertedAsync(string serverKey, string databaseName)
+        {
+            DatabaseStateCleared.Add((serverKey, databaseName));
+            return Task.CompletedTask;
+        }
     }
 
     private sealed class RecordingDeliverer : IAlertDeliverer

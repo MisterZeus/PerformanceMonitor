@@ -303,11 +303,11 @@ ON CONFLICT (server_id) DO NOTHING", connection);
             /* Per-server delivery override (#1236): the enum name or NULL = "inherit the global". */
             AddNullableText(command, server.AlertDeliveryModeOverride?.ToString());
             command.Parameters.AddWithValue(now);
-            /* V67: the engine, persisted as the raw darling.json string rather than the parsed enum, so the
+            /* V68: the engine, persisted as the raw darling.json string rather than the parsed enum, so the
                store round-trips exactly what the operator wrote — including an alias like "aurora" — and the
                single parse in MonitoredServer.TargetEngine stays the only place that interprets it. */
             command.Parameters.AddWithValue(server.Engine);
-            /* V67: the port, PostgreSQL-only (0 = the driver's default). Persisted for the same reason as the
+            /* V68: the port, PostgreSQL-only (0 = the driver's default). Persisted for the same reason as the
                engine — a non-default port dropped here would connect to 5432 and fail with an error naming
                the right host. */
             command.Parameters.AddWithValue(server.Port);
@@ -602,7 +602,7 @@ ORDER BY name", connection);
             MonthlyCostUsd = reader.GetDecimal(11),
             /* #1236: the per-server delivery override (null = inherit the global), available at delivery time. */
             AlertDeliveryModeOverride = ParseDeliveryOverride(reader.IsDBNull(12) ? null : reader.GetString(12)),
-            /* V67. Without this the registry — which is authoritative once seeded — silently downgraded every
+            /* V68. Without this the registry — which is authoritative once seeded — silently downgraded every
                PostgreSQL target to the "sqlserver" property default, and the service opened a SqlConnection to
                port 5432. NOT NULL DEFAULT in both columns means the DBNull guards are belt-and-braces for a
                store mid-migration, not an expected path. */

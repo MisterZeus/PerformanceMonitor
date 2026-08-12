@@ -138,7 +138,14 @@ public sealed class AlertEngine
        is keyed per database (serverKey + "|" + dbName) so each database throttles independently, and
        an entry is removed when its database recovers. In-memory only, like the other family state. */
     private readonly ConcurrentDictionary<string, HashSet<string>> _activeDatabaseStateAlerts = new();
-    private readonly ConcurrentDictionary<string, DateTime> _lastDatabaseStateAlert = new();
+
+    /* #2166: keyed per (server, database, STATE) as a tuple rather than a delimited string. Per-state
+       because a chosen state now goes quiet indefinitely, so letting one state's clock rate-limit a
+       transition to a DIFFERENT state is a silence rather than a delay — and the state it would silence is
+       SUSPECT. Structural rather than concatenated because clearing a database's clocks means matching on
+       two of the three parts, and a string key makes that a prefix match: SQL Server permits '|' in a
+       database name, so `Foo|Bar` would collide with `Foo` under any delimiter a sysname can contain. */
+    private readonly ConcurrentDictionary<(string Server, string Database, string State), DateTime> _lastDatabaseStateAlert = new();
 
     /* #2157: per-PLAN active set and cooldowns. The alerting unit is one forced plan, not one server —
        two plans failing on the same database are independent conditions that resolve independently.
@@ -1250,8 +1257,27 @@ public sealed class AlertEngine
         foreach (var (dbName, db) in current)
         {
             active.Add(dbName);
-            var cooldownKey = DatabaseStateCooldownKey(key, dbName);
-            if (!suppressed && CooldownElapsed(_lastDatabaseStateAlert, cooldownKey, now, alertCooldown))
+            /* Keyed per database AND per STATE (#2166). It used to be per database, which was survivable when
+               every deviation re-fired every cooldown: a transition suppressed by the previous state's
+               cooldown re-announced on the next tick anyway. Now that a chosen state goes quiet
+               indefinitely, that suppression would be permanent for the length of a cooldown window — so a
+               database going OFFLINE and then SUSPECT inside one window could have its SUSPECT transition
+               swallowed, which is precisely the integrity case this alert must never go quiet about. Each
+               state now rate-limits itself and cannot borrow another's clock. */
+            var cooldownKey = (Server: key, Database: dbName, State: db.StateDesc);
+            /* #2166: for the states an operator usually CHOSE (a parked OFFLINE, a secondary flickering
+               RESTORING), repetition is noise — alert on the transition and stay quiet until the state
+               changes. Compared against the PERSISTED last-alerted state, so a service restart cannot
+               re-announce every parked database. The integrity states skip this entirely: nobody parks a
+               database in SUSPECT, so their repetition is the signal and the cooldown still governs.
+
+               A host that does not persist the memory (Lite today) reports empty here, every deviation
+               reads as new, and behavior is exactly as it was before this change. */
+            var alreadyAnnounced =
+                DatabaseStateTokens.RepeatsAreNoise(db.StateDesc)
+                && string.Equals(db.LastAlertedState, db.StateDesc, StringComparison.OrdinalIgnoreCase);
+
+            if (!suppressed && !alreadyAnnounced && CooldownElapsed(_lastDatabaseStateAlert, cooldownKey, now, alertCooldown))
             {
                 var severity = DatabaseStateTokens.SeverityFor(db.StateDesc);
                 var stateText = DatabaseStateTokens.Humanize(db.StateDesc);
@@ -1298,6 +1324,24 @@ public sealed class AlertEngine
                     NumericCurrentValue: null, NumericThresholdValue: null,
                     Muted: isMuted, Severity: severity,
                     ShortMessage: shortMessage), ct);
+
+                /* Stamped AFTER delivery so a failed fire is retried next cycle rather than silenced, and
+                   written for every state rather than only the edge-triggered ones, so that reclassifying a
+                   state later has correct history to work from.
+
+                   NOT stamped when MUTED, which is the one place this memory and the cooldown beside it must
+                   disagree. The cooldown is rate limiting and applies whether or not anyone was told; this
+                   memory means "the operator has been told about this state", and under a mute they have not.
+                   Stamping it anyway made a mute permanent: the four edge-triggered states gate all future
+                   firing on this value, so muting a parked database, then REMOVING the mute, left
+                   LastAlertedState equal to the current state forever and the alert never returned — the
+                   operator's mute silently became irreversible for as long as the state held. Skipping the
+                   stamp costs a repeat inside the mute (invisible by definition, and exactly the pre-#2166
+                   cooldown behavior) and keeps unmuting meaningful. */
+                if (!isMuted)
+                {
+                    await _stateStore.SaveDatabaseStateAlertedAsync(key, dbName, db.StateDesc);
+                }
             }
         }
 
@@ -1308,10 +1352,42 @@ public sealed class AlertEngine
         if (active.Count > 0)
         {
             var recovered = active.Where(d => !current.ContainsKey(d)).ToList();
+
+            /* Every recovered database's clocks are dropped in ONE pass over the cooldown map, not one pass
+               each (#2166). The key is per-state, so a single removal per database would leave its other
+               states' stamps behind to rate-limit a future episode against a cooldown that started before the
+               recovery — but the map holds every server's entries, so scanning it per database made the sweep
+               O(recovered x everything tracked) where the old string key was an O(1) remove. Hoisting it back
+               to one scan keeps the correctness and drops a factor. Matching on two tuple parts rather than a
+               string prefix is what keeps a database named 'Foo|Bar' from being swept when 'Foo' recovers. */
+            if (recovered.Count > 0)
+            {
+                /* ORDINAL, like `current` and `active` above and for the same reason: per-database keys here
+                   must be case-SENSITIVE to match the stores' case-sensitive expected-state joins. A
+                   case-insensitive set would let recovering `Foo` clear `foo`'s per-state stamps on a
+                   case-sensitive collation where both exist — resetting the only quiet mechanism an integrity
+                   state has, which is the same collision class the tuple key just removed for '|'. */
+                var recoveredSet = new HashSet<string>(recovered, StringComparer.Ordinal);
+                foreach (var stamped in _lastDatabaseStateAlert.Keys)
+                {
+                    if (string.Equals(stamped.Server, key, StringComparison.Ordinal)
+                        && recoveredSet.Contains(stamped.Database))
+                    {
+                        _lastDatabaseStateAlert.TryRemove(stamped, out _);
+                    }
+                }
+            }
+
             foreach (var dbName in recovered)
             {
                 active.Remove(dbName);
-                _lastDatabaseStateAlert.TryRemove(DatabaseStateCooldownKey(key, dbName), out _);
+
+                /* #2166 falling edge: forget the announced state as well as the in-memory cooldown, or the
+                   edge only ever triggers once per database. Cleared even when suppressed — suppression
+                   governs whether operators are TOLD about a transition, never whether the engine keeps
+                   accurate state, and leaving a stale memory behind would swallow the next real episode. */
+                await _stateStore.ClearDatabaseStateAlertedAsync(key, dbName);
+
                 if (!suppressed)
                 {
                     await NotifyResolutionAsync(new AlertResolution(
@@ -1322,14 +1398,6 @@ public sealed class AlertEngine
             }
         }
     }
-
-    /// <summary>
-    /// Per-database cooldown key. The serverKey is always a digit-only int (see the adapters'
-    /// ParseServerKey), so the first '|' unambiguously ends it regardless of what the database name
-    /// contains — no collision between e.g. (server 1, db "23") and (server 12, db "3").
-    /// </summary>
-    private static string DatabaseStateCooldownKey(string serverKey, string dbName) =>
-        serverKey + "|" + dbName;
 
     /// <summary>
     /// Forced Query Store plans the engine is currently failing to reproduce (#2157). The adapter returns
@@ -1471,9 +1539,17 @@ public sealed class AlertEngine
 
     /* ---------------- helpers ---------------- */
 
-    /// <summary>Lite's per-check cooldown test: no prior fire, or the cooldown has elapsed.</summary>
-    private static bool CooldownElapsed(
-        ConcurrentDictionary<string, DateTime> lastFired, string key, DateTime now, TimeSpan cooldown) =>
+    /// <summary>
+    /// Lite's per-check cooldown test: no prior fire, or the cooldown has elapsed.
+    ///
+    /// <para>Generic in the KEY type only (#2166) so a family whose cooldown is scoped by more than one thing
+    /// can key it structurally instead of concatenating a string. Every existing caller is string-keyed and
+    /// infers unchanged; the database-state family keys by (server, database, state), where a string key
+    /// would need a delimiter no <c>sysname</c> can contain — and SQL Server permits <c>|</c>.</para>
+    /// </summary>
+    private static bool CooldownElapsed<TKey>(
+        ConcurrentDictionary<TKey, DateTime> lastFired, TKey key, DateTime now, TimeSpan cooldown)
+        where TKey : notnull =>
         !lastFired.TryGetValue(key, out var last) || now - last >= cooldown;
 
     /// <summary>

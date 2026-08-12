@@ -161,7 +161,7 @@ the ambient identity), so the caveat that matters for integrated auth does not a
 
 Adding the first PostgreSQL target does not need a store change of its own, but **starting this build
 against an existing store migrates it** — the PostgreSQL collector tables arrive as migration rungs
-V60–V66 and are applied automatically on start. Forward-only; there is no down-migration.
+V61–V67, and the registry's engine/port columns as V68, all applied automatically on start. Forward-only; there is no down-migration.
 
 **Before starting, if your store is unmanaged and has TimescaleDB**, re-derive the background-worker
 settings. Every collector table becomes a hypertable, so seven new tables move the required numbers, and
@@ -179,7 +179,7 @@ Darling\PerformanceMonitor.Darling.Service\bin\Release\net10.0\PerformanceMonito
 was behind — on a fresh store it is all of them):
 
 ```
-Postgres store ready (schema v67, 8 migration(s) applied)
+Postgres store ready (schema v68, 8 migration(s) applied)
 ```
 
 The target was probed as PostgreSQL:
@@ -322,7 +322,7 @@ re-probes the target — which is how a promoted reader stops being gated as a s
 
 | Symptom | Cause |
 |---|---|
-| The connect line says SQL Server, or the error mentions `SqlException` / a TDS handshake against 5432 | the target lost its `engine` on the way through the registry. Requires store schema **v67+**: `SELECT name, engine, port FROM config.config_monitored_servers;` — if `engine` is not a column, this build predates the fix and no darling.json edit will help |
+| The connect line says SQL Server, or the error mentions `SqlException` / a TDS handshake against 5432 | the target lost its `engine` on the way through the registry. Requires store schema **v68+**: `SELECT name, engine, port FROM config.config_monitored_servers;` — if `engine` is not a column, this build predates the fix and no darling.json edit will help |
 | Autovacuum health reports everything fine on a cluster you know is behind | you are reading a **reader**. It reports all zeros, not an error. Measured: writer 13,654,458 dead tuples, reader 0, same cluster and tables |
 | Added a target to darling.json and nothing happened | the store was already seeded; use `add_servers` (step 2) |
 | `pg_wait_stats` and `pg_top_queries` empty, everything else fine | not Aurora. Core PostgreSQL has no cumulative wait counters at all |

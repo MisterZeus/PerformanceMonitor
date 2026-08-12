@@ -116,14 +116,15 @@ public static class PgMigrations
         new Migration(57, "store-job-cadence-knob", V57Sql),
         new Migration(58, "qs-backfill-switch", V58Sql),
         new Migration(59, "collector-memory-knobs", V59Sql),
-        new Migration(60, "pg-wait-stats", V60Sql),
-        new Migration(61, "pg-statement-stats", V61Sql),
-        new Migration(62, "pg-wraparound-stats", V62Sql),
-        new Migration(63, "pg-xmin-horizon", V63Sql),
-        new Migration(64, "pg-replication-slots", V64Sql),
-        new Migration(65, "pg-autovacuum-stats", V65Sql),
-        new Migration(66, "pg-io-stats", V66Sql),
-        new Migration(67, "monitored-server-engine", V67Sql),
+        new Migration(60, "database-state-edge-memory", V60Sql),
+        new Migration(61, "pg-wait-stats", V61Sql),
+        new Migration(62, "pg-statement-stats", V62Sql),
+        new Migration(63, "pg-wraparound-stats", V63Sql),
+        new Migration(64, "pg-xmin-horizon", V64Sql),
+        new Migration(65, "pg-replication-slots", V65Sql),
+        new Migration(66, "pg-autovacuum-stats", V66Sql),
+        new Migration(67, "pg-io-stats", V67Sql),
+        new Migration(68, "monitored-server-engine", V68Sql),
     };
 
     /// <summary>
@@ -1165,7 +1166,25 @@ ALTER TABLE config.config_service
     ADD COLUMN IF NOT EXISTS max_concurrent_sweeps integer NOT NULL DEFAULT 4;";
 
     /// <summary>
-    /// V60 — <c>pg_wait_stats</c>, the first PostgreSQL collector table: cumulative Aurora wait
+    /// V60 — restart-surviving edge memory for the database-state alert (#2166). Two nullable columns on
+    /// <c>config.database_state_expected</c>, which is already keyed per (server, database) and already
+    /// exists for this alert, so the memory lives beside the config it belongs with rather than in a new
+    /// table or smuggled into <c>config_edge_trigger_watermarks</c>' metric_name (that column feeds alert
+    /// history and mute matching; a compound key hidden in a label is a trap).
+    ///
+    /// <para>Why it must persist: the reporter's case is a database deliberately parked OFFLINE for a
+    /// month. Edge-triggering on in-memory state would re-fire every parked database on every service
+    /// restart — worse than the cooldown-repeat it replaces. NULL means never alerted, so an upgraded
+    /// store's first evaluation fires once per deviating database and then goes quiet.</para>
+    /// </summary>
+    private const string V60Sql = @"
+ALTER TABLE config.database_state_expected
+    ADD COLUMN IF NOT EXISTS last_alerted_state text;
+ALTER TABLE config.database_state_expected
+    ADD COLUMN IF NOT EXISTS last_alerted_at timestamp;";
+
+    /// <summary>
+    /// V61 — <c>pg_wait_stats</c>, the first PostgreSQL collector table: cumulative Aurora wait
     /// counters with deltas computed on write, the Postgres counterpart of <c>wait_stats</c>.
     /// <para>Columns are spelled out here in the generator's exact emission order (the four standard
     /// prefix columns, then <see cref="PerformanceMonitor.Collectors.PgWaitStatsCollector"/>'s payload
@@ -1185,7 +1204,7 @@ ALTER TABLE config.config_service
     /// name breaks its own history across an upgrade. Nullable because the type/event lookups are LEFT
     /// JOINed — an event Aurora reports but does not name is still recorded.</para>
     /// </summary>
-    private const string V60Sql = @"
+    private const string V61Sql = @"
 CREATE TABLE IF NOT EXISTS collect.pg_wait_stats (
     collection_id bigint NOT NULL,
     collection_time timestamp NOT NULL,
@@ -1205,7 +1224,7 @@ CREATE INDEX IF NOT EXISTS idx_pg_wait_stats_time
     ON collect.pg_wait_stats(server_id, collection_time);";
 
     /// <summary>
-    /// V61 — <c>pg_statement_stats</c>, per-query-shape execution statistics from Aurora's extended
+    /// V62 — <c>pg_statement_stats</c>, per-query-shape execution statistics from Aurora's extended
     /// <c>aurora_stat_statements()</c>: the Postgres counterpart of <c>query_stats</c>.
     /// <para>Two column groups exist nowhere on the SQL Server side. The Aurora I/O source split
     /// (<c>storage_blks_read</c> / <c>orcache_blks_hit</c> and their times) decomposes what is otherwise
@@ -1226,7 +1245,7 @@ CREATE INDEX IF NOT EXISTS idx_pg_wait_stats_time
     /// arrives with a dedicated low-cadence text collector that stores each statement once instead of
     /// once per snapshot.</para>
     /// </summary>
-    private const string V61Sql = @"
+    private const string V62Sql = @"
 CREATE TABLE IF NOT EXISTS collect.pg_statement_stats (
     collection_id bigint NOT NULL,
     collection_time timestamp NOT NULL,
@@ -1268,7 +1287,7 @@ CREATE INDEX IF NOT EXISTS idx_pg_statement_stats_time
     ON collect.pg_statement_stats(server_id, collection_time);";
 
     /// <summary>
-    /// V62 — <c>pg_wraparound_stats</c>: transaction id and MultiXact id freeze headroom per database.
+    /// V63 — <c>pg_wraparound_stats</c>: transaction id and MultiXact id freeze headroom per database.
     /// <para>Both counters are stored, because they are independent and each is separately fatal.
     /// MultiXact exhaustion is the one almost nobody monitors: ids are consumed when a row is locked by
     /// several transactions at once, so a <c>SELECT FOR UPDATE</c>-heavy or foreign-key-heavy workload
@@ -1281,7 +1300,7 @@ CREATE INDEX IF NOT EXISTS idx_pg_statement_stats_time
     /// <para>The first PostgreSQL collector table that is not Aurora-specific — it reads only core
     /// catalog surfaces, so it populates on any PostgreSQL target.</para>
     /// </summary>
-    private const string V62Sql = @"
+    private const string V63Sql = @"
 CREATE TABLE IF NOT EXISTS collect.pg_wraparound_stats (
     collection_id bigint NOT NULL,
     collection_time timestamp NOT NULL,
@@ -1305,7 +1324,7 @@ CREATE INDEX IF NOT EXISTS idx_pg_wraparound_stats_time
     ON collect.pg_wraparound_stats(server_id, collection_time);";
 
     /// <summary>
-    /// V63 — <c>pg_xmin_horizon</c>: what is holding back the xmin horizon, attributed by cause.
+    /// V64 — <c>pg_xmin_horizon</c>: what is holding back the xmin horizon, attributed by cause.
     /// <para>Four unrelated causes produce an identical picture — dead tuples accumulate, autovacuum
     /// runs and reports success, nothing shrinks — and the fix differs completely for each: kill a
     /// session, drop a replication slot, disable standby feedback, or resolve an orphaned prepared
@@ -1319,7 +1338,7 @@ CREATE INDEX IF NOT EXISTS idx_pg_wraparound_stats_time
     /// that <c>standby_feedback</c> is expected to be absent on Aurora, whose replicas read the same
     /// storage volume instead of streaming WAL.</para>
     /// </summary>
-    private const string V63Sql = @"
+    private const string V64Sql = @"
 CREATE TABLE IF NOT EXISTS collect.pg_xmin_horizon (
     collection_id bigint NOT NULL,
     collection_time timestamp NOT NULL,
@@ -1336,7 +1355,7 @@ CREATE INDEX IF NOT EXISTS idx_pg_xmin_horizon_time
     ON collect.pg_xmin_horizon(server_id, collection_time);";
 
     /// <summary>
-    /// V64 — <c>pg_replication_slots</c>: slot state, including the two independent ways an abandoned
+    /// V65 — <c>pg_replication_slots</c>: slot state, including the two independent ways an abandoned
     /// slot can take a server down.
     /// <para><c>retained_wal_bytes</c> is the disk-exhaustion measure and is COMPUTED rather than read,
     /// because the column that would answer it directly — <c>safe_wal_size</c> — is NULL whenever
@@ -1350,7 +1369,7 @@ CREATE INDEX IF NOT EXISTS idx_pg_xmin_horizon_time
     /// <c>inactive_since</c> is the column that distinguishes a consumer between polls from a slot
     /// orphaned three weeks ago.</para>
     /// </summary>
-    private const string V64Sql = @"
+    private const string V65Sql = @"
 CREATE TABLE IF NOT EXISTS collect.pg_replication_slots (
     collection_id bigint NOT NULL,
     collection_time timestamp NOT NULL,
@@ -1378,7 +1397,7 @@ CREATE INDEX IF NOT EXISTS idx_pg_replication_slots_time
     ON collect.pg_replication_slots(server_id, collection_time);";
 
     /// <summary>
-    /// V65 — <c>collect.pg_autovacuum_stats</c>, per-table autovacuum state, and the first PostgreSQL
+    /// V66 — <c>collect.pg_autovacuum_stats</c>, per-table autovacuum state, and the first PostgreSQL
     /// collector on the per-database fan-out path.
     /// <para>The threshold columns are what make the table worth having. Dead-tuple counts alone are not
     /// actionable — autovacuum fires at <c>autovacuum_vacuum_threshold + scale_factor * reltuples</c>, so
@@ -1392,10 +1411,10 @@ CREATE INDEX IF NOT EXISTS idx_pg_replication_slots_time
     /// dead-tuple rule — and an append-only table that is never vacuumed is never frozen either.</para>
     /// <para><c>database_name</c> comes from the per-database loop's connection rather than the result
     /// set: <c>pg_stat_user_tables</c> shows only the connected database, so the connection IS the
-    /// authoritative answer. Additive and view-less exactly like V60–V64 — a fresh store gets the table
+    /// authoritative answer. Additive and view-less exactly like V61–V65 — a fresh store gets the table
     /// from V1's generated schema, and this rung is what an already-existing store gets.</para>
     /// </summary>
-    private const string V65Sql = @"
+    private const string V66Sql = @"
 CREATE TABLE IF NOT EXISTS collect.pg_autovacuum_stats (
     collection_id bigint NOT NULL,
     collection_time timestamp NOT NULL,
@@ -1427,7 +1446,7 @@ CREATE INDEX IF NOT EXISTS idx_pg_autovacuum_stats_time
     ON collect.pg_autovacuum_stats(server_id, collection_time);";
 
     /// <summary>
-    /// V66 — <c>collect.pg_io_stats</c>, I/O attributed to a (backend_type, object, context) triple rather
+    /// V67 — <c>collect.pg_io_stats</c>, I/O attributed to a (backend_type, object, context) triple rather
     /// than to a file, from <c>pg_stat_io</c> (PostgreSQL 16+).
     /// <para>Every counter column is NULLABLE and that is load-bearing, not incidental. PostgreSQL uses
     /// NULL for "this counter does not apply to this combination" — the checkpointer performs no reads,
@@ -1436,10 +1455,10 @@ CREATE INDEX IF NOT EXISTS idx_pg_autovacuum_stats_time
     /// a 0 default would claim measurements that were never taken, and a consumer averaging write latency
     /// would divide by them.</para>
     /// <para>Cumulative counters stored raw, with the windowed change computed at read time. Additive and
-    /// view-less exactly like V60-V65: a fresh store gets the table from V1's generated schema, and this
+    /// view-less exactly like V61-V66: a fresh store gets the table from V1's generated schema, and this
     /// rung is what an already-existing store gets.</para>
     /// </summary>
-    private const string V66Sql = @"
+    private const string V67Sql = @"
 CREATE TABLE IF NOT EXISTS collect.pg_io_stats (
     collection_id bigint NOT NULL,
     collection_time timestamp NOT NULL,
@@ -1469,7 +1488,7 @@ CREATE INDEX IF NOT EXISTS idx_pg_io_stats_time
     ON collect.pg_io_stats(server_id, collection_time);";
 
     /// <summary>
-    /// V67 — <c>config.config_monitored_servers.engine</c> and <c>.port</c>, the two columns without which a
+    /// V68 — <c>config.config_monitored_servers.engine</c> and <c>.port</c>, the two columns without which a
     /// PostgreSQL target cannot survive its own registration.
     /// <para>The registry is store-authoritative after the first seed: darling.json seeds it once, and from
     /// then on the worker's server list comes from this table. Every other <c>MonitoredServer</c> field had a
@@ -1483,7 +1502,7 @@ CREATE INDEX IF NOT EXISTS idx_pg_io_stats_time
     /// property does. The SQL-Server-only writers — the Viewer's Add / Manage Servers dialogs — keep
     /// inserting without naming either column and keep meaning the same thing.</para>
     /// </summary>
-    private const string V67Sql = @"
+    private const string V68Sql = @"
 ALTER TABLE config.config_monitored_servers
     ADD COLUMN IF NOT EXISTS engine text NOT NULL DEFAULT 'sqlserver';
 

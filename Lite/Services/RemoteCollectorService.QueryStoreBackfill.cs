@@ -509,6 +509,87 @@ public partial class RemoteCollectorService
         }
     }
 
+    /// <summary>
+    /// Retires one collector's per-database <c>collector_state</c> rows for databases the server no longer
+    /// has (#2188) — the DuckDB twin of <c>DarlingCollectorRunner.PruneOrphanedDatabaseStateKeysSql</c>,
+    /// same guards in DuckDB's dialect. <c>$1</c> server_id, <c>$2</c> collector_name, <c>$3</c> the key
+    /// prefix, which is also what reconstructs each live database's key for the anti-join.
+    ///
+    /// <para><b>The existence list is <c>database_states</c>, not query_store's enumeration.</b> The
+    /// enumeration is heavily filtered — ONLINE only, AG primaries only, the excluded-database filter, the
+    /// vendor-name screen, <c>HAS_DBACCESS</c>, and a per-database probe that can fail — so a database
+    /// missing from one cycle's items is far more often offline or unprobeable than dropped, and pruning on
+    /// that absence would delete LIVE state on exactly the servers that keep databases parked. database_states
+    /// is an unfiltered <c>SELECT ... FROM sys.databases</c>, which answers the only question asked here.
+    /// Lite already reads the newest snapshot this same way in
+    /// <c>LocalDataService.GetDatabaseStateDeviationsAsync</c>, which prunes auto-baselines for dropped
+    /// databases — this is that established idiom applied to collector_state.</para>
+    ///
+    /// <para><b>The snapshot must be NEWER than the row it judges</b> (<c>updated_at &lt; newest</c>).
+    /// Existing is not current: if database_states stops collecting, its newest snapshot freezes, and every
+    /// database created after that instant is missing from it while being perfectly alive — presence alone
+    /// would prune such a database's state on EVERY tick forever. A snapshot cannot judge a row written
+    /// after it was taken. Both stamps are the service clock's UTC (<c>collectionTime</c> and
+    /// <see cref="SaveCollectorStateAsync"/> both read <c>DateTime.UtcNow</c>). This also subsumes the
+    /// empty-snapshot case for free: <c>&lt;</c> against a NULL MAX is NULL, so a server that has never
+    /// collected database_states prunes nothing rather than everything.</para>
+    ///
+    /// <para><b>Which keys</b> comes from the SHARED <see cref="QueryStorePerDatabaseState.PrunableKeys"/>,
+    /// deliberately including <c>planwm:</c> that Lite never writes: running one no-op delete is what
+    /// guarantees that enabling plan capture here later cannot quietly create an orphan class this forgot
+    /// about. Best-effort like its siblings — a failed prune leaves the rows and the next tick retries.</para>
+    /// </summary>
+    private const string PruneOrphanedDatabaseStateKeysSql = @"
+DELETE FROM collector_state
+WHERE server_id = $1
+AND   collector_name = $2
+AND   starts_with(state_key, $3)
+AND   updated_at < (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
+AND   NOT EXISTS
+      (
+          SELECT 1
+          FROM database_states ds
+          WHERE ds.server_id = $1
+          AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
+          AND   collector_state.state_key = $3 || ds.database_name
+      )";
+
+    /// <summary>
+    /// Runs <see cref="PruneOrphanedDatabaseStateKeysSql"/> for every shared owner/prefix pair, once per
+    /// query_store cycle for one server — the same trigger and the same placement as Darling's, so the two
+    /// cannot drift on WHEN they prune either.
+    /// </summary>
+    protected async Task PruneOrphanedQueryStoreDatabaseStateAsync(int serverId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var conn = _duckDb.CreateConnection();
+            await conn.OpenAsync(cancellationToken);
+            var pruned = 0;
+
+            foreach (var (owner, prefix) in QueryStorePerDatabaseState.PrunableKeys)
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = PruneOrphanedDatabaseStateKeysSql;
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = owner });
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = prefix });
+                pruned += await cmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            if (pruned > 0)
+            {
+                _logger?.LogInformation(
+                    "Pruned {Count} query_store state row(s) for database(s) no longer on server {ServerId}",
+                    pruned, serverId);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Pruning orphaned query_store database state failed; next cycle retries");
+        }
+    }
+
     /// <summary>Records a clamp-opened Query Store hole for the backfill worker (#2058), under the
     /// WORKER's collector_state name — merged wider with any pending hole so a repeat outage cannot
     /// overwrite an unserviced one. Best-effort: a lost record is a lost backfill opportunity,

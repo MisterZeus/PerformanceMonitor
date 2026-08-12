@@ -456,4 +456,94 @@ VALUES ($1, $2, 0, $3, $4)";
             AppLogger.Error("Alerts", $"Could not persist failed-job watermark: {ex.Message}");
         }
     }
+
+    /// <summary>
+    /// #2203: stamps the alerted state onto the database's row in <c>config_database_state_expected</c>, the
+    /// table that already holds this alert's per-database config. The Lite half of #2166's edge trigger.
+    ///
+    /// <para>UPDATE, never upsert — the constraint #2166 established on the Darling side. An INSERT would have
+    /// to supply <c>expected_state</c> (NOT NULL) and the only value on hand is the state being alerted ON, so
+    /// a database first observed SUSPECT would get SUSPECT as its accepted baseline, stop deviating, read as
+    /// recovered while still corrupt, and never alert again. The seed deliberately refuses to baseline the
+    /// integrity states for exactly that reason; this must not do it behind the seed's back.</para>
+    /// </summary>
+    public async Task SaveDatabaseStateAlertedAsync(int serverId, string databaseName, string effectiveState)
+    {
+        try
+        {
+            var duckDb = _duckDb;
+            if (duckDb == null)
+            {
+                var dbPath = App.DatabasePath;
+                if (string.IsNullOrEmpty(dbPath)) return;
+                duckDb = new DuckDbInitializer(dbPath);
+            }
+
+            using var writeLock = duckDb.AcquireWriteLock();
+            using var connection = duckDb.CreateConnection();
+            await connection.OpenAsync();
+
+            using var command = connection.CreateCommand();
+            command.CommandText = @"
+UPDATE config_database_state_expected
+SET last_alerted_state = $3,
+    last_alerted_at = $4
+WHERE server_id = $1
+AND   database_name = $2";
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = effectiveState });
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DateTime.UtcNow });
+
+            await command.ExecuteNonQueryAsync();
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Alerts", $"Could not record the alerted database state for {databaseName}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// #2203: forgets the alerted state when a database returns to its expected one. The falling edge of an
+    /// edge trigger — without it each database announces once and then never again, so a second parking of
+    /// the same database in the same state is silently swallowed.
+    ///
+    /// <para>A failed clear costs a MISSED alert on the next episode rather than a duplicate, which makes it
+    /// the more consequential of this pair's two failures — hence logged with the database named, and hence
+    /// the store-derived sweep in <c>LocalDataService.GetDatabaseStateDeviationsAsync</c> that heals the
+    /// memory independently of whether this call ever ran.</para>
+    /// </summary>
+    public async Task ClearDatabaseStateAlertedAsync(int serverId, string databaseName)
+    {
+        try
+        {
+            var duckDb = _duckDb;
+            if (duckDb == null)
+            {
+                var dbPath = App.DatabasePath;
+                if (string.IsNullOrEmpty(dbPath)) return;
+                duckDb = new DuckDbInitializer(dbPath);
+            }
+
+            using var writeLock = duckDb.AcquireWriteLock();
+            using var connection = duckDb.CreateConnection();
+            await connection.OpenAsync();
+
+            using var command = connection.CreateCommand();
+            command.CommandText = @"
+UPDATE config_database_state_expected
+SET last_alerted_state = NULL,
+    last_alerted_at = NULL
+WHERE server_id = $1
+AND   database_name = $2";
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
+
+            await command.ExecuteNonQueryAsync();
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Alerts", $"Could not clear the alerted database state for {databaseName}: {ex.Message}");
+        }
+    }
 }

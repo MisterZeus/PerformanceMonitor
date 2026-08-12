@@ -478,10 +478,13 @@ public static class DarlingCliCommands
 
         if (!File.Exists(credentialPath))
         {
-            error.WriteLine(
-                $"The '{role}' role credential ({credentialPath}) does not exist yet. Start the PerformanceMonitor " +
-                "Darling service once so its first run provisions the least-privilege roles and their credentials, " +
-                "then re-run this command.");
+            /* #2197: which of the two things this means is decided from the store's own files, not assumed.
+               A bootstrap that has already failed produces this same absence, and telling THAT operator to
+               start the service again is the dead end the field report walked into. */
+            error.WriteLine(DarlingStoreBootstrapEvidence.MissingCredentialMessage(
+                $"The '{role}' role credential ({credentialPath})",
+                "provisions the least-privilege roles and their credentials",
+                dataDirectory));
             return null;
         }
 
@@ -2443,9 +2446,7 @@ public static class DarlingCliCommands
         var connectionString = DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres);
         if (connectionString is null)
         {
-            error.WriteLine(
-                "The managed store credential does not exist yet — start the PerformanceMonitor Darling service once " +
-                "so its first run initializes the store, then re-run this command.");
+            error.WriteLine(DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres));
             return 1;
         }
 
@@ -2943,7 +2944,7 @@ public static class DarlingCliCommands
         if (string.IsNullOrWhiteSpace(connectionString))
         {
             error.WriteLine(postgres.Managed
-                ? "The managed store credential does not exist yet — start the PerformanceMonitor Darling service once so its first run initializes the store, then re-run this command."
+                ? DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres)
                 : "postgres.connectionString is empty, so there is no store to repair.");
             return 1;
         }
@@ -3300,7 +3301,7 @@ public static class DarlingCliCommands
         if (string.IsNullOrWhiteSpace(connectionString))
         {
             error.WriteLine(postgres.Managed
-                ? "The managed store credential does not exist yet — start the PerformanceMonitor Darling service once so its first run initializes the store, then re-run this command."
+                ? DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres)
                 : "postgres.connectionString is empty, so there is no store to convert.");
             return 1;
         }
@@ -3588,7 +3589,7 @@ public static class DarlingCliCommands
         if (string.IsNullOrWhiteSpace(connectionString))
         {
             error.WriteLine(postgres.Managed
-                ? "The managed store credential does not exist yet — start the PerformanceMonitor Darling service once so its first run initializes the store, then re-run this command."
+                ? DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres)
                 : "postgres.connectionString is empty, so there is no store to back fill.");
             return 1;
         }

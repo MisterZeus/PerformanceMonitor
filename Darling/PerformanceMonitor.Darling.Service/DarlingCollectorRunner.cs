@@ -183,6 +183,35 @@ public sealed class DarlingCollectorRunner
             ? null
             : await GetCollectorStateAsync(server.ServerId, definition.Name, cancellationToken);
 
+        /* #2188: retire the per-database state rows of databases that no longer exist, BEFORE the load
+           below, so this cycle also works from a cleaned dictionary rather than one carrying names the
+           server dropped. Runs for query_store regardless of plan capture, because the backfill worker's
+           per-database keys orphan the same way and are pruned in the same pass.
+
+           Gated on the SAME AppliesTo that decides whether database_states is collected at all, rather than
+           leaning on the statement's own empty-snapshot guard to no-op: on Azure SQL DB there is no snapshot
+           by design, so this would otherwise run three guaranteed-no-op deletes on every cycle forever and
+           #2191's boundary would be emergent rather than stated. */
+        if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
+            && DatabaseStateCollector.Instance.AppliesTo(server.Target))
+        {
+            await PruneOrphanedQueryStoreDatabaseStateAsync(server.ServerId, cancellationToken);
+        }
+
+        /* #2164: the per-database plan-XML watermarks, owned by the HOST under its own state collector name
+           rather than declared by the definition — the QueryStoreBackfillState seam. The definition cannot
+           declare these: the keys are one per DATABASE and only known at runtime, and declaring a prefix
+           would make query_store a second state-declaring collector, which is a two-host contract change
+           (CollectorStateContractTests) rather than the local one this is. Loaded only when plan capture is
+           on, because that is the only case where anything reads or writes them. */
+        if (collectorState is null
+            && string.Equals(definition.Name, "query_store", StringComparison.Ordinal)
+            && _capturePlans())
+        {
+            collectorState = await GetCollectorStateAsync(
+                server.ServerId, QueryStorePlanXmlState.StateCollectorName, cancellationToken);
+        }
+
         var context = new CollectorContext
         {
             ServerId = server.ServerId,
@@ -736,7 +765,15 @@ public sealed class DarlingCollectorRunner
            path. Outside the storage-phase timer: this is host bookkeeping, not collected data. */
         if (context.PendingState.Count > 0)
         {
-            await SaveCollectorStateAsync(server.ServerId, definition.Name, context.PendingState, cancellationToken);
+            /* #2164: query_store's pending state is the plan-XML watermark set, which belongs to the host's
+               own state owner, NOT to the definition's name — the definition declares no state keys, so a row
+               written under "query_store" would never be read back and the watermark would silently never
+               apply. Everything else keeps writing under its definition. */
+            var stateOwner = string.Equals(definition.Name, "query_store", StringComparison.Ordinal)
+                ? QueryStorePlanXmlState.StateCollectorName
+                : definition.Name;
+
+            await SaveCollectorStateAsync(server.ServerId, stateOwner, context.PendingState, cancellationToken);
         }
 
         _logger?.LogDebug("Collected {RowCount} {Collector} rows for server '{Server}'",
@@ -1083,6 +1120,127 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
         catch (Exception ex)
         {
             _logger?.LogDebug(ex, "Deleting collector state {Key} for {Collector} failed; next tick re-derives", stateKey, collectorName);
+        }
+    }
+
+    /// <summary>
+    /// Retires one collector's per-database <c>collector_state</c> rows for databases the server no longer
+    /// has (#2188). One statement per (owner, prefix) pair — <c>$1</c> server_id, <c>$2</c> collector_name,
+    /// <c>$3</c> the key prefix, which is also what reconstructs each live database's key for the anti-join.
+    ///
+    /// <para><b>The existence list is <c>database_states</c>, not the collector's enumeration.</b> That is
+    /// the whole design. query_store's enumeration is a heavily FILTERED list — ONLINE only, AG primaries
+    /// only, the excluded-database filter, the vendor-name screen, <c>HAS_DBACCESS</c>, and a per-database
+    /// probe that can fail — so a database missing from one cycle's items is far more often offline,
+    /// excluded or unprobeable than dropped, and pruning on that absence would delete live watermarks on
+    /// exactly the servers that have such databases. <c>database_states</c> is an unfiltered
+    /// <c>SELECT ... FROM sys.databases</c>, so it answers the only question being asked here: does this
+    /// name still exist on the instance.</para>
+    ///
+    /// <para><b>Guarded on the snapshot existing</b> (<c>newest IS NOT NULL</c>): a server that has never
+    /// collected database_states, or whose rows have aged out, produces an empty snapshot, and an unguarded
+    /// anti-join against nothing deletes EVERY row. The subselect always yields one row (MAX over zero rows
+    /// is NULL), so the guard is what turns "no snapshot" into "prune nothing" instead of "prune all".</para>
+    ///
+    /// <para><b>And guarded on the snapshot being NEWER than the state row</b>
+    /// (<c>s.updated_at &lt; snapshot.newest</c>), which is the stronger of the two and the one that makes
+    /// this correct rather than merely usually-correct. Existing is not the same as CURRENT: if
+    /// database_states stops collecting for a server — a per-server schedule change, a failing collector,
+    /// anything — the newest snapshot freezes, and every database created after that instant is missing from
+    /// it while being perfectly alive. Presence alone would prune such a database's watermark on EVERY cycle
+    /// forever, silently paying a full plan-XML refetch each time: the exact cost #2164 exists to remove,
+    /// with a log line confidently calling a live database dropped. A snapshot cannot judge a row written
+    /// after it was taken. This holds regardless of the two collectors' relative cadences, so nothing here
+    /// depends on database_states being scheduled more often than query_store; both stamps are the SERVICE
+    /// clock's naive UTC (<c>collectionTime</c> and <see cref="SaveCollectorStateAsync"/> both read
+    /// <c>DateTime.UtcNow</c>), never the monitored server's. A genuinely dropped database is still pruned:
+    /// its last state write necessarily precedes any snapshot taken after the drop.</para>
+    ///
+    /// <para>The two guards overlap — <c>&lt;</c> against a NULL newest is already NULL, so the freshness
+    /// test alone would cover the empty snapshot. The explicit NULL check stays anyway: "no snapshot prunes
+    /// nothing" is a promise worth reading off the statement instead of deriving from three-valued
+    /// logic.</para>
+    ///
+    /// <para><b>Bounded consequence, either way.</b> Deleting a watermark that should have stayed costs one
+    /// full plan-XML refetch for that database and nothing else — the same conservative path an absent or
+    /// expired watermark already takes (<see cref="QueryStorePlanXmlState.Resolve"/>), which is why racing
+    /// an in-flight cycle is safe: the write-back is an upsert, so a cycle that had already loaded the state
+    /// simply restores the row it is still using, and a row deleted for a genuinely dropped database has no
+    /// cycle to race.</para>
+    ///
+    /// <para><b>Not reached on Azure SQL DB</b>, where <c>DatabaseStateCollector.AppliesTo</c> is false and
+    /// there is therefore no snapshot to check — the guard makes it a no-op rather than a mass delete. Those
+    /// orphans stay (#2191 tracks the Azure arm, including why that path's own database list cannot be used
+    /// as the existence check); the accumulation is bounded to one ~100-byte row per database name ever
+    /// seen.</para>
+    ///
+    /// <para>Best-effort like every sibling here: a failed prune leaves the rows and the next cycle retries.
+    /// Nothing downstream reads them — an orphan is a row nobody asks about, which is why this is hygiene
+    /// rather than a correctness fix.</para>
+    /// </summary>
+    internal const string PruneOrphanedDatabaseStateKeysSql = @"
+DELETE FROM collector_state s
+USING (SELECT MAX(collection_time) AS newest FROM database_states WHERE server_id = $1) snapshot
+WHERE s.server_id = $1
+AND   s.collector_name = $2
+AND   starts_with(s.state_key, $3)
+AND   snapshot.newest IS NOT NULL
+AND   s.updated_at < snapshot.newest
+AND   NOT EXISTS
+      (
+          SELECT 1
+          FROM database_states ds
+          WHERE ds.server_id = $1
+          AND   ds.collection_time = snapshot.newest
+          AND   s.state_key = $3 || ds.database_name
+      )
+RETURNING s.state_key";
+
+    /// <summary>
+    /// Runs <see cref="PruneOrphanedDatabaseStateKeysSql"/> for every owner/prefix in the SHARED
+    /// <see cref="QueryStorePerDatabaseState.PrunableKeys"/> — the same set Lite's DuckDB twin
+    /// (<c>RemoteCollectorService.PruneOrphanedQueryStoreDatabaseStateAsync</c>) iterates, so a prefix
+    /// cannot end up pruned on one SKU and orphaning on the other. Once per query_store cycle for one
+    /// server. Separate statements rather than one combined predicate because Npgsql's positional
+    /// parameters cannot span a multi-statement batch, and three narrow deletes down the primary key are
+    /// easier to read than one that ORs three prefixes together.
+    /// </summary>
+    internal async Task PruneOrphanedQueryStoreDatabaseStateAsync(int serverId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            var pruned = new List<string>();
+
+            foreach (var (owner, prefix) in QueryStorePerDatabaseState.PrunableKeys)
+            {
+                using var command = new NpgsqlCommand(PruneOrphanedDatabaseStateKeysSql, connection);
+                command.Parameters.AddWithValue(serverId);
+                command.Parameters.AddWithValue(owner);
+                command.Parameters.AddWithValue(prefix);
+
+                /* RETURNING rather than a rows-affected count: the only symptom of a WRONG delete here is a
+                   silent refetch, so a bare number would leave nothing to diagnose it with. The keys name
+                   the databases, which is what makes a mistaken prune visible in the log. */
+                using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    pruned.Add(reader.GetString(0));
+                }
+            }
+
+            if (pruned.Count > 0)
+            {
+                /* Information, like DarlingObservability's orphaned-server sweep: rare, and it names a
+                   database lifecycle event the operator may not know the monitor noticed. */
+                _logger?.LogInformation(
+                    "[server_id {ServerId}] pruned {Count} query_store state row(s) for database(s) no longer on the server: {Keys}",
+                    serverId, pruned.Count, string.Join(", ", pruned));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Pruning orphaned query_store database state failed; next cycle retries");
         }
     }
 
