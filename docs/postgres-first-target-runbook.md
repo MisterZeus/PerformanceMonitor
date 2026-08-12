@@ -4,11 +4,17 @@ End to end, with a **proof point at every step** — what to look at, and what i
 [README's PostgreSQL Targets section](../Darling/README.md#postgresql-targets) is the reference for *what*
 each collector does; this is the ordered procedure for getting one collecting and knowing that it is.
 
-> **Status.** This is the procedure derived from the code, not a transcript of a completed run. Log text is
-> quoted from the source that emits it, and every SQL query here has been run, but **no instance has yet
-> been monitored end to end by the service** — the first person to follow this is also validating it.
-> Where a step's expected output is inferred rather than observed it says so. Correct this file from what
-> you actually see.
+> **Status.** This is the procedure derived from the code, not a transcript of a completed run.
+>
+> What IS proven: every collector's generated SQL and every MCP reader's SQL has been executed against live
+> Aurora PostgreSQL 16.11 and 17.7, confirming they run, return the expected shape, carry no timezone on a
+> naive column, and compute their windowed differences correctly.
+>
+> What is NOT: **the service has never been pointed at a PostgreSQL target.** Nothing has done connect probe
+> → collector dispatch → COPY into a store → read back out. Log text below is quoted from the source that
+> emits it, not from a session. The first person to follow this runbook is validating that layer, and should
+> expect to find things — the last defect found this way was one where every collector's SQL was correct and
+> the feature still could not work. Correct this file from what you actually see.
 
 ---
 
