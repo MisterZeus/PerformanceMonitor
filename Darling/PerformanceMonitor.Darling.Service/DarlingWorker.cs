@@ -3115,7 +3115,11 @@ LIMIT 1", connection);
                    feed the health bands and analysis, which key on status, so a fake success is worse than an
                    error. Re-read from server.Runtime because a preceding RunOneAsync in this loop can have
                    nulled it on a connection-level failure. */
-                if (server.Runtime is null || !CollectorCatalog.EngineMatches(name, server.Runtime.Target))
+                if (server.Runtime is null
+                    || !CollectorCatalog.EngineMatches(name, server.Runtime.Target)
+                    /* And the within-engine gate, PostgreSQL only — same reasoning as the scheduled sweep. */
+                    || (server.Runtime.Target.Engine == CollectorTargetEngine.PostgreSql
+                        && !CollectorCatalog.AppliesTo(name, server.Runtime.Target)))
                 {
                     continue;
                 }
@@ -3202,6 +3206,27 @@ LIMIT 1", connection);
                    health bands and analysis, which key on status. This is Darling's equivalent of Lite's
                    pre-dispatch SKIPPED path: no dispatch, no log row, no NextDue churn. */
                 if (!CollectorCatalog.EngineMatches(name, runtime.Target))
+                {
+                    continue;
+                }
+
+                /* WITHIN-engine gates get the same treatment, on PostgreSQL targets only.
+                   EngineMatches above drops the wrong DIALECT; it says nothing about a collector that is
+                   right-dialect but inapplicable to this particular target — pg_wait_stats and
+                   pg_statement_stats read Aurora-only functions, so on stock PostgreSQL they dispatched, came
+                   back with 0 rows, and RunOneAsync recorded SUCCESS. Two collectors at a 1-minute cadence is
+                   ~2,880 fake successes a day per server, and the PR promised "a graceful skip with an
+                   explanation" instead. Confirmed on the review's live stock-PostgreSQL run.
+
+                   Scoped to PostgreSQL deliberately rather than applied to the composed gate for everyone: on
+                   SQL Server the same zero-row-SUCCESS path covers a long-established handful of Azure-gated
+                   collectors, and silencing those is a change to a shipping SKU's log semantics that deserves
+                   its own decision rather than riding along here.
+
+                   No log row is the honest outcome, and it is not silent: --test-connection names exactly
+                   which collectors do not apply to a target, and why, before the service ever runs. */
+                if (runtime.Target.Engine == CollectorTargetEngine.PostgreSql
+                    && !CollectorCatalog.AppliesTo(name, runtime.Target))
                 {
                     continue;
                 }
