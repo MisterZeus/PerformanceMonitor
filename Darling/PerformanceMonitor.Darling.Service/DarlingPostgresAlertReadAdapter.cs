@@ -142,7 +142,7 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
         var rows = new List<PostgresWraparoundAlertInfo>();
         await using var command = _postgres.CreateCommand(WraparoundSql);
         command.Parameters.AddWithValue(serverId);
-        command.Parameters.AddWithValue(DateTime.UtcNow - Freshness);
+        command.Parameters.AddWithValue(NaiveUtcNow() - Freshness);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -166,7 +166,7 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
     {
         await using var command = _postgres.CreateCommand(XminSql);
         command.Parameters.AddWithValue(serverId);
-        command.Parameters.AddWithValue(DateTime.UtcNow - Freshness);
+        command.Parameters.AddWithValue(NaiveUtcNow() - Freshness);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
@@ -188,7 +188,7 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
         var rows = new List<PostgresSlotAlertInfo>();
         await using var command = _postgres.CreateCommand(SlotSql);
         command.Parameters.AddWithValue(serverId);
-        command.Parameters.AddWithValue(DateTime.UtcNow - Freshness);
+        command.Parameters.AddWithValue(NaiveUtcNow() - Freshness);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -203,4 +203,11 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
 
         return rows;
     }
+
+    /// <summary>Naive-UTC now, Kind-Unspecified - the product's PG timestamp discipline (the same
+    /// helper DarlingAlertReadAdapter carries). Kind=Utc binds infer timestamptz and shift the freshness
+    /// window by the store session's zone offset: east of UTC the three Tier 0 alerts silently never
+    /// fire. The doc blocks on the window SQL always said naive UTC; now the binds do too.</summary>
+    private static DateTime NaiveUtcNow() =>
+        DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
 }
