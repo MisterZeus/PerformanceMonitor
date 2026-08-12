@@ -44,8 +44,17 @@ public static class AlertContextBuilders
     /// (#1140/#1141) with true occurrence count + wait range; capped at 10 groups with a "+N more"
     /// trailer; the first row with report XML becomes the attachment. Null when nothing renders.
     /// </summary>
+    /// <param name="decorateIncidents">
+    /// #2216: optional hook applied to the grouped incidents BEFORE they are rendered, so a caller that
+    /// keeps per-fingerprint history (the engine, via <see cref="IncidentOccurrenceAccumulator"/>) can
+    /// attach each incident's monotonic total. It has to run here rather than on the finished context
+    /// because the renderer projects the incidents into detail items in the same pass — decorating
+    /// afterwards would leave the rendered facts describing the undecorated values. Null for callers with
+    /// no such history, which is every path that built this context before #2216.
+    /// </param>
     public static AlertContext? BuildBlockingContext(
-        string serverName, IReadOnlyList<BlockedProcessAlertRow>? events, IReadOnlyList<string> excludedDatabases)
+        string serverName, IReadOnlyList<BlockedProcessAlertRow>? events, IReadOnlyList<string> excludedDatabases,
+        Func<IReadOnlyList<AlertIncident>, IReadOnlyList<AlertIncident>>? decorateIncidents = null)
     {
         if (events == null || events.Count == 0) return null;
 
@@ -107,7 +116,7 @@ public static class AlertContextBuilders
             context.AttachmentFileName = "blocked_process_report.xml";
         }
 
-        AlertIncidentRenderer.Apply(context, shown.Select(g => g.Incident).ToList());
+        AlertIncidentRenderer.Apply(context, Decorate(shown.Select(g => g.Incident).ToList(), decorateIncidents));
 
         return context.Details.Count == 0 ? null : context;
     }
@@ -127,8 +136,15 @@ public static class AlertContextBuilders
     /// fingerprint, and the two lists even disagreed on membership (victims = first 3 raw events,
     /// incidents = all fingerprints).</para>
     /// </summary>
+    /// <param name="decorateIncidents">
+    /// #2216: see <see cref="BuildBlockingContext"/> — the same pre-render hook, for the same reason. This
+    /// builder renders each incident itself rather than through
+    /// <see cref="AlertIncidentRenderer.Apply"/> (#2108's self-contained cards), so the hook has to sit
+    /// ahead of that loop too.
+    /// </param>
     public static AlertContext? BuildDeadlockContext(
-        string serverName, IReadOnlyList<DeadlockAlertRow>? deadlocks, IReadOnlyList<string> excludedDatabases)
+        string serverName, IReadOnlyList<DeadlockAlertRow>? deadlocks, IReadOnlyList<string> excludedDatabases,
+        Func<IReadOnlyList<AlertIncident>, IReadOnlyList<AlertIncident>>? decorateIncidents = null)
     {
         if (deadlocks == null || deadlocks.Count == 0) return null;
 
@@ -187,7 +203,7 @@ public static class AlertContextBuilders
             parsed.Select(p => new DeadlockIncidentGrouper.DeadlockEvent(
                 p.Objects,
                 DeadlockDetailFields(p.Databases, p.Row.VictimSqlText, p.Row.ProcessSummary))));
-        var incidents = groups.Select(g => g.Incident).ToList();
+        var incidents = Decorate(groups.Select(g => g.Incident).ToList(), decorateIncidents);
         if (incidents.Count > 0)
         {
             context.Incidents = new List<AlertIncident>(incidents);
@@ -199,6 +215,24 @@ public static class AlertContextBuilders
         }
 
         return context;
+    }
+
+    /* #2216: runs the caller's incident decorator, with the no-decorator and no-incident cases short-
+       circuited. A decorator that returned a different NUMBER of incidents would silently change what the
+       alert renders — dropped incidents, or a "+N more" trailer that no longer matches the items below it —
+       so a mismatched result is discarded in favour of the originals. The accumulator's contract is
+       same-order-same-count; this makes a breach of it inert rather than invisible. */
+    private static IReadOnlyList<AlertIncident> Decorate(
+        List<AlertIncident> incidents,
+        Func<IReadOnlyList<AlertIncident>, IReadOnlyList<AlertIncident>>? decorate)
+    {
+        if (decorate is null || incidents.Count == 0)
+        {
+            return incidents;
+        }
+
+        var decorated = decorate(incidents);
+        return decorated is not null && decorated.Count == incidents.Count ? decorated : incidents;
     }
 
     /* #1141/#2109: forensic detail carried on a deadlock incident — the representative event's

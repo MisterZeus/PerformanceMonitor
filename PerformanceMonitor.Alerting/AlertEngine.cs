@@ -67,6 +67,19 @@ public sealed class AlertEngine
     public const string BlockingWatermarkMetric = "Blocking Detected";
     public const string DeadlockWatermarkMetric = "Deadlocks Detected";
 
+    /// <summary>
+    /// The rolling window both count gates read, in hours (#1091's "in the last hour"). Named because
+    /// #2216's occurrence accumulator has to agree with it: its staleness horizon is what stops a row
+    /// stranded by a crash from being trusted on the same fingerprint's NEXT incident, and the only value
+    /// that makes that judgement correct is the window itself — inside the window a persisted row is
+    /// describing the very events the gauge is still counting, outside it the row cannot be. Two literals
+    /// that must match are two literals that will eventually not.
+    /// </summary>
+    public const int RollingCountWindowHours = 1;
+
+    /* #2216: rows untouched for longer than the read window are treated as absent by the accumulator. */
+    private static readonly TimeSpan OccurrenceStaleAfter = TimeSpan.FromHours(RollingCountWindowHours);
+
     private readonly IAlertEngineSettings _settings;
     private readonly IAlertReadAdapter _readAdapter;
     private readonly IAlertStateStore _stateStore;
@@ -378,7 +391,7 @@ public sealed class AlertEngine
             {
                 /* ONE fetch serves the rolling count, the excluded-database recount (:118-133),
                    and the fired alert's context (:172) — see class remarks adaptation (1). */
-                blockingRows = await _readAdapter.GetRecentBlockedProcessReportsAsync(key, hoursBack: 1, ct);
+                blockingRows = await _readAdapter.GetRecentBlockedProcessReportsAsync(key, hoursBack: RollingCountWindowHours, ct);
 
                 /* Lite's overview count semantics (LocalDataService.Overview.cs:74-77): prefer the
                    XE blocked-process-report count; fall back to the DMV snapshot count when the XE
@@ -435,7 +448,10 @@ public sealed class AlertEngine
 
             /* :172-173 — Lite's BuildBlockingContextAsync refetches the same rows; the engine
                reuses this sweep's fetch (identical query/window). */
-            var blockingContext = AlertContextBuilders.BuildBlockingContext(serverName, blockingRows, _settings.ExcludedDatabases);
+            var occurrences = await AccumulateOccurrencesAsync(key, BlockingWatermarkMetric, now);
+            var blockingContext = AlertContextBuilders.BuildBlockingContext(
+                serverName, blockingRows, _settings.ExcludedDatabases, occurrences.Decorate);
+            await occurrences.PersistAsync();
             var detailText = AlertContextBuilders.ContextToDetailText(blockingContext);
 
             /* :175-183 — SendDetectedAlertAsync's #1141/#1236 delivery-mode fan-out is an
@@ -453,6 +469,14 @@ public sealed class AlertEngine
         }
         else if (!blockingDecision.Active && wasBlockingActive)                     /* :185 */
         {
+            /* #2216: the incident is over, so its per-fingerprint counters are too. Cleared here rather
+               than left to the accumulator's staleness horizon because THIS is the falling edge the
+               product knows about — a recovery the user is being told about should also be the point the
+               next incident's total starts from 1 with a start time that says so. Deliberately outside
+               the suppression check below: whether the user is TOLD about the recovery is a delivery
+               question, but the incident ended either way. */
+            await ClearOccurrencesAsync(key, BlockingWatermarkMetric);
+
             if (!suppressed && _settings.BlockingEnabled)                           /* :187 */
             {
                 await NotifyResolutionAsync(new AlertResolution(
@@ -469,6 +493,106 @@ public sealed class AlertEngine
            incident content is worse than skipping the sweep (state untouched, same as every other
            check's failure shape). */
         await CheckBlockingWaitAsync(key, serverName, now, alertCooldown, suppressed, blockingRows, ct);
+    }
+
+    /* ---------------- per-fingerprint occurrence counters (#2216) ---------------- */
+
+    /// <summary>
+    /// Loads the metric's persisted per-fingerprint occurrence state and returns the pass that will
+    /// accumulate against it. Split into load-then-decorate-then-persist because the accumulation has to
+    /// happen INSIDE the context builder — the builder renders each incident's facts in the same pass that
+    /// produces it, so a total attached afterwards would not appear on the alert anyone reads.
+    ///
+    /// <para>Failure-isolated: a store that cannot answer yields an empty map, which the accumulator treats
+    /// as first contact — every total equals its window count, exactly the pre-#2216 information. An alert
+    /// that is already firing must never be lost to a bookkeeping read.</para>
+    /// </summary>
+    private async Task<OccurrencePass> AccumulateOccurrencesAsync(string key, string metricName, DateTime now)
+    {
+        IReadOnlyDictionary<string, IncidentOccurrenceState> persisted;
+        try
+        {
+            persisted = await _stateStore.LoadIncidentOccurrencesAsync(key, metricName)
+                ?? EmptyOccurrenceStates;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning("Could not load incident occurrences for {Metric}: {Message}", metricName, ex.Message);
+            persisted = EmptyOccurrenceStates;
+        }
+
+        return new OccurrencePass(this, key, metricName, now, persisted);
+    }
+
+    /// <summary>
+    /// Records the falling edge: the metric has no incidents left, so its counters are cleared and the next
+    /// incident starts from 1 with a fresh start time. An empty set IS the clear — see
+    /// <see cref="IAlertStateStore.SaveIncidentOccurrencesAsync"/>.
+    /// </summary>
+    private Task ClearOccurrencesAsync(string key, string metricName) =>
+        SaveOccurrencesAsync(key, metricName, EmptyOccurrenceStates);
+
+    private async Task SaveOccurrencesAsync(
+        string key, string metricName, IReadOnlyDictionary<string, IncidentOccurrenceState> states)
+    {
+        try
+        {
+            await _stateStore.SaveIncidentOccurrencesAsync(key, metricName, states);
+        }
+        catch (Exception ex)
+        {
+            /* A dropped write costs accuracy on the next delivery's total — that fingerprint reads as new
+               and restarts, with a start time saying so — never a missed or duplicated alert. */
+            _logger?.LogWarning("Could not persist incident occurrences for {Metric}: {Message}", metricName, ex.Message);
+        }
+    }
+
+    private static readonly IReadOnlyDictionary<string, IncidentOccurrenceState> EmptyOccurrenceStates =
+        new Dictionary<string, IncidentOccurrenceState>(StringComparer.Ordinal);
+
+    /// <summary>
+    /// One metric's occurrence-accounting pass: holds the state loaded before the context was built, runs
+    /// the accumulator as the builder's decorator, and remembers what to write afterwards. A class rather
+    /// than a tuple because <see cref="Decorate"/> is handed to the builder as a delegate and has to write
+    /// back what it computed.
+    /// </summary>
+    private sealed class OccurrencePass
+    {
+        private readonly AlertEngine _engine;
+        private readonly string _key;
+        private readonly string _metricName;
+        private readonly DateTime _now;
+        private readonly IReadOnlyDictionary<string, IncidentOccurrenceState> _persisted;
+        private IReadOnlyDictionary<string, IncidentOccurrenceState>? _toPersist;
+
+        internal OccurrencePass(
+            AlertEngine engine, string key, string metricName, DateTime now,
+            IReadOnlyDictionary<string, IncidentOccurrenceState> persisted)
+        {
+            _engine = engine;
+            _key = key;
+            _metricName = metricName;
+            _now = now;
+            _persisted = persisted;
+        }
+
+        /// <summary>The builder's pre-render hook (<c>AlertContextBuilders.BuildBlockingContext</c>).</summary>
+        internal IReadOnlyList<AlertIncident> Decorate(IReadOnlyList<AlertIncident> incidents)
+        {
+            var result = IncidentOccurrenceAccumulator.Accumulate(incidents, _persisted, _now, OccurrenceStaleAfter);
+            _toPersist = result.Changed ? result.States : null;
+            return result.Incidents;
+        }
+
+        /// <summary>
+        /// Writes what <see cref="Decorate"/> computed. A no-op when the builder never called the decorator
+        /// — it returns null before reaching the incidents (every row excluded, nothing renderable), and in
+        /// that case this sweep saw no fingerprints at all, which is not the same statement as "the
+        /// metric's incidents have ended". Clearing on it would restart a live incident's total every time
+        /// one alert happened to render nothing.
+        /// </summary>
+        internal Task PersistAsync() =>
+            _toPersist is null ? Task.CompletedTask : _engine.SaveOccurrencesAsync(_key, _metricName, _toPersist);
     }
 
     /* ---------------- blocking wait time (#1839) ---------------- */
@@ -577,7 +701,7 @@ public sealed class AlertEngine
             {
                 /* ONE fetch serves the rolling count, the excluded-database recount (:198-211),
                    and the fired alert's context (:249) — class remarks adaptation (1). */
-                deadlockRows = await _readAdapter.GetRecentDeadlocksAsync(key, hoursBack: 1, ct);
+                deadlockRows = await _readAdapter.GetRecentDeadlocksAsync(key, hoursBack: RollingCountWindowHours, ct);
                 effectiveDeadlockCount = deadlockRows.Count;
 
                 /* :198-205 — recount excluding deadlocks whose processes ALL ran in excluded
@@ -623,7 +747,10 @@ public sealed class AlertEngine
             _lastDeadlockAlert[key] = now;                                          /* :236 */
 
             /* :249-250 — context from this sweep's fetch. */
-            var deadlockContext = AlertContextBuilders.BuildDeadlockContext(serverName, deadlockRows, _settings.ExcludedDatabases);
+            var occurrences = await AccumulateOccurrencesAsync(key, DeadlockWatermarkMetric, now);
+            var deadlockContext = AlertContextBuilders.BuildDeadlockContext(
+                serverName, deadlockRows, _settings.ExcludedDatabases, occurrences.Decorate);
+            await occurrences.PersistAsync();
             var detailText = AlertContextBuilders.ContextToDetailText(deadlockContext);
 
             /* :252-260 — ShortMessage = the toast body of :244. Numerics carried explicitly (#1830):
@@ -639,6 +766,9 @@ public sealed class AlertEngine
         }
         else if (!deadlockDecision.Active && wasDeadlockActive)                     /* :262 */
         {
+            /* #2216: the falling edge — see the blocking twin above. */
+            await ClearOccurrencesAsync(key, DeadlockWatermarkMetric);
+
             if (!suppressed && _settings.DeadlockEnabled)                           /* :264 */
             {
                 await NotifyResolutionAsync(new AlertResolution(
