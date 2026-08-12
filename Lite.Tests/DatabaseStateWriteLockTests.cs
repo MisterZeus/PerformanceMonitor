@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-using System;
+using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitorLite.Tests;
@@ -15,38 +15,32 @@ using Xunit;
 namespace Lite.Tests;
 
 /// <summary>
-/// Runs ALONE. These tests take the process-wide <c>s_dbLock</c> write lock and hold it across an awaited
-/// call, and every DuckDB access in the assembly goes through that same static lock — so a neighbour running
-/// concurrently would block on it and could burn its own 5-second budget. Serialising the collection is what
-/// makes holding the lock safe to do at all.
-/// </summary>
-[CollectionDefinition("db-write-lock", DisableParallelization = true)]
-public sealed class DatabaseStateWriteLockCollection { }
-
-/// <summary>
 /// #2208: the database-state write paths take the WRITE lock. They used the read lock, which let their
-/// INSERT/UPDATE/DELETE interleave with archival and starved writers process-wide — a
-/// <c>ReaderWriterLockSlim</c> writer waits for every reader to drain, and <c>OpenWriteConnectionAsync</c>
-/// gives up after five seconds.
+/// INSERT/UPDATE/DELETE interleave with archival and starved writers process-wide.
 ///
-/// <para>WHAT THESE PIN, precisely: that the two OPERATOR paths acquire the write lock, observed by holding it
-/// and requiring them to report the wait rather than proceed. That is the #2212 decision worth locking down —
-/// those methods deliberately do NOT swallow the timeout, because they are button presses and the exception's
-/// message ("try again in a few moments") is written to be shown, so silently dropping an operator's declared
-/// expected state would be the worst outcome available.</para>
+/// <para>These exploit the lock's own recursion policy rather than its timeout, which makes them both fast and
+/// genuinely watched-red. <c>s_dbLock</c> is built with <c>LockRecursionPolicy.NoRecursion</c>, so a thread
+/// that already holds the write lock and calls <c>TryEnterWriteLock</c> again gets a
+/// <see cref="LockRecursionException"/> immediately. <c>AcquireReadLock</c>, by contrast, deliberately CATCHES
+/// that exception and hands back a no-op disposable. So from a thread holding the write lock:</para>
 ///
-/// <para>WHAT THEY CANNOT PIN, and why it is a limitation rather than an omission: the deviation read's
-/// best-effort skip path. Forcing its prologue to time out means holding the write lock, but the read that
-/// follows takes the READ lock, and <c>AcquireReadLock</c> has no timeout — so the call would block forever
-/// rather than demonstrating the skip. Testing that arm needs the timeout injected, which means changing
-/// production shape for testability. Recorded here so the gap is visible rather than assumed covered.</para>
+/// <para>• a method that takes the WRITE lock throws — which is what these assert;<br/>
+/// • a method that takes the READ lock proceeds silently, which is exactly what these methods did before
+/// #2212, so the pre-fix behaviour is a FAILED assertion rather than a hang or a pass.</para>
 ///
-/// <para>Neither test is cleanly watched-red either: before #2212 these methods took the read lock, so with
-/// the write lock held they would have blocked indefinitely on <c>EnterReadLock</c> instead of failing. The
-/// pre-fix signal is a hang, not a red test. That is worth saying out loud — a test whose "before" state is a
-/// hang proves less than one whose before state is an assertion failure.</para>
+/// <para>Deliberately NOT the 5-second timeout route, and not a serialised collection. Both were in the first
+/// draft of this file and both were wrong: calling on the holding thread never reaches the timeout (the
+/// recursion check fires first), and <c>DisableParallelization</c> only orders collections inside the
+/// non-parallel bucket — it cannot stop other classes from contending on a static lock. Holding the write lock
+/// for five seconds to force a timeout would therefore have blocked arbitrary neighbours for five seconds with
+/// no isolation to show for it. The recursion route holds the lock for the duration of one synchronous call.</para>
+///
+/// <para>What is still NOT covered: the deviation read's best-effort skip path. Forcing its prologue to fail
+/// means making its write-lock acquisition fail, and the read that follows takes the read lock — which under
+/// this same recursion policy would be handed a no-op disposable and proceed, so the skip is unobservable from
+/// here. That arm needs the timeout injected, i.e. production shape changed for testability. Left visible
+/// rather than implied-covered.</para>
 /// </summary>
-[Collection("db-write-lock")]
 public sealed class DatabaseStateWriteLockTests : IClassFixture<SharedDuckDbFixture>
 {
     private readonly SharedDuckDbFixture _fixture;
@@ -54,28 +48,27 @@ public sealed class DatabaseStateWriteLockTests : IClassFixture<SharedDuckDbFixt
     public DatabaseStateWriteLockTests(SharedDuckDbFixture fixture) => _fixture = fixture;
 
     [Fact]
-    public async Task SetDatabaseStateExpected_TakesTheWriteLock_AndReportsTheWaitInsteadOfProceeding()
+    public async Task SetDatabaseStateExpected_TakesTheWriteLock()
     {
         var service = new LocalDataService(_fixture.DuckDb);
 
         using (_fixture.DuckDb.AcquireWriteLock())
         {
-            /* An operator declaring an expected state while archival holds the lock must be TOLD, not ignored.
-               The message this throws is what the overrides window already surfaces through its generic
-               handler, so the wait reaches the person who pressed the button. */
-            await Assert.ThrowsAsync<TimeoutException>(
+            /* Same thread, so NoRecursion rejects the second write-lock entry. A read-lock implementation —
+               what this was before #2212 — would be handed a no-op disposable and complete normally. */
+            await Assert.ThrowsAsync<LockRecursionException>(
                 () => service.SetDatabaseStateExpectedAsync(1, "probedb", "OFFLINE"));
         }
     }
 
     [Fact]
-    public async Task ResetDatabaseStateExpectedToCurrent_TakesTheWriteLock_AndReportsTheWait()
+    public async Task ResetDatabaseStateExpectedToCurrent_TakesTheWriteLock()
     {
         var service = new LocalDataService(_fixture.DuckDb);
 
         using (_fixture.DuckDb.AcquireWriteLock())
         {
-            await Assert.ThrowsAsync<TimeoutException>(
+            await Assert.ThrowsAsync<LockRecursionException>(
                 () => service.ResetDatabaseStateExpectedToCurrentAsync(1, "probedb"));
         }
     }
