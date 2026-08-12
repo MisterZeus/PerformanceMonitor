@@ -3598,12 +3598,6 @@ LIMIT 1";
     };
 
     /// <summary>
-    /// True when a SqlException is a permission denial — the expected failure when the least-privilege monitoring
-    /// login (VIEW SERVER STATE only) re-executes a query that reads/writes user objects. Detected by the known
-    /// permission error numbers or a "permission was denied" / "does not have permission" message, so the handler
-    /// can surface a clear cause instead of a raw exception.
-    /// </summary>
-    /// <summary>
     /// Maps a PostgreSQL fault to a collection_log status plus the sentence an operator needs.
     /// <para>The store has five statuses and none of them is "this feature is not installed", so the
     /// non-fatal-degradation bucket (PERMISSIONS) carries those cases and the MESSAGE distinguishes them —
@@ -3650,6 +3644,12 @@ LIMIT 1";
         };
     }
 
+    /// <summary>
+    /// True when a SqlException is a permission denial — the expected failure when the least-privilege monitoring
+    /// login (VIEW SERVER STATE only) re-executes a query that reads/writes user objects. Detected by the known
+    /// permission error numbers or a "permission was denied" / "does not have permission" message, so the handler
+    /// can surface a clear cause instead of a raw exception.
+    /// </summary>
     private static bool IsPermissionError(SqlException ex)
     {
         foreach (SqlError error in ex.Errors)
