@@ -1142,6 +1142,16 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
                 nameof(budgetBytes), budgetBytes, "The plan-fetch byte budget must be positive; a zero or negative budget ships nothing and stalls the watermark.");
         }
 
+        /* Same failure, fourth route: TOP (0) returns no rows and TOP with a negative literal is a syntax error,
+           so a bad candidate count ships nothing and holds the watermark exactly like a bad budget. Every caller
+           today sources this from CandidatePlanCount, which floors at MinCandidatePlans — but "the only caller
+           happens to be safe" is the assumption this method has already been wrong about once. */
+        if (candidatePlans <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(candidatePlans), candidatePlans, "The candidate plan count must be positive; TOP (0) ships nothing and stalls the watermark.");
+        }
+
         var escapedDbName = item.Replace("]", "]]", StringComparison.Ordinal);
         var k = candidatePlans.ToString(System.Globalization.CultureInfo.InvariantCulture);
         var budget = budgetBytes.ToString(System.Globalization.CultureInfo.InvariantCulture);

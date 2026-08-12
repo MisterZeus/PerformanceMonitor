@@ -110,12 +110,23 @@ WHERE EXCLUDED.last_seen >= query_store_plan_map.last_seen";
     /// than the newest fact batch that referenced it, so the prune cannot take a row that live facts are
     /// touching.</para>
     ///
-    /// <para>It also RETURNS the reset signal, in the same round trip, because the batch join it already does is
-    /// exactly where that signal lives: a batch row at or below the watermark (<c>$5</c>) with NO map row is a
-    /// plan whose content the store has never resolved, which "no new plans this window" cannot produce — that
-    /// is a renumbered catalog, i.e. Query Store was cleared. The caller resets that database's watermark to
-    /// zero and logs loudly. It cuts reset blackout from the refresh horizon (up to a day, and per the
-    /// walk-cost measurement the horizon cannot even be relied on to complete) down to one cycle.</para>
+    /// <para>It also returns the RESOLVED-ness of every batch row, in the same round trip, because the batch
+    /// join it already does is where the reset signal lives: a plan the store has never resolved cannot be
+    /// produced by "no new plans this window". What it deliberately does NOT do is decide that a reset happened.
+    /// Two reasons, both of which bit the first version of this query:</para>
+    ///
+    /// <para>• <b>One dormant plan is not a reset.</b> Filtering to absent rows at or below a watermark fires on
+    /// a SINGLE dormant plan resuming execution, which would zero that database's watermark and trigger a full
+    /// refetch — the opposite of what this design is for. The reset case is MASS absence, and "mass" is a
+    /// judgement the caller makes across the batch. A lone absence is the CURSOR's job (it fetches that plan and
+    /// moves on), which is what <c>RefreshAfter</c>'s comment already says owns dormancy.<br/>
+    /// • <b>Watermarks are per database.</b> These array parameters can carry rows for several databases in one
+    /// call, so comparing them all against one scalar watermark is wrong for every database but one. The caller
+    /// already holds the per-database watermarks; it applies them.</para>
+    ///
+    /// <para>So this returns facts — <c>(server_id, database_name, plan_id, resolved)</c> — and the host decides.
+    /// When it does conclude a reset it zeroes that database's watermark and logs loudly, recovering in one
+    /// cycle rather than waiting on a refresh sweep.</para></para>
     ///
     /// <para>The three preceding CTEs still run. Postgres executes data-modifying <c>WITH</c> statements exactly
     /// once and to completion whether or not the primary query reads their output, so making the final statement
@@ -163,16 +174,14 @@ dim_touch AS (
       AND d.last_seen < $4::timestamp - interval '1 hour'
     RETURNING d.digest
 )
-SELECT batch.plan_id
+SELECT batch.server_id, batch.database_name, batch.plan_id, (m.plan_id IS NOT NULL) AS resolved
 FROM unnest($1::integer[], $2::text[], $3::bigint[])
      AS batch(server_id, database_name, plan_id)
 LEFT JOIN collect.query_store_plan_map AS m
        ON  m.server_id = batch.server_id
        AND m.database_name = batch.database_name
        AND m.plan_id = batch.plan_id
-WHERE m.plan_id IS NULL
-  AND batch.plan_id <= $5::bigint
-ORDER BY batch.plan_id";
+ORDER BY batch.server_id, batch.database_name, batch.plan_id";
 
     /// <summary>
     /// The map rows a re-verify cursor slice needs to judge, for one database over a bounded
