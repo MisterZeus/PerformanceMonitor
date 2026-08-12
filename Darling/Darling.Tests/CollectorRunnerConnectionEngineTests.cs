@@ -117,10 +117,10 @@ public sealed class CollectorRunnerConnectionEngineTests
            entry must name something a reviewer can check. */
         var allowed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
-            /* Caller-gated in DarlingWorker.ReconcileLongQueryTraceAsync (Engine != SqlServer returns
-               early) AND self-gated at the top of ReconcileLongQueryCompletionsAsync — XE is SQL Server
-               only, and both XE construction sites are behind those gates. */
-            ["DarlingXeSessions.cs"] = "engine gate at ReconcileLongQueryCompletionsAsync entry",
+            /* BOTH public entry points self-gate on Engine == SqlServer at their first line
+               (EnsureAllAsync and ReconcileLongQueryCompletionsAsync) — XE is SQL Server only, and
+               every construction site in the file sits behind one of those two gates. */
+            ["DarlingXeSessions.cs"] = "self-gates at EnsureAllAsync and ReconcileLongQueryCompletionsAsync entries",
 
             /* Backfill dispatch runs behind CollectorCatalog.AppliesTo (the composed engine gate) at
                QueryStoreBackfill's work-selection, so a PostgreSQL target never reaches the SQL branch. */
@@ -128,7 +128,9 @@ public sealed class CollectorRunnerConnectionEngineTests
         };
 
         var offenders = new List<string>();
-        foreach (var path in Directory.EnumerateFiles(ServiceSourceDirectory(), "*.cs"))
+        /* Recursive: Mcp/, Targets/ and friends are exactly one directory down, and "the single-file
+           scan is how this one hid" applies verbatim to a single-directory scan. */
+        foreach (var path in Directory.EnumerateFiles(ServiceSourceDirectory(), "*.cs", SearchOption.AllDirectories))
         {
             var name = Path.GetFileName(path);
             if (allowed.ContainsKey(name))

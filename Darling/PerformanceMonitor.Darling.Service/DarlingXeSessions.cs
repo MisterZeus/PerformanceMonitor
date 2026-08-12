@@ -35,6 +35,15 @@ public static class DarlingXeSessions
 {
     public static async Task EnsureAllAsync(ServerRuntime server, DarlingCollectorRunner runner, ILogger? logger, CancellationToken cancellationToken)
     {
+        /* Same self-gate as ReconcileLongQueryCompletionsAsync, same reason: this method constructs a
+           SqlConnection from the engine-ambiguous connection string, so it enforces its own precondition
+           rather than trusting the caller's gate (DarlingWorker's connect path) to be the only entry
+           forever. XE does not exist on PostgreSQL. */
+        if (server.Target.Engine != PerformanceMonitor.Collectors.CollectorTargetEngine.SqlServer)
+        {
+            return;
+        }
+
         if (server.Target.IsAzureSqlDb)
         {
             await EnsureDatabaseScopedAsync(server, runner, logger, cancellationToken);

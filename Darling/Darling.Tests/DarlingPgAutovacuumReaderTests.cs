@@ -7,8 +7,8 @@
  */
 
 using System;
-using System.Text.RegularExpressions;
 using System.Linq;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
@@ -65,10 +65,10 @@ public class DarlingPgAutovacuumReaderTests
            the RATIO GREATEST specifically: the raw tie-break below is itself GREATEST(dead, inserts),
            so a bare "GREATEST(" token is present even after the exact regression this guards
            (unwrapping the ratios into two sequential ORDER BY terms). */
-        var flattened = Regex.Replace(orderClause, @"\s+", " ");
+        var collapsed = Regex.Replace(orderClause, @"\s+", "");
         Assert.Contains(
-            "GREATEST( l.dead_tuples::numeric / NULLIF(l.vacuum_threshold, 0),",
-            flattened, StringComparison.Ordinal);
+            "GREATEST(l.dead_tuples::numeric/NULLIF(l.vacuum_threshold,0),",
+            collapsed, StringComparison.Ordinal);
 
         /* The disabled flag outranks everything, then the ratio, then the raw counts as a tie-break. */
         var disabledAt = orderClause.IndexOf("l.autovacuum_disabled DESC", StringComparison.Ordinal);

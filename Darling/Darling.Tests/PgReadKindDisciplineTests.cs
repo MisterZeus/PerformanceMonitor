@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -42,10 +43,11 @@ public sealed class PgReadKindDisciplineTests
             var source = File.ReadAllText(path);
             var name = Path.GetFileName(path);
 
-            /* Bare window-parameter binds: AddWithValue(startUtc) / AddWithValue(endUtc). The callers hand
-               these down from DateTime.UtcNow, so an unwrapped bind ships Kind=Utc. */
+            /* Bare window-parameter binds: any *Utc-named identifier bound raw. The callers hand these
+               down from DateTime.UtcNow, so an unwrapped bind ships Kind=Utc — and the name-suffix match
+               survives a rename to fooUtc where a literal startUtc/endUtc list would not. */
             foreach (Match match in Regex.Matches(
-                source, @"AddWithValue\(\s*(?:startUtc|endUtc|sinceUtc|fromUtc|toUtc)\s*\)"))
+                source, @"AddWithValue\(\s*\w*[Uu]tc\s*\)"))
             {
                 offenders.Add(name + ": " + match.Value);
             }
@@ -68,6 +70,23 @@ public sealed class PgReadKindDisciplineTests
             + "east of UTC the Tier 0 alerts silently never fire.");
     }
 
+    [Fact]
+    public void TheAdapterHelper_ActuallyStripsKind()
+    {
+        /* The three adapter binds route through NaiveUtcNow(), so the scan above cannot see them revert
+           if the HELPER quietly becomes DateTime.UtcNow again. Pin its body: the SpecifyKind call is the
+           whole point of the function. */
+        var adapter = PgReadFamilyFiles().Last();
+        var source = File.ReadAllText(adapter);
+        var body = Regex.Match(
+            source,
+            @"private static DateTime NaiveUtcNow\(\)\s*=>\s*(?<body>[^;]+);",
+            RegexOptions.Singleline);
+
+        Assert.True(body.Success, "DarlingPostgresAlertReadAdapter must carry the NaiveUtcNow helper.");
+        Assert.Contains("SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified)", body.Groups["body"].Value, StringComparison.Ordinal);
+    }
+
     private static IEnumerable<string> PgReadFamilyFiles([CallerFilePath] string thisFile = "")
     {
         var testsDir = Path.GetDirectoryName(thisFile)!;
@@ -76,6 +95,13 @@ public sealed class PgReadKindDisciplineTests
         foreach (var reader in Directory.EnumerateFiles(Path.Combine(service, "Mcp"), "DarlingPg*Reader.cs"))
         {
             yield return reader;
+        }
+
+        /* The Tools siblings create the DateTime.UtcNow values the readers bind — a Tools file that
+           starts binding directly is the same hazard one hop up. */
+        foreach (var tools in Directory.EnumerateFiles(Path.Combine(service, "Mcp"), "DarlingMcpPg*Tools.cs"))
+        {
+            yield return tools;
         }
 
         yield return Path.Combine(service, "DarlingPostgresAlertReadAdapter.cs");

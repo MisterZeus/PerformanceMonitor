@@ -1232,6 +1232,8 @@ CREATE TABLE IF NOT EXISTS config.incident_occurrences (
     last_observed_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
     PRIMARY KEY (server_id, metric_name, dedup_key)
 );";
+
+    /// <summary>
     /// V62 — the #2171 plan-XML codec knob for direct-SQL store consumers. 'gzip' (default) keeps
     /// today's write path; 'none' makes the dim writer store plain text in query_plan_xml (lz4 TOAST
     /// compresses, ~8.9x measured vs gzip's 14.0x) so Grafana-class readers get plans back with plain
@@ -1256,6 +1258,8 @@ BEGIN
             CHECK (plan_xml_compression IN ('gzip', 'none'));
     END IF;
 END $$;";
+
+    /// <summary>
     /// V63 — <c>pg_wait_stats</c>, the first PostgreSQL collector table: cumulative Aurora wait
     /// counters with deltas computed on write, the Postgres counterpart of <c>wait_stats</c>.
     /// <para>Columns are spelled out here in the generator's exact emission order (the four standard
@@ -1483,7 +1487,7 @@ CREATE INDEX IF NOT EXISTS idx_pg_replication_slot_stats_time
     /// dead-tuple rule — and an append-only table that is never vacuumed is never frozen either.</para>
     /// <para><c>database_name</c> comes from the per-database loop's connection rather than the result
     /// set: <c>pg_stat_user_tables</c> shows only the connected database, so the connection IS the
-    /// authoritative answer. Additive and view-less exactly like V61–V65 — a fresh store gets the table
+    /// authoritative answer. Additive and view-less exactly like V63–V67 — a fresh store gets the table
     /// from V1's generated schema, and this rung is what an already-existing store gets.</para>
     /// </summary>
     private const string V68Sql = @"
@@ -1527,7 +1531,7 @@ CREATE INDEX IF NOT EXISTS idx_pg_autovacuum_stats_time
     /// a 0 default would claim measurements that were never taken, and a consumer averaging write latency
     /// would divide by them.</para>
     /// <para>Cumulative counters stored raw, with the windowed change computed at read time. Additive and
-    /// view-less exactly like V61-V66: a fresh store gets the table from V1's generated schema, and this
+    /// view-less exactly like V63-V68: a fresh store gets the table from V1's generated schema, and this
     /// rung is what an already-existing store gets.</para>
     /// </summary>
     private const string V69Sql = @"

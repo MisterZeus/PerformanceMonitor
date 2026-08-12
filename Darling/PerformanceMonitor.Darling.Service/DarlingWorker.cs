@@ -2908,6 +2908,8 @@ LIMIT 1", connection);
            Same decision, same honest answer, re-written here so the tombstone survives the click. */
         if (server.Runtime?.Target.Engine == CollectorTargetEngine.PostgreSql)
         {
+            /* Mirror the scheduled arm's once-latch so the tick does not re-write what this just wrote. */
+            server.PostgresAnalysisStateWritten = true;
             await DarlingObservability.WriteAnalysisStateAsync(
                 _postgres!,
                 server.Runtime.ServerId,
