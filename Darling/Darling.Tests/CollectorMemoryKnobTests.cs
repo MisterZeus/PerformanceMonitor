@@ -191,6 +191,6 @@ public sealed class CollectorMemoryKnobTests
             true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true,
             true, true, true, true, true, true, hasJobMetricsColumns: true, hasJobCadenceKnob: true,
             hasBackfillSwitch: true, hasCollectorMemoryKnobs: true, hasDatabaseStateEdgeMemory: false));
-        Assert.Equal(60, ViewerDataService.RequiredStoreSchemaVersion);
+        Assert.Equal(61, ViewerDataService.RequiredStoreSchemaVersion);
     }
 }
