@@ -55,6 +55,20 @@ public sealed class CrossAppMcpToolInventoryPinTests
     // system_health parser tools). A NEW Darling-only tool must be either ported to Lite or added here.
     private static readonly HashSet<string> KnownLiteMissingMcpTools = new(StringComparer.Ordinal)
     {
+        /* The seven PostgreSQL reads. Darling-ONLY by architecture, not "not ported yet", so these are the
+           same kind of entry as get_store_metrics rather than a to-do: Lite has no PostgreSQL target and
+           cannot acquire one (the engine gate never dispatches a PostgreSQL definition there), and Lite does
+           not even create the tables — DuckDbSchemaGenerator.StoredCollectors filters them out, so there is
+           nothing for a Lite twin to read. If Lite ever gains a PostgreSQL target, port these and delete
+           them from here; the ratchet only shrinks. */
+        "get_pg_wait_stats",
+        "get_pg_top_queries",
+        "get_pg_wraparound_risk",
+        "get_pg_xmin_horizon",
+        "get_pg_replication_slots",
+        "get_pg_autovacuum_health",
+        "get_pg_io_stats",
+
         /* #2068: the store self-metrics read (get_store_metrics) over collect.store_metrics — the central
            Postgres store measuring ITSELF (hypertable sizes/compression, payload dims, whole-store growth)
            for capacity forecasting. Darling-ONLY by architecture, not a "not ported yet" item: Lite is a

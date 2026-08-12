@@ -127,16 +127,23 @@ public sealed class CollectorGateSurfacePinTests
     [Fact]
     public void CatalogByNameGate_AgreesWithDefinitionAppliesTo_ForEveryCollectorAndTarget()
     {
-        /* The parity crux: Lite consults CollectorCatalog.AppliesTo(name, target) pre-dispatch; Darling's
-           runner calls definition.AppliesTo(target). If those ever disagreed the two SKUs would gate
-           differently — exactly the drift this collapse removes. Pin that they are identical for every
-           catalog collector across every target dimension. */
+        /* The parity crux: Lite consults CollectorCatalog.AppliesTo(NAME, target) pre-dispatch, Darling's
+           runner calls CollectorCatalog.AppliesTo(DEFINITION, target). If those ever disagreed the two SKUs
+           would gate differently — exactly the drift this collapse removes.
+        
+           Both COMPOSED forms, deliberately. This used to compare the raw definition.AppliesTo(target)
+           against the by-name form, which was equivalent only while every collector was SQL Server: the
+           composed overload also requires definition.TargetEngine == target.Engine, so a PostgreSQL
+           definition whose own AppliesTo returns true unconditionally (the slots collector) legitimately
+           disagrees with its raw gate when handed a SQL Server target. Comparing raw-to-composed would force
+           either a wrong assertion or a filtered loop; comparing composed-to-composed is the claim that
+           actually matters and holds for every collector against every target. */
         foreach (var definition in CollectorCatalog.All)
         {
             foreach (var target in AllTargets)
             {
                 Assert.Equal(
-                    definition.AppliesTo(target),
+                    CollectorCatalog.AppliesTo(definition, target),
                     CollectorCatalog.AppliesTo(definition.Name, target));
             }
         }

@@ -115,7 +115,10 @@ public class DuckDbInitializer
        for free — no hand-maintained list to keep in sync. Mirrors ArchiveService.ArchivableTables (same set,
        same derivation); a test pins the two against each other and against the catalog. */
     internal static readonly string[] ArchivableTables =
-        CollectorCatalog.All.Select(c => c.TargetTable)
+        /* StoredCollectors, not CollectorCatalog.All: Lite does not CREATE the PostgreSQL collectors' tables
+           (it has no PostgreSQL target and cannot get one), so an archive view over them would reference a
+           table that does not exist. */
+        DuckDbSchemaGenerator.StoredCollectors.Select(c => c.TargetTable)
             .Concat(["config_alert_log", "collection_log"])
             .ToArray();
 

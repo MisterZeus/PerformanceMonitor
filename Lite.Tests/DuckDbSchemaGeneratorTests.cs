@@ -165,11 +165,11 @@ public sealed class DuckDbSchemaGeneratorTests
     [Fact]
     public void Generated_EmitsEveryCatalogTable_AndThirtyNineIndexes()
     {
-        Assert.Equal(41, DuckDbSchemaGenerator.CreateTableStatements().Count());
+        Assert.Equal(DuckDbSchemaGenerator.StoredCollectors.Count(), DuckDbSchemaGenerator.CreateTableStatements().Count());
 
-        /* 41 collectors minus the two index-less config tables = 39 indexes (database_states is a
+        /* The stored collectors minus the two index-less config tables (database_states is a
            time-series collector and gets the default retrieval index). */
-        Assert.Equal(39, DuckDbSchemaGenerator.CreateIndexStatements().Count());
+        Assert.Equal(DuckDbSchemaGenerator.StoredCollectors.Count() - 2, DuckDbSchemaGenerator.CreateIndexStatements().Count());
     }
 
     /// <summary>
@@ -184,7 +184,7 @@ public sealed class DuckDbSchemaGeneratorTests
     {
         var failures = new List<string>();
 
-        foreach (var schema in CollectorCatalog.All)
+        foreach (var schema in DuckDbSchemaGenerator.StoredCollectors)
         {
             var expected = new List<(string Name, string Type)>();
             if (schema.IncludesCollectionId)
@@ -222,7 +222,7 @@ public sealed class DuckDbSchemaGeneratorTests
     [Fact]
     public void ArchivableTables_AreCatalogDriven_AndMirrorEachOther()
     {
-        var expected = CollectorCatalog.All.Select(c => c.TargetTable)
+        var expected = DuckDbSchemaGenerator.StoredCollectors.Select(c => c.TargetTable)
             .Concat(new[] { "config_alert_log", "collection_log" })
             .OrderBy(t => t, StringComparer.Ordinal)
             .ToArray();
@@ -236,7 +236,7 @@ public sealed class DuckDbSchemaGeneratorTests
         /* The time column for every archivable collector table is its catalog prefix-time column;
            the two non-collector tables carry their own. */
         var timeByTable = ArchiveService.ArchivableTables.ToDictionary(t => t.Table, t => t.TimeColumn);
-        foreach (var schema in CollectorCatalog.All)
+        foreach (var schema in DuckDbSchemaGenerator.StoredCollectors)
         {
             Assert.Equal(schema.PrefixTimeColumnName, timeByTable[schema.TargetTable]);
         }
