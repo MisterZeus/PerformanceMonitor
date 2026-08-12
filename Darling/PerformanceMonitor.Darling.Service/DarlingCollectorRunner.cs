@@ -625,6 +625,14 @@ public sealed class DarlingCollectorRunner
                         using var itemReader = await itemCommand.ExecuteReaderAsync(ct);
                         context.PerItemOpenMs = openWatch.ElapsedMilliseconds;
                         await definition.ReadItemAsync(item, itemReader, batch, context, ct);
+                        /* #2210: this database's plan-XML fetch, right after its runtime-stats read. A separate
+                           query on purpose — it ships in plan_id order, so a budget cut truncates a SUFFIX,
+                           which is the only reason the watermark can advance from a cut pass at all. */
+                        if (context.CapturePlanXml)
+                        {
+                            await FetchAndStorePlansAsync(sqlConnection, server, item, context, itemTimeout, ct);
+                        }
+
                         return batch;
                     },
                     writeBatch: (batch, ct) => WriteBatchAsync(pgConnection, definition, batch, server, collectionTime, context, ct),
@@ -1006,6 +1014,104 @@ public sealed class DarlingCollectorRunner
             _logger?.LogDebug(ex, "Reading collector state for {Collector} failed; using the no-state path", collectorName);
         }
         return state;
+    }
+
+    /// <summary>
+    /// Fetches one database's un-stored plan XML in <c>plan_id</c> order, lands it into the shared plan dimension
+    /// plus the map, and advances that database's watermark to what actually LANDED (#2210).
+    ///
+    /// <para>Failure-isolated, and that is load-bearing rather than defensive: plan XML is an enrichment on top
+    /// of runtime statistics, so a fetch that throws must not cost the database its runtime stats. It logs and
+    /// returns with the watermark untouched, which is safe by construction — the watermark only ever advances to
+    /// content already written, so the next pass simply re-selects the same plans.</para>
+    ///
+    /// <para>The candidate window is seeded conservatively rather than adapted, DELIBERATELY, and this is the one
+    /// piece of the ratified design not yet wired: the adaptive input is the previous pass's own
+    /// bytes-per-plan, and there is nowhere to keep it. <c>CollectorContext</c> is shared with Lite, so adding a
+    /// field is a two-host contract change — the same reasoning that put the watermark under its own state owner
+    /// rather than on the definition — and the state VALUE is a parsed <c>planId:stamp</c> pair that cannot carry
+    /// a third field without a format change and a migration for readers. Passing null means K comes from
+    /// <c>FirstContactAvgPlanBytes</c>, which over-estimates plan size and therefore under-sizes the window: it
+    /// fetches fewer plans per pass than it could, and never more than it should. Slower convergence, never
+    /// unsafe.</para>
+    /// </summary>
+    private async Task FetchAndStorePlansAsync(
+        SqlConnection sqlConnection,
+        ServerRuntime server,
+        string databaseName,
+        CollectorContext context,
+        int itemTimeout,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var watermark = QueryStorePlanXmlState.Resolve(context.State, databaseName, context.CollectionTime);
+            var budget = context.TextByteBudgetOverride ?? 12 * 1024 * 1024;
+            var candidates = QueryStorePlanXmlState.CandidatePlanCount(
+                observedAvgPlanBytes: null, budget, out var clamped);
+
+            if (clamped)
+            {
+                _logger?.LogInformation(
+                    "query_store plan fetch on '{Server}' database [{Database}]: candidate window clamped to {K} — a bound sized this pass, not a measurement.",
+                    server.Config.DisplayName, databaseName, candidates);
+            }
+
+            var query = QueryStoreCollector.Instance.BuildPlanFetchQuery(
+                databaseName, context, watermark, candidates, budget);
+
+            var fetched = new List<FetchedPlan>();
+            using (var command = CreateCollectorCommand(query, sqlConnection, itemTimeout))
+            await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    fetched.Add(new FetchedPlan(
+                        reader.GetInt64(0),
+                        reader.IsDBNull(1) ? null : reader.GetString(1),
+                        PlanHash: null));
+                }
+            }
+
+            if (fetched.Count == 0)
+            {
+                return;
+            }
+
+            await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+            var landed = await QueryStorePlanWriter.WriteAsync(
+                pgConnection, server.ServerId, databaseName, fetched, context.CollectionTime, cancellationToken);
+
+            var advance = QueryStorePlanXmlState.AdvanceWatermark(watermark, landed);
+            if (!advance.ArrivedInPlanIdOrder)
+            {
+                /* Loud rather than swallowed: the fetch's ORDER BY is what makes a budget cut a suffix, so
+                   out-of-order arrival means that safety argument no longer holds and the pass earns nothing. */
+                _logger?.LogWarning(
+                    "query_store plan fetch on '{Server}' database [{Database}]: plans arrived OUT OF plan_id order — watermark held at {Watermark}. The ORDER BY is what makes a cut safe, so this pass earned no advance.",
+                    server.Config.DisplayName, databaseName, watermark);
+                return;
+            }
+
+            if (advance.Watermark > watermark)
+            {
+                /* Same stamp discipline as the runtime write-back: carried FORWARD across an advance, stamped
+                   fresh only when the standing watermark was 0 (this pass WAS the full fetch). Re-stamping on
+                   every advance would push the sweep period out forever on any database that keeps compiling. */
+                var stamp = watermark > 0
+                    ? QueryStorePlanXmlState.ResolveStamp(context.State, databaseName) ?? context.CollectionTime
+                    : context.CollectionTime;
+
+                context.PendingState[QueryStorePlanXmlState.KeyFor(databaseName)] =
+                    QueryStorePlanXmlState.Format(advance.Watermark, stamp);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogWarning(ex,
+                "query_store plan fetch failed on '{Server}' database [{Database}] — runtime statistics are unaffected and the watermark is unchanged, so the next pass re-selects the same plans.",
+                server.Config.DisplayName, databaseName);
+        }
     }
 
     /// <summary>
