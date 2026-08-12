@@ -57,6 +57,20 @@ public sealed class CollectorMemoryKnobTests
     public void TextBudgetClamp_KeepsTheKnobInsideTheMemoryBound(int stored, int expected) =>
         Assert.Equal(expected, StoreConfigProvider.ClampTextBudgetMb(stored));
 
+    /// <summary>#2171: the codec knob fails toward the shipped default - anything that is not
+    /// exactly 'none' (any casing, padded) is 'gzip', so a hand-edited row cannot put the writer
+    /// in an undefined mode. Mirrors the V62 CHECK constraint; both fail the same direction.</summary>
+    [Theory]
+    [InlineData(null, "gzip")]
+    [InlineData("", "gzip")]
+    [InlineData("gzip", "gzip")]
+    [InlineData("  GZIP ", "gzip")]
+    [InlineData("none", "none")]
+    [InlineData(" NONE ", "none")]
+    [InlineData("zstd", "gzip")]
+    public void PlanXmlCompression_NormalizesToGzipOrNone_FailingTowardGzip(string? stored, string expected) =>
+        Assert.Equal(expected, StoreConfigProvider.NormalizePlanXmlCompression(stored));
+
     [Theory]
     [InlineData(0, 1)]          // never zero — that would stop collection entirely
     [InlineData(1, 1)]
@@ -191,6 +205,8 @@ public sealed class CollectorMemoryKnobTests
             true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true,
             true, true, true, true, true, true, hasJobMetricsColumns: true, hasJobCadenceKnob: true,
             hasBackfillSwitch: true, hasCollectorMemoryKnobs: true, hasDatabaseStateEdgeMemory: false));
-        Assert.Equal(68, ViewerDataService.RequiredStoreSchemaVersion);
+        /* Invariant form, no literal to go stale (the fourth such pin found in two days of version
+           bumps): the gate always requires exactly the build's schema version. */
+        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
     }
 }

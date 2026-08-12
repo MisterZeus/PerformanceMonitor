@@ -10,7 +10,6 @@ using System;
 using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Reflection;
 using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows.Media;
@@ -625,26 +624,20 @@ public sealed class ViewerSchemaVersionGateTests
            the guard against the probe silently under-reporting a newer store as skewed, which would make
            the connect-time gate refuse to open the viewer against a perfectly healthy store.
 
-           The argument list is built from the method's OWN ARITY rather than hand-counted literals, because
-           hand-counted literals are how this broke: a new sentinel was appended, this call still passed the
-           old count, the missing one defaulted to false, and "a fully-migrated store" quietly came to mean
-           "one rung short". The assertion then failed on the version number and pointed at the migration
-           instead of at this line. Reflection cannot drift from the signature. */
-        var allSentinelsTrue = Enumerable
-            .Repeat<object>(true, typeof(ViewerDataService)
-                .GetMethod(
-                    nameof(ViewerDataService.MapProbedSchemaVersion),
-                    BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)!
-                .GetParameters().Length)
-            .ToArray();
+           Built by REFLECTION so the call's arity tracks the signature: the literal-true form silently
+           defaults every newly added sentinel parameter to false, maps one version low, and fails this test
+           on every probe extension — it broke on the V61 bump and again on the V61+V62 merge. All-true IS
+           the contract here (a fully-migrated store has every sentinel), so the arity is the only thing the
+           literals ever expressed. */
+        var map = typeof(ViewerDataService).GetMethod(
+            nameof(ViewerDataService.MapProbedSchemaVersion),
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+        var allTrue = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        Assert.Equal(ViewerDataService.RequiredStoreSchemaVersion, (int)map.Invoke(null, allTrue)!);
 
-        Assert.Equal(
-            ViewerDataService.RequiredStoreSchemaVersion,
-            (int)typeof(ViewerDataService)
-                .GetMethod(
-                    nameof(ViewerDataService.MapProbedSchemaVersion),
-                    BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)!
-                .Invoke(null, allSentinelsTrue)!);
+        /* Probe row width vs mapper arity is deliberately NOT string-counted here: one ordinal is
+           legitimately a compound (two EXISTS OR-ed), so token counting lies. The live probe tests cover
+           that seam — a width/arity mismatch throws on GetBoolean against a real store. */
     }
 }
 

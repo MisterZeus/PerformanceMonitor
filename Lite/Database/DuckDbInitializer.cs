@@ -98,7 +98,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 53;
+    internal const int CurrentSchemaVersion = 54;
 
     private readonly string _archivePath;
 
@@ -1219,6 +1219,29 @@ public class DuckDbInitializer
             catch
             {
                 /* Table doesn't exist yet — will be created with the full schema below */
+            }
+        }
+
+        if (fromVersion < 54)
+        {
+            /* v54 (#2216): the per-fingerprint occurrence counters, porting Darling's V61. The count on an
+               alert incident is a rolling-window gauge, so a consumer receiving only throttled deliveries
+               cannot recover the true total from a sequence of readings. New table only — fresh installs
+               get it from GetAllTableStatements(); this CREATE is for an existing database, and it is
+               idempotent so a re-run is a no-op. Nothing to backfill: an absent row means "no incident in
+               flight for this fingerprint", which is what every fingerprint looks like before the feature
+               existed, so the first delivery after the upgrade opens an incident and counts from there. */
+            _logger?.LogInformation("Running migration to v54: adding config_incident_occurrences");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, Schema.CreateIncidentOccurrencesTable);
+            }
+            catch (Exception ex)
+            {
+                /* Non-fatal, matching v31's posture: without the table the store's load returns empty and
+                   the accumulator degrades to reporting the total as the window count — the pre-#2216
+                   information rather than a broken alert path. */
+                _logger?.LogWarning("Migration to v54 encountered an error (non-fatal): {Error}", ex.Message);
             }
         }
     }

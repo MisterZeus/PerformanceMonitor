@@ -74,6 +74,18 @@ public sealed class DarlingConfig
     public int QueryStoreTextBudgetMb { get; set; } = 64;
 
     /// <summary>
+    /// The plan-XML storage codec (#2171). Store-backed (config_service, V62), normalized to 'gzip' or
+    /// 'none' on read. 'gzip' (default, unchanged): plans live as gzip bytes in query_plan_gz - 14.0x
+    /// measured, readable only through the apps/MCP. 'none': plans written as plain text into
+    /// query_plan_xml - lz4 TOAST compresses ~8.9x, and anything reading the store directly over SQL
+    /// (Grafana, report tooling) gets plan XML back with no extension and no UDF. Flipping it affects
+    /// NEW rows only; the readers' text-first-else-gz resolution covers every mix. The dimension is
+    /// content-addressed either way, so the digest and dedup are codec-independent.
+    /// </summary>
+    [JsonPropertyName("planXmlCompression")]
+    public string PlanXmlCompression { get; set; } = "gzip";
+
+    /// <summary>
     /// How many per-server collection bodies may hold a SQL connection at once (#2170) — the #1553 fleet
     /// gate, previously hardcoded to 4. Store-backed (config_service, V59), clamped [1,16], default 4.
     /// Raise it on a host with headroom watching a large fleet, where 4-wide serialization is what makes

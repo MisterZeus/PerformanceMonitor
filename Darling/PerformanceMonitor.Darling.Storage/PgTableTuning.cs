@@ -51,7 +51,7 @@ public static class PgTableTuning
     /// COVERING composer indexes (INCLUDE the aggregate columns the Procedures / Queries / Query Store measures
     /// SUM/AVG, for an Index Only Scan), three <c>(server_id, handle/hash/id, collection_time DESC)</c> lookup
     /// indexes for the single-row analyze_*_plan reads (no INCLUDE — one heap fetch is cheap), then the per-table
-    /// autovacuum-insert override on exactly the three growing tables. Bare collect-qualified names; every
+    /// autovacuum-insert override on exactly the four growing tables. Bare collect-qualified names; every
     /// identifier is a compile-time constant, never user input, so interpolation is not a concern.
     /// </summary>
     public static IReadOnlyList<string> Statements { get; } = new[]
