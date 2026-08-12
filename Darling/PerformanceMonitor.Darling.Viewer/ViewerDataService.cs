@@ -492,12 +492,20 @@ SELECT
     /// </summary>
     internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false, bool hasAgCollectors = false, bool hasAgAlertKnobs = false, bool hasAgLatencyColumns = false, bool hasAgDisconnectRefire = false, bool hasPayloadDimensions = false, bool hasDimFloorIndexes = false, bool hasBlockingWaitThreshold = false, bool hasQueryStoreIntervalIdentity = false, bool hasPagerDutyWebhook = false, bool hasPagerDutyProxy = false, bool hasCollectorState = false, bool hasPlanCorrection = false, bool hasPvsStats = false, bool hasPvsPressureKnobs = false, bool hasDatabaseStateAlert = false, bool hasServerTagColour = false, bool hasQueryStatsHostObject = false, bool hasFindingDrillDown = false, bool hasStoreMetrics = false, bool hasPlanDimGzip = false, bool hasSelfAlertKnobs = false, bool hasJobMetricsColumns = false, bool hasJobCadenceKnob = false, bool hasBackfillSwitch = false, bool hasCollectorMemoryKnobs = false, bool hasDatabaseStateEdgeMemory = false, bool hasMonitoredServerEngine = false, bool hasPgBlockingEdges = false)
     {
-        /* V69 (collect.pg_blocking_edges): a table-existence sentinel and now the newest-first arm. A
-           collector table would ordinarily get no arm at all — see the V61-V67 note below — but the TOP rung
-           always needs one, whatever it happens to be, because RequiredStoreSchemaVersion is
+        /* V69 (the PostgreSQL blocking-edges rung): a table-existence sentinel and now the newest-first arm.
+           A collector table would ordinarily get no arm at all — see the V61-V67 note below — but the TOP
+           rung always needs one, whatever it happens to be, because RequiredStoreSchemaVersion is
            StorageVersion.SchemaVersion and a fully-migrated store must map to EXACTLY that or the version
            banner reports a mismatch on a store that is current. Being a collector table makes it no less
-           reliable as a sentinel; it simply is not interesting for any other reason. */
+           reliable as a sentinel; it simply is not interesting for any other reason.
+
+           Deliberately NOT spelled with its collect.<table> name here, and this is the only place in the
+           file where that matters. ViewerCollectorCoverageTests scans this reader layer for collector table
+           names by plain substring to decide which tables the viewer actually reads; it strips the probe's
+           information_schema lines precisely so a migration sentinel cannot fake coverage, but a PROSE
+           mention has no such line to strip. Naming the table in this comment made the table look read,
+           which silently exempted it from the coverage ratchet — the exact failure that pin exists to
+           catch, reported as a stale allow-list entry. */
         if (hasPgBlockingEdges)
         {
             return 69;
