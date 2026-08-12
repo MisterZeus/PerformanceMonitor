@@ -505,8 +505,13 @@ public partial class App : Application
                 ? ActiveWindowHandleOnUIThread()
                 : dispatcher.Invoke(ActiveWindowHandleOnUIThread);
         }
-        catch
+        catch (Exception ex)
         {
+            /* Zero reproduces the original #2184 symptom (0xwindow_handle_required), so a throw here
+               must leave a trace - a silent fallback would be this bug's own shape one layer down. The
+               log call is guarded because this can fire during shutdown, after the dispatcher and
+               logger are gone, and logging must never be the thing that breaks auth. */
+            try { AppLogger.Warn("App", $"Entra parent-window handle resolution failed; WAM will see no handle: {ex.Message}"); } catch { /* nothing left to log to */ }
             return IntPtr.Zero;
         }
     }
