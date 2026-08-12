@@ -99,6 +99,19 @@ WHERE EXCLUDED.last_seen >= query_store_plan_map.last_seen";
     /// than the newest fact batch that referenced it, so the prune cannot take a row that live facts are
     /// touching.</para>
     ///
+    /// <para>It also RETURNS the reset signal, in the same round trip, because the batch join it already does is
+    /// exactly where that signal lives: a batch row at or below the watermark (<c>$5</c>) with NO map row is a
+    /// plan whose content the store has never resolved, which "no new plans this window" cannot produce — that
+    /// is a renumbered catalog, i.e. Query Store was cleared. The caller resets that database's watermark to
+    /// zero and logs loudly. It cuts reset blackout from the refresh horizon (up to a day, and per the
+    /// walk-cost measurement the horizon cannot even be relied on to complete) down to one cycle.</para>
+    ///
+    /// <para>The three preceding CTEs still run. Postgres executes data-modifying <c>WITH</c> statements exactly
+    /// once and to completion whether or not the primary query reads their output, so making the final statement
+    /// a SELECT does not turn the liveness stamping into a no-op. That is a load-bearing detail: if it were not
+    /// true, this restructure would silently stop refreshing <c>last_seen</c> and reintroduce the GC hazard the
+    /// touch exists to prevent.</para>
+    ///
     /// <para>Guarded at one hour like the dimension upsert's own conflict arm, and for the same reason — the
     /// horizons are multi-day, so an update per row per hour is enough freshness and the write amplification
     /// stays bounded on a hot catalog. The margin arithmetic already accounts for this trailing hour.</para>
@@ -131,11 +144,24 @@ map_touch AS (
       AND m.database_name = t.database_name
       AND m.plan_id = t.plan_id
     RETURNING t.digest
+),
+dim_touch AS (
+    UPDATE collect.query_plan_dim AS d
+    SET last_seen = $4::timestamp
+    WHERE d.digest IN (SELECT digest FROM map_touch)
+      AND d.last_seen < $4::timestamp - interval '1 hour'
+    RETURNING d.digest
 )
-UPDATE collect.query_plan_dim AS d
-SET last_seen = $4::timestamp
-WHERE d.digest IN (SELECT digest FROM map_touch)
-  AND d.last_seen < $4::timestamp - interval '1 hour'";
+SELECT batch.plan_id
+FROM unnest($1::integer[], $2::text[], $3::bigint[])
+     AS batch(server_id, database_name, plan_id)
+LEFT JOIN collect.query_store_plan_map AS m
+       ON  m.server_id = batch.server_id
+       AND m.database_name = batch.database_name
+       AND m.plan_id = batch.plan_id
+WHERE m.plan_id IS NULL
+  AND batch.plan_id <= $5::bigint
+ORDER BY batch.plan_id";
 
     /// <summary>
     /// Days of margin the map prune adds past the fact-retention horizon. **Strictly less than the dimension
