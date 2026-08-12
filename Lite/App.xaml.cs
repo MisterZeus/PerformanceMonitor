@@ -16,6 +16,7 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Interop;
 using PerformanceMonitor.Notifications;
 using System.Windows.Threading;
 using PerformanceMonitorLite.Services;
@@ -459,9 +460,75 @@ public partial class App : Application
         DispatcherUnhandledException += OnDispatcherUnhandledException;
         TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
 
+        /* Entra MFA needs a parent window handle for the WAM broker, or interactive auth fails with
+           0xwindow_handle_required instead of prompting (#2184). Registered once, before any window
+           exists, because SqlAuthenticationProvider installs process-wide: the Add/Edit dialog's Test
+           Connection and every collector connection are covered without per-site wiring. The handle
+           itself is resolved lazily per prompt, so registering this early is safe. */
+        Services.EntraInteractiveAuth.Register(ActiveWindowHandle);
+
         // Create and show main window (StartupUri removed for Velopack custom Main)
         _mainWindow = new MainWindow();
         _mainWindow.Show();
+    }
+
+    /// <summary>
+    /// The window that should own an Entra MFA prompt, resolved at the moment MSAL asks (#2184).
+    ///
+    /// <para>Prefers whichever window is currently active over the main window, because a connection is
+    /// usually triggered from the Add/Edit Server dialog — parenting the account picker to the main
+    /// window behind it would let the picker appear behind the dialog the user is looking at. Falls back
+    /// to the main window, then to <see cref="IntPtr.Zero"/>, which MSAL treats the same as no handle:
+    /// the prompt fails rather than the app crashing, which is the right way round for an auth path.</para>
+    ///
+    /// <para>Resolved per call rather than captured once: a window's HWND does not exist until the
+    /// window has been sourced, and the right parent is whichever window is in front now, not the one
+    /// that existed at startup.</para>
+    ///
+    /// <para>Marshaled to the UI thread: MSAL invokes this from whatever thread SqlClient's token
+    /// acquisition runs on — collector worker threads included — and WPF enforces dispatcher affinity
+    /// on <see cref="Window"/> properties, so an off-thread read would throw rather than merely race.
+    /// The blocking Invoke is safe here because no UI-thread path blocks on a SQL connection open
+    /// (opens are async throughout; the UI stays pumping). If the dispatcher cannot deliver anyway
+    /// (shutdown timing), Zero degrades to MSAL's normal no-handle failure instead of throwing from
+    /// inside the auth callback.</para>
+    /// </summary>
+    private static IntPtr ActiveWindowHandle()
+    {
+        try
+        {
+            var dispatcher = Current?.Dispatcher;
+            if (dispatcher is null)
+                return IntPtr.Zero;
+
+            return dispatcher.CheckAccess()
+                ? ActiveWindowHandleOnUIThread()
+                : dispatcher.Invoke(ActiveWindowHandleOnUIThread);
+        }
+        catch
+        {
+            return IntPtr.Zero;
+        }
+    }
+
+    private static IntPtr ActiveWindowHandleOnUIThread()
+    {
+        var app = Current;
+        if (app is null)
+            return IntPtr.Zero;
+
+        Window? active = null;
+        foreach (Window window in app.Windows)
+        {
+            if (window.IsActive)
+            {
+                active = window;
+                break;
+            }
+        }
+
+        var owner = active ?? app.MainWindow;
+        return owner is null ? IntPtr.Zero : new WindowInteropHelper(owner).Handle;
     }
 
     /// <summary>
