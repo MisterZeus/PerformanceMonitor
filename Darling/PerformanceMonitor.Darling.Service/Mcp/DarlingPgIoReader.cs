@@ -40,12 +40,17 @@ public static class DarlingPgIoReader
     /// Positive-difference-per-interval, summed over the window — the same rule the statement read uses,
     /// for the same reason: these are cumulative counters, so a plain last-minus-first goes negative
     /// whenever <c>pg_stat_reset_shared('io')</c> runs or the server restarts.
-    /// <para>NULL survives the arithmetic on purpose. PostgreSQL uses NULL for "this counter does not apply
-    /// to this combination", and on Aurora the whole write side is NULL because backends there do not write
-    /// data files. <c>SUM</c> skips NULLs, so a combination that never tracked a counter contributes
-    /// nothing rather than a fabricated zero — and <c>write_counters_tracked</c> reports which case a row is
-    /// in, so a caller can tell "no writes happened" from "writes are not measured here" instead of
-    /// dividing by a zero that means the latter.</para>
+    /// <para><b>The numeric columns DO come back as 0 for an untracked counter, and
+    /// <c>write_counters_tracked</c> is what makes that safe.</b> PostgreSQL uses NULL for "this counter does
+    /// not apply to this combination", and on Aurora the entire write side is NULL because backends there do
+    /// not write data files. Two things then flatten it: <c>GREATEST(NULL, 0)</c> returns <c>0</c> — GREATEST
+    /// ignores NULLs, verified against live Aurora 17.7 — and the outer <c>coalesce(SUM(...), 0)</c> would do
+    /// it anyway. So a caller MUST read <c>write_counters_tracked</c> to tell "no writes happened" from
+    /// "writes are not measured here"; the zero alone cannot distinguish them, and averaging latency over it
+    /// divides by a number that was never measured.</para>
+    /// <para>This comment previously claimed NULL survived the arithmetic. It does not, and the claim was
+    /// worse than useless: it would have licensed someone to drop the tracked flag believing the NULLs were
+    /// carrying the information. The flag is not belt-and-braces — it is the only discriminator.</para>
     /// <para>$1 server_id, $2/$3 window (naive UTC).</para>
     /// </summary>
     public const string PgIoSql = """
