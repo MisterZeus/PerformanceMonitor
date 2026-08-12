@@ -46,7 +46,7 @@ public sealed class PvsStatsStoreTests
            this migration — the newest-rung pins track the newest, the V47 identity pins below are
            unchanged. */
         Assert.Equal(60, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(60, StorageVersion.SchemaVersion);
+        Assert.Equal(61, StorageVersion.SchemaVersion);
 
         /* collect.-qualified like V44 and V34, and idempotent so a re-run is a no-op. */
         Assert.Contains("CREATE TABLE IF NOT EXISTS collect.pvs_stats (", v47.Sql, StringComparison.Ordinal);
@@ -87,7 +87,7 @@ public sealed class PvsStatsStoreTests
            migration reports every healthy store as skewed and refuses to open it — permanently.
            (53 since #2068's store self-metrics table; the full-sentinel pin lives in
            ViewerDataServiceTests.) */
-        Assert.Equal(60, ViewerDataService.RequiredStoreSchemaVersion);
+        Assert.Equal(61, ViewerDataService.RequiredStoreSchemaVersion);
         Assert.Contains("table_name = 'pvs_stats'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         /* The V47 arm: pvs_stats present (and nothing newer) maps to exactly 47. */
