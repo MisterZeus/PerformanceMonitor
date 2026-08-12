@@ -1131,6 +1131,17 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
                 "BuildPlanFetchQuery requires CapturePlanXml; a host that does not capture plan XML must not issue the plan fetch.");
         }
 
+        /* A non-positive budget would make the predicate `running_bytes - plan_bytes < 0`, which excludes even
+           the FIRST candidate (its running total before it is 0, and 0 < 0 is false) — the pass ships nothing,
+           the watermark holds, and the next pass re-selects the same plans. The oversized-plan stall for a third
+           time, from a third direction. CandidatePlanCount already floors a non-positive budget for its own
+           sizing; this method has to guard its own input rather than assume the caller passed that value through. */
+        if (budgetBytes <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(budgetBytes), budgetBytes, "The plan-fetch byte budget must be positive; a zero or negative budget ships nothing and stalls the watermark.");
+        }
+
         var escapedDbName = item.Replace("]", "]]", StringComparison.Ordinal);
         var k = candidatePlans.ToString(System.Globalization.CultureInfo.InvariantCulture);
         var budget = budgetBytes.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -1159,7 +1170,8 @@ SELECT
     query_plan_text = b.query_plan_text
 FROM budgeted AS b
 WHERE b.running_bytes - b.plan_bytes < {budget}
-ORDER BY b.plan_id;";
+ORDER BY b.plan_id
+OPTION(RECOMPILE);";
 
         var escapedBody = body.Replace("'", "''", StringComparison.Ordinal);
 
