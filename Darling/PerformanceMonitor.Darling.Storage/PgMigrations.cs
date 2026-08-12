@@ -117,7 +117,7 @@ public static class PgMigrations
         new Migration(58, "qs-backfill-switch", V58Sql),
         new Migration(59, "collector-memory-knobs", V59Sql),
         new Migration(60, "database-state-edge-memory", V60Sql),
-        new Migration(69, "query-store-plan-map", V69Sql),
+        new Migration(61, "query-store-plan-map", V61Sql),
     };
 
     /// <summary>
@@ -1177,7 +1177,7 @@ ALTER TABLE config.database_state_expected
     ADD COLUMN IF NOT EXISTS last_alerted_at timestamp;";
 
     /// <summary>
-    /// V69 — the Query Store plan map (#2210): <c>(server_id, database_name, plan_id) → digest</c>, so Query
+    /// V61 — the Query Store plan map (#2210): <c>(server_id, database_name, plan_id) → digest</c>, so Query
     /// Store facts can reference plan XML they no longer carry once the cutover moves that content into the
     /// shared <c>query_plan_dim</c>. Plan XML was stored INLINE on <c>query_store_stats</c> at roughly 5x
     /// redundancy — the same plans re-shipped pass after pass — which is what this replaces.
@@ -1188,13 +1188,19 @@ ALTER TABLE config.database_state_expected
     /// <c>last_seen</c> rather than by counting references, and ending the re-shipping ends the signal that
     /// used to keep those dim rows alive.</para>
     ///
-    /// <para>NUMBERED 69, not 61, and deliberately gapped: PR #2213 (PostgreSQL/Aurora target monitoring)
-    /// claims V61-V68 and moves <c>StorageVersion.SchemaVersion</c> to 68. The gap costs nothing — the runner
-    /// skips any rung at or below the store's current version and stamps what it applies — while a COLLIDING
-    /// number would be silently skipped rather than rejected, and a map table that never got created reads as
-    /// "plan not yet collected" on every lookup. The cutover would look healthy and hold nothing.</para>
+    /// <para>NUMBERED <c>max(dev) + 1</c>, WITHOUT a gap, and that is the load-bearing part. PR #2213 also
+    /// claims rungs in this range, and the tempting move — number above it and leave 61-68 free — is unsafe in a
+    /// way that is easy to talk yourself into: the runner skips any rung at or below the store's stamped version,
+    /// so if THIS branch merges first and a store stamps 69, #2213's 61-68 are all skipped SILENTLY on every
+    /// upgraded store. Gapping is only safe when the gap-filler lands first, which a branch cannot guarantee
+    /// about another branch.</para>
+    ///
+    /// <para>So whichever of the two merges second renumbers to sit immediately above the other, and the ordering
+    /// is settled by a rebase conflict on the migration list rather than by assumption. A collision is loud; a
+    /// gap is silent, and a map table that was never created reads as "plan not yet collected" on every lookup —
+    /// the cutover would look healthy and hold nothing.</para>
     /// </summary>
-    private const string V69Sql = @"
+    private const string V61Sql = @"
 CREATE TABLE IF NOT EXISTS collect.query_store_plan_map (
     server_id integer NOT NULL,
     database_name text NOT NULL,
