@@ -414,6 +414,10 @@ public sealed class DarlingWorker : BackgroundService
         public required MonitoredServer Config { get; set; }
         public ServerRuntime? Runtime { get; set; }
 
+        /* Set once per process after the PostgreSQL analysis-state row is written, so the explanation is
+           recorded without rewriting the same row every analysis interval forever. */
+        public bool PostgresAnalysisStateWritten { get; set; }
+
         /* ConcurrentDictionary (#1553 D1): with the fire-and-track sweep the per-server body runs on a pool
            thread, so a reload's RecomputeNextDueAsync on the OUTER thread can touch this map concurrently with the
            body's RunDueCollectorsAsync read-and-advance. It is only ever INDEXED by the static collector-catalog
@@ -1594,8 +1598,43 @@ public sealed class DarlingWorker : BackgroundService
             {
                 var intervalMinutes = Math.Clamp(config.Analysis.IntervalMinutes, MinAnalysisIntervalMinutes, MaxAnalysisIntervalMinutes);
                 server.NextAnalysisDue = DateTime.UtcNow.AddMinutes(intervalMinutes);
-                await RunScheduledAnalysisAsync(
-                    server, planFetcher, notificationService, config.Analysis.NotificationsEnabled, stoppingToken);
+
+                /* The analysis pipeline is SQL-Server-shaped: its facts come from wait_stats, query_stats,
+                   cpu_utilization_stats and friends, none of which a PostgreSQL target ever writes. Running it
+                   anyway is not harmless. RunAnalysisPassAsync takes a serverId and a storage name — not the
+                   target — so it cannot gate itself, and it would read those tables, find nothing, hit the
+                   24-hour data-span gate and persist insufficient_data = true. FOREVER: those tables will
+                   never have rows for a PostgreSQL server_id, so the Recommendations tab would say "still
+                   collecting" for the life of the deployment, which is the one thing analysis_state exists to
+                   distinguish from a genuine all-clear. Plus a fresh DarlingAnalysisService and up to a
+                   120-second pass per target per interval, producing nothing.
+
+                   So: skip the pass, and say why ONCE rather than leaving the tab silent. The message is the
+                   honest state — not "still collecting", which is a lie about a young deployment. */
+                if (server.Runtime?.Target.Engine == CollectorTargetEngine.PostgreSql)
+                {
+                    if (!server.PostgresAnalysisStateWritten)
+                    {
+                        server.PostgresAnalysisStateWritten = true;
+                        await DarlingObservability.WriteAnalysisStateAsync(
+                            _postgres!,
+                            server.Runtime.ServerId,
+                            insufficientData: true,
+                            message: "Scheduled analysis does not apply to a PostgreSQL target: its findings are "
+                                + "derived from SQL Server collectors (waits, query stats, CPU) that this engine "
+                                + "does not populate. This is not \"still collecting\" — use the PostgreSQL MCP "
+                                + "reads (get_pg_wait_stats, get_pg_top_queries, get_pg_autovacuum_health, "
+                                + "get_pg_wraparound_risk, get_pg_xmin_horizon, get_pg_replication_slots, "
+                                + "get_pg_io_stats) and the three outage-predictor alerts instead.",
+                            _logger,
+                            stoppingToken);
+                    }
+                }
+                else
+                {
+                    await RunScheduledAnalysisAsync(
+                        server, planFetcher, notificationService, config.Analysis.NotificationsEnabled, stoppingToken);
+                }
             }
         }
         catch (OperationCanceledException)

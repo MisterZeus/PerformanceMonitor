@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Data.Common;
 using System.IO;
 using System.Linq;
@@ -129,5 +130,40 @@ public sealed class CollectorRunnerConnectionEngineTests
         var testsDir = Path.GetDirectoryName(thisFile)!;
         return Path.Combine(
             testsDir, "..", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
+    }
+
+    /// <summary>
+    /// The scheduled ANALYSIS pass is gated by engine too, and for a reason worth stating: the pass cannot
+    /// gate itself. <c>RunAnalysisPassAsync</c> takes a serverId and a storage name, not the target, so the
+    /// decision has to be made at the call site.
+    /// <para>Ungated, a PostgreSQL target got a full pass — a fresh analysis service and up to 120 seconds —
+    /// reading SQL Server tables that will never have rows for its server_id. It would hit the 24-hour
+    /// data-span gate and persist <c>insufficient_data = true</c> forever, so the Recommendations tab would
+    /// read "still collecting" for the life of the deployment: exactly the state <c>analysis_state</c> exists
+    /// to tell apart from a genuine all-clear.</para>
+    /// </summary>
+    [Fact]
+    public void TheScheduledAnalysisPassIsGatedByEngine()
+    {
+        var source = File.ReadAllText(WorkerSourcePath());
+
+        var gateAt = source.IndexOf(
+            "server.Runtime?.Target.Engine == CollectorTargetEngine.PostgreSql", StringComparison.Ordinal);
+        var callAt = source.IndexOf("await RunScheduledAnalysisAsync(", StringComparison.Ordinal);
+
+        Assert.True(gateAt > 0, "the analysis call site must test the target engine");
+        Assert.True(
+            gateAt < callAt,
+            "the engine test must come BEFORE the analysis call, or the pass runs and then discovers it "
+            + "should not have");
+
+        /* And the PostgreSQL arm must say why rather than leaving the tab blank. */
+        Assert.Contains("does not apply to a PostgreSQL target", source, StringComparison.Ordinal);
+    }
+
+    private static string WorkerSourcePath([CallerFilePath] string thisFile = "")
+    {
+        var testsDir = Path.GetDirectoryName(thisFile)!;
+        return Path.Combine(testsDir, "..", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
     }
 }

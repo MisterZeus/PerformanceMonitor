@@ -193,9 +193,15 @@ public class PgWraparoundStatsCollectorDefinitionTests
         Assert.Equal(0.0, (double)writer.Values[7]!);
     }
 
-    /// <summary>Remaining headroom counts down from the ceiling, so it shrinks as age grows.</summary>
+    /// <summary>
+    /// Remaining headroom counts down to the point where writes STOP, not to the raw 2^31 ceiling.
+    /// <para>PostgreSQL refuses new write transactions with roughly <see cref="PgWraparoundStatsCollector.StopMargin"/>
+    /// ids still unconsumed, so counting to the ceiling overstated the runway by that margin — and disagreed
+    /// with the MCP tool's own 99.86%-of-space figure, which already accounts for it. This assertion changed
+    /// with that fix and the change IS the fix.</para>
+    /// </summary>
     [Fact]
-    public void RemainingHeadroomCountsDownFromTheCeiling()
+    public void RemainingHeadroomCountsDownToWhereWritesStop()
     {
         var writer = new RecordingCollectorRowWriter();
         PgWraparoundStatsCollector.Instance.WritePayload(
@@ -203,8 +209,29 @@ public class PgWraparoundStatsCollectorDefinitionTests
             writer,
             MakeContext());
 
-        Assert.Equal(PgWraparoundStatsCollector.WraparoundCeiling - 1_000_000_000, writer.Values[9]);
-        Assert.Equal(PgWraparoundStatsCollector.WraparoundCeiling - 2_000_000_000, writer.Values[10]);
+        var stopPoint = PgWraparoundStatsCollector.WraparoundCeiling - PgWraparoundStatsCollector.StopMargin;
+        Assert.Equal(stopPoint - 1_000_000_000, writer.Values[9]);
+        Assert.Equal(stopPoint - 2_000_000_000, writer.Values[10]);
+
+        /* And the margin is real, not zero — otherwise this test would pass against the old behaviour. */
+        Assert.True(PgWraparoundStatsCollector.StopMargin > 0);
+    }
+
+    /// <summary>
+    /// Past the stop point, headroom clamps at 0 rather than going negative. A negative "ids remaining" is
+    /// nonsense to render and worse to compare against a threshold.
+    /// </summary>
+    [Fact]
+    public void RemainingHeadroomClampsAtZeroPastTheStopPoint()
+    {
+        var writer = new RecordingCollectorRowWriter();
+        PgWraparoundStatsCollector.Instance.WritePayload(
+            new PgWraparoundStatsCollector.Row("app", 2_147_000_000, 2_147_000_000, 200_000_000, 400_000_000, true),
+            writer,
+            MakeContext());
+
+        Assert.Equal(0L, writer.Values[9]);
+        Assert.Equal(0L, writer.Values[10]);
     }
 
     /// <summary>Age is a distance from a wall, not accumulated work, so no deltas are taken.</summary>
