@@ -45,8 +45,10 @@ public sealed class PvsStatsStoreTests
            (#2060, the persisted finding drill-down), then V53 (#2068, the store self-metrics table) followed
            this migration — the newest-rung pins track the newest, the V47 identity pins below are
            unchanged. */
-        Assert.Equal(60, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(61, StorageVersion.SchemaVersion);
+        /* The invariant the test name states, with no literal to go stale: the build's schema version IS
+           the newest registered rung. Two in-flight branches bumping versions made the literal form a
+           recurring four-test failure (#2210 round). */
+        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
 
         /* collect.-qualified like V44 and V34, and idempotent so a re-run is a no-op. */
         Assert.Contains("CREATE TABLE IF NOT EXISTS collect.pvs_stats (", v47.Sql, StringComparison.Ordinal);

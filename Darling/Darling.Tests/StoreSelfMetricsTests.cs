@@ -40,8 +40,10 @@ public sealed class StoreSelfMetricsTests
         var v53 = PgMigrations.Scripts.Single(m => m.Version == 53);
 
         Assert.Equal("store-self-metrics", v53.Name);
-        Assert.Equal(60, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(61, StorageVersion.SchemaVersion);
+        /* The invariant the test name states, with no literal to go stale: the build's schema version IS
+           the newest registered rung. Two in-flight branches bumping versions made the literal form a
+           recurring four-test failure (#2210 round). */
+        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
 
         /* collect.-qualified like V44/V47/V49, and idempotent so a re-run is a no-op. */
         Assert.Contains("CREATE TABLE IF NOT EXISTS collect.store_metrics (", v53.Sql, StringComparison.Ordinal);
