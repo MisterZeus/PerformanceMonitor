@@ -184,6 +184,26 @@ LEFT JOIN collect.query_store_plan_map AS m
 ORDER BY batch.server_id, batch.database_name, batch.plan_id";
 
     /// <summary>
+    /// Strips the <see cref="DateTimeKind"/> off a timestamp before it is bound to any of this class's
+    /// <c>::timestamp</c> parameters. Every call site that binds a <see cref="DateTime"/> here must go through
+    /// this — <see cref="UpsertSql"/>'s stamp array and <see cref="TouchSql"/>'s <c>$4</c>, plus the prune's
+    /// cutoff.
+    ///
+    /// <para>This is the #1969 trap, and it is silent. Npgsql infers the parameter type from the value's Kind:
+    /// a <c>Utc</c> or <c>Local</c> DateTime infers <c>timestamptz</c>, Postgres then converts it into the
+    /// session time zone on the way into a naive <c>timestamp</c> column, and the row lands at the wrong hour
+    /// with no error anywhere. For the liveness columns that is worse than a visible failure: a
+    /// <c>last_seen</c> written hours early ages a map or dimension row out ahead of the facts that reference
+    /// it, which is the silent-missing-plans outcome this whole design is built to prevent, arrived at through
+    /// a timezone rather than through a GC bug.</para>
+    ///
+    /// <para>A helper rather than a convention because a convention is what fails at the one call site somebody
+    /// adds later. The value is not shifted, only relabelled: callers are expected to pass UTC already, and
+    /// <see cref="System.DateTime.SpecifyKind"/> changes the Kind without touching the ticks.</para>
+    /// </summary>
+    public static DateTime Naive(DateTime utc) => DateTime.SpecifyKind(utc, DateTimeKind.Unspecified);
+
+    /// <summary>
     /// The map rows a re-verify cursor slice needs to judge, for one database over a bounded
     /// <c>plan_id</c> range: what content the store believes each plan has.
     ///

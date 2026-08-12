@@ -86,6 +86,34 @@ public sealed class DarlingDimensionGcBoundTests
     }
 
     /// <summary>
+    /// #2210 / #1969: timestamps bound to the map's naive <c>::timestamp</c> parameters must carry
+    /// <see cref="DateTimeKind.Unspecified"/>, or Npgsql infers <c>timestamptz</c> from the Kind and Postgres
+    /// converts into the session zone on the way in — landing <c>last_seen</c> at the wrong hour silently. For a
+    /// liveness column that ages a row out ahead of the facts referencing it, which is the silent-missing-plans
+    /// outcome by way of a timezone.
+    ///
+    /// <para>Pins that the helper relabels without SHIFTING: same ticks, Kind cleared. A version that converted
+    /// would be worse than the bug, since it would look correct in isolation.</para>
+    /// </summary>
+    [Fact]
+    public void MapTimestamps_AreRelabelledNaive_WithoutShiftingTheInstant()
+    {
+        var utc = new DateTime(2026, 8, 12, 10, 52, 43, DateTimeKind.Utc);
+
+        var naive = QueryStorePlanMap.Naive(utc);
+
+        Assert.Equal(DateTimeKind.Unspecified, naive.Kind);
+        Assert.Equal(utc.Ticks, naive.Ticks);
+
+        /* Idempotent, and a Local input is relabelled rather than converted — the caller's contract is that it
+           passes UTC, and this must not quietly "fix" a value it was handed. */
+        Assert.Equal(naive, QueryStorePlanMap.Naive(naive));
+        Assert.Equal(
+            utc.Ticks,
+            QueryStorePlanMap.Naive(DateTime.SpecifyKind(utc, DateTimeKind.Local)).Ticks);
+    }
+
+    /// <summary>
     /// #2210, the both-orders race: whichever order the two prunes run in, there must be no reachable state
     /// where a surviving map row resolves to an absent digest.
     ///
