@@ -213,7 +213,7 @@ public sealed class AbandonableStepTests
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
         var wedge = new TaskCompletionSource();
 
-        var result = await step.RunAsync(() => wedge.Task, Generous, cts.Token);
+        var result = await step.RunAsync(() => wedge.Task, Generous, cancellationToken: cts.Token);
 
         Assert.Equal(AbandonableStepOutcome.Cancelled, result.Outcome);
 

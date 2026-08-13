@@ -130,9 +130,19 @@ public sealed class NpgsqlRootCertificateValidationTests
             handshakeCompleted = true;
 
             /* Past the handshake the client sends its startup message; just swallow a little and
-               close — the failure Npgsql then reports is a protocol error, not a certificate one. */
+               close — the failure Npgsql then reports is a protocol error, not a certificate one.
+
+               CA2022 (inexact read) is suppressed rather than "fixed", because the fix it asks for would
+               break this. The byte COUNT is deliberately meaningless here: the read exists only to let the
+               client finish its startup write before the server drops the connection, and any number of
+               bytes serves that. ReadExactlyAsync — the usual remedy, and the one #2193 suggested — would
+               block until a full 256 bytes arrived, which this client never sends, hanging the test until
+               its timeout. The warning is right that the result is unused; it is wrong that this code
+               depends on a complete read. */
             var scratch = new byte[256];
+#pragma warning disable CA2022 // Avoid inexact read: any count satisfies this drain, see above.
             try { await ssl.ReadAsync(scratch, cts.Token); } catch { /* client may bail first */ }
+#pragma warning restore CA2022
         }, cts.Token);
 
         var builder = new NpgsqlConnectionStringBuilder
