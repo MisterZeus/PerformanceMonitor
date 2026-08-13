@@ -53,8 +53,12 @@ public sealed class DarlingMcpPgWraparoundTools
     private static string Grade(double pctTowardWraparound, double pctTowardEmergencyVacuum) =>
         pctTowardWraparound switch
         {
-            /* ~40M ids left. PostgreSQL starts emitting "must be vacuumed within N transactions". */
-            >= 98.0 => "critical_wraparound_imminent",
+            /* PostgreSQL starts its own "must be vacuumed within N transactions" warnings at
+               wrapLimit - 100M for BOTH counters (varsup.c SetTransactionIdLimit, multixact.c
+               SetMultiXactIdLimit) = ~95.3% of 2^31 — an earlier draft said 98% ("~40M left"),
+               which put this rung ~57M ids AFTER the server began warning. The tool should never
+               grade calmer than the engine. */
+            >= 95.3 => "critical_wraparound_imminent",
             /* vacuum_failsafe_age (1.6B) — cost limits and index cleanup are abandoned to catch up. */
             >= 74.5 => "critical_failsafe_range",
             >= 50.0 => "warning",
@@ -143,7 +147,7 @@ public sealed class DarlingMcpPgWraparoundTools
                 {
                     anti_wraparound_vacuum_forced_at_pct_of_freeze_max_age = 100,
                     failsafe_engages_around_pct = 74.5,
-                    server_warnings_begin_around_pct = 98.0,
+                    server_warnings_begin_around_pct = 95.3,
                     writes_stop_at_pct = 99.86,
                 },
                 databases,

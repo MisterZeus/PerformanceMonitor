@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
@@ -128,6 +129,54 @@ public sealed class LiteAlertStateStore : IAlertStateStore
     {
         var serverId = ParseServerKey(serverKey);
         return Task.Run(() => _store.ClearDatabaseStateAlertedAsync(serverId, databaseName));
+    }
+
+    /// <summary>
+    /// #2216: loads the per-fingerprint occurrence accounting for one server/metric. Wrapped in
+    /// <c>Task.Run</c> like every other method here — DuckDB.NET's I/O is synchronous under its async
+    /// facade and the engine runs on the WPF dispatcher, so an unwrapped call is a UI hitch (#1202).
+    /// </summary>
+    public Task<IReadOnlyDictionary<string, IncidentOccurrenceState>> LoadIncidentOccurrencesAsync(
+        string serverKey, string metricName)
+    {
+        var serverId = ParseServerKey(serverKey);
+        return Task.Run(async () =>
+        {
+            var rows = await _store.LoadIncidentOccurrencesAsync(serverId, metricName);
+            var states = new Dictionary<string, IncidentOccurrenceState>(rows.Count, StringComparer.Ordinal);
+            foreach (var row in rows)
+            {
+                states[row.DedupKey] = new IncidentOccurrenceState(
+                    row.TotalOccurrences, row.ObservedWindowCount, row.IncidentStartedUtc, row.LastObservedUtc);
+            }
+            return (IReadOnlyDictionary<string, IncidentOccurrenceState>)states;
+        });
+    }
+
+    /// <summary>
+    /// #2216: replaces the persisted occurrence set for one server/metric — see the store method for why
+    /// the contract is replace-the-set rather than upsert-each-row, and why an empty set is the falling edge
+    /// rather than a no-op.
+    /// </summary>
+    public Task SaveIncidentOccurrencesAsync(
+        string serverKey, string metricName, IReadOnlyDictionary<string, IncidentOccurrenceState> states)
+    {
+        var serverId = ParseServerKey(serverKey);
+        var rows = new List<(string, long, int, DateTime, DateTime)>(states?.Count ?? 0);
+        if (states is not null)
+        {
+            foreach (var entry in states)
+            {
+                rows.Add((
+                    entry.Key,
+                    entry.Value.TotalOccurrences,
+                    entry.Value.ObservedWindowCount,
+                    entry.Value.IncidentStartedUtc,
+                    entry.Value.LastObservedUtc));
+            }
+        }
+
+        return Task.Run(() => _store.SaveIncidentOccurrencesAsync(serverId, metricName, rows));
     }
 
     private static int ParseServerKey(string serverKey) =>

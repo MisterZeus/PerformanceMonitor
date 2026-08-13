@@ -8,6 +8,7 @@
 
 using System;
 using System.Linq;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
@@ -41,8 +42,9 @@ public class DarlingPgAutovacuumReaderTests
     /// <para>Asserted by STRUCTURE rather than by an exact substring: the previous version matched
     /// <c>"l.dead_tuples::numeric / NULLIF(l.vacuum_threshold, 0) DESC"</c> verbatim and broke on a
     /// reformat that left the behaviour intact, which is a test failing for the wrong reason. The ordering
-    /// SEMANTICS are what matter and they are checked against a live store by
-    /// <c>RanksInsertOnlyTablesAlongsideDeadTupleTables</c> below.</para>
+    /// SEMANTICS are what matter; they were hand-verified on live Aurora during the #2213 rounds
+    /// (no live test carries that name - an earlier draft of this comment asserted one into
+    /// existence).</para>
     /// </summary>
     [Fact]
     public void RanksByThresholdRatioNotRawDeadTupleCount()
@@ -59,8 +61,14 @@ public class DarlingPgAutovacuumReaderTests
         Assert.Contains("l.insert_vacuum_threshold", orderClause, StringComparison.Ordinal);
 
         /* Both ratios must be considered TOGETHER — the worse one decides — rather than one after the other,
-           which would let a table with zero dead tuples sort below every table that has any. */
-        Assert.Contains("GREATEST(", orderClause, StringComparison.Ordinal);
+           which would let a table with zero dead tuples sort below every table that has any. Pinned on
+           the RATIO GREATEST specifically: the raw tie-break below is itself GREATEST(dead, inserts),
+           so a bare "GREATEST(" token is present even after the exact regression this guards
+           (unwrapping the ratios into two sequential ORDER BY terms). */
+        var collapsed = Regex.Replace(orderClause, @"\s+", "");
+        Assert.Contains(
+            "GREATEST(l.dead_tuples::numeric/NULLIF(l.vacuum_threshold,0),",
+            collapsed, StringComparison.Ordinal);
 
         /* The disabled flag outranks everything, then the ratio, then the raw counts as a tie-break. */
         var disabledAt = orderClause.IndexOf("l.autovacuum_disabled DESC", StringComparison.Ordinal);

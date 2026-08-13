@@ -994,7 +994,10 @@ public sealed class DarlingWorker : BackgroundService
            CollectSchemaChangeEvents is a file-only knob (darling.json), read the same way for symmetry —
            default true keeps every SKU collecting Object DDL; set false to silence a benchmark box's flood. */
         var runner = new DarlingCollectorRunner(postgres, deltas, _logger, () => config.CapturePlans, () => config.CollectSchemaChangeEvents,
-            () => StoreConfigProvider.ClampTextBudgetMb(config.QueryStoreTextBudgetMb));
+            () => StoreConfigProvider.ClampTextBudgetMb(config.QueryStoreTextBudgetMb),
+            /* #2171: live provider like its siblings — a store reload flipping plan_xml_compression
+               takes effect on the next write batch, no restart. */
+            compressPlanContent: () => !string.Equals(config.PlanXmlCompression, "none", StringComparison.OrdinalIgnoreCase));
         var servers = new List<ServerLoopState>();
         /* #1581 cold-start stagger: capture ONE startup instant so every initial server's first-sweep offset is
            measured from the same base — the deterministic per-server ColdStartFirstSweepDue then spreads the
@@ -1666,6 +1669,17 @@ public sealed class DarlingWorker : BackgroundService
     private async Task ReconcileLongQueryTraceAsync(ServerLoopState server, DarlingCollectorRunner runner, CancellationToken cancellationToken)
     {
         if (server.Runtime is null)
+        {
+            return;
+        }
+
+        /* XE is a SQL Server concept: there is nothing to create or drop on a PostgreSQL target, and the
+           un-gated form was the round-2 live catch — ReconcileLongQueryCompletionsAsync builds a
+           SqlConnection, the ctor throws "Keyword not supported: 'host'", the catch below skips the latch
+           assignment, and because LongQueryTraceApplied resets to null on every connect the failure retried
+           EVERY sweep forever (~1,440 warnings/day/server, the same order as the defect this PR fixed).
+           Same gate as EnsureAllAsync and FetchFailedJobsAsync, the two doors this class already closed. */
+        if (server.Runtime.Target.Engine != CollectorTargetEngine.SqlServer)
         {
             return;
         }
@@ -2887,6 +2901,39 @@ LIMIT 1", connection);
             return new CommandOutcome(false, "server not monitored", JsonError($"no monitored server with server_id {serverId}"));
         }
 
+        /* The operator door the scheduled-path gate (see the PostgreSql arm in the analysis tick) did not
+           cover: "Generate now" against a PostgreSQL target ran the full SQL-Server-shaped pass, which
+           found nothing, persisted the GENERIC insufficient_data message, and thereby OVERWROTE the honest
+           engine tombstone the scheduled arm wrote — the Recommendations tab regressed from "does not
+           apply, use the PG reads" back to "still collecting" the moment an operator clicked the button.
+           Same decision, same honest answer, re-written here so the tombstone survives the click. */
+        if (server.Runtime?.Target.Engine == CollectorTargetEngine.PostgreSql)
+        {
+            /* Mirror the scheduled arm's once-latch so the tick does not re-write what this just wrote. */
+            server.PostgresAnalysisStateWritten = true;
+            await DarlingObservability.WriteAnalysisStateAsync(
+                _postgres!,
+                server.Runtime.ServerId,
+                insufficientData: true,
+                message: "Scheduled analysis does not apply to a PostgreSQL target: its findings are "
+                    + "derived from SQL Server collectors (waits, query stats, CPU) that this engine "
+                    + "does not populate. This is not \"still collecting\" — use the PostgreSQL MCP "
+                    + "reads (get_pg_wait_stats, get_pg_top_queries, get_pg_autovacuum_health, "
+                    + "get_pg_wraparound_risk, get_pg_xmin_horizon, get_pg_replication_slots, "
+                    + "get_pg_io_stats) and the three outage-predictor alerts instead.",
+                _logger,
+                cancellationToken);
+
+            return new CommandOutcome(true, "analysis not applicable",
+                JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    server = server.Config.DisplayName,
+                    message = "Analysis is SQL-Server-shaped and does not apply to a PostgreSQL target; "
+                        + "use the get_pg_* MCP reads and the outage-predictor alerts instead.",
+                }));
+        }
+
         var result = await RunAnalysisPassAsync(
             serverId, server.Config.StorageName, server.Config.DisplayName,
             planFetcher, notificationService, config.Analysis.NotificationsEnabled, cancellationToken);
@@ -3342,6 +3389,18 @@ LIMIT 1", connection);
                    enabled one NOW regardless of frequency or NextDue — that is what "snapshot" means. */
                 var effective = StoreConfigProvider.ResolveSchedule(name, runtime.ServerId, _scheduleOverrides);
                 if (!effective.Enabled)
+                {
+                    continue;
+                }
+
+                /* The THIRD dispatch loop, and it got neither engine gate in the first round: an operator
+                   snapshot against a PostgreSQL target dispatched every SQL Server collector, whose
+                   AppliesTo early-return yields zero rows and lands a burst of fake SUCCESS in
+                   collection_log — the phantom-success class the other two loops (on-load :3157, scheduled
+                   sweep) were gated against. Same predicate, same PostgreSQL-only scoping. */
+                if (!CollectorCatalog.EngineMatches(name, runtime.Target)
+                    || (runtime.Target.Engine == CollectorTargetEngine.PostgreSql
+                        && !CollectorCatalog.AppliesTo(name, runtime.Target)))
                 {
                     continue;
                 }

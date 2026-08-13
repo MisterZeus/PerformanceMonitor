@@ -125,8 +125,13 @@ public static class DarlingPgStatementReader
         var rows = new List<PgStatementRow>();
         await using var command = postgres.CreateCommand(PgTopQueriesSql);
         command.Parameters.AddWithValue(serverId);
-        command.Parameters.AddWithValue(startUtc);
-        command.Parameters.AddWithValue(endUtc);
+        /* Kind-Unspecified at the BIND, per the store's naive-UTC discipline: a Kind=Utc DateTime makes
+           Npgsql infer timestamptz, and PostgreSQL then resolves the comparison against these naive
+           timestamp columns by converting THEM at the store session's TimeZone - east of UTC every fresh
+           row falls out of the window and the read silently returns nothing. Hidden by UTC-hosted test
+           stores; found by the round-2 review. */
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

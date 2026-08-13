@@ -591,14 +591,14 @@ public sealed class PgSchemaGeneratorTests
     {
         var rungs = new (int Version, ICollectorSchemaInfo Collector)[]
         {
-            (61, PgWaitStatsCollector.Instance),
-            (62, PgStatementStatsCollector.Instance),
-            (63, PgWraparoundStatsCollector.Instance),
-            (64, PgXminHorizonCollector.Instance),
-            (65, PgReplicationSlotsCollector.Instance),
-            (66, PgAutovacuumStatsCollector.Instance),
-            (67, PgIoStatsCollector.Instance),
-            (69, PgBlockingCollector.Instance),
+            (63, PgWaitStatsCollector.Instance),
+            (64, PgStatementStatsCollector.Instance),
+            (65, PgWraparoundStatsCollector.Instance),
+            (66, PgXminHorizonCollector.Instance),
+            (67, PgReplicationSlotsCollector.Instance),
+            (68, PgAutovacuumStatsCollector.Instance),
+            (69, PgIoStatsCollector.Instance),
+            (71, PgBlockingCollector.Instance),
         };
 
         /* Every PostgreSQL collector must appear above. A ninth added without a rung listed here would

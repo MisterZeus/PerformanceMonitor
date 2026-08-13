@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Data.Common;
 using System.IO;
 using System.Linq;
@@ -98,38 +99,68 @@ public sealed class CollectorRunnerConnectionEngineTests
     /// alert-wiring pins already use in this suite.
     /// </summary>
     [Fact]
-    public void TheRunnerNeverConstructsAnEngineSpecificConnectionDirectly()
+    public void NoServiceFileConstructsAnEngineSpecificConnectionDirectly()
     {
-        var source = File.ReadAllText(RunnerSourcePath());
-
         /* The precise hazard is not "constructs a connection" — it is "constructs a connection from
            server.ConnectionString", the engine-AMBIGUOUS value, which is exactly what the bug did. A
            connection built from a string an explicitly SQL-Server-only plan produced is fine and must stay
            allowed: the Azure SQL master hop calls SqlServerTargetProvider.Instance.BuildDatabaseListPlan and
            then opens its own SqlConnection, because per-database enumeration on Azure SQL DB is a SQL Server
            feature by definition. A blunter "no constructions at all" rule flags that and teaches the next
-           person to suppress the test rather than read it. */
-        var ambiguous = Regex.Matches(
-                source,
-                @"new\s+(?:SqlConnection|NpgsqlConnection)\s*\(\s*server\.ConnectionString\s*\)")
-            .Select(m => m.Value)
-            .ToArray();
+           person to suppress the test rather than read it.
+
+           DIRECTORY-scoped, not runner-scoped, because the single-file form missed the round-2 live catch:
+           the identical construction sat in DarlingXeSessions.cs, out of scan reach, and failed once a
+           minute on every PostgreSQL target. Files listed below are ALLOWED to carry the construction
+           because every path into them is engine-gated, and each entry names the gate that makes it true —
+           an allowlisted file whose gate is later removed is a live bug this test can no longer see, so the
+           entry must name something a reviewer can check. */
+        var allowed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            /* BOTH public entry points self-gate on Engine == SqlServer at their first line
+               (EnsureAllAsync and ReconcileLongQueryCompletionsAsync) — XE is SQL Server only, and
+               every construction site in the file sits behind one of those two gates. */
+            ["DarlingXeSessions.cs"] = "self-gates at EnsureAllAsync and ReconcileLongQueryCompletionsAsync entries",
+
+            /* Backfill dispatch runs behind CollectorCatalog.AppliesTo (the composed engine gate) at
+               QueryStoreBackfill's work-selection, so a PostgreSQL target never reaches the SQL branch. */
+            ["QueryStoreBackfill.cs"] = "composed AppliesTo gate at backfill dispatch",
+        };
+
+        var offenders = new List<string>();
+        /* Recursive: Mcp/, Targets/ and friends are exactly one directory down, and "the single-file
+           scan is how this one hid" applies verbatim to a single-directory scan. */
+        foreach (var path in Directory.EnumerateFiles(ServiceSourceDirectory(), "*.cs", SearchOption.AllDirectories))
+        {
+            var name = Path.GetFileName(path);
+            if (allowed.ContainsKey(name))
+            {
+                continue;
+            }
+
+            foreach (Match match in Regex.Matches(
+                File.ReadAllText(path),
+                @"new\s+(?:SqlConnection|NpgsqlConnection)\s*\(\s*server\.ConnectionString\s*\)"))
+            {
+                offenders.Add(name + ": " + match.Value);
+            }
+        }
 
         Assert.True(
-            ambiguous.Length == 0,
-            "DarlingCollectorRunner constructs an engine-specific connection from server.ConnectionString: "
-            + string.Join(", ", ambiguous)
+            offenders.Count == 0,
+            "Service code constructs an engine-specific connection from server.ConnectionString: "
+            + string.Join(", ", offenders)
             + ". That value's engine is whatever the target is — route it through "
-            + "CreateTargetConnection/TargetProviders.For(server.Target). A hardcoded SqlConnection here is "
-            + "what made six of seven PostgreSQL collectors fail in the connection-string parser, every "
-            + "sweep, with an ArgumentException that missed both fault-classification arms.");
+            + "CreateTargetConnection/TargetProviders.For(server.Target), or gate every path into the file "
+            + "on engine and add an allowlist entry NAMING the gate. A hardcoded SqlConnection here is what "
+            + "made six of seven PostgreSQL collectors fail in the connection-string parser every sweep — "
+            + "and the seventh occurrence hid in a file the old single-file scan never read.");
     }
 
-    private static string RunnerSourcePath([CallerFilePath] string thisFile = "")
+    private static string ServiceSourceDirectory([CallerFilePath] string thisFile = "")
     {
         var testsDir = Path.GetDirectoryName(thisFile)!;
-        return Path.Combine(
-            testsDir, "..", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
+        return Path.GetFullPath(Path.Combine(testsDir, "..", "PerformanceMonitor.Darling.Service"));
     }
 
     /// <summary>

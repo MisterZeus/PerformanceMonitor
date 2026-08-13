@@ -184,4 +184,35 @@ public class PgXminHorizonCollectorDefinitionTests
         Assert.Equal(30, schedule.RetentionDays);
         Assert.True(schedule.DefaultEnabled);
     }
+
+    /// <summary>
+    /// The round-2 fixes, pinned the way the three sibling collectors already pin theirs — this was the
+    /// one fixed collector left unpinned. Timestamptz renders go through AT TIME ZONE 'UTC', never a
+    /// bare ::text (which renders in the SESSION's TimeZone and agrees with UTC only while every server's
+    /// timezone GUC says UTC — exactly what keeps the bug invisible on this fleet); the horizon takes the
+    /// GREATEST of both counters so an idle-in-transaction backend (backend_xid, no snapshot) is visible;
+    /// and the monitor's own session can never be the reported holder.
+    /// </summary>
+    [Fact]
+    public void HorizonQuery_RendersUtc_SeesXidOnlyBackends_AndExcludesItself()
+    {
+        var sql = PgXminHorizonCollector.Instance.BuildQuery(MakeContext()).Text;
+
+        /* The three timestamptz renders. */
+        Assert.Contains("(a.xact_start AT TIME ZONE 'UTC')::text", sql, StringComparison.Ordinal);
+        Assert.Contains("(a.query_start AT TIME ZONE 'UTC')::text", sql, StringComparison.Ordinal);
+        Assert.Contains("(p.prepared AT TIME ZONE 'UTC')::text", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("a.xact_start::text", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("a.query_start::text", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("p.prepared::text", sql, StringComparison.Ordinal);
+
+        /* Idle-in-transaction visibility: either counter qualifies a backend, and the age is the worse
+           of the two — an xid-only session pins the horizon exactly as hard as a snapshot-holder. */
+        Assert.Contains("(a.backend_xmin IS NOT NULL OR a.backend_xid IS NOT NULL)", sql, StringComparison.Ordinal);
+        Assert.Contains("coalesce(age(a.backend_xid), 0)", sql, StringComparison.Ordinal);
+        Assert.Contains("GREATEST(", sql, StringComparison.Ordinal);
+
+        /* Self-attribution: the collector's own connection holds a snapshot while it reads. */
+        Assert.Contains("a.pid <> pg_backend_pid()", sql, StringComparison.Ordinal);
+    }
 }

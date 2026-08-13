@@ -83,7 +83,7 @@ includes a two-level chain, a fan-out root, and an `idle in transaction` root.
 
 ## What building it changed — 2026-08-12
 
-Shipped as `pg_blocking` → `collect.pg_blocking_edges`, rung **V69**, `SchemaVersion` 69. Seven of the eight
+Shipped as `pg_blocking` → `collect.pg_blocking_edges`, rung **V71**, `SchemaVersion` 71. Seven of the eight
 decisions above survived contact unchanged. What the live runs changed is recorded here rather than edited
 into the decisions above, because the corrections are the useful part.
 

@@ -58,11 +58,27 @@ public sealed class MigrationLadderPins
     {
         /* The replay math above only holds when versions are strictly increasing and unique — a
            duplicated or out-of-order version would let two rungs disagree about what "already ran"
-           means. Density is deliberately NOT pinned: the ladder has one historical gap (V45) and a
-           gap is harmless (the stamp comparison is >, not sequence arithmetic). Cheap to pin,
-           catastrophic to debug from a half-migrated field store. */
+           means. The historical V45 hole stays sanctioned (a gap NOBODY fills is harmless — the
+           stamp comparison is >, not sequence arithmetic); new gaps are the next pin's job. Cheap
+           to pin, catastrophic to debug from a half-migrated field store. */
         var versions = PgMigrations.Scripts.Select(m => m.Version).ToList();
         Assert.Equal(versions.OrderBy(v => v).ToList(), versions);
         Assert.Equal(versions.Count, versions.Distinct().Count());
+    }
+
+    [Fact]
+    public void TheLadder_IsDenseAboveTheHistoricalGap()
+    {
+        /* #2226: a NEW gap is a rung some other branch intends to fill later — and the applier
+           ascends with `version <= currentVersion ? skip`, so a rung filled AFTER a store stamped
+           past it is skipped silently and forever: its objects never exist, readers of them fail
+           permanently, and no upgrade can repair the store. That exact window nearly opened between
+           two in-flight branches (one at V61, one at V62 while dev's MAX was 60; nightlies ship
+           from dev, so the window is real). Density makes the hazard fail at AUTHORING time, in the
+           author's own test run: every branch must take max(dev)+1, and two branches that both do
+           so collide loudly at rebase instead of coexisting into a field incident. V45 is the one
+           sanctioned hole, vacant for many releases and filled by nobody. */
+        var above = PgMigrations.Scripts.Select(m => m.Version).Where(v => v > 45).OrderBy(v => v).ToList();
+        Assert.Equal(Enumerable.Range(above[0], above.Count).ToList(), above);
     }
 }

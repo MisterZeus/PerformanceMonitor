@@ -185,6 +185,27 @@ public class LiteAlertForwardingTests : IDisposable
             return Task.CompletedTask;
         }
 
+        /* #2216: replace-the-set, exactly like both real stores — whatever arrives IS the metric's state, so
+           an empty map clears it. A fake that merged instead would hide the falling-edge bug class. */
+        public Dictionary<(string Key, string Metric), Dictionary<string, IncidentOccurrenceState>> Occurrences { get; } = new();
+
+        public Task<IReadOnlyDictionary<string, IncidentOccurrenceState>> LoadIncidentOccurrencesAsync(string serverKey, string metricName) =>
+            Task.FromResult<IReadOnlyDictionary<string, IncidentOccurrenceState>>(
+                Occurrences.TryGetValue((serverKey, metricName), out var states)
+                    ? states
+                    : new Dictionary<string, IncidentOccurrenceState>(StringComparer.Ordinal));
+
+        public Task SaveIncidentOccurrencesAsync(string serverKey, string metricName, IReadOnlyDictionary<string, IncidentOccurrenceState> states)
+        {
+            var replacement = new Dictionary<string, IncidentOccurrenceState>(StringComparer.Ordinal);
+            foreach (var entry in states)
+            {
+                replacement[entry.Key] = entry.Value;
+            }
+            Occurrences[(serverKey, metricName)] = replacement;
+            return Task.CompletedTask;
+        }
+
         /* #2166 */
         public List<(string Server, string Db, string State)> DatabaseStateAlerted { get; } = new();
 
