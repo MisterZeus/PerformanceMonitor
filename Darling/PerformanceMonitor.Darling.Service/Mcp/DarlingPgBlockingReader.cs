@@ -234,8 +234,12 @@ public static class DarlingPgBlockingReader
         var rows = new List<PgBlockingChainRow>();
         await using var command = postgres.CreateCommand(PgBlockingChainsSql);
         command.Parameters.AddWithValue(serverId);
-        command.Parameters.AddWithValue(startUtc);
-        command.Parameters.AddWithValue(endUtc);
+        /* SpecifyKind(Unspecified), not the bare value. Npgsql does not reject Kind=Utc — it infers
+           timestamptz, and PostgreSQL then zone-shifts the window against the store's NAIVE timestamp
+           columns, so east of UTC the window silently slides off the data. Same convention as every
+           other PostgreSQL read (DarlingPgXminReader, and the alert adapter's NaiveUtcNow). */
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(limit);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -351,8 +355,12 @@ public static class DarlingPgBlockingReader
         var rows = new List<PgBlockingCycleRow>();
         await using var command = postgres.CreateCommand(PgBlockingCyclesSql);
         command.Parameters.AddWithValue(serverId);
-        command.Parameters.AddWithValue(startUtc);
-        command.Parameters.AddWithValue(endUtc);
+        /* SpecifyKind(Unspecified), not the bare value. Npgsql does not reject Kind=Utc — it infers
+           timestamptz, and PostgreSQL then zone-shifts the window against the store's NAIVE timestamp
+           columns, so east of UTC the window silently slides off the data. Same convention as every
+           other PostgreSQL read (DarlingPgXminReader, and the alert adapter's NaiveUtcNow). */
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(limit);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -404,8 +412,12 @@ public static class DarlingPgBlockingReader
     {
         await using var command = postgres.CreateCommand(PgBlockingCaptureCountsSql);
         command.Parameters.AddWithValue(serverId);
-        command.Parameters.AddWithValue(startUtc);
-        command.Parameters.AddWithValue(endUtc);
+        /* SpecifyKind(Unspecified), not the bare value. Npgsql does not reject Kind=Utc — it infers
+           timestamptz, and PostgreSQL then zone-shifts the window against the store's NAIVE timestamp
+           columns, so east of UTC the window silently slides off the data. Same convention as every
+           other PostgreSQL read (DarlingPgXminReader, and the alert adapter's NaiveUtcNow). */
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (await reader.ReadAsync(cancellationToken))
         {
