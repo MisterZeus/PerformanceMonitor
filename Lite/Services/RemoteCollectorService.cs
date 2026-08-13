@@ -485,7 +485,9 @@ public partial class RemoteCollectorService
         try
         {
             /* Target-gate collectors through the shared AppliesTo — the single authoritative gate surface
-               both SKUs consult. Darling's collector runner calls definition.AppliesTo(target) directly;
+               both SKUs consult. Darling's collector runner calls CollectorCatalog.AppliesTo(definition, target)
+               — the COMPOSED overload, which also requires the definition's TargetEngine to match, so a
+               PostgreSQL definition is never handed a SQL Server target or vice versa;
                here it drives Lite's clean pre-dispatch SKIPPED log (a genuine skip with no collection_log
                row, vs. the SUCCESS/0-rows a gated collector would otherwise record). The gate CONDITION
                lives ONLY in each definition's AppliesTo override — never re-encoded in the host — so Lite

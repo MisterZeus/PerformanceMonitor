@@ -286,11 +286,7 @@ public static class DarlingCliCommands
             return $"  [FAIL] {serverName}: {probe.Error}";
         }
 
-        var edition = string.IsNullOrEmpty(probe.EngineEditionDescription)
-            ? DarlingServerConnector.DescribeEngineEdition(probe.EngineEdition)
-            : probe.EngineEditionDescription;
-        var msdb = probe.HasMsdbAccess ? "msdb access: yes" : "msdb access: NO (failed-job alerts unavailable)";
-        return $"  [PASS] {serverName}: SQL major version {probe.MajorVersion}, {edition}, {msdb}";
+        return $"  [PASS] {serverName}: {DarlingServerConnector.DescribeProbeFacts(probe)}";
     }
 
     /// <summary>

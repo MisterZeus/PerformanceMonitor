@@ -10,6 +10,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Data;
+using System.Data.Common;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
@@ -18,6 +19,7 @@ using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service.Targets;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -150,8 +152,10 @@ public sealed class DarlingCollectorRunner
         var collectionTime = DateTime.UtcNow;
 
         /* Some collectors don't exist on some targets (e.g. ring buffers on Azure SQL DB) —
-           skip the cycle entirely, matching Lite. */
-        if (!definition.AppliesTo(server.Target))
+           skip the cycle entirely, matching Lite. CollectorCatalog.AppliesTo composes the
+           engine-dialect check over the definition's own gate, so a T-SQL definition can never be
+           dispatched at a non-SQL-Server target. */
+        if (!CollectorCatalog.AppliesTo(definition, server.Target))
         {
             return new CollectorRunResult(0, 0, 0);
         }
@@ -247,6 +251,16 @@ public sealed class DarlingCollectorRunner
            items WERE found and merely some of their probes failed. Lite's twin is _lastCollectionNote. */
         string? collectionNote = null;
 
+        /* The engine's provider, resolved ONCE for both branches. It used to be resolved only inside the
+           per-database branch, and the branch below opened a hardcoded SqlConnection — so every collector
+           that does NOT fan out per database was handed a SQL Server connection whatever the target was.
+           Six of the seven PostgreSQL collectors take that path (only pg_autovacuum_stats fans out), and
+           SqlClient rejects Npgsql's keywords while parsing the connection string, before any query runs:
+           "Keyword not supported: 'host'". Worse, an ArgumentException is neither SqlException nor
+           PostgresException, so it missed BOTH classification arms in DarlingWorker and recorded a raw
+           ERROR every sweep forever — including for all three Tier 0 outage predictors. */
+        var targetProvider = TargetProviders.For(server.Target);
+
         if (definition.RunsPerDatabase(context.Target))
         {
             /* Azure SQL DB scopes some DMVs to the connected database — run the query once per
@@ -267,7 +281,16 @@ public sealed class DarlingCollectorRunner
                 ? definition.BuildQuery(context)
                 : null;
             var perDbTimeout = definition.CommandTimeoutSecondsOverride ?? CommandTimeoutSeconds;
-            var databases = await GetAzureDatabaseListAsync(server, cancellationToken);
+            var perDbProvider = targetProvider;
+
+            /* Two enumeration paths because the FAILURE semantics genuinely differ, not the SQL. On
+               Azure SQL DB an inaccessible master has a real fallback (collect the one connected
+               database) and a re-probe throttle to stop hammering it; on PostgreSQL a login that
+               cannot read pg_database cannot monitor the server at all, so inventing a fallback would
+               turn a permissions problem into a silent one-database collection. */
+            var databases = server.Target.Engine == CollectorTargetEngine.PostgreSql
+                ? await GetPostgresDatabaseListAsync(server, cancellationToken)
+                : await GetAzureDatabaseListAsync(server, cancellationToken);
 
             var attempted = 0;
             var failed = 0;
@@ -370,8 +393,8 @@ public sealed class DarlingCollectorRunner
 
                     var sqlSlice = Stopwatch.StartNew();
                     List<TRow> batch;
-                    using (var dbConnection = await OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken))
-                    using (var dbCommand = CreateCollectorCommand(dbPlan, dbConnection, perDbTimeout))
+                    using (var dbConnection = await OpenDatabaseConnectionAsync(perDbProvider, server, databaseName, cancellationToken))
+                    using (var dbCommand = CreateCollectorCommand(perDbProvider, dbPlan, dbConnection, perDbTimeout))
                     using (var dbReader = await dbCommand.ExecuteReaderAsync(cancellationToken))
                     {
                         batch = await definition.ReadAsync(dbReader, context, cancellationToken);
@@ -467,8 +490,8 @@ public sealed class DarlingCollectorRunner
         }
         else
         {
-            using var sqlConnection = new SqlConnection(server.ConnectionString);
-            await sqlConnection.OpenAsync(cancellationToken);
+            using var targetConnection = CreateTargetConnection(server);
+            await targetConnection.OpenAsync(cancellationToken);
 
             var enumerationPlan = definition.BuildEnumerationQuery(context);
             if (enumerationPlan is not null)
@@ -478,7 +501,7 @@ public sealed class DarlingCollectorRunner
                    with a warning, matching Lite. */
                 var listSlice = Stopwatch.StartNew();
                 EnumerationOutcome enumeration;
-                using (var enumerationCommand = CreateCollectorCommand(enumerationPlan, sqlConnection, CommandTimeoutSeconds))
+                using (var enumerationCommand = CreateCollectorCommand(targetProvider, enumerationPlan, targetConnection, CommandTimeoutSeconds))
                 using (var enumerationReader = await enumerationCommand.ExecuteReaderAsync(cancellationToken))
                 {
                     /* Shared read (#1837): the item list, then the OPTIONAL second result set of items the
@@ -509,7 +532,7 @@ public sealed class DarlingCollectorRunner
                 {
                     try
                     {
-                        using var probeCommand = CreateCollectorCommand(probePlan, sqlConnection, 10);
+                        using var probeCommand = CreateCollectorCommand(targetProvider, probePlan, targetConnection, 10);
                         var probeResult = await probeCommand.ExecuteScalarAsync(cancellationToken);
                         if (probeResult is not null && probeResult != DBNull.Value)
                         {
@@ -614,7 +637,7 @@ public sealed class DarlingCollectorRunner
                     readItem: async (item, ct) =>
                     {
                         var batch = new List<TRow>();
-                        using var itemCommand = CreateCollectorCommand(definition.BuildPerItemQuery(item, context), sqlConnection, itemTimeout);
+                        using var itemCommand = CreateCollectorCommand(targetProvider, definition.BuildPerItemQuery(item, context), targetConnection, itemTimeout);
                         /* #2164: time the OPEN separately from the drain. ExecuteReaderAsync returns only
                            when the first rowset is available, so for query_store's staged batch this is the
                            #pm_qs_slice aggregate plus time-to-first-row — the part no client-side budget can
@@ -704,7 +727,7 @@ public sealed class DarlingCollectorRunner
                 var sqlSlice = Stopwatch.StartNew();
                 var plan = definition.BuildQuery(context);
                 List<TRow> rows;
-                using (var command = CreateCollectorCommand(plan, sqlConnection, definition.CommandTimeoutSecondsOverride ?? CommandTimeoutSeconds))
+                using (var command = CreateCollectorCommand(targetProvider, plan, targetConnection, definition.CommandTimeoutSecondsOverride ?? CommandTimeoutSeconds))
                 using (var reader = await command.ExecuteReaderAsync(cancellationToken))
                 {
                     rows = await definition.ReadAsync(reader, context, cancellationToken);
@@ -733,7 +756,7 @@ public sealed class DarlingCollectorRunner
                 {
                     try
                     {
-                        using var supplementalCommand = CreateCollectorCommand(supplementalPlan, sqlConnection, CommandTimeoutSeconds);
+                        using var supplementalCommand = CreateCollectorCommand(targetProvider, supplementalPlan, targetConnection, CommandTimeoutSeconds);
                         using var supplementalReader = await supplementalCommand.ExecuteReaderAsync(cancellationToken);
                         await definition.ApplySupplementalAsync(rows, supplementalReader, context, cancellationToken);
                     }
@@ -917,7 +940,7 @@ public sealed class DarlingCollectorRunner
         int commandTimeoutSeconds,
         CancellationToken cancellationToken)
     {
-        if (!definition.AppliesTo(server.Target))
+        if (!CollectorCatalog.AppliesTo(definition, server.Target))
         {
             return new List<TRow>();
         }
@@ -944,9 +967,12 @@ public sealed class DarlingCollectorRunner
 
         var plan = definition.BuildQuery(context);
 
-        using var connection = new SqlConnection(server.ConnectionString);
+        /* Engine-neutral: a Postgres target gets an NpgsqlConnection here and the definition's
+           ReadAsync never knows the difference — it reads a DbDataReader either way. */
+        var provider = TargetProviders.For(server.Target);
+        using var connection = provider.CreateConnection(server.ConnectionString);
         await connection.OpenAsync(cancellationToken);
-        using var command = CreateCollectorCommand(plan, connection, commandTimeoutSeconds);
+        using var command = CreateCollectorCommand(provider, plan, connection, commandTimeoutSeconds);
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         return await definition.ReadAsync(reader, context, cancellationToken);
     }
@@ -1366,27 +1392,20 @@ RETURNING s.state_key";
             return FallbackDatabaseList(server, targetDb, reason: "master previously inaccessible", quiet: true);
         }
 
-        var masterConnectionString = new SqlConnectionStringBuilder(server.ConnectionString)
-        {
-            InitialCatalog = "master",
-        }.ConnectionString;
-
-        var (exclusionClause, exclusionParameters) = DatabaseExclusionFilter.Build(
-            server.Config.ExcludedDatabases, "name");
+        /* The query and the hop to master both come from the provider, so the enumeration set is defined
+           in exactly one place per engine. What stays here is the failure policy below, which is the
+           part that is genuinely Azure-specific. */
+        var (masterConnectionString, enumerationQuery) = SqlServerTargetProvider.Instance.BuildDatabaseListPlan(
+            server.ConnectionString, server.Config.ExcludedDatabases);
 
         var databases = new List<string>();
         try
         {
             using var connection = new SqlConnection(masterConnectionString);
             await connection.OpenAsync(cancellationToken);
-            using var command = new SqlCommand(
-                $"SELECT name FROM sys.databases WHERE state_desc = N'ONLINE' AND database_id > 0 {exclusionClause} ORDER BY name;",
-                connection)
-            { CommandTimeout = CommandTimeoutSeconds };
-            foreach (var parameter in exclusionParameters)
-            {
-                command.Parameters.Add(ToSqlParameter(parameter));
-            }
+            /* Azure master enumeration is SQL-Server-only, but it goes through the same parameter
+               mapping as every other command so a type cannot be mapped two ways. */
+            using var command = CreateCollectorCommand(enumerationQuery, connection, CommandTimeoutSeconds);
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -1462,15 +1481,81 @@ RETURNING s.state_key";
     }
 
     internal async Task<SqlConnection> OpenAzureDatabaseConnectionAsync(ServerRuntime server, string databaseName, CancellationToken cancellationToken)
-    {
-        var connectionString = new SqlConnectionStringBuilder(server.ConnectionString)
-        {
-            InitialCatalog = databaseName,
-        }.ConnectionString;
+        => (SqlConnection)await OpenDatabaseConnectionAsync(
+            SqlServerTargetProvider.Instance, server, databaseName, cancellationToken);
 
-        var connection = new SqlConnection(connectionString);
+    /// <summary>
+    /// The connection for a collector that reads the server as a whole — engine-resolved from the probed
+    /// target, never constructed directly.
+    /// <para>Extracted so it can be PINNED by test. This is the exact seam that broke: the non-per-database
+    /// branch built a <c>SqlConnection</c> literally, so six of the seven PostgreSQL collectors got a SQL
+    /// Server connection and failed in the connection-string parser before running a query. Both engines'
+    /// providers were already correct and individually tested — nothing asserted that the RUNNER asked them.
+    /// A test that opens nothing and only checks the returned TYPE is enough to catch it, which is why it is
+    /// worth having.</para>
+    /// </summary>
+    internal static DbConnection CreateTargetConnection(ServerRuntime server)
+    {
+        ArgumentNullException.ThrowIfNull(server);
+
+        return TargetProviders.For(server.Target).CreateConnection(server.ConnectionString);
+    }
+
+    /// <summary>
+    /// The engine-neutral per-database connection: same monitored server, one specific database.
+    /// <para>PostgreSQL has no alternative to this. A SQL Server collector can reach another database
+    /// without reconnecting (<c>EXECUTE [db].sys.sp_executesql</c>), but a PostgreSQL connection is
+    /// bound to one database for its lifetime, so a per-database collector there is necessarily one
+    /// connection per database per cycle. That is the cost of reading <c>pg_stat_user_tables</c> and
+    /// friends at all, and it is why per-database PostgreSQL collectors get slow cadences.</para>
+    /// </summary>
+    internal static async Task<DbConnection> OpenDatabaseConnectionAsync(
+        ITargetProvider provider, ServerRuntime server, string databaseName, CancellationToken cancellationToken)
+    {
+        var connection = provider.CreateConnection(
+            provider.WithDatabase(server.ConnectionString, databaseName));
+
+        try
+        {
+            await connection.OpenAsync(cancellationToken);
+            return connection;
+        }
+        catch
+        {
+            /* The caller only disposes what it receives, so a connection that fails to open must be
+               disposed HERE or it leaks — once per database per cycle, on exactly the unreachable
+               database the per-database loop is designed to skip and keep going past. */
+            await connection.DisposeAsync();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Lists the databases to fan out over on a PostgreSQL target.
+    /// <para>No master-inaccessible fallback and no re-probe throttle, unlike the Azure twin, because
+    /// neither has a meaning here: <c>pg_database</c> is a shared catalog readable from the connected
+    /// database, so a failure means the login or the server is broken rather than that one catalog is
+    /// out of reach. Falling back to the connected database would convert a permissions problem into a
+    /// quiet partial collection, which is the failure mode that fallback exists to avoid elsewhere.</para>
+    /// </summary>
+    internal async Task<List<string>> GetPostgresDatabaseListAsync(ServerRuntime server, CancellationToken cancellationToken)
+    {
+        var provider = TargetProviders.For(server.Target);
+        var (connectionString, query) = provider.BuildDatabaseListPlan(
+            server.ConnectionString, server.Config.ExcludedDatabases);
+
+        var databases = new List<string>();
+
+        using var connection = provider.CreateConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-        return connection;
+        using var command = CreateCollectorCommand(provider, query, connection, CommandTimeoutSeconds);
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            databases.Add(reader.GetString(0));
+        }
+
+        return databases;
     }
 
     private static List<string> SingleDbOrEmpty(string? targetDb)
@@ -1496,26 +1581,20 @@ RETURNING s.state_key";
         SqlErrorClassification.ShouldFallBackToSingleDatabase(errorNumber);
 
     /* Internal, not private: QueryStoreBackfill (#2022) builds its slice commands through the same
-       parameter mapping so the two paths cannot drift on a type. */
+       parameter mapping so the two paths cannot drift on a type.
+
+       Still SqlCommand-typed and still SQL-Server-only, because every caller of THIS overload is:
+       Query Store backfill and the Azure per-database/master paths are SQL Server features by
+       definition. The engine-neutral path goes through CreateCollectorCommand(ITargetProvider, ...)
+       below, and both end up in the same parameter mapping inside SqlServerTargetProvider, so a
+       parameter type cannot be mapped two ways. */
     internal static SqlCommand CreateCollectorCommand(CollectorQuery plan, SqlConnection connection, int commandTimeoutSeconds)
-    {
-        var command = new SqlCommand(plan.Text, connection) { CommandTimeout = commandTimeoutSeconds };
+        => (SqlCommand)SqlServerTargetProvider.Instance.CreateCommand(plan, connection, commandTimeoutSeconds);
 
-        foreach (var parameter in plan.Parameters)
-        {
-            command.Parameters.Add(ToSqlParameter(parameter));
-        }
-
-        return command;
-    }
-
-    private static SqlParameter ToSqlParameter(CollectorParameter parameter) => parameter.Type switch
-    {
-        CollectorParameterType.DateTime2 => new SqlParameter(parameter.Name, SqlDbType.DateTime2) { Value = parameter.Value ?? DBNull.Value },
-        CollectorParameterType.NVarChar128 => new SqlParameter(parameter.Name, SqlDbType.NVarChar, 128) { Value = parameter.Value ?? DBNull.Value },
-        CollectorParameterType.NVarChar260 => new SqlParameter(parameter.Name, SqlDbType.NVarChar, 260) { Value = parameter.Value ?? DBNull.Value },
-        CollectorParameterType.Int32 => new SqlParameter(parameter.Name, SqlDbType.Int) { Value = parameter.Value ?? DBNull.Value },
-        CollectorParameterType.BigInt => new SqlParameter(parameter.Name, SqlDbType.BigInt) { Value = parameter.Value ?? DBNull.Value },
-        _ => throw new ArgumentOutOfRangeException(nameof(parameter), parameter.Type, "Unmapped collector parameter type"),
-    };
+    /// <summary>
+    /// The engine-neutral command factory: same collector query, whichever engine the target is.
+    /// </summary>
+    private static DbCommand CreateCollectorCommand(
+        ITargetProvider provider, CollectorQuery plan, DbConnection connection, int commandTimeoutSeconds)
+        => provider.CreateCommand(plan, connection, commandTimeoutSeconds);
 }

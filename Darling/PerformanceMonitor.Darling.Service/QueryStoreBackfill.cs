@@ -119,7 +119,12 @@ public sealed class QueryStoreBackfill
     /// </summary>
     public async Task<bool> RunServerSliceAsync(ServerRuntime server, CancellationToken cancellationToken)
     {
-        if (!QueryStoreCollector.Instance.AppliesTo(server.Target))
+        /* The COMPOSED gate, not the definition's own AppliesTo. Query Store is a SQL Server feature and this
+           method opens SqlConnections, but the raw override never checks the engine — it reads
+           SqlMajorVersion, and CollectorTargetInfo treats 0 as "assume newest" so a PostgreSQL target (which
+           has no SqlMajorVersion at all) sails straight through. Latent today only because the caller happens
+           to be reached from a SQL-Server-shaped path; one new call site and it becomes B1 again. */
+        if (!CollectorCatalog.AppliesTo(QueryStoreCollector.Instance, server.Target))
         {
             return false;
         }

@@ -119,6 +119,14 @@ public static class PgMigrations
         new Migration(60, "database-state-edge-memory", V60Sql),
         new Migration(61, "incident-occurrence-counters", V61Sql),
         new Migration(62, "plan-xml-compression-knob", V62Sql),
+        new Migration(63, "pg-wait-stats", V63Sql),
+        new Migration(64, "pg-statement-stats", V64Sql),
+        new Migration(65, "pg-wraparound-stats", V65Sql),
+        new Migration(66, "pg-xmin-horizon", V66Sql),
+        new Migration(67, "pg-replication-slots", V67Sql),
+        new Migration(68, "pg-autovacuum-stats", V68Sql),
+        new Migration(69, "pg-io-stats", V69Sql),
+        new Migration(70, "monitored-server-engine", V70Sql),
     };
 
     /// <summary>
@@ -1224,6 +1232,8 @@ CREATE TABLE IF NOT EXISTS config.incident_occurrences (
     last_observed_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
     PRIMARY KEY (server_id, metric_name, dedup_key)
 );";
+
+    /// <summary>
     /// V62 — the #2171 plan-XML codec knob for direct-SQL store consumers. 'gzip' (default) keeps
     /// today's write path; 'none' makes the dim writer store plain text in query_plan_xml (lz4 TOAST
     /// compresses, ~8.9x measured vs gzip's 14.0x) so Grafana-class readers get plans back with plain
@@ -1248,6 +1258,332 @@ BEGIN
             CHECK (plan_xml_compression IN ('gzip', 'none'));
     END IF;
 END $$;";
+
+    /// <summary>
+    /// V63 — <c>pg_wait_stats</c>, the first PostgreSQL collector table: cumulative Aurora wait
+    /// counters with deltas computed on write, the Postgres counterpart of <c>wait_stats</c>.
+    /// <para>Columns are spelled out here in the generator's exact emission order (the four standard
+    /// prefix columns, then <see cref="PerformanceMonitor.Collectors.PgWaitStatsCollector"/>'s payload
+    /// in its declared order) so a fresh store — where V1 generates this from the catalog — and an
+    /// upgraded store, where this rung creates it, end up with an identical physical column order for
+    /// the binary COPY. No PRIMARY KEY, and the <c>(server_id, collection_time)</c> index, per the
+    /// convention every collector table follows.</para>
+    /// <para><c>wait_time_us</c> is MICROSECONDS. The AWS documentation contradicts itself on the unit
+    /// — microseconds for <c>aurora_stat_system_waits</c>, milliseconds for
+    /// <c>aurora_stat_backend_waits</c> — so it was settled by measurement instead: read as
+    /// milliseconds, the observed totals imply tens of thousands of concurrently waiting sessions
+    /// against a <c>max_connections</c> of 5,000, which is impossible. The name carries the unit so a
+    /// reader never has to relitigate it.</para>
+    /// <para>Both the numeric id and the decoded name are stored. The name is what an operator reads,
+    /// but the id is the stable key: wait-event name casing differs between Aurora majors
+    /// (<c>AutoVacuumMain</c> on 16.11 versus <c>AutovacuumMain</c> on 17.7), so anything keyed on the
+    /// name breaks its own history across an upgrade. Nullable because the type/event lookups are LEFT
+    /// JOINed — an event Aurora reports but does not name is still recorded.</para>
+    /// </summary>
+    private const string V63Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_wait_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    wait_type_id integer,
+    wait_event_id bigint,
+    wait_type text,
+    wait_event text,
+    waits bigint,
+    wait_time_us bigint,
+    delta_waits bigint,
+    delta_wait_time_us bigint
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_wait_stats_time
+    ON collect.pg_wait_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V64 — <c>pg_statement_stats</c>, per-query-shape execution statistics from Aurora's extended
+    /// <c>aurora_stat_statements()</c>: the Postgres counterpart of <c>query_stats</c>.
+    /// <para>Two column groups exist nowhere on the SQL Server side. The Aurora I/O source split
+    /// (<c>storage_blks_read</c> / <c>orcache_blks_hit</c> and their times) decomposes what is otherwise
+    /// an opaque block read into "came from the storage volume" versus "hit the local NVMe tier" — which
+    /// is why a cache-hit ratio computed the community way is arithmetically misleading on Aurora. And
+    /// <c>total_exec_peakmem_bytes</c> / <c>max_exec_peakmem_bytes</c> are the nearest thing PostgreSQL
+    /// has to memory-grant data, which core PostgreSQL has no concept of at all. Per-query
+    /// <c>wal_bytes</c> likewise has no SQL Server DMV equivalent.</para>
+    /// <para><b>No query text column, deliberately.</b> Text belongs in the shared
+    /// <c>query_text_dim</c> rather than inline — inline payload was 94% of a 250 GB field store — but
+    /// registering a new dim-feeding table cannot be done from a rung this late: V38 is GENERATED from
+    /// <c>PayloadDimensions.All</c>, so adding an entry makes V38 emit
+    /// <c>ALTER TABLE pg_statement_stats ADD COLUMN query_text_digest</c>, and on an upgraded store V38
+    /// runs long before this rung creates the table — the ALTER would hit a nonexistent table and fail
+    /// the entire migration. Retrofitting a dim-feeding table therefore needs either a
+    /// existence-guarded V38 or a rung-aware dimension registry, which is a design change and not a
+    /// drive-by. Until then <c>queryid</c> is the identity, which is the join key anyway, and text
+    /// arrives with a dedicated low-cadence text collector that stores each statement once instead of
+    /// once per snapshot.</para>
+    /// </summary>
+    private const string V64Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_statement_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    queryid bigint,
+    database_id bigint,
+    user_id bigint,
+    toplevel boolean,
+    calls bigint,
+    total_exec_time_ms double precision,
+    min_exec_time_ms double precision,
+    max_exec_time_ms double precision,
+    mean_exec_time_ms double precision,
+    rows_returned bigint,
+    shared_blks_hit bigint,
+    shared_blks_read bigint,
+    shared_blks_dirtied bigint,
+    shared_blks_written bigint,
+    temp_blks_read bigint,
+    temp_blks_written bigint,
+    blk_read_time_ms double precision,
+    blk_write_time_ms double precision,
+    storage_blks_read bigint,
+    orcache_blks_hit bigint,
+    storage_blk_read_time_ms double precision,
+    orcache_blk_read_time_ms double precision,
+    wal_records bigint,
+    wal_fpi bigint,
+    wal_bytes bigint,
+    total_exec_peakmem_bytes bigint,
+    max_exec_peakmem_bytes bigint,
+    delta_calls bigint,
+    delta_total_exec_time_ms bigint,
+    delta_rows bigint
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_statement_stats_time
+    ON collect.pg_statement_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V65 — <c>pg_wraparound_stats</c>: transaction id and MultiXact id freeze headroom per database.
+    /// <para>Both counters are stored, because they are independent and each is separately fatal.
+    /// MultiXact exhaustion is the one almost nobody monitors: ids are consumed when a row is locked by
+    /// several transactions at once, so a <c>SELECT FOR UPDATE</c>-heavy or foreign-key-heavy workload
+    /// burns them much faster than plain transaction ids, and a server can look comfortable on XID age
+    /// while being in trouble on MultiXact age.</para>
+    /// <para>The percentages are STORED rather than derived on read because their denominators are
+    /// per-server settings. Recomputing later against whatever <c>autovacuum_freeze_max_age</c> happens
+    /// to be then would silently rewrite history the moment someone tunes it; a stored percentage stays
+    /// true to the configuration in force when it was measured.</para>
+    /// <para>The first PostgreSQL collector table that is not Aurora-specific — it reads only core
+    /// catalog surfaces, so it populates on any PostgreSQL target.</para>
+    /// </summary>
+    private const string V65Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_wraparound_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    frozen_xid_age bigint,
+    min_multixid_age bigint,
+    autovacuum_freeze_max_age bigint,
+    autovacuum_multixact_freeze_max_age bigint,
+    pct_toward_emergency_vacuum double precision,
+    pct_toward_wraparound double precision,
+    pct_toward_multixact_emergency double precision,
+    pct_toward_multixact_wraparound double precision,
+    xids_remaining bigint,
+    multixids_remaining bigint,
+    allows_connections boolean
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_wraparound_stats_time
+    ON collect.pg_wraparound_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V66 — <c>pg_xmin_horizon</c>: what is holding back the xmin horizon, attributed by cause.
+    /// <para>Four unrelated causes produce an identical picture — dead tuples accumulate, autovacuum
+    /// runs and reports success, nothing shrinks — and the fix differs completely for each: kill a
+    /// session, drop a replication slot, disable standby feedback, or resolve an orphaned prepared
+    /// transaction. That is why this table stores one row per SOURCE with the oldest holder for that
+    /// source, plus an <c>is_winner</c> flag, rather than a single horizon age. Attribution is the whole
+    /// value; an aggregate would leave a reader exactly where they started.</para>
+    /// <para><c>is_winner</c> is stamped at collection rather than derived on read, so a stored row names
+    /// the winner as of the moment it was measured — deriving it later would depend on which rows a
+    /// query happened to select, and a filtered read could crown a holder that never held the horizon.</para>
+    /// <para>Zero rows is the HEALTHY state and must never be read as a collection failure. Note also
+    /// that <c>standby_feedback</c> is expected to be absent on Aurora, whose replicas read the same
+    /// storage volume instead of streaming WAL.</para>
+    /// </summary>
+    private const string V66Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_xmin_horizon (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    source text,
+    xmin_age bigint,
+    holder text,
+    detail text,
+    is_winner boolean
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_xmin_horizon_time
+    ON collect.pg_xmin_horizon(server_id, collection_time);";
+
+    /// <summary>
+    /// V67 — <c>collect.pg_replication_slot_stats</c>: slot state, including the two independent ways an abandoned
+    /// slot can take a server down.
+    /// <para><c>retained_wal_bytes</c> is the disk-exhaustion measure and is COMPUTED rather than read,
+    /// because the column that would answer it directly — <c>safe_wal_size</c> — is NULL whenever
+    /// <c>max_slot_wal_keep_size</c> is <c>-1</c>, which is the default. Reading only that column would
+    /// mean reporting nothing on a stock server, exactly where retention is unbounded. <c>-1</c> is
+    /// stored as the not-applicable sentinel so a consumer cannot mistake "no limit configured" for "no
+    /// data collected".</para>
+    /// <para><c>inactive_since</c> and <c>invalidation_reason</c> are PostgreSQL 17+ and
+    /// <c>conflicting</c> is 16+; on older majors the collector substitutes NULL/false so the table shape
+    /// stays constant across a mixed-version fleet and a chart does not change shape at an upgrade.
+    /// <c>inactive_since</c> is the column that distinguishes a consumer between polls from a slot
+    /// orphaned three weeks ago.</para>
+    /// </summary>
+    private const string V67Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_replication_slot_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    slot_name text,
+    slot_type text,
+    plugin text,
+    database_name text,
+    is_active boolean,
+    active_pid bigint,
+    is_temporary boolean,
+    two_phase boolean,
+    wal_status text,
+    safe_wal_size_bytes bigint,
+    retained_wal_bytes bigint,
+    xmin_age bigint,
+    catalog_xmin_age bigint,
+    inactive_since timestamp,
+    invalidation_reason text,
+    conflicting boolean
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_replication_slot_stats_time
+    ON collect.pg_replication_slot_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V68 — <c>collect.pg_autovacuum_stats</c>, per-table autovacuum state, and the first PostgreSQL
+    /// collector on the per-database fan-out path.
+    /// <para>The threshold columns are what make the table worth having. Dead-tuple counts alone are not
+    /// actionable — autovacuum fires at <c>autovacuum_vacuum_threshold + scale_factor * reltuples</c>, so
+    /// the same count is routine on a large table and urgent on a small one. The collector computes each
+    /// table's OWN threshold, honouring per-table <c>reloptions</c> overrides rather than only the GUCs,
+    /// because those overrides are common on exactly the big hot tables where the global default is
+    /// wrong.</para>
+    /// <para><c>inserts_since_vacuum</c> / <c>insert_vacuum_threshold</c> are PostgreSQL 13+ and carry
+    /// <c>-1</c> on older majors so the table shape stays constant across a mixed-version fleet. They
+    /// cover the append-only case, which has no dead tuples at all and is therefore invisible to the
+    /// dead-tuple rule — and an append-only table that is never vacuumed is never frozen either.</para>
+    /// <para><c>database_name</c> comes from the per-database loop's connection rather than the result
+    /// set: <c>pg_stat_user_tables</c> shows only the connected database, so the connection IS the
+    /// authoritative answer. Additive and view-less exactly like V63–V67 — a fresh store gets the table
+    /// from V1's generated schema, and this rung is what an already-existing store gets.</para>
+    /// </summary>
+    private const string V68Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_autovacuum_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    schema_name text,
+    table_name text,
+    live_tuples bigint,
+    dead_tuples bigint,
+    mods_since_analyze bigint,
+    inserts_since_vacuum bigint,
+    vacuum_threshold bigint,
+    insert_vacuum_threshold bigint,
+    analyze_threshold bigint,
+    autovacuum_disabled boolean,
+    total_bytes bigint,
+    last_vacuum timestamp,
+    last_autovacuum timestamp,
+    last_analyze timestamp,
+    last_autoanalyze timestamp,
+    vacuum_count bigint,
+    autovacuum_count bigint,
+    analyze_count bigint,
+    autoanalyze_count bigint
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_autovacuum_stats_time
+    ON collect.pg_autovacuum_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V69 — <c>collect.pg_io_stats</c>, I/O attributed to a (backend_type, object, context) triple rather
+    /// than to a file, from <c>pg_stat_io</c> (PostgreSQL 16+).
+    /// <para>Every counter column is NULLABLE and that is load-bearing, not incidental. PostgreSQL uses
+    /// NULL for "this counter does not apply to this combination" — the checkpointer performs no reads,
+    /// <c>bulkread</c> never extends, the <c>normal</c> context has no ring buffer to reuse — and on Aurora
+    /// the entire write side is NULL because backends there do not write data files. A NOT NULL column with
+    /// a 0 default would claim measurements that were never taken, and a consumer averaging write latency
+    /// would divide by them.</para>
+    /// <para>Cumulative counters stored raw, with the windowed change computed at read time. Additive and
+    /// view-less exactly like V63-V68: a fresh store gets the table from V1's generated schema, and this
+    /// rung is what an already-existing store gets.</para>
+    /// </summary>
+    private const string V69Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_io_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    backend_type text,
+    object_type text,
+    context text,
+    reads bigint,
+    read_time_ms double precision,
+    writes bigint,
+    write_time_ms double precision,
+    writebacks bigint,
+    writeback_time_ms double precision,
+    extends bigint,
+    extend_time_ms double precision,
+    op_bytes bigint,
+    hits bigint,
+    evictions bigint,
+    reuses bigint,
+    fsyncs bigint,
+    fsync_time_ms double precision,
+    stats_reset timestamp
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_io_stats_time
+    ON collect.pg_io_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V70 — <c>config.config_monitored_servers.engine</c> and <c>.port</c>, the two columns without which a
+    /// PostgreSQL target cannot survive its own registration.
+    /// <para>The registry is store-authoritative after the first seed: darling.json seeds it once, and from
+    /// then on the worker's server list comes from this table. Every other <c>MonitoredServer</c> field had a
+    /// column here; these two did not, so a PostgreSQL entry round-tripped through the store as
+    /// <c>"sqlserver"</c> on the driver's default port (both property defaults) and the service then opened a
+    /// <c>SqlConnection</c> to it. That happens on the FIRST start, not a later one, because the seed is
+    /// immediately followed by the load that replaces the file's list with the store's.</para>
+    /// <para>Both defaults are what make this safe on an existing store. Every row already there is a SQL
+    /// Server target, and <c>port</c> is consumed only by the PostgreSQL connection builder (the SQL Server
+    /// path carries a port in the host string), so <c>0</c> means "the driver's default" exactly as the
+    /// property does. The SQL-Server-only writers — the Viewer's Add / Manage Servers dialogs — keep
+    /// inserting without naming either column and keep meaning the same thing.</para>
+    /// </summary>
+    private const string V70Sql = @"
+ALTER TABLE config.config_monitored_servers
+    ADD COLUMN IF NOT EXISTS engine text NOT NULL DEFAULT 'sqlserver';
+
+ALTER TABLE config.config_monitored_servers
+    ADD COLUMN IF NOT EXISTS port integer NOT NULL DEFAULT 0;";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

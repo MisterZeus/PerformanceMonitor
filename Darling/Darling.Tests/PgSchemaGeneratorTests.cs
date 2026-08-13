@@ -30,10 +30,22 @@ public sealed class PgSchemaGeneratorTests
         /* 35 through agent_status + long_query_completions (#1496 long-query trace) = 36, plus the two
            Availability Group collectors (#991) = 38, plus plan_correction (#1952 automatic plan
            correction) = 39, plus pvs_stats (#1951 ADR version store) = 40, plus database_states
-           (baseline-deviation database-state alert) = 41. */
-        Assert.Equal(41, CollectorCatalog.All.Count);
-        Assert.Equal(41, CollectorCatalog.All.Select(s => s.TargetTable).Distinct().Count());
-        Assert.Equal(41, CollectorCatalog.All.Select(s => s.Name).Distinct().Count());
+           (baseline-deviation database-state alert) = 41, plus pg_wait_stats (the first PostgreSQL
+           collector) = 42, plus pg_statement_stats = 43, plus pg_wraparound_stats = 44, plus pg_xmin_horizon = 45,
+           plus pg_replication_slot_stats = 46, plus pg_autovacuum_stats (the first per-database PostgreSQL
+           collector) = 47, plus pg_io_stats = 48. The catalog is deliberately engine-mixed: the schema generator walks it to
+           create tables and one store can hold both engines' data, so splitting it per engine would
+           fragment DDL generation. Dispatch is gated separately, by engine, in
+           CollectorCatalog.AppliesTo(definition, target). */
+        Assert.Equal(48, CollectorCatalog.All.Count);
+
+        /* Uniqueness is asserted AGAINST THE COUNT rather than against a second literal. The literals here
+           had drifted to 45 while the real figure tracked the count, so the test that exists to catch a
+           duplicate table or name was itself failing for an unrelated reason — and could not say so, because
+           this project does not execute on the machine the collectors were written on. Two collectors sharing
+           a TargetTable would still fail this, which is the point. */
+        Assert.Equal(CollectorCatalog.All.Count, CollectorCatalog.All.Select(s => s.TargetTable).Distinct().Count());
+        Assert.Equal(CollectorCatalog.All.Count, CollectorCatalog.All.Select(s => s.Name).Distinct().Count());
     }
 
     [Fact]
@@ -557,13 +569,17 @@ public sealed class PgSchemaGeneratorTests
     {
         var script = PgSchemaGenerator.GenerateFullSchema();
 
+        /* EVERY table, asserted against the catalog count rather than a literal — the test's name is the
+           invariant, and a literal here silently became a subset check (it read 46 of 48) the moment the
+           catalog grew. A collector whose table the generator skips still fails this. */
         var tableCount = CollectorCatalog.All.Count(s => script.Contains($"CREATE TABLE IF NOT EXISTS {s.TargetTable} (", StringComparison.Ordinal));
-        Assert.Equal(41, tableCount);
+        Assert.Equal(CollectorCatalog.All.Count, tableCount);
 
-        /* 41 tables minus the two index-less config tables (server_config, database_config) = 39 indexes
-           (database_states is a time-series collector and gets the default retrieval index). */
+        /* Every table gets a retrieval index except the two index-less config tables (server_config,
+           database_config), which CreateIndex returns null for — so this tracks the catalog minus exactly
+           those two, not a literal that has to be remembered per collector. */
         var indexCount = script.Split("CREATE INDEX IF NOT EXISTS").Length - 1;
-        Assert.Equal(39, indexCount);
+        Assert.Equal(CollectorCatalog.All.Count - 2, indexCount);
 
         /* The precision guard can never regress silently. */
         Assert.DoesNotContain("numeric(0,0)", script, StringComparison.Ordinal);

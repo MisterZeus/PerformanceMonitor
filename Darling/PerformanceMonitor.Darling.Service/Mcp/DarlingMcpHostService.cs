@@ -472,6 +472,35 @@ public sealed class DarlingMcpHostService : BackgroundService
                    is served; Darling's delta collectors store no sample_interval_seconds, so per-second rates are
                    derived from the LAG interval. */
                 .WithGeminiCompatibleTools<DarlingMcpLatchSpinlockTools>()
+                /* get_pg_wait_stats — PostgreSQL wait events for an Aurora target, paired with the
+                   pg_wait_stats collector. A separate tool from get_wait_stats rather than a widened
+                   one: PostgreSQL's waits are a two-level type/event taxonomy with no signal-wait
+                   concept, reported in microseconds, so the two engines cannot share a result shape
+                   without lying about a unit or emitting mostly-null columns. */
+                .WithGeminiCompatibleTools<DarlingMcpPgWaitTools>()
+                /* get_pg_top_queries — PostgreSQL query shapes by total time, paired with the
+                   pg_statement_stats collector. Carries Aurora's I/O source split and per-statement
+                   peak memory, neither of which the SQL Server tools have an equivalent for. */
+                .WithGeminiCompatibleTools<DarlingMcpPgStatementTools>()
+                /* get_pg_wraparound_risk — XID/MultiXact freeze headroom, the highest-consequence
+                   PostgreSQL signal and one with no SQL Server counterpart. Not Aurora-gated. */
+                .WithGeminiCompatibleTools<DarlingMcpPgWraparoundTools>()
+                /* get_pg_xmin_horizon — why vacuum reclaims nothing, attributed to one of four causes
+                   that are indistinguishable by symptom and need different fixes. */
+                .WithGeminiCompatibleTools<DarlingMcpPgXminTools>()
+                /* get_pg_replication_slots — the other half of the abandoned-slot story. The xmin tool
+                   reports a slot pinning the horizon; this one reports the WAL it is retaining, which is
+                   unbounded by default and fills the volume regardless of what vacuum is doing. */
+                .WithGeminiCompatibleTools<DarlingMcpPgSlotTools>()
+                /* get_pg_autovacuum_health — which tables autovacuum is not keeping up with, ranked by
+                   how far past each table's OWN threshold it is. The ratio is the whole tool: a
+                   dead-tuple count is not comparable between a 50-million-row table and a 10,000-row
+                   one, and the threshold is what makes it so. */
+                .WithGeminiCompatibleTools<DarlingMcpPgAutovacuumTools>()
+                /* get_pg_io_stats — I/O attributed to who/what/why rather than to a file. The context
+                   dimension has no SQL Server counterpart and is what separates a buffer-pool miss that
+                   more memory would fix from a ring-buffered sequential scan that it would not. */
+                .WithGeminiCompatibleTools<DarlingMcpPgIoTools>()
                 .WithGeminiCompatibleTools<DarlingMcpMemoryGrantTools>()
                 .WithGeminiCompatibleTools<DarlingMcpPlanCacheSchedulerTools>()
                 .WithGeminiCompatibleTools<DarlingMcpJobTools>()

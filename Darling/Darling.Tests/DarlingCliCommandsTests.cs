@@ -13,6 +13,7 @@ using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Hosting;
 using Xunit;
@@ -96,6 +97,96 @@ public sealed class DarlingCliCommandsTests
         Assert.Contains("SQL03", line, StringComparison.Ordinal);
         Assert.Contains("Login failed", line, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// A PostgreSQL target has no SQL major version, no engine edition and no msdb, so the line must not
+    /// claim any of them. Before the engine branch existed this printed "SQL major version 0,
+    /// Unknown (0), msdb access: yes" for a perfectly healthy Aurora cluster — a PASS that reads like a
+    /// misconfiguration, on the one verb whose whole job is to be trusted as a deployment gate.
+    /// </summary>
+    [Fact]
+    public void FormatProbeLine_PostgresTarget_ReportsPostgresFactsAndNoSqlServerOnes()
+    {
+        var line = DarlingCliCommands.FormatProbeLine("aurora-writer", PostgresProbe());
+
+        Assert.Contains("[PASS]", line, StringComparison.Ordinal);
+        Assert.Contains("PostgreSQL 17", line, StringComparison.Ordinal);
+        Assert.Contains("170007", line, StringComparison.Ordinal);
+        Assert.Contains("writer", line, StringComparison.Ordinal);
+        Assert.Contains("Aurora", line, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("SQL major version", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("msdb", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("Unknown (0)", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>An Aurora writer clears every gate, so the count says so rather than listing nothing.</summary>
+    [Fact]
+    public void FormatProbeLine_AuroraWriter_ReportsEveryPostgresCollectorApplies()
+    {
+        var expected = CollectorCatalog.All.Count(d => d.TargetEngine == CollectorTargetEngine.PostgreSql);
+
+        var line = DarlingCliCommands.FormatProbeLine("aurora-writer", PostgresProbe());
+
+        Assert.Contains($"all {expected} PostgreSQL collectors apply", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("skipped", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The case the count exists for. A stock-PostgreSQL 15 reader is the worst realistic target: no
+    /// Aurora functions, no pg_stat_io, and autovacuum stats that read as all zeros on a standby. Finding
+    /// that out at pre-flight is the difference between "this is configured" and "this will collect".
+    /// </summary>
+    [Fact]
+    public void FormatProbeLine_StockPostgresReader_NamesTheCollectorsThatWillNotRun()
+    {
+        var probe = PostgresProbe() with
+        {
+            PostgresMajorVersion = 15,
+            PostgresVersionNum = 150012,
+            IsAurora = false,
+            IsInRecovery = true,
+        };
+
+        var line = DarlingCliCommands.FormatProbeLine("selfhosted-replica", probe);
+
+        Assert.Contains("reader (in recovery)", line, StringComparison.Ordinal);
+        Assert.Contains("not Aurora", line, StringComparison.Ordinal);
+
+        /* The Aurora-only pair, the writer-only one and the 16+ one — each named, so nobody has to
+           reverse-engineer an empty table later. */
+        Assert.Contains("skipped:", line, StringComparison.Ordinal);
+        Assert.Contains("pg_wait_stats", line, StringComparison.Ordinal);
+        Assert.Contains("pg_statement_stats", line, StringComparison.Ordinal);
+        Assert.Contains("pg_autovacuum_stats", line, StringComparison.Ordinal);
+        Assert.Contains("pg_io_stats", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The count is derived from the real gate, not a parallel list that can rot. Asking the catalog the
+    /// same question the runner asks must give the same answer.
+    /// </summary>
+    [Fact]
+    public void ToTargetInfo_RoundTripsTheFactsTheGateReads()
+    {
+        var target = PostgresProbe().ToTargetInfo();
+
+        Assert.Equal(CollectorTargetEngine.PostgreSql, target.Engine);
+        Assert.Equal(17, target.PostgresMajorVersion);
+        Assert.Equal(170007, target.PostgresVersionNum);
+        Assert.True(target.IsAurora);
+        Assert.False(target.IsInRecovery);
+
+        Assert.All(
+            CollectorCatalog.All.Where(d => d.TargetEngine == CollectorTargetEngine.SqlServer),
+            d => Assert.False(CollectorCatalog.AppliesTo(d, target)));
+    }
+
+    private static ConnectionProbeResult PostgresProbe() => new(
+        Success: true, MajorVersion: 0, EngineEdition: 0, EngineEditionDescription: null,
+        IsAzureSqlDb: false, IsAzureManagedInstance: false, IsAwsRds: false, HasMsdbAccess: true, Error: null,
+        Engine: CollectorTargetEngine.PostgreSql, PostgresMajorVersion: 17, PostgresVersionNum: 170007,
+        IsAurora: true, IsInRecovery: false);
 
     [Fact]
     public void DescribeEngineEdition_MapsKnownEditions()
