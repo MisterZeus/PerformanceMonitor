@@ -20,8 +20,8 @@ namespace PerformanceMonitor.Collectors;
 /// RemoteCollectorService.Perfmon.cs — the curated default counter list is parity brain and lives
 /// HERE; hosts may supply an override via <see cref="CollectorContext.PerfmonCounterOverride"/>
 /// (Lite: perfmon_counters.json). Counter names interpolate as escaped N'...' literals; one delta
-/// group ("perfmon") keyed "{object}|{counter}|{instance}" with the 300 s gap; the constant 60 s
-/// sample interval is written per row.
+/// group ("perfmon") keyed "{object}|{counter}|{instance}" with the shared gap; the sample interval
+/// written per row is the MEASURED gap since the previous sweep, not the configured cadence (#2234).
 /// </summary>
 public sealed class PerfmonStatsCollector : CollectorDefinitionBase<PerfmonStatsCollector.Row>
 {
@@ -169,18 +169,27 @@ OPTION(RECOMPILE);";
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
     {
-        /* Delta for per-second counters — gap detection at 5min (5x the 1-min collection interval)
-           prevents inflated deltas after app restarts. Group/key/gap are the parity contract. */
+        /* Delta for per-second counters. Group/key/gap are the parity contract.
+
+           The interval is MEASURED, not assumed. This wrote a literal 60 — the configured one-minute
+           cadence — on every row, while the fleet's actual gap between perfmon sweeps runs a median of
+           299 s (p99 830 s, max 2,514 s over 99,717 samples). Every consumer that divides by it, and
+           they all do via NULLIF(sample_interval_seconds, 0), was computing a rate up to 5x too high
+           from a denominator the collector had invented. QueryStatsCollector already captures the real
+           interval this way; perfmon was the outlier (#2234). A 0 here means no delta was knowable
+           (first sighting, counter reset, or a gap past the policy), which the NULLIF idiom every
+           reader already uses turns into NULL rather than a divide-by-zero. */
         var deltaKey = $"{row.ObjectName}|{row.CounterName}|{row.InstanceName}";
-        var deltaCntrValue = context.Deltas.CalculateDelta(context.ServerId, "perfmon", deltaKey, row.CntrValue,
-            collectionTime: context.CollectionTime, maxGapSeconds: 300);
+        var deltaCntrValue = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "perfmon", deltaKey,
+            row.CntrValue, out var sampleIntervalSeconds,
+            collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
 
         writer
-            .Value(row.ObjectName)      /* object_name VARCHAR */
-            .Value(row.CounterName)     /* counter_name VARCHAR */
-            .Value(row.InstanceName)    /* instance_name VARCHAR */
-            .Value(row.CntrValue)       /* cntr_value BIGINT */
-            .Value(deltaCntrValue)      /* delta_cntr_value BIGINT */
-            .Value(60);                 /* sample_interval_seconds — 1-minute collection interval */
+            .Value(row.ObjectName)          /* object_name VARCHAR */
+            .Value(row.CounterName)         /* counter_name VARCHAR */
+            .Value(row.InstanceName)        /* instance_name VARCHAR */
+            .Value(row.CntrValue)           /* cntr_value BIGINT */
+            .Value(deltaCntrValue)          /* delta_cntr_value BIGINT */
+            .Value(sampleIntervalSeconds);  /* sample_interval_seconds — measured, not the cadence */
     }
 }

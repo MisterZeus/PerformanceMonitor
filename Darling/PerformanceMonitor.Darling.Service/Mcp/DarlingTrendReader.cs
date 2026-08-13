@@ -48,7 +48,14 @@ internal static class DarlingTrendReader
 
     /// <summary>One perfmon-trend point for a single counter: the counter value and per-interval delta,
     /// both summed across the counter's instances at that collection (Lite's <c>PerfmonTrendPoint</c>).</summary>
-    public sealed record PerfmonTrendPoint(DateTime CollectionTime, long Value, long DeltaValue);
+    /// <summary>One perfmon point: the cumulative counter, the delta, and the wall-clock seconds that
+    /// delta actually covers, summed the same way. <c>SampleIntervalSeconds</c> is what makes a zero
+    /// readable: the collector reports 0 in exactly the cases where no delta was knowable (first
+    /// sighting, counter reset, gap past the policy), so (0, 0) is "unknown" while (0, n) is "genuinely
+    /// idle". Without it the two are the same number and a fabricated zero reads as quiet (#2234).
+    /// <para>Rows written before that fix carry a hard-coded 60 regardless of the real gap, so a rate
+    /// derived over a window spanning the upgrade is only as good as its newest rows.</para></summary>
+    public sealed record PerfmonTrendPoint(DateTime CollectionTime, long Value, long DeltaValue, long SampleIntervalSeconds);
 
     /// <summary>One file I/O-latency-trend point: average read/write latency (stall-ms / op) per collection
     /// for one (database, file) — the tool surfaces database_name + latencies, mirroring Lite's
@@ -121,7 +128,8 @@ internal static class DarlingTrendReader
         SELECT
             collection_time,
             CAST(SUM(cntr_value) AS bigint) AS cntr_value,
-            CAST(SUM(delta_cntr_value) AS bigint) AS delta_cntr_value
+            CAST(SUM(delta_cntr_value) AS bigint) AS delta_cntr_value,
+            CAST(SUM(sample_interval_seconds) AS bigint) AS sample_interval_seconds
         FROM v_perfmon_stats
         WHERE server_id = $1
         AND   counter_name = $2
@@ -146,7 +154,8 @@ internal static class DarlingTrendReader
             items.Add(new PerfmonTrendPoint(
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
-                reader.IsDBNull(2) ? 0 : reader.GetInt64(2)));
+                reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                reader.IsDBNull(3) ? 0 : reader.GetInt64(3)));
         }
 
         return items;

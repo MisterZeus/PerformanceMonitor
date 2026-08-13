@@ -22,21 +22,38 @@ namespace PerformanceMonitor.Collectors;
 public class CollectorDeltaCalculator : ICollectorDeltaCalculator
 {
     /// <summary>
+    /// The gap past which a cached baseline is treated as too stale to subtract from, shared by every
+    /// delta call site in this assembly so the policy cannot drift collector by collector.
+    ///
+    /// <para>One hour, chosen from measurement rather than intuition. The previous value — 300 s,
+    /// hard-coded at all 41 call sites — sat almost exactly on the fleet's median sweep gap, so it
+    /// fired during ordinary operation instead of after the restarts it was written for. Measured over
+    /// 99,717 consecutive perfmon gaps across 52 production servers and 7 days: p50 <b>299 s</b>,
+    /// p90 580 s, p99 830 s, p99.9 1,190 s, max 2,514 s. The share of ordinary gaps each candidate
+    /// rejects: <b>300 s → 50.0%</b>, 600 s → 8.3%, 900 s → 0.6%, 1,800 s → 0.0%, 3,600 s → 0.0%.
+    /// Half of every delta collector's output was a fabricated zero (#2233, #2234).</para>
+    ///
+    /// <para>An hour clears the observed maximum with room to spare while still catching what the
+    /// guard is actually for: a server unreachable for hours, or a baseline restored from a store row
+    /// old enough that attributing its whole accrual to one interval would read as a spike. Note the
+    /// direction of the harm this replaces — a rejected gap returns 0, and a 0 is indistinguishable
+    /// from a genuinely idle interval, so the guard did not merely lose data, it invented quiet.</para>
+    /// </summary>
+    public const int DefaultMaxGapSeconds = 3600;
+
+    /// <summary>
     /// How far back a restart re-seed reads when restoring baselines from a host's own store.
     ///
-    /// <para>A correctness bound before it is a performance one. Every delta call site in this
-    /// assembly passes <c>maxGapSeconds: 300</c> — all 36 of them — and the gap policy in
-    /// <see cref="CalculateDeltaWithInterval"/> discards any baseline older than that and returns 0
-    /// instead. A seed row from outside a ~5-minute window therefore cannot produce a delta no matter
-    /// what it cost to find, so reading it is work whose result is thrown away.</para>
+    /// <para>Fifteen minutes, and since <see cref="DefaultMaxGapSeconds"/> became an hour this window
+    /// — not the gap policy — is what bounds restart recovery. It used to be the other way round: at a
+    /// 300 s policy every seed row older than five minutes was rejected on arrival, so most of this
+    /// window was work whose result was thrown away. Now every row it returns can produce a real
+    /// delta, which is the point.</para>
     ///
-    /// <para>Fifteen minutes rather than five: the seed runs at startup and the first collection lands
-    /// some seconds after it, so the window needs slack over the policy it serves, and a window that
-    /// merely errs generous costs nothing (a row the policy rejects seeds a baseline that is
-    /// immediately re-based, which is what an unseeded key does anyway). It still sits well inside one
-    /// store chunk, which is the property that matters: it lets TimescaleDB exclude the rest of a
-    /// multi-hundred-GB hypertable rather than scan every chunk on a 30-second command timeout — the
-    /// field failure in #1772.</para>
+    /// <para>Left at fifteen minutes deliberately. It sits well inside one store chunk, which is the
+    /// property that matters: it lets TimescaleDB exclude the rest of a multi-hundred-GB hypertable
+    /// rather than scan every chunk on a 30-second command timeout — the field failure in #1772.
+    /// Widening it to chase the hour-long policy would trade that back.</para>
     /// </summary>
     public static readonly TimeSpan SeedLookback = TimeSpan.FromMinutes(15);
 
@@ -70,6 +87,12 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
     /// Gap detection: if collectionTime and maxGapSeconds are provided and the gap since the
     /// last cached value exceeds maxGapSeconds, returns 0 to avoid inflated deltas after restarts.
     /// Thread-safe via atomic AddOrUpdate.
+    /// <para>All three of those zeros mean "no delta is knowable here", which a <c>long</c> cannot say
+    /// any other way — and none of them is the same claim as "this interval was idle". Use
+    /// <see cref="CalculateDeltaWithInterval"/> when a caller has to tell them apart: the reported
+    /// interval is 0 in exactly these cases and non-zero whenever the delta is real, so a stored
+    /// (delta, interval) pair of (0, 0) reads as unknown while (0, n) reads as genuinely idle. That
+    /// pairing is what makes a zero interpretable downstream (#2234).</para>
     /// </summary>
     public long CalculateDelta(int serverId, string collectorName, string key, long currentValue,
         DateTime? collectionTime = null, int maxGapSeconds = 0)
@@ -121,9 +144,23 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
                     ? (int)(collectionTime.Value - previous.Timestamp.Value).TotalSeconds
                     : 0;
 
-                delta = currentValue < previous.Value
-                    ? 0              /* counter reset (plan cache eviction/re-entry) — not real new work */
-                    : currentValue - previous.Value;
+                if (currentValue < previous.Value)
+                {
+                    /* Counter reset (plan cache eviction/re-entry): the work between the two readings
+                       is unknowable, not zero. Report no interval either, so the pair stays honest —
+                       a 0 delta over a REAL interval is a claim that nothing happened for that long,
+                       and this is the one case where that claim would be false. That invariant
+                       (interval 0 <=> no delta knowable) is what lets a reader tell a fabricated zero
+                       from an idle one, and every consumer already maps 0 to NULL via
+                       NULLIF(sample_interval_seconds, 0). */
+                    delta = 0;
+                    interval = 0;
+                }
+                else
+                {
+                    delta = currentValue - previous.Value;
+                }
+
                 return (currentValue, collectionTime);
             });
 

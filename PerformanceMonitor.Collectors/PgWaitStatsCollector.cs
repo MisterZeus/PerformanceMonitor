@@ -179,10 +179,10 @@ WHERE w.wait_time > 0";
 
         var deltaWaits = context.Deltas.CalculateDelta(
             context.ServerId, "pg_wait_stats_waits", key, row.Waits,
-            collectionTime: context.CollectionTime, maxGapSeconds: 300);
+            collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
         var deltaWaitTime = context.Deltas.CalculateDelta(
             context.ServerId, "pg_wait_stats_time", key, row.WaitTimeMicroseconds,
-            collectionTime: context.CollectionTime, maxGapSeconds: 300);
+            collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
 
         writer
             .Value(row.TypeId)                  /* wait_type_id INTEGER */
