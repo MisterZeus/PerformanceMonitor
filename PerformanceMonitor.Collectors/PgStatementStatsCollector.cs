@@ -226,16 +226,16 @@ WHERE calls > 0";
 
         var deltaCalls = context.Deltas.CalculateDelta(
             context.ServerId, "pg_statement_stats_calls", key, row.Calls,
-            collectionTime: context.CollectionTime, maxGapSeconds: 300);
+            collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
         /* Time is stored as double milliseconds but the delta machinery is integral, so the delta is
            taken on whole milliseconds. Sub-millisecond drift per interval is immaterial against the
            totals this feeds, and keeping one delta calculator for both engines is worth more. */
         var deltaTotalTime = context.Deltas.CalculateDelta(
             context.ServerId, "pg_statement_stats_time", key, (long)row.TotalExecTimeMs,
-            collectionTime: context.CollectionTime, maxGapSeconds: 300);
+            collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
         var deltaRows = context.Deltas.CalculateDelta(
             context.ServerId, "pg_statement_stats_rows", key, row.RowsReturned,
-            collectionTime: context.CollectionTime, maxGapSeconds: 300);
+            collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
 
         writer
             .Value(row.QueryId)
