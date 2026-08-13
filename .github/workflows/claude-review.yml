@@ -32,16 +32,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      # #2229: the review can execute genuinely, spend tokens, and post NOTHING anywhere, and the
-      # action still succeeds. Stamp the time first so the check below only counts artifacts this
-      # run produced.
-      - name: Stamp review start
-        id: stamp
-        if: ${{ env.CLAUDE_CODE_OAUTH_TOKEN != '' }}
-        run: echo "since=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
-
       - name: Claude review
-        id: review
         if: ${{ env.CLAUDE_CODE_OAUTH_TOKEN != '' }}
         uses: anthropics/claude-code-action@v1
         with:
@@ -61,91 +52,9 @@ jobs:
             this codebase and explicitly unwanted.
 
             The PR branch is already checked out in the working directory.
-            You MUST post at least one GitHub comment before finishing, even when the change is
-            clean: in that case post a brief top-level comment saying so. A review that posts
-            nothing is indistinguishable from a review that silently failed to post (#2229), and
-            the run below will flag it.
             Use `gh pr comment` for top-level feedback, and
             `mcp__github_inline_comment__create_inline_comment` (with confirmed: true) for
             specific line-level issues. Only post GitHub comments — do not emit review text as
             plain messages.
           claude_args: |
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
-
-      # The discriminator #2229 asks for: did this run leave anything an operator can read? Counts all
-      # three artifact kinds, because reviews on this repo routinely carry an EMPTY body and put every
-      # finding in INLINE comments -- a check that counted review bodies alone would call 15 genuine
-      # reviews silent. Separates "reviewed and said nothing" from "never ran" first, so a run that
-      # never reached Claude is never reported as a silent reviewer. Fails loudly, but this workflow is
-      # advisory and not a required check, so a red mark here never blocks a merge.
-      - name: Verify the review posted something
-        if: ${{ always() && env.CLAUDE_CODE_OAUTH_TOKEN != '' && steps.stamp.outputs.since != '' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR: ${{ github.event.pull_request.number }}
-          SINCE: ${{ steps.stamp.outputs.since }}
-          RAN: ${{ steps.review.outputs.execution_file }}
-          OUTCOME: ${{ steps.review.outcome }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          set -euo pipefail
-          R='${{ github.repository }}'
-          WF='.github/workflows/claude-review.yml'
-          # An EMPTY execution_file means the action returned before it ever invoked Claude. Its
-          # workflow-validation skip path sets neither execution_file nor conclusion and exits
-          # SUCCESS, and the composite action does not surface its own
-          # skipped_due_to_workflow_validation_mismatch output -- so this is the only signal it
-          # leaves. Counting comments in that state would blame a reviewer that never ran.
-          if [ -z "${RAN:-}" ]; then
-            if [ "${OUTCOME:-}" != "success" ]; then
-              echo "::error title=Review action failed before invoking Claude::The action reported"\
-                "'$OUTCOME' with no execution file, so no review happened. Read the step above for the"\
-                "cause; do NOT read this PR as reviewed."
-              echo '### Claude review never ran (action failed)' >> "$GITHUB_STEP_SUMMARY"
-              exit 1
-            fi
-            touched=$(gh api "repos/$R/pulls/$PR/files" --paginate --jq '.[].filename' \
-              | { grep -Fx "$WF" || true; })
-            {
-              echo '### Claude review never ran'
-              echo 'The action exited before invoking Claude and still reported success.'
-            } >> "$GITHUB_STEP_SUMMARY"
-            if [ -n "$touched" ]; then
-              # Expected and unavoidable: the action requires this file to match the default branch
-              # byte for byte, so a PR editing it cannot be Claude-reviewed until it merges. Warn
-              # rather than fail -- a mark that is always red on workflow PRs teaches people to
-              # ignore it.
-              echo "::warning title=Review skipped - PR edits the workflow::This PR changes $WF, which"\
-                "claude-code-action refuses to run until it matches $DEFAULT_BRANCH. This PR is NOT"\
-                "Claude-reviewed and this guard cannot verify it -- a human must review it."
-              echo "- Expected: this PR edits \`$WF\`, so a human must review it." >> "$GITHUB_STEP_SUMMARY"
-              exit 0
-            fi
-            # Nothing in this PR explains the skip, so $WF on this branch has drifted from the
-            # default branch -- which silently disables review for EVERY PR, not just this one.
-            echo "::error title=Review disabled repo-wide::Claude never ran and this PR does not touch"\
-              "$WF, so that file has drifted from $DEFAULT_BRANCH. Every PR is silently going"\
-              "unreviewed until the two match."
-            echo "- Unexpected: \`$WF\` has drifted from \`$DEFAULT_BRANCH\`; ALL PRs go unreviewed." >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-          issue=$(gh api "repos/$R/issues/$PR/comments" --paginate \
-            --jq "[.[] | select(.created_at > \"$SINCE\")] | length")
-          inline=$(gh api "repos/$R/pulls/$PR/comments" --paginate \
-            --jq "[.[] | select(.created_at > \"$SINCE\")] | length")
-          reviews=$(gh api "repos/$R/pulls/$PR/reviews" --paginate \
-            --jq "[.[] | select(.submitted_at != null and .submitted_at > \"$SINCE\")] | length")
-          total=$(( issue + inline + reviews ))
-          echo "posted since $SINCE -- issue comments: $issue, inline: $inline, reviews: $reviews"
-          {
-            echo '### Claude review output'
-            echo "- issue comments: $issue"
-            echo "- inline comments: $inline"
-            echo "- reviews: $reviews"
-          } >> "$GITHUB_STEP_SUMMARY"
-          if [ "$total" -eq 0 ]; then
-            echo "::error title=Review posted nothing::The review ran but left no comment, inline comment,"\
-              "or review on PR #$PR since $SINCE. Tokens were spent and the output vanished (#2229). Do NOT"\
-              "read this PR as reviewed; re-run the workflow."
-            exit 1
-          fi

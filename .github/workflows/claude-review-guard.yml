@@ -1,0 +1,177 @@
+name: Claude review guard
+
+# #2229: the review workflow can finish green and leave nothing an operator can read. Two ways,
+# both observed on this repo, both silent:
+#
+#   1. claude-code-action refuses to run when .github/workflows/claude-review.yml differs from the
+#      DEFAULT branch -- the check is server-side, during the OIDC token exchange. It exits SUCCESS
+#      in about four seconds and sets no output a caller can read.
+#   2. The review runs for real and posts nothing anyway. PR #2213 did this eleven times; one run
+#      spent $4.18 over 24 turns with 6 permission denials, reported subtype=success, and left zero
+#      comments. A 104-file change merged unreviewed and nothing anywhere said so.
+#
+# This guard is a SEPARATE workflow on purpose. Editing claude-review.yml makes this branch's copy
+# differ from the default branch, which triggers cause (1) for EVERY pull request in the repo until
+# the next release -- so a guard living inside the file it protects would disable review each time
+# it was touched. Nothing here invokes claude-code-action, so this file can be edited freely.
+#
+# It polls rather than using `on: workflow_run` because workflow_run only ever fires from the copy
+# of a workflow that is on the default branch: that variant would be dormant, and untestable, until
+# a release shipped it.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [dev, main]
+
+# Match the review's own cancel-in-progress behavior. A new push cancels the review it is watching,
+# so the guard has to go too, or it waits out its deadline on a run that was cancelled by design.
+concurrency:
+  group: claude-review-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    # The review is capped at 30 minutes; leave room to observe one that uses all of it.
+    timeout-minutes: 40
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Verify the review posted something
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          R: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          WF: .github/workflows/claude-review.yml
+          # Coupling to a step NAME in the other workflow. Deliberate: the step's conclusion is the
+          # only structured way to tell "no token, skipped cleanly" from "ran and said nothing".
+          REVIEW_STEP: Claude review
+        run: |
+          set -euo pipefail
+
+          summary() { echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
+
+          # Wait for the review run on this exact commit. Nothing appearing inside the grace window
+          # means review is not operating here at all -- no secret, or a fork PR, which the review
+          # workflow no-ops by design and which is not this guard's business.
+          run_id=''; status=''; conclusion=''; created=''
+          for attempt in $(seq 1 70); do
+            line=$(gh api \
+              "repos/$R/actions/workflows/claude-review.yml/runs?head_sha=$SHA&per_page=1" \
+              --jq '.workflow_runs[0] // empty
+                    | "\(.id) \(.status) \(.conclusion // "-") \(.created_at)"')
+            if [ -n "$line" ]; then
+              read -r run_id status conclusion created <<<"$line"
+              [ "$status" = "completed" ] && break
+            elif [ "$attempt" -ge 6 ]; then
+              echo "::notice title=No review run::No Claude Auto Review run exists for $SHA, so"\
+                "review is not operating on this PR (missing secret, or a fork). Nothing to verify."
+              exit 0
+            fi
+            sleep 30
+          done
+
+          if [ "$status" != "completed" ]; then
+            echo "::warning title=Review did not finish::Gave up waiting on review run $run_id for"\
+              "PR #$PR after 35 minutes. Its own 30-minute timeout will mark it; this PR is NOT"\
+              "Claude-reviewed."
+            summary '### Claude review did not finish inside the guard window'
+            exit 0
+          fi
+
+          if [ "$conclusion" = "cancelled" ] || [ "$conclusion" = "skipped" ]; then
+            echo "::notice title=Review $conclusion::run $run_id was $conclusion; nothing to verify."
+            exit 0
+          fi
+
+          # The step's own conclusion, which separates a clean no-op from a real run.
+          step=$(gh api "repos/$R/actions/runs/$run_id/jobs" --paginate \
+            --jq '[.jobs[].steps[] | select(.name == env.REVIEW_STEP)] | .[0].conclusion // empty')
+
+          if [ -z "$step" ]; then
+            echo "::error title=Guard cannot find the review step::No step named"\
+              "'$REVIEW_STEP' in run $run_id. This guard reads that step to verify the review, so"\
+              "renaming it in $WF blinds the guard -- update REVIEW_STEP here to match."
+            summary "### Guard is blind: no step named \`$REVIEW_STEP\` in the review run"
+            exit 1
+          fi
+
+          if [ "$step" = "skipped" ]; then
+            echo "::notice title=Review skipped cleanly::The '$REVIEW_STEP' step was skipped"\
+              "(no CLAUDE_CODE_OAUTH_TOKEN, or a fork PR). Nothing to verify."
+            exit 0
+          fi
+
+          # Did the action invoke Claude at all? Its workflow-validation skip reaches the outside
+          # world ONLY as a warning annotation: it sets skipped_due_to_workflow_validation_mismatch,
+          # but that output is not declared in the composite action's outputs block, and it returns
+          # before execution_file and conclusion are ever set. Actions job ids double as check-run
+          # ids, which is what makes the annotation readable from a different workflow.
+          never_ran=''
+          for job in $(gh api "repos/$R/actions/runs/$run_id/jobs" --paginate --jq '.jobs[].id'); do
+            if gh api "repos/$R/check-runs/$job/annotations" --jq '.[].message' 2>/dev/null \
+                 | grep -qF 'Skipping action due to workflow validation'; then
+              never_ran=1
+              break
+            fi
+          done
+
+          if [ -n "$never_ran" ]; then
+            touched=$(gh api "repos/$R/pulls/$PR/files" --paginate --jq '.[].filename' \
+              | { grep -Fx "$WF" || true; })
+            summary '### Claude review never ran'
+            if [ -n "$touched" ]; then
+              # Expected and unavoidable: the action requires that file to match the default branch
+              # byte for byte, so a PR editing it cannot be reviewed until it merges. A warning, not
+              # a failure -- a mark that is always red on workflow PRs is one people learn to ignore.
+              echo "::warning title=Review skipped - PR edits the workflow::This PR changes $WF,"\
+                "which claude-code-action refuses to run until it matches $DEFAULT_BRANCH. This PR"\
+                "is NOT Claude-reviewed and cannot be until it merges -- a human must review it."
+              summary "- Expected: this PR edits \`$WF\`, so a human must review it."
+              exit 0
+            fi
+            # Nothing in this PR explains the skip, so $WF on this branch has drifted from the
+            # default branch -- which silently disables review for EVERY PR, not just this one.
+            echo "::error title=Review disabled repo-wide::Claude never ran and this PR does not"\
+              "touch $WF, so that file has drifted from $DEFAULT_BRANCH. Every PR in the repo is"\
+              "silently going unreviewed until the two match."
+            summary "- Unexpected: \`$WF\` has drifted from \`$DEFAULT_BRANCH\`; ALL PRs go unreviewed."
+            exit 1
+          fi
+
+          if [ "$step" != "success" ]; then
+            echo "::error title=Review step failed::The '$REVIEW_STEP' step reported '$step' in run"\
+              "$run_id, so no review happened. Read that run for the cause; do NOT read this PR as"\
+              "reviewed."
+            summary "### Claude review failed (step conclusion: \`$step\`)"
+            exit 1
+          fi
+
+          # Count all three artifact kinds. Reviews on this repo routinely carry an EMPTY body and
+          # put every finding in INLINE comments -- #2225 had fifteen reviews with body_len=0 and
+          # twelve findings inline, so a check counting review bodies alone would call it silent.
+          issue=$(gh api "repos/$R/issues/$PR/comments" --paginate \
+            --jq "[.[] | select(.created_at > \"$created\")] | length")
+          inline=$(gh api "repos/$R/pulls/$PR/comments" --paginate \
+            --jq "[.[] | select(.created_at > \"$created\")] | length")
+          reviews=$(gh api "repos/$R/pulls/$PR/reviews" --paginate \
+            --jq "[.[] | select(.submitted_at != null and .submitted_at > \"$created\")] | length")
+          total=$(( issue + inline + reviews ))
+          echo "posted since $created -- issue: $issue, inline: $inline, reviews: $reviews"
+          summary '### Claude review output'
+          summary "- issue comments: $issue"
+          summary "- inline comments: $inline"
+          summary "- reviews: $reviews"
+
+          if [ "$total" -eq 0 ]; then
+            echo "::error title=Review posted nothing::Review run $run_id completed but left no"\
+              "comment, inline comment, or review on PR #$PR. Real money was spent and the output"\
+              "vanished (#2229, and PR #2213 which did this eleven times). Do NOT read this PR as"\
+              "reviewed; re-run the review workflow."
+            exit 1
+          fi
