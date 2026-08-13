@@ -319,25 +319,25 @@ public static class DarlingPgBlockingReader
         ArgumentNullException.ThrowIfNull(reader);
 
         return new PgBlockingChainRow(
-                reader.GetDateTime(0),
-                reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
-                reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
-                reader.IsDBNull(3) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(3),
-                reader.IsDBNull(4) ? null : reader.GetString(4),
-                reader.IsDBNull(5) ? null : reader.GetString(5),
-                reader.IsDBNull(6) ? null : reader.GetString(6),
-                reader.IsDBNull(7) ? null : reader.GetString(7),
-                !reader.IsDBNull(8) && reader.GetBoolean(8),
-                reader.IsDBNull(9) ? -1 : reader.GetInt64(9),
-                reader.IsDBNull(10) ? -1 : reader.GetInt64(10),
-                reader.IsDBNull(11) ? 0 : reader.GetInt32(11),
-                reader.IsDBNull(12) ? 0 : reader.GetInt32(12),
-                reader.IsDBNull(13) ? 0 : reader.GetInt32(13),
-                reader.IsDBNull(14) ? -1 : reader.GetInt64(14),
-                reader.IsDBNull(15) ? null : reader.GetString(15),
-                reader.IsDBNull(16) ? null : reader.GetInt64(16),
-                !reader.IsDBNull(17) && reader.GetBoolean(17),
-                !reader.IsDBNull(18) && reader.GetBoolean(18));
+            reader.GetDateTime(0),
+            reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
+            reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
+            reader.IsDBNull(3) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(3),
+            reader.IsDBNull(4) ? null : reader.GetString(4),
+            reader.IsDBNull(5) ? null : reader.GetString(5),
+            reader.IsDBNull(6) ? null : reader.GetString(6),
+            reader.IsDBNull(7) ? null : reader.GetString(7),
+            !reader.IsDBNull(8) && reader.GetBoolean(8),
+            reader.IsDBNull(9) ? -1 : reader.GetInt64(9),
+            reader.IsDBNull(10) ? -1 : reader.GetInt64(10),
+            reader.IsDBNull(11) ? 0 : reader.GetInt32(11),
+            reader.IsDBNull(12) ? 0 : reader.GetInt32(12),
+            reader.IsDBNull(13) ? 0 : reader.GetInt32(13),
+            reader.IsDBNull(14) ? -1 : reader.GetInt64(14),
+            reader.IsDBNull(15) ? null : reader.GetString(15),
+            reader.IsDBNull(16) ? null : reader.GetInt64(16),
+            !reader.IsDBNull(17) && reader.GetBoolean(17),
+            !reader.IsDBNull(18) && reader.GetBoolean(18));
     }
 
     public sealed record PgBlockingCycleRow(
@@ -541,13 +541,13 @@ public static class DarlingPgBlockingReader
         ArgumentNullException.ThrowIfNull(reader);
 
         return new PgBlockingCycleRow(
-                reader.GetDateTime(0),
-                reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
-                reader.IsDBNull(2) ? Array.Empty<int>() : reader.GetFieldValue<int[]>(2),
-                reader.IsDBNull(3) ? null : reader.GetString(3),
-                reader.IsDBNull(4) ? null : reader.GetString(4),
-                reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
-                reader.IsDBNull(6) ? Array.Empty<int>() : reader.GetFieldValue<int[]>(6));
+            reader.GetDateTime(0),
+            reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+            reader.IsDBNull(2) ? Array.Empty<int>() : reader.GetFieldValue<int[]>(2),
+            reader.IsDBNull(3) ? null : reader.GetString(3),
+            reader.IsDBNull(4) ? null : reader.GetString(4),
+            reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
+            reader.IsDBNull(6) ? Array.Empty<int>() : reader.GetFieldValue<int[]>(6));
     }
 
     /// <summary>
