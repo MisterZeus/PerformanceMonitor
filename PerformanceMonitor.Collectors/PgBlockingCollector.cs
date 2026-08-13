@@ -170,7 +170,9 @@ SELECT
     blocker.query                                               AS blocking_query,
     coalesce(blocker.xact_duration_ms, -1)                      AS blocking_xact_duration_ms,
     coalesce(blocker.query_duration_ms, -1)                     AS blocking_query_duration_ms,
-    coalesce(f.blocked_pid_count, 1)                            AS blocked_pid_count,
+    /* No coalesce: fan_out is grouped from the same edges CTE and joined INNER, so every blocking_pid
+       here necessarily has a row and the fallback was unreachable. */
+    f.blocked_pid_count                                         AS blocked_pid_count,
     /* Stamped here rather than derived on read: the remedy for this root differs from every other root, and
        a reader filtering rows must not be able to lose the distinction. */
     coalesce(blocker.state, '') = 'idle in transaction'          AS blocking_is_idle_in_transaction,

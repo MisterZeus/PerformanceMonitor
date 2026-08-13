@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
@@ -244,5 +245,110 @@ public class DarlingPgBlockingReaderTests
             Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
             Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>
+    /// Sessions queued BEHIND a cycle must be reported. Before this, a "lollipop" — X blocked by A where
+    /// A/B/C form a cycle — put X in neither read: <c>chains</c> cannot reach it because no cycle member
+    /// qualifies as a root, and the cycle walk cannot either because a walk starting at X's edge extends into
+    /// the cycle and is barred from closing on its own start, so it never lands in <c>closed</c>. A real,
+    /// captured blocking relationship appeared nowhere at all — the one outcome this collector's whole design
+    /// forbids.
+    /// <para>Transitive, and members are excluded, so a session two hops behind the cycle still counts and a
+    /// participant is never double-reported as its own victim. Verified live: 910 and 911 appear as neither a
+    /// chain root nor a cycle participant, and surface only through this count.</para>
+    /// </summary>
+    [Fact]
+    public void SessionsQueuedBehindACycleAreReported()
+    {
+        Assert.Contains("behind AS (", CyclesSql, StringComparison.Ordinal);
+        /* Transitive: the CTE must recurse on itself, not just take direct victims. */
+        Assert.Contains("FROM behind AS b", CyclesSql, StringComparison.Ordinal);
+        /* Members are never counted as being behind their own cycle. */
+        Assert.Contains("e.blocked_pid <> ALL(c.members)", CyclesSql, StringComparison.Ordinal);
+        Assert.Contains("blocked_behind_count", CyclesSql, StringComparison.Ordinal);
+        /* Zero, not NULL, for a cycle with nothing behind it — an absent count would read as unknown. */
+        Assert.Contains("coalesce(max(b.blocked_behind_count), 0)", CyclesSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The two columns the collector computes per EDGE must be aggregated over all of the root's edges, never
+    /// taken from the one edge <c>DISTINCT ON</c> happens to pick. <c>database_name</c> is
+    /// <c>coalesce(blocked.datname, blocker.datname)</c> and <c>query_text_may_be_truncated</c> is an OR
+    /// across both queries, so an arbitrary pick attributes a victim's database, or a victim's clipped text,
+    /// to the root. Everything else on <c>root_detail</c> is genuinely backend-constant and the pick is fine.
+    /// </summary>
+    [Fact]
+    public void PerEdgeColumnsAreAggregatedNotArbitrarilyPicked()
+    {
+        Assert.Contains("root_edge_agg AS (", ChainsSql, StringComparison.Ordinal);
+        Assert.Contains("array_agg(DISTINCT e.database_name) AS databases", ChainsSql, StringComparison.Ordinal);
+        Assert.Contains("bool_or(e.query_text_may_be_truncated)", ChainsSql, StringComparison.Ordinal);
+        /* And root_detail must no longer carry either of them. */
+        var rootDetail = ChainsSql[ChainsSql.IndexOf("root_detail AS (", StringComparison.Ordinal)..
+                                   ChainsSql.IndexOf("root_edge_agg AS (", StringComparison.Ordinal)];
+        Assert.DoesNotContain("e.database_name", rootDetail, StringComparison.Ordinal);
+        Assert.DoesNotContain("e.query_text_may_be_truncated", rootDetail, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A chain that hit the walk cap must say so. With the revisit guard in place a <c>max_depth</c> of 32 is
+    /// no longer a masked cycle — it is a genuinely 32-level walk the cap stopped, which makes
+    /// <c>total_victims</c> and the worst victim FLOORS rather than totals, indistinguishable from a complete
+    /// answer. Implausible in practice and reported anyway, for the same reason the sampling caveat is:
+    /// a short answer must never pass for the whole picture.
+    /// </summary>
+    [Fact]
+    public void ATruncatedChainAnnouncesItself()
+    {
+        Assert.Contains("chain_may_be_truncated", ChainsSql, StringComparison.Ordinal);
+        Assert.Contains("(s.max_depth >= 32)", ChainsSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Every <c>RemedyFor</c> branch, pinned individually — the same treatment
+    /// <c>DarlingMcpPgXminTools.RemedyFor</c> already gets, and for the same reason: this text IS the
+    /// product's answer, and the branches are ordered, so reordering the aborted-state check relative to the
+    /// boolean flag would silently change which remedy a caller receives.
+    /// <para>The distinctions are not cosmetic. Idle-in-transaction is an application defect, active is a
+    /// tuning problem, aborted is a client that ignored an error it already had, and a null state means the
+    /// chain resolved itself. Prescribing any one of those for another wastes the reader's time or loses
+    /// work.</para>
+    /// </summary>
+    [Fact]
+    public void EveryRemedyBranchIsDistinctAndNamesItsOwnAction()
+    {
+        var idle = DarlingMcpPgBlockingTools.RemedyFor("idle in transaction", false, 240_000);
+        var idleByFlag = DarlingMcpPgBlockingTools.RemedyFor(null, true, 0);
+        var aborted = DarlingMcpPgBlockingTools.RemedyFor("idle in transaction (aborted)", false, 0);
+        var active = DarlingMcpPgBlockingTools.RemedyFor("active", false, 8_400);
+        var unknown = DarlingMcpPgBlockingTools.RemedyFor(null, false, 0);
+        var other = DarlingMcpPgBlockingTools.RemedyFor("fastpath function call", false, 0);
+
+        Assert.Contains("IDLE IN TRANSACTION", idle, StringComparison.Ordinal);
+        Assert.Contains("idle_in_transaction_session_timeout", idle, StringComparison.Ordinal);
+
+        /* The boolean flag alone must reach the same branch — the collector stamps it, and a root whose
+           state string was not captured can still be known to have been idle in transaction. */
+        Assert.Equal(idle, idleByFlag);
+
+        Assert.Contains("ABORTED", aborted, StringComparison.Ordinal);
+        Assert.Contains("ROLLBACK", aborted, StringComparison.Ordinal);
+        /* Ordering pin: 'idle in transaction (aborted)' must NOT fall into the plain idle branch, which its
+           prefix would match under a StartsWith or a reordered check. */
+        Assert.NotEqual(idle, aborted);
+
+        Assert.Contains("ACTIVE", active, StringComparison.Ordinal);
+        /* The duration is only mentioned when there is one to mention. */
+        Assert.Contains("8400 ms", active, StringComparison.Ordinal);
+        Assert.DoesNotContain("ms", DarlingMcpPgBlockingTools.RemedyFor("active", false, 0), StringComparison.Ordinal);
+
+        Assert.Contains("was not captured", unknown, StringComparison.Ordinal);
+
+        Assert.Contains("fastpath function call", other, StringComparison.Ordinal);
+
+        /* All six answers distinct — a collapsed branch is the failure this test exists for. */
+        var all = new[] { idle, aborted, active, unknown, other };
+        Assert.Equal(all.Length, all.Distinct(StringComparer.Ordinal).Count());
     }
 }

@@ -114,6 +114,13 @@ public sealed class DarlingMcpPgBlockingTools
                 pids = c.Pids,
                 database = c.DatabaseName,
                 application = c.ApplicationName,
+                /* Sessions queued behind the deadlock without being part of it. Previously invisible to
+                   BOTH reads — chains cannot see them (no cycle member qualifies as a root) and the cycle
+                   walk cannot either (their walks never close). This count is usually what decides
+                   urgency: a two-way deadlock is a bug, a two-way deadlock with forty sessions behind it
+                   is an outage. */
+                blocked_behind_count = c.BlockedBehindCount,
+                blocked_behind_pids = c.BlockedBehindPids,
                 finding =
                     "These backends were each waiting on a lock held by another member of the same set — a "
                     + "genuine cycle, which is a deadlock. PostgreSQL's deadlock detector resolves it after "
@@ -173,7 +180,7 @@ public sealed class DarlingMcpPgBlockingTools
                 /* Surfaced because it is what samples_as_root counts, and a reader comparing pids across
                    captures without it can be fooled by pid reuse. */
                 root_backend_id = c.RootBackendId,
-                database = c.DatabaseName,
+                databases = c.Databases,
                 root_username = c.RootUsername,
                 root_application = c.RootApplicationName,
                 root_state = c.RootState,
@@ -194,7 +201,14 @@ public sealed class DarlingMcpPgBlockingTools
                     ? "Unknown: this root had already left pg_stat_activity when the edge was captured, so "
                     + "it has no stable backend identity to count appearances of. Not a sign it is new."
                     : null,
+                /* Chain-wide, not root-only: the stored flag is an OR across both sides of an edge, so it
+                   answers "some text in this chain may be clipped". */
                 query_text_may_be_truncated = c.QueryTextMayBeTruncated,
+                chain_may_be_truncated = c.ChainMayBeTruncated,
+                chain_truncation_note = c.ChainMayBeTruncated
+                    ? "This chain hit the read's 32-level walk cap, so total_victims, max_depth and the "
+                    + "worst victim are computed over a truncated walk and are FLOORS, not totals."
+                    : null,
                 recommended_action = RemedyFor(c.RootState, c.RootIsIdleInTransaction, c.RootXactDurationMs),
             }).ToList();
 

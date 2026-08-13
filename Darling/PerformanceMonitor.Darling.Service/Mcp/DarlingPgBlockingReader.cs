@@ -28,7 +28,7 @@ public static class DarlingPgBlockingReader
         DateTime CapturedAt,
         long RootBackendId,
         int RootPid,
-        string? DatabaseName,
+        string[] Databases,
         string? RootUsername,
         string? RootApplicationName,
         string? RootState,
@@ -45,7 +45,8 @@ public static class DarlingPgBlockingReader
            vanished-blocker sentinel). Recurrence is genuinely UNKNOWN there, and "seen once" is a
            different claim from "cannot tell". */
         long? SamplesAsRoot,
-        bool QueryTextMayBeTruncated);
+        bool QueryTextMayBeTruncated,
+        bool ChainMayBeTruncated);
 
     /// <summary>
     /// One row per (capture, root blocker), with the chain behind it measured and the root's own state
@@ -176,26 +177,43 @@ public static class DarlingPgBlockingReader
             FROM chain
             ORDER BY collection_id, root_pid, coalesce(blocked_query_duration_ms, -1) DESC
         ),
+        /* Split deliberately in two. DISTINCT ON picks ONE of the root's edges, which is correct only for
+           columns that are constant per BACKEND — username, application, state, query, the durations all
+           come from the same blocker row whichever edge is chosen. It is NOT correct for the two columns
+           the collector computes per EDGE from both sides: database_name is
+           coalesce(blocked.datname, blocker.datname) and query_text_may_be_truncated is an OR across both
+           queries. Taking those from an arbitrary edge attributes a victim's truncated text, or a victim's
+           database, to the root. They are aggregated over all the root's edges instead. */
         root_detail AS (
             SELECT DISTINCT ON (e.collection_id, e.blocking_pid)
                 e.collection_id,
                 e.collection_time,
                 e.blocking_pid,
                 e.blocking_backend_id,
-                e.database_name,
                 e.blocking_username,
                 e.blocking_application_name,
                 e.blocking_state,
                 e.blocking_query,
                 e.blocking_is_idle_in_transaction,
                 e.blocking_xact_duration_ms,
-                e.blocking_query_duration_ms,
-                e.query_text_may_be_truncated
+                e.blocking_query_duration_ms
             FROM edges AS e
             JOIN roots AS r
               ON  r.collection_id = e.collection_id
               AND r.blocking_pid = e.blocking_pid
             ORDER BY e.collection_id, e.blocking_pid, e.blocked_pid
+        ),
+        root_edge_agg AS (
+            SELECT
+                e.collection_id,
+                e.blocking_pid,
+                array_agg(DISTINCT e.database_name) AS databases,
+                bool_or(e.query_text_may_be_truncated) AS query_text_may_be_truncated
+            FROM edges AS e
+            JOIN roots AS r
+              ON  r.collection_id = e.collection_id
+              AND r.blocking_pid = e.blocking_pid
+            GROUP BY e.collection_id, e.blocking_pid
         ),
         recurrence AS (
             SELECT
@@ -220,7 +238,7 @@ public static class DarlingPgBlockingReader
             d.collection_time                        AS captured_at,
             d.blocking_backend_id                    AS root_backend_id,
             d.blocking_pid                           AS root_pid,
-            d.database_name                          AS database_name,
+            a.databases                              AS databases,
             d.blocking_username                      AS root_username,
             d.blocking_application_name              AS root_application_name,
             d.blocking_state                         AS root_state,
@@ -234,7 +252,13 @@ public static class DarlingPgBlockingReader
             s.worst_victim_wait_ms                   AS worst_victim_wait_ms,
             v.blocked_query                          AS worst_victim_query,
             c.samples_as_root                        AS samples_as_root,
-            d.query_text_may_be_truncated            AS query_text_may_be_truncated
+            a.query_text_may_be_truncated            AS query_text_may_be_truncated,
+            /* #5: the depth cap must announce itself. With the revisit guard in place a max_depth of 32 is
+               no longer a masked cycle — it means a genuinely 32-level walk that the cap stopped, so
+               total_victims and the worst victim are computed over a TRUNCATED walk and read identically to
+               a complete one. Implausible in practice; reported anyway, because this collector's premise is
+               that a short answer must never pass for the whole picture. */
+            (s.max_depth >= 32)                      AS chain_may_be_truncated
         FROM root_detail AS d
         JOIN chain_stats AS s
           ON  s.collection_id = d.collection_id
@@ -242,6 +266,9 @@ public static class DarlingPgBlockingReader
         LEFT JOIN worst_victim AS v
           ON  v.collection_id = d.collection_id
           AND v.root_pid = d.blocking_pid
+        JOIN root_edge_agg AS a
+          ON  a.collection_id = d.collection_id
+          AND a.blocking_pid = d.blocking_pid
         LEFT JOIN recurrence AS c
           ON  c.blocking_backend_id = d.blocking_backend_id
         ORDER BY s.total_victims DESC, s.max_depth DESC, d.collection_time DESC
@@ -269,7 +296,7 @@ public static class DarlingPgBlockingReader
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
                 reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
-                reader.IsDBNull(3) ? null : reader.GetString(3),
+                reader.IsDBNull(3) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(3),
                 reader.IsDBNull(4) ? null : reader.GetString(4),
                 reader.IsDBNull(5) ? null : reader.GetString(5),
                 reader.IsDBNull(6) ? null : reader.GetString(6),
@@ -283,7 +310,8 @@ public static class DarlingPgBlockingReader
                 reader.IsDBNull(14) ? -1 : reader.GetInt64(14),
                 reader.IsDBNull(15) ? null : reader.GetString(15),
                 reader.IsDBNull(16) ? null : reader.GetInt64(16),
-                !reader.IsDBNull(17) && reader.GetBoolean(17)));
+                !reader.IsDBNull(17) && reader.GetBoolean(17),
+                !reader.IsDBNull(18) && reader.GetBoolean(18)));
         }
 
         return rows;
@@ -294,7 +322,9 @@ public static class DarlingPgBlockingReader
         int ParticipantCount,
         int[] Pids,
         string? DatabaseName,
-        string? ApplicationName);
+        string? ApplicationName,
+        int BlockedBehindCount,
+        int[] BlockedBehindPids);
 
     /// <summary>
     /// Backends caught in a lock CYCLE — each one reachable from itself through the edge list.
@@ -388,14 +418,65 @@ public static class DarlingPgBlockingReader
                 collection_id,
                 (SELECT array_agg(m ORDER BY m) FROM unnest(members) AS m) AS members
             FROM closed
+        ),
+        behind AS (
+            /* Backends stuck BEHIND the cycle: blocked by a member, transitively, without being a member.
+               These were invisible to BOTH reads, which is the one outcome this collector's design forbids.
+               chains cannot see them — every cycle member is itself blocked, so no member qualifies as a
+               root and no root walk ever reaches their edges. And this query's own walk cannot see them
+               either: a walk starting at such an edge extends into the cycle but is barred from closing on
+               its own start, so it never lands in `closed`. A real, captured blocking relationship therefore
+               appeared nowhere at all. Reported here, attached to the cycle that is causing it, because
+               "this deadlock also has nine sessions queued behind it" is the part that decides urgency. */
+            SELECT
+                c.collection_id,
+                c.members,
+                e.blocked_pid,
+                1 AS depth,
+                ARRAY[e.blocked_pid] AS seen
+            FROM components AS c
+            JOIN edges AS e
+              ON  e.collection_id = c.collection_id
+              AND e.blocking_pid = ANY(c.members)
+            WHERE e.blocked_pid <> ALL(c.members)
+
+            UNION ALL
+
+            SELECT
+                b.collection_id,
+                b.members,
+                e.blocked_pid,
+                b.depth + 1,
+                b.seen || e.blocked_pid
+            FROM behind AS b
+            JOIN edges AS e
+              ON  e.collection_id = b.collection_id
+              AND e.blocking_pid = b.blocked_pid
+            WHERE b.depth < 32
+            AND   e.blocked_pid <> ALL(b.members)
+            AND   e.blocked_pid <> ALL(b.seen)
+        ),
+        behind_stats AS (
+            SELECT
+                collection_id,
+                members,
+                count(DISTINCT blocked_pid)::int AS blocked_behind_count,
+                array_agg(DISTINCT blocked_pid) AS blocked_behind_pids
+            FROM behind
+            GROUP BY collection_id, members
         )
         SELECT
             e.collection_time                        AS captured_at,
             cardinality(c.members)                   AS participant_count,
             c.members                                AS pids,
             min(e.database_name)                     AS database_name,
-            min(e.blocked_application_name)          AS application_name
+            min(e.blocked_application_name)          AS application_name,
+            coalesce(max(b.blocked_behind_count), 0) AS blocked_behind_count,
+            coalesce(max(b.blocked_behind_pids), ARRAY[]::int[]) AS blocked_behind_pids
         FROM components AS c
+        LEFT JOIN behind_stats AS b
+          ON  b.collection_id = c.collection_id
+          AND b.members = c.members
         JOIN edges AS e
           ON  e.collection_id = c.collection_id
           /* Scoped to the cycle's OWN participants. Joining on collection_id alone aggregated
@@ -430,7 +511,9 @@ public static class DarlingPgBlockingReader
                 reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
                 reader.IsDBNull(2) ? Array.Empty<int>() : reader.GetFieldValue<int[]>(2),
                 reader.IsDBNull(3) ? null : reader.GetString(3),
-                reader.IsDBNull(4) ? null : reader.GetString(4)));
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
+                reader.IsDBNull(6) ? Array.Empty<int>() : reader.GetFieldValue<int[]>(6)));
         }
 
         return rows;
