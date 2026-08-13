@@ -190,6 +190,19 @@ public sealed class CollectorRunnerConnectionEngineTests
 
         /* And the PostgreSQL arm must say why rather than leaving the tab blank. */
         Assert.Contains("does not apply to a PostgreSQL target", source, StringComparison.Ordinal);
+
+        /* ONE message, shared by the scheduled pass and the manual "Generate now" path. There were two
+           hand-maintained copies and they had already drifted — adding get_pg_blocking to the scheduled one
+           left the manual one listing seven tools, so the same product gave different guidance depending on
+           which door the operator came through. The list grows with every PostgreSQL read, so the drift
+           recurs by construction unless there is only one copy. */
+        Assert.Equal(
+            2,
+            Regex.Matches(source, @"message: PostgresAnalysisNotApplicable,").Count);
+        Assert.DoesNotContain(
+            "Scheduled analysis does not apply to a PostgreSQL target: its findings are \"",
+            source,
+            StringComparison.Ordinal);
     }
 
     private static string WorkerSourcePath([CallerFilePath] string thisFile = "")

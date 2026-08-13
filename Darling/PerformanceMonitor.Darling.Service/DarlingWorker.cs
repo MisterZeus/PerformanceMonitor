@@ -1623,12 +1623,7 @@ public sealed class DarlingWorker : BackgroundService
                             _postgres!,
                             server.Runtime.ServerId,
                             insufficientData: true,
-                            message: "Scheduled analysis does not apply to a PostgreSQL target: its findings are "
-                                + "derived from SQL Server collectors (waits, query stats, CPU) that this engine "
-                                + "does not populate. This is not \"still collecting\" — use the PostgreSQL MCP "
-                                + "reads (get_pg_wait_stats, get_pg_top_queries, get_pg_autovacuum_health, "
-                                + "get_pg_wraparound_risk, get_pg_xmin_horizon, get_pg_replication_slots, "
-                                + "get_pg_io_stats) and the three outage-predictor alerts instead.",
+                            message: PostgresAnalysisNotApplicable,
                             _logger,
                             stoppingToken);
                     }
@@ -2914,12 +2909,7 @@ LIMIT 1", connection);
                 _postgres!,
                 server.Runtime.ServerId,
                 insufficientData: true,
-                message: "Scheduled analysis does not apply to a PostgreSQL target: its findings are "
-                    + "derived from SQL Server collectors (waits, query stats, CPU) that this engine "
-                    + "does not populate. This is not \"still collecting\" — use the PostgreSQL MCP "
-                    + "reads (get_pg_wait_stats, get_pg_top_queries, get_pg_autovacuum_health, "
-                    + "get_pg_wraparound_risk, get_pg_xmin_horizon, get_pg_replication_slots, "
-                    + "get_pg_io_stats) and the three outage-predictor alerts instead.",
+                message: PostgresAnalysisNotApplicable,
                 _logger,
                 cancellationToken);
 
@@ -4105,7 +4095,23 @@ LIMIT 1";
         ["pg_replication_slots"] = (r, s, ct) => r.RunAsync(PgReplicationSlotsCollector.Instance, s, ct),
         ["pg_autovacuum_stats"] = (r, s, ct) => r.RunAsync(PgAutovacuumStatsCollector.Instance, s, ct),
         ["pg_io_stats"] = (r, s, ct) => r.RunAsync(PgIoStatsCollector.Instance, s, ct),
+        ["pg_blocking"] = (r, s, ct) => r.RunAsync(PgBlockingCollector.Instance, s, ct),
     };
+
+    /// <summary>
+    /// The analysis_state message for a PostgreSQL target, shared by the SCHEDULED pass and the manual
+    /// "Generate now" path.
+    /// <para>One constant because there were two hand-maintained copies and they had already drifted: adding
+    /// <c>get_pg_blocking</c> to the scheduled one left the manual one listing seven tools, so an operator
+    /// clicking Generate now got different guidance from the same product depending on which door they came
+    /// through. The list grows with every PostgreSQL read, which guarantees the drift recurs.</para>
+    /// </summary>
+    internal const string PostgresAnalysisNotApplicable =
+        "Scheduled analysis does not apply to a PostgreSQL target: its findings are derived from SQL Server "
+        + "collectors (waits, query stats, CPU) that this engine does not populate. This is not "
+        + "\"still collecting\" — use the PostgreSQL MCP reads (get_pg_wait_stats, get_pg_top_queries, "
+        + "get_pg_autovacuum_health, get_pg_wraparound_risk, get_pg_xmin_horizon, get_pg_replication_slots, "
+        + "get_pg_io_stats, get_pg_blocking) and the three outage-predictor alerts instead.";
 
     /// <summary>
     /// Signals that a blocking/deadlock XE session is missing or inaccessible so the reader returned no

@@ -73,6 +73,7 @@ public static class CollectorCatalog
         PgReplicationSlotsCollector.Instance,
         PgAutovacuumStatsCollector.Instance,
         PgIoStatsCollector.Instance,
+        PgBlockingCollector.Instance,
     };
 
     /// <summary>Name → definition, for the by-name target-gate lookup. Built once from <see cref="All"/>.</summary>
