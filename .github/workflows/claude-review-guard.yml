@@ -51,6 +51,8 @@ jobs:
           # Coupling to a step NAME in the other workflow. Deliberate: the step's conclusion is the
           # only structured way to tell "no token, skipped cleanly" from "ran and said nothing".
           REVIEW_STEP: Claude review
+          # Author of every artifact the review leaves behind (the action reports bot_name).
+          REVIEW_BOT: claude[bot]
         run: |
           set -euo pipefail
 
@@ -59,7 +61,7 @@ jobs:
           # Wait for the review run on this exact commit. Nothing appearing inside the grace window
           # means review is not operating here at all -- no secret, or a fork PR, which the review
           # workflow no-ops by design and which is not this guard's business.
-          run_id=''; status=''; conclusion=''; created=''
+          run_id=''; status=''; conclusion=''; created=''; seen=''
           for attempt in $(seq 1 70); do
             line=$(gh api \
               "repos/$R/actions/workflows/claude-review.yml/runs?head_sha=$SHA&per_page=1" \
@@ -67,8 +69,11 @@ jobs:
                     | "\(.id) \(.status) \(.conclusion // "-") \(.created_at)"')
             if [ -n "$line" ]; then
               read -r run_id status conclusion created <<<"$line"
+              seen=1
               [ "$status" = "completed" ] && break
-            elif [ "$attempt" -ge 6 ]; then
+            # Keyed on never having seen a run, not on this poll being empty: a transient empty
+            # listing after one was found must not be read as "review is not operating here".
+            elif [ -z "$seen" ] && [ "$attempt" -ge 6 ]; then
               echo "::notice title=No review run::No Claude Auto Review run exists for $SHA, so"\
                 "review is not operating on this PR (missing secret, or a fork). Nothing to verify."
               exit 0
@@ -152,17 +157,25 @@ jobs:
             exit 1
           fi
 
-          # Count all three artifact kinds. Reviews on this repo routinely carry an EMPTY body and
-          # put every finding in INLINE comments -- #2225 had fifteen reviews with body_len=0 and
-          # twelve findings inline, so a check counting review bodies alone would call it silent.
+          # Count all three artifact kinds, scoped to the reviewer. Reviews on this repo routinely
+          # carry an EMPTY body and put every finding in INLINE comments -- #2225 had fifteen
+          # reviews with body_len=0 and twelve findings inline, so counting review bodies alone
+          # would call it silent. The AUTHOR filter matters just as much: the review window runs up
+          # to 30 minutes, so without it any human or unrelated bot commenting inside that window
+          # satisfies the guard and recreates the false pass this exists to catch. If the app is
+          # ever renamed this reports a false "posted nothing" -- loud and wrong, which is the safer
+          # direction for a guard to fail.
+          mine='select(.user.login == env.REVIEW_BOT)'
           issue=$(gh api "repos/$R/issues/$PR/comments" --paginate \
-            --jq "[.[] | select(.created_at > \"$created\")] | length")
+            --jq "[.[] | $mine | select(.created_at > \"$created\")] | length")
           inline=$(gh api "repos/$R/pulls/$PR/comments" --paginate \
-            --jq "[.[] | select(.created_at > \"$created\")] | length")
+            --jq "[.[] | $mine | select(.created_at > \"$created\")] | length")
           reviews=$(gh api "repos/$R/pulls/$PR/reviews" --paginate \
-            --jq "[.[] | select(.submitted_at != null and .submitted_at > \"$created\")] | length")
+            --jq "[.[] | $mine | select(.submitted_at != null
+                                        and .submitted_at > \"$created\")] | length")
           total=$(( issue + inline + reviews ))
-          echo "posted since $created -- issue: $issue, inline: $inline, reviews: $reviews"
+          echo "posted by $REVIEW_BOT since $created -- issue: $issue, inline: $inline,"\
+            "reviews: $reviews"
           summary '### Claude review output'
           summary "- issue comments: $issue"
           summary "- inline comments: $inline"
@@ -170,7 +183,8 @@ jobs:
 
           if [ "$total" -eq 0 ]; then
             echo "::error title=Review posted nothing::Review run $run_id completed but left no"\
-              "comment, inline comment, or review on PR #$PR. Real money was spent and the output"\
+              "comment, inline comment, or review by $REVIEW_BOT on PR #$PR. Real money was spent"\
+              "and the output"\
               "vanished (#2229, and PR #2213 which did this eleven times). Do NOT read this PR as"\
               "reviewed; re-run the review workflow."
             exit 1
