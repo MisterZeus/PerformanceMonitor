@@ -138,3 +138,28 @@ never read as "not checked", and has a dedicated `cycles_only` status for a wind
   captures for one backend id, and the cycle. 21 checks, including that neither acyclic scenario is
   *mis*-reported as a cycle — a false deadlock claim is worse than a missed one, because it prescribes lock
   ordering as the fix when that is not the fix.
+
+### The invariant that replaced scenario-hunting — 2026-08-13
+
+Two review rounds each found the same CATEGORY of defect: **a captured blocking relationship that no read
+reports.** First pure cycles (no root exists, so `chains` drops the whole component); then the "lollipop" —
+X blocked by A where A/B/C cycle — which `chains` cannot reach *and* the cycle walk cannot close on, so X
+appeared nowhere at all.
+
+Fixing the first instance did nothing to prevent the second, because both fixes were scenario-shaped and the
+probe's scenarios were all **isolated**: one situation per capture, where a real capture snapshots the whole
+instance. Enumerating scenarios finds instances; it does not close a category.
+
+`probe_blocking_reader_sql.py` now asserts the invariant directly: **every `blocked_pid` in the stored edge
+set must be accounted for by some read** — in a root's chain, as a cycle participant, or in the set queued
+behind a cycle. It is built by SPLICING the shipped queries' own CTE blocks (cut at the final top-level
+`SELECT`, which is the one at column 0 after the raw-string literal dedents) rather than reimplementing them,
+so it cannot keep passing while the real logic drifts.
+
+Proven non-vacuous rather than assumed: with the `behind` arm removed — the pre-fix state — it reports
+exactly `(9, 910)` and `(9, 911)`, the two lollipop victims. With the arm present, zero orphans on both
+stage majors.
+
+**Any future read added here should be added to that reconciliation.** A new read that covers nothing new
+still has to leave the orphan set empty, and a new *collector* case that nothing covers will show up as an
+orphan instead of as a silent absence months later.
