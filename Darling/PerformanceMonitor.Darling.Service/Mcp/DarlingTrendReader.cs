@@ -46,13 +46,13 @@ internal static class DarlingTrendReader
         DateTime CollectionTime, double TotalServerMemoryMb, double TargetServerMemoryMb,
         double BufferPoolMb, double PlanCacheMb);
 
-    /// <summary>One perfmon-trend point for a single counter: the counter value and per-interval delta,
-    /// both summed across the counter's instances at that collection (Lite's <c>PerfmonTrendPoint</c>).</summary>
-    /// <summary>One perfmon point: the cumulative counter, the delta, and the wall-clock seconds that
-    /// delta actually covers, summed the same way. <c>SampleIntervalSeconds</c> is what makes a zero
-    /// readable: the collector reports 0 in exactly the cases where no delta was knowable (first
-    /// sighting, counter reset, gap past the policy), so (0, 0) is "unknown" while (0, n) is "genuinely
-    /// idle". Without it the two are the same number and a fabricated zero reads as quiet (#2234).
+    /// <summary>One perfmon-trend point for a single counter: the counter value, the per-interval delta,
+    /// and the wall-clock seconds that delta covers, all summed across the counter's instances at that
+    /// collection (Lite's <c>PerfmonTrendPoint</c>, plus the interval Lite does not carry).
+    /// <para><c>SampleIntervalSeconds</c> is what makes a zero readable: the collector reports 0 in
+    /// exactly the cases where no delta was knowable (first sighting, counter reset, gap past the
+    /// policy), so (0, 0) is "unknown" while (0, n) is "genuinely idle". Without it the two are the same
+    /// number and a fabricated zero reads as quiet (#2234).</para>
     /// <para>Rows written before that fix carry a hard-coded 60 regardless of the real gap, so a rate
     /// derived over a window spanning the upgrade is only as good as its newest rows.</para></summary>
     public sealed record PerfmonTrendPoint(DateTime CollectionTime, long Value, long DeltaValue, long SampleIntervalSeconds);

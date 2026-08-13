@@ -213,9 +213,9 @@ public class PgWaitStatsCollectorDefinitionTests
         Assert.Contains(deltas.Calls, call => call.Group == "pg_wait_stats_waits");
         Assert.Contains(deltas.Calls, call => call.Group == "pg_wait_stats_time");
 
-        /* Same 300-second gap policy as wait_stats: past that, no delta rather than a spike that is
+        /* Same shared gap policy as wait_stats: past it, no delta rather than a spike that is
            really an interval measurement. */
-        Assert.All(deltas.Calls, call => Assert.Equal(300, call.MaxGap));
+        Assert.All(deltas.Calls, call => Assert.Equal(CollectorDeltaCalculator.DefaultMaxGapSeconds, call.MaxGap));
         Assert.All(deltas.Calls, call => Assert.Equal(context.CollectionTime, call.Time));
     }
 
