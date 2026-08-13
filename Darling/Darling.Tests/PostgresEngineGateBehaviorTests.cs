@@ -48,10 +48,19 @@ namespace Darling.Tests;
 public sealed class PostgresEngineGateBehaviorTests
 {
     /// <summary>
-    /// A server_id far outside the fleet's range, derived the same way the worker derives it, so this test
-    /// cannot collide with a real server's analysis_state row.
+    /// The HOST is what identity derives from, which is the trap this test tripped over first:
+    /// <c>MonitoredServer.StorageName</c> is <c>BuildStorageName(Host, Database, ReadOnlyIntent)</c> — NOT
+    /// <c>Name</c> — and <c>RunAnalyzeNowAsync</c> finds a server by hashing that. A server_id hashed from
+    /// anything else simply is not found, and the gate then returns "server not monitored" rather than the
+    /// arm under test. Unique hosts so neither case can collide with a real server's analysis_state row.
     /// </summary>
-    private const string StorageName = "pg-engine-gate-behavior-test-2230";
+    private const string PgHost = "pg-engine-gate-behavior-2230.invalid";
+
+    private const string SqlHost = "sql-engine-gate-behavior-2230.invalid";
+
+    /// <summary>Derived through the SAME helper the worker uses, so the test cannot drift from the lookup.</summary>
+    private static int ServerIdFor(string host) =>
+        ServerIdHelper.GetDeterministicHashCode(ServerIdHelper.BuildStorageName(host, null, false));
 
     [Fact]
     public async Task AnalyzeNow_AgainstAPostgresTarget_WritesTheEngineTombstone_AndDoesNotRunThePass()
@@ -61,7 +70,7 @@ public sealed class PostgresEngineGateBehaviorTests
             "Set DARLING_TEST_PG to a Postgres connection string to run the analyze_now engine-gate test.");
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
-        var serverId = ServerIdHelper.GetDeterministicHashCode(StorageName);
+        var serverId = ServerIdFor(PgHost);
 
         /* Fabricated worker, the CollectorMemoryKnobTests.SweepGate idiom: the real ctor wants a host's worth
            of dependencies, and the gate under test reads exactly three fields. Reflection because pinning the
@@ -81,8 +90,10 @@ public sealed class PostgresEngineGateBehaviorTests
             var outcome = await InvokeAnalyzeNowAsync(worker, servers, serverId);
 
             /* 1. The gate returned the success shape, not a failure and not the analysis result. */
-            Assert.True(GetOutcomeSuccess(outcome));
+            /* Assert the STATUS first: if the lookup missed, the status is "server not monitored" and says
+               so, where a bare Assert.True on Success only reports Expected/Actual booleans. */
             Assert.Equal("analysis not applicable", GetOutcomeStatus(outcome));
+            Assert.True(GetOutcomeSuccess(outcome));
 
             /* 2. The once-latch is set, so the scheduled tick will not re-write what this just wrote —
                   the two arms share the tombstone rather than racing to overwrite it. */
@@ -122,7 +133,7 @@ public sealed class PostgresEngineGateBehaviorTests
             "Set DARLING_TEST_PG to a Postgres connection string to run the analyze_now engine-gate test.");
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
-        var serverId = ServerIdHelper.GetDeterministicHashCode(StorageName + "-sqlserver");
+        var serverId = ServerIdFor(SqlHost);
 
         var worker = (DarlingWorker)System.Runtime.CompilerServices.RuntimeHelpers
             .GetUninitializedObject(typeof(DarlingWorker));
@@ -217,24 +228,24 @@ public sealed class PostgresEngineGateBehaviorTests
     }
 
     private static object PostgresLoopState(int serverId) => NewLoopState(
-        new MonitoredServer { Name = StorageName, Host = "pg-gate-test.invalid", Engine = "postgres" },
+        new MonitoredServer { Name = "pg-gate", Host = PgHost, Engine = "postgres" },
         new ServerRuntime
         {
-            Config = new MonitoredServer { Name = StorageName, Host = "pg-gate-test.invalid" },
-            ConnectionString = "Host=pg-gate-test.invalid;Database=postgres;Username=monitor",
+            Config = new MonitoredServer { Name = "pg-gate", Host = PgHost, Engine = "postgres" },
+            ConnectionString = $"Host={PgHost};Database=postgres;Username=monitor",
             Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
-            StorageName = StorageName,
+            StorageName = PgHost,
             ServerId = serverId,
         });
 
     private static object SqlServerLoopState(int serverId) => NewLoopState(
-        new MonitoredServer { Name = StorageName + "-sqlserver", Host = "sql-gate-test.invalid" },
+        new MonitoredServer { Name = "sql-gate", Host = SqlHost },
         new ServerRuntime
         {
-            Config = new MonitoredServer { Name = StorageName + "-sqlserver", Host = "sql-gate-test.invalid" },
-            ConnectionString = "Server=sql-gate-test.invalid;Integrated Security=true",
+            Config = new MonitoredServer { Name = "sql-gate", Host = SqlHost },
+            ConnectionString = $"Server={SqlHost};Integrated Security=true",
             Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.SqlServer },
-            StorageName = StorageName + "-sqlserver",
+            StorageName = SqlHost,
             ServerId = serverId,
         });
 
