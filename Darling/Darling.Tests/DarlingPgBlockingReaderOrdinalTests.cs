@@ -200,8 +200,11 @@ public sealed class DarlingPgBlockingReaderOrdinalTests
            which is the only reason it is not now a pin that lies. */
         sql = Regex.Replace(sql, @"/\*.*?\*/", string.Empty, RegexOptions.Singleline);
 
-        /* The final SELECT is the last line that is exactly "SELECT" — raw string literals dedent, so the
-           outer one sits at column 0 while every CTE-internal SELECT is indented. */
+        /* The final projection is the LAST bare "SELECT" line, and Last() is what makes that true — not
+           indentation. Trim() strips leading whitespace, so every CTE's own SELECT matches this predicate
+           too; the outer one wins only because it is textually last in the query. (An earlier version of
+           this comment claimed indentation was doing the work, which would have misled anyone reformatting
+           the query.) */
         var lines = sql.Split('\n');
         var start = Enumerable.Range(0, lines.Length).Last(i => lines[i].Trim() == "SELECT");
 
