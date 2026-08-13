@@ -34,6 +34,10 @@ jobs:
     runs-on: ubuntu-latest
     # The review is capped at 30 minutes; leave room to observe one that uses all of it.
     timeout-minutes: 40
+    # No issues: scope here, despite the tally reading repos/.../issues/$PR/comments for
+    # top-level output. A pull request IS an issue to that API, and the PullRequests scope
+    # covers its comments: run 31726598542 was granted exactly Actions/Checks/Contents/
+    # Metadata/PullRequests read and counted issue: 1 from that endpoint without a 403.
     permissions:
       actions: read
       checks: read
