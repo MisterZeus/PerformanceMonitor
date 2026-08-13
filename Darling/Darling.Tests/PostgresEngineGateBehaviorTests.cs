@@ -29,10 +29,12 @@ namespace Darling.Tests;
 /// scan cannot tell a gate that returns early from one that falls through and happens to write the same
 /// text.</para>
 ///
-/// <para><b>Why this gate and not the other two.</b> Its observable is a PRESENCE — a row in
-/// <c>analysis_state</c> carrying the engine tombstone — so it can be asserted directly. The reconcile and
-/// snapshot_now gates observe an ABSENCE (no connection attempted), which needs a counting seam that does
-/// not exist yet; #2230 says as much, and this is the tractable half.</para>
+/// <para><b>Two of the three doors.</b> The analyze_now gate's observable is a PRESENCE — a row in
+/// <c>analysis_state</c> carrying the engine tombstone — so it is asserted directly. The reconcile gate
+/// looked like it needed a counting seam to observe an absence, and that was wrong: the belt gate inside
+/// <see cref="DarlingXeSessions.ReconcileLongQueryCompletionsAsync"/> is public and its own precondition,
+/// so an ungated call THROWS and a gated one returns — a difference an assertion can see with no seam, no
+/// live store, and no network. snapshot_now remains uncovered; see #2230.</para>
 ///
 /// <para><b>The regression it guards is specific and was real.</b> Clicking "Generate now" against a
 /// PostgreSQL target used to run the full SQL-Server-shaped pass, find nothing, and persist the GENERIC
@@ -182,6 +184,62 @@ public sealed class PostgresEngineGateBehaviorTests
         }
     }
 
+    /// <summary>
+    /// The reconcile door, gated (#2230). <see cref="DarlingXeSessions.ReconcileLongQueryCompletionsAsync"/>
+    /// carries its own engine precondition — "belt to the worker's braces" — and it is the belt that
+    /// actually stopped the field failure, so it is the one worth pinning.
+    ///
+    /// <para>The regression was measured, not theoretical: ungated, this method built a
+    /// <c>SqlConnection</c> from a PostgreSQL connection string, the ctor threw
+    /// <c>Keyword not supported: 'host'</c>, the caller's catch skipped the latch assignment, and because
+    /// <c>LongQueryTraceApplied</c> resets to null on every connect it retried EVERY sweep forever —
+    /// ~1,440 warnings/day/server (#2213 round 2).</para>
+    ///
+    /// <para>Both <c>enabled</c> values, because the gate sits ahead of that branch: ungated, the false arm
+    /// would try to DROP a session over the same impossible connection.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ReconcileLongQueryCompletions_AgainstAPostgresTarget_ReturnsBeforeBuildingASqlConnection(bool enabled)
+    {
+        /* runner is null on purpose: reaching it would mean the gate did not fire. */
+        await DarlingXeSessions.ReconcileLongQueryCompletionsAsync(
+            PostgresRuntime(), runner: null!, enabled, NullLogger<DarlingWorker>.Instance, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// The proof the test above is not vacuous. Same connection string, ENGINE flipped to SQL Server: the
+    /// gate no longer applies, the ctor rejects the string, and the exact field exception surfaces. Without
+    /// this arm, the pin above would pass just as happily against a method that had stopped connecting for
+    /// some unrelated reason.
+    /// </summary>
+    [Fact]
+    public async Task ReconcileLongQueryCompletions_SameStringButSqlServerEngine_ThrowsTheFieldFailure()
+    {
+        /* The engine is the ONLY difference from the gated case — same host, same connection string. */
+        var ungated = PostgresRuntime(CollectorTargetEngine.SqlServer);
+
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() =>
+            DarlingXeSessions.ReconcileLongQueryCompletionsAsync(
+                ungated, runner: null!, enabled: true, NullLogger<DarlingWorker>.Instance, CancellationToken.None));
+
+        /* The words from the sweep log, so a future reader can match this pin to that incident. */
+        Assert.Contains("Keyword not supported", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("host", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>A PostgreSQL runtime whose connection string is the PostgreSQL shape that <c>SqlConnection</c>
+    /// cannot parse — the combination that produced the field failure.</summary>
+    private static ServerRuntime PostgresRuntime(
+        CollectorTargetEngine engine = CollectorTargetEngine.PostgreSql) => new()
+    {
+        Config = new MonitoredServer { Name = "pg-reconcile-gate", Host = PgHost, Engine = "postgres" },
+        ConnectionString = $"Host={PgHost};Database=postgres;Username=monitor",
+        Target = new CollectorTargetInfo { Engine = engine },
+        StorageName = PgHost,
+        ServerId = ServerIdFor(PgHost),
+    };
     private static void SetField(DarlingWorker worker, string name, object value) =>
         typeof(DarlingWorker)
             .GetField(name, BindingFlags.NonPublic | BindingFlags.Instance)!
