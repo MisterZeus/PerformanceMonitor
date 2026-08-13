@@ -173,12 +173,13 @@ OPTION(RECOMPILE);";
 
            The interval is MEASURED, not assumed. This wrote a literal 60 — the configured one-minute
            cadence — on every row, while the fleet's actual gap between perfmon sweeps runs a median of
-           299 s (p99 830 s, max 2,514 s over 99,717 samples). Every consumer that divides by it, and
-           they all do via NULLIF(sample_interval_seconds, 0), was computing a rate up to 5x too high
-           from a denominator the collector had invented. QueryStatsCollector already captures the real
-           interval this way; perfmon was the outlier (#2234). A 0 here means no delta was knowable
-           (first sighting, counter reset, or a gap past the policy), which the NULLIF idiom every
-           reader already uses turns into NULL rather than a divide-by-zero. */
+           299 s (p99 830 s, max 2,514 s over 99,717 samples), so anyone deriving a rate from it was up
+           to 5x high on a denominator the collector had invented. Nothing in-product divided by THIS
+           column (the perfmon MCP tools hand it to the caller and the Viewer carries it unplotted); the
+           NULLIF(sample_interval_seconds, 0) idiom guards query_stats' interval, which
+           QueryStatsCollector has always measured. Perfmon was the outlier (#2234). A 0 here means no
+           delta was knowable — first sighting, counter reset, or a gap past the policy — so callers must
+           treat 0 as unknown rather than dividing by it. */
         var deltaKey = $"{row.ObjectName}|{row.CounterName}|{row.InstanceName}";
         var deltaCntrValue = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "perfmon", deltaKey,
             row.CntrValue, out var sampleIntervalSeconds,
