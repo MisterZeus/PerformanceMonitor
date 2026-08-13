@@ -110,7 +110,11 @@ public sealed class PostgresEngineGateBehaviorTests
             /* And the specific words that make it honest rather than merely non-empty. */
             Assert.Contains("does not apply to a PostgreSQL target", message, StringComparison.Ordinal);
             Assert.Contains("get_pg_blocking", message, StringComparison.Ordinal);
-            Assert.DoesNotContain("still collecting\"", message, StringComparison.Ordinal);
+            /* And it DISCLAIMS the still-collecting reading rather than avoiding the words: the message
+               quotes the phrase in order to contrast with it ("This is not \"still collecting\""), so a
+               DoesNotContain on those words can never pass and asserting it was my error, not the
+               product's. The property worth pinning is that the disclaimer is present. */
+            Assert.Contains("This is not \"still collecting\"", message, StringComparison.Ordinal);
         }
         finally
         {
