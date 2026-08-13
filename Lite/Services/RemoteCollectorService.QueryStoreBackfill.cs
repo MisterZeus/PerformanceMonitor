@@ -74,10 +74,11 @@ public partial class RemoteCollectorService
             var step = _backfillSliceSteps.GetOrAdd(server.Id, static _ => new AbandonableStep());
             var result = await step.RunAsync(
                 () => RunQueryStoreBackfillSliceAsync(server, cancellationToken),
-                BackfillSliceDeadline, cancellationToken,
+                BackfillSliceDeadline,
                 onLateFault: ex => _logger?.LogError(ex,
                     "query_store backfill slice on '{Server}' faulted AFTER being abandoned — this is the wedge's own exception (#2148)",
-                    server.DisplayName));
+                    server.DisplayName),
+                cancellationToken: cancellationToken);
 
             switch (result.Outcome)
             {

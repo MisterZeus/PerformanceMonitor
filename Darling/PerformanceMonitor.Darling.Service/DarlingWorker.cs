@@ -1908,10 +1908,11 @@ public sealed class DarlingWorker : BackgroundService
                 var step = _backfillSliceSteps.GetOrAdd(runtime.ServerId, static _ => new AbandonableStep());
                 var result = await step.RunAsync(
                     () => backfill.RunServerSliceAsync(runtime, stoppingToken),
-                    BackfillSliceDeadline, stoppingToken,
+                    BackfillSliceDeadline,
                     onLateFault: ex => _logger.LogError(ex,
                         "query_store backfill slice on '{Server}' faulted AFTER being abandoned — this is the wedge's own exception (#2148)",
-                        runtime.Config.DisplayName));
+                        runtime.Config.DisplayName),
+                    cancellationToken: stoppingToken);
 
                 switch (result.Outcome)
                 {
