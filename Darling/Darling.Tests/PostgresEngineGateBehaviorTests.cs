@@ -84,7 +84,7 @@ public sealed class PostgresEngineGateBehaviorTests
         var server = PostgresLoopState(serverId);
         var servers = NewLoopStateList(server);
 
-        await CleanupAsync(postgres, serverId);
+        var bodySucceeded = false;
         try
         {
             var outcome = await InvokeAnalyzeNowAsync(worker, servers, serverId);
@@ -115,10 +115,13 @@ public sealed class PostgresEngineGateBehaviorTests
                DoesNotContain on those words can never pass and asserting it was my error, not the
                product's. The property worth pinning is that the disclaimer is present. */
             Assert.Contains("This is not \"still collecting\"", message, StringComparison.Ordinal);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await CleanupAsync(postgres, serverId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, (cleanup, cleanupCt) =>
+                DeleteAnalysisStateAsync(cleanup, cleanupCt, serverId));
         }
     }
 
@@ -148,7 +151,7 @@ public sealed class PostgresEngineGateBehaviorTests
         var server = SqlServerLoopState(serverId);
         var servers = NewLoopStateList(server);
 
-        await CleanupAsync(postgres, serverId);
+        var bodySucceeded = false;
         try
         {
             /* The SQL Server path runs the real analysis pass, which needs collaborators the fabricated
@@ -169,10 +172,13 @@ public sealed class PostgresEngineGateBehaviorTests
             Assert.NotEqual("analysis not applicable", status);
             Assert.False(AnalysisStateWritten(server),
                 "the PostgreSQL once-latch must not be set for a SQL Server target");
+
+            bodySucceeded = true;
         }
         finally
         {
-            await CleanupAsync(postgres, serverId);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, (cleanup, cleanupCt) =>
+                DeleteAnalysisStateAsync(cleanup, cleanupCt, serverId));
         }
     }
 
@@ -272,13 +278,19 @@ public sealed class PostgresEngineGateBehaviorTests
     }
 
     /// <summary>
-    /// Deletes only this test's own synthetic server_id. Runs on CancellationToken.None deliberately, so a
-    /// cancelled run still leaves the shared live store clean — the LiveStoreCleanup convention.
+    /// Deletes only this test's own synthetic server_id, through <c>LiveStoreCleanup</c> so the teardown runs
+    /// on its OWN connection rather than the body's (#1902). A finally that tears down on the body's
+    /// connection throws out of the finally and REPLACES the body's exception with the teardown's — and it is
+    /// the body's failure that closed the connection in the first place, so the teardown fails because of the
+    /// thing it then hides. Opening a fresh connection by hand is explicitly not accepted either: it is half
+    /// the fix and still throws from the finally.
     /// </summary>
-    private static async Task CleanupAsync(NpgsqlDataSource postgres, int serverId)
+    private static async Task DeleteAnalysisStateAsync(
+        NpgsqlConnection cleanup, CancellationToken cleanupCt, int serverId)
     {
-        await using var command = postgres.CreateCommand("DELETE FROM analysis_state WHERE server_id = $1");
+        await using var command = new NpgsqlCommand(
+            "DELETE FROM analysis_state WHERE server_id = $1", cleanup);
         command.Parameters.AddWithValue(serverId);
-        await command.ExecuteNonQueryAsync(CancellationToken.None);
+        await command.ExecuteNonQueryAsync(cleanupCt);
     }
 }
