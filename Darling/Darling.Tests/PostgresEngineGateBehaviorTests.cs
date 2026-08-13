@@ -240,6 +240,7 @@ public sealed class PostgresEngineGateBehaviorTests
         StorageName = PgHost,
         ServerId = ServerIdFor(PgHost),
     };
+
     private static void SetField(DarlingWorker worker, string name, object value) =>
         typeof(DarlingWorker)
             .GetField(name, BindingFlags.NonPublic | BindingFlags.Instance)!
