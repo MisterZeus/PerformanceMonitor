@@ -177,14 +177,22 @@ public sealed class DeltaGapPolicyTests
     }
 
     /// <summary>The read has to carry the denominator, or the distinction dies at the API boundary —
-    /// which is the half of #2234 that made a fabricated zero unfalsifiable from outside.</summary>
+    /// which is the half of #2234 that made a fabricated zero unfalsifiable from outside.
+    /// <para>And it must AGGREGATE it correctly: the value and delta are additive across a counter's
+    /// instance rows, the interval is not — it is one measured gap repeated per instance. Fleet-measured,
+    /// Transactions/sec carries a median of 12 (max 17) rows per collection_time, so SUM would report a
+    /// rate 12-17x too low. Pinning the aggregate by name because a review caught exactly that.</para>
+    /// </summary>
     [Fact]
-    public void ThePerfmonTrendReadProjectsTheInterval()
+    public void ThePerfmonTrendReadProjectsTheInterval_AggregatedAsMaxNotSum()
     {
-        Assert.Contains(
-            "SUM(sample_interval_seconds)",
-            PerformanceMonitor.Darling.Service.Mcp.DarlingTrendReader.PerfmonTrendSql,
-            StringComparison.Ordinal);
+        var sql = PerformanceMonitor.Darling.Service.Mcp.DarlingTrendReader.PerfmonTrendSql;
+
+        Assert.Contains("MAX(sample_interval_seconds)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("SUM(sample_interval_seconds)", sql, StringComparison.Ordinal);
+        /* The additive pair must stay additive — this guards the fix from being over-applied. */
+        Assert.Contains("SUM(cntr_value)", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(delta_cntr_value)", sql, StringComparison.Ordinal);
     }
 
     private static string RepoRoot()

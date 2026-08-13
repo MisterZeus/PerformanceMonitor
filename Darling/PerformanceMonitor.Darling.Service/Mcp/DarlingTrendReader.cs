@@ -123,13 +123,22 @@ internal static class DarlingTrendReader
     /// viewer's perfmon read: SUM the counter's instances per collection. Postgres <c>SUM(bigint)</c> is
     /// numeric, so both SUMs CAST back to bigint for the typed GetInt64 reader (the viewer's PerfmonTrendsSql
     /// makes the same cast). $1 server_id, $2 counter_name, $3/$4 window (naive UTC).
+    /// <para>The interval is MAX, not SUM, and that distinction is load-bearing. cntr_value and
+    /// delta_cntr_value are additive across a counter's instance rows — summing Transactions/sec over
+    /// every database is a meaningful total — but the interval is the same measured sweep gap repeated
+    /// once per instance, so summing it multiplies the denominator by the instance count. Measured on
+    /// the fleet: Transactions/sec, Log Flushes/sec and Log Bytes Flushed/sec carry a median of 12 and
+    /// up to 17 rows per collection_time, so a summed denominator would report rates 12-17x too LOW —
+    /// the same silent corruption this read exists to expose, pointed the other way. MAX also ignores a
+    /// 0 from an instance seen for the first time, while still reporting 0 when every instance is
+    /// unknown.</para>
     /// </summary>
     public const string PerfmonTrendSql = """
         SELECT
             collection_time,
             CAST(SUM(cntr_value) AS bigint) AS cntr_value,
             CAST(SUM(delta_cntr_value) AS bigint) AS delta_cntr_value,
-            CAST(SUM(sample_interval_seconds) AS bigint) AS sample_interval_seconds
+            CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds
         FROM v_perfmon_stats
         WHERE server_id = $1
         AND   counter_name = $2

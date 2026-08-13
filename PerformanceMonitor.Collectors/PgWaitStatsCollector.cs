@@ -173,7 +173,7 @@ WHERE w.wait_time > 0";
            is stable, and event_id >> 24 == type_id holds (verified on every event on two clusters),
            so the id also carries the type.
 
-           300-second gap policy matches wait_stats: past that, emit no delta rather than a spike that
+           The shared gap policy matches wait_stats: past it, emit no delta rather than a spike that
            is really an interval measurement. */
         var key = row.EventId.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
