@@ -186,8 +186,14 @@ public sealed class DarlingMcpPgBlockingTools
                 max_chain_depth = c.MaxDepth,
                 worst_victim_wait_ms = c.WorstVictimWaitMs,
                 worst_victim_query = c.WorstVictimQuery,
-                /* The one-off vs. pattern discriminator, keyed on the stable backend id. */
+                /* The one-off vs. pattern discriminator, keyed on the stable backend id. NULL when the
+                   root's own identity did not resolve — reported as unknown rather than as 1, because a
+                   fabricated "seen once" reads as a real finding. */
                 samples_as_root = c.SamplesAsRoot,
+                samples_as_root_note = c.SamplesAsRoot is null
+                    ? "Unknown: this root had already left pg_stat_activity when the edge was captured, so "
+                    + "it has no stable backend identity to count appearances of. Not a sign it is new."
+                    : null,
                 query_text_may_be_truncated = c.QueryTextMayBeTruncated,
                 recommended_action = RemedyFor(c.RootState, c.RootIsIdleInTransaction, c.RootXactDurationMs),
             }).ToList();

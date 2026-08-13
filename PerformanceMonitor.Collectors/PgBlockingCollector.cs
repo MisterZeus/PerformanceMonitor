@@ -181,11 +181,18 @@ SELECT
        scales to the largest whole unit), so current_setting(...)::int raises an
        invalid-input-syntax-for-integer error and takes the WHOLE collection down with it, every cycle.
        Verified against both majors rather than reasoned about. pg_size_bytes parses every unit form, so
-       this stays right if the value is ever set in MB or left at the 1kB default. */
+       this stays right if the value is ever set in MB or left at the 1kB default.
+
+       octet_length(), NOT length() — the same unit mistake as above wearing a different disguise, and it
+       shipped in the first draft one line under a comment about getting units right. PostgreSQL truncates
+       query text at a BYTE boundary while length() counts CHARACTERS in the session encoding, so on
+       multi-byte text the comparison undercounts and the flag comes back false for a query that really was
+       clipped. Measured on live Aurora: repeat('あ',100) is length 100, octet_length 300 — a 3x undercount
+       against an 8192-byte limit. */
     (
-        length(coalesce(blocked.query, ''))
+        octet_length(coalesce(blocked.query, ''))
             >= pg_size_bytes(current_setting('track_activity_query_size'))
-     OR length(coalesce(blocker.query, ''))
+     OR octet_length(coalesce(blocker.query, ''))
             >= pg_size_bytes(current_setting('track_activity_query_size'))
     )                                                           AS query_text_may_be_truncated
 FROM edges AS e

@@ -176,6 +176,20 @@ public class PgBlockingCollectorDefinitionTests
             "pg_size_bytes(current_setting('track_activity_query_size'))", sql, StringComparison.Ordinal);
         Assert.DoesNotContain(
             "current_setting('track_activity_query_size')::int", sql, StringComparison.Ordinal);
+
+        /* And the LEFT side of that comparison must be BYTES too — the same unit mistake in a second
+           disguise, which is how it shipped one line under a comment about getting units right.
+           track_activity_query_size truncates at a byte boundary; length() counts characters, so on
+           multi-byte text it undercounts and the flag reads false for a query that really was clipped.
+           Measured on live Aurora: repeat('あ',100) is length 100, octet_length 300. */
+        Assert.Contains("octet_length(coalesce(blocked.query, ''))", sql, StringComparison.Ordinal);
+        Assert.Contains("octet_length(coalesce(blocker.query, ''))", sql, StringComparison.Ordinal);
+        /* The negative needs a LEADING SPACE to mean anything: "length(coalesce(" is a substring of
+           "octet_length(coalesce(", so the bare form is satisfied by the very code it is meant to reject.
+           With the space it matches only a genuine character-length comparison, since the character before
+           "length" in the correct form is an underscore. */
+        Assert.DoesNotContain(" length(coalesce(blocked.query", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain(" length(coalesce(blocker.query", sql, StringComparison.Ordinal);
     }
 
     /// <summary>

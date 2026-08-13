@@ -41,7 +41,10 @@ public static class DarlingPgBlockingReader
         int MaxDepth,
         long WorstVictimWaitMs,
         string? WorstVictimQuery,
-        long SamplesAsRoot,
+        /* NULL, not 0 or 1, when the root's own backend id did not resolve (the collector's
+           vanished-blocker sentinel). Recurrence is genuinely UNKNOWN there, and "seen once" is a
+           different claim from "cannot tell". */
+        long? SamplesAsRoot,
         bool QueryTextMayBeTruncated);
 
     /// <summary>
@@ -123,7 +126,8 @@ public static class DarlingPgBlockingReader
                 e.blocked_pid,
                 e.blocked_query,
                 e.blocked_query_duration_ms,
-                1 AS depth
+                1 AS depth,
+                ARRAY[r.blocking_pid, e.blocked_pid] AS visited
             FROM roots AS r
             JOIN edges AS e
               ON  e.collection_id = r.collection_id
@@ -137,12 +141,21 @@ public static class DarlingPgBlockingReader
                 e.blocked_pid,
                 e.blocked_query,
                 e.blocked_query_duration_ms,
-                c.depth + 1
+                c.depth + 1,
+                c.visited || e.blocked_pid
             FROM chain AS c
             JOIN edges AS e
               ON  e.collection_id = c.collection_id
               AND e.blocking_pid = c.blocked_pid
             WHERE c.depth < 32
+            /* Never revisit a backend already on this walk. Without it a cycle hanging off an otherwise
+               legitimate root is walked until the depth cap: root A blocks B while B/C/D form a cycle among
+               themselves, B is correctly excluded from roots (it IS blocked) but A still qualifies, and the
+               walk goes B -> C -> D -> B -> ... to 32. The cap stops the runaway but chain_stats then reports
+               max_depth = 32 and a worst victim drawn from repeated revisits of the same three backends,
+               which is indistinguishable from a genuine 32-deep chain. With the guard the counts are the
+               DISTINCT set, and the cycle itself is reported by PgBlockingCyclesSql instead. */
+            AND   e.blocked_pid <> ALL(c.visited)
         ),
         chain_stats AS (
             SELECT
@@ -189,6 +202,14 @@ public static class DarlingPgBlockingReader
                 blocking_backend_id,
                 count(DISTINCT collection_id) AS samples_as_root
             FROM roots
+            /* Exclude the vanished-blocker sentinel. The collector stores
+               coalesce(blocker.backend_id, 0), so every root whose own row had already left
+               pg_stat_activity lands on id 0 — and grouping those together counts unrelated one-off
+               incidents in different captures as repeat appearances of one backend. That is precisely the
+               conflation the synthetic backend id exists to prevent, arriving through the fallback instead
+               of through pid reuse. Excluded rather than counted, so the final LEFT JOIN yields NULL and
+               the read reports recurrence as UNKNOWN rather than inventing a number. */
+            WHERE blocking_backend_id <> 0
             GROUP BY blocking_backend_id
         )
         /* Every output column is aliased, including the ones whose name looks obvious. The C# reader is
@@ -212,7 +233,7 @@ public static class DarlingPgBlockingReader
             s.max_depth                              AS max_depth,
             s.worst_victim_wait_ms                   AS worst_victim_wait_ms,
             v.blocked_query                          AS worst_victim_query,
-            coalesce(c.samples_as_root, 1)           AS samples_as_root,
+            c.samples_as_root                        AS samples_as_root,
             d.query_text_may_be_truncated            AS query_text_may_be_truncated
         FROM root_detail AS d
         JOIN chain_stats AS s
@@ -261,7 +282,7 @@ public static class DarlingPgBlockingReader
                 reader.IsDBNull(13) ? 0 : reader.GetInt32(13),
                 reader.IsDBNull(14) ? -1 : reader.GetInt64(14),
                 reader.IsDBNull(15) ? null : reader.GetString(15),
-                reader.IsDBNull(16) ? 0 : reader.GetInt64(16),
+                reader.IsDBNull(16) ? null : reader.GetInt64(16),
                 !reader.IsDBNull(17) && reader.GetBoolean(17)));
         }
 
@@ -292,8 +313,17 @@ public static class DarlingPgBlockingReader
     ///
     /// <para>Detected by reachability rather than by "the collection has no root", which would miss a cycle
     /// sharing a capture with an ordinary chain. Recursion stops as soon as a walk returns to where it
-    /// started (<c>at_pid &lt;&gt; start_pid</c>) and is depth-capped besides, so a cycle terminates it
-    /// instead of running away.</para>
+    /// started (<c>at_pid &lt;&gt; start_pid</c>), refuses to wander into a foreign cycle, and is
+    /// depth-capped besides.</para>
+    ///
+    /// <para><b>One row per CYCLE, not per capture, and the attributed names come from the cycle's own
+    /// edges.</b> Both of those were wrong first time and both failed the same way — silently, with a
+    /// plausible number. Grouping on <c>collection_id</c> alone merged two independent deadlocks that landed
+    /// in one sample into a single bogus component; joining the edge rows on <c>collection_id</c> alone
+    /// aggregated <c>database_name</c> over every edge in the capture, so a cycle sharing a sample with an
+    /// unrelated chain reported whichever database sorted first. Each walk's <c>members</c> array is carried
+    /// specifically so the component can be canonicalised (sorted, then DISTINCT collapses the rotations one
+    /// per participant) and used to scope the join.</para>
     ///
     /// <para>$1 server_id, $2/$3 window (naive UTC), $4 row limit.</para>
     /// </summary>
@@ -316,7 +346,8 @@ public static class DarlingPgBlockingReader
                 collection_id,
                 blocked_pid AS start_pid,
                 blocking_pid AS at_pid,
-                1 AS depth
+                1 AS depth,
+                ARRAY[blocked_pid] AS members
             FROM edges
 
             UNION ALL
@@ -325,25 +356,54 @@ public static class DarlingPgBlockingReader
                 w.collection_id,
                 w.start_pid,
                 e.blocking_pid,
-                w.depth + 1
+                w.depth + 1,
+                w.members || e.blocked_pid
             FROM walk AS w
             JOIN edges AS e
               ON  e.collection_id = w.collection_id
               AND e.blocked_pid = w.at_pid
             WHERE w.depth < 32
+            /* Stop the moment the walk closes on where it started — that IS the detection. */
             AND   w.at_pid <> w.start_pid
+            /* And never wander into a FOREIGN cycle: without this, a walk that starts outside a cycle and
+               reaches one loops inside it to the depth cap, doing 32 rounds of work per starting edge. */
+            AND   (e.blocking_pid = w.start_pid OR e.blocking_pid <> ALL(w.members))
+        ),
+        closed AS (
+            /* A walk that returned to its own start. Its `members` array is exactly that cycle's
+               participants, which is why the array is carried at all. */
+            SELECT collection_id, members
+            FROM walk
+            WHERE at_pid = start_pid
+        ),
+        components AS (
+            /* Canonicalise: every participant of one cycle produces its own closed walk with the same
+               member SET in a rotated order, so sorting collapses them to one row per actual cycle.
+               DISTINCT then dedupes the rotations.
+
+               Grouping by the component rather than by the capture is load-bearing: two independent
+               deadlocks landing in the same one-minute capture are two findings, and grouping on
+               collection_id alone merged their pids into one bogus connected component. */
+            SELECT DISTINCT
+                collection_id,
+                (SELECT array_agg(m ORDER BY m) FROM unnest(members) AS m) AS members
+            FROM closed
         )
         SELECT
             e.collection_time                        AS captured_at,
-            count(DISTINCT w.start_pid)::int         AS participant_count,
-            array_agg(DISTINCT w.start_pid)          AS pids,
+            cardinality(c.members)                   AS participant_count,
+            c.members                                AS pids,
             min(e.database_name)                     AS database_name,
             min(e.blocked_application_name)          AS application_name
-        FROM walk AS w
+        FROM components AS c
         JOIN edges AS e
-          ON  e.collection_id = w.collection_id
-        WHERE w.at_pid = w.start_pid
-        GROUP BY e.collection_id, e.collection_time
+          ON  e.collection_id = c.collection_id
+          /* Scoped to the cycle's OWN participants. Joining on collection_id alone aggregated
+             database_name and application_name over every edge in the capture, so a cycle in one database
+             sharing a sample with an ordinary chain in another reported whichever name sorted first —
+             pointing the reader at a database the deadlock never touched. */
+          AND e.blocked_pid = ANY(c.members)
+        GROUP BY e.collection_id, e.collection_time, c.members
         ORDER BY e.collection_time DESC
         LIMIT $4
         """;

@@ -65,6 +65,63 @@ public class DarlingPgBlockingReaderTests
     }
 
     /// <summary>
+    /// The CHAIN recursion must refuse to revisit a backend already on its walk. Without it, a cycle hanging
+    /// off an otherwise legitimate root is walked to the depth cap: root A blocks B while B/C/D cycle among
+    /// themselves, A still qualifies as a root, and the walk goes B → C → D → B → … until depth 32. The cap
+    /// stops the runaway, but the reader then sees <c>max_depth = 32</c> and a worst victim drawn from
+    /// repeated revisits — indistinguishable from a genuine 32-deep chain.
+    /// <para>Demonstrated against live Aurora on a fixture with exactly that shape: the unguarded recursion
+    /// reported <c>max_depth = 32</c> where the guarded one reports 2.</para>
+    /// </summary>
+    [Fact]
+    public void TheChainRecursionRefusesToRevisitABackend()
+    {
+        Assert.Contains("ARRAY[r.blocking_pid, e.blocked_pid] AS visited", ChainsSql, StringComparison.Ordinal);
+        Assert.Contains("e.blocked_pid <> ALL(c.visited)", ChainsSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Recurrence must exclude the vanished-blocker sentinel. The collector stores
+    /// <c>coalesce(blocker.backend_id, 0)</c>, so every root whose own row had already left
+    /// <c>pg_stat_activity</c> lands on id <c>0</c> — and grouping those together counts unrelated one-off
+    /// incidents from different captures as repeat appearances of one backend. That is exactly the
+    /// conflation the synthetic backend id exists to prevent, arriving through the fallback rather than
+    /// through pid reuse.
+    /// <para>Excluded rather than counted, so the outer LEFT JOIN yields NULL and the read reports
+    /// recurrence as UNKNOWN. "Seen once" and "cannot tell" are different claims and the tool says which.</para>
+    /// </summary>
+    [Fact]
+    public void RecurrenceExcludesTheVanishedBlockerSentinel()
+    {
+        Assert.Contains("WHERE blocking_backend_id <> 0", ChainsSql, StringComparison.Ordinal);
+        /* And the projection must NOT coalesce the resulting NULL into a number. */
+        Assert.DoesNotContain("coalesce(c.samples_as_root, 1)", ChainsSql, StringComparison.Ordinal);
+        Assert.Contains("c.samples_as_root", ChainsSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The cycle query must be scoped to its own participants and grouped per COMPONENT, not per capture.
+    /// A one-minute capture snapshots the whole instance, so one collection routinely holds several
+    /// unrelated situations — the case none of the original probe scenarios covered, since each was isolated.
+    /// <para>Both failure modes were demonstrated live on a fixture holding a cycle in <c>zz_cycle_db</c>
+    /// beside an unrelated chain in <c>aa_other_db</c>, plus two disjoint cycles in one capture: the
+    /// unscoped join reported the deadlock's database as <c>aa_other_db</c> (alphabetically first across the
+    /// whole capture), and grouping on <c>collection_id</c> alone merged the two disjoint cycles into one
+    /// bogus four-participant component.</para>
+    /// </summary>
+    [Fact]
+    public void TheCycleQueryIsScopedToItsOwnParticipantsAndGroupedPerComponent()
+    {
+        /* Scoped join: the edge rows feeding min(database_name) must belong to the cycle. */
+        Assert.Contains("e.blocked_pid = ANY(c.members)", CyclesSql, StringComparison.Ordinal);
+        /* Per-component grouping, canonicalised so each participant's rotation collapses to one row. */
+        Assert.Contains("array_agg(m ORDER BY m)", CyclesSql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY e.collection_id, e.collection_time, c.members", CyclesSql, StringComparison.Ordinal);
+        /* And the walk must not wander into a foreign cycle on the way. */
+        Assert.Contains("e.blocking_pid <> ALL(w.members)", CyclesSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The cycle walk must also stop when it returns to where it started, not lean on the depth cap alone.
     /// The cap bounds the damage; this is what makes the query correct rather than merely finite.
     /// </summary>
@@ -72,8 +129,9 @@ public class DarlingPgBlockingReaderTests
     public void TheCycleWalkStopsOnClosingTheLoop()
     {
         Assert.Contains("w.at_pid <> w.start_pid", CyclesSql, StringComparison.Ordinal);
-        /* And the detection itself: reachable from yourself. */
-        Assert.Contains("WHERE w.at_pid = w.start_pid", CyclesSql, StringComparison.Ordinal);
+        /* And the detection itself: reachable from yourself. Unaliased — it lives in the `closed` CTE,
+           which selects straight from `walk`. */
+        Assert.Contains("WHERE at_pid = start_pid", CyclesSql, StringComparison.Ordinal);
     }
 
     /// <summary>
