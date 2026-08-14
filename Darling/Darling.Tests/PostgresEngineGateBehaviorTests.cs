@@ -307,7 +307,7 @@ public sealed class PostgresEngineGateBehaviorTests
     /// dispatching anything at all — a loop broken for some unrelated reason looks identical to a loop
     /// gated correctly, and "ran zero collectors" is exactly what a broken snapshot also reports.</para>
     ///
-    /// <para>The host is unresolvable and <c>Connect Timeout=1</c>, so the collector fails immediately
+    /// <para>The connection goes to a loopback port with no listener, so the collector fails immediately
     /// rather than waiting out a default timeout. The STATUS is not asserted: whether the attempt lands
     /// ERROR or a zero-row SUCCESS depends on how far the collector gets before the connection dies, and the
     /// fact under test is that it was dispatched at all.</para>
@@ -472,16 +472,25 @@ public sealed class PostgresEngineGateBehaviorTests
     }
 
     /// <summary>
-    /// A runtime for the snapshot arms. The connection string is deliberately unreachable and shaped for the
-    /// engine under test, with a one-second connect timeout: a dispatched collector must fail FAST, because
-    /// the SQL Server arm's whole purpose is to prove dispatch happened, not to collect anything.
+    /// A runtime for the snapshot arms. A dispatched collector must fail FAST, because the SQL Server arm's
+    /// whole purpose is to prove dispatch happened, not to collect anything.
+    ///
+    /// <para><b>The connection host is deliberately NOT the identity host.</b> Identity comes from
+    /// <c>host</c> — a synthetic <c>.invalid</c> name, so the lookup and the store rows cannot collide with a
+    /// real server — while the connection goes to <c>127.0.0.1</c> port 1, which is the suite's existing
+    /// unreachable-endpoint idiom (<c>ViewerControlPlaneStage3bTests</c>, the MCP <c>DeadStore</c>
+    /// constants). Connection-refused from a loopback port with no listener is immediate and depends on
+    /// nothing outside the runner; resolving a <c>.invalid</c> name instead makes the timing a property of
+    /// CI's resolver, which is not a thing this test should be measuring.</para>
     /// </summary>
     private static ServerRuntime SnapshotRuntime(string host, int serverId, CollectorTargetEngine engine) => new()
     {
         Config = new MonitoredServer { Name = host, Host = host },
         ConnectionString = engine == CollectorTargetEngine.PostgreSql
-            ? $"Host={host};Database=postgres;Username=monitor;Timeout=1"
-            : $"Server={host};Integrated Security=true;Connect Timeout=1;TrustServerCertificate=true",
+            ? "Host=127.0.0.1;Port=1;Database=postgres;Username=monitor;Timeout=1"
+            /* SQL auth rather than integrated: the failure under test is the connect, and integrated auth on
+               a Linux runner fails for a platform reason instead, which is a different thing to assert on. */
+            : "Server=127.0.0.1,1;User ID=x;Password=x;Connect Timeout=1;Encrypt=false",
         Target = new CollectorTargetInfo { Engine = engine },
         StorageName = host,
         ServerId = serverId,
