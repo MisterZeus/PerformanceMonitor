@@ -234,7 +234,7 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups  Materialize the retention rollups back over existing history, after a disk preflight." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --collapse-legacy-slices  Repair Query Store rows collected before the split-slice fix, then re-materialize the rollups they fed." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --recompress-plan-dim  Convert the plan dimension's pre-V54 text rows to gzip in batches while the service runs, then VACUUM FULL to return the space to the volume (--no-vacuum-full to skip; --vacuum-full to compact an already-converted store)." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --add-server        Register monitored server(s) from a JSON array on stdin (the add_servers shape); the running service picks them up without a restart." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --add-server, --add-servers   Register monitored server(s) from a JSON array on stdin (the add_servers shape); the running service picks them up without a restart." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run   Show the plan, the disk estimate and the time budget, and change nothing.";
 
     /// <summary>
@@ -3595,7 +3595,8 @@ public static class DarlingCliCommands
     public static string AddServerUsageText() =>
         "Nothing arrived on stdin, so no server was added." + Environment.NewLine +
         Environment.NewLine +
-        "--add-server reads a JSON ARRAY of servers from stdin — the same shape the add_servers MCP tool takes." + Environment.NewLine +
+        "--add-server (or --add-servers) reads a JSON ARRAY of servers from stdin — the same shape the" + Environment.NewLine +
+        "add_servers MCP tool takes." + Environment.NewLine +
         "The password is read from stdin rather than the command line on purpose: an argument is visible in the" + Environment.NewLine +
         "process list and in shell history." + Environment.NewLine +
         Environment.NewLine +
@@ -3733,18 +3734,25 @@ public static class DarlingCliCommands
             }
 
             connectionString = DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres);
+            if (string.IsNullOrWhiteSpace(connectionString))
+            {
+                /* Emitted HERE, inside the branch the guard above proved is Windows, rather than from a shared
+                   check below keyed on postgres.Managed. The sibling verbs can write it below because they carry
+                   [SupportedOSPlatform("windows")] on the whole method; this one deliberately does not, and a
+                   bool is not something the platform analyzer can correlate with an earlier OS guard — so the
+                   call has to sit where Windows is provable rather than where it merely happens to hold. */
+                error.WriteLine(DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres));
+                return 1;
+            }
         }
         else
         {
             connectionString = postgres.ConnectionString;
-        }
-
-        if (string.IsNullOrWhiteSpace(connectionString))
-        {
-            error.WriteLine(postgres.Managed
-                ? DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres)
-                : "postgres.connectionString is empty, so there is no store to register a server in.");
-            return 1;
+            if (string.IsNullOrWhiteSpace(connectionString))
+            {
+                error.WriteLine("postgres.connectionString is empty, so there is no store to register a server in.");
+                return 1;
+            }
         }
 
         output.WriteLine();
