@@ -1558,12 +1558,28 @@ RETURNING s.state_key";
     {
         var targetDb = new SqlConnectionStringBuilder(server.ConnectionString).InitialCatalog;
 
-        /* Skip the throttle when there is nothing to fall back TO — see Lite's twin. With no target
-           database the fallback can only throw, so honouring the throttle would guarantee 15 minutes
-           of failure without ever attempting to recover. */
-        var hasFallback = SingleDbOrEmpty(targetDb).Count > 0;
+        /* #2220: a registration that NAMES a database is a registration OF that database, so its sweep
+           covers exactly that one and never touches master. Before this, EVERY database-scoped collector
+           enumerated master and swept every online database on the logical server, storing all of it under
+           the one server_id of whichever registration ran the sweep — N registrations of N databases on one
+           server meant N² collection with every registration's history contaminated by its siblings'.
 
-        if (hasFallback && IsMasterProbeThrottled(server.ServerId))
+           This also subsumes the #857 case it looks like it bypasses, and improves on it: a login granted
+           access to one user database but not to master HAS a named database, so it now returns here without
+           probing master at all, rather than probing, failing, forming a verdict and falling back. Master is
+           reached only by a registration that names no database — the logical-server registration, which has
+           nothing else to enumerate from. */
+        var ownDatabase = AzureSweepScope.OwnDatabaseOrEmpty(targetDb);
+        if (ownDatabase.Count > 0)
+        {
+            return ownDatabase;
+        }
+
+        /* Reached only when the registration names no database, so there is nothing to fall back TO and
+           the throttle would guarantee 15 minutes of failure without attempting to recover. Kept as the
+           guard it always was rather than deleted: it states the precondition this path now satisfies by
+           construction. */
+        if (IsMasterProbeThrottled(server.ServerId))
         {
             return FallbackDatabaseList(server, targetDb, reason: "master previously inaccessible", quiet: true);
         }
@@ -1734,14 +1750,11 @@ RETURNING s.state_key";
         return databases;
     }
 
-    private static List<string> SingleDbOrEmpty(string? targetDb)
-    {
-        if (string.IsNullOrEmpty(targetDb) || string.Equals(targetDb, "master", StringComparison.OrdinalIgnoreCase))
-        {
-            return new List<string>();
-        }
-        return new List<string> { targetDb };
-    }
+    /* #2220: delegates to the shared rule. Both runners carried their own copy of this predicate, and a
+       sweep-scoping rule that disagrees between Lite and Darling is the same class of defect as the one
+       #2220 fixes. */
+    private static List<string> SingleDbOrEmpty(string? targetDb) =>
+        AzureSweepScope.OwnDatabaseOrEmpty(targetDb);
 
     /// <summary>
     /// Whether master enumeration failed in a way that means database-scoped collectors should fall back

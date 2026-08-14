@@ -831,13 +831,27 @@ WHERE server_id = $3";
         var baseConnStr = _serverManager.CredentialResolver.GetConnectionString(server);
         var targetDb = new SqlConnectionStringBuilder(baseConnStr).InitialCatalog;
 
-        /* Skip the throttle when there is nothing to fall back TO. With no target database the fallback
-           can only throw, and an error lands in collection_log either way — so honouring the throttle
-           here would buy one saved round-trip at the cost of 15 minutes of guaranteed failure with no
-           attempt to recover. Probe master instead: it might work now. */
-        var hasFallback = SingleDbOrEmpty(targetDb).Count > 0;
+        /* #2220: a registration that NAMES a database is a registration OF that database, so its sweep
+           covers exactly that one and never touches master. Before this, EVERY database-scoped collector
+           enumerated master and swept every online database on the logical server, storing all of it under
+           the one server_id of whichever registration ran the sweep — N registrations of N databases on one
+           server meant N² collection with every registration's history contaminated by its siblings'.
 
-        if (hasFallback && IsMasterProbeThrottled(serverId))
+           This also subsumes the #857 case it looks like it bypasses, and improves on it: a login granted
+           access to one user database but not to master HAS a named database, so it now returns here without
+           probing master at all, rather than probing, failing, forming a verdict and falling back. Master is
+           reached only by a registration that names no database — the logical-server registration, which has
+           nothing else to enumerate from. */
+        var ownDatabase = AzureSweepScope.OwnDatabaseOrEmpty(targetDb);
+        if (ownDatabase.Count > 0)
+        {
+            return ownDatabase;
+        }
+
+        /* Reached only when the registration names no database, so there is nothing to fall back TO and
+           the throttle would buy one saved round-trip at the cost of 15 minutes of guaranteed failure.
+           Probe master instead: it might work now. */
+        if (IsMasterProbeThrottled(serverId))
         {
             return FallbackDatabaseList(server, targetDb, reason: "master previously inaccessible", quiet: true);
         }
@@ -1024,12 +1038,9 @@ WHERE server_id = $3";
         return $"AND {columnExpression} NOT IN ({string.Join(", ", quoted)})";
     }
 
-    private static List<string> SingleDbOrEmpty(string? targetDb)
-    {
-        if (string.IsNullOrEmpty(targetDb) || string.Equals(targetDb, "master", StringComparison.OrdinalIgnoreCase))
-            return new List<string>();
-        return new List<string> { targetDb };
-    }
+    /* #2220: delegates to the shared rule — see AzureSweepScope for why this is not duplicated per host. */
+    private static List<string> SingleDbOrEmpty(string? targetDb) =>
+        AzureSweepScope.OwnDatabaseOrEmpty(targetDb);
 
     /// <summary>
     /// Whether master enumeration failed in a way that means database-scoped collectors should fall back
