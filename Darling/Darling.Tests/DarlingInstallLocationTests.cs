@@ -264,10 +264,15 @@ public class DarlingInstallLocationTests
     /// functions here, which PowerShell resolves ahead of the real ones, so the WMI-restricted box is
     /// simulated rather than described.</para>
     ///
-    /// <para>The last case is the one that keeps the fix honest: when WMI answers "local", Get-PSDrive is
-    /// rigged to THROW. A terminating error would surface as stderr and fail this test, so the case passing
-    /// proves the fallback was never consulted — the guard still trusts a definite WMI answer, and does not
-    /// invent a refusal from a drive that merely has a DisplayRoot.</para>
+    /// <para>Case 4 is the one that keeps the fix honest: when WMI answers "local", Get-PSDrive is rigged
+    /// to THROW. A terminating error would surface as stderr and fail this test, so the case passing proves
+    /// the fallback was never consulted — the guard still trusts a definite WMI answer, and does not invent
+    /// a refusal from a drive that merely has a DisplayRoot.</para>
+    ///
+    /// <para>Case 5 draws the line around what "definite" means. <c>DriveType 0</c> is WMI's <i>unknown</i>,
+    /// not local, and a partial row is likeliest on precisely the restricted images this fallback exists
+    /// for — so it must fall through rather than short-circuit. It works because 0 is falsy in PowerShell,
+    /// which is worth pinning rather than trusting to stay true.</para>
     /// </summary>
     [Fact]
     public void NetworkPathKind_WhenWmiIsUnavailable_FallsBackToPSDriveDisplayRoot()
@@ -302,6 +307,8 @@ function Get-PSDrive {
             ("4", "", "mapped drive", "WMI itself said network, no fallback needed"),
             ("3", "throw", "<none>",
                 "a definite local answer from WMI must not consult the fallback at all"),
+            ("0", @"\\fileserver\share", "mapped drive",
+                "DriveType 0 is unknown, not local - a partial WMI row must not short-circuit the fallback"),
         };
 
         for (var i = 0; i < cases.Length; i++)
