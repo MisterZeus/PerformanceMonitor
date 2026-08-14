@@ -80,6 +80,7 @@ public sealed class CollectorGateSurfacePinTests
         Assert.True(TempDbStatsCollector.Instance.AppliesTo(NoMsdb));
         Assert.True(TempDbStatsCollector.Instance.AppliesTo(Unknown));
     }
+
     [Fact]
     public void TraceFlags_AppliesTo_SkipsOnlyAzureSqlDb()
     {
