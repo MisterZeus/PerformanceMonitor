@@ -109,6 +109,14 @@ public sealed class StoreConfigProvider
             {
                 await SeedMonitoredServersAsync(connection, config, now, cancellationToken);
             }
+            else
+            {
+                /* #2254: the seed is skipped, so any server added to darling.json AFTER the first start is
+                   silently ignored — and --test-connection reads the FILE, so it validates those servers
+                   happily while the service never monitors them. Say so once per start instead of leaving the
+                   operator to discover it. */
+                await WarnAboutFileOnlyServersAsync(connection, config, cancellationToken);
+            }
 
             /* LAST — its presence marks the seed complete (the reload gate keys on config_version). */
             if (await CountAsync(connection, "config_service", cancellationToken) == 0)
@@ -122,6 +130,74 @@ public sealed class StoreConfigProvider
                 "Could not seed the config store from darling.json — running on the file config; the store will seed on a later start: {Message}",
                 ex.Message);
         }
+    }
+
+    /// <summary>
+    /// #2254: names the servers present in darling.json that the store does not have, once per start.
+    ///
+    /// <para>The seed runs only while <c>config_monitored_servers</c> is empty, so a server added to the file
+    /// after the first successful start is a permanent no-op. What made that expensive in the field is that
+    /// <c>--test-connection</c> reads the FILE and validated the new server as PASS, so the operator had two
+    /// outputs that were each correct about different things and no way to see the disagreement: config edit,
+    /// service restart, support round trip.</para>
+    ///
+    /// <para>Compared on <b>server_id</b>, not name — that is the identity the collectors and the registry
+    /// actually key on, so a file entry whose host or read-only intent differs is correctly reported as
+    /// absent even if a same-named row exists. Reported BY name, because that is what the operator typed.</para>
+    /// </summary>
+    private async Task WarnAboutFileOnlyServersAsync(
+        NpgsqlConnection connection, DarlingConfig config, CancellationToken ct)
+    {
+        var storeIds = new HashSet<int>();
+        using (var command = new NpgsqlCommand("SELECT server_id FROM config_monitored_servers", connection))
+        await using (var reader = await command.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                storeIds.Add(reader.GetInt32(0));
+            }
+        }
+
+        var fileOnly = ServersOnlyInFile(config.Servers, storeIds);
+        if (fileOnly.Count == 0)
+        {
+            return;
+        }
+
+        _logger?.LogWarning(
+            "darling.json lists {FileCount} server(s) and the store has {StoreCount}. NOT monitoring {IgnoredCount} " +
+            "of them: {Ignored}. The store is authoritative after the first seed, so servers added to the file "
+            + "later are never picked up and a restart cannot change that — add them with the Viewer's Add Server "
+            + "dialog or the MCP add_servers tool. Note --test-connection reads darling.json, so it will report "
+            + "these as PASS regardless.",
+            config.Servers.Count,
+            storeIds.Count,
+            fileOnly.Count,
+            string.Join(", ", fileOnly));
+    }
+
+    /// <summary>
+    /// The file entries whose <c>server_id</c> is absent from the store, by display name. Pure so the
+    /// comparison is testable without a store — the log line above is the only part that needs one.
+    /// </summary>
+    internal static IReadOnlyList<string> ServersOnlyInFile(
+        IEnumerable<MonitoredServer> fileServers, ISet<int> storeServerIds)
+    {
+        var missing = new List<string>();
+        if (fileServers is null)
+        {
+            return missing;
+        }
+
+        foreach (var server in fileServers)
+        {
+            if (!storeServerIds.Contains(ServerIdHelper.GetDeterministicHashCode(server.StorageName)))
+            {
+                missing.Add(server.DisplayName);
+            }
+        }
+
+        return missing;
     }
 
     private static async Task<long> CountAsync(NpgsqlConnection connection, string table, CancellationToken ct)
