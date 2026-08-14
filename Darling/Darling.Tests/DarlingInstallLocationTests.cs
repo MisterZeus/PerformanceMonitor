@@ -326,6 +326,7 @@ function Get-PSDrive {
                 $"{answers[0]} — {because}");
         }
     }
+
     /// <summary>Runs <paramref name="script"/> under Windows PowerShell 5.1 and returns its non-empty output
     /// lines. Written to a temp file rather than passed with -Command: the script under test is a whole
     /// function body, and quoting it through a command line is a source of failures that have nothing to do
