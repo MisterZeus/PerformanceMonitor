@@ -128,6 +128,7 @@ public static class PgMigrations
         new Migration(69, "pg-io-stats", V69Sql),
         new Migration(70, "monitored-server-engine", V70Sql),
         new Migration(71, "pg-blocking-edges", V71Sql),
+        new Migration(72, "query-store-plan-map", V72Sql),
     };
 
     /// <summary>
@@ -1639,6 +1640,42 @@ CREATE TABLE IF NOT EXISTS collect.pg_blocking_edges (
 
 CREATE INDEX IF NOT EXISTS idx_pg_blocking_edges_time
     ON collect.pg_blocking_edges(server_id, collection_time);";
+
+    /// <summary>
+    /// V72 — the Query Store plan map (#2210): <c>(server_id, database_name, plan_id) → digest</c>, so Query
+    /// Store facts can reference plan XML they no longer carry once the cutover moves that content into the
+    /// shared <c>query_plan_dim</c>. Plan XML was stored INLINE on <c>query_store_stats</c> at roughly 5x
+    /// redundancy — the same plans re-shipped pass after pass — which is what this replaces.
+    ///
+    /// <para><c>plan_hash</c> is the re-verification key and is nullable on purpose: rows written before it
+    /// existed re-verify once and self-heal. <c>last_seen</c> is the liveness column the map prune sweeps and
+    /// the batch touch refreshes — load-bearing, because the dimension GC decides what to collect from
+    /// <c>last_seen</c> rather than by counting references, and ending the re-shipping ends the signal that
+    /// used to keep those dim rows alive.</para>
+    ///
+    /// <para>NUMBERED <c>max(dev) + 1</c>, WITHOUT a gap, and that is the load-bearing part. The runner skips
+    /// any rung at or below the store's stamped version, so a gap left for another in-flight branch is skipped
+    /// SILENTLY on every upgraded store the moment this one stamps a higher number. Gapping is only safe when
+    /// the gap-filler lands first, which a branch cannot guarantee about another branch.</para>
+    ///
+    /// <para>The race this comment was written to survive HAPPENED: it was V61 while #2213 and the PostgreSQL
+    /// collector rungs were in flight, they merged first and took the ladder to V71, and the collision surfaced
+    /// as a conflict on the migration list — loudly, on the merge, exactly as intended — so this renumbered to
+    /// sit immediately above them. A collision is loud; a gap is silent, and a map table that was never created
+    /// reads as "plan not yet collected" on every lookup, so the cutover would look healthy and hold nothing.</para>
+    /// </summary>
+    private const string V72Sql = @"
+CREATE TABLE IF NOT EXISTS collect.query_store_plan_map (
+    server_id integer NOT NULL,
+    database_name text NOT NULL,
+    plan_id bigint NOT NULL,
+    digest bytea NOT NULL,
+    plan_hash text,
+    last_seen timestamp NOT NULL,
+    PRIMARY KEY (server_id, database_name, plan_id)
+);
+CREATE INDEX IF NOT EXISTS idx_query_store_plan_map_last_seen
+    ON collect.query_store_plan_map(last_seen);";
 
     /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:

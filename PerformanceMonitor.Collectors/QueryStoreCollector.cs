@@ -707,17 +707,22 @@ END;
            exact fix is a store-DERIVED watermark (the host asking its own plan dimension for the lowest
            plan_id missing XML) rather than this collector-derived one; that needs host plumbing on both
            products and is tracked separately. */
-        var watermarkDb = backfill ? null : databaseName ?? context.CurrentDatabaseName;
-        var planWatermark = string.IsNullOrEmpty(watermarkDb)
-            ? 0L
-            : QueryStorePlanXmlState.Resolve(context.State, watermarkDb!, context.CollectionTime);
-        var watermarkPredicate = planWatermark > 0
-            ? " AND qsp.plan_id > " + planWatermark.ToString(System.Globalization.CultureInfo.InvariantCulture)
-            : string.Empty;
+        /* #2210: the watermark now belongs to BuildPlanFetchQuery (the `watermark` parameter there,
+           resolved by the host via QueryStorePlanXmlState.Resolve). It no longer narrows anything in
+           this runtime-stats query, so there is nothing to compute here. */
 
-        string planTextCol = context.CapturePlanXml
-            ? "query_plan_text = CASE WHEN ROW_NUMBER() OVER (PARTITION BY qsp.plan_id ORDER BY qsrs.last_execution_time DESC) = 1" + watermarkPredicate + " THEN CONVERT(nvarchar(max), qsp.query_plan) ELSE CONVERT(nvarchar(max), NULL) END,"
-            : "query_plan_text = CONVERT(nvarchar(1), NULL),";
+        /* #2210: this runtime-stats query no longer carries plan XML at all — the ROW_NUMBER-gated
+           CASE and its in-stream watermark predicate are DELETED, not reworked. BuildPlanFetchQuery is
+           the only thing that reads plan XML now: it fetches plans in plan_id order under a byte
+           budget and lands each plan ONCE per database LIFETIME instead of once per PASS. The shape
+           being replaced re-shipped every plan on every pass forever — measured at 5.0x redundancy
+           (871,196 plan-XML rows against 175,328 distinct database/plan pairs in a day, on a 33 GB
+           table). Both branches below now emit the same placeholder, so the payload is byte-identical
+           to Lite's regardless of the flag, and CapturePlanXml gates the separate BuildPlanFetchQuery
+           fetch rather than this query. Existing inline rows are NOT migrated by this change and stay
+           readable via the reader's existing NULL-guarded fallback; dropping the query_plan_text column
+           itself is a separate, later migration. */
+        const string planTextCol = "query_plan_text = CONVERT(nvarchar(1), NULL),";
 
         /* The replica-attribution column + its join (see hasReplicaAttribution above). Selected after every
            version-gated column, so pre-2022 targets read the nvarchar(1) NULL placeholder at the same
@@ -1086,6 +1091,141 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
     @cutoff_time;";
 
         return new CollectorQuery(text, BuildCutoffParameters(context));
+    }
+
+    /// <summary>
+    /// The plan-XML fetch for one database (#2210): plans above the watermark, in <c>plan_id</c> order, bounded
+    /// twice — coarsely by <paramref name="candidatePlans"/> and exactly by a running byte total.
+    ///
+    /// <para>SEPARATE from the runtime-stats query on purpose, and that separation is the fix rather than a
+    /// refactor. The runtime query ships <c>ORDER BY qsrs.last_execution_time</c>, so a budget cut truncates it
+    /// in TIME order and the plans whose XML landed are an arbitrary SUBSET of plan_ids — against which no
+    /// watermark value is safe, because receiving plan 500 while missing 300 skips 300 forever. That is why the
+    /// previous shape could not advance on a cut, and 97.8% of production passes are cut. Here rows arrive in
+    /// plan_id order, so a cut truncates a SUFFIX and the highest landed id is safe by construction.</para>
+    ///
+    /// <para>The two bounds are not redundant. The running total is exact but expensive to compute: it needs
+    /// <c>DATALENGTH</c>, and <c>sys.query_store_plan.query_plan</c> is decompressed BY the view on access, so an
+    /// unbounded candidate set pays a whole catalog's decompression to enforce a budget meant to prevent exactly
+    /// that. <c>TOP (@candidate_plans)</c> is evaluated on <c>plan_id</c> alone — no XML touched to sort or
+    /// filter — so the decompression is capped at K, sized per database by
+    /// <see cref="QueryStorePlanXmlState.CandidatePlanCount"/> from the previous pass's own bytes-per-plan.</para>
+    ///
+    /// <para>The budget test is <c>running_bytes - plan_bytes &lt; budget</c>, i.e. admit a plan when the total
+    /// BEFORE it was still under. The obvious <c>running_bytes &lt;= budget</c> is a per-database STALL: a single
+    /// plan larger than the whole budget has a running total that already exceeds it on its own row, so it is
+    /// excluded, every later row is excluded too (the total is monotonic), the pass ships nothing, the watermark
+    /// holds, and the next pass re-selects the same plan first — forever. One 13 MB plan against the 12 MB
+    /// default is enough, and it is the same never-advances failure this change exists to end, reached through
+    /// plan SIZE instead of cut ordering. Admitting the offender ships it alone, cuts after it, and moves the
+    /// watermark past it.</para>
+    ///
+    /// <para>The honest cost of that: worst-case bytes for one pass are <c>budget + largest single plan</c>,
+    /// not <c>budget</c>. The runtime-stats budget a few hundred lines up pays exactly the same price for the
+    /// same reason (measured: 19.6 MB shipped against a 12 MB budget when one very large plan carried a pass
+    /// past it), so "12 MB" is a floor on ship volume in both paths rather than a cap.</para>
+    ///
+    /// <para>Both bounds are inlined as parsed integers rather than parameters, matching the watermark predicate
+    /// above and for the same reason: the body nests inside <c>sp_executesql</c>, and the values are host-computed
+    /// longs that never touch operator input.</para>
+    ///
+    /// <para>A NULL <c>query_plan</c> — a plan too large to persist, or certain forced-plan-failure paths —
+    /// counts as ZERO bytes and STILL SHIPS, as a row with NULL text. Letting the NULL propagate through the
+    /// arithmetic instead would make the budget predicate NULL and filter the row out, and a window whose plans
+    /// are all NULL would then return nothing, hold the watermark, and re-select the same plans forever: the
+    /// same permanent stall as the oversized-plan case, reached through a different mechanism. Shipping the row
+    /// lets the watermark advance past a plan whose XML will never exist, which is correct — the store's readers
+    /// already guard <c>query_plan_text IS NOT NULL</c> because the runtime path has always been able to write
+    /// per-row NULLs there.</para>
+    ///
+    /// <para>NEVER on the backfill path, for the reason the watermark itself is not: backfill reads intervals
+    /// older than anything collected, whose plans are numbered BELOW the watermark, so a plan_id-ascending fetch
+    /// above the watermark would return nothing the backfill needs. Backfill plan XML stays on its own rows.</para>
+    ///
+    /// <para>The <c>CONVERT</c> happens ONCE, inside the candidate window, and the running total sums
+    /// <c>DATALENGTH</c> of that converted text rather than of the view column. The alternative — measure with
+    /// <c>DATALENGTH(qsp.query_plan)</c> in the window and join back to <c>sys.query_store_plan</c> for the text
+    /// — decompresses every shipped plan TWICE, and that is measured, not reasoned: on a 73,163-plan production
+    /// catalog, K=114 and a 12 MB budget, both shapes returned the same 114 rows and 1.7 MB, and the join-back
+    /// form took 274ms cold / 262ms warm against 133ms for this one. Plan-id-only with no XML touched was 114ms,
+    /// so this shape sits 19ms above the floor while the join-back form pays for the decompression twice.</para>
+    /// </summary>
+    public CollectorQuery BuildPlanFetchQuery(string item, CollectorContext context, long watermark, int candidatePlans, long budgetBytes)
+    {
+        /* The invariant the doc comment spends a paragraph on, actually enforced rather than left to the caller:
+           this query exists only to fetch plan XML, so building it with plan capture off is a caller bug, not a
+           no-op to swallow. Cheap, and it makes CapturePlanXml the single gate for the whole feature — the
+           runtime query's plan-text CASE already reads the same flag. */
+        if (context is null)
+        {
+            throw new ArgumentNullException(nameof(context));
+        }
+
+        if (!context.CapturePlanXml)
+        {
+            throw new InvalidOperationException(
+                "BuildPlanFetchQuery requires CapturePlanXml; a host that does not capture plan XML must not issue the plan fetch.");
+        }
+
+        /* A non-positive budget would make the predicate `running_bytes - plan_bytes < 0`, which excludes even
+           the FIRST candidate (its running total before it is 0, and 0 < 0 is false) — the pass ships nothing,
+           the watermark holds, and the next pass re-selects the same plans. The oversized-plan stall for a third
+           time, from a third direction. CandidatePlanCount already floors a non-positive budget for its own
+           sizing; this method has to guard its own input rather than assume the caller passed that value through. */
+        if (budgetBytes <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(budgetBytes), budgetBytes, "The plan-fetch byte budget must be positive; a zero or negative budget ships nothing and stalls the watermark.");
+        }
+
+        /* Same failure, fourth route: TOP (0) returns no rows and TOP with a negative literal is a syntax error,
+           so a bad candidate count ships nothing and holds the watermark exactly like a bad budget. Every caller
+           today sources this from CandidatePlanCount, which floors at MinCandidatePlans — but "the only caller
+           happens to be safe" is the assumption this method has already been wrong about once. */
+        if (candidatePlans <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(candidatePlans), candidatePlans, "The candidate plan count must be positive; TOP (0) ships nothing and stalls the watermark.");
+        }
+
+        var escapedDbName = item.Replace("]", "]]", StringComparison.Ordinal);
+        var k = candidatePlans.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var budget = budgetBytes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var floor = watermark.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        /* ROWS UNBOUNDED PRECEDING, not the RANGE default: RANGE would tie-group peers and, more to the point,
+           forces a spool. The frame is per-row precisely because the cut has to fall between two plans. */
+        var body = $@"WITH candidates AS (
+    SELECT TOP ({k})
+        plan_id = qsp.plan_id,
+        query_plan_text = CONVERT(nvarchar(max), qsp.query_plan)
+    FROM sys.query_store_plan AS qsp
+    WHERE qsp.plan_id > {floor}
+    ORDER BY qsp.plan_id
+),
+budgeted AS (
+    SELECT
+        plan_id = c.plan_id,
+        query_plan_text = c.query_plan_text,
+        plan_bytes = COALESCE(DATALENGTH(c.query_plan_text), 0),
+        running_bytes = SUM(COALESCE(DATALENGTH(c.query_plan_text), 0)) OVER (ORDER BY c.plan_id ROWS UNBOUNDED PRECEDING)
+    FROM candidates AS c
+)
+SELECT
+    plan_id = b.plan_id,
+    query_plan_text = b.query_plan_text
+FROM budgeted AS b
+WHERE b.running_bytes - b.plan_bytes < {budget}
+ORDER BY b.plan_id
+OPTION(RECOMPILE);";
+
+        var escapedBody = body.Replace("'", "''", StringComparison.Ordinal);
+
+        var text = $@"
+EXECUTE [{escapedDbName}].sys.sp_executesql
+    N'{escapedBody}';";
+
+        return new CollectorQuery(text, new List<CollectorParameter>());
     }
 
     /// <summary>
