@@ -52,10 +52,18 @@ public sealed class QueryStoreCorrectedRollupLiveTests
     private const long InflatedSum = ReCollections * (ReCollections + 1L) / 2L;
 
     /// <summary>
-    /// L1's retention horizon in days, read from the product constant rather than transcribed (#2223).
+    /// L1's retention horizon in days (#2223), from the product's own TIMESPAN rather than re-parsing the
+    /// interval string.
+    ///
+    /// <para>Review catch: the first cut split <c>IntervalRetentionInterval</c> on whitespace and parsed the
+    /// leading number, reimplementing a conversion that already exists typed — and one that would quietly
+    /// produce a wrong seed depth if the interval were ever written <c>"1 week"</c>. It matters more here than
+    /// it looks: this feeds a static initializer, so a bad parse fails as a
+    /// <c>TypeInitializationException</c> across the whole class rather than as anything readable.
+    /// <c>TimescaleContinuousAggregateTests</c> pins the span equal to the string, so this cannot drift from
+    /// the SQL the policy is created with.</para>
     /// </summary>
-    private static readonly int L1RetentionDays =
-        int.Parse(TimescaleSupport.IntervalRetentionInterval.Split(' ')[0], CultureInfo.InvariantCulture);
+    private static readonly int L1RetentionDays = TimescaleSupport.IntervalRetentionSpan.Days;
 
     /// <summary>
     /// How deep every retention-arming test in this class seeds its history — DERIVED from L1's horizon, with
