@@ -3588,25 +3588,6 @@ public static class DarlingCliCommands
     }
 
     /// <summary>
-    /// Materializes the query-acceleration rollups back over pre-existing history so the held raw retention
-    /// policies can arm themselves (#1759 Phase 2). Runs while the service is UP.
-    ///
-    /// <para><b>Concurrency.</b> <c>refresh_continuous_aggregate</c> takes no lock that blocks writers on the
-    /// source hypertable, so collection keeps running throughout; readers are likewise unaffected (Phase 1 has
-    /// them on raw for these windows anyway, and a window whose coverage a slice has just filled starts
-    /// resolving to the rollup at the next probe). What the refresh DOES contend with is the compression policy
-    /// on the same chunks, which is why slices are one chunk wide — a short window cannot sit across a
-    /// compression job long enough to deadlock (the #1778 watch). It cannot run inside a transaction
-    /// (<c>PreventInTransactionBlock</c>), so each slice is its own statement and partial progress survives an
-    /// abort.
-    ///
-    /// <para><b>Resumable and idempotent.</b> Every pass re-plans from the MEASURED coverage floor, so an
-    /// interrupted run continues where it stopped and a completed one converges to a no-op.</para>
-    ///
-    /// <para>Returns 0 when every rollup reached coverage (or already had it), 1 on a load/mode/credential
-    /// error, on a preflight refusal, or when any rollup finished short of raw.</para>
-    /// </summary>
-    /// <summary>
     /// What <c>--add-server</c> prints when stdin carries nothing — to STDOUT, per the [#2097] lesson that a
     /// prompt or error on STDERR is invisible in the ISE and some integrated terminals, so a verb that writes
     /// only there reads as hung.
@@ -3791,6 +3772,25 @@ public static class DarlingCliCommands
         return exitCode;
     }
 
+    /// <summary>
+    /// Materializes the query-acceleration rollups back over pre-existing history so the held raw retention
+    /// policies can arm themselves (#1759 Phase 2). Runs while the service is UP.
+    ///
+    /// <para><b>Concurrency.</b> <c>refresh_continuous_aggregate</c> takes no lock that blocks writers on the
+    /// source hypertable, so collection keeps running throughout; readers are likewise unaffected (Phase 1 has
+    /// them on raw for these windows anyway, and a window whose coverage a slice has just filled starts
+    /// resolving to the rollup at the next probe). What the refresh DOES contend with is the compression policy
+    /// on the same chunks, which is why slices are one chunk wide — a short window cannot sit across a
+    /// compression job long enough to deadlock (the #1778 watch). It cannot run inside a transaction
+    /// (<c>PreventInTransactionBlock</c>), so each slice is its own statement and partial progress survives an
+    /// abort.
+    ///
+    /// <para><b>Resumable and idempotent.</b> Every pass re-plans from the MEASURED coverage floor, so an
+    /// interrupted run continues where it stopped and a completed one converges to a no-op.</para>
+    ///
+    /// <para>Returns 0 when every rollup reached coverage (or already had it), 1 on a load/mode/credential
+    /// error, on a preflight refusal, or when any rollup finished short of raw.</para>
+    /// </summary>
     [SupportedOSPlatform("windows")]
     public static async Task<int> BackfillRollupsAsync(
         string? configPath, bool dryRun, TextWriter output, TextWriter error, CancellationToken cancellationToken)
