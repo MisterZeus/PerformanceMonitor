@@ -327,7 +327,7 @@ function Get-PSDrive {
 
             Assert.Single(answers);
             /* Assert.True over Assert.Equal so the REASON travels with the failure: "expected mapped
-               drive, got <none>" is not actionable on its own, and this test has five cases. */
+               drive, got <none>" is not actionable on its own, and this test has six cases. */
             Assert.True(expected == answers[0],
                 $"case {i} (wmi={wmi}, DisplayRoot='{displayRoot}'): expected {expected}, got " +
                 $"{answers[0]} — {because}");
