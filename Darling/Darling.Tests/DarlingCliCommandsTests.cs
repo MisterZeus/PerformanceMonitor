@@ -1474,9 +1474,11 @@ public sealed class DarlingMissingCredentialMessageTests
         Assert.DoesNotContain("first run provisions the least-privilege roles", source, StringComparison.Ordinal);
 
         /* Every managed missing-credential refusal goes through the shared builder instead — one for the
-           role credentials, four for the store's own. */
+           role credentials, FIVE for the store's own (--add-server became the fifth in #2256; the count grows
+           with each new store verb, and growing it is the point — a verb that grew its OWN copy of the advice
+           instead would fail the two DoesNotContain assertions above). */
         Assert.Equal(1, CountOccurrences(source, "DarlingStoreBootstrapEvidence.MissingCredentialMessage("));
-        Assert.Equal(4, CountOccurrences(source, "DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage("));
+        Assert.Equal(5, CountOccurrences(source, "DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage("));
     }
 
     private static string WriteManagedConfig(string directory, string dataDirectory)
