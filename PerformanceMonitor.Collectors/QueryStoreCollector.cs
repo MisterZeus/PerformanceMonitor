@@ -327,6 +327,37 @@ END;
     public const int MaxTextBytesPerDatabase = 64 * 1024 * 1024;
 
     /// <summary>
+    /// The WALL-CLOCK ceiling for one database's pass (#2150), and the bound of last resort: the row cap
+    /// bounds ROWS, the byte budget bounds BYTES, and neither bounds TIME.
+    ///
+    /// <para><b>The field report it exists for.</b> Two Azure SQL DB elastic-pool databases, same day,
+    /// across the 3.3.0 → 3.4.0 upgrade: 198 passes at a median of <b>4.8 s</b> before, then six passes of
+    /// 0.1, 37.6, 46.1, 82.1, 0.1 and <b>99.8 minutes</b> after. Because a host's live collectors run one
+    /// after another, a single 100-minute pass starves every other collector on that server — which is the
+    /// actual mechanism behind #2148's "all collection stopped".</para>
+    ///
+    /// <para><b>Why nothing already caught it.</b> The <c>CommandTimeout</c> was 30 s the whole time. It
+    /// bounds the wait for a network read and SqlClient resets it on each read that arrives, so a result
+    /// set that trickles rows never trips it — see <see cref="PerItemWallClockBudget"/>.</para>
+    ///
+    /// <para><b>Why ten minutes.</b> It has to sit far above every healthy observation and far below every
+    /// pathological one. Healthy: 4.8 s median and 31 s max across 198 field passes; 375–524 ms for the
+    /// staged query measured on a 212k-row Query Store; 6 s for the two fast post-upgrade passes.
+    /// Pathological: 37.6 minutes at the low end. Ten minutes is ~19× the worst healthy pass, ~10× the
+    /// Darling command-timeout default, and ~3.7× under the smallest pass this is meant to stop.</para>
+    ///
+    /// <para><b>It converges rather than repeating.</b> A cut pass ships nothing, so the watermark does not
+    /// advance and the range is re-read — but the failure also feeds #2111's consecutive-failure count, so
+    /// the catch-up window halves per failure toward 15 minutes until a pass fits. A success resets it and
+    /// the database returns to full width. Without that this would be a bound that fires forever on the same
+    /// impossible width; with it, a database that cannot finish narrows until it can.</para>
+    /// </summary>
+    public static readonly TimeSpan PerDatabaseWallClockBudget = TimeSpan.FromMinutes(10);
+
+    /// <inheritdoc />
+    public override TimeSpan? PerItemWallClockBudget => PerDatabaseWallClockBudget;
+
+    /// <summary>
     /// The self-identification marker every collector query carries in its leading comment. Self rows
     /// are excluded CLIENT-SIDE in the shared read loop both paths use (#1565) — the old SQL-side
     /// NOT LIKE predicate was 75% of the read's elapsed time (a full nvarchar(max) scan per row on a
