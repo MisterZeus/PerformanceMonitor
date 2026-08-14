@@ -249,13 +249,16 @@ Collector queries specifically:
   varies enormously between a first-run catch-up window and a steady-state minute, and a plan
   cached from one is wrong for the other. A statement added to an existing batch needs its own
   hint — one on a neighbouring statement does not cover it.
-- **Schema-qualify everything in migrations** (`collect.*`, `config.*`). The migrate session's
-  `search_path` resolves bare names to a different schema, so an unqualified `CREATE` can land
-  an object in the wrong one silently.
 - **Comments explain WHY, at length.** This codebase's comments carry measurements, issue
   numbers, and the failure the line prevents. A comment restating the code is noise; one
   recording "this threshold was 300s and the fleet's median gap is 299s, so it discarded half
   of every sweep" is what stops the next person undoing it.
+
+Darling's PostgreSQL store (not T-SQL — the Darling service stores to PostgreSQL/TimescaleDB):
+
+- **Schema-qualify every object in a migration** (`collect.*`, `config.*`). The migrate session's
+  `search_path` resolves bare names to a different schema, so an unqualified `CREATE` or `ALTER`
+  can land an object in the wrong one silently.
 
 ### C# Style
 
