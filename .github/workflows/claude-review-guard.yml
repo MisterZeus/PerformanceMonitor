@@ -10,6 +10,11 @@ name: Claude review guard
 #      spent $4.18 over 24 turns with 6 permission denials, reported subtype=success, and left zero
 #      comments. A 104-file change merged unreviewed and nothing anywhere said so.
 #
+# What it must NOT do is call a CLEAN review a failure. The prompt tells the reviewer HOW to report
+# findings, not to report when it has none, so silence on a one-line change is the correct outcome --
+# and a mark that goes red there is one people learn to ignore, which costs more than it catches. So
+# the zero-posted verdict is keyed on whether claude-review.yml actually promises a post.
+#
 # This guard is a SEPARATE workflow on purpose. Editing claude-review.yml makes this branch's copy
 # differ from the default branch, which triggers cause (1) for EVERY pull request in the repo until
 # the next release -- so a guard living inside the file it protects would disable review each time
@@ -57,10 +62,22 @@ jobs:
           REVIEW_STEP: Claude review
           # Author of every artifact the review leaves behind (the action reports bot_name).
           REVIEW_BOT: claude[bot]
+          # Whether "posted nothing" is a DEFECT depends on whether the review is obliged to post.
+          # Today's prompt says "use gh pr comment for top-level feedback" -- an instruction about
+          # HOW to report findings, not a promise to report when there are none -- so a clean review
+          # is legitimately silent, and failing on it would make this mark red on every tidy PR.
+          # Keyed on a sentinel in the prompt rather than on prose so the coupling is exact: add
+          # MUST_POST_SENTINEL to $WF along with the #2229 allowedTools cure and this guard turns
+          # strict by itself, with no second edit here to forget.
+          MUST_POST_SENTINEL: ALWAYS POST
         run: |
           set -euo pipefail
 
-          summary() { echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
+          # "$*", not "$1": every echo in this step wraps across lines with a trailing backslash,
+          # which produces SEPARATE ARGUMENTS that echo joins with a space. A helper reading only $1
+          # silently truncates at the first wrap -- the summary keeps its opening clause and drops
+          # the rest, with nothing to show that it did. Identical for the single-argument calls.
+          summary() { echo "$*" >> "$GITHUB_STEP_SUMMARY"; }
 
           # Wait for the review run on this exact commit. Nothing appearing inside the grace window
           # means review is not operating here at all -- no secret, or a fork PR, which the review
@@ -185,11 +202,43 @@ jobs:
           summary "- inline comments: $inline"
           summary "- reviews: $reviews"
 
-          if [ "$total" -eq 0 ]; then
-            echo "::error title=Review posted nothing::Review run $run_id completed but left no"\
-              "comment, inline comment, or review by $REVIEW_BOT on PR #$PR. Real money was spent"\
-              "and the output"\
-              "vanished (#2229, and PR #2213 which did this eleven times). Do NOT read this PR as"\
-              "reviewed; re-run the review workflow."
-            exit 1
+          if [ "$total" -ne 0 ]; then
+            exit 0
           fi
+
+          # Nothing posted. Whether that is a defect or a clean bill of health is NOT decidable from
+          # the artifact count -- the two are the same observation from out here -- so it is decided
+          # by the contract in $WF on the DEFAULT branch, which is the copy the action validated and
+          # ran. A missing file or an unreadable one reads as "no obligation", the same as a prompt
+          # without the sentinel: a lookup failure must not become a review verdict.
+          # The trailing `|| true` is load-bearing under `set -euo pipefail`: without it a 404 on
+          # $WF, or a payload base64 cannot decode, fails the PIPELINE and kills this step -- turning
+          # a lookup failure into exactly the hard guard failure the comment above forbids. Verified
+          # against all four inputs: sentinel present, sentinel absent, empty, undecodable.
+          encoded=$(gh api "repos/$R/contents/$WF?ref=$DEFAULT_BRANCH" --jq '.content' 2>/dev/null \
+            || true)
+          must_post=$(printf '%s' "$encoded" | base64 -d 2>/dev/null \
+            | { grep -qF "$MUST_POST_SENTINEL" && echo 1 || true; } || true)
+
+          if [ -z "$must_post" ]; then
+            # The honest reading of today's prompt. Still surfaced, because "reviewed and clean" and
+            # "reviewed and swallowed" are the same observation, and a reader deciding whether to
+            # trust the green check needs to know that which one it is cannot be told from here.
+            echo "::warning title=Review posted nothing::Review run $run_id completed and left no"\
+              "comment, inline comment, or review by $REVIEW_BOT on PR #$PR. $WF does not oblige"\
+              "the review to post when it finds nothing, so this is consistent with a clean review"\
+              "-- but it is ALSO what the #2229 swallowed-output failure looks like, and the two"\
+              "cannot be told apart from here. Treat the review as unconfirmed."
+            summary '- Nothing posted. Consistent with a clean review, and also indistinguishable'\
+              'from the #2229 failure because the prompt does not require a post. UNCONFIRMED.'
+            exit 0
+          fi
+
+          # The prompt promises a post, so silence is a broken promise and nothing else.
+          echo "::error title=Review posted nothing::Review run $run_id completed but left no"\
+            "comment, inline comment, or review by $REVIEW_BOT on PR #$PR, and $WF requires a post"\
+            "even for a clean review. Real money was spent and the output vanished (#2229, and PR"\
+            "#2213 which did this eleven times). Do NOT read this PR as reviewed; re-run the review"\
+            "workflow."
+          summary "- Nothing posted, and \`$WF\` requires a post. The output was LOST."
+          exit 1
