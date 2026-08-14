@@ -318,6 +318,16 @@ public partial class RemoteCollectorService
                             context.PerItemShippedBoundary?.ToString("o") ?? "n/a");
                     }
                 }
+                catch (OutOfMemoryException)
+                {
+                    /* AHEAD of the budget arm, because ItemBudgetExpired classifies on the TOKENS and never
+                       looks at the exception type (review catch). Without this, an OOM thrown while the
+                       budget's timer had already fired — materializing a large batch, or inside the store
+                       write — would be caught by that arm and logged as a routine per-database timeout,
+                       silently breaking the invariant the generic catch below states outright. The shared
+                       EnumeratedCollectorDriver already orders it this way; these two loops did not. */
+                    throw;
+                }
                 catch (Exception ex) when (EnumeratedCollectorDriver.ItemBudgetExpired(dbBudget, cancellationToken))
                 {
                     /* #2150: this database ran out of wall clock. Counted as a per-database failure so the

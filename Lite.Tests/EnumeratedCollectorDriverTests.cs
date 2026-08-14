@@ -350,6 +350,48 @@ public sealed class EnumeratedCollectorDriverTests
     }
 
     /// <summary>
+    /// An OutOfMemoryException that fires while the budget has ALREADY expired must still propagate.
+    ///
+    /// <para>The reason it is not obvious: <see cref="EnumeratedCollectorDriver.ItemBudgetExpired"/>
+    /// classifies on the TOKENS and never looks at the exception type — which is deliberate, because a
+    /// cancelled SqlClient command does not reliably arrive as an OperationCanceledException. The cost is
+    /// that the budget arm would happily claim an unrelated fatal exception, so its ORDERING behind the
+    /// OOM rethrow is load-bearing rather than stylistic. Review found both hosts' per-database loops
+    /// missing that ordering; this pins the shared driver's.</para>
+    /// </summary>
+    [Fact]
+    public async Task RunAsync_AnOomWithAnExpiredBudget_StillPropagates()
+    {
+        var errors = new List<string>();
+
+        await Assert.ThrowsAsync<OutOfMemoryException>(async () =>
+            await EnumeratedCollectorDriver.RunAsync<int>(
+                new[] { "a" },
+                perItemWatermark: null,
+                readItem: async (item, ct) =>
+                {
+                    /* Let the budget expire FIRST, then throw something unrelated and fatal. */
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(5), ct);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                    }
+
+                    throw new OutOfMemoryException("unrelated to the budget");
+                },
+                writeBatch: (batch, ct) => Task.CompletedTask,
+                onItemComplete: (item, count, sqlMs, storageMs) => { },
+                onItemError: (item, ex) => errors.Add(item),
+                CancellationToken.None,
+                perItemBudget: TimeSpan.FromMilliseconds(100)));
+
+        /* Not swallowed as a routine per-database timeout. */
+        Assert.Empty(errors);
+    }
+
+    /// <summary>
     /// The classifier, all four combinations. It decides whether an exception is a per-item skip or a
     /// shutdown, and it is deliberately asked of the TOKENS rather than of the exception type: cancelling a
     /// SqlClient command does not reliably surface as an OperationCanceledException, so the type cannot
