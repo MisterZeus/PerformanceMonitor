@@ -38,9 +38,10 @@ WITH cpu_24h AS (
     WHERE server_id = $1
     AND   collection_time >= $2
 ),
+/* Only the worker counts are consumed now: memory_ratio used to feed this read's own CASE, and that
+   CASE was the #2246 bug. The verdict comes from ProvisioningVerdict, so the division would be dead. */
 mem_latest AS (
     SELECT
-        CAST(total_server_memory_mb AS DECIMAL(10,2)) / NULLIF(target_server_memory_mb, 0) AS memory_ratio,
         max_workers_count,
         current_workers_count
     FROM v_memory_stats
