@@ -61,6 +61,25 @@ public sealed class CollectorGateSurfacePinTests
         Assert.True(ServerConfigCollector.Instance.AppliesTo(Unknown));
     }
 
+    /// <summary>
+    /// #2150 field report: this fired 11x consecutive on an Azure SQL DB elastic pool with error 262,
+    /// "VIEW DATABASE PERFORMANCE STATE permission denied in database 'tempdb'". The query reads
+    /// <c>tempdb.sys.dm_db_file_space_usage</c> three-part, which a non-administrative login on Azure
+    /// SQL DB cannot be granted, so the collector could only ever fail there.
+    /// <para>Managed Instance must KEEP collecting — it has a real tempdb — which is why this asserts
+    /// both directions rather than just the skip.</para>
+    /// </summary>
+    [Fact]
+    public void TempDbStats_AppliesTo_SkipsOnlyAzureSqlDb()
+    {
+        Assert.False(TempDbStatsCollector.Instance.AppliesTo(AzureSqlDb));  /* error 262 in tempdb */
+        Assert.True(TempDbStatsCollector.Instance.AppliesTo(AzureMi));
+        Assert.True(TempDbStatsCollector.Instance.AppliesTo(AwsRds));
+        Assert.True(TempDbStatsCollector.Instance.AppliesTo(OnPrem2016));
+        Assert.True(TempDbStatsCollector.Instance.AppliesTo(OnPrem2014));
+        Assert.True(TempDbStatsCollector.Instance.AppliesTo(NoMsdb));
+        Assert.True(TempDbStatsCollector.Instance.AppliesTo(Unknown));
+    }
     [Fact]
     public void TraceFlags_AppliesTo_SkipsOnlyAzureSqlDb()
     {
