@@ -118,16 +118,32 @@ function Get-NetworkPathKind([string]$path) {
         return 'UNC'
     }
 
+    $qualifier = $null
+    try { $qualifier = Split-Path -Qualifier $path -ErrorAction Stop } catch { }
+    if (-not $qualifier) { return $null }
+
     try {
-        $qualifier = Split-Path -Qualifier $path -ErrorAction Stop
         $drive = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$qualifier'" -ErrorAction Stop
         # DriveType 4 = network drive.
         if ($drive -and $drive.DriveType -eq 4) { return 'mapped drive' }
+        # A DEFINITE answer is trusted, including "local" - so the fallback below is not consulted and
+        # cannot second-guess WMI on a box where WMI works. DriveType 0 is "unknown", which is NOT an
+        # answer: 0 is falsy here, so an unknown row falls through to the probe below instead of being
+        # read as "local". That matters because a partial WMI response is likeliest on exactly the
+        # restricted images this fallback exists for (review catch on #2248).
+        if ($drive -and $drive.DriveType) { return $null }
     }
     catch {
-        # No qualifier, or WMI unavailable. Unknown is not network: this branch must never invent a
-        # refusal, since the profile check above is the one carrying the evidence.
+        # WMI unavailable (locked-down or Server Core images). Fall through to the probe below rather
+        # than answering "not network", which is the fail-open in #2201.
     }
+
+    # No answer from WMI. DisplayRoot is populated ONLY for a drive letter mapped to a share, and comes
+    # from .NET rather than WMI, so it survives a restricted image. That keeps the rule this function has
+    # always followed - unknown is not network, and a refusal needs evidence - while no longer MISSING the
+    # one case the guard exists to catch. Unknown still returns $null two lines down.
+    $psDrive = Get-PSDrive -Name $qualifier.TrimEnd(':') -ErrorAction SilentlyContinue
+    if ($psDrive -and -not [string]::IsNullOrWhiteSpace($psDrive.DisplayRoot)) { return 'mapped drive' }
 
     return $null
 }

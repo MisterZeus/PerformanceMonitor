@@ -41,8 +41,8 @@ public sealed class StoreSelfMetricsTests
 
         Assert.Equal("store-self-metrics", v53.Name);
         /* The invariant the test name states, with no literal to go stale: the build's schema version IS
-           the newest registered rung. Two in-flight branches bumping versions made the literal form a
-           recurring four-test failure (#2210 round). */
+           the newest registered rung. Three in-flight branches bumping versions made the literal form a
+           recurring multi-test failure (#2210 round, again here at V62). */
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
 
         /* collect.-qualified like V44/V47/V49, and idempotent so a re-run is a no-op. */
@@ -143,8 +143,9 @@ public sealed class StoreSelfMetricsTests
     public void ViewerSchemaGate_KnowsV53_SoAFullyMigratedStoreIsNotRefused()
     {
         /* The trap a StorageVersion bump sets: a probe that cannot SEE the newest migration maps every
-           healthy store below RequiredStoreSchemaVersion and the connect-time gate refuses it permanently. */
-        Assert.Equal(61, ViewerDataService.RequiredStoreSchemaVersion);
+           healthy store below RequiredStoreSchemaVersion and the connect-time gate refuses it permanently.
+           Invariant form, no literal to go stale: the gate always requires exactly the build's version. */
+        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
         Assert.Contains("table_name = 'store_metrics'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         /* The V53 arm: store_metrics present (and everything below it, but NOT V54's gz column —

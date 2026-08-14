@@ -7,9 +7,11 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
@@ -64,11 +66,30 @@ public sealed class QueryStoreStatePruneTests : IClassFixture<SharedDuckDbFixtur
     public void Dispose() => _seedConn?.Dispose();
 
     /// <summary>Exposes the runner's protected prune and state accessors; only <c>_duckDb</c> is exercised.</summary>
-    private sealed class Pruner(DuckDbInitializer duckDb)
-        : RemoteCollectorService(duckDb, serverManager: null!, scheduleManager: null!)
+    private sealed class Pruner(DuckDbInitializer duckDb, ILogger<RemoteCollectorService>? logger = null)
+        : RemoteCollectorService(duckDb, serverManager: null!, scheduleManager: null!, logger)
     {
         public Task PruneAsync(int serverId) =>
             PruneOrphanedQueryStoreDatabaseStateAsync(serverId, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Captures formatted log lines so the prune's DIAGNOSTIC can be asserted, not just its effect.
+    /// <para>#2205: correctness already matched Darling exactly, and the gap was forensic — Lite logged a
+    /// COUNT where Darling names the retired keys, so on Lite you could see that three rows went without
+    /// seeing WHICH databases' watermark and backfill state was retired. A count cannot be told apart from
+    /// a mistaken prune of the same size, which is the case an operator most needs to see.</para>
+    /// </summary>
+    private sealed class CapturingLogger : ILogger<RemoteCollectorService>
+    {
+        public List<string> Lines { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter) => Lines.Add(formatter(state, exception));
     }
 
     private static string Done(string database) => QueryStoreBackfillState.DoneKeyPrefix + database;
@@ -282,5 +303,41 @@ VALUES ($1, $2, $3, $4, $5)";
         cmd.CommandText = "SELECT COUNT(*) FROM collector_state WHERE server_id = $1";
         cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
         return Convert.ToInt64(await cmd.ExecuteScalarAsync(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// #2205: the log line must NAME the pruned keys, matching Darling's wording field for field.
+    ///
+    /// <para>Watched red before it went green: with the previous <c>ExecuteNonQueryAsync</c> +
+    /// counter, the message read "Pruned 2 query_store state row(s)…" and contained neither key, so both
+    /// key assertions failed while the row-level assertions passed — which is exactly the shape of the
+    /// defect. The <c>DELETE … RETURNING</c> it now depends on was verified against real DuckDB 1.5.5
+    /// before the change, using the shipped SQL string rather than a copy.</para>
+    /// </summary>
+    [Fact]
+    public async Task Prune_LogNamesTheRetiredKeys_NotJustACount()
+    {
+        var logger = new CapturingLogger();
+        var pruner = new Pruner(_duckDb, logger);
+
+        await SeedSnapshotAsync(Newest, "Live");
+        await SeedStateAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Done("Live"), "2026-08-11T09:00:00Z");
+        await SeedStateAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Done("DroppedOne"), "2026-08-11T09:00:00Z");
+        await SeedStateAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Hole("DroppedTwo"), EncodedHole());
+
+        await pruner.PruneAsync(ServerId);
+
+        var line = Assert.Single(logger.Lines, l => l.Contains("pruned", StringComparison.OrdinalIgnoreCase));
+
+        /* The keys themselves — the whole point of the change. */
+        Assert.Contains(Done("DroppedOne"), line, StringComparison.Ordinal);
+        Assert.Contains(Hole("DroppedTwo"), line, StringComparison.Ordinal);
+
+        /* And it must not name a database that was NOT pruned, or the log is worse than a count. */
+        Assert.DoesNotContain("Live", line, StringComparison.Ordinal);
+
+        /* Same fields as DarlingCollectorRunner's line, so one sentence serves both SKUs. */
+        Assert.Contains($"[server_id {ServerId}]", line, StringComparison.Ordinal);
+        Assert.Contains("2 query_store state row(s)", line, StringComparison.Ordinal);
     }
 }

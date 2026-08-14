@@ -109,6 +109,14 @@ public sealed class StoreConfigProvider
             {
                 await SeedMonitoredServersAsync(connection, config, now, cancellationToken);
             }
+            else
+            {
+                /* #2254: the seed is skipped, so any server added to darling.json AFTER the first start is
+                   silently ignored — and --test-connection reads the FILE, so it validates those servers
+                   happily while the service never monitors them. Say so once per start instead of leaving the
+                   operator to discover it. */
+                await WarnAboutFileOnlyServersAsync(connection, config, cancellationToken);
+            }
 
             /* LAST — its presence marks the seed complete (the reload gate keys on config_version). */
             if (await CountAsync(connection, "config_service", cancellationToken) == 0)
@@ -124,6 +132,87 @@ public sealed class StoreConfigProvider
         }
     }
 
+    /// <summary>
+    /// #2254: names the servers present in darling.json that the store does not have, once per start.
+    ///
+    /// <para>The seed runs only while <c>config_monitored_servers</c> is empty, so a server added to the file
+    /// after the first successful start is a permanent no-op. What made that expensive in the field is that
+    /// <c>--test-connection</c> reads the FILE and validated the new server as PASS, so the operator had two
+    /// outputs that were each correct about different things and no way to see the disagreement: config edit,
+    /// service restart, support round trip.</para>
+    ///
+    /// <para>Compared on <b>server_id</b>, not name — that is the identity the collectors and the registry
+    /// actually key on, so a file entry whose host or read-only intent differs is correctly reported as
+    /// absent even if a same-named row exists. Reported BY name, because that is what the operator typed.</para>
+    /// </summary>
+    private async Task WarnAboutFileOnlyServersAsync(
+        NpgsqlConnection connection, DarlingConfig config, CancellationToken ct)
+    {
+        var storeIds = new HashSet<int>();
+        using (var command = new NpgsqlCommand("SELECT server_id FROM config_monitored_servers", connection))
+        await using (var reader = await command.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                storeIds.Add(reader.GetInt32(0));
+            }
+        }
+
+        var fileOnly = ServersOnlyInFile(config.Servers, storeIds);
+        if (fileOnly.Count == 0)
+        {
+            return;
+        }
+
+        /* INFORMATION, not a warning, and the wording covers BOTH causes — because this cannot tell them
+           apart. The Viewer's Remove action hard-deletes the store row and deliberately never touches
+           darling.json (the file is a one-time bootstrap; SeedMonitoredServersAsync's own comment notes a
+           Viewer deletion is never resurrected by a re-seed). So an operator who removed a server on purpose
+           and left the file alone is in a CORRECT state, and a warning telling them to re-add it would be
+           wrong advice repeated on every start forever. Distinguishing the two needs a tombstone the store
+           does not keep — filed separately; until then this reconciles rather than accuses, and names the
+           edit that silences it. */
+        _logger?.LogInformation(
+            "darling.json lists {FileCount} server(s) and the store has {StoreCount}; {IgnoredCount} in the file "
+            + "are not monitored: {Ignored}. The store is authoritative after the first seed. If you added these "
+            + "to the file expecting them to be picked up, that does not work and a restart cannot change it — "
+            + "add them with the Viewer's Add Server dialog or the MCP add_servers tool. If you removed them "
+            + "deliberately, this is expected; delete them from darling.json to silence this line. Either way "
+            + "--test-connection reads darling.json, so it will keep reporting them as PASS.",
+            config.Servers.Count,
+            storeIds.Count,
+            fileOnly.Count,
+            string.Join(", ", fileOnly));
+    }
+
+    /// <summary>
+    /// The file entries whose <c>server_id</c> is absent from the store, by display name. Pure so the
+    /// comparison is testable without a store — the log line above is the only part that needs one.
+    /// </summary>
+    internal static IReadOnlyList<string> ServersOnlyInFile(
+        IEnumerable<MonitoredServer> fileServers, ISet<int> storeServerIds)
+    {
+        var missing = new List<string>();
+        if (fileServers is null)
+        {
+            return missing;
+        }
+
+        foreach (var server in fileServers)
+        {
+            /* A file entry has no StoredServerId, so ServerId here IS the derivation — which is what this
+               comparison needs: it is asking "would the id this file entry describes be in the store". Once
+               identity stops being derivable (#2218) that question stops being answerable this way and has
+               to move onto the observed-identity fingerprint; noted on #2228 rather than pre-solved here. */
+            if (!storeServerIds.Contains(server.ServerId))
+            {
+                missing.Add(server.DisplayName);
+            }
+        }
+
+        return missing;
+    }
+
     private static async Task<long> CountAsync(NpgsqlConnection connection, string table, CancellationToken ct)
     {
         /* table is a compile-time constant name, never user input — interpolation is safe. */
@@ -136,8 +225,8 @@ public sealed class StoreConfigProvider
         /* config_version starts at 0; the four desired-state seed writes below bump it via the trigger,
            so the worker's post-seed baseline read reflects the seeded state and triggers no spurious reload. */
         using var command = new NpgsqlCommand(@"
-INSERT INTO config_service (id, paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, mcp_enabled, mcp_port, web_enabled, web_port, config_version, updated_at, updated_by)
-VALUES (1, FALSE, $1, $7, $8, $9, $2, $3, $4, $5, 0, $6, 'seed')
+INSERT INTO config_service (id, paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, config_version, updated_at, updated_by)
+VALUES (1, FALSE, $1, $7, $8, $9, $10, $2, $3, $4, $5, 0, $6, 'seed')
 ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(config.CapturePlans);
         command.Parameters.AddWithValue(config.Mcp.Enabled);
@@ -148,6 +237,11 @@ ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(config.QueryStoreBackfillEnabled);
         command.Parameters.AddWithValue(config.QueryStoreTextBudgetMb);
         command.Parameters.AddWithValue(config.MaxConcurrentSweeps);
+        /* Normalized at the WRITE too, not just the read: the V62 CHECK is case-sensitive by design
+           (it mirrors this normalizer's output), so seeding the raw file value would turn
+           "planXmlCompression": "GZIP" in darling.json into a CHECK violation during store bring-up —
+           the seed is the last step of first contact, and a cosmetic casing choice must not fail it. */
+        command.Parameters.AddWithValue(NormalizePlanXmlCompression(config.PlanXmlCompression));
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -282,10 +376,13 @@ ON CONFLICT (id) DO NOTHING", connection);
 INSERT INTO config_monitored_servers (
     server_id, name, host, database, auth, username, encrypted_password, encrypt_mode,
     trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
-    monthly_cost_usd, capture_plans, alert_delivery_mode_override, is_enabled, created_at, modified_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, $14, TRUE, $15, $15)
+    monthly_cost_usd, capture_plans, alert_delivery_mode_override, engine, port, is_enabled, created_at, modified_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, $14, $16, $17, TRUE, $15, $15)
 ON CONFLICT (server_id) DO NOTHING", connection);
-            command.Parameters.AddWithValue(ServerIdHelper.GetDeterministicHashCode(server.StorageName));
+            /* THE ALLOCATION SITE. A darling.json entry has no StoredServerId, so this is the derivation —
+               and this is where it is minted and made permanent. When new rows stop being hash-keyed
+               (#2218), this is the write that changes; every READ already goes through the stored value. */
+            command.Parameters.AddWithValue(server.ServerId);
             command.Parameters.AddWithValue(server.DisplayName);
             command.Parameters.AddWithValue(server.Host);
             AddNullableText(command, server.Database);
@@ -303,6 +400,14 @@ ON CONFLICT (server_id) DO NOTHING", connection);
             /* Per-server delivery override (#1236): the enum name or NULL = "inherit the global". */
             AddNullableText(command, server.AlertDeliveryModeOverride?.ToString());
             command.Parameters.AddWithValue(now);
+            /* V68: the engine, persisted as the raw darling.json string rather than the parsed enum, so the
+               store round-trips exactly what the operator wrote — including an alias like "aurora" — and the
+               single parse in MonitoredServer.TargetEngine stays the only place that interprets it. */
+            command.Parameters.AddWithValue(server.Engine);
+            /* V68: the port, PostgreSQL-only (0 = the driver's default). Persisted for the same reason as the
+               engine — a non-default port dropped here would connect to 5432 and fail with an error naming
+               the right host. */
+            command.Parameters.AddWithValue(server.Port);
             await command.ExecuteNonQueryAsync(ct);
         }
     }
@@ -326,7 +431,7 @@ ON CONFLICT (server_id) DO NOTHING", connection);
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
-            var (paused, capturePlans, backfillEnabled, textBudgetMb, maxSweeps, mcpEnabled, mcpPort, webEnabled, webPort, configVersion) = await ReadServiceRowAsync(connection, cancellationToken);
+            var (paused, capturePlans, backfillEnabled, textBudgetMb, maxSweeps, planXmlCompression, mcpEnabled, mcpPort, webEnabled, webPort, configVersion) = await ReadServiceRowAsync(connection, cancellationToken);
             var (alerts, analysis) = await ReadAlertSettingsAsync(connection, cancellationToken);
             var (smtp, webhooks) = await ReadNotificationAsync(connection, cancellationToken);
             var servers = await ReadMonitoredServersAsync(connection, bootstrap, cancellationToken);
@@ -340,6 +445,7 @@ ON CONFLICT (server_id) DO NOTHING", connection);
                 QueryStoreBackfillEnabled = backfillEnabled,
                 QueryStoreTextBudgetMb = textBudgetMb,
                 MaxConcurrentSweeps = maxSweeps,
+                PlanXmlCompression = planXmlCompression,
                 McpEnabled = mcpEnabled,
                 McpPort = mcpPort,
                 WebEnabled = webEnabled,
@@ -370,23 +476,31 @@ ON CONFLICT (server_id) DO NOTHING", connection);
 
     internal static int ClampConcurrentSweeps(int value) => Math.Clamp(value, MinConcurrentSweeps, MaxConcurrentSweepsLimit);
 
-    private static async Task<(bool Paused, bool CapturePlans, bool QueryStoreBackfillEnabled, int QueryStoreTextBudgetMb, int MaxConcurrentSweeps, bool McpEnabled, int McpPort, bool WebEnabled, int WebPort, long ConfigVersion)>
+    /// <summary>#2171: unknown values normalize to 'gzip' (fail to the shipped default) so a hand-edited
+    /// row cannot switch the writer into an undefined mode; the V62 CHECK constraint enforces the same
+    /// set DB-side, and this guard covers pre-constraint rows and direct writes with the constraint
+    /// dropped.</summary>
+    internal static string NormalizePlanXmlCompression(string? value) =>
+        string.Equals(value?.Trim(), "none", StringComparison.OrdinalIgnoreCase) ? "none" : "gzip";
+
+    private static async Task<(bool Paused, bool CapturePlans, bool QueryStoreBackfillEnabled, int QueryStoreTextBudgetMb, int MaxConcurrentSweeps, string PlanXmlCompression, bool McpEnabled, int McpPort, bool WebEnabled, int WebPort, long ConfigVersion)>
         ReadServiceRowAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var command = new NpgsqlCommand(
-            "SELECT paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, mcp_enabled, mcp_port, web_enabled, web_port, config_version FROM config_service WHERE id = 1", connection);
+            "SELECT paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, config_version FROM config_service WHERE id = 1", connection);
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
         {
             /* Row missing (unseeded) — treat as defaults; capture and backfill stay on, and the memory
                knobs reproduce the pre-V59 compile-time constants (64 MB budget, 4-wide sweep). */
-            return (false, true, true, 64, 4, false, 5152, false, 5153, 0);
+            return (false, true, true, 64, 4, "gzip", false, 5152, false, 5153, 0);
         }
 
         return (reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2),
             ClampTextBudgetMb(reader.GetInt32(3)), ClampConcurrentSweeps(reader.GetInt32(4)),
-            reader.GetBoolean(5), reader.GetInt32(6),
-            reader.GetBoolean(7), reader.GetInt32(8), reader.GetInt64(9));
+            NormalizePlanXmlCompression(reader.GetString(5)),
+            reader.GetBoolean(6), reader.GetInt32(7),
+            reader.GetBoolean(8), reader.GetInt32(9), reader.GetInt64(10));
     }
 
     private static async Task<(AlertsConfig Alerts, AnalysisConfig Analysis)> ReadAlertSettingsAsync(NpgsqlConnection connection, CancellationToken ct)
@@ -551,9 +665,14 @@ FROM config_notification WHERE id = 1", connection);
         NpgsqlConnection connection, DarlingConfig bootstrap, CancellationToken ct)
     {
         var servers = new List<MonitoredServer>();
+        /* server_id is LAST rather than first (#2218): every ordinal in BuildServerFromRow is positional, so
+           appending is the only addition that cannot silently re-map an existing column onto the wrong
+           property. It was absent entirely before this — the registry's own PRIMARY KEY was read past, and
+           twelve downstream sites re-derived it from the mutable columns instead. */
         using var command = new NpgsqlCommand(@"
 SELECT name, host, database, auth, username, encrypted_password, encrypt_mode, trust_server_certificate,
-       read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, alert_delivery_mode_override
+       read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, alert_delivery_mode_override,
+       engine, port, server_id
 FROM config_monitored_servers WHERE is_enabled = TRUE
 ORDER BY name", connection);
         using var reader = await command.ExecuteReaderAsync(ct);
@@ -593,6 +712,16 @@ ORDER BY name", connection);
             MonthlyCostUsd = reader.GetDecimal(11),
             /* #1236: the per-server delivery override (null = inherit the global), available at delivery time. */
             AlertDeliveryModeOverride = ParseDeliveryOverride(reader.IsDBNull(12) ? null : reader.GetString(12)),
+            /* V68. Without this the registry — which is authoritative once seeded — silently downgraded every
+               PostgreSQL target to the "sqlserver" property default, and the service opened a SqlConnection to
+               port 5432. NOT NULL DEFAULT in both columns means the DBNull guards are belt-and-braces for a
+               store mid-migration, not an expected path. */
+            Engine = reader.IsDBNull(13) ? "sqlserver" : reader.GetString(13),
+            Port = reader.IsDBNull(14) ? 0 : reader.GetInt32(14),
+            /* #2218: the row's OWN primary key, which this read used to discard. NOT NULL in the table, so
+               the DBNull guard is for a store mid-migration rather than an expected path — and a null there
+               falls back to the derivation, which is exactly what it did before this column was read at all. */
+            StoredServerId = reader.IsDBNull(15) ? null : reader.GetInt32(15),
         };
 
         if (server.UsesSqlAuth && string.IsNullOrWhiteSpace(server.EncryptedPassword))
@@ -659,6 +788,7 @@ ORDER BY name", connection);
         config.QueryStoreBackfillEnabled = view.QueryStoreBackfillEnabled;
         config.QueryStoreTextBudgetMb = view.QueryStoreTextBudgetMb;
         config.MaxConcurrentSweeps = view.MaxConcurrentSweeps;
+        config.PlanXmlCompression = view.PlanXmlCompression;
         config.Mcp.Enabled = view.McpEnabled;
         config.Mcp.Port = view.McpPort;
         config.Web.Enabled = view.WebEnabled;
@@ -801,6 +931,16 @@ public sealed class StoreConfigView
 
     /// <summary>The #2164 per-database query_store text budget in MB (config_service, V59), already clamped.</summary>
     public int QueryStoreTextBudgetMb { get; init; } = 64;
+
+    /// <summary>
+    /// The #2171 plan-XML storage codec (config_service, V62), already normalized to 'gzip' or 'none'.
+    /// 'gzip' (the default, unchanged behavior): the plan dim stores gzip bytes in query_plan_gz,
+    /// 14.0x measured, and only the apps/MCP can read plans back. 'none': plain text into
+    /// query_plan_xml - lz4 TOAST compresses at ~8.9x and any direct-SQL consumer (Grafana, report
+    /// tooling) reads the column bare, no extension, no UDF. Existing rows are untouched either way;
+    /// the readers' text-first-else-gz resolution covers every mix of eras and modes.
+    /// </summary>
+    public string PlanXmlCompression { get; init; } = "gzip";
 
     /// <summary>The #2170 fleet sweep width (config_service, V59), already clamped.</summary>
     public int MaxConcurrentSweeps { get; init; } = 4;

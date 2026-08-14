@@ -74,10 +74,11 @@ public partial class RemoteCollectorService
             var step = _backfillSliceSteps.GetOrAdd(server.Id, static _ => new AbandonableStep());
             var result = await step.RunAsync(
                 () => RunQueryStoreBackfillSliceAsync(server, cancellationToken),
-                BackfillSliceDeadline, cancellationToken,
+                BackfillSliceDeadline,
                 onLateFault: ex => _logger?.LogError(ex,
                     "query_store backfill slice on '{Server}' faulted AFTER being abandoned — this is the wedge's own exception (#2148)",
-                    server.DisplayName));
+                    server.DisplayName),
+                cancellationToken: cancellationToken);
 
             switch (result.Outcome)
             {
@@ -552,7 +553,8 @@ AND   NOT EXISTS
           WHERE ds.server_id = $1
           AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
           AND   collector_state.state_key = $3 || ds.database_name
-      )";
+      )
+RETURNING state_key";
 
     /// <summary>
     /// Runs <see cref="PruneOrphanedDatabaseStateKeysSql"/> for every shared owner/prefix pair, once per
@@ -565,7 +567,7 @@ AND   NOT EXISTS
         {
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
-            var pruned = 0;
+            var pruned = new List<string>();
 
             foreach (var (owner, prefix) in QueryStorePerDatabaseState.PrunableKeys)
             {
@@ -574,14 +576,26 @@ AND   NOT EXISTS
                 cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
                 cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = owner });
                 cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = prefix });
-                pruned += await cmd.ExecuteNonQueryAsync(cancellationToken);
+
+                /* RETURNING and a reader, not a rows-affected count (#2205). The only symptom of a WRONG
+                   delete here is a silent refetch, so a bare number leaves nothing to diagnose it with — on
+                   Lite you could see that three rows went without seeing WHICH databases' watermark and
+                   backfill state was retired. Correctness already matched Darling exactly (same anti-join,
+                   same freshness guard, pinned by the #2195 tests); this closes the FORENSICS gap. */
+                using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    pruned.Add(reader.GetString(0));
+                }
             }
 
-            if (pruned > 0)
+            if (pruned.Count > 0)
             {
+                /* Same shape and same fields as DarlingCollectorRunner's, so an operator reading either
+                   SKU's log sees the same sentence. */
                 _logger?.LogInformation(
-                    "Pruned {Count} query_store state row(s) for database(s) no longer on server {ServerId}",
-                    pruned, serverId);
+                    "[server_id {ServerId}] pruned {Count} query_store state row(s) for database(s) no longer on the server: {Keys}",
+                    serverId, pruned.Count, string.Join(", ", pruned));
             }
         }
         catch (Exception ex)

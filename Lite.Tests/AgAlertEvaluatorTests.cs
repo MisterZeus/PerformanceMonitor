@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -143,15 +142,16 @@ public class AgAlertEvaluatorTests
         Assert.Contains(item.Fields, f => f.Label == "Replica");
         Assert.Contains(("Suspend Reason", "SUSPEND_FROM_USER"), item.Fields);
 
-        var behind = Assert.Single(e.EvaluateDatabases(
-            ServerId, new[] { Database(suspended: false, lagSeconds: 600) }, 300, 0, Cooldown)
-            .Where(a => a.MetricName == AgAlertPolicy.SyncFellBehindMetric));
+        var behind = Assert.Single(
+            e.EvaluateDatabases(
+                ServerId, new[] { Database(suspended: false, lagSeconds: 600) }, 300, 0, Cooldown),
+            a => a.MetricName == AgAlertPolicy.SyncFellBehindMetric);
         Assert.Contains(Assert.Single(behind.Context!.Details).Fields, f => f.Label == "Database");
 
         /* Resolutions stay context-less — they carry no database-scoped payload to route on. */
-        var resumed = Assert.Single(e.EvaluateDatabases(
-            ServerId, new[] { Database(suspended: false) }, 300, 0, Cooldown)
-            .Where(a => a.IsResolution));
+        var resumed = Assert.Single(
+            e.EvaluateDatabases(ServerId, new[] { Database(suspended: false) }, 300, 0, Cooldown),
+            a => a.IsResolution);
         Assert.Null(resumed.Context);
     }
 

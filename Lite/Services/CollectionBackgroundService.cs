@@ -130,9 +130,10 @@ public class CollectionBackgroundService : BackgroundService
                        refresh that never returns, a network path that swallows packets) must not stop
                        every server's collection. */
                     var check = await _connectionCheckStep.RunAsync(
-                        () => _serverManager.CheckAllConnectionsAsync(), ConnectionCheckDeadline, stoppingToken,
+                        () => _serverManager.CheckAllConnectionsAsync(), ConnectionCheckDeadline,
                         onLateFault: ex => _logger?.LogError(ex,
-                            "Connection check faulted AFTER being abandoned — this is the wedge's own exception (#2148)"));
+                            "Connection check faulted AFTER being abandoned — this is the wedge's own exception (#2148)"),
+                        cancellationToken: stoppingToken);
                     LogStepOutcome(check, "Connection check", ConnectionCheckDeadline);
                 }
 

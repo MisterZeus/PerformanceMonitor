@@ -12,6 +12,7 @@ using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Text.Json;
+using PerformanceMonitor.Collectors;
 using System.Text.Json.Serialization;
 using PerformanceMonitor.Notifications;
 
@@ -71,6 +72,18 @@ public sealed class DarlingConfig
     /// </summary>
     [JsonPropertyName("queryStoreTextBudgetMb")]
     public int QueryStoreTextBudgetMb { get; set; } = 64;
+
+    /// <summary>
+    /// The plan-XML storage codec (#2171). Store-backed (config_service, V62), normalized to 'gzip' or
+    /// 'none' on read. 'gzip' (default, unchanged): plans live as gzip bytes in query_plan_gz - 14.0x
+    /// measured, readable only through the apps/MCP. 'none': plans written as plain text into
+    /// query_plan_xml - lz4 TOAST compresses ~8.9x, and anything reading the store directly over SQL
+    /// (Grafana, report tooling) gets plan XML back with no extension and no UDF. Flipping it affects
+    /// NEW rows only; the readers' text-first-else-gz resolution covers every mix. The dimension is
+    /// content-addressed either way, so the digest and dedup are codec-independent.
+    /// </summary>
+    [JsonPropertyName("planXmlCompression")]
+    public string PlanXmlCompression { get; set; } = "gzip";
 
     /// <summary>
     /// How many per-server collection bodies may hold a SQL connection at once (#2170) — the #1553 fleet
@@ -269,6 +282,23 @@ public sealed class DarlingConfig
             else if (!string.Equals(server.Auth, "integrated", StringComparison.OrdinalIgnoreCase))
             {
                 problems.Add($"{label}: auth must be 'integrated' or 'sql' (got '{server.Auth}').");
+            }
+
+            /* Caught here, in the pre-flight, rather than only where the connection string is built.
+               MonitoredServerConnection throws on this too — it has to, since it is what actually
+               knows the driver can't honour it — but that throw happens at first connect, which for a
+               service means the misconfiguration surfaces in a log after deployment instead of in
+               --test-connection before it. */
+            if (server.IsPostgres && !server.UsesSqlAuth)
+            {
+                problems.Add(
+                    $"{label}: a PostgreSQL target requires auth 'sql' with a username and password " +
+                    "(integrated/Kerberos auth is not supported for PostgreSQL targets).");
+            }
+
+            if (server.Port is not 0 && server.Port is < 1 or > 65535)
+            {
+                problems.Add($"{label}: port must be between 1 and 65535 (got {server.Port}).");
             }
         }
 
@@ -1038,8 +1068,28 @@ public sealed class MonitoredServer
     [JsonPropertyName("name")]
     public string Name { get; set; } = "";
 
+    /// <summary>
+    /// Which database engine this target runs: <c>"sqlserver"</c> (default) or <c>"postgres"</c>
+    /// (accepted spellings: postgres, postgresql, pg, aurora-postgresql).
+    /// <para>This is configuration rather than something probed, because it has to be known BEFORE
+    /// connecting — it decides which driver builds the connection string and which detection query
+    /// runs. An omitted or unrecognized value means SQL Server, so every existing darling.json keeps
+    /// its exact present behaviour.</para>
+    /// </summary>
+    [JsonPropertyName("engine")]
+    public string Engine { get; set; } = "sqlserver";
+
     [JsonPropertyName("host")]
     public string Host { get; set; } = "";
+
+    /// <summary>
+    /// TCP port, for PostgreSQL targets on a non-default port. <c>0</c> (the default) means "use the
+    /// driver's default", which is 5432.
+    /// <para>Unused for SQL Server, which carries a non-default port in the host itself as
+    /// <c>host,1433</c> — that convention is left alone rather than migrated.</para>
+    /// </summary>
+    [JsonPropertyName("port")]
+    public int Port { get; set; }
 
     /// <summary>Azure SQL Database: the one database this entry monitors (feeds the storage-name identity).</summary>
     [JsonPropertyName("database")]
@@ -1100,6 +1150,23 @@ public sealed class MonitoredServer
     [JsonIgnore]
     public bool UsesSqlAuth => string.Equals(Auth, "sql", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// <see cref="Engine"/> parsed. Anything unrecognized resolves to
+    /// <see cref="CollectorTargetEngine.SqlServer"/> rather than throwing: a typo in one server entry
+    /// must not stop the service from starting and monitoring everything else. The mismatch surfaces
+    /// immediately anyway — the SQL Server detection query fails against a Postgres target.
+    /// </summary>
+    [JsonIgnore]
+    public CollectorTargetEngine TargetEngine => Engine?.Trim().ToLowerInvariant() switch
+    {
+        "postgres" or "postgresql" or "pg" or "aurora-postgresql" or "aurora" => CollectorTargetEngine.PostgreSql,
+        _ => CollectorTargetEngine.SqlServer,
+    };
+
+    /// <summary>True when this entry targets PostgreSQL, so the SQL Server-only config is inapplicable.</summary>
+    [JsonIgnore]
+    public bool IsPostgres => TargetEngine == CollectorTargetEngine.PostgreSql;
+
     /// <summary>Display name falls back to the host.</summary>
     [JsonIgnore]
     public string DisplayName => string.IsNullOrWhiteSpace(Name) ? Host : Name;
@@ -1110,4 +1177,38 @@ public sealed class MonitoredServer
     /// </summary>
     [JsonIgnore]
     public string StorageName => PerformanceMonitor.Common.ServerIdHelper.BuildStorageName(Host, Database, ReadOnlyIntent);
+
+    /// <summary>
+    /// <c>config_monitored_servers.server_id</c> as READ FROM THE STORE, or null for an entry that has no
+    /// store row yet — a <c>darling.json</c> bootstrap entry before the first seed.
+    ///
+    /// <para><b>Not settable from the file</b> (<see cref="JsonIgnore"/>) on purpose. The registry is
+    /// authoritative for identity once seeded, so letting an operator pin a <c>server_id</c> in
+    /// <c>darling.json</c> would create a second authority that could disagree with it — and disagree
+    /// silently, since nothing downstream re-checks.</para>
+    /// </summary>
+    [JsonIgnore]
+    public int? StoredServerId { get; set; }
+
+    /// <summary>
+    /// This server's <c>server_id</c>: the stored value when there is one, otherwise derived from
+    /// <see cref="StorageName"/>.
+    ///
+    /// <para><b>This is the single place a monitored server's identity is decided</b> (#2218, #2158). It used
+    /// to be recomputed at twelve call sites — every operator-command lookup, the reconcile, the self-alert
+    /// stamps, the schedule resolution — which is what makes identity-derived-from-mutable-config expensive
+    /// to change: a stored surrogate is only useful if nothing re-derives it behind the store's back.</para>
+    ///
+    /// <para><b>Today the two are always equal</b>, because the seed and the Viewer both write exactly this
+    /// hash, so reading the stored value changes no behaviour and no data moves. The point is that the
+    /// FALLBACK is now the only derivation: when identity stops being derivable, this property is what
+    /// changes, and the twelve call sites do not.</para>
+    ///
+    /// <para>The store is preferred over the derivation rather than merely agreeing with it, because that is
+    /// the ordering that makes a stored id which no longer matches its host keep working — which is the
+    /// whole point of storing it.</para>
+    /// </summary>
+    [JsonIgnore]
+    public int ServerId =>
+        StoredServerId ?? PerformanceMonitor.Common.ServerIdHelper.GetDeterministicHashCode(StorageName);
 }

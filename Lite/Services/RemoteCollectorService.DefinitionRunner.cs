@@ -56,7 +56,7 @@ public partial class RemoteCollectorService
 
         /* Some collectors don't exist on some targets (e.g. ring buffers on Azure SQL DB) —
            skip the cycle entirely, matching the original hand-rolled collectors. */
-        if (!definition.AppliesTo(target))
+        if (!CollectorCatalog.AppliesTo(definition, target))
         {
             return 0;
         }

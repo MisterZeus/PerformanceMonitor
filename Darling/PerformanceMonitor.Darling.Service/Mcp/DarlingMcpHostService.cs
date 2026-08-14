@@ -358,13 +358,43 @@ public sealed class DarlingMcpHostService : BackgroundService
             var postgres = NpgsqlDataSource.Create(storeConnectionString);
             _appDataSource = postgres;
 
-            /* serverId → connection string from config (first entry wins on a duplicate storage
-               name, mirroring the worker's FirstOrDefault over runtimes). Resolution is lazy so
-               DPAPI decrypt runs only when a plan fetch actually needs the connection. */
-            var serversById = new Dictionary<int, MonitoredServer>();
-            foreach (var server in config.Servers)
+            /* serverId → connection string, keyed by the STORE's identity (review catch on #2218).
+               Resolution is lazy so DPAPI decrypt runs only when a plan fetch actually needs the
+               connection; first entry wins on a duplicate storage name, mirroring the worker's
+               FirstOrDefault over runtimes.
+
+               This used to read config.Servers — i.e. darling.json — which is wrong in two ways that
+               both end in "live plan fetch returns null for a server the MCP tools can otherwise see":
+
+                 1. TODAY: the registry is authoritative after the first seed, so a server added by
+                    add_servers or the Viewer is in the store and NOT in the file (#2254/#2256). It was
+                    therefore absent from this map entirely, while every MCP tool resolved it fine —
+                    DarlingServerResolver reads the STORE. Analysis and plan drill-down for those
+                    servers silently had no connection.
+                 2. AFTER #2218 step 2: [JsonIgnore] keeps StoredServerId off the file, so a file-sourced
+                    MonitoredServer always falls back to the derived id. The tools hand this map the
+                    store's id. They agree only while identity is still derivable.
+
+               So the fix is the same for both: key on the registry. Store-unreachable falls back to the
+               file, which is this host's documented posture (it deliberately starts on darling.json when
+               the store is down) — and a fallback that is only reached when the store cannot answer
+               cannot be the thing that disagrees with it. */
+            IReadOnlyList<MonitoredServer> registryServers = config.Servers;
+            var storeView = await new StoreConfigProvider(postgres, _logger).LoadViewAsync(config, stoppingToken);
+            if (storeView is not null)
             {
-                serversById.TryAdd(ServerIdHelper.GetDeterministicHashCode(server.StorageName), server);
+                registryServers = storeView.EnabledServers;
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "MCP could not read the monitored-server registry — live plan fetch will use darling.json, so any server added through add_servers or the Viewer will have no connection until the store answers.");
+            }
+
+            var serversById = new Dictionary<int, MonitoredServer>();
+            foreach (var server in registryServers)
+            {
+                serversById.TryAdd(server.ServerId, server);
             }
 
             var planFetcher = new PgPlanFetcher(
@@ -472,6 +502,41 @@ public sealed class DarlingMcpHostService : BackgroundService
                    is served; Darling's delta collectors store no sample_interval_seconds, so per-second rates are
                    derived from the LAG interval. */
                 .WithGeminiCompatibleTools<DarlingMcpLatchSpinlockTools>()
+                /* get_pg_wait_stats — PostgreSQL wait events for an Aurora target, paired with the
+                   pg_wait_stats collector. A separate tool from get_wait_stats rather than a widened
+                   one: PostgreSQL's waits are a two-level type/event taxonomy with no signal-wait
+                   concept, reported in microseconds, so the two engines cannot share a result shape
+                   without lying about a unit or emitting mostly-null columns. */
+                .WithGeminiCompatibleTools<DarlingMcpPgWaitTools>()
+                /* get_pg_top_queries — PostgreSQL query shapes by total time, paired with the
+                   pg_statement_stats collector. Carries Aurora's I/O source split and per-statement
+                   peak memory, neither of which the SQL Server tools have an equivalent for. */
+                .WithGeminiCompatibleTools<DarlingMcpPgStatementTools>()
+                /* get_pg_wraparound_risk — XID/MultiXact freeze headroom, the highest-consequence
+                   PostgreSQL signal and one with no SQL Server counterpart. Not Aurora-gated. */
+                .WithGeminiCompatibleTools<DarlingMcpPgWraparoundTools>()
+                /* get_pg_xmin_horizon — why vacuum reclaims nothing, attributed to one of four causes
+                   that are indistinguishable by symptom and need different fixes. */
+                .WithGeminiCompatibleTools<DarlingMcpPgXminTools>()
+                /* get_pg_replication_slots — the other half of the abandoned-slot story. The xmin tool
+                   reports a slot pinning the horizon; this one reports the WAL it is retaining, which is
+                   unbounded by default and fills the volume regardless of what vacuum is doing. */
+                .WithGeminiCompatibleTools<DarlingMcpPgSlotTools>()
+                /* get_pg_autovacuum_health — which tables autovacuum is not keeping up with, ranked by
+                   how far past each table's OWN threshold it is. The ratio is the whole tool: a
+                   dead-tuple count is not comparable between a 50-million-row table and a 10,000-row
+                   one, and the threshold is what makes it so. */
+                .WithGeminiCompatibleTools<DarlingMcpPgAutovacuumTools>()
+                /* get_pg_io_stats — I/O attributed to who/what/why rather than to a file. The context
+                   dimension has no SQL Server counterpart and is what separates a buffer-pool miss that
+                   more memory would fix from a ring-buffered sequential scan that it would not. */
+                .WithGeminiCompatibleTools<DarlingMcpPgIoTools>()
+                /* get_pg_blocking — who is blocked by whom, assembled from the stored edge list into chains
+                   with the ROOT attributed. The one PostgreSQL read whose caveat has to travel WITH the
+                   answer: SQL Server's blocked-process report is engine-recorded, this is periodically
+                   sampled, so "no blocking" here means "none was sampled" and the tool reports its own
+                   capture count so that distinction cannot be lost. */
+                .WithGeminiCompatibleTools<DarlingMcpPgBlockingTools>()
                 .WithGeminiCompatibleTools<DarlingMcpMemoryGrantTools>()
                 .WithGeminiCompatibleTools<DarlingMcpPlanCacheSchedulerTools>()
                 .WithGeminiCompatibleTools<DarlingMcpJobTools>()

@@ -402,16 +402,16 @@ OUTER APPLY
         /* Delta key = the dm_exec_query_stats row identity (sql_handle + offsets + plan_handle).
            Keying on plan_handle alone cross-contaminated multi-statement plans — parity contract. */
         var deltaKey = $"{row.SqlHandle}:{row.StatementStartOffset}:{row.StatementEndOffset}:{row.PlanHandle}";
-        var deltaExecCount = context.Deltas.CalculateDelta(context.ServerId, "query_stats_exec", deltaKey, row.ExecutionCount, collectionTime: context.CollectionTime, maxGapSeconds: 300);
+        var deltaExecCount = context.Deltas.CalculateDelta(context.ServerId, "query_stats_exec", deltaKey, row.ExecutionCount, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
         /* Capture the collection interval alongside the CPU delta so the display can derive
            worker_time_per_second (peak CPU-ms per wall-clock second) over the window. */
-        var deltaWorkerTime = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "query_stats_worker", deltaKey, row.TotalWorkerTime, out var sampleIntervalSeconds, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaElapsedTime = context.Deltas.CalculateDelta(context.ServerId, "query_stats_elapsed", deltaKey, row.TotalElapsedTime, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaLogicalReads = context.Deltas.CalculateDelta(context.ServerId, "query_stats_reads", deltaKey, row.TotalLogicalReads, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaLogicalWrites = context.Deltas.CalculateDelta(context.ServerId, "query_stats_writes", deltaKey, row.TotalLogicalWrites, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaPhysicalReads = context.Deltas.CalculateDelta(context.ServerId, "query_stats_phys_reads", deltaKey, row.TotalPhysicalReads, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaRows = context.Deltas.CalculateDelta(context.ServerId, "query_stats_rows", deltaKey, row.TotalRows, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaSpills = context.Deltas.CalculateDelta(context.ServerId, "query_stats_spills", deltaKey, row.TotalSpills, collectionTime: context.CollectionTime, maxGapSeconds: 300);
+        var deltaWorkerTime = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "query_stats_worker", deltaKey, row.TotalWorkerTime, out var sampleIntervalSeconds, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaElapsedTime = context.Deltas.CalculateDelta(context.ServerId, "query_stats_elapsed", deltaKey, row.TotalElapsedTime, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaLogicalReads = context.Deltas.CalculateDelta(context.ServerId, "query_stats_reads", deltaKey, row.TotalLogicalReads, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaLogicalWrites = context.Deltas.CalculateDelta(context.ServerId, "query_stats_writes", deltaKey, row.TotalLogicalWrites, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaPhysicalReads = context.Deltas.CalculateDelta(context.ServerId, "query_stats_phys_reads", deltaKey, row.TotalPhysicalReads, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaRows = context.Deltas.CalculateDelta(context.ServerId, "query_stats_rows", deltaKey, row.TotalRows, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaSpills = context.Deltas.CalculateDelta(context.ServerId, "query_stats_spills", deltaKey, row.TotalSpills, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
 
         writer
             .Value(row.DatabaseName)

@@ -71,10 +71,14 @@ public sealed class AbandonableStep
     /// awaited path did NOT already receive; a fault landing in the microseconds between the deadline
     /// decision and the abandonment flag can be missed (never doubled), which costs one log line, not
     /// correctness — the caller already logged the abandonment itself.
+    /// <para><b>Parameter order:</b> <paramref name="cancellationToken"/> is LAST, per CA1068. It was third
+    /// until #2193, which is the ordering the analyzer flags — and every call site already passed
+    /// <paramref name="onLateFault"/> by name, so the move cost nothing at the callers and the compiler
+    /// found all of them.</para>
     /// </summary>
     public async Task<AbandonableStepResult> RunAsync(
-        Func<Task> step, TimeSpan timeout, CancellationToken cancellationToken = default,
-        Action<Exception>? onLateFault = null)
+        Func<Task> step, TimeSpan timeout, Action<Exception>? onLateFault = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(step);
 

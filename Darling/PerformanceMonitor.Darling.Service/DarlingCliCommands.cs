@@ -122,6 +122,14 @@ public static class DarlingCliCommands
     public static bool IsRecompressPlanDimVerb(string arg) =>
         string.Equals(arg, "--recompress-plan-dim", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The verb <see cref="AddServerAsync"/> handles — register monitored server(s) in the store from a
+    /// JSON array on STDIN (#2256). The store is authoritative after the first seed, so on a headless host with no
+    /// GUI and no MCP client this was previously impossible: the web surface excludes the write tools by design
+    /// and darling.json is a one-time bootstrap.</summary>
+    public static bool IsAddServerVerb(string arg) =>
+        string.Equals(arg, "--add-server", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(arg, "--add-servers", StringComparison.OrdinalIgnoreCase);
+
     /// <summary><c>--version</c>/<c>-v</c> — print the product version and exit.</summary>
     public static bool IsVersionVerb(string arg) =>
         string.Equals(arg, "--version", StringComparison.OrdinalIgnoreCase)
@@ -152,7 +160,8 @@ public static class DarlingCliCommands
         || IsDisableWebVerb(arg)
         || IsBackfillRollupsVerb(arg)
         || IsCollapseLegacySlicesVerb(arg)
-        || IsRecompressPlanDimVerb(arg);
+        || IsRecompressPlanDimVerb(arg)
+        || IsAddServerVerb(arg);
 
     /// <summary>
     /// Classifies the exe's command line from its FIRST argument (#1581): no args → run the host; a recognized
@@ -225,6 +234,7 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups  Materialize the retention rollups back over existing history, after a disk preflight." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --collapse-legacy-slices  Repair Query Store rows collected before the split-slice fix, then re-materialize the rollups they fed." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --recompress-plan-dim  Convert the plan dimension's pre-V54 text rows to gzip in batches while the service runs, then VACUUM FULL to return the space to the volume (--no-vacuum-full to skip; --vacuum-full to compact an already-converted store)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --add-server, --add-servers   Register monitored server(s) from a JSON array on stdin (the add_servers shape); the running service picks them up without a restart." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run   Show the plan, the disk estimate and the time budget, and change nothing.";
 
     /// <summary>
@@ -286,11 +296,7 @@ public static class DarlingCliCommands
             return $"  [FAIL] {serverName}: {probe.Error}";
         }
 
-        var edition = string.IsNullOrEmpty(probe.EngineEditionDescription)
-            ? DarlingServerConnector.DescribeEngineEdition(probe.EngineEdition)
-            : probe.EngineEditionDescription;
-        var msdb = probe.HasMsdbAccess ? "msdb access: yes" : "msdb access: NO (failed-job alerts unavailable)";
-        return $"  [PASS] {serverName}: SQL major version {probe.MajorVersion}, {edition}, {msdb}";
+        return $"  [PASS] {serverName}: {DarlingServerConnector.DescribeProbeFacts(probe)}";
     }
 
     /// <summary>
@@ -3249,6 +3255,30 @@ public static class DarlingCliCommands
     }
 
     /// <summary>
+    /// #2171: whether the store's plan_xml_compression setting is 'none' — the mode where the live
+    /// writer stores plans as plain text and recompression would fight it forever. Reads defensively:
+    /// the column arrives at V62, and the verb must keep working against the older stores it exists
+    /// to convert, so a missing column (42703) is "no mode to conflict with". Public-for-tests via
+    /// the live suite; the verb is its only production caller.
+    /// </summary>
+    internal static async Task<bool> StoreIsSetToPlainTextPlansAsync(
+        NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var codec = new NpgsqlCommand(
+                "SELECT plan_xml_compression FROM config_service WHERE id = 1", connection);
+            return await codec.ExecuteScalarAsync(cancellationToken) is string mode
+                && string.Equals(mode.Trim(), "none", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (PostgresException ex) when (ex.SqlState == "42703")
+        {
+            /* Pre-V62 store: no column, no mode to conflict with — proceed. */
+            return false;
+        }
+    }
+
+    /// <summary>
     /// <c>--recompress-plan-dim</c> (#2076): convert the plan dimension's pre-V54 text rows to the gzip form
     /// V54's write path produces (#2069), in bounded batches, while the service keeps running.
     ///
@@ -3324,6 +3354,20 @@ public static class DarlingCliCommands
         output.WriteLine();
         output.WriteLine("PerformanceMonitor Darling — plan-dimension recompression (--recompress-plan-dim)");
         output.WriteLine();
+
+        /* #2171: a store configured plan_xml_compression = 'none' WANTS text rows — the operator chose
+           direct-SQL readability, and this verb would convert exactly the rows the live writer keeps
+           producing, the two fighting forever. Refuse with the way out rather than silently churning. */
+        if (await StoreIsSetToPlainTextPlansAsync(connection, cancellationToken))
+        {
+            error.WriteLine(
+                "This store is configured plan_xml_compression = 'none' (plans deliberately stored as " +
+                "plain text for direct-SQL consumers, #2171). Recompressing would convert rows the live " +
+                "writer keeps producing as text - the two would fight forever. If you want gzip storage " +
+                "back, set plan_xml_compression = 'gzip' in the store's service settings first, then " +
+                "re-run this verb.");
+            return 1;
+        }
 
         PlanDimRecompression.Survey survey;
         try
@@ -3541,6 +3585,208 @@ public static class DarlingCliCommands
         output.WriteLine($"  COMPACTED in {stopwatch.Elapsed:hh\\:mm\\:ss} — " +
             $"{before / (1024.0 * 1024 * 1024):N1} GB -> {after / (1024.0 * 1024 * 1024):N1} GB on disk.");
         return 0;
+    }
+
+    /// <summary>
+    /// What <c>--add-server</c> prints when stdin carries nothing — to STDOUT, per the [#2097] lesson that a
+    /// prompt or error on STDERR is invisible in the ISE and some integrated terminals, so a verb that writes
+    /// only there reads as hung.
+    /// </summary>
+    public static string AddServerUsageText() =>
+        "Nothing arrived on stdin, so no server was added." + Environment.NewLine +
+        Environment.NewLine +
+        "--add-server (or --add-servers) reads a JSON ARRAY of servers from stdin — the same shape the" + Environment.NewLine +
+        "add_servers MCP tool takes." + Environment.NewLine +
+        "The password is read from stdin rather than the command line on purpose: an argument is visible in the" + Environment.NewLine +
+        "process list and in shell history." + Environment.NewLine +
+        Environment.NewLine +
+        "  PowerShell:  Get-Content servers.json | .\\PerformanceMonitor.Darling.Service.exe --add-server" + Environment.NewLine +
+        "  cmd:         type servers.json | PerformanceMonitor.Darling.Service.exe --add-server" + Environment.NewLine +
+        Environment.NewLine +
+        "servers.json, SQL Server and PostgreSQL:" + Environment.NewLine +
+        "  [" + Environment.NewLine +
+        "    {\"host\":\"sql01\",\"auth\":\"integrated\"}," + Environment.NewLine +
+        "    {\"host\":\"aurora.cluster-abc.us-east-1.rds.amazonaws.com\",\"engine\":\"postgres\"," + Environment.NewLine +
+        "     \"auth\":\"SQL\",\"username\":\"darling_monitor\",\"password\":\"...\"}" + Environment.NewLine +
+        "  ]";
+
+    /// <summary>
+    /// Renders the <c>add_servers</c> result JSON as operator lines plus an exit code. PURE, so the formatting and
+    /// the exit-code policy pin without a store — the same split <see cref="FormatProbeLine"/> uses.
+    ///
+    /// <para>Exit 0 requires that something landed and nothing failed. A batch of pure duplicates exits 0: re-running
+    /// the same file is idempotent, not an error. Nothing at all landed (an empty array, or every entry rejected)
+    /// exits 1, because a verb that changed nothing must not report success to a deployment script.</para>
+    /// </summary>
+    internal static (IReadOnlyList<string> Lines, int ExitCode) FormatAddServerOutcome(string resultJson)
+    {
+        var lines = new List<string>();
+        try
+        {
+            using var document = JsonDocument.Parse(resultJson);
+            var root = document.RootElement;
+
+            /* The whole-payload rejection shape — {status, message} with no per-server results. */
+            if (!root.TryGetProperty("results", out var results) || results.ValueKind != JsonValueKind.Array)
+            {
+                var status = root.TryGetProperty("status", out var s) ? s.GetString() : "error";
+                var message = root.TryGetProperty("message", out var m) ? m.GetString() : resultJson;
+                lines.Add($"  [{status?.ToUpperInvariant()}] {message}");
+                return (lines, 1);
+            }
+
+            foreach (var result in results.EnumerateArray())
+            {
+                var server = result.TryGetProperty("server", out var sv) ? sv.GetString() : null;
+                var status = (result.TryGetProperty("status", out var st) ? st.GetString() : null) ?? string.Empty;
+                var detail = result.TryGetProperty("detail", out var dt) ? dt.GetString() : null;
+                var tag = status switch
+                {
+                    "added" => "ADDED",
+                    "duplicate" => "SKIP",
+                    "connection_failed" => "FAIL",
+                    "invalid" => "INVALID",
+                    _ => status.ToUpperInvariant(),
+                };
+                lines.Add(string.IsNullOrWhiteSpace(detail)
+                    ? $"  [{tag}] {server ?? "(unnamed)"}"
+                    : $"  [{tag}] {server ?? "(unnamed)"}: {detail}");
+            }
+
+            var added = root.TryGetProperty("added", out var a) ? a.GetInt32() : 0;
+            var skipped = root.TryGetProperty("skipped", out var k) ? k.GetInt32() : 0;
+            var failed = root.TryGetProperty("failed", out var f) ? f.GetInt32() : 0;
+
+            lines.Add(string.Empty);
+            lines.Add(string.Format(
+                CultureInfo.InvariantCulture,
+                "{0} added, {1} already registered, {2} failed.",
+                added,
+                skipped,
+                failed));
+
+            if (added > 0)
+            {
+                /* The registry write bumps config_version through trg_bump_monitored_servers, which the worker
+                   polls every sweep — so say the restart is unnecessary rather than leaving them to wonder. */
+                lines.Add("The running service picks these up on its next config poll; no restart is needed.");
+            }
+
+            return (lines, failed > 0 || (added == 0 && skipped == 0) ? 1 : 0);
+        }
+        catch (JsonException)
+        {
+            /* Not every failure arrives as JSON. AddServersAsync's catch-all returns McpHelpers.FormatError,
+               which is PLAIN TEXT ("Error during add_servers: ..."), so a genuine store failure that happens
+               AFTER the request parsed — a dropped connection mid-batch, a constraint violation — lands here.
+               That text IS the message the operator needs; wrapping it in "could not parse" buries the one line
+               that explains the failure, precisely when the verb is being used as a deployment gate. Only
+               something that looked like JSON and was not gets the parse wrapper. */
+            var text = resultJson?.Trim() ?? string.Empty;
+            lines.Add(text.StartsWith('{') || text.StartsWith('[')
+                ? $"  Could not parse the result: {text}"
+                : $"  {text}");
+            return (lines, 1);
+        }
+    }
+
+    /// <summary>
+    /// <c>--add-server</c> (#2256): registers monitored server(s) in the store from a JSON array on stdin, through
+    /// the SAME <see cref="DarlingMcpServerAdminTools.AddServers"/> path the MCP tool uses — so validation, dedupe,
+    /// the in-process connection probe, password encryption and the identity computation are shared rather than
+    /// reimplemented. <c>server_id</c> in particular is a hash of the storage name, which is exactly the part an
+    /// operator cannot safely produce by hand.
+    ///
+    /// <para>Why this exists: the store is authoritative after the first seed, so darling.json edits are ignored,
+    /// and the web surface deliberately excludes the write tools. A headless host — the field report ran Windows
+    /// Server 2012, which cannot run the Viewer at all — had no supported path.</para>
+    /// </summary>
+    public static async Task<int> AddServerAsync(
+        string? configPath, TextReader input, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        var json = input is null ? null : await input.ReadToEndAsync(cancellationToken);
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            output.WriteLine(AddServerUsageText());
+            return 1;
+        }
+
+        DarlingConfig config;
+        try
+        {
+            config = DarlingConfig.Load(configPath);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not load configuration: {ex.Message}");
+            return 1;
+        }
+
+        var postgres = config.Postgres;
+        if (postgres is null)
+        {
+            error.WriteLine("postgres section is required.");
+            return 1;
+        }
+
+        string? connectionString;
+        if (postgres.Managed)
+        {
+            /* The managed store credential is DPAPI, so it can only be read on Windows. Bring-your-own needs no
+               such guard, which is why this is scoped to the managed branch rather than the whole verb — a Linux
+               host pointed at its own Postgres can register servers. */
+            if (!OperatingSystem.IsWindows())
+            {
+                error.WriteLine("A managed Postgres store keeps its credential in DPAPI, so --add-server needs Windows. "
+                    + "A bring-your-own store (postgres.connectionString) works on any platform.");
+                return 1;
+            }
+
+            connectionString = DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres);
+            if (string.IsNullOrWhiteSpace(connectionString))
+            {
+                /* Emitted HERE, inside the branch the guard above proved is Windows, rather than from a shared
+                   check below keyed on postgres.Managed. The sibling verbs can write it below because they carry
+                   [SupportedOSPlatform("windows")] on the whole method; this one deliberately does not, and a
+                   bool is not something the platform analyzer can correlate with an earlier OS guard — so the
+                   call has to sit where Windows is provable rather than where it merely happens to hold. */
+                error.WriteLine(DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres));
+                return 1;
+            }
+        }
+        else
+        {
+            connectionString = postgres.ConnectionString;
+            if (string.IsNullOrWhiteSpace(connectionString))
+            {
+                error.WriteLine("postgres.connectionString is empty, so there is no store to register a server in.");
+                return 1;
+            }
+        }
+
+        output.WriteLine();
+        output.WriteLine("PerformanceMonitor Darling — register monitored server(s) (--add-server)");
+        output.WriteLine();
+
+        string resultJson;
+        try
+        {
+            await using var dataSource = NpgsqlDataSource.Create(connectionString);
+            resultJson = await DarlingMcpServerAdminTools.AddServers(dataSource, json);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"Could not reach the store: {ex.Message}");
+            return 1;
+        }
+
+        var (lines, exitCode) = FormatAddServerOutcome(resultJson);
+        foreach (var line in lines)
+        {
+            output.WriteLine(line);
+        }
+
+        return exitCode;
     }
 
     /// <summary>

@@ -108,7 +108,7 @@ Data starts flowing within 1–5 minutes. That's it. No installation on your ser
 
 ### Lite Collectors
 
-38 collectors run on independent, configurable schedules (the long-running-query completion trace is opt-in and ships disabled):
+41 collectors run on independent, configurable schedules (the long-running-query completion trace is opt-in and ships disabled):
 
 | Collector | Default | Source |
 |---|---|---|
@@ -123,6 +123,7 @@ Data starts flowing within 1–5 minutes. That's it. No installation on your ser
 | query_stats | 1 min | `sys.dm_exec_query_stats` (deltas) |
 | procedure_stats | 1 min | `sys.dm_exec_procedure_stats` (deltas) |
 | cpu_utilization | 1 min | `sys.dm_os_ring_buffers` scheduler monitor |
+| database_states | 1 min | `sys.databases` state per database — feeds the database offline/unhealthy alert (not Azure SQL DB) |
 | file_io_stats | 1 min | `sys.dm_io_virtual_file_stats` (deltas) |
 | memory_stats | 1 min | `sys.dm_os_sys_memory` + memory counters |
 | memory_grant_stats | 1 min | `sys.dm_exec_query_memory_grants` |

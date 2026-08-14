@@ -248,6 +248,92 @@ public class DarlingInstallLocationTests
         }
     }
 
+    /// <summary>
+    /// #2201: the mapped-drive probe must not fail OPEN when WMI is unavailable.
+    ///
+    /// <para><b>The defect.</b> The probe asks <c>Get-CimInstance Win32_LogicalDisk</c> for the drive type.
+    /// On a WMI-restricted image (locked-down or Server Core) that call throws, or answers with nothing at
+    /// all, and the guard then returns "not network" — for exactly the drive-letter-mapped share it exists
+    /// to refuse. UNC paths are caught lexically before this point, so the exposure is only mapped LETTERS
+    /// on boxes where WMI is restricted.</para>
+    ///
+    /// <para><b>Why executed rather than structural.</b> The fix is a fallback ORDER — try WMI, and only on
+    /// its silence consult <c>Get-PSDrive</c>, whose <c>DisplayRoot</c> names the share a letter maps to
+    /// without touching WMI. A source scan can see that both cmdlets appear; it cannot see which answer
+    /// wins, nor that the fallback is skipped when WMI already answered. Both cmdlets are shadowed by
+    /// functions here, which PowerShell resolves ahead of the real ones, so the WMI-restricted box is
+    /// simulated rather than described.</para>
+    ///
+    /// <para>Case 4 is the one that keeps the fix honest: when WMI answers "local", Get-PSDrive is rigged
+    /// to THROW. A terminating error would surface as stderr and fail this test, so the case passing proves
+    /// the fallback was never consulted — the guard still trusts a definite WMI answer, and does not invent
+    /// a refusal from a drive that merely has a DisplayRoot.</para>
+    ///
+    /// <para>Case 5 draws the line around what "definite" means. <c>DriveType 0</c> is WMI's <i>unknown</i>,
+    /// not local, and a partial row is likeliest on precisely the restricted images this fallback exists
+    /// for — so it must fall through rather than short-circuit. It works because 0 is falsy in PowerShell,
+    /// which is worth pinning rather than trusting to stay true.</para>
+    /// </summary>
+    [Fact]
+    public void NetworkPathKind_WhenWmiIsUnavailable_FallsBackToPSDriveDisplayRoot()
+    {
+        /* Shadows need [CmdletBinding()] so the shipped call sites can pass -ErrorAction, which is a common
+           parameter and not one a plain function accepts. */
+        const string Shadows = @"
+function Get-CimInstance {
+    [CmdletBinding()]
+    param([Parameter(ValueFromRemainingArguments = $true)] $Rest)
+    if ($env:PM_WMI -eq ""throw"") { throw ""WMI is not available on this image"" }
+    if ($env:PM_WMI -eq ""silent"") { return $null }
+    return [pscustomobject]@{ DriveType = [int]$env:PM_WMI }
+}
+function Get-PSDrive {
+    [CmdletBinding()]
+    param([Parameter(ValueFromRemainingArguments = $true)] $Rest)
+    if ($env:PM_PSDRIVE -eq ""throw"") { throw ""Get-PSDrive must not be consulted when WMI answered"" }
+    return [pscustomobject]@{ DisplayRoot = $env:PM_PSDRIVE }
+}
+";
+
+        /* wmi: "throw" | "silent" | a DriveType number (4 = network, 3 = local fixed disk). */
+        var cases = new (string Wmi, string DisplayRoot, string Expected, string Because)[]
+        {
+            ("silent", @"\\fileserver\share", "mapped drive",
+                "WMI answered nothing on a restricted image and the letter maps to a share"),
+            ("throw", @"\\fileserver\share", "mapped drive",
+                "WMI threw and the letter maps to a share"),
+            ("silent", "", "<none>",
+                "no evidence either way must stay not-network: the guard may not invent a refusal"),
+            ("4", "", "mapped drive", "WMI itself said network, no fallback needed"),
+            ("3", "throw", "<none>",
+                "a definite local answer from WMI must not consult the fallback at all"),
+            ("0", @"\\fileserver\share", "mapped drive",
+                "DriveType 0 is unknown, not local - a partial WMI row must not short-circuit the fallback"),
+        };
+
+        for (var i = 0; i < cases.Length; i++)
+        {
+            var (wmi, displayRoot, expected, because) = cases[i];
+
+            var probe = new StringBuilder();
+            probe.AppendLine($"$env:PM_WMI = '{wmi}'");
+            probe.AppendLine($"$env:PM_PSDRIVE = '{displayRoot}'");
+            probe.AppendLine(Shadows);
+            probe.AppendLine(ExtractFunction(InstallScript, "Get-NetworkPathKind"));
+            probe.AppendLine(@"$k = Get-NetworkPathKind 'Z:\PerformanceMonitorDarling'; " +
+                "if ($null -eq $k) { '<none>' } else { $k }");
+
+            var answers = RunWindowsPowerShell(probe.ToString());
+
+            Assert.Single(answers);
+            /* Assert.True over Assert.Equal so the REASON travels with the failure: "expected mapped
+               drive, got <none>" is not actionable on its own, and this test has six cases. */
+            Assert.True(expected == answers[0],
+                $"case {i} (wmi={wmi}, DisplayRoot='{displayRoot}'): expected {expected}, got " +
+                $"{answers[0]} — {because}");
+        }
+    }
+
     /// <summary>Runs <paramref name="script"/> under Windows PowerShell 5.1 and returns its non-empty output
     /// lines. Written to a temp file rather than passed with -Command: the script under test is a whole
     /// function body, and quoting it through a command line is a source of failures that have nothing to do

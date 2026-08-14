@@ -125,6 +125,11 @@ internal sealed class RecordingCollectorDeltaCalculator : ICollectorDeltaCalcula
 
     public int LastServerId { get; private set; }
 
+    /// <summary>What <see cref="CalculateDeltaWithInterval"/> hands back. Left at 0 so every existing
+    /// pin is unaffected; set it to something distinctive to prove a collector writes the MEASURED
+    /// interval rather than a constant of its own (#2234, where perfmon wrote a literal 60).</summary>
+    public int ReportedInterval { get; set; }
+
     public long CalculateDelta(int serverId, string collectorName, string key, long currentValue,
         DateTime? collectionTime = null, int maxGapSeconds = 0)
     {
@@ -136,7 +141,7 @@ internal sealed class RecordingCollectorDeltaCalculator : ICollectorDeltaCalcula
     public long CalculateDeltaWithInterval(int serverId, string collectorName, string key, long currentValue,
         out int intervalSeconds, DateTime? collectionTime = null, int maxGapSeconds = 0)
     {
-        intervalSeconds = 0;
+        intervalSeconds = ReportedInterval;
         return CalculateDelta(serverId, collectorName, key, currentValue, collectionTime, maxGapSeconds);
     }
 }
