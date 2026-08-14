@@ -242,8 +242,6 @@ not obvious:
 - **Never suggest missing-index DMV recommendations.** `sys.dm_db_missing_index_*` output
   is not used in this project and changes proposing it will not be accepted.
 - **No full-text search.**
-- **No ASCII-art headers or banner comments.** Block comments carry the reasoning; dividers
-  do not.
 
 Collector queries specifically:
 
