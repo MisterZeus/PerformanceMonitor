@@ -307,6 +307,14 @@ public class PostgresTargetConfigTests
             ("ExcludedDatabases", "excluded_databases"),
             ("MonthlyCostUsd", "monthly_cost_usd"),
             ("AlertDeliveryModeOverride", "alert_delivery_mode_override"),
+            /* #2218. The one entry whose property name deliberately does not resemble its column: the
+               property says STORED because that is the whole point — it is the registry's value, and null
+               means "no store row yet", which is what makes MonitoredServer.ServerId fall back to the
+               derivation. It belongs in this list rather than beside Password's exemption because it really
+               does round-trip, through the table's own PRIMARY KEY. That column existed from V17 and this
+               read simply did not select it, which is the class of bug this test was written for: a property
+               and a column that fail to meet, with nothing failing to compile. */
+            ("StoredServerId", "server_id"),
         };
 
         /* Password is the deliberate exception: a plaintext dev password is never persisted, and is

@@ -40,6 +40,14 @@ namespace Darling.Tests;
 /// <c>server_id</c> DISAGREES with the hash of its own host. Without that, every assertion here would pass
 /// just as well against the old code, since the two values coincide.</para>
 /// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. The one live test reaches DARLING_TEST_PG
+   only to CREATE and DROP its own database through ScratchPostgres, then works entirely inside it — it never
+   touches the shared database's tables, so it cannot race the live collection and serializing every pure test
+   here alongside it would be pure slowdown. Same shape and same reason as DarlingAlertTuningKnobsTests and
+   DarlingDeliveryModeTests, which also pair pure pins with one scratch-store seed/read round-trip. Kept in one
+   class rather than split, for that symmetry and because the split would leave a single-test file whose
+   subject is the same seam the pure pins above cover. This comment is here so the next sweep does not "fix"
+   it. */
 public sealed class ServerIdentityFromStoreTests
 {
     private static int Derived(string host, string? database = null, bool readOnlyIntent = false) =>
