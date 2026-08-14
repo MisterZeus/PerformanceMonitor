@@ -2211,7 +2211,8 @@ public sealed class DarlingWorker : BackgroundService
     /// <c>[0, period)</c> without any further mixing (an extra multiply was reviewed out as unnecessary — the
     /// input is already avalanched). This is the ONE consumer that wants the value only as a spreading
     /// function rather than as an identity, so if #2218 ever makes ids sequential the extra mixing that was
-    /// reviewed out has to come back here: consecutive integers modulo a period do not spread, they line up. Restart-stable because it is a pure function of the id — no <see cref="Random"/>.
+    /// reviewed out has to come back here: consecutive integers modulo a period do not spread, they line up.
+    /// Restart-stable because it is a pure function of the id — no <see cref="Random"/>.
     /// A non-positive period yields no offset (guards the callers where a period could in principle be zero, and
     /// keeps the result well-defined for tests). Applied ONLY at initial cadence stamps, never the steady-state
     /// advance: directly for the on-connect analysis stamp, and — capped at min(interval, 150s) via
