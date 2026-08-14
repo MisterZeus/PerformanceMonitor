@@ -127,8 +127,11 @@ function Get-NetworkPathKind([string]$path) {
         # DriveType 4 = network drive.
         if ($drive -and $drive.DriveType -eq 4) { return 'mapped drive' }
         # A DEFINITE answer is trusted, including "local" - so the fallback below is not consulted and
-        # cannot second-guess WMI on a box where WMI works.
-        if ($drive) { return $null }
+        # cannot second-guess WMI on a box where WMI works. DriveType 0 is "unknown", which is NOT an
+        # answer: 0 is falsy here, so an unknown row falls through to the probe below instead of being
+        # read as "local". That matters because a partial WMI response is likeliest on exactly the
+        # restricted images this fallback exists for (review catch on #2248).
+        if ($drive -and $drive.DriveType) { return $null }
     }
     catch {
         # WMI unavailable (locked-down or Server Core images). Fall through to the probe below rather
