@@ -46,7 +46,6 @@ public sealed class AzureSweepScopeTests
     public void ARegistrationThatNamesADatabase_SweepsOnlyThatDatabase(string catalog)
     {
         Assert.Equal(new[] { catalog }, AzureSweepScope.OwnDatabaseOrEmpty(catalog));
-        Assert.True(AzureSweepScope.IsScopedToOneDatabase(catalog));
     }
 
     /// <summary>
@@ -60,7 +59,6 @@ public sealed class AzureSweepScopeTests
     public void ARegistrationThatNamesNoDatabase_StillEnumeratesTheServer(string? catalog)
     {
         Assert.Empty(AzureSweepScope.OwnDatabaseOrEmpty(catalog));
-        Assert.False(AzureSweepScope.IsScopedToOneDatabase(catalog));
     }
 
     /// <summary>
@@ -76,7 +74,6 @@ public sealed class AzureSweepScopeTests
     public void MasterIsNotADatabaseAnyoneRegisteredFor(string catalog)
     {
         Assert.Empty(AzureSweepScope.OwnDatabaseOrEmpty(catalog));
-        Assert.False(AzureSweepScope.IsScopedToOneDatabase(catalog));
     }
 
     /// <summary>
@@ -90,23 +87,6 @@ public sealed class AzureSweepScopeTests
     public void ADatabaseNamedLikeMasterIsStillItsOwnDatabase(string catalog)
     {
         Assert.Equal(new[] { catalog }, AzureSweepScope.OwnDatabaseOrEmpty(catalog));
-    }
-
-    /// <summary>
-    /// The two members cannot disagree: the boolean is the list's emptiness, named for the decision it
-    /// drives. Pinned because two predicates that answer the same question are how a caller ends up asking
-    /// the one that has not been updated.
-    /// </summary>
-    [Theory]
-    [InlineData("db1")]
-    [InlineData("master")]
-    [InlineData(null)]
-    [InlineData("")]
-    public void TheBooleanAndTheListAlwaysAgree(string? catalog)
-    {
-        Assert.Equal(
-            AzureSweepScope.OwnDatabaseOrEmpty(catalog).Count > 0,
-            AzureSweepScope.IsScopedToOneDatabase(catalog));
     }
 
     /// <summary>

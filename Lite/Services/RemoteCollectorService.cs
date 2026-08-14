@@ -815,15 +815,24 @@ WHERE server_id = $3";
     }
 
     /// <summary>
-    /// Enumerates online databases on an Azure SQL DB logical server.
-    /// HAS_DBACCESS() returns false for user databases from master on Azure SQL DB,
-    /// so we skip that filter — inaccessible databases should be handled by callers via try/catch.
+    /// The databases one Azure SQL DB registration's per-database sweep covers.
     ///
-    /// On Azure SQL DB, logins are sometimes granted access only to a specific user database and
-    /// not to master (e.g. Microsoft Dynamics 365 FO). In that case, master enumeration fails with
-    /// an access/login error; we fall back to returning the connection's initial catalog as a
-    /// single-database list, and throttle re-probes of master so we don't retry it every cycle.
-    /// See issue #857.
+    /// <para><b>A registration that names a database sweeps that database, and nothing else</b> (#2220) —
+    /// the common case, since <c>server_id</c> hashes <c>host[:database][:RO]</c> and registering each
+    /// database separately is how you get separate identities. That path returns immediately and never
+    /// touches <c>master</c>. It also covers #857's own case better than #857 did: a login with access to one
+    /// user database but not to master has a named database, so it no longer probes master, fails, and falls
+    /// back — it simply never probes.</para>
+    ///
+    /// <para>Only a registration naming NO database — or naming <c>master</c>, where a catalog-less Azure
+    /// connection lands — is a registration of the logical SERVER, and only that one enumerates.
+    /// HAS_DBACCESS() returns false for user databases from master on Azure SQL DB, so that filter is
+    /// skipped and inaccessible databases are handled by callers via try/catch. The re-probe throttle is
+    /// deliberately NOT consulted on that path; see the comment at the call site.</para>
+    ///
+    /// <para>It read master unconditionally before #2220, sweeping every online database on the logical
+    /// server into whichever registration ran the sweep — N registrations of N databases meant N² collection
+    /// with every registration's history contaminated by its siblings'.</para>
     /// </summary>
     protected async Task<List<string>> GetAzureDatabaseListAsync(ServerConnection server, CancellationToken cancellationToken)
     {

@@ -62,14 +62,4 @@ public static class AzureSweepScope
 
         return new List<string> { initialCatalog };
     }
-
-    /// <summary>
-    /// True when the registration names its own database, so its sweep is scoped to that one database and
-    /// must NOT enumerate the logical server.
-    ///
-    /// <para>The same question as <see cref="OwnDatabaseOrEmpty"/>'s count, named for the decision it drives
-    /// so a call site reads as the rule rather than as a length check.</para>
-    /// </summary>
-    public static bool IsScopedToOneDatabase(string? initialCatalog) =>
-        OwnDatabaseOrEmpty(initialCatalog).Count > 0;
 }

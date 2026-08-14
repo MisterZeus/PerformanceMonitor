@@ -1550,9 +1550,22 @@ RETURNING s.state_key";
     }
 
     /// <summary>
-    /// Lists databases on an Azure SQL DB logical server, mirroring Lite's #857 behavior: try
-    /// master enumeration first (with the per-server exclusion filter), and on a master-access
-    /// error fall back to the connection's own database, throttling re-probes per server.
+    /// The databases one Azure SQL DB registration's per-database sweep covers.
+    ///
+    /// <para><b>A registration that names a database sweeps that database, and nothing else</b> (#2220) —
+    /// which is the common case, since <c>server_id</c> hashes <c>host[:database][:RO]</c> and registering
+    /// each database separately is how you get separate identities. That path returns immediately and never
+    /// touches <c>master</c>.</para>
+    ///
+    /// <para>Only a registration naming NO database — or naming <c>master</c>, where a catalog-less Azure
+    /// connection lands — is a registration of the logical SERVER, and only that one enumerates: master
+    /// first with the per-server exclusion filter, and on a master-access error a fallback that has nothing
+    /// to fall back to and therefore throws (#857's shape, now the exceptional path rather than the default).
+    /// The re-probe throttle is deliberately NOT consulted there; see the comment at the call site.</para>
+    ///
+    /// <para>It read master unconditionally before #2220, sweeping every online database on the logical
+    /// server into whichever registration ran the sweep — N registrations of N databases meant N² collection
+    /// with every registration's history contaminated by its siblings'.</para>
     /// </summary>
     internal async Task<List<string>> GetAzureDatabaseListAsync(ServerRuntime server, CancellationToken cancellationToken)
     {
