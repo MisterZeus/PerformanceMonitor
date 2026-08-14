@@ -104,6 +104,21 @@ public partial class RemoteCollectorService
         {
             await PruneOrphanedQueryStoreDatabaseStateAsync(serverId, cancellationToken);
         }
+        else if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
+                 && target.IsAzureSqlDb)
+        {
+            /* #2191's boundary, now crossable. Azure SQL DB has no database_states snapshot by design, which
+               is why the arm above states it as a no-op — but after #2220 a registration that names a database
+               sweeps only that database, so its one legitimate key is the connection string's own catalog. A
+               registration naming NO database is still skipped: it is a registration of the logical SERVER,
+               and a single-name prune there would delete every live watermark it has. */
+            var ownDatabase = new SqlConnectionStringBuilder(
+                _serverManager.CredentialResolver.GetConnectionString(server)).InitialCatalog;
+            if (AzureSweepScope.OwnDatabaseOrEmpty(ownDatabase).Count > 0)
+            {
+                await PruneForeignQueryStoreDatabaseStateAsync(serverId, ownDatabase, cancellationToken);
+            }
+        }
 
         var context = new CollectorContext
         {
