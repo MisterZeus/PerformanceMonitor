@@ -334,9 +334,18 @@ public sealed class DarlingCollectorRunner
                            branch on Azure SQL DB (#1836) and does need the bound, so it applies
                            WatermarkPolicy.ClampCatchup inside its own cutoff computation: the clamp
                            travels with the collector that needs it instead of with the path. */
+                    /* dbToken throughout this branch (#2150 review catch): the interface contract says the
+                       budget covers "the watermark refresh, the command, and the whole drain", and the
+                       enumerated path's perItemWatermark delegate already honours that. Leaving these three
+                       store round-trips on cancellationToken made THIS loop — the one the field report is
+                       actually on — the only place the promise was not kept, and a store that has stopped
+                       answering is exactly the stall the budget exists to bound. Safe for the hole records
+                       specifically: a budget expiry abandons the whole pass, so the watermark does not
+                       advance, the clamp is re-derived next cycle, and the hole is re-recorded (merged wider
+                       with any already pending) rather than lost. */
                         context.Watermark = await GetLastCollectedTimeForDatabaseAsync(
                             server.ServerId, definition.TargetTable, definition.WatermarkColumn!,
-                            definition.PerDatabaseWatermarkColumn!, databaseName, cancellationToken);
+                            definition.PerDatabaseWatermarkColumn!, databaseName, dbToken);
 
                         /* #2111 adaptive shrink, Azure arm — tighten BEFORE BuildQuery: the
                            definition's own clamp only floors OLDER watermarks, so a tighter one
@@ -356,7 +365,7 @@ public sealed class DarlingCollectorRunner
                                     _logger?.LogWarning(
                                         "query_store on '{Server}' database [{Database}] adaptive catch-up shrink: {Failures} consecutive failed cycles — window narrowed to {Minutes:F0}m; the skipped range rides the backfill hole.",
                                         server.Config.DisplayName, databaseName, azureFailures, adaptiveSpan.TotalMinutes);
-                                    await RecordQueryStoreBackfillHoleAsync(server.ServerId, databaseName, azureRaw, tighterFloor, cancellationToken);
+                                    await RecordQueryStoreBackfillHoleAsync(server.ServerId, databaseName, azureRaw, tighterFloor, dbToken);
                                     context.Watermark = tighterFloor;
                                 }
                             }
@@ -394,7 +403,7 @@ public sealed class DarlingCollectorRunner
                                 && WatermarkPolicy.ClampCatchup(context.Watermark, collectionTime) is DateTime azureClampedFloor)
                             {
                                 await RecordQueryStoreBackfillHoleAsync(
-                                    server.ServerId, databaseName, context.Watermark.Value, azureClampedFloor, cancellationToken);
+                                    server.ServerId, databaseName, context.Watermark.Value, azureClampedFloor, dbToken);
                             }
                         }
                     }
