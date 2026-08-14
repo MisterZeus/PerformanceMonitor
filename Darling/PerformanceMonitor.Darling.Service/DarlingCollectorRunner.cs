@@ -1550,23 +1550,56 @@ RETURNING s.state_key";
     }
 
     /// <summary>
-    /// Lists databases on an Azure SQL DB logical server, mirroring Lite's #857 behavior: try
-    /// master enumeration first (with the per-server exclusion filter), and on a master-access
-    /// error fall back to the connection's own database, throttling re-probes per server.
+    /// The databases one Azure SQL DB registration's per-database sweep covers.
+    ///
+    /// <para><b>A registration that names a database sweeps that database, and nothing else</b> (#2220) —
+    /// which is the common case, since <c>server_id</c> hashes <c>host[:database][:RO]</c> and registering
+    /// each database separately is how you get separate identities. That path returns immediately and never
+    /// touches <c>master</c>.</para>
+    ///
+    /// <para>Only a registration naming NO database — or naming <c>master</c>, where a catalog-less Azure
+    /// connection lands — is a registration of the logical SERVER, and only that one enumerates: master
+    /// first with the per-server exclusion filter, and on a master-access error a fallback that has nothing
+    /// to fall back to and therefore throws (#857's shape, now the exceptional path rather than the default).
+    /// The re-probe throttle is deliberately NOT consulted there; see the comment at the call site.</para>
+    ///
+    /// <para>It read master unconditionally before #2220, sweeping every online database on the logical
+    /// server into whichever registration ran the sweep — N registrations of N databases meant N² collection
+    /// with every registration's history contaminated by its siblings'.</para>
     /// </summary>
     internal async Task<List<string>> GetAzureDatabaseListAsync(ServerRuntime server, CancellationToken cancellationToken)
     {
         var targetDb = new SqlConnectionStringBuilder(server.ConnectionString).InitialCatalog;
 
-        /* Skip the throttle when there is nothing to fall back TO — see Lite's twin. With no target
-           database the fallback can only throw, so honouring the throttle would guarantee 15 minutes
-           of failure without ever attempting to recover. */
-        var hasFallback = SingleDbOrEmpty(targetDb).Count > 0;
+        /* #2220: a registration that NAMES a database is a registration OF that database, so its sweep
+           covers exactly that one and never touches master. Before this, EVERY database-scoped collector
+           enumerated master and swept every online database on the logical server, storing all of it under
+           the one server_id of whichever registration ran the sweep — N registrations of N databases on one
+           server meant N² collection with every registration's history contaminated by its siblings'.
 
-        if (hasFallback && IsMasterProbeThrottled(server.ServerId))
+           This also subsumes the #857 case it looks like it bypasses, and improves on it: a login granted
+           access to one user database but not to master HAS a named database, so it now returns here without
+           probing master at all, rather than probing, failing, forming a verdict and falling back. Master is
+           reached only by a registration that names no database — the logical-server registration, which has
+           nothing else to enumerate from. */
+        var ownDatabase = AzureSweepScope.OwnDatabaseOrEmpty(targetDb);
+        if (ownDatabase.Count > 0)
         {
-            return FallbackDatabaseList(server, targetDb, reason: "master previously inaccessible", quiet: true);
+            return ownDatabase;
         }
+
+        /* NO throttle check here, and that is deliberate rather than an omission — restoring what the
+           `hasFallback &&` guard used to achieve. This branch is reached ONLY when the registration names no
+           database, so there is nothing to fall back TO: honouring the throttle would return
+           FallbackDatabaseList, which throws immediately without probing, and would keep throwing for the
+           whole recheck interval while never attempting the one thing that could recover. Probing master
+           every cycle is the cheaper failure. (Review caught me reintroducing exactly this: I read
+           `hasFallback &&` as a redundant condition when it was there to DISABLE the throttle.)
+
+           The throttle machinery itself is left alone. It is tested behaviour from #857/#1506, and it is now
+           unreachable in production for a different reason than this one: its whole purpose was to stop
+           re-probing master for a registration that HAS a fallback, and such a registration no longer probes
+           master at all. Retiring it is its own change, with those tests. */
 
         /* The query and the hop to master both come from the provider, so the enumeration set is defined
            in exactly one place per engine. What stays here is the failure policy below, which is the
@@ -1734,14 +1767,11 @@ RETURNING s.state_key";
         return databases;
     }
 
-    private static List<string> SingleDbOrEmpty(string? targetDb)
-    {
-        if (string.IsNullOrEmpty(targetDb) || string.Equals(targetDb, "master", StringComparison.OrdinalIgnoreCase))
-        {
-            return new List<string>();
-        }
-        return new List<string> { targetDb };
-    }
+    /* #2220: delegates to the shared rule. Both runners carried their own copy of this predicate, and a
+       sweep-scoping rule that disagrees between Lite and Darling is the same class of defect as the one
+       #2220 fixes. */
+    private static List<string> SingleDbOrEmpty(string? targetDb) =>
+        AzureSweepScope.OwnDatabaseOrEmpty(targetDb);
 
     /// <summary>
     /// Whether master enumeration failed in a way that means database-scoped collectors should fall back
