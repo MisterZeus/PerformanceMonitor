@@ -29,9 +29,9 @@ namespace Lite.Tests;
 /// query_store path needs a per-database connection anyway, #1836). The second shape silently behaved like
 /// the first, N times over — N registrations of N databases is N² collection.</para>
 ///
-/// <para>Pinned in BOTH suites against the shared implementation — this is Lite's half. A rule that disagrees
-/// and Darling is the same class of defect as the one being fixed, and both runners previously carried their
-/// own private copy of it.</para>
+/// <para>Pinned in BOTH suites against the shared implementation — this is Lite's half. A scoping rule that
+/// disagrees between Lite and Darling is the same class of defect as the one being fixed, and both runners
+/// previously carried their own private copy of it.</para>
 /// </summary>
 public sealed class AzureSweepScopeTests
 {
