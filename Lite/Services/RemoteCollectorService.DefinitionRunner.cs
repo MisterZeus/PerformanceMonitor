@@ -164,6 +164,15 @@ public partial class RemoteCollectorService
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 attempted++;
+
+                /* #2150: THE path the field report is on — Azure SQL DB collects query_store per database
+                   here, not through the enumerated driver, so the wall-clock ceiling has to be applied on
+                   both. Null for every collector that declares none, in which case dbToken IS
+                   cancellationToken and this loop is byte-for-byte what it was. Darling's twin is the same
+                   shape in DarlingCollectorRunner. */
+                using var dbBudget = EnumeratedCollectorDriver.StartItemBudget(
+                    definition.PerItemWallClockBudget, cancellationToken);
+                var dbToken = dbBudget?.Token ?? cancellationToken;
                 try
                 {
                     /* The authoritative database_name for XE rows read on this path — see
@@ -244,11 +253,14 @@ public partial class RemoteCollectorService
 
                     var sqlSlice = Stopwatch.StartNew();
                     List<TRow> batch;
-                    using (var dbConnection = await OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken))
+                    /* dbToken, not cancellationToken (#2150): connect, execute and drain are the phases the
+                       budget bounds. The FLUSH below deliberately stays on cancellationToken — abandoning a
+                       write already in flight would trade a slow cycle for a partially-written one. */
+                    using (var dbConnection = await OpenAzureDatabaseConnectionAsync(server, databaseName, dbToken))
                     using (var dbCommand = CreateCollectorCommand(dbPlan, dbConnection, commandTimeout))
-                    using (var dbReader = await dbCommand.ExecuteReaderAsync(cancellationToken))
+                    using (var dbReader = await dbCommand.ExecuteReaderAsync(dbToken))
                     {
-                        batch = await definition.ReadAsync(dbReader, context, cancellationToken);
+                        batch = await definition.ReadAsync(dbReader, context, dbToken);
 
                         /* #1875: the payload path's probe-failure contract, on the path that used to
                            ignore it. blocked_process_report is the declaring collector that also runs per
@@ -259,7 +271,7 @@ public partial class RemoteCollectorService
                         if (definition.EmitsProbeFailures)
                         {
                             cycleProbeFailures.Add(
-                                await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(dbReader, cancellationToken));
+                                await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(dbReader, dbToken));
                         }
                     }
                     sqlMs += sqlSlice.ElapsedMilliseconds;
@@ -296,6 +308,35 @@ public partial class RemoteCollectorService
                             context.PerItemTextBytesShipped / (1024.0 * 1024.0),
                             context.PerItemShippedBoundary?.ToString("o") ?? "n/a");
                     }
+                }
+                catch (Exception ex) when (EnumeratedCollectorDriver.ItemBudgetExpired(dbBudget, cancellationToken))
+                {
+                    /* #2150: this database ran out of wall clock. Counted as a per-database failure so the
+                       cycle moves on — one database must not be able to starve the rest, which is the harm
+                       the field report describes, and it bites hardest on Lite because its live collectors
+                       run strictly one after another. Ahead of the generic catch because a cancelled command
+                       does not reliably arrive as an OperationCanceledException, so that filter cannot be
+                       trusted to claim it; the token check is what keeps a real shutdown out of this arm. */
+                    _ = ex;
+                    var budgetFailure = EnumeratedCollectorDriver.ItemBudgetException(
+                        definition.PerItemWallClockBudget!.Value);
+                    failed++;
+                    firstFailure ??= budgetFailure;
+
+                    /* Same #2111 stamp the generic arm makes, and it MATTERS more here: this is what turns
+                       the bound from a cut that repeats forever into one that converges. The consecutive
+                       count narrows this database's next catch-up window, so a database that cannot finish
+                       in the budget keeps halving until it can. */
+                    if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                    {
+                        OnQueryStoreItemFailed(serverId, databaseName);
+                    }
+
+                    /* WARNING, not Debug, unlike the routine per-database skip beside it: an offline
+                       database is ordinary and this is a collector that could not finish its work. */
+                    _logger?.LogWarning(
+                        "{Collector} on '{Server}' database [{Database}] {Message}",
+                        definition.Name, server.DisplayName, databaseName, budgetFailure.Message);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)
                 {
@@ -526,7 +567,10 @@ public partial class RemoteCollectorService
                         _logger?.LogWarning("Failed to collect {Collector} from [{Database}] on '{Server}': {Message}",
                             definition.Name, item, server.DisplayName, ex.Message);
                     },
-                    cancellationToken);
+                    cancellationToken,
+                    /* #2150: the per-database wall-clock ceiling. Null for every collector but
+                       query_store, so this argument leaves every other cycle untouched. */
+                    perItemBudget: definition.PerItemWallClockBudget);
 
                 rowsWritten = driverResult.Rows;
                 sqlMs += driverResult.SqlMs;

@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Data.Common;
 using System.Threading;
@@ -46,6 +47,8 @@ public abstract class CollectorDefinitionBase<TRow> : ICollectorDefinition<TRow>
     public virtual int? PerItemRowCountWarnThreshold => null;
 
     public virtual int? PerItemTextByteBudget => null;
+
+    public virtual TimeSpan? PerItemWallClockBudget => null;
 
     public virtual CollectorTargetEngine TargetEngine => CollectorTargetEngine.SqlServer;
 
