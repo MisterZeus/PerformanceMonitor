@@ -202,6 +202,21 @@ public sealed class DarlingCollectorRunner
         {
             await PruneOrphanedQueryStoreDatabaseStateAsync(server.ServerId, cancellationToken);
         }
+        else if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
+                 && server.Target.IsAzureSqlDb)
+        {
+            /* #2191's boundary, now crossable. Azure SQL DB has no database_states snapshot by design, which
+               is why this was a stated no-op — but after #2220 a registration that names a database sweeps
+               only that database, so its one legitimate key is the connection string's own catalog. No
+               master read, nothing filtered, nothing that can go stale. A registration naming NO database is
+               still skipped: it is a registration of the logical SERVER, and a single-name prune there would
+               delete every live watermark it legitimately has. */
+            var ownDatabase = new SqlConnectionStringBuilder(server.ConnectionString).InitialCatalog;
+            if (AzureSweepScope.OwnDatabaseOrEmpty(ownDatabase).Count > 0)
+            {
+                await PruneForeignQueryStoreDatabaseStateAsync(server.ServerId, ownDatabase, cancellationToken);
+            }
+        }
 
         /* #2164: the per-database plan-XML watermarks, owned by the HOST under its own state collector name
            rather than declared by the definition — the QueryStoreBackfillState seam. The definition cannot
@@ -1389,6 +1404,37 @@ AND   NOT EXISTS
 RETURNING s.state_key";
 
     /// <summary>
+    /// The Azure SQL DB variant (#2191): prune every per-database state key that is not the ONE database this
+    /// registration names. <c>$1</c> server_id, <c>$2</c> collector_name, <c>$3</c> key prefix, <c>$4</c> the
+    /// registration's own database.
+    ///
+    /// <para><b>Why this needs no snapshot, and no freshness guard.</b> The on-prem statement anti-joins
+    /// <c>database_states</c> because the question there is "does this name still exist on the instance", and
+    /// it needs the two guards because a SNAPSHOT can be empty or stale. Here there is no snapshot: after
+    /// #2220 a registration that names a database sweeps only that database, so its one legitimate key is
+    /// derivable from the connection string's own catalog — which is current by construction and cannot go
+    /// stale, be empty, or be filtered. That is why #2191 looked unfixable when it was filed and is not now:
+    /// it asked for "an authoritative unfiltered sys.databases read from master, used only on the success
+    /// path", and #2220 removed the need for any master read on this path at all.</para>
+    ///
+    /// <para><b>What it actually deletes, today.</b> Mostly #2220's residue. Before that fix each Azure
+    /// registration swept every sibling database on the logical server and wrote a watermark for each, all
+    /// under its own server_id — so these keys are the state half of that contamination. <c>collector_state</c>
+    /// carries no retention (it is state, not facts), so unlike the collected rows those orphans would
+    /// otherwise persist forever rather than ageing out.</para>
+    ///
+    /// <para>Bounded consequence, exactly as on the on-prem path: deleting a watermark that should have
+    /// stayed costs one full plan-XML refetch for that database and nothing else.</para>
+    /// </summary>
+    internal const string PruneForeignDatabaseStateKeysSql = @"
+DELETE FROM collector_state s
+WHERE s.server_id = $1
+AND   s.collector_name = $2
+AND   starts_with(s.state_key, $3)
+AND   s.state_key <> $3 || $4
+RETURNING s.state_key";
+
+    /// <summary>
     /// Runs <see cref="PruneOrphanedDatabaseStateKeysSql"/> for every owner/prefix in the SHARED
     /// <see cref="QueryStorePerDatabaseState.PrunableKeys"/> — the same set Lite's DuckDB twin
     /// (<c>RemoteCollectorService.PruneOrphanedQueryStoreDatabaseStateAsync</c>) iterates, so a prefix
@@ -1433,6 +1479,64 @@ RETURNING s.state_key";
         catch (Exception ex)
         {
             _logger?.LogDebug(ex, "Pruning orphaned query_store database state failed; next cycle retries");
+        }
+    }
+
+    /// <summary>
+    /// The Azure SQL DB arm of the #2188 prune (#2191): retire every per-database state key that does not
+    /// belong to the one database this registration names.
+    ///
+    /// <para>Runs the same shared <see cref="QueryStorePerDatabaseState.PrunableKeys"/> set as the on-prem
+    /// path, so a prefix cannot be pruned on one target type and left orphaning on the other.</para>
+    /// </summary>
+    /// <param name="ownDatabase">
+    /// The registration's own database — the connection string's initial catalog. Callers must only reach
+    /// here when that is non-empty: a registration naming no database (or naming <c>master</c>) is a
+    /// registration of the logical SERVER, whose legitimate database set is everything on it, and pruning
+    /// against a single name there would delete every live watermark it has.
+    /// </param>
+    internal async Task PruneForeignQueryStoreDatabaseStateAsync(
+        int serverId, string ownDatabase, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(ownDatabase))
+        {
+            return;
+        }
+
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            var pruned = new List<string>();
+
+            foreach (var (owner, prefix) in QueryStorePerDatabaseState.PrunableKeys)
+            {
+                using var command = new NpgsqlCommand(PruneForeignDatabaseStateKeysSql, connection);
+                command.Parameters.AddWithValue(serverId);
+                command.Parameters.AddWithValue(owner);
+                command.Parameters.AddWithValue(prefix);
+                command.Parameters.AddWithValue(ownDatabase);
+
+                using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    pruned.Add(reader.GetString(0));
+                }
+            }
+
+            if (pruned.Count > 0)
+            {
+                /* Names the keys rather than counting them, like the on-prem twin: the only symptom of a
+                   wrong delete here is a silent refetch, so a bare number would leave nothing to diagnose
+                   with. On an Azure server upgraded past #2220 this fires ONCE and clears that fix's state
+                   residue, which is worth saying plainly rather than looking like a recurring anomaly. */
+                _logger?.LogInformation(
+                    "[server_id {ServerId}] pruned {Count} query_store state row(s) belonging to databases other than this registration's [{Database}]: {Keys}",
+                    serverId, pruned.Count, ownDatabase, string.Join(", ", pruned));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Pruning foreign query_store database state failed; next cycle retries");
         }
     }
 

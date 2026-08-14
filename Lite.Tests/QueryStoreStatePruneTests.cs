@@ -71,6 +71,11 @@ public sealed class QueryStoreStatePruneTests : IClassFixture<SharedDuckDbFixtur
     {
         public Task PruneAsync(int serverId) =>
             PruneOrphanedQueryStoreDatabaseStateAsync(serverId, CancellationToken.None);
+
+        /// <summary>The #2191 Azure arm, which prunes against the registration's own database rather than
+        /// against a database_states snapshot.</summary>
+        public Task PruneForeignAsync(int serverId, string ownDatabase) =>
+            PruneForeignQueryStoreDatabaseStateAsync(serverId, ownDatabase, CancellationToken.None);
     }
 
     /// <summary>
@@ -339,5 +344,96 @@ VALUES ($1, $2, $3, $4, $5)";
         /* Same fields as DarlingCollectorRunner's line, so one sentence serves both SKUs. */
         Assert.Contains($"[server_id {ServerId}]", line, StringComparison.Ordinal);
         Assert.Contains("2 query_store state row(s)", line, StringComparison.Ordinal);
+    }
+    /* ─────────────── #2191: the Azure arm, pruned against the registration's own database ─────────────── */
+
+    /// <summary>
+    /// The Azure prune keeps the registration's own database and retires every sibling — executed against
+    /// real DuckDB, so this covers the statement itself (<c>starts_with</c> plus
+    /// <c>state_key &lt;&gt; prefix || own</c>) rather than its text.
+    ///
+    /// <para>These keys are what #2220 left behind: before that fix each Azure registration swept every
+    /// sibling database on the logical server and wrote a watermark for it under its OWN server_id. And
+    /// <c>collector_state</c> carries no retention, so they would persist indefinitely rather than ageing out
+    /// with the collected rows.</para>
+    /// </summary>
+    [Fact]
+    public async Task ForeignPrune_KeepsThisRegistrationsDatabase_AndRetiresItsSiblings()
+    {
+        /* Deliberately NO database_states snapshot: an Azure server never has one, and the point of this arm
+           is that it does not need one. */
+        await SeedStateAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Done("Payments"), "2026-08-11T09:00:00Z");
+        await SeedStateAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Hole("Payments"), EncodedHole());
+        await SeedStateAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Done("Sibling-A"), "2026-08-11T09:00:00Z");
+        await SeedStateAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Hole("Sibling-B"), EncodedHole());
+
+        /* The prefix trap, same one the on-prem test carries: an inequality written as a prefix comparison
+           would spare "PaymentsArchive" because "Payments" is a prefix of it. */
+        await SeedStateAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Done("PaymentsArchive"), "2026-08-11T09:00:00Z");
+
+        /* Not database-keyed, and another collector, and another server — all three must survive. */
+        await SeedStateAsync(ServerId, QueryStoreBackfillState.StateCollectorName, "unrelated-bookkeeping", "keep me");
+        await SeedStateAsync(ServerId, DefaultTraceEventsCollector.Instance.Name,
+            DefaultTraceEventsCollector.LastTraceFilePathStateKey, @"S:\MSSQL\Log\log_766.trc");
+        await SeedStateAsync(NeighborServerId, QueryStoreBackfillState.StateCollectorName, Done("Sibling-A"), "2026-08-11T09:00:00Z");
+
+        await _pruner.PruneForeignAsync(ServerId, "Payments");
+
+        Assert.Null(await ValueAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Done("Sibling-A")));
+        Assert.Null(await ValueAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Hole("Sibling-B")));
+        Assert.Null(await ValueAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Done("PaymentsArchive")));
+
+        Assert.Equal("2026-08-11T09:00:00Z", await ValueAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Done("Payments")));
+        Assert.Equal(EncodedHole(), await ValueAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Hole("Payments")));
+        Assert.Equal("keep me", await ValueAsync(ServerId, QueryStoreBackfillState.StateCollectorName, "unrelated-bookkeeping"));
+        Assert.Equal(@"S:\MSSQL\Log\log_766.trc", await ValueAsync(ServerId, DefaultTraceEventsCollector.Instance.Name,
+            DefaultTraceEventsCollector.LastTraceFilePathStateKey));
+        Assert.Equal("2026-08-11T09:00:00Z", await ValueAsync(NeighborServerId, QueryStoreBackfillState.StateCollectorName, Done("Sibling-A")));
+
+        /* Idempotent: it runs every query_store cycle, so a second pass must touch nothing. */
+        await _pruner.PruneForeignAsync(ServerId, "Payments");
+        Assert.Equal(4L, await CountAsync(ServerId));
+    }
+
+    /// <summary>
+    /// An empty own-database short-circuits BEFORE the statement runs, deleting nothing.
+    ///
+    /// <para>This is the arm's safety property rather than an edge case. A registration naming no database is
+    /// a registration of the logical SERVER, whose legitimate database set is everything on it — so running
+    /// the single-name prune there would delete every live watermark it has. The caller gates on
+    /// <c>AzureSweepScope</c>, and the method guards again itself, because the consequence of getting it
+    /// wrong is silent and total.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("")]
+    public async Task ForeignPrune_WithNoOwnDatabase_RetiresNothing(string ownDatabase)
+    {
+        await SeedStateAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Done("Payments"), "2026-08-11T09:00:00Z");
+        await SeedStateAsync(ServerId, QueryStoreBackfillState.StateCollectorName, Done("Sibling-A"), "2026-08-11T09:00:00Z");
+
+        await _pruner.PruneForeignAsync(ServerId, ownDatabase);
+
+        Assert.Equal(2L, await CountAsync(ServerId));
+    }
+
+    /// <summary>
+    /// Every per-database prefix is pruned, not just the backfill ones — the watermark prefix included, even
+    /// though Lite writes none today (it never sets <c>CapturePlanXml</c>). Pinned for the same reason the
+    /// on-prem twin pins it: the shared prefix list is what stops a prefix being pruned on one SKU and
+    /// orphaning on the other, and a Lite-only omission would be invisible on Darling.
+    /// </summary>
+    [Fact]
+    public async Task ForeignPrune_CoversTheWatermarkPrefixToo()
+    {
+        var foreignWatermark = QueryStorePlanXmlState.KeyFor("Sibling-A");
+        var ownWatermark = QueryStorePlanXmlState.KeyFor("Payments");
+
+        await SeedStateAsync(ServerId, QueryStorePlanXmlState.StateCollectorName, foreignWatermark, "8140");
+        await SeedStateAsync(ServerId, QueryStorePlanXmlState.StateCollectorName, ownWatermark, "8150");
+
+        await _pruner.PruneForeignAsync(ServerId, "Payments");
+
+        Assert.Null(await ValueAsync(ServerId, QueryStorePlanXmlState.StateCollectorName, foreignWatermark));
+        Assert.Equal("8150", await ValueAsync(ServerId, QueryStorePlanXmlState.StateCollectorName, ownWatermark));
     }
 }

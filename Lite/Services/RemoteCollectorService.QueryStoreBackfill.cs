@@ -557,6 +557,25 @@ AND   NOT EXISTS
 RETURNING state_key";
 
     /// <summary>
+    /// The Azure SQL DB variant (#2191) — the DuckDB twin of
+    /// <c>DarlingCollectorRunner.PruneForeignDatabaseStateKeysSql</c>. Prunes every per-database state key
+    /// that is not the ONE database this registration names.
+    ///
+    /// <para>No snapshot and no freshness guard, and that is the difference rather than an omission: the
+    /// on-prem statement guards because a SNAPSHOT can be empty or stale, while the single legitimate name
+    /// here comes from the connection string's own catalog, which is current by construction. #2191 asked for
+    /// "an authoritative unfiltered sys.databases read from master, used only on the success path"; #2220
+    /// removed the need for any master read on this path, which is what makes it reachable now.</para>
+    /// </summary>
+    private const string PruneForeignDatabaseStateKeysSql = @"
+DELETE FROM collector_state
+WHERE server_id = $1
+AND   collector_name = $2
+AND   starts_with(state_key, $3)
+AND   state_key <> $3 || $4
+RETURNING state_key";
+
+    /// <summary>
     /// Runs <see cref="PruneOrphanedDatabaseStateKeysSql"/> for every shared owner/prefix pair, once per
     /// query_store cycle for one server — the same trigger and the same placement as Darling's, so the two
     /// cannot drift on WHEN they prune either.
@@ -601,6 +620,64 @@ RETURNING state_key";
         catch (Exception ex)
         {
             _logger?.LogDebug(ex, "Pruning orphaned query_store database state failed; next cycle retries");
+        }
+    }
+
+    /// <summary>
+    /// The Azure SQL DB arm of the #2188 prune (#2191) — Darling's twin is
+    /// <c>PruneForeignQueryStoreDatabaseStateAsync</c>, same trigger, same placement, same shared
+    /// <see cref="QueryStorePerDatabaseState.PrunableKeys"/> set, so the two cannot drift on which prefixes
+    /// get pruned or when.
+    ///
+    /// <para>What it deletes today is mostly #2220's residue: before that fix each Azure registration swept
+    /// every sibling database on the logical server and wrote a watermark for each under its own server_id.
+    /// <c>collector_state</c> carries no retention, so unlike the collected rows those orphans would persist
+    /// indefinitely rather than ageing out.</para>
+    /// </summary>
+    /// <param name="ownDatabase">The registration's own database. Callers must only reach here when it is
+    /// non-empty — a registration naming none is a registration of the logical SERVER, and a single-name
+    /// prune there would delete every live watermark it legitimately has.</param>
+    protected async Task PruneForeignQueryStoreDatabaseStateAsync(
+        int serverId, string ownDatabase, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(ownDatabase))
+        {
+            return;
+        }
+
+        try
+        {
+            using var conn = _duckDb.CreateConnection();
+            await conn.OpenAsync(cancellationToken);
+            var pruned = new List<string>();
+
+            foreach (var (owner, prefix) in QueryStorePerDatabaseState.PrunableKeys)
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = PruneForeignDatabaseStateKeysSql;
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = owner });
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = prefix });
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = ownDatabase });
+
+                using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    pruned.Add(reader.GetString(0));
+                }
+            }
+
+            if (pruned.Count > 0)
+            {
+                /* Same sentence as Darling's twin, so an operator reading either SKU's log sees one wording. */
+                _logger?.LogInformation(
+                    "[server_id {ServerId}] pruned {Count} query_store state row(s) belonging to databases other than this registration's [{Database}]: {Keys}",
+                    serverId, pruned.Count, ownDatabase, string.Join(", ", pruned));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Pruning foreign query_store database state failed; next cycle retries");
         }
     }
 
