@@ -1177,4 +1177,38 @@ public sealed class MonitoredServer
     /// </summary>
     [JsonIgnore]
     public string StorageName => PerformanceMonitor.Common.ServerIdHelper.BuildStorageName(Host, Database, ReadOnlyIntent);
+
+    /// <summary>
+    /// <c>config_monitored_servers.server_id</c> as READ FROM THE STORE, or null for an entry that has no
+    /// store row yet — a <c>darling.json</c> bootstrap entry before the first seed.
+    ///
+    /// <para><b>Not settable from the file</b> (<see cref="JsonIgnore"/>) on purpose. The registry is
+    /// authoritative for identity once seeded, so letting an operator pin a <c>server_id</c> in
+    /// <c>darling.json</c> would create a second authority that could disagree with it — and disagree
+    /// silently, since nothing downstream re-checks.</para>
+    /// </summary>
+    [JsonIgnore]
+    public int? StoredServerId { get; set; }
+
+    /// <summary>
+    /// This server's <c>server_id</c>: the stored value when there is one, otherwise derived from
+    /// <see cref="StorageName"/>.
+    ///
+    /// <para><b>This is the single place a monitored server's identity is decided</b> (#2218, #2158). It used
+    /// to be recomputed at twelve call sites — every operator-command lookup, the reconcile, the self-alert
+    /// stamps, the schedule resolution — which is what makes identity-derived-from-mutable-config expensive
+    /// to change: a stored surrogate is only useful if nothing re-derives it behind the store's back.</para>
+    ///
+    /// <para><b>Today the two are always equal</b>, because the seed and the Viewer both write exactly this
+    /// hash, so reading the stored value changes no behaviour and no data moves. The point is that the
+    /// FALLBACK is now the only derivation: when identity stops being derivable, this property is what
+    /// changes, and the twelve call sites do not.</para>
+    ///
+    /// <para>The store is preferred over the derivation rather than merely agreeing with it, because that is
+    /// the ordering that makes a stored id which no longer matches its host keep working — which is the
+    /// whole point of storing it.</para>
+    /// </summary>
+    [JsonIgnore]
+    public int ServerId =>
+        StoredServerId ?? PerformanceMonitor.Common.ServerIdHelper.GetDeterministicHashCode(StorageName);
 }

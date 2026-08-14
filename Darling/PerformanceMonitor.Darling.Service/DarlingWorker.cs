@@ -1011,7 +1011,7 @@ public sealed class DarlingWorker : BackgroundService
             {
                 Config = server,
                 FirstSweepDueUtc = ColdStartFirstSweepDue(
-                    coldStartInstant, ServerIdHelper.GetDeterministicHashCode(server.StorageName)),
+                    coldStartInstant, server.ServerId),
             });
         }
 
@@ -1048,7 +1048,7 @@ public sealed class DarlingWorker : BackgroundService
                 lock (_serversLock)
                 {
                     return servers
-                        .Find(s => ServerIdHelper.GetDeterministicHashCode(s.Config.StorageName) == id)
+                        .Find(s => s.Config.ServerId == id)
                         ?.Config.AlertDeliveryModeOverride;
                 }
             });
@@ -1561,7 +1561,7 @@ public sealed class DarlingWorker : BackgroundService
                 server.NextSelfAlertSweep = DateTime.UtcNow.Add(s_alertSweepInterval);
                 await _selfAlerts!.EvaluateStoreAlertsAsync(
                     _postgres!,
-                    ServerIdHelper.GetDeterministicHashCode(server.Config.StorageName),
+                    server.Config.ServerId,
                     server.Config.DisplayName,
                     connected: server.Runtime is not null,
                     stoppingToken);
@@ -1678,7 +1678,7 @@ public sealed class DarlingWorker : BackgroundService
             return;
         }
 
-        var serverId = ServerIdHelper.GetDeterministicHashCode(server.Config.StorageName);
+        var serverId = server.Config.ServerId;
         var enabled = StoreConfigProvider.ResolveSchedule("long_query_completions", serverId, _scheduleOverrides).Enabled;
 
         if (server.LongQueryTraceApplied == enabled)
@@ -2069,13 +2069,13 @@ public sealed class DarlingWorker : BackgroundService
         var desiredById = new Dictionary<int, MonitoredServer>();
         foreach (var d in desired)
         {
-            desiredById[ServerIdHelper.GetDeterministicHashCode(d.StorageName)] = d;
+            desiredById[d.ServerId] = d;
         }
 
         for (int i = servers.Count - 1; i >= 0; i--)
         {
             var state = servers[i];
-            var id = ServerIdHelper.GetDeterministicHashCode(state.Config.StorageName);
+            var id = state.Config.ServerId;
             if (!desiredById.TryGetValue(id, out var desiredServer))
             {
                 _logger.LogInformation(
@@ -2205,10 +2205,13 @@ public sealed class DarlingWorker : BackgroundService
     /// <summary>
     /// A deterministic, restart-stable per-server phase offset within a cadence period (#1553 cadence jitter),
     /// used to break the fleet-wide lockstep at cadence boundaries — the field incident re-herded every server
-    /// at once, so at each boundary all collectors fired together. The <paramref name="serverId"/> is ALREADY an
-    /// FNV-1a hash (<see cref="ServerIdHelper.GetDeterministicHashCode"/>), so a plain modulo spreads it across
+    /// at once, so at each boundary all collectors fired together. The <paramref name="serverId"/> is
+    /// <see cref="MonitoredServer.ServerId"/>, which today is an FNV-1a hash
+    /// (<see cref="ServerIdHelper.GetDeterministicHashCode"/>) — so a plain modulo spreads it across
     /// <c>[0, period)</c> without any further mixing (an extra multiply was reviewed out as unnecessary — the
-    /// input is already avalanched). Restart-stable because it is a pure function of the id — no <see cref="Random"/>.
+    /// input is already avalanched). This is the ONE consumer that wants the value only as a spreading
+    /// function rather than as an identity, so if #2218 ever makes ids sequential the extra mixing that was
+    /// reviewed out has to come back here: consecutive integers modulo a period do not spread, they line up. Restart-stable because it is a pure function of the id — no <see cref="Random"/>.
     /// A non-positive period yields no offset (guards the callers where a period could in principle be zero, and
     /// keeps the result well-defined for tests). Applied ONLY at initial cadence stamps, never the steady-state
     /// advance: directly for the on-connect analysis stamp, and — capped at min(interval, 150s) via
@@ -2888,7 +2891,7 @@ LIMIT 1", connection);
         ServerLoopState? server;
         lock (_serversLock)
         {
-            server = servers.Find(s => ServerIdHelper.GetDeterministicHashCode(s.Config.StorageName) == serverId);
+            server = servers.Find(s => s.Config.ServerId == serverId);
         }
 
         if (server is null)
@@ -3241,9 +3244,12 @@ LIMIT 1", connection);
 
             /* Stage 4: the online->offline connection edge (Server Unreachable) — fires once when a
                previously-connected server can no longer be reached; a repeated failed reconnect does NOT
-               re-fire (the state machine dedups). server_id is derived from the config since Runtime is null. */
+               re-fire (the state machine dedups). server_id comes from the CONFIG rather than the runtime,
+               because Runtime is null here by definition -- and post-#2218 the config carries the STORED id,
+               so an alert on a server that has never once connected keys on the same identity its collected
+               history does. */
             await _selfAlerts!.ApplyConnectionOutcomeAsync(
-                ServerIdHelper.GetDeterministicHashCode(server.Config.StorageName),
+                server.Config.ServerId,
                 server.Config.DisplayName, online: false, error: ex.Message, cancellationToken);
         }
     }
@@ -3343,7 +3349,7 @@ LIMIT 1", connection);
         ServerLoopState? server;
         lock (_serversLock)
         {
-            server = servers.Find(s => ServerIdHelper.GetDeterministicHashCode(s.Config.StorageName) == serverId);
+            server = servers.Find(s => s.Config.ServerId == serverId);
         }
 
         if (server is null)
@@ -3442,7 +3448,7 @@ LIMIT 1", connection);
         string displayName;
         lock (_serversLock)
         {
-            server = servers.Find(s => ServerIdHelper.GetDeterministicHashCode(s.Config.StorageName) == serverId);
+            server = servers.Find(s => s.Config.ServerId == serverId);
             connected = server?.Runtime is not null;
             displayName = server?.Config.DisplayName ?? serverId.ToString(CultureInfo.InvariantCulture);
         }
@@ -3508,7 +3514,7 @@ LIMIT 1", connection);
         string displayName;
         lock (_serversLock)
         {
-            server = servers.Find(s => ServerIdHelper.GetDeterministicHashCode(s.Config.StorageName) == serverId);
+            server = servers.Find(s => s.Config.ServerId == serverId);
             runtime = server?.Runtime;
             displayName = server?.Config.DisplayName ?? serverId.ToString(CultureInfo.InvariantCulture);
         }
@@ -3635,7 +3641,7 @@ LIMIT 1";
         string displayName;
         lock (_serversLock)
         {
-            var server = servers.Find(s => ServerIdHelper.GetDeterministicHashCode(s.Config.StorageName) == serverId);
+            var server = servers.Find(s => s.Config.ServerId == serverId);
             serverExists = server is not null;
             connectionString = server?.Runtime?.ConnectionString;
             isAzureSqlDb = server?.Runtime?.Target.IsAzureSqlDb ?? false;

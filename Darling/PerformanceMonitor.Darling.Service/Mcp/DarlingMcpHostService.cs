@@ -364,7 +364,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             var serversById = new Dictionary<int, MonitoredServer>();
             foreach (var server in config.Servers)
             {
-                serversById.TryAdd(ServerIdHelper.GetDeterministicHashCode(server.StorageName), server);
+                serversById.TryAdd(server.ServerId, server);
             }
 
             var planFetcher = new PgPlanFetcher(

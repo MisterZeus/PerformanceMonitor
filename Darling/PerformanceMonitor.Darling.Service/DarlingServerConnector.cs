@@ -181,7 +181,11 @@ SELECT
                 HasMsdbAccess = hasMsdbAccess,
             },
             StorageName = storageName,
-            ServerId = ServerIdHelper.GetDeterministicHashCode(storageName),
+            /* #2218: the STORED identity, not a fresh hash of storageName. This is the runtime's only
+               identity stamp — DarlingCollectorRunner copies it onto every CollectorContext, so every
+               collected row keys on whatever this says — which is why it has to read the registry rather
+               than re-derive from the connection fields the operator can edit. */
+            ServerId = config.ServerId,
             HasMsdbAccess = hasMsdbAccess,
             IsAwsRds = isAwsRds,
             EngineEdition = engineEdition,
@@ -242,7 +246,7 @@ SELECT
                 IsInRecovery = isInRecovery,
             },
             StorageName = storageName,
-            ServerId = ServerIdHelper.GetDeterministicHashCode(storageName),
+            ServerId = config.ServerId,
         };
     }
 
