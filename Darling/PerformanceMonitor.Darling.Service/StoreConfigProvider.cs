@@ -164,12 +164,21 @@ public sealed class StoreConfigProvider
             return;
         }
 
-        _logger?.LogWarning(
-            "darling.json lists {FileCount} server(s) and the store has {StoreCount}. NOT monitoring {IgnoredCount} " +
-            "of them: {Ignored}. The store is authoritative after the first seed, so servers added to the file "
-            + "later are never picked up and a restart cannot change that — add them with the Viewer's Add Server "
-            + "dialog or the MCP add_servers tool. Note --test-connection reads darling.json, so it will report "
-            + "these as PASS regardless.",
+        /* INFORMATION, not a warning, and the wording covers BOTH causes — because this cannot tell them
+           apart. The Viewer's Remove action hard-deletes the store row and deliberately never touches
+           darling.json (the file is a one-time bootstrap; SeedMonitoredServersAsync's own comment notes a
+           Viewer deletion is never resurrected by a re-seed). So an operator who removed a server on purpose
+           and left the file alone is in a CORRECT state, and a warning telling them to re-add it would be
+           wrong advice repeated on every start forever. Distinguishing the two needs a tombstone the store
+           does not keep — filed separately; until then this reconciles rather than accuses, and names the
+           edit that silences it. */
+        _logger?.LogInformation(
+            "darling.json lists {FileCount} server(s) and the store has {StoreCount}; {IgnoredCount} in the file "
+            + "are not monitored: {Ignored}. The store is authoritative after the first seed. If you added these "
+            + "to the file expecting them to be picked up, that does not work and a restart cannot change it — "
+            + "add them with the Viewer's Add Server dialog or the MCP add_servers tool. If you removed them "
+            + "deliberately, this is expected; delete them from darling.json to silence this line. Either way "
+            + "--test-connection reads darling.json, so it will keep reporting them as PASS.",
             config.Servers.Count,
             storeIds.Count,
             fileOnly.Count,
