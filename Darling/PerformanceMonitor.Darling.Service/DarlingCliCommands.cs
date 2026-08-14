@@ -3676,7 +3676,16 @@ public static class DarlingCliCommands
         }
         catch (JsonException)
         {
-            lines.Add($"  Could not parse the result: {resultJson}");
+            /* Not every failure arrives as JSON. AddServersAsync's catch-all returns McpHelpers.FormatError,
+               which is PLAIN TEXT ("Error during add_servers: ..."), so a genuine store failure that happens
+               AFTER the request parsed — a dropped connection mid-batch, a constraint violation — lands here.
+               That text IS the message the operator needs; wrapping it in "could not parse" buries the one line
+               that explains the failure, precisely when the verb is being used as a deployment gate. Only
+               something that looked like JSON and was not gets the parse wrapper. */
+            var text = resultJson?.Trim() ?? string.Empty;
+            lines.Add(text.StartsWith('{') || text.StartsWith('[')
+                ? $"  Could not parse the result: {text}"
+                : $"  {text}");
             return (lines, 1);
         }
     }

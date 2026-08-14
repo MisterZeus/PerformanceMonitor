@@ -158,13 +158,32 @@ public sealed class AddServerVerbTests
         Assert.Contains(lines, l => l.Contains("must be a JSON array", StringComparison.Ordinal));
     }
 
-    /// <summary>Malformed JSON reports the payload instead of throwing out of a CLI verb.</summary>
+    /// <summary>
+    /// A store failure AFTER the request parsed does not arrive as JSON at all: <c>AddServersAsync</c>'s
+    /// catch-all returns <c>McpHelpers.FormatError</c>, which is plain text. That text IS the message the
+    /// operator needs, so it must be surfaced verbatim rather than buried under a "could not parse" wrapper —
+    /// which is what happened before, precisely when the verb is being used as a deployment gate.
+    /// </summary>
     [Fact]
-    public void MalformedJson_IsReportedNotThrown()
+    public void APlainTextStoreError_IsSurfacedVerbatim_NotWrapped()
     {
-        var (lines, exit) = DarlingCliCommands.FormatAddServerOutcome("not json at all");
+        var (lines, exit) = DarlingCliCommands.FormatAddServerOutcome(
+            "Error during add_servers: 57P01: terminating connection due to administrator command");
+
+        Assert.Equal(1, exit);
+        Assert.Contains(lines, l => l.Contains("57P01", StringComparison.Ordinal));
+        Assert.DoesNotContain(lines, l => l.Contains("Could not parse", StringComparison.Ordinal));
+    }
+
+    /// <summary>Something that LOOKED like JSON and was not still says so, and still shows the payload — the
+    /// two cases are told apart by shape so neither hides the other.</summary>
+    [Fact]
+    public void MalformedJson_SaysSo_AndShowsThePayload()
+    {
+        var (lines, exit) = DarlingCliCommands.FormatAddServerOutcome("{\"added\":1, oops");
 
         Assert.Equal(1, exit);
         Assert.Contains(lines, l => l.Contains("Could not parse", StringComparison.Ordinal));
+        Assert.Contains(lines, l => l.Contains("oops", StringComparison.Ordinal));
     }
 }
