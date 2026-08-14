@@ -309,16 +309,35 @@ public sealed class ViewerFinOpsSqlTests
         }
     }
 
+    /// <summary>
+    /// The inventory grid read now projects the verdict INPUTS and classifies in C# through the shared
+    /// <c>ProvisioningVerdict</c>, rather than deciding inline in SQL.
+    ///
+    /// <para>It used to carry its own <c>CASE ... memory_ratio &gt; 0.95 THEN UNDER_PROVISIONED</c> — copies
+    /// 5 and 6 of the bug in #2246, and on the screen the field report was actually looking at, so the grid
+    /// disagreed with the drill-down for the same server. The absence assertions are the drift guard: a SQL
+    /// verdict here can never come back without failing this test.</para>
+    /// </summary>
     [Fact]
-    public void ServerMetricsSql_ReadsCpuStorageIdleProvisioning()
+    public void ServerMetricsSql_ProjectsTheVerdictInputs_AndDoesNotDecideInSql()
     {
         var sql = ViewerDataService.ServerMetricsSql;
         Assert.Contains("FROM v_cpu_utilization_stats", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_database_size_stats", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_query_stats", sql, StringComparison.Ordinal);
         Assert.Contains("EXCEPT", sql, StringComparison.Ordinal);
-        Assert.Contains("OVER_PROVISIONED", sql, StringComparison.Ordinal);
-        Assert.Contains("UNDER_PROVISIONED", sql, StringComparison.Ordinal);
+
+        /* The pressure inputs the shared predicate needs, which this read did not fetch before. */
+        Assert.Contains("FROM v_memory_grant_stats", sql, StringComparison.Ordinal);
+        Assert.Contains("waiter_count", sql, StringComparison.Ordinal);
+        Assert.Contains("timeout_error_count_delta", sql, StringComparison.Ordinal);
+        Assert.Contains("forced_grant_count_delta", sql, StringComparison.Ordinal);
+        Assert.Contains("max_workers_count", sql, StringComparison.Ordinal);
+
+        /* And the verdict itself must NOT be decided here any more. */
+        Assert.DoesNotContain("OVER_PROVISIONED", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("UNDER_PROVISIONED", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("RIGHT_SIZED", sql, StringComparison.Ordinal);
     }
 
     // ── PG dialect guard across every FinOps read ──

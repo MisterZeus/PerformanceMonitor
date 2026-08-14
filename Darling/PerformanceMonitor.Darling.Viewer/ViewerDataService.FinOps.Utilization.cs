@@ -140,6 +140,10 @@ LEFT JOIN grants g ON true";
             BufferPoolMb = reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7)),
             MemoryRatio = memRatio,
             ProvisioningStatus = status,
+            MaxGrantWaiters = reader.IsDBNull(12) ? 0L : Convert.ToInt64(reader.GetValue(12)),
+            GrantTimeouts = reader.IsDBNull(13) ? 0L : Convert.ToInt64(reader.GetValue(13)),
+            ForcedGrants = reader.IsDBNull(14) ? 0L : Convert.ToInt64(reader.GetValue(14)),
+            GrantUtilizationPct = reader.IsDBNull(15) ? 0m : Convert.ToDecimal(reader.GetValue(15)),
             MaxWorkersCount = maxWorkers,
             CurrentWorkersCount = currentWorkers,
             CpuCount = reader.IsDBNull(11) ? 0 : Convert.ToInt32(reader.GetValue(11))

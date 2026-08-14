@@ -127,4 +127,48 @@ public static class ProvisioningVerdict
 
         return RightSized;
     }
+
+    /// <summary>
+    /// Why <see cref="Evaluate"/> returned <see cref="UnderProvisioned"/>, in the operator's words.
+    ///
+    /// <para>Shared for the same reason the verdict is: the UI used to re-derive the cause with
+    /// <c>P95CpuPct &gt; 85 ? "CPU..." : "memory ratio is {x} (threshold: 0.95)"</c>, so once the verdict
+    /// gained grant-pressure and worker-thread reasons, every one of those would have been explained as a
+    /// memory ratio that no longer decides anything — a fabricated cause citing a threshold the code does
+    /// not check. Deriving the text beside the decision is what stops that recurring.</para>
+    ///
+    /// <para>Checked in the same order <see cref="Evaluate"/> checks them, so the reason names the condition
+    /// that actually fired first.</para>
+    /// </summary>
+    public static string UnderProvisionedReason(
+        decimal p95CpuPercent,
+        long maxGrantWaiters,
+        long grantTimeouts,
+        long forcedGrants,
+        int maxWorkers,
+        int currentWorkers)
+    {
+        if (p95CpuPercent > HighCpuP95Percent)
+        {
+            return $"CPU p95 is {p95CpuPercent:N1}% (threshold: {HighCpuP95Percent:N0}%). "
+                + "This server may need more CPU capacity.";
+        }
+
+        if (maxGrantWaiters > 0 || grantTimeouts > 0 || forcedGrants > 0)
+        {
+            return "Queries could not get the workspace memory they asked for: peak "
+                + $"{maxGrantWaiters} grant waiter(s), {grantTimeouts} grant timeout(s), "
+                + $"{forcedGrants} forced grant(s). This server may need more memory.";
+        }
+
+        if (maxWorkers > 0 && currentWorkers / (double)maxWorkers > HighWorkerRatio)
+        {
+            return $"Worker threads are near the limit: {currentWorkers} of {maxWorkers} in use "
+                + $"(threshold: {HighWorkerRatio:P0}). This server may need more CPU capacity.";
+        }
+
+        /* Reachable only if a caller asks for a reason on inputs that are not under-provisioned. Say so
+           rather than inventing a cause, which is the failure this method exists to end. */
+        return "No under-provisioning condition is currently met.";
+    }
 }

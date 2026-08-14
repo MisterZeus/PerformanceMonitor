@@ -150,6 +150,38 @@ public sealed class ProvisioningVerdictTests
         Assert.Equal(ProvisioningVerdict.RightSized, verdict);
     }
 
+    /// <summary>
+    /// The REASON must name the condition that actually fired. The UI used to derive this itself as
+    /// "p95 &gt; 85 ? CPU : blame the memory ratio", so once the verdict gained grant-pressure and
+    /// worker-thread reasons, every one of those would have been explained as a memory ratio that no longer
+    /// decides anything — citing a threshold the code does not check. These pin that each cause explains
+    /// itself.
+    /// </summary>
+    [Fact]
+    public void TheReasonNamesTheConditionThatFired()
+    {
+        var cpu = ProvisioningVerdict.UnderProvisionedReason(92m, 0, 0, 0, 576, 200);
+        Assert.Contains("CPU p95 is 92.0%", cpu, System.StringComparison.Ordinal);
+
+        /* Grant pressure with QUIET cpu: the old text would have blamed the memory ratio here. */
+        var grants = ProvisioningVerdict.UnderProvisionedReason(11m, 3, 1, 2, 576, 142);
+        Assert.Contains("workspace memory", grants, System.StringComparison.Ordinal);
+        Assert.Contains("3 grant waiter(s)", grants, System.StringComparison.Ordinal);
+        Assert.Contains("1 grant timeout(s)", grants, System.StringComparison.Ordinal);
+        Assert.Contains("2 forced grant(s)", grants, System.StringComparison.Ordinal);
+        /* And it must NOT cite the retired threshold. */
+        Assert.DoesNotContain("0.95", grants, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("memory ratio", grants, System.StringComparison.Ordinal);
+
+        var workers = ProvisioningVerdict.UnderProvisionedReason(11m, 0, 0, 0, 100, 81);
+        Assert.Contains("Worker threads", workers, System.StringComparison.Ordinal);
+        Assert.Contains("81 of 100", workers, System.StringComparison.Ordinal);
+
+        /* Asked about inputs that are not under-provisioned, it says so rather than inventing a cause. */
+        var none = ProvisioningVerdict.UnderProvisionedReason(11m, 0, 0, 0, 576, 142);
+        Assert.Contains("No under-provisioning condition", none, System.StringComparison.Ordinal);
+    }
+
     /// <summary>The boundaries themselves, since every one of them is a published constant that something
     /// downstream will eventually be tuned against. Strict comparisons, so a value sitting exactly ON a
     /// limit does not trip it.</summary>
