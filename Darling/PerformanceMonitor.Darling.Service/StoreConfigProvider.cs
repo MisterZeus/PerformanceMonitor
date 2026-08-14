@@ -200,7 +200,11 @@ public sealed class StoreConfigProvider
 
         foreach (var server in fileServers)
         {
-            if (!storeServerIds.Contains(ServerIdHelper.GetDeterministicHashCode(server.StorageName)))
+            /* A file entry has no StoredServerId, so ServerId here IS the derivation — which is what this
+               comparison needs: it is asking "would the id this file entry describes be in the store". Once
+               identity stops being derivable (#2218) that question stops being answerable this way and has
+               to move onto the observed-identity fingerprint; noted on #2228 rather than pre-solved here. */
+            if (!storeServerIds.Contains(server.ServerId))
             {
                 missing.Add(server.DisplayName);
             }
@@ -375,7 +379,10 @@ INSERT INTO config_monitored_servers (
     monthly_cost_usd, capture_plans, alert_delivery_mode_override, engine, port, is_enabled, created_at, modified_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, $14, $16, $17, TRUE, $15, $15)
 ON CONFLICT (server_id) DO NOTHING", connection);
-            command.Parameters.AddWithValue(ServerIdHelper.GetDeterministicHashCode(server.StorageName));
+            /* THE ALLOCATION SITE. A darling.json entry has no StoredServerId, so this is the derivation —
+               and this is where it is minted and made permanent. When new rows stop being hash-keyed
+               (#2218), this is the write that changes; every READ already goes through the stored value. */
+            command.Parameters.AddWithValue(server.ServerId);
             command.Parameters.AddWithValue(server.DisplayName);
             command.Parameters.AddWithValue(server.Host);
             AddNullableText(command, server.Database);
@@ -658,10 +665,14 @@ FROM config_notification WHERE id = 1", connection);
         NpgsqlConnection connection, DarlingConfig bootstrap, CancellationToken ct)
     {
         var servers = new List<MonitoredServer>();
+        /* server_id is LAST rather than first (#2218): every ordinal in BuildServerFromRow is positional, so
+           appending is the only addition that cannot silently re-map an existing column onto the wrong
+           property. It was absent entirely before this — the registry's own PRIMARY KEY was read past, and
+           twelve downstream sites re-derived it from the mutable columns instead. */
         using var command = new NpgsqlCommand(@"
 SELECT name, host, database, auth, username, encrypted_password, encrypt_mode, trust_server_certificate,
        read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, alert_delivery_mode_override,
-       engine, port
+       engine, port, server_id
 FROM config_monitored_servers WHERE is_enabled = TRUE
 ORDER BY name", connection);
         using var reader = await command.ExecuteReaderAsync(ct);
@@ -707,6 +718,10 @@ ORDER BY name", connection);
                store mid-migration, not an expected path. */
             Engine = reader.IsDBNull(13) ? "sqlserver" : reader.GetString(13),
             Port = reader.IsDBNull(14) ? 0 : reader.GetInt32(14),
+            /* #2218: the row's OWN primary key, which this read used to discard. NOT NULL in the table, so
+               the DBNull guard is for a store mid-migration rather than an expected path — and a null there
+               falls back to the derivation, which is exactly what it did before this column was read at all. */
+            StoredServerId = reader.IsDBNull(15) ? null : reader.GetInt32(15),
         };
 
         if (server.UsesSqlAuth && string.IsNullOrWhiteSpace(server.EncryptedPassword))

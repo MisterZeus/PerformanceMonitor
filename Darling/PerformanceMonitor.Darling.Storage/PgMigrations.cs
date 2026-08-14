@@ -1749,8 +1749,11 @@ ALTER TABLE server_properties ADD COLUMN IF NOT EXISTS utc_offset_minutes intege
 /* --- A. Config plane: the Viewer writes desired state, the service reads + honors it. --- */
 
 /* 1. config_monitored_servers — the desired-state twin of the collect.servers observed registry.
-      server_id = ServerIdHelper.GetDeterministicHashCode(BuildStorageName(host,database,ro)), the
-      SAME identity the collectors stamp, so it JOINs collected data. is_enabled drives collection;
+      server_id is THIS ROW'S identity and this table owns it: the service reads it here rather than
+      recomputing it, so a stored id keeps working when the fields below no longer produce it (#2218).
+      It is minted from the storage identity host[:database][:RO] — the same value the collectors
+      stamp, which is why it JOINs collected data and why no existing store needs migrating — but that
+      is now the ALLOCATION rule, not a definition anything re-derives. is_enabled drives collection;
       the connection fields reconstruct a MonitoredServer for the service's connect path. */
 CREATE TABLE IF NOT EXISTS config.config_monitored_servers (
     server_id integer NOT NULL PRIMARY KEY,

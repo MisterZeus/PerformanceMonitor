@@ -358,13 +358,43 @@ public sealed class DarlingMcpHostService : BackgroundService
             var postgres = NpgsqlDataSource.Create(storeConnectionString);
             _appDataSource = postgres;
 
-            /* serverId → connection string from config (first entry wins on a duplicate storage
-               name, mirroring the worker's FirstOrDefault over runtimes). Resolution is lazy so
-               DPAPI decrypt runs only when a plan fetch actually needs the connection. */
-            var serversById = new Dictionary<int, MonitoredServer>();
-            foreach (var server in config.Servers)
+            /* serverId → connection string, keyed by the STORE's identity (review catch on #2218).
+               Resolution is lazy so DPAPI decrypt runs only when a plan fetch actually needs the
+               connection; first entry wins on a duplicate storage name, mirroring the worker's
+               FirstOrDefault over runtimes.
+
+               This used to read config.Servers — i.e. darling.json — which is wrong in two ways that
+               both end in "live plan fetch returns null for a server the MCP tools can otherwise see":
+
+                 1. TODAY: the registry is authoritative after the first seed, so a server added by
+                    add_servers or the Viewer is in the store and NOT in the file (#2254/#2256). It was
+                    therefore absent from this map entirely, while every MCP tool resolved it fine —
+                    DarlingServerResolver reads the STORE. Analysis and plan drill-down for those
+                    servers silently had no connection.
+                 2. AFTER #2218 step 2: [JsonIgnore] keeps StoredServerId off the file, so a file-sourced
+                    MonitoredServer always falls back to the derived id. The tools hand this map the
+                    store's id. They agree only while identity is still derivable.
+
+               So the fix is the same for both: key on the registry. Store-unreachable falls back to the
+               file, which is this host's documented posture (it deliberately starts on darling.json when
+               the store is down) — and a fallback that is only reached when the store cannot answer
+               cannot be the thing that disagrees with it. */
+            IReadOnlyList<MonitoredServer> registryServers = config.Servers;
+            var storeView = await new StoreConfigProvider(postgres, _logger).LoadViewAsync(config, stoppingToken);
+            if (storeView is not null)
             {
-                serversById.TryAdd(ServerIdHelper.GetDeterministicHashCode(server.StorageName), server);
+                registryServers = storeView.EnabledServers;
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "MCP could not read the monitored-server registry — live plan fetch will use darling.json, so any server added through add_servers or the Viewer will have no connection until the store answers.");
+            }
+
+            var serversById = new Dictionary<int, MonitoredServer>();
+            foreach (var server in registryServers)
+            {
+                serversById.TryAdd(server.ServerId, server);
             }
 
             var planFetcher = new PgPlanFetcher(
