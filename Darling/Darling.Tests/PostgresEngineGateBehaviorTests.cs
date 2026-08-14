@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
@@ -29,12 +30,14 @@ namespace Darling.Tests;
 /// scan cannot tell a gate that returns early from one that falls through and happens to write the same
 /// text.</para>
 ///
-/// <para><b>Two of the three doors.</b> The analyze_now gate's observable is a PRESENCE — a row in
+/// <para><b>All three doors.</b> The analyze_now gate's observable is a PRESENCE — a row in
 /// <c>analysis_state</c> carrying the engine tombstone — so it is asserted directly. The reconcile gate
 /// looked like it needed a counting seam to observe an absence, and that was wrong: the belt gate inside
 /// <see cref="DarlingXeSessions.ReconcileLongQueryCompletionsAsync"/> is public and its own precondition,
 /// so an ungated call THROWS and a gated one returns — a difference an assertion can see with no seam, no
-/// live store, and no network. snapshot_now remains uncovered; see #2230.</para>
+/// live store, and no network. snapshot_now needed neither trick: its dispatch loop already reports how many
+/// collectors it ran, and every run it makes writes itself to <c>collection_log</c>, so the gate's effect is
+/// a count and a set of rows rather than something that has to be inferred.</para>
 ///
 /// <para><b>The regression it guards is specific and was real.</b> Clicking "Generate now" against a
 /// PostgreSQL target used to run the full SQL-Server-shaped pass, find nothing, and persist the GENERIC
@@ -59,6 +62,17 @@ public sealed class PostgresEngineGateBehaviorTests
     private const string PgHost = "pg-engine-gate-behavior-2230.invalid";
 
     private const string SqlHost = "sql-engine-gate-behavior-2230.invalid";
+
+    /* snapshot_now writes to collection_log rather than analysis_state, and it asserts on EMPTINESS — so it
+       needs hosts of its own, or the analyze_now cases sharing a server_id would make the absence assertion
+       depend on test ordering. */
+    private const string PgSnapshotHost = "pg-snapshot-gate-behavior-2230.invalid";
+
+    private const string SqlSnapshotHost = "sql-snapshot-gate-behavior-2230.invalid";
+
+    /// <summary>The one collector both snapshot arms leave enabled: SQL-Server-only, so the engine gate is
+    /// the ONLY thing that can decide whether it is dispatched.</summary>
+    private const string SnapshotCollector = "wait_stats";
 
     /// <summary>Derived through the SAME helper the worker uses, so the test cannot drift from the lookup.</summary>
     private static int ServerIdFor(string host) =>
@@ -229,6 +243,110 @@ public sealed class PostgresEngineGateBehaviorTests
         Assert.Contains("host", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// The snapshot_now door, the THIRD dispatch loop and the one that got neither engine gate in #2213's
+    /// first round (#2230).
+    ///
+    /// <para><b>The regression is phantom success, not a crash.</b> An operator snapshot against a
+    /// PostgreSQL target dispatched every SQL Server collector. Those collectors do not fail loudly — their
+    /// own <c>AppliesTo</c> early-returns, yielding zero rows, and <c>RunOneAsync</c> then writes
+    /// <c>SUCCESS</c> to <c>collection_log</c>. So one click produced a burst of ~40 rows saying collection
+    /// worked, on an engine where those collectors cannot mean anything. That reads as health, which is
+    /// strictly worse than an error.</para>
+    ///
+    /// <para><b>Why one collector rather than all of them.</b> The schedule overrides disable everything
+    /// except <c>wait_stats</c> — SQL-Server-only, and dispatched through the same loop — so the two arms
+    /// below differ in the ENGINE and nothing else: same collector, same overrides, same store. That keeps
+    /// the test to a single dispatch decision instead of 49, and makes the SQL Server arm cheap enough to be
+    /// the non-vacuity proof rather than a second slow test.</para>
+    /// </summary>
+    [Fact]
+    public async Task SnapshotNow_AgainstAPostgresTarget_DispatchesNoSqlServerCollector()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the snapshot_now engine-gate test.");
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var serverId = ServerIdFor(PgSnapshotHost);
+
+        var bodySucceeded = false;
+        try
+        {
+            var (collectorsRun, _) = await InvokeSnapshotAsync(
+                postgres,
+                NewLoopState(
+                    new MonitoredServer { Name = "pg-snapshot-gate", Host = PgSnapshotHost, Engine = "postgres" },
+                    SnapshotRuntime(PgSnapshotHost, serverId, CollectorTargetEngine.PostgreSql)),
+                serverId);
+
+            /* 1. THE GATE: the only enabled collector is SQL-Server-only, so a gated loop runs nothing. */
+            Assert.Equal(0, collectorsRun);
+
+            /* 2. And it left no trace claiming otherwise. This is the assertion that would have caught the
+                  original defect: ungated, collection_log carries a wait_stats row here, and its status is
+                  SUCCESS — the phantom-success class. Asserting on the ABSENCE of the row rather than on its
+                  status is deliberate, because a gate that dispatched and then failed would also avoid
+                  SUCCESS while still having connected to a PostgreSQL host as SQL Server. */
+            Assert.Empty(await ReadLoggedCollectorsAsync(postgres, serverId));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, (cleanup, cleanupCt) =>
+                DeleteCollectionLogAsync(cleanup, cleanupCt, serverId));
+        }
+    }
+
+    /// <summary>
+    /// The proof the test above is not vacuous. Same collector, same overrides, engine flipped to SQL
+    /// Server: the loop dispatches it, and the run writes itself to <c>collection_log</c>.
+    ///
+    /// <para>Without this arm the gate assertion would pass just as well against a snapshot that had stopped
+    /// dispatching anything at all — a loop broken for some unrelated reason looks identical to a loop
+    /// gated correctly, and "ran zero collectors" is exactly what a broken snapshot also reports.</para>
+    ///
+    /// <para>The host is unresolvable and <c>Connect Timeout=1</c>, so the collector fails immediately
+    /// rather than waiting out a default timeout. The STATUS is not asserted: whether the attempt lands
+    /// ERROR or a zero-row SUCCESS depends on how far the collector gets before the connection dies, and the
+    /// fact under test is that it was dispatched at all.</para>
+    /// </summary>
+    [Fact]
+    public async Task SnapshotNow_AgainstASqlServerTarget_DispatchesTheSameCollector()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the snapshot_now engine-gate test.");
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var serverId = ServerIdFor(SqlSnapshotHost);
+
+        var bodySucceeded = false;
+        try
+        {
+            var (collectorsRun, success) = await InvokeSnapshotAsync(
+                postgres,
+                NewLoopState(
+                    new MonitoredServer { Name = "sql-snapshot-gate", Host = SqlSnapshotHost },
+                    SnapshotRuntime(SqlSnapshotHost, serverId, CollectorTargetEngine.SqlServer)),
+                serverId);
+
+            Assert.True(success);
+            Assert.Equal(1, collectorsRun);
+
+            /* The row the PostgreSQL arm must not have, under the name that identifies it. */
+            Assert.Equal(new[] { "wait_stats" }, await ReadLoggedCollectorsAsync(postgres, serverId));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, (cleanup, cleanupCt) =>
+                DeleteCollectionLogAsync(cleanup, cleanupCt, serverId));
+        }
+    }
+
     /// <summary>A PostgreSQL runtime whose connection string is the PostgreSQL shape that <c>SqlConnection</c>
     /// cannot parse — the combination that produced the field failure.</summary>
     private static ServerRuntime PostgresRuntime(
@@ -349,6 +467,97 @@ public sealed class PostgresEngineGateBehaviorTests
     {
         await using var command = new NpgsqlCommand(
             "DELETE FROM analysis_state WHERE server_id = $1", cleanup);
+        command.Parameters.AddWithValue(serverId);
+        await command.ExecuteNonQueryAsync(cleanupCt);
+    }
+
+    /// <summary>
+    /// A runtime for the snapshot arms. The connection string is deliberately unreachable and shaped for the
+    /// engine under test, with a one-second connect timeout: a dispatched collector must fail FAST, because
+    /// the SQL Server arm's whole purpose is to prove dispatch happened, not to collect anything.
+    /// </summary>
+    private static ServerRuntime SnapshotRuntime(string host, int serverId, CollectorTargetEngine engine) => new()
+    {
+        Config = new MonitoredServer { Name = host, Host = host },
+        ConnectionString = engine == CollectorTargetEngine.PostgreSql
+            ? $"Host={host};Database=postgres;Username=monitor;Timeout=1"
+            : $"Server={host};Integrated Security=true;Connect Timeout=1;TrustServerCertificate=true",
+        Target = new CollectorTargetInfo { Engine = engine },
+        StorageName = host,
+        ServerId = serverId,
+    };
+
+    /// <summary>
+    /// Every collector disabled except <see cref="SnapshotCollector"/>, as per-server overrides. This is what
+    /// keeps the two arms to a single dispatch decision — and it goes through the shipped
+    /// <see cref="StoreConfigProvider.ResolveSchedule"/>, which the loop consults, rather than reaching past
+    /// it.
+    /// </summary>
+    private static IReadOnlyList<ScheduleOverride> SingleEnabledCollectorOverrides(int serverId) =>
+        CollectorScheduleDefaults.All.Keys
+            .Select(name => new ScheduleOverride(
+                serverId, name, null, null,
+                Enabled: string.Equals(name, SnapshotCollector, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+
+    /// <summary>
+    /// Drives the real <c>RunSnapshotAsync</c> and returns what its outcome JSON reports. The runner is a
+    /// REAL <see cref="DarlingCollectorRunner"/> rather than a stand-in: a fake would have to reimplement the
+    /// dispatch it exists to observe, and the collection_log write that carries the assertion happens inside
+    /// the real path.
+    /// </summary>
+    private static async Task<(int CollectorsRun, bool Success)> InvokeSnapshotAsync(
+        NpgsqlDataSource postgres, object loopState, int serverId)
+    {
+        var worker = (DarlingWorker)System.Runtime.CompilerServices.RuntimeHelpers
+            .GetUninitializedObject(typeof(DarlingWorker));
+        SetField(worker, "_serversLock", new object());
+        SetField(worker, "_logger", NullLogger<DarlingWorker>.Instance);
+        SetField(worker, "_postgres", postgres);
+        SetField(worker, "_scheduleOverrides", SingleEnabledCollectorOverrides(serverId));
+
+        var runner = new DarlingCollectorRunner(
+            postgres, new CollectorDeltaCalculator(), NullLogger<DarlingCollectorRunner>.Instance);
+
+        var method = typeof(DarlingWorker).GetMethod(
+            "RunSnapshotAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        var task = (Task)method.Invoke(worker, new object?[]
+        {
+            NewLoopStateList(loopState), runner, serverId, TestContext.Current.CancellationToken,
+        })!;
+        await task;
+
+        var outcome = (CommandOutcome)task.GetType().GetProperty("Result")!.GetValue(task)!;
+
+        /* collectorsRun is only in the JSON — the outcome record carries the status text, not the count. A
+           failure shape has no such property, so a missing one is reported as a failed snapshot rather than
+           silently read as zero. */
+        using var json = System.Text.Json.JsonDocument.Parse(outcome.ResultJson!);
+        var ran = json.RootElement.TryGetProperty("collectorsRun", out var value) ? value.GetInt32() : -1;
+        return (ran, outcome.Success);
+    }
+
+    /// <summary>The distinct collector names this snapshot logged, ordered so the assertion is stable.</summary>
+    private static async Task<List<string>> ReadLoggedCollectorsAsync(NpgsqlDataSource postgres, int serverId)
+    {
+        var names = new List<string>();
+        await using var command = postgres.CreateCommand(
+            "SELECT DISTINCT collector_name FROM collection_log WHERE server_id = $1 ORDER BY collector_name");
+        command.Parameters.AddWithValue(serverId);
+        await using var reader = await command.ExecuteReaderAsync(TestContext.Current.CancellationToken);
+        while (await reader.ReadAsync(TestContext.Current.CancellationToken))
+        {
+            names.Add(reader.GetString(0));
+        }
+
+        return names;
+    }
+
+    private static async Task DeleteCollectionLogAsync(
+        NpgsqlConnection cleanup, CancellationToken cleanupCt, int serverId)
+    {
+        await using var command = new NpgsqlCommand(
+            "DELETE FROM collection_log WHERE server_id = $1", cleanup);
         command.Parameters.AddWithValue(serverId);
         await command.ExecuteNonQueryAsync(cleanupCt);
     }
