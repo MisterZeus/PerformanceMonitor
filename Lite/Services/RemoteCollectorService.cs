@@ -848,13 +848,18 @@ WHERE server_id = $3";
             return ownDatabase;
         }
 
-        /* Reached only when the registration names no database, so there is nothing to fall back TO and
-           the throttle would buy one saved round-trip at the cost of 15 minutes of guaranteed failure.
-           Probe master instead: it might work now. */
-        if (IsMasterProbeThrottled(serverId))
-        {
-            return FallbackDatabaseList(server, targetDb, reason: "master previously inaccessible", quiet: true);
-        }
+        /* NO throttle check here, and that is deliberate rather than an omission — restoring what the
+           `hasFallback &&` guard used to achieve. This branch is reached ONLY when the registration names no
+           database, so there is nothing to fall back TO: honouring the throttle would return
+           FallbackDatabaseList, which throws immediately without probing, and would keep throwing for the
+           whole recheck interval while never attempting the one thing that could recover. Probing master
+           every cycle is the cheaper failure. (Review caught me reintroducing exactly this: I read
+           `hasFallback &&` as a redundant condition when it was there to DISABLE the throttle.)
+
+           The throttle machinery itself is left alone. It is tested behaviour from #857/#1506, and it is now
+           unreachable in production for a different reason than this one: its whole purpose was to stop
+           re-probing master for a registration that HAS a fallback, and such a registration no longer probes
+           master at all. Retiring it is its own change, with those tests. */
 
         var connStr = new SqlConnectionStringBuilder(baseConnStr)
         {
