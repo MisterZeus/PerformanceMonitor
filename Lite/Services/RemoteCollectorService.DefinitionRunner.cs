@@ -90,6 +90,36 @@ public partial class RemoteCollectorService
             ? null
             : await GetCollectorStateAsync(serverId, definition.Name, cancellationToken);
 
+        /* #2312: the open-interval refresh stamps, HOST-owned under their own state owner — the same
+           pattern as Darling's plan/text watermarks: the definition cannot declare these keys (one per
+           DATABASE, only known at runtime). Read unconditionally for query_store and merged into the
+           same flat State; a store predating this owner has no rows, and absent keys read as "include
+           the open interval", which is today's behavior exactly. */
+        if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+        {
+            var openIntervalState = await GetCollectorStateAsync(
+                serverId, QueryStoreOpenIntervalState.StateCollectorName, cancellationToken);
+
+            if (openIntervalState is { Count: > 0 })
+            {
+                var merged = new Dictionary<string, string>(StringComparer.Ordinal);
+                if (collectorState is not null)
+                {
+                    foreach (var entry in collectorState)
+                    {
+                        merged[entry.Key] = entry.Value;
+                    }
+                }
+
+                foreach (var entry in openIntervalState)
+                {
+                    merged[entry.Key] = entry.Value;
+                }
+
+                collectorState = merged;
+            }
+        }
+
         /* #2188: retire the per-database state rows of databases that no longer exist. Lite's backfill
            worker writes done: and hole: per database and only ever deletes a hole it SERVICES or expires,
            so a dropped database's markers were kept forever — the same defect as Darling's watermark rows,
@@ -188,6 +218,11 @@ public partial class RemoteCollectorService
                 using var dbBudget = EnumeratedCollectorDriver.StartItemBudget(
                     definition.PerItemWallClockBudget, cancellationToken);
                 var dbToken = dbBudget?.Token ?? cancellationToken;
+
+                /* #2312: this database's open-interval stamp, staged at decision time and landed only
+                   after its read and flush succeed — per iteration, so a fault cannot leak a stamp
+                   into a sibling database's landing. Mirrors Darling. */
+                string? stagedOpenIntervalStamp = null;
                 try
                 {
                     /* The authoritative database_name for XE rows read on this path — see
@@ -246,6 +281,22 @@ public partial class RemoteCollectorService
                                     "query_store on '{Server}' database [{Database}] adaptive first-contact shrink: {Failures} consecutive failed cycles — first-run window narrowed to {Minutes:F0}m.",
                                     server.DisplayName, databaseName, azureFailures, adaptiveSpan.TotalMinutes);
                                 context.Watermark = tighterFloor;
+                            }
+                        }
+
+                        /* #2312, Azure arm: same per-database open-interval decision as the enumerated
+                           delegate, BEFORE BuildQuery bakes the predicate. Staged into the local, landed
+                           only in the post-flush success block below — a per-database fault this loop
+                           tolerates must re-include next cycle, not spend the refresh window. Mirrors
+                           Darling. */
+                        if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                        {
+                            var includeOpen = QueryStoreOpenIntervalState.ShouldIncludeOpenInterval(
+                                context.State, databaseName, collectionTime);
+                            context.IncludeOpenInterval = includeOpen;
+                            if (includeOpen)
+                            {
+                                stagedOpenIntervalStamp = QueryStoreOpenIntervalState.Format(collectionTime);
                             }
                         }
 
@@ -320,6 +371,12 @@ public partial class RemoteCollectorService
                     if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                     {
                         OnQueryStoreItemSucceeded(serverId, databaseName);
+
+                        /* #2312: read and flush both landed — the staged open-interval stamp may too. */
+                        if (stagedOpenIntervalStamp is not null)
+                        {
+                            context.PendingState[QueryStoreOpenIntervalState.KeyFor(databaseName)] = stagedOpenIntervalStamp;
+                        }
                     }
 
                     var capHit = definition.PerItemRowCountWarnThreshold is int cap && batch.Count >= cap;
@@ -486,6 +543,12 @@ public partial class RemoteCollectorService
                 using var duckConnection = _duckDb.CreateConnection();
                 await duckConnection.OpenAsync(cancellationToken);
 
+                /* #2312: open-interval stamps STAGED at decision time (perItemWatermark, below), landed
+                   into PendingState only from onItemComplete — after the item's read AND flush succeeded.
+                   A per-item fault the driver tolerates must re-include next cycle, not spend the
+                   15-minute refresh window on a cycle that captured nothing. Mirrors Darling. */
+                var stagedOpenIntervalStamps = new Dictionary<string, string>(StringComparer.Ordinal);
+
                 var driverResult = await EnumeratedCollectorDriver.RunAsync<TRow>(
                     items,
                     /* Per-database watermark refresh + the 24h catch-up clamp, computed INSIDE the loop —
@@ -549,6 +612,24 @@ public partial class RemoteCollectorService
                             }
 
                             context.Watermark = clamped;
+
+                            /* #2312: decide per database whether this cycle reads the OPEN interval. The
+                               stamp is only STAGED here — it lands in PendingState from onItemComplete,
+                               after this item's read and flush actually succeeded, so a per-item fault
+                               (which this driver swallows by design) re-includes next time instead of
+                               spending the refresh window on a cycle that captured nothing. Mirrors
+                               Darling. */
+                            if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                            {
+                                var includeOpen = QueryStoreOpenIntervalState.ShouldIncludeOpenInterval(
+                                    context.State, item, collectionTime);
+                                context.IncludeOpenInterval = includeOpen;
+                                if (includeOpen)
+                                {
+                                    stagedOpenIntervalStamps[QueryStoreOpenIntervalState.KeyFor(item)] =
+                                        QueryStoreOpenIntervalState.Format(collectionTime);
+                                }
+                            }
                         },
                     readItem: async (item, ct) =>
                     {
@@ -566,6 +647,14 @@ public partial class RemoteCollectorService
                         if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                         {
                             OnQueryStoreItemSucceeded(serverId, item);
+
+                            /* #2312: NOW the open-interval stamp may land — this hook only fires after
+                               the item's read and flush both succeeded. Remove, not read: a stamp left
+                               staged (read faulted) must not leak into a later run's landing. */
+                            if (stagedOpenIntervalStamps.Remove(QueryStoreOpenIntervalState.KeyFor(item), out var landedStamp))
+                            {
+                                context.PendingState[QueryStoreOpenIntervalState.KeyFor(item)] = landedStamp;
+                            }
                         }
 
                         /* Per-DATABASE line for non-empty batches (#1565): the per-server summary blends
@@ -674,7 +763,32 @@ public partial class RemoteCollectorService
            path. Outside the storage-phase timer: this is host bookkeeping, not collected data. */
         if (context.PendingState.Count > 0)
         {
-            await SaveCollectorStateAsync(serverId, definition.Name, context.PendingState, cancellationToken);
+            /* #2312: the open-interval stamps belong to their OWN state owner, not the definition's name
+               — a row written under "query_store" would load back (nothing reads that owner here) but the
+               shared prune set pairs qsowm: with query_store_open_interval, and a prefix pruned under the
+               wrong owner deletes nothing. Split by prefix on the way out, like Darling's runner. */
+            var openIntervalKeys = context.PendingState
+                .Where(entry => entry.Key.StartsWith(QueryStoreOpenIntervalState.WatermarkKeyPrefix, StringComparison.Ordinal))
+                .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
+
+            if (openIntervalKeys.Count > 0)
+            {
+                var others = context.PendingState
+                    .Where(entry => !openIntervalKeys.ContainsKey(entry.Key))
+                    .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
+
+                await SaveCollectorStateAsync(
+                    serverId, QueryStoreOpenIntervalState.StateCollectorName, openIntervalKeys, cancellationToken);
+
+                if (others.Count > 0)
+                {
+                    await SaveCollectorStateAsync(serverId, definition.Name, others, cancellationToken);
+                }
+            }
+            else
+            {
+                await SaveCollectorStateAsync(serverId, definition.Name, context.PendingState, cancellationToken);
+            }
         }
 
         telemetry.SqlMs = sqlMs;
