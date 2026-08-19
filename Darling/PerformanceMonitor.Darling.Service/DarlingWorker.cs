@@ -573,6 +573,21 @@ public sealed class DarlingWorker : BackgroundService
             return;
         }
 
+        /* #2339: publish the declared peer stores as soon as a VALIDATED config is in hand, so the web
+           dashboard's read dispatch (which reuses the MCP tool methods) discloses the same peers even when
+           the MCP endpoint is disabled. The MCP host publishes the identical snapshot from its own load;
+           whichever runs first wins and they cannot disagree, both reading darling.json.
+
+           Publish re-validates and refuses rather than trusting the Validate() above: it cannot fire here
+           (we already returned on any problem), but the check belongs to the publish, not to this call site,
+           because the MCP host reaches Publish WITHOUT ever calling Validate. Logged if it ever does, rather
+           than discarded, so an impossible state cannot become a silent one. */
+        var peerPublish = DarlingPeerDirectory.Publish(config.Peers);
+        foreach (var problem in peerPublish.RefusedProblems)
+        {
+            _logger.LogCritical("Peer disclosure refused (nothing published): {Problem}", problem);
+        }
+
         /* Network-endpoint caller warnings (darling-network-endpoints, D-BYO / D7) — emitted AFTER
            Validate() passes and NEVER inside it (Validate is all-fatal; an optional-endpoint note must not
            abort startup). Covers BYO-mode network.* being ignored and the network.role=admin pivot risk. */
