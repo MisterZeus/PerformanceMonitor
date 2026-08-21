@@ -125,10 +125,17 @@ function cardNeedsAttention(c) {
    FleetRollup.AttentionFilterCountText (#2424), because the point of doing all three surfaces at once is
    that a reader moving between them meets one vocabulary rather than three. The all-clear arms matter as
    much as the count: a filtered grid holding nothing is otherwise an empty page with no explanation, and an
-   empty FLEET must not be told that zero of its servers are healthy. */
-function attentionCountText(shown, total) {
+   empty FLEET must not be told that zero of its servers are healthy.
+
+   The `narrowed` arms are the one place this surface needs words the viewer does not have, and review found
+   out why: the viewer's Overview has no search box, so "the 1 server monitored is healthy" is simply true
+   there. Here the denominator is what the SEARCH left, so on a 57-server fleet narrowed to one match that
+   sentence claims the fleet holds one server, while 56 others exist and were never looked at. The all-clear
+   has to name the population it is clearing. */
+function attentionCountText(shown, total, narrowed) {
   if (shown > 0) return "showing " + shown + " of " + total;
   if (total <= 0) return "no servers to filter";
+  if (narrowed) return total === 1 ? "the 1 matching server is healthy" : "all " + total + " matching servers are healthy";
   if (total === 1) return "the 1 server monitored is healthy";
   return "all " + total + " servers are healthy";
 }
@@ -273,7 +280,7 @@ function attentionNotice(shown, total) {
   const kind = searchFoundNothing ? "none" : shown > 0 ? "warn" : "ok";
   const sentence = searchFoundNothing
     ? label + " — nothing matches that term, so no server was judged."
-    : label + " — " + attentionCountText(shown, total) + ".";
+    : label + " — " + attentionCountText(shown, total, term !== "") + ".";
 
   return el("div", { class: "attention-note " + kind, role: "status" }, [
     el("span", { text: sentence }),

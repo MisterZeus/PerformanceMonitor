@@ -127,6 +127,15 @@ public sealed class FleetPageAttentionFilterTests
         Assert.Contains("\"the 1 server monitored is healthy\"", FleetJs, StringComparison.Ordinal);
         Assert.Contains("\"no servers to filter\"", FleetJs, StringComparison.Ordinal);
 
+        /* The one place this surface needs words the viewer does not have, and review found out why: the
+           viewer's Overview has no search box, so "the 1 server monitored is healthy" is simply true there.
+           Here the denominator is what the SEARCH left, so on a 57-server fleet narrowed to one match that
+           sentence claims the fleet holds one server while 56 others exist and were never looked at. An
+           all-clear has to name the population it is clearing. */
+        Assert.Contains("\"the 1 matching server is healthy\"", FleetJs, StringComparison.Ordinal);
+        Assert.Contains("\"all \" + total + \" matching servers are healthy\"", FleetJs, StringComparison.Ordinal);
+        Assert.Contains("attentionCountText(shown, total, term !== \"\")", FleetJs, StringComparison.Ordinal);
+
         var viewer = ReadRepoFile(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.Fleet.cs"));
         Assert.Contains("$\"showing {shown} of {total}\"", viewer, StringComparison.Ordinal);
