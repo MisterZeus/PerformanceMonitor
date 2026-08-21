@@ -127,6 +127,24 @@ public partial class MainWindow : Window
     private ServerOverviewSortMode _overviewSortMode;
 
     /// <summary>
+    /// The FULL, sorted Overview card set — the authority behind <c>OverviewItemsControl.ItemsSource</c> since
+    /// #2424, which now shows a possibly-filtered projection of it. Everything that used to read the bound list
+    /// back to answer "what cards are there" reads this instead, for the same reason <see cref="FleetView"/>
+    /// separates <c>All</c> from <c>Visible</c>: the moment the bound list is a SUBSET, a consumer that reads it
+    /// back is silently answering a different question.
+    /// </summary>
+    private List<ServerSummaryItem> _overviewCards = new();
+
+    /// <summary>
+    /// True while the Overview grid is filtered to servers that need attention (#2424) — the destination the
+    /// "+N more need attention" line finally has. Deliberately NOT persisted to ViewerAppSettings the way
+    /// <see cref="_overviewSortMode"/> is: a sort is a preference, this is a triage action tied to a moment, and
+    /// an Overview that opens with 52 of 57 servers already hidden is a support ticket even with the toggle in
+    /// plain sight.
+    /// </summary>
+    private bool _overviewAttentionOnly;
+
+    /// <summary>
     /// The non-secret configuration block shown on every connection/config failure (#1954): which
     /// darling.json won and what was parsed from it. Built at startup before the load is attempted (so a
     /// missing file still reports where the viewer looked) and extended with the parse summary once the file
@@ -1087,12 +1105,12 @@ public partial class MainWindow : Window
         settings.OverviewSortMode = ServerOverviewSort.ToToken(_overviewSortMode);
         _appSettingsStore.Save(settings);
 
-        if (OverviewItemsControl.ItemsSource is IEnumerable<ServerSummaryItem> current)
-        {
-            OverviewItemsControl.ItemsSource = ServerOverviewSort.Order(
-                current.ToList(), _overviewSortMode,
-                s => s.CpuPercentForAlert, s => s.DisplayName, s => s.ServerId);
-        }
+        /* Sorts the FULL card set, never the bound list: with the needs-attention filter on, the bound list is
+           a subset, and sorting that would quietly discard every card the filter is hiding. */
+        _overviewCards = ServerOverviewSort.Order(
+            _overviewCards, _overviewSortMode,
+            s => s.CpuPercentForAlert, s => s.DisplayName, s => s.ServerId);
+        ApplyOverviewCardFilter();
     }
 
     /// <summary>Attaches each server's tags as coloured pills to its Overview summary, joining the loaded tag
@@ -1123,17 +1141,19 @@ public partial class MainWindow : Window
         }
     }
 
-    /// <summary>Re-stamps tag pills onto the cards the Overview is currently showing (after a tag colour /
-    /// assignment change), reassigning ItemsSource so the change renders without a full per-server reload.
+    /// <summary>Re-stamps tag pills onto the Overview's cards (after a tag colour / assignment change) and
+    /// re-projects so the change renders without a full per-server reload. Stamps the FULL card set rather than
+    /// the bound list, so a card the needs-attention filter is hiding does not come back missing its pills.
     /// A no-op unless the Overview is populated.</summary>
     private void RestampOverviewTagPills()
     {
-        if (OverviewItemsControl.ItemsSource is IEnumerable<ServerSummaryItem> items)
+        if (_overviewCards.Count == 0)
         {
-            var list = items.ToList();
-            StampTagPills(list);
-            OverviewItemsControl.ItemsSource = list;
+            return;
         }
+
+        StampTagPills(_overviewCards);
+        ApplyOverviewCardFilter();
     }
 
     /// <summary>
@@ -1152,16 +1172,14 @@ public partial class MainWindow : Window
         var servers = _fleet.All;
         if (servers.Count == 0)
         {
-            OverviewItemsControl.ItemsSource = null;
-            FleetRollupContainer.Visibility = Visibility.Collapsed;
+            ClearOverviewCards();
             return;
         }
 
         var list = servers.ToList();
         if (list.Count == 0)
         {
-            OverviewItemsControl.ItemsSource = null;
-            FleetRollupContainer.Visibility = Visibility.Collapsed;
+            ClearOverviewCards();
             return;
         }
 
@@ -1190,7 +1208,11 @@ public partial class MainWindow : Window
             built,
             _overviewSortMode,
             s => s.CpuPercentForAlert, s => s.DisplayName, s => s.ServerId);
-        OverviewItemsControl.ItemsSource = cards;
+
+        /* The full set is the authority; the grid shows whatever the needs-attention filter leaves of it. A
+           refresh must not silently drop the filter, so this re-applies it rather than binding `cards` directly. */
+        _overviewCards = cards;
+        ApplyOverviewCardFilter();
 
         /* Fleet-wide NOC roll-up above the cards — the cross-server totals SQL aggregate (the read only
            Darling's central store can serve) plus the band counts / worst-N ranking reduced from the
@@ -1224,9 +1246,83 @@ public partial class MainWindow : Window
         FleetRollupContainer.Visibility = rollup.TotalServers > 0 ? Visibility.Visible : Visibility.Collapsed;
 
         FleetWorstServersList.Visibility = rollup.HasProblems ? Visibility.Visible : Visibility.Collapsed;
-        FleetAdditionalProblemsText.Visibility =
+        FleetAdditionalProblems.Visibility =
             rollup.AdditionalProblemCount > 0 ? Visibility.Visible : Visibility.Collapsed;
         FleetAllHealthyText.Visibility = rollup.HasProblems ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>Empties the Overview: no cards, no roll-up, and no stale authority left behind for the filter
+    /// or the tag re-stamp to project from.</summary>
+    private void ClearOverviewCards()
+    {
+        _overviewCards = new List<ServerSummaryItem>();
+        OverviewItemsControl.ItemsSource = null;
+        FleetRollupContainer.Visibility = Visibility.Collapsed;
+        ApplyOverviewAttentionCount(shown: 0);
+    }
+
+    /// <summary>
+    /// Projects <see cref="_overviewCards"/> onto the grid through the needs-attention filter (#2424) — the
+    /// ONE place ItemsSource is set for a populated Overview, so a refresh, a re-sort and a tag re-stamp cannot
+    /// each have their own opinion about whether the filter is still on.
+    ///
+    /// <para>The predicate is <see cref="FleetRollup.NeedsAttention"/>, the same banding the roll-up counted
+    /// the "+N more" with, so the grid the link lands on holds exactly the servers the link was counting.</para>
+    /// </summary>
+    private void ApplyOverviewCardFilter()
+    {
+        var shown = _overviewAttentionOnly
+            ? FleetRollup.NeedsAttention(_overviewCards)
+            : _overviewCards;
+
+        OverviewItemsControl.ItemsSource = shown;
+        ApplyOverviewAttentionCount(shown.Count);
+    }
+
+    /// <summary>
+    /// Shows what the filter did, beside the toggle that did it. Only rendered while the filter is on: a grid
+    /// showing every server needs no arithmetic, and a filtered one must never be mistakable for it.
+    ///
+    /// <para>The colour follows the sentence. This line has two of them — a count of servers wanting attention,
+    /// and an all-clear when the filter matched none — and painting the all-clear amber would be a colour
+    /// contradicting its own text, which is the family of defect this whole change is about. Set through
+    /// SetResourceReference (the alert badge's idiom) so it still tracks a theme change.</para>
+    /// </summary>
+    private void ApplyOverviewAttentionCount(int shown)
+    {
+        if (_overviewAttentionOnly)
+        {
+            OverviewAttentionCountText.Text = FleetRollup.AttentionFilterCountText(shown, _overviewCards.Count);
+            OverviewAttentionCountText.SetResourceReference(
+                ForegroundProperty, shown > 0 ? "WarningBrush" : "SuccessBrush");
+            OverviewAttentionCountText.Visibility = Visibility.Visible;
+            return;
+        }
+
+        OverviewAttentionCountText.Text = string.Empty;
+        OverviewAttentionCountText.Visibility = Visibility.Collapsed;
+    }
+
+    /// <summary>The needs-attention toggle: re-projects the grid from the unchanged card set, so turning it off
+    /// restores the full fleet without a store round-trip. Deliberately carries no IsLoaded guard, unlike the sort
+    /// selector — that one needs it because seeding the ComboBox raises SelectionChanged during construction, and
+    /// nothing seeds this box. A guard here would only be able to drop a real transition and leave a ticked box
+    /// over an unfiltered grid, which is the same lie as the one this fixes, in the other direction.</summary>
+    private void OverviewAttentionOnlyCheck_Changed(object sender, RoutedEventArgs e)
+    {
+        _overviewAttentionOnly = OverviewAttentionOnlyCheck.IsChecked == true;
+        ApplyOverviewCardFilter();
+    }
+
+    /// <summary>
+    /// "+N more need attention" — the servers the ranking's cap could not show. Clicking it turns the filter on
+    /// rather than doing the filtering itself, so the state lands in the toggle where the reader can see it is on
+    /// and can turn it off; the alternative, a grid that silently shrank, is the worse version of this defect.
+    /// </summary>
+    private void FleetAdditionalProblems_Click(object sender, MouseButtonEventArgs e)
+    {
+        OverviewAttentionOnlyCheck.IsChecked = true;
+        e.Handled = true;
     }
 
     /// <summary>Double-clicking an Overview card opens (or focuses) that server's tab (Lite's rule).</summary>

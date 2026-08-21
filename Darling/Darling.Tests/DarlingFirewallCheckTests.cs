@@ -365,7 +365,146 @@ public class DarlingFirewallCheckTests
         Assert.All(all, p => Assert.Contains($"(port {p.Port})", p.RuleName, StringComparison.Ordinal));
     }
 
+    /* ---- #2414: the plan's PORT follows the endpoint, not darling.json ---- */
+
+    /// <summary>
+    /// The defect, at the surface that owns every rule. The supervisor binds <c>config_service.mcp_port</c>;
+    /// the planner used <c>config.Mcp.Port</c>. On a box where those differ, the elevated verb created
+    /// "…MCP (port 5152)" for a server listening on 5199 — the served port left shut and an inbound allow rule
+    /// standing on a port with nothing behind it — and re-created it on every subsequent run.
+    /// </summary>
+    [Fact]
+    public void PlanFirewallRules_NamesTheRuleForTheStoresPort_NotTheFilesSeed()
+    {
+        var config = ManagedConfig();
+        config.Mcp.Port = 5152;
+        config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
+
+        var mcp = Assert.Single(
+            DarlingCliCommands.PlanFirewallRules(config, mcpStore: (true, 5199)).Where(p => p.Surface == "MCP"));
+
+        Assert.Equal(DarlingCliCommands.FirewallRuleAction.Open, mcp.Action);
+        Assert.Equal(5199, mcp.Port);
+        Assert.Equal("PerformanceMonitor Darling MCP (port 5199)", mcp.RuleName);
+        Assert.Equal(DarlingMcpHostService.McpFirewallRuleName(5199), mcp.RuleName);
+
+        /* The rule the service's own start-up check looks for, and the wildcard the sweep clears, are both
+           derived from this name — so pinning the name pins that the verb and the runtime agree. */
+        Assert.Equal("PerformanceMonitor Darling MCP (port *)", DarlingFirewallCheck.SurfaceRuleWildcard(mcp.RuleName));
+
+        Assert.NotNull(mcp.PortNote);
+        Assert.Contains("config.config_service.mcp_port", mcp.PortNote, StringComparison.Ordinal);
+        Assert.Contains("mcp.port = 5152", mcp.PortNote, StringComparison.Ordinal);
+    }
+
+    /// <summary>web is the byte-identical twin: the same split, the same resolver, the same rule shape.</summary>
+    [Fact]
+    public void PlanFirewallRules_WebToo_NamesTheRuleForTheStoresPort()
+    {
+        var config = ManagedConfig();
+        config.Web.Port = 5153;
+        config.Web.Network = new WebNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
+
+        var web = Assert.Single(
+            DarlingCliCommands.PlanFirewallRules(config, webStore: (true, 5188)).Where(p => p.Surface == "web dashboard"));
+
+        Assert.Equal(DarlingCliCommands.FirewallRuleAction.Open, web.Action);
+        Assert.Equal(5188, web.Port);
+        Assert.Equal(DarlingWebHostService.WebFirewallRuleName(5188), web.RuleName);
+        Assert.NotNull(web.PortNote);
+        Assert.Contains("config.config_service.web_port", web.PortNote, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The store surface has NO such split — <c>postgres.port</c> is file-only, with no config_service column
+    /// able to disagree with it — so it keeps resolving from the file and must not grow a note claiming a
+    /// provenance it does not have.
+    /// </summary>
+    [Fact]
+    public void PlanFirewallRules_TheStoreSurfacesPortStaysFileResolved_AndCarriesNoPortNote()
+    {
+        var config = ManagedConfig();
+        config.Postgres!.Port = 5641;
+        config.Postgres.Network = new PostgresNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24" };
+
+        var store = Assert.Single(
+            DarlingCliCommands.PlanFirewallRules(config, mcpStore: (true, 5199), webStore: (true, 5188))
+                .Where(p => p.Surface == "store"));
+
+        Assert.Equal(5641, store.Port);
+        Assert.Null(store.PortNote);
+    }
+
+    /// <summary>
+    /// The install-time path, and the one with a security cost if it stays quiet. The verb runs elevated before
+    /// the store exists, so it falls back to darling.json's port — which is correct there, because the store row
+    /// is SEEDED from that value — but the plan has to carry the admission, the reason, and the state in which
+    /// the port it just used is the wrong one.
+    /// </summary>
+    [Fact]
+    public void PlanFirewallRules_StoreUnreadable_UsesTheFilePort_AndSaysSoRatherThanFallingBackQuietly()
+    {
+        var config = ManagedConfig();
+        config.Mcp.Port = 5152;
+        config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
+
+        var mcp = Assert.Single(
+            DarlingCliCommands.PlanFirewallRules(config, storeUnavailableReason: "the store did not answer within 10 seconds")
+                .Where(p => p.Surface == "MCP"));
+
+        Assert.Equal(5152, mcp.Port);
+        Assert.NotNull(mcp.PortNote);
+        Assert.Contains("could NOT read the control plane", mcp.PortNote, StringComparison.Ordinal);
+        Assert.Contains("the store did not answer within 10 seconds", mcp.PortNote, StringComparison.Ordinal);
+        Assert.Contains("WRONG port", mcp.PortNote, StringComparison.Ordinal);
+    }
+
+    /// <summary>A Remove plan sweeps EVERY port of its surface, so it does not depend on having picked the
+    /// right one — a port note there would be noise claiming a decision that was never made.</summary>
+    [Fact]
+    public void PlanFirewallRules_LoopbackPlansCarryNoPortNote()
+        => Assert.All(
+            DarlingCliCommands.PlanFirewallRules(ManagedConfig(), mcpStore: (true, 5199), webStore: (true, 5188)),
+            p => Assert.Null(p.PortNote));
+
     /* ---- drift guards: the seams a rename or a deleted call would break silently ---- */
+
+    /// <summary>
+    /// #2414's regression guard, and the reason it is a source scan: the defect was that two call sites
+    /// derived a firewall rule's port from darling.json while the endpoint bound the store's. Nothing about
+    /// that is visible to a behavioral test of the shipped surface — both paths compile, both produce a valid
+    /// rule, and they agree until someone moves a port. What CAN be pinned is that no firewall rule name in
+    /// the CLI is built from the file's port field again.
+    /// </summary>
+    [Fact]
+    public void NoFirewallRuleIsEverNamedFromDarlingJsonsPortField()
+    {
+        var source = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs"));
+
+        Assert.DoesNotContain("McpFirewallRuleName(config.Mcp.Port)", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("WebFirewallRuleName(config.Web.Port)", source, StringComparison.Ordinal);
+
+        /* And the resolution goes through the ONE resolver the supervisors bind on, not a second copy of
+           "published?.Port ?? filePort" — a second path is how these two drifted apart. */
+        Assert.Contains("DarlingHostBinding.ResolveEndpointToggle", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The security half. The port is part of the rule NAME, so moving a port strands the old rule as an
+    /// inbound allow on a port nothing serves; reconciling one exact DisplayName cannot reach it. Both the
+    /// elevated verb and the toggle verbs sweep the per-surface wildcard, and the toggle verbs' old
+    /// exact-name removal is gone — it could only ever have removed the rule for the port they had just
+    /// resolved, which is the one rule that was never stale.
+    /// </summary>
+    [Fact]
+    public void TheCliRemovesFirewallRulesByTheSurfaceWildcard_NotByOneExactName()
+    {
+        var source = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs"));
+
+        Assert.Contains("DarlingFirewallCheck.SurfaceRuleWildcard", source, StringComparison.Ordinal);
+        Assert.Contains("BuildFirewallSweepCommand", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("BuildFirewallDisableCommand", source, StringComparison.Ordinal);
+    }
 
     [Fact]
     public void EveryRuleNameBuilder_CarriesTheSharedPrefix_ThatUninstallSweepsBy()

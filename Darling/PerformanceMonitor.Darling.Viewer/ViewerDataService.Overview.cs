@@ -345,6 +345,41 @@ WHERE server_id = $1";
 }
 
 /// <summary>
+/// The Overview card's status-line state, as a VALUE rather than a rendered string. The word on the card
+/// (<see cref="ServerSummaryItem.StatusDisplay"/>), the colour it is painted
+/// (<see cref="ServerSummaryItem.StatusBrush"/>), the reason the ranking shows
+/// (<see cref="FleetRollup.BuildReason"/>) and the sentence in the card's tooltip
+/// (<see cref="FleetRollup.BuildStatusTooltip"/>) are all renderings OF THIS.
+///
+/// <para>That is the entire reason it exists. Those four used to read the
+/// (<c>IsOnline</c>, <c>AwaitingFirstCollection</c>) flag pair independently, and two review passes on #2429
+/// each turned up a DIFFERENT combination where two of the readings contradicted each other — first
+/// <c>IsOnline</c> null with no awaiting marker, then <c>IsOnline</c> true WITH one, which would have put a
+/// green "Online" over a tooltip reading "Awaiting first collection". Both flags are plain settable
+/// properties, so nothing stops a fixture or a new data path reaching either pair. Two instances of one
+/// category is the signal to fix the category: with a single discriminant there is no combination left for
+/// the renderings to disagree about, because they no longer each decide.</para>
+/// </summary>
+public enum ServerCardStatus
+{
+    /// <summary>Collection is current.</summary>
+    Online,
+
+    /// <summary>Online, but the newest collection has lagged — the card's amber "Warning".</summary>
+    Stale,
+
+    /// <summary>Nothing has landed for long enough to call the server dark.</summary>
+    Offline,
+
+    /// <summary>Registered but never collected — the service has not reached it yet, not a dead server.</summary>
+    AwaitingFirstCollection,
+
+    /// <summary>Freshness was never classified. <see cref="ServerSummaryItem.ApplyFreshness"/> cannot produce
+    /// this; a hand-built summary can, which is exactly why it is a named state rather than a fall-through.</summary>
+    Unknown,
+}
+
+/// <summary>
 /// One Overview server card's view-model — copied from Lite's <c>ServerSummaryItem</c>
 /// (Lite/Services/LocalDataService.Overview.cs) and enriched toward the Dashboard's
 /// <c>ServerHealthStatus</c> (Threads / Collectors rows, the resource-semaphore Memory signal, blocking
@@ -560,22 +595,49 @@ public sealed class ServerSummaryItem
         : "Never";
 
     /* Connection status — verbatim from Lite; in the viewer the inputs come from ApplyFreshness.
-       The null arm distinguishes "not reached yet" (bootstrap) from a legacy unknown. */
-    public string StatusDisplay => IsOnline switch
+       The null arm distinguishes "not reached yet" (bootstrap) from a legacy unknown.
+
+       This is the ONE place the (IsOnline, AwaitingFirstCollection) pair is read. Everything downstream —
+       the word, the colour, the ranking's reason, the tooltip — renders the resulting ServerCardStatus, so
+       no two of them can land on different answers for the same card. See ServerCardStatus for the two
+       contradictions that motivated collapsing it. */
+    public ServerCardStatus CardStatus => IsOnline switch
     {
-        true when HasCollectorErrors => "Warning",
-        true => "Online",
-        false => "Offline",
-        _ => AwaitingFirstCollection ? "Awaiting first collection" : "Unknown"
+        true when HasCollectorErrors => ServerCardStatus.Stale,
+        true => ServerCardStatus.Online,
+        false => ServerCardStatus.Offline,
+        _ => AwaitingFirstCollection ? ServerCardStatus.AwaitingFirstCollection : ServerCardStatus.Unknown,
     };
 
-    public SolidColorBrush StatusBrush => MakeBrush(IsOnline switch
+    public string StatusDisplay => CardStatus switch
     {
-        true when HasCollectorErrors => "#FFD54F",  // amber — stale collection
-        true => "#81C784",
-        false => "#E57373",
-        _ => AwaitingFirstCollection ? "#FFD54F" : "#888888"  // amber — queued, not dead
+        ServerCardStatus.Stale => "Warning",
+        ServerCardStatus.Online => "Online",
+        ServerCardStatus.Offline => "Offline",
+        ServerCardStatus.AwaitingFirstCollection => "Awaiting first collection",
+        _ => "Unknown",
+    };
+
+    public SolidColorBrush StatusBrush => MakeBrush(CardStatus switch
+    {
+        ServerCardStatus.Stale => "#FFD54F",  // amber — stale collection
+        ServerCardStatus.Online => "#81C784",
+        ServerCardStatus.Offline => "#E57373",
+        ServerCardStatus.AwaitingFirstCollection => "#FFD54F",  // amber — queued, not dead
+        _ => "#888888",
     });
+
+    /// <summary>
+    /// What the status word MEANS on this card, for the tooltip the status line carries (#2422). A colour and
+    /// a one-word band were the whole answer the Overview gave, and the reporter's question — "what is it that
+    /// this text warns me about?" — is one the card could already answer: <see cref="FleetRollup.BuildReason"/>
+    /// builds the sentence out of THIS card's own metric displays, and until now only the Needs Attention
+    /// ranking got to see it.
+    ///
+    /// <para>Delegated rather than reimplemented on purpose: two independent derivations of "why is this amber"
+    /// would eventually disagree, and the one place they would disagree is a card the reader is staring at.</para>
+    /// </summary>
+    public string StatusTooltip => FleetRollup.BuildStatusTooltip(this);
 
     public bool IsOffline => IsOnline == false;
 

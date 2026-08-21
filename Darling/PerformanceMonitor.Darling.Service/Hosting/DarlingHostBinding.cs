@@ -338,4 +338,63 @@ internal static class DarlingHostBinding
             + "plane cannot change where this endpoint binds or what token it requires."
             + consequence;
     }
+
+    /* ---------------------------------------------------------------------------------------------------
+       #2414: the same split, one layer down -- which port a FIREWALL rule is named for.
+
+       A scoped rule carries its port inside its DisplayName ("PerformanceMonitor Darling MCP (port 5152)"),
+       so the port is not a parameter of the rule, it IS the rule's identity. The endpoint binds the CONTROL
+       PLANE's port; every firewall surface used to derive both the name and the -LocalPort from darling.json.
+       Those two agree right up until somebody moves the port in the Viewer's Settings, and then the elevated
+       verb opens a rule for a port nothing serves while leaving the served port shut -- an unreachable
+       endpoint AND an inbound allow rule with no listener behind it, which is the exact inverse of what
+       scoping the rule to a port was for.
+
+       So a firewall verb resolves its port through ResolveEndpointToggle, the same call the two supervisors
+       bind on, and then SAYS which plane answered. Saying it is not decoration: a verb that opens a port and
+       guesses at which one silently is precisely how this defect stayed invisible for as long as it did, and
+       an operator who has to be told to re-run something needs to know what the last run actually did. The
+       describer is pure so the wording pins in a test rather than being discovered in the field.
+       --------------------------------------------------------------------------------------------------- */
+
+    /// <summary>
+    /// PURE: what a firewall verb discloses about the port it just scoped a rule to (#2414). Three states,
+    /// because they call for three different things from the reader:
+    /// <list type="bullet">
+    /// <item>the control plane answered and DISAGREES with darling.json -- the defect's own precondition, so
+    /// it names both ports and says what naming the rule for the file's one would have cost;</item>
+    /// <item>the control plane answered and agrees -- a one-line confirmation, so an operator can see the
+    /// authoritative read happened rather than having to infer it from silence;</item>
+    /// <item>the control plane could NOT be read -- the file's seed was used, and this says so, why, and what
+    /// makes it wrong, because a firewall verb that falls back without saying so re-creates the bug quietly.</item>
+    /// </list>
+    /// <paramref name="section"/> is the darling.json object name, the config_service column prefix and the
+    /// CLI verb suffix at once ("mcp" -&gt; mcp.port / config_service.mcp_port / --enable-mcp), which is what
+    /// keeps the MCP and web wordings from drifting apart -- the same seam <see cref="DescribeToggleOverride"/>
+    /// uses. <paramref name="filePort"/> is passed in rather than re-derived so the message quotes the value
+    /// the caller actually loaded.
+    /// </summary>
+    internal static string DescribeFirewallPortAuthority(
+        EndpointToggle toggle, string section, string surface, int filePort, string? storeUnavailableReason)
+    {
+        if (toggle.Origin == EndpointToggleOrigin.ControlPlane)
+        {
+            return toggle.PortOverridden
+                ? $"Firewall: scoping the {surface} rule to port {toggle.Port} -- the CONTROL PLANE's port "
+                    + $"(config.config_service.{section}_port), which is the port this endpoint actually binds. "
+                    + $"darling.json says {section}.port = {filePort}, but after the first run that is only the seed: "
+                    + $"a rule named for {filePort} would leave the served port closed to the LAN and hold an inbound "
+                    + "allow rule open on a port nothing is listening on."
+                : $"Firewall: scoping the {surface} rule to port {toggle.Port}, confirmed against the control plane "
+                    + $"(config.config_service.{section}_port) -- darling.json's {section}.port agrees.";
+        }
+
+        return $"Firewall: could NOT read the control plane ({storeUnavailableReason ?? "reason unknown"}), so the "
+            + $"{surface} rule is scoped to darling.json's {section}.port = {filePort}. That value is the FIRST-RUN "
+            + "SEED: it is the right port on a box whose store has never been written -- the normal state at install "
+            + "time, which is why this verb uses it rather than refusing -- and it is the WRONG port the moment the "
+            + $"{surface} port has been changed in the Viewer's Settings or with --enable-{section}. If the endpoint "
+            + "is unreachable from the LAN after this, re-run --configure-firewall once the store is up: it resolves "
+            + "the effective port and moves the rule.";
+    }
 }
