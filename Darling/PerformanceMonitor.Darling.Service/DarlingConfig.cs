@@ -721,10 +721,17 @@ public sealed class SmtpConfig
 /// </summary>
 public sealed class McpConfig
 {
-    /// <summary>Default OFF — the headless twin of both apps' mcp_enabled=false default.</summary>
+    /// <summary>Default OFF — the headless twin of both apps' mcp_enabled=false default.
+    /// <para>A first-run SEED only (#2389): once the store is seeded, <c>config.config_service.mcp_enabled</c>
+    /// is authoritative and this value is never read again except before the worker's first publish. Editing it
+    /// on a seeded box changes nothing — use <c>--enable-mcp</c>/<c>--disable-mcp</c> or the Viewer's Settings.
+    /// <see cref="Network"/>, sitting right beside it, is the OPPOSITE: file-only with no store equivalent.
+    /// The supervisor reports the disagreement when the two planes differ.</para></summary>
     [JsonPropertyName("enabled")]
     public bool Enabled { get; set; }
 
+    /// <summary>A first-run SEED only, like <see cref="Enabled"/> — <c>config.config_service.mcp_port</c> wins
+    /// on a seeded store.</summary>
     [JsonPropertyName("port")]
     public int Port { get; set; } = 5152;
 

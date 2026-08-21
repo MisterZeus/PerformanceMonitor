@@ -117,6 +117,9 @@ public sealed class DarlingWebHostService : BackgroundService
            lifetime exactly as before (the network exposure block is restart-only by design). */
         DarlingConfig? config = null;
         var lastFailedStartUtc = DateTime.MinValue;
+        /* #2389: the last control-plane-override report emitted, so a steady disagreement is stated once per
+           distinct state instead of on every 5s poll tick. */
+        string? lastOverrideReport = null;
         while (!stoppingToken.IsCancellationRequested)
         {
             if (config is null && DateTime.UtcNow - lastFailedStartUtc >= FailedStartBackoff)
@@ -149,13 +152,28 @@ public sealed class DarlingWebHostService : BackgroundService
             }
 
             var published = _state.Read();
-            var enabled = published?.Enabled ?? config.Web.Enabled;
-            var desiredPort = published?.Port ?? config.Web.Port;
 
-            switch (DecideWebAction(_app is not null, _runningPort, enabled, desiredPort))
+            /* #2389: the store still wins whenever the worker has published (unchanged), but the resolution
+               now carries WHICH plane supplied each value — the MCP host's twin, sharing one resolver so the
+               two surfaces cannot drift. */
+            var toggle = DarlingHostBinding.ResolveEndpointToggle(
+                published is null ? null : (published.Enabled, published.Port), config.Web.Enabled, config.Web.Port);
+
+            /* Report the DISAGREEMENT at the point of override, once per distinct state, so a file edit that
+               the control plane is quietly ignoring says so instead of presenting as a successful start. */
+            var overrideReport = DarlingHostBinding.DescribeToggleOverride(
+                toggle, "web", "Web dashboard", config.Web.Enabled, config.Web.Port);
+            if (overrideReport is not null && !string.Equals(overrideReport, lastOverrideReport, StringComparison.Ordinal))
+            {
+                _logger.LogWarning("{Report}", overrideReport);
+            }
+
+            lastOverrideReport = overrideReport;
+
+            switch (DecideWebAction(_app is not null, _runningPort, toggle.Enabled, toggle.Port))
             {
                 case WebSupervisorAction.Start when DateTime.UtcNow - lastFailedStartUtc >= FailedStartBackoff:
-                    if (!await TryStartServerAsync(config, desiredPort, stoppingToken))
+                    if (!await TryStartServerAsync(config, toggle, stoppingToken))
                     {
                         lastFailedStartUtc = DateTime.UtcNow;
                     }
@@ -168,9 +186,9 @@ public sealed class DarlingWebHostService : BackgroundService
 
                 case WebSupervisorAction.Restart:
                     _logger.LogInformation(
-                        "Web dashboard port changed via the control plane ({Old} -> {New}) — rebinding", _runningPort, desiredPort);
+                        "Web dashboard port changed via the control plane ({Old} -> {New}) — rebinding", _runningPort, toggle.Port);
                     await StopServerAsync(stoppingToken);
-                    if (!await TryStartServerAsync(config, desiredPort, stoppingToken))
+                    if (!await TryStartServerAsync(config, toggle, stoppingToken))
                     {
                         lastFailedStartUtc = DateTime.UtcNow;
                     }
@@ -260,13 +278,18 @@ public sealed class DarlingWebHostService : BackgroundService
     }
 
     /// <summary>
-    /// One start ATTEMPT of the inner web app at <paramref name="effectivePort"/>: the port comes from the live
+    /// One start ATTEMPT of the inner web app at <paramref name="toggle"/>'s port: the port comes from the live
     /// control-plane value, and every bail path returns false so the supervisor retries with backoff instead of
     /// standing down for the process lifetime. The bind/network/token decisions come from the FILE-loaded config
     /// (network exposure is deliberately restart-only); returns true when the app is started and listening.
+    /// <para>#2389: the toggle carries the enable/port PROVENANCE, not just the port, so the start line names
+    /// the plane each half of the bind came from.</para>
     /// </summary>
-    private async Task<bool> TryStartServerAsync(DarlingConfig config, int effectivePort, CancellationToken stoppingToken)
+    private async Task<bool> TryStartServerAsync(
+        DarlingConfig config, DarlingHostBinding.EndpointToggle toggle, CancellationToken stoppingToken)
     {
+        var effectivePort = toggle.Port;
+
         var web = config.Web;
         var network = web.Network;
 
@@ -476,15 +499,21 @@ public sealed class DarlingWebHostService : BackgroundService
             _app.UseDefaultFiles();
             _app.UseStaticFiles();
 
+            /* #2389: name the authority for each half of what is being started — enabled/port from whichever
+               plane the supervisor resolved, listen/allowFrom/token always from darling.json. */
+            var origin = DarlingHostBinding.DescribeToggleOrigin(toggle);
             if (networkMode)
             {
                 _logger.LogInformation(
-                    "Starting web dashboard on http://{Listen}:{Port} (LAN-exposed to {Cidr} behind a token->cookie gate + in-app CIDR; loopback also bound, tokenless)",
-                    primaryBind, effectivePort, allowedCidr);
+                    "Starting web dashboard on http://{Listen}:{Port} (LAN-exposed to {Cidr} behind a token->cookie gate + in-app CIDR; loopback also bound, tokenless) — "
+                    + "enabled/port from {Origin}; listen/allowFrom/token from darling.json web.network (file-only, restart-only)",
+                    primaryBind, effectivePort, allowedCidr, origin);
             }
             else
             {
-                _logger.LogInformation("Starting web dashboard on http://localhost:{Port} (loopback only)", effectivePort);
+                _logger.LogInformation(
+                    "Starting web dashboard on http://localhost:{Port} (loopback only) — enabled/port from {Origin}",
+                    effectivePort, origin);
             }
 
             /* StartAsync, not RunAsync: the supervisor loop owns the wait — the app keeps serving until
