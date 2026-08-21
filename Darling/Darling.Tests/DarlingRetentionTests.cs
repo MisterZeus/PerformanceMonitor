@@ -804,7 +804,12 @@ WHERE hypertable_name = 'wait_stats'
         var at = source.IndexOf("private static async Task<int?> PurgeOneAsync(", StringComparison.Ordinal);
         Assert.True(at >= 0, "PurgeOneAsync moved (#2386)");
 
-        var body = source[at..Math.Min(source.Length, at + 4000)];
+        /* Brace-matched rather than a fixed character window. The window was 4000, the method is now 4651
+           chars, and the catch this test exists to check sits at 4521 — so #2401's comment additions pushed
+           the assertion's target out of the slice and the test failed while the code it guards was correct.
+           A guard whose reach depends on how much prose the method carries is a guard that goes off at the
+           wrong times. */
+        var body = MethodBodyFrom(source, at);
 
         Assert.Contains("after removing {Rows} row(s)", body, StringComparison.Ordinal);
 
@@ -815,6 +820,26 @@ WHERE hypertable_name = 'wait_stats'
             body.IndexOf("var deleted = 0;", StringComparison.Ordinal)
                 < body.IndexOf("catch (Exception ex)", StringComparison.Ordinal),
             "the row accumulator must be declared before the catch can read it (#2386)");
+    }
+
+    /// <summary>
+    /// The full body of the member starting at <paramref name="declarationAt"/>, by brace matching. Replaces
+    /// the fixed-size slices these source guards used to take: those silently shrink their own coverage as a
+    /// method grows, so an assertion can stop reaching its target without anything failing to compile.
+    /// </summary>
+    private static string MethodBodyFrom(string source, int declarationAt)
+    {
+        var open = source.IndexOf('{', declarationAt);
+        Assert.True(open >= 0, "no body found at the declaration offset");
+
+        var depth = 0;
+        for (var i = open; i < source.Length; i++)
+        {
+            if (source[i] == '{') depth++;
+            else if (source[i] == '}' && --depth == 0) return source[declarationAt..i];
+        }
+
+        throw new InvalidOperationException("unbalanced braces scanning the method body");
     }
 
     private static string ReadRetentionSource(
