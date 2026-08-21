@@ -1,0 +1,298 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
+using PerformanceMonitor.Darling.Service;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// The web server page's sub-tabs — the port of the desktop viewer's per-server TabControl.
+///
+/// <para><b>The invariant these pins exist for.</b> A panel descriptor names its data source as a STRING
+/// (<c>read: "get_wait_stats"</c>). A typo, or a read renamed on the C# side, produces a 400 inside one panel at
+/// runtime and is completely invisible to inspection — the JS still parses, the page still renders, one panel
+/// just says "unknown". With ~60 reads named across eleven tabs that is not a defect you find by reading. So
+/// rather than pinning individual panels, this asserts the CATEGORY: every read name the shipped module mentions
+/// exists in the shipped dispatch table, and every viz it names exists in the shipped viz vocabulary. Both sides
+/// come from the artifacts themselves, never a transcribed copy, so the check cannot drift into agreeing with a
+/// stale list of its own.</para>
+///
+/// <para>This repository carries no JavaScript test runner, so the scan is a text scan over the shipped module
+/// (the <see cref="FleetPageAttentionFilterTests"/> / <see cref="ViewerGridPayloadColumnOrderPinTests"/>
+/// pattern). Behaviour was verified separately by running the shipped modules under a minimal DOM shim with a
+/// stubbed fetch across four response shapes (empty envelope, error, data-with-no-rows, data-with-rows): every
+/// tab built without throwing at three time ranges, and every request the page actually issued was checked
+/// against <c>CatalogDescriptors</c> for parameter-key validity. See the PR.</para>
+/// </summary>
+public sealed class ServerPageTabsTests
+{
+    private static string ServerTabsJs => ReadRepoFile(Path.Combine(
+        "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
+
+    private static string ServerJs => ReadRepoFile(Path.Combine(
+        "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server.js"));
+
+    private static string AppJs => ReadRepoFile(Path.Combine(
+        "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "app.js"));
+
+    /// <summary>
+    /// Every read name the tab module mentions is a read the service actually serves.
+    ///
+    /// <para>The scan is deliberately over the whole file rather than over parsed descriptors: read names live in
+    /// the <c>get_*</c> namespace and nothing else in this module does, so a literal in a comment is caught too —
+    /// which is the point. A comment that names a read the dispatch no longer has is stale documentation about
+    /// the one thing here that is impossible to verify by eye.</para>
+    /// </summary>
+    [Fact]
+    public void EveryReadTheServerPageNames_ExistsInTheDispatch()
+    {
+        var dispatch = DarlingWebEndpoints.BuildReadDispatch().Keys.ToHashSet(StringComparer.Ordinal);
+        var named = ReadNamesIn(ServerTabsJs);
+
+        Assert.NotEmpty(named);
+
+        var unknown = named.Where(n => !dispatch.Contains(n)).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+        Assert.True(
+            unknown.Length == 0,
+            "server-tabs.js names reads that GET /api/read/{name} does not serve — each renders as a broken " +
+            "panel at runtime and looks fine on inspection: " + string.Join(", ", unknown));
+    }
+
+    /// <summary>
+    /// Every parameter key the page sends is one its read actually binds.
+    ///
+    /// <para>This is the half that fails SILENTLY rather than loudly: an unknown query key is ignored, so a panel
+    /// asking <c>limit=10</c> of a read that binds <c>top</c> quietly returns the read's default 20 rows and
+    /// nothing anywhere says so. <c>CatalogDescriptors</c> is the authority for a read's real wire keys (the
+    /// dispatch lambdas bind string literals imperatively, so the C# parameter names are not those keys), and the
+    /// two documented aliases the dispatch also accepts are allowed explicitly rather than by accident.</para>
+    /// </summary>
+    [Fact]
+    public void EveryParameterKeyTheServerPageSends_IsOneItsReadBinds()
+    {
+        var js = ServerTabsJs;
+        var problems = new List<string>();
+
+        foreach (var (read, keys) in ParamsSentIn(js))
+        {
+            if (!DarlingWebEndpoints.CatalogDescriptors.TryGetValue(read, out var descriptor))
+            {
+                continue; // the read-existence pin above owns this failure and names it better.
+            }
+
+            var allowed = descriptor.Params.Select(p => p.Name).ToHashSet(StringComparer.Ordinal);
+
+            /* The dispatch's two documented aliases: Hours() reads ?hours= then ?hours_back=, and Server() reads
+               ?server= then ?server_name=. Named here rather than assumed, so removing one breaks this test. */
+            if (allowed.Contains("hours")) allowed.Add("hours_back");
+            if (allowed.Contains("server")) allowed.Add("server_name");
+
+            foreach (var key in keys.Where(k => !allowed.Contains(k)))
+            {
+                problems.Add($"{read} is sent '{key}' but binds only [{string.Join(", ", allowed.OrderBy(a => a, StringComparer.Ordinal))}]");
+            }
+        }
+
+        Assert.True(problems.Count == 0, string.Join("; ", problems));
+    }
+
+    /// <summary>
+    /// The page speaks the catalog's canonical time key. Both <c>hours</c> and <c>hours_back</c> reach the same
+    /// binding, so this is a consistency rule rather than a correctness one — but it is the rule that keeps the
+    /// pin above meaningful: with two spellings in play, a reviewer cannot tell a deliberate alias from a typo
+    /// that happened to land on the alias.
+    /// </summary>
+    [Fact]
+    public void TheServerPage_UsesTheCatalogsCanonicalTimeKey()
+    {
+        Assert.DoesNotContain("hours_back:", ServerTabsJs, StringComparison.Ordinal);
+        Assert.Contains("hours: ctx.hours", ServerTabsJs, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Every viz a descriptor names is in the shipped vocabulary. The four kinds are the whole registry; a fifth
+    /// would have to be added to panels.js's VIZ, to <c>KnownVizList</c> (or the composer could not offer it), to
+    /// derive.js's <c>deriveVizConfig</c> and to the editor's config arms — so a page quietly introducing one
+    /// would be a page-only special case, which is exactly what the seam exists to prevent.
+    /// </summary>
+    [Fact]
+    public void EveryVizTheServerPageNames_IsInTheShippedVocabulary()
+    {
+        var vocabulary = DarlingWebEndpoints.KnownVizList.ToHashSet(StringComparer.Ordinal);
+        var named = Regex.Matches(ServerTabsJs, "viz:\\s*\"([a-z]+)\"")
+            .Select(m => m.Groups[1].Value)
+            .ToHashSet(StringComparer.Ordinal);
+
+        Assert.NotEmpty(named);
+        Assert.All(named, v => Assert.Contains(v, vocabulary));
+
+        /* And the registry in panels.js is that same vocabulary — the C# validator and the browser renderer
+           agreeing is what lets a stored view and a built-in page share one seam. */
+        var panels = ReadRepoFile(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js"));
+        foreach (var v in vocabulary)
+        {
+            Assert.Contains("  " + v + ": viz", panels, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// No PostgreSQL read appears on the server page, and this is a guard rather than an oversight.
+    ///
+    /// <para>The web dashboard's per-server surface is fed by <c>/api/fleet</c>, whose card
+    /// (<c>DarlingFleetReader.FleetServerCard</c>) carries <c>engine_edition</c> — the SQL Server
+    /// SERVERPROPERTY value — and NO <c>CollectorTargetEngine</c> discriminator. So the browser cannot tell a
+    /// PostgreSQL target from a SQL Server one, and a <c>get_pg_*</c> panel added to these tabs would render for
+    /// every server in the fleet, permanently empty on the ~all of them that are SQL Server. Adding the
+    /// discriminator to the fleet payload is the prerequisite; this fails until then rather than letting the
+    /// panel ship first.</para>
+    /// </summary>
+    [Fact]
+    public void NoPostgresRead_IsOnTheServerPage_UntilTheFleetPayloadCanTellTheEngines()
+    {
+        var pg = ReadNamesIn(ServerTabsJs).Where(n => n.StartsWith("get_pg_", StringComparison.Ordinal)).ToArray();
+        Assert.True(
+            pg.Length == 0,
+            "the fleet payload carries no target-engine discriminator, so these would render on every SQL Server " +
+            "too: " + string.Join(", ", pg));
+    }
+
+    /// <summary>
+    /// The shell links only to tabs that exist, and every tab is reachable. A sub-tab link is a real href, so a
+    /// stale id is a page that renders Overview while claiming to be something else — the fallback that makes old
+    /// <c>#/server/{name}</c> links keep working is the same fallback that would hide this.
+    /// </summary>
+    [Fact]
+    public void TheSubTabBar_IsBuiltFromTheRegistry_AndTheRouterCarriesTheTab()
+    {
+        /* One source of truth for the bar: it maps the registry rather than listing ids. */
+        Assert.Contains("SERVER_TABS.map((t) =>", ServerJs, StringComparison.Ordinal);
+        Assert.Contains("\"#/server/\" + encodeURIComponent(server) + \"/\" + t.id", ServerJs, StringComparison.Ordinal);
+
+        /* And the router parses that second segment back out and hands it to the page. */
+        Assert.Contains("function serverRoute(rest)", AppJs, StringComparison.Ordinal);
+        Assert.Contains("renderServer(main, r.param, r.tab)", AppJs, StringComparison.Ordinal);
+
+        /* The name is decoded AFTER the split, so an encoded '/' inside a server name survives the tab segment
+           being introduced — the one way this change could have broken existing links. */
+        Assert.Contains("decodeURIComponent(rest.slice(0, slash))", AppJs, StringComparison.Ordinal);
+        Assert.Contains("if (slash < 0) return { name: \"server\", param: decodeURIComponent(rest) };", AppJs, StringComparison.Ordinal);
+
+        /* An unknown id resolves to a tab rather than throwing, which is what keeps a stale bookmark working. */
+        Assert.Contains("SERVER_TABS.find((t) => t.id === id) || SERVER_TABS[0]", ServerTabsJs, StringComparison.Ordinal);
+
+        /* Ids are unique — two tabs sharing one id makes the second unreachable and the bar's active state lie. */
+        var ids = Regex.Matches(ServerTabsJs, "^\\s{4}id: \"([a-z-]+)\",$", RegexOptions.Multiline)
+            .Select(m => m.Groups[1].Value)
+            .ToArray();
+        Assert.True(ids.Length >= 10, "expected the full tab set; found " + ids.Length);
+        Assert.Equal(ids.Length, ids.Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal("overview", ids[0]); // the fallback tab must be the first one
+    }
+
+    /// <summary>
+    /// The tabs whose desktop twin does something the browser cannot say so, in the tab itself.
+    ///
+    /// <para>Plan analysis, the query heatmap, cached-plan retrieval and actual-plan re-execution all need either
+    /// a plan renderer or a command back to the monitored server, and this read-only seat has neither. The same
+    /// goes for the block-chain view and the interactive deadlock graph. A reader told to open the desktop viewer
+    /// is better served than one given a web page that looks like plan analysis and is not — so the absence is
+    /// stated where they go looking for it, not left as a page that simply lacks the feature.</para>
+    /// </summary>
+    [Fact]
+    public void TheTabsThatCannotDoWhatTheDesktopDoes_SaySo()
+    {
+        var js = ServerTabsJs;
+
+        Assert.Contains("desktop-viewer features", js, StringComparison.Ordinal);
+        Assert.Contains("Execution-plan analysis, the query heatmap", js, StringComparison.Ordinal);
+        Assert.Contains("block-chain view", js, StringComparison.Ordinal);
+
+        /* The note renders — a `note` field with no renderer is the same silence in a different place. */
+        Assert.Contains("return tab.note ? noticeStrip(tab.note) : null;", js, StringComparison.Ordinal);
+        Assert.Contains("tabNote(tab)", ServerJs, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Every table panel says why it could be empty.
+    ///
+    /// <para>renderPanel already shows a read's own <c>{status,message}</c> envelope when the read has nothing —
+    /// that path is honest and better-worded than anything a descriptor could carry. What it does NOT cover is
+    /// the read returning data whose row array is empty: vizTable falls back to a generic "No rows in this
+    /// window", which on a collector that is off, opt-in, or daily reads as a fault. So every table panel here
+    /// supplies its own <c>emptyText</c>, and this counts them rather than spot-checking one.</para>
+    /// </summary>
+    [Fact]
+    public void EveryTablePanel_ExplainsItsOwnEmptyState()
+    {
+        var js = ServerTabsJs;
+
+        /* Not a count of sentences — a structural guard. Counting "No ..." literals would pass vacuously the
+           moment a comment happened to contain one, which is the shape of check that converts an open question
+           into false confidence. The helper THROWS without an emptyText, and every tab is built during the
+           DOM-shim run, so a table panel that forgot one cannot reach a browser. */
+        Assert.Contains("function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2)", js, StringComparison.Ordinal);
+        Assert.Contains(
+            "if (!emptyText) throw new Error(\"table(\" + title + \"): a table panel must explain its own empty state.\");",
+            js,
+            StringComparison.Ordinal);
+
+        /* And renderPanel is what renders it, from the descriptor field the helper sets. */
+        var panels = ReadRepoFile(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js"));
+        Assert.Contains("desc.emptyText || \"No rows in this window.\"", panels, StringComparison.Ordinal);
+    }
+
+    // ── helpers ────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>Every read name the module mentions. Read names live in their own <c>get_*</c> namespace plus
+    /// three one-off verbs; nothing else in this module is a string literal of that shape.</summary>
+    private static HashSet<string> ReadNamesIn(string js) =>
+        Regex.Matches(js, "\"(get_[a-z0-9_]+|audit_config|list_servers|compare_analysis)\"")
+            .Select(m => m.Groups[1].Value)
+            .ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The (read, param-keys) pairs the module sends. Both descriptor forms are covered: the positional helpers
+    /// (<c>table("T", "read", { ... })</c>) and the direct <c>readTool("read", { ... })</c> calls in the
+    /// composites. The params object is matched non-greedily up to its closing brace, which is exact here because
+    /// no params object in this file nests another.
+    /// </summary>
+    private static IEnumerable<(string Read, string[] Keys)> ParamsSentIn(string js)
+    {
+        foreach (Match m in Regex.Matches(js, "\"(get_[a-z0-9_]+|audit_config)\",\\s*\\{([^{}]*)\\}", RegexOptions.Singleline))
+        {
+            var keys = Regex.Matches(m.Groups[2].Value, @"(?:^|[,{]\s*)([a-z_][a-z0-9_]*)\s*(?::|,|\})")
+                .Select(k => k.Groups[1].Value)
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            yield return (m.Groups[1].Value, keys);
+        }
+    }
+
+    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
+    {
+        for (var dir = new DirectoryInfo(Path.GetDirectoryName(thisFile)!); dir is not null; dir = dir.Parent)
+        {
+            var candidate = Path.Combine(dir.FullName, relative);
+            if (File.Exists(candidate))
+            {
+                return File.ReadAllText(candidate).Replace("\r\n", "\n", StringComparison.Ordinal);
+            }
+        }
+
+        throw new FileNotFoundException($"Could not locate {relative} walking up from {thisFile}");
+    }
+}
