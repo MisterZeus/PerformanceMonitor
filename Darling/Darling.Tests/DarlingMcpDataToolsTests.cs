@@ -25,9 +25,9 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// Pins the core data-read MCP slice — the fifteen resource-metric / query-performance /
+/// Pins the core data-read MCP slice — the sixteen resource-metric / query-performance /
 /// discovery-health tools over the Postgres store, the same names the Dashboard and Lite expose.
-/// Ungated: the tool surface is EXACTLY the fifteen names (all static, on a [McpServerToolType]
+/// Ungated: the tool surface is EXACTLY the pinned names (all static, on a [McpServerToolType]
 /// class, returning the string envelope); each tool's MCP parameter contract matches Lite's (server_name
 /// optional / sole-server auto-select, hours_back / top / limit windows, wait_type required on
 /// get_wait_trend); every read SQL is Postgres-dialect, positional-param, reads the collector columns the
@@ -530,7 +530,10 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     public void AdvertisedSchema_IsGeminiClean_ForAllSixteenDataTools()
     {
         var tools = BuildDataToolSchemas();
-        Assert.Equal(15, tools.Count);
+        /* Derived from the pinned name list rather than restated. This literal was 15 while the list
+           beside it held 16 and the method name said Sixteen -- a count kept by hand in four places
+           drifts in whichever one the next person forgets. */
+        Assert.Equal(DataToolSurface.Length, tools.Count);
 
         var violations = tools.SelectMany(t => SchemaViolations(t.Name, t.InputSchema)).ToList();
         Assert.True(violations.Count == 0,
