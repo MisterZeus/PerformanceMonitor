@@ -170,6 +170,43 @@ public class DarlingPrintEndpointTokenTests
     }
 
     /// <summary>
+    /// A NON-DPAPI resolve failure must not be diagnosed as a DPAPI one.
+    ///
+    /// <para>Review catch on #2479. <c>ResolveToken</c> also resolves <c>env:</c> and <c>file:</c> secret
+    /// references, and those fail with an <see cref="InvalidOperationException"/> whose message already
+    /// names the missing variable or the unreadable path. Appending "a DPAPI blob only decrypts on the
+    /// machine that produced it — regenerate it with --configure-network" to THOSE is a false diagnosis
+    /// pointing at a destructive fix: regenerating invalidates every client configured against the token,
+    /// when the actual repair is to set the environment variable or correct the path. The token is fine.</para>
+    /// </summary>
+    [Fact]
+    public void Elevated_WhenAnEnvOrFileReferenceFails_DoesNotBlameDpapi_OrSuggestRegenerating()
+    {
+        var output = new StringWriter();
+        var error = new StringWriter();
+
+        var exit = DarlingCliCommands.PrintEndpointToken(
+            "mcp", "MCP bearer", "--print-mcp-token", "clients send it as a header",
+            elevated: true, configured: true,
+            () => throw new InvalidOperationException(
+                "mcp.network.token references environment variable 'DARLING_MCP_TOKEN', which is not set (or empty)."),
+            output, error);
+
+        var message = error.ToString();
+
+        Assert.Equal(1, exit);
+        Assert.Equal(string.Empty, output.ToString());
+
+        /* The real cause survives... */
+        Assert.Contains("DARLING_MCP_TOKEN", message, StringComparison.Ordinal);
+
+        /* ...and the DPAPI story, with its destructive remedy, does not appear at all. */
+        Assert.DoesNotContain("DPAPI", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("--configure-network", message, StringComparison.Ordinal);
+        Assert.Contains("does not need regenerating", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The success path, and the split that makes it usable: STDOUT is the token and NOTHING else, so
     /// <c>… &gt; token.txt</c> and <c>… | clip</c> both produce a pasteable value; every warning is on
     /// STDERR, so the redirect cannot swallow it; and the token appears on STDERR nowhere at all.

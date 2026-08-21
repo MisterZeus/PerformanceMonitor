@@ -568,12 +568,28 @@ public static class DarlingCliCommands
         {
             token = resolveToken();
         }
-        catch (Exception ex)
+        catch (System.Security.Cryptography.CryptographicException ex)
         {
+            /* The DPAPI cause, and ONLY the DPAPI cause. ResolveToken also resolves env: and file: secret
+               references, and those fail with an InvalidOperationException whose message already names the
+               missing variable or the unreadable path (review catch on #2479). Appending "a DPAPI blob only
+               decrypts on the machine that produced it - regenerate it" to THOSE would be a false diagnosis
+               pointing at a destructive fix: regenerating invalidates every configured client, when the
+               actual repair is to set the environment variable or correct the path. So the advice is gated
+               on the exception that earns it, and the arm below reports what it actually knows. */
             error.WriteLine($"Could not read the {tokenName} token: {ex.Message}");
             error.WriteLine(
                 $"A DPAPI blob only decrypts on the machine that produced it, so a {section}.network.encryptedToken "
                 + "copied from another host can never be read here - regenerate it with --configure-network.");
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not read the {tokenName} token: {ex.Message}");
+            error.WriteLine(
+                $"That is what {section}.network resolved to. Fix the source it names (an env: reference needs "
+                + "the variable set in THIS shell; a file: reference needs a path this account can read), then "
+                + "re-run - the token itself is fine and does not need regenerating.");
             return 1;
         }
 
