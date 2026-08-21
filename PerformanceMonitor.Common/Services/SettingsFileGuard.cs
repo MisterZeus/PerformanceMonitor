@@ -70,14 +70,18 @@ public readonly record struct SettingsMemberProblem(string Member, string Proble
 /// empty (or null) means nothing in the file was usable, and the caller's own defaults are the whole
 /// answer.</para>
 ///
-/// <para><b>The invariant, because a caller reads one field and believes the other:</b>
-/// <c>UnreadableMembers</c> is non-empty if and only if <c>Value</c> is non-null. Review found the
-/// combination that broke it — a recovery that dropped one member and then hit a fault it could not
-/// attribute returned a null value WITH a member list, and the viewer's dialog routes on the list, so it
-/// would have said "everything else in their file loaded normally" about a file where nothing loaded at
-/// all. It is enforced at the one place that can enforce it (see
-/// <see cref="SettingsFileGuard.DeserializeWithMemberRecovery{T}"/>) rather than at each caller, because
-/// every caller that has to remember a rule is a caller that can forget it.</para>
+/// <para><b>The invariant, because a caller reads one field and believes the other:</b> a non-empty
+/// <c>UnreadableMembers</c> always comes with a non-null <c>Value</c>. One direction only, and stated that
+/// way deliberately — the reverse is false, because an ordinary <see cref="SettingsFileState.Readable"/>
+/// file has a value and no members at all, so an "if and only if" here would be a sentence a future
+/// <c>Debug.Assert</c> could fire on down the happy path.</para>
+///
+/// <para>Review found the combination that broke the direction that IS guaranteed: a recovery that dropped
+/// one member and then hit a fault it could not attribute returned a null value WITH a member list, and the
+/// viewer's dialog routes on the list — so it would have said "everything else in their file loaded
+/// normally" about a file where nothing loaded at all. It is enforced at the one place that can enforce it
+/// (see <see cref="SettingsFileGuard.DeserializeWithMemberRecovery{T}"/>) rather than at each caller,
+/// because every caller that has to remember a rule is a caller that can forget it.</para>
 /// </summary>
 public readonly record struct SettingsObjectRead<T>(
     SettingsFileState State,

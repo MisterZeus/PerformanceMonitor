@@ -252,8 +252,10 @@ public sealed class ViewerSettingsMemberRecoveryTests : IDisposable
     }
 
     /// <summary>
-    /// The invariant, and the combination review found that broke it: <c>UnreadableMembers</c> is non-empty
-    /// if and only if <c>Value</c> is non-null.
+    /// The invariant, and the combination review found that broke it: a non-empty
+    /// <c>UnreadableMembers</c> always comes with a non-null <c>Value</c>. One direction only — an ordinary
+    /// readable file has a value and no members, which <see cref="ReadObject_SaysNothingAboutAHealthyFile"/>
+    /// covers.
     ///
     /// <para>The reader can drop one member successfully and THEN meet a fault it cannot attribute — a path
     /// like <c>$['weird.name']</c>, which System.Text.Json bracket-quotes for a property name that is not a
