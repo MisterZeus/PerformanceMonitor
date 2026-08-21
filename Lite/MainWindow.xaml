@@ -433,13 +433,27 @@
                                                                 </Grid>
                                                             </Viewbox>
                                                             <Ellipse Width="10" Height="10" Fill="{Binding StatusBrush}"
+                                                                     ToolTip="{Binding StatusTooltip}"
                                                                      VerticalAlignment="Center"/>
                                                         </StackPanel>
                                                         <TextBlock Text="{Binding DisplayName}" FontSize="16" FontWeight="SemiBold"
                                                                    TextTrimming="CharacterEllipsis"
                                                                    Foreground="{DynamicResource ForegroundBrush}"/>
                                                     </DockPanel>
+                                                    <!-- #2437 (the Lite half of #2422): the status line carries the
+                                                         reason it is that colour. It was a bare word — a reader saw
+                                                         "Warning" in amber and had to scan the metric rows guessing
+                                                         which one it meant, on every card. The tooltip is built from
+                                                         the card's OWN displays (StatusReason), so it cannot disagree
+                                                         with the rows directly underneath it, and it says which axis
+                                                         the word is about: in Lite "Warning" is failing COLLECTORS,
+                                                         while a card in metric trouble still says "Online".
+                                                         Background=Transparent is load-bearing: a TextBlock with a
+                                                         null Background hit-tests on its rendered glyphs alone, so
+                                                         the tooltip would appear over the letters of "Warning" and
+                                                         nowhere in the space around them. -->
                                                     <TextBlock Text="{Binding StatusDisplay}" Foreground="{Binding StatusBrush}"
+                                                               Background="Transparent" ToolTip="{Binding StatusTooltip}"
                                                                FontSize="11" Margin="0,0,0,10"/>
                                                     <!-- Tag pills (#2020 2b-i): the server's tags as coloured chips,
                                                          collapsed when it has none so untagged cards are unchanged. -->
