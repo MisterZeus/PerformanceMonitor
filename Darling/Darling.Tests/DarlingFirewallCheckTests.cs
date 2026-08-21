@@ -531,26 +531,62 @@ public class DarlingFirewallCheckTests
     /// store does not exist, so <c>mcp.enabled</c> IS the value <c>config_service.mcp_enabled</c> will be seeded
     /// with. A network block beside <c>enabled = false</c> therefore describes an endpoint that will not start
     /// on the first run either — opening its port was never "ready for later", it was ready for nothing.
+    /// <para>Review's second finding, and the reason the note offers that as a READING rather than a fact: a
+    /// File origin is not "fresh install". Every store-read failure — BYO, a missing credential, a timeout —
+    /// collapses into it, so this branch is also reached on a long-lived box whose store is merely unreachable
+    /// this minute, where mcp.enabled may be a seed nobody has touched since <c>--enable-mcp</c> wrote the
+    /// store. Asserting the endpoint is off there would contradict the sweep-declined line the same run prints
+    /// a few lines later, which says the off may be stale and the rule may be the live one — and that line is
+    /// the one that is right.</para>
     /// </summary>
     [Fact]
-    public void PlanFirewallRules_FileSeedSaysTheSurfaceIsOff_OpensNothing_AndNamesTheSeedRatherThanTheStore()
+    public void PlanFirewallRules_FileSeedSaysTheSurfaceIsOff_OpensNothing_AndOffersThatAsAReadingNotAFact()
     {
         var config = ManagedConfig();
         config.Mcp.Enabled = false;
         config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
 
-        var mcp = Assert.Single(PlansFor(config, "MCP"));
+        var mcp = Assert.Single(
+            DarlingCliCommands.PlanFirewallRules(config, storeUnavailableReason: "the store did not answer within 10 seconds")
+                .Where(p => p.Surface == "MCP"));
 
         Assert.Equal(DarlingCliCommands.FirewallRuleAction.Remove, mcp.Action);
         Assert.NotNull(mcp.Note);
+
+        /* Which plane it went on and why it could not do better — the shape DescribeFirewallPortAuthority
+           already applies to the port, now applied to the flag. */
+        Assert.Contains("could NOT be read", mcp.Note, StringComparison.Ordinal);
+        Assert.Contains("the store did not answer within 10 seconds", mcp.Note, StringComparison.Ordinal);
         Assert.Contains("mcp.enabled = false", mcp.Note, StringComparison.Ordinal);
+
+        /* BOTH readings, so neither box's operator is misled: right at install time... */
         Assert.Contains("SEEDED", mcp.Note, StringComparison.Ordinal);
+        /* ...and possibly stale on one that has run before. */
+        Assert.Contains("may be stale", mcp.Note, StringComparison.Ordinal);
 
         /* No port note: this plan opened nothing, so it made no port decision to disclose. */
         Assert.Null(mcp.PortNote);
 
         /* And it does NOT sweep — see the test below, which is the reason. */
         Assert.False(mcp.SweepOtherPorts);
+    }
+
+    /// <summary>The confirmed half stays a flat statement, because there it IS one: the control plane answered
+    /// and said off, so nothing is being inferred from a file the enable path never writes. Pinned so the two
+    /// wordings cannot be collapsed into one hedged message that under-states a certain answer.</summary>
+    [Fact]
+    public void PlanFirewallRules_ControlPlaneAnsweredOff_SaysSoWithoutAStalenessCaveat()
+    {
+        var config = ManagedConfig();
+        config.Mcp.Enabled = true;
+        config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
+
+        var note = Assert.Single(
+            DarlingCliCommands.PlanFirewallRules(config, mcpStore: (false, 5152)).Where(p => p.Surface == "MCP")).Note;
+
+        Assert.Contains("the CONTROL PLANE has it off", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("may be stale", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("could NOT be read", note, StringComparison.Ordinal);
     }
 
     /// <summary>

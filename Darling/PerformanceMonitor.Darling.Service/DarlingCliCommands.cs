@@ -2830,7 +2830,9 @@ public static class DarlingCliCommands
             mcpOpen ? CanonicalCidrOrNull(config.Mcp.Network?.AllowFrom) : null,
             mcpOpen
                 ? null
-                : mcpExposed ? DescribeDisabledSurface(mcpToggle, "mcp") : DescribeLoopbackReason(mcpBind.Reason, "mcp"),
+                : mcpExposed
+                    ? DescribeDisabledSurface(mcpToggle, "mcp", storeUnavailableReason)
+                    : DescribeLoopbackReason(mcpBind.Reason, "mcp"),
             mcpOpen
                 ? DarlingHostBinding.DescribeFirewallPortAuthority(mcpToggle, "mcp", "MCP", config.Mcp.Port, storeUnavailableReason)
                 : null,
@@ -2853,7 +2855,7 @@ public static class DarlingCliCommands
             webOpen
                 ? null
                 : webExposed
-                    ? DescribeDisabledSurface(webToggle, "web")
+                    ? DescribeDisabledSurface(webToggle, "web", storeUnavailableReason)
                     : DescribeLoopbackReason((DarlingMcpHostService.McpBindReason)webBind.Reason, "web"),
             webOpen
                 ? DarlingHostBinding.DescribeFirewallPortAuthority(webToggle, "web", "web dashboard", config.Web.Port, storeUnavailableReason)
@@ -2884,16 +2886,31 @@ public static class DarlingCliCommands
     /// next <c>--configure-firewall</c> — which every upgrade runs — silently re-opened it, so the disable verb
     /// did not stay done. And the convenience is not lost, only deferred to one elevated action the service
     /// already asks for by name: its start-up check reports the missing rule and prints the command.</para>
+    ///
+    /// <para>Two messages, on the same three-state honesty <see cref="DarlingHostBinding.DescribeFirewallPortAuthority"/>
+    /// applies to the port — and for a reason review had to point out. <c>Origin == File</c> is NOT "fresh
+    /// install": <see cref="TryReadEndpointTogglesAsync"/> collapses BYO, a missing credential, a timeout and
+    /// every other connection failure into the same answer, so this branch is also reached on a long-lived box
+    /// whose store is merely unreachable this minute and may well hold <c>mcp_enabled = true</c>. Asserting the
+    /// endpoint is off there would contradict the sweep-declined line printed a few lines later in the same
+    /// run, which says the opposite — that the off may be stale and the rule may be the live one — and it is
+    /// the sweep-declined line that is right.</para>
     /// </summary>
-    private static string DescribeDisabledSurface(DarlingHostBinding.EndpointToggle toggle, string section)
+    private static string DescribeDisabledSurface(
+        DarlingHostBinding.EndpointToggle toggle, string section, string? storeUnavailableReason)
         => toggle.Origin == DarlingHostBinding.EndpointToggleOrigin.ControlPlane
             ? $"{section}.network exposes this endpoint, but the CONTROL PLANE has it off "
                 + $"(config.config_service.{section}_enabled = false), so the service does not start it and no rule "
                 + $"belongs on that port — turn it on with --enable-{section} or in the Viewer's Settings, then "
                 + "re-run --configure-firewall from an elevated prompt"
-            : $"{section}.network exposes this endpoint, but {section}.enabled = false, which is the value the "
-                + "store is SEEDED from, so the service will not start it and no rule belongs on that port — turn "
-                + $"it on with --enable-{section} (or set {section}.enabled before the first start)";
+            : $"{section}.network exposes this endpoint, but the control plane could NOT be read "
+                + $"({storeUnavailableReason ?? "reason unknown"}), so this run goes on darling.json's "
+                + $"{section}.enabled = false and opens nothing. On a box whose store has never been written — the "
+                + $"normal state at install time — that is right: config.config_service.{section}_enabled is SEEDED "
+                + "from this value, so the endpoint will not start. On a box that has run before it may be stale, "
+                + $"because --enable-{section} and the Viewer's Settings write only the control plane and never back "
+                + "to the file; if the endpoint IS enabled there, re-run --configure-firewall once the store is up "
+                + "and it will open the port";
 
     /// <summary>Why a surface is loopback-only, when the reason is a DEGRADE worth printing. A plain
     /// loopback-by-default config is the normal case and gets no note.</summary>
