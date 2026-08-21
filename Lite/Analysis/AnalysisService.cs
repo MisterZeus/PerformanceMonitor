@@ -112,6 +112,17 @@ public class AnalysisService
 
         try
         {
+            /* #2412: a checkpoint ahead of every store-touching stage, so the rule is simply that
+               no store read STARTS after the budget has gone. One check at the top of the method
+               would not deliver that — each stage below is a many-query phase, and a cancelled
+               pass would run out whichever one it was already inside. This first checkpoint earns
+               its place even though the read below is a single scalar: an already-cancelled
+               context arrives here whenever the budget is very short or the pass queued behind a
+               wedged server, and it should not buy a round-trip. The post-enrichment tail (action
+               build + insert) carries no check on purpose — by then the expensive work is paid
+               for and finishing is what preserves it. */
+            context.CancellationToken.ThrowIfCancellationRequested();
+
             // 0. Check minimum data span — total history, not the analysis window.
             // A server with 100h of total history can be analyzed over a 4h window.
             var dataSpanHours = await GetTotalDataSpanHoursAsync(context.ServerId);
@@ -135,11 +146,6 @@ public class AnalysisService
                 return [];
             }
 
-            /* #2412: abandon BETWEEN the expensive store stages when the pass has outlived its
-               budget. Each of the three below is a many-query phase, so a check only at the top
-               of the method would let a cancelled pass run to completion anyway. The
-               post-enrichment tail (action build + insert) carries no check on purpose: by then
-               the expensive work is already paid for and finishing preserves it. */
             context.CancellationToken.ThrowIfCancellationRequested();
 
             // 1. Collect facts from DuckDB
@@ -182,6 +188,8 @@ public class AnalysisService
             // solo; db-scoped object anomalies never cross databases. Presentation-only: nothing is
             // dropped, only the incident tag is reconciled.
             AnomalyIncidentReconciler.Reconcile(stories);
+
+            context.CancellationToken.ThrowIfCancellationRequested();
 
             // 4. Mute-filter the stories into the surviving findings WITHOUT inserting yet (the
             //    Darling twin's D2/P2 reorder) — enrichment + action-build happen on the survivors
