@@ -518,11 +518,27 @@
                                     </Grid.RowDefinitions>
 
                                     <!-- Status dot (collection freshness) + the muted-bell silence indicator
-                                         (#2031: a silenced server must not look healthy-quiet). -->
+                                         (#2031: a silenced server must not look healthy-quiet).
+
+                                         #2473: the dot renders the same ServerCollectionStatus the Overview
+                                         card does, and carries the same first line the card's tooltip opens
+                                         on. It had triggers for three of the five states, so a registered-
+                                         but-never-collected server fell through to the muted default and
+                                         went grey "Unknown" while the card said amber "Awaiting first
+                                         collection" about that same server, one panel over.
+
+                                         There is deliberately still NO trigger for "Unknown": grey is the
+                                         honest paint for a server whose freshness was never classified, and
+                                         it is the muted default precisely so it needs no arm. Every OTHER
+                                         member of the enum must have one, which is asserted rather than
+                                         commented (ViewerSidebarDotRendersTheCardStatusTests) — a missing
+                                         trigger paints a wrong colour and fails nothing, which is exactly
+                                         how this defect survived. -->
                                     <StackPanel Grid.Column="0" Grid.RowSpan="2"
                                                 Orientation="Horizontal" VerticalAlignment="Center">
                                         <Ellipse Width="10" Height="10"
                                                  Margin="0,0,8,0"
+                                                 ToolTip="{Binding Server.DotTooltip}"
                                                  VerticalAlignment="Center">
                                             <Ellipse.Style>
                                                 <Style TargetType="Ellipse">
@@ -535,6 +551,14 @@
                                                             <Setter Property="Fill" Value="{DynamicResource ErrorBrush}"/>
                                                         </DataTrigger>
                                                         <DataTrigger Binding="{Binding Server.DotStatus}" Value="Warning">
+                                                            <Setter Property="Fill" Value="{DynamicResource WarningBrush}"/>
+                                                        </DataTrigger>
+                                                        <!-- Amber, the colour the card already chose for this state and wrote
+                                                             down why: a queued server is not a dead one. Grey would have been
+                                                             the smaller change and is arguably honest ("no information yet"),
+                                                             but it is a SECOND answer to a question the card has already
+                                                             answered on the same screen, which is the whole defect. -->
+                                                        <DataTrigger Binding="{Binding Server.DotStatus}" Value="Awaiting first collection">
                                                             <Setter Property="Fill" Value="{DynamicResource WarningBrush}"/>
                                                         </DataTrigger>
                                                     </Style.Triggers>

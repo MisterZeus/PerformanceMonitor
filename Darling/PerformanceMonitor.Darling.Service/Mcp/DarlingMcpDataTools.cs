@@ -998,26 +998,22 @@ public sealed class DarlingMcpDataTools
 
     /* ─────────────────────────── list_servers helpers ─────────────────────────── */
 
-    /// <summary>Older than twice the ~1-minute collector cadence = the collection has visibly lagged.</summary>
-    private static readonly TimeSpan StaleThreshold = TimeSpan.FromMinutes(2);
-
-    /// <summary>Older than this (or no collection at all) = the server is treated as Offline.</summary>
-    private static readonly TimeSpan OfflineThreshold = TimeSpan.FromMinutes(15);
-
     /// <summary>
-    /// The freshness-derived status the headless viewer's cards use (<c>ServerSummaryItem.ClassifyFreshness</c>):
-    /// Fresh → Online, Stale → Warning, long-dead → Offline, never-collected → AwaitingFirstCollection
-    /// (the service hasn't reached the server yet — a bootstrap state, not an outage; additive status
-    /// value, existing values unchanged). Both instants are UTC.
+    /// The freshness-derived status this tool reports: Fresh → Online, Stale → Warning, long-dead → Offline,
+    /// never-collected → AwaitingFirstCollection (the service hasn't reached the server yet — a bootstrap
+    /// state, not an outage). Both instants are UTC.
+    ///
+    /// <para>It used to classify freshness itself, against its OWN copies of the 2-minute and 15-minute
+    /// thresholds — so <c>ServerHealthThresholds</c> could move and <c>list_servers</c> would silently keep
+    /// answering with the old numbers. It now shares the ladder with every other status surface (#2473). What
+    /// it does NOT share is the vocabulary: <see cref="ServerCollectionStatusRules.McpToken"/> spells the
+    /// never-collected state as one word because that value was published to MCP clients, and a status value
+    /// a client keys on is a consumer API.</para>
     /// </summary>
-    private static string FreshnessStatus(DateTime? lastCollectionUtc, DateTime nowUtc)
-    {
-        if (!lastCollectionUtc.HasValue) return "AwaitingFirstCollection";
-        var age = nowUtc - lastCollectionUtc.Value;
-        if (age > OfflineThreshold) return "Offline";
-        if (age > StaleThreshold) return "Warning";
-        return "Online";
-    }
+    private static string FreshnessStatus(DateTime? lastCollectionUtc, DateTime nowUtc) =>
+        ServerCollectionStatusRules
+            .FromFreshness(ServerHealthClassifier.ClassifyFreshness(lastCollectionUtc, nowUtc))
+            .McpToken();
 
     /// <summary>Product-name label for a sql_major_version (the viewer's <c>SqlVersionLabel</c>); 2016+ is
     /// what the product supports, older/unknown majors fall back to a bare version tag, null to empty.</summary>

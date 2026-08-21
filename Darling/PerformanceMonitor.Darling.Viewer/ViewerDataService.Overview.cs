@@ -344,40 +344,15 @@ WHERE server_id = $1";
         instantUtc.HasValue ? Math.Max(0, (int)(nowUtc - instantUtc.Value).TotalMinutes) : null;
 }
 
-/// <summary>
-/// The Overview card's status-line state, as a VALUE rather than a rendered string. The word on the card
-/// (<see cref="ServerSummaryItem.StatusDisplay"/>), the colour it is painted
-/// (<see cref="ServerSummaryItem.StatusBrush"/>), the reason the ranking shows
-/// (<see cref="FleetRollup.BuildReason"/>) and the sentence in the card's tooltip
-/// (<see cref="FleetRollup.BuildStatusTooltip"/>) are all renderings OF THIS.
-///
-/// <para>That is the entire reason it exists. Those four used to read the
-/// (<c>IsOnline</c>, <c>AwaitingFirstCollection</c>) flag pair independently, and two review passes on #2429
-/// each turned up a DIFFERENT combination where two of the readings contradicted each other — first
-/// <c>IsOnline</c> null with no awaiting marker, then <c>IsOnline</c> true WITH one, which would have put a
-/// green "Online" over a tooltip reading "Awaiting first collection". Both flags are plain settable
-/// properties, so nothing stops a fixture or a new data path reaching either pair. Two instances of one
-/// category is the signal to fix the category: with a single discriminant there is no combination left for
-/// the renderings to disagree about, because they no longer each decide.</para>
-/// </summary>
-public enum ServerCardStatus
-{
-    /// <summary>Collection is current.</summary>
-    Online,
+/* The card's status discriminant used to be declared here, as ServerCardStatus. It is now
+   PerformanceMonitor.Common's ServerCollectionStatus, because three OTHER places derived the same ladder and
+   two of them are in the headless service, which cannot reference WPF (#2473). The argument for having one
+   discriminant at all is unchanged and is written down on the enum; what changed is how far "one" reaches.
 
-    /// <summary>Online, but the newest collection has lagged — the card's amber "Warning".</summary>
-    Stale,
-
-    /// <summary>Nothing has landed for long enough to call the server dark.</summary>
-    Offline,
-
-    /// <summary>Registered but never collected — the service has not reached it yet, not a dead server.</summary>
-    AwaitingFirstCollection,
-
-    /// <summary>Freshness was never classified. <see cref="ServerSummaryItem.ApplyFreshness"/> cannot produce
-    /// this; a hand-built summary can, which is exactly why it is a named state rather than a fall-through.</summary>
-    Unknown,
-}
+   The rename is not cosmetic. Lite has its own ServerCardStatus meaning a CONNECTION check, and #2457 kept
+   the two axes apart on purpose; giving the shared type the collection name (beside Common's existing
+   ServerConnectionStatus) means the two can no longer be confused for each other by a reader or by a
+   using directive. */
 
 /// <summary>
 /// One Overview server card's view-model — copied from Lite's <c>ServerSummaryItem</c>
@@ -594,36 +569,31 @@ public sealed class ServerSummaryItem
         ? ViewerTimeHelper.ForDisplay(LastCollectionTime.Value).ToString("HH:mm:ss")
         : "Never";
 
-    /* Connection status — verbatim from Lite; in the viewer the inputs come from ApplyFreshness.
-       The null arm distinguishes "not reached yet" (bootstrap) from a legacy unknown.
+    /* Collection status. The (IsOnline, HasCollectorErrors, AwaitingFirstCollection) triple is resolved by
+       ServerCollectionStatusRules.Classify and nowhere else in the viewer — the sidebar row's dot carried its
+       own four-state copy until #2473, which is how a never-collected server got a grey "Unknown" dot beside
+       this card's amber "Awaiting first collection". Everything downstream — the word, the colour, the
+       ranking's reason, the tooltip, the sidebar dot — renders the resulting ServerCollectionStatus, so no
+       two of them can land on different answers for the same server. See ServerCollectionStatus for the
+       contradictions that motivated collapsing it.
 
-       This is the ONE place the (IsOnline, AwaitingFirstCollection) pair is read. Everything downstream —
-       the word, the colour, the ranking's reason, the tooltip — renders the resulting ServerCardStatus, so
-       no two of them can land on different answers for the same card. See ServerCardStatus for the two
-       contradictions that motivated collapsing it. */
-    public ServerCardStatus CardStatus => IsOnline switch
-    {
-        true when HasCollectorErrors => ServerCardStatus.Stale,
-        true => ServerCardStatus.Online,
-        false => ServerCardStatus.Offline,
-        _ => AwaitingFirstCollection ? ServerCardStatus.AwaitingFirstCollection : ServerCardStatus.Unknown,
-    };
+       The null arm distinguishes "not reached yet" (bootstrap) from a legacy unknown. */
+    public ServerCollectionStatus CardStatus =>
+        ServerCollectionStatusRules.Classify(IsOnline, HasCollectorErrors, AwaitingFirstCollection);
 
-    public string StatusDisplay => CardStatus switch
-    {
-        ServerCardStatus.Stale => "Warning",
-        ServerCardStatus.Online => "Online",
-        ServerCardStatus.Offline => "Offline",
-        ServerCardStatus.AwaitingFirstCollection => "Awaiting first collection",
-        _ => "Unknown",
-    };
+    public string StatusDisplay => CardStatus.Word();
 
+    /* The palette stays here rather than moving to the rules class: these are the viewer's dark-theme hexes,
+       and the sidebar dot paints the same states from the THEME dictionaries instead (a DynamicResource, so
+       it follows the light / cool-breeze themes the cards do not). The states agree; only the colour source
+       differs, and ViewerSidebarDotRendersTheCardStatusTests pins that every state the card paints has a
+       trigger on the dot. */
     public SolidColorBrush StatusBrush => MakeBrush(CardStatus switch
     {
-        ServerCardStatus.Stale => "#FFD54F",  // amber — stale collection
-        ServerCardStatus.Online => "#81C784",
-        ServerCardStatus.Offline => "#E57373",
-        ServerCardStatus.AwaitingFirstCollection => "#FFD54F",  // amber — queued, not dead
+        ServerCollectionStatus.Stale => "#FFD54F",  // amber — stale collection
+        ServerCollectionStatus.Online => "#81C784",
+        ServerCollectionStatus.Offline => "#E57373",
+        ServerCollectionStatus.AwaitingFirstCollection => "#FFD54F",  // amber — queued, not dead
         _ => "#888888",
     });
 
@@ -725,25 +695,22 @@ public sealed class ServerSummaryItem
         ServerHealthClassifier.ClassifyFreshness(lastCollectionUtc, nowUtc);
 
     /// <summary>
-    /// Maps the freshness band onto Lite's card inputs, taking the live-ping's place: Fresh → Online,
-    /// Stale → the amber Warning state, Offline → the red Offline overlay, NeverCollected → the amber
-    /// "Awaiting first collection" state (IsOnline stays null: the truth is "unknown, not reached yet",
-    /// not "was up and died").
+    /// Maps the freshness band onto the card's three status flags, taking the live-ping's place: Fresh →
+    /// Online, Stale → the amber Warning state, Offline → the red Offline overlay, NeverCollected → the amber
+    /// "Awaiting first collection" state (IsOnline stays null: the truth is "unknown, not reached yet", not
+    /// "was up and died").
+    ///
+    /// <para>The mapping itself is <see cref="ServerCollectionStatusRules.FlagsFor"/>, shared with the sidebar
+    /// row and the service's fleet reader. It was written out here in longhand, and the sidebar's longhand
+    /// copy set two of the three flags and dropped <c>AwaitingFirstCollection</c> — an omission that is
+    /// invisible in a block of assignments and impossible when the three arrive together (#2473).</para>
     /// </summary>
     public void ApplyFreshness(DateTime nowUtc)
     {
-        var freshness = ClassifyFreshness(LastCollectionTime, nowUtc);
-        if (freshness == ServerFreshness.NeverCollected)
-        {
-            IsOnline = null;
-            HasCollectorErrors = false;
-            AwaitingFirstCollection = true;
-            return;
-        }
-
-        AwaitingFirstCollection = false;
-        IsOnline = freshness != ServerFreshness.Offline;
-        HasCollectorErrors = freshness == ServerFreshness.Stale;
+        var flags = ServerCollectionStatusRules.FlagsFor(ClassifyFreshness(LastCollectionTime, nowUtc));
+        IsOnline = flags.IsOnline;
+        HasCollectorErrors = flags.HasCollectorErrors;
+        AwaitingFirstCollection = flags.AwaitingFirstCollection;
     }
 
     private static SolidColorBrush SeverityBrush(HealthSeverity severity) => severity switch

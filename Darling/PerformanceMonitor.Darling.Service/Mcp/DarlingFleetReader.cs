@@ -317,23 +317,14 @@ GROUP BY server_id, collector_name";
             FailedCollectorCount = collectors.Failing,
         };
 
-        /* Freshness -> the card's connection state, exactly as the WPF card's ApplyFreshness. */
+        /* Freshness -> the card's collection state, through the SAME mapping the WPF card and the sidebar
+           row use (#2473). It was a hand-written copy of ApplyFreshness that happened to agree; the copy on
+           the sidebar row happened not to, which is the argument for none of them writing it out. */
         var freshness = ServerHealthClassifier.ClassifyFreshness(lastCollection, now);
-        bool? isOnline;
-        bool awaitingFirstCollection;
-        bool hasCollectorErrors;
-        if (freshness == ServerFreshness.NeverCollected)
-        {
-            isOnline = null;
-            awaitingFirstCollection = true;
-            hasCollectorErrors = false;
-        }
-        else
-        {
-            isOnline = freshness != ServerFreshness.Offline;
-            awaitingFirstCollection = false;
-            hasCollectorErrors = freshness == ServerFreshness.Stale;
-        }
+        var flags = ServerCollectionStatusRules.FlagsFor(freshness);
+        var isOnline = flags.IsOnline;
+        var awaitingFirstCollection = flags.AwaitingFirstCollection;
+        var hasCollectorErrors = flags.HasCollectorErrors;
 
         var overall = ServerHealthClassifier.OverallMetricSeverity(metrics);
         var band = ServerHealthClassifier.ClassifyBand(isOnline, awaitingFirstCollection, hasCollectorErrors, overall);
@@ -478,7 +469,9 @@ GROUP BY server_id, collector_name";
 
         if (c.AwaitingFirstCollection)
         {
-            return "Awaiting first collection";
+            /* The word itself, not a copy of it — this was one of five spellings of the phrase across four
+               files, which is the duplication #2473's pin now forbids. */
+            return ServerCollectionStatus.AwaitingFirstCollection.Word();
         }
 
         var parts = new List<string>();
@@ -523,13 +516,11 @@ GROUP BY server_id, collector_name";
         return parts.Count > 0 ? string.Join(", ", parts) : "Needs attention";
     }
 
-    private static string StatusLabel(bool? isOnline, bool awaitingFirstCollection, bool hasCollectorErrors) => isOnline switch
-    {
-        true when hasCollectorErrors => "Warning",
-        true => "Online",
-        false => "Offline",
-        _ => awaitingFirstCollection ? "Awaiting first collection" : "Unknown",
-    };
+    /// <summary>The card's status word. Delegates to the one ladder every Darling surface renders (#2473):
+    /// this file's own copy agreed with the WPF card, but the WPF sidebar row's copy did not, and three
+    /// agreeing copies plus one that does not is still four places where the answer is decided.</summary>
+    private static string StatusLabel(bool? isOnline, bool awaitingFirstCollection, bool hasCollectorErrors) =>
+        ServerCollectionStatusRules.Classify(isOnline, hasCollectorErrors, awaitingFirstCollection).Word();
 
     /// <summary>
     /// Classifies a server's raw SERVERPROPERTY('EngineEdition') into the RELIABLE per-server platform flags the
