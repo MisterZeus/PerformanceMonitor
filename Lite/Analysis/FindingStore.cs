@@ -153,7 +153,8 @@ public class FindingStore
     }
 
     /// <summary>
-    /// Returns the most recent findings for a server within the given time range.    ///
+    /// Returns the most recent findings for a server within the given time range.
+    ///
     /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
     /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
     /// its store calls take no pass token. Threading one here would mean inventing a caller that
@@ -220,7 +221,8 @@ LIMIT $3";
     }
 
     /// <summary>
-    /// Returns the latest analysis run's findings for a server (most recent analysis_time).    ///
+    /// Returns the latest analysis run's findings for a server (most recent analysis_time).
+    ///
     /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
     /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
     /// its store calls take no pass token. Threading one here would mean inventing a caller that
@@ -285,7 +287,8 @@ ORDER BY severity DESC";
     }
 
     /// <summary>
-    /// Mutes a story pattern so it won't appear in future analysis runs.    ///
+    /// Mutes a story pattern so it won't appear in future analysis runs.
+    ///
     /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
     /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
     /// its store calls take no pass token. Threading one here would mean inventing a caller that
@@ -315,7 +318,8 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     }
 
     /// <summary>
-    /// Cleans up old findings beyond the retention period.    ///
+    /// Cleans up old findings beyond the retention period.
+    ///
     /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
     /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
     /// its store calls take no pass token. Threading one here would mean inventing a caller that
