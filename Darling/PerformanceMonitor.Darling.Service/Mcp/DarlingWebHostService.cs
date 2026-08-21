@@ -522,7 +522,7 @@ public sealed class DarlingWebHostService : BackgroundService
             _logger.LogInformation(
                 "{Report}",
                 DarlingHostBinding.DescribeNetworkBlockLifetime(
-                    "web", "Web dashboard", config.Web.Network.IsConfigured, networkMode,
+                    "web", "Web dashboard", config.Web.Network?.IsConfigured ?? false, networkMode,
                     networkMode ? primaryBind.ToString() : null,
                     networkMode ? allowedCidr.ToString() : null));
 

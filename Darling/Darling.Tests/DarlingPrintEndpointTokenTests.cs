@@ -340,6 +340,33 @@ public class DarlingNetworkBlockLifetimeTests
         Assert.True(call > exposedLine, $"{fileName} states the lifetime before its LAN start line");
     }
 
+    /// <summary>
+    /// The lifetime report reads the network block NULL-SAFELY.
+    ///
+    /// <para>Review catch on #2479, and the exact shape of defect this project keeps finding: a call site
+    /// that never learned a concept the code around it already knew. <c>config.Mcp.Network</c> is
+    /// <c>McpNetworkConfig?</c> and is null on the DEFAULT secure config — no <c>mcp.network</c> block at
+    /// all — which is precisely the state this line exists to describe. The dereferences inside
+    /// <c>if (networkMode)</c> are safe because the bind resolution has already proven a block exists;
+    /// this one runs unconditionally. A bare <c>.IsConfigured</c> throws on every start of an un-exposed
+    /// server, is swallowed by the surrounding catch, and retry-fails forever because the config never
+    /// changes between attempts — so the feature that explains loopback-only would have been the thing
+    /// keeping the endpoint from starting at all.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("DarlingMcpHostService.cs", "config.Mcp.Network")]
+    [InlineData("DarlingWebHostService.cs", "config.Web.Network")]
+    public void TheLifetimeReport_ReadsTheNetworkBlockNullSafely(string fileName, string accessor)
+    {
+        var source = ReadHostSource(fileName);
+
+        var call = source.IndexOf("DarlingHostBinding.DescribeNetworkBlockLifetime(", StringComparison.Ordinal);
+        Assert.True(call >= 0, $"{fileName} no longer states its network block's lifetime at start-up (#2479)");
+
+        var arguments = source[call..Math.Min(source.Length, call + 400)];
+        Assert.Contains($"{accessor}?.IsConfigured ?? false", arguments, StringComparison.Ordinal);
+    }
+
     private static string ReadHostSource(string fileName, [CallerFilePath] string thisFile = "")
     {
         var relative = Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Mcp", fileName);
