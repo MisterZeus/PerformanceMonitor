@@ -219,11 +219,17 @@ public sealed class AnalysisPassTokenThreadingTests
 
     /// <summary>
     /// The decision #2443 asked to be made explicitly rather than assumed: what a cancelled PERSIST
-    /// means. The insert batch has no transaction, every row shares one <c>analysis_time</c>, and the
-    /// latest-findings read takes the newest <c>analysis_time</c>. So a batch cut in half does not read
-    /// as truncated; it reads as a complete analysis that found fewer problems, and the server looks
-    /// HEALTHIER for having been abandoned. The lock and the connection open are therefore the last
-    /// abandonment points: before the first row, or not at all.
+    /// means. Every row shares one <c>analysis_time</c> and the latest-findings read takes the newest
+    /// <c>analysis_time</c>, so a batch cut in half does not read as truncated; it reads as a complete
+    /// analysis that found fewer problems, and the server looks HEALTHIER for having been abandoned.
+    /// The lock and the connection open are therefore the last abandonment points: before the first
+    /// row, or not at all.
+    ///
+    /// <para>#2448 closed the other half of that. #2443 could only reason about the CANCELLATION path,
+    /// and the same truncated set was still reachable from an ordinary store fault mid-batch, where no
+    /// amount of token discipline reaches. The batch is now one transaction, so it is all-or-nothing
+    /// against a fault as well. Deliberately the same answer as the Darling twin's, pinned the same
+    /// way, because a divergence here would be a parity bug rather than a local choice.</para>
     /// </summary>
     [Fact]
     public void TheFindingInsertIsAbandonedBeforeItStartsOrNotAtAll()
@@ -242,6 +248,13 @@ public sealed class AnalysisPassTokenThreadingTests
         /* And nothing after them does. A ThrowIfCancellationRequested between rows would MAKE the
            partial set rather than prevent it, which is why there is none. */
         Assert.DoesNotContain("ThrowIfCancellationRequested", insertBatch, StringComparison.Ordinal);
+
+        /* #2448: the batch is one transaction, and the rows are enlisted in it. Both halves are pinned
+           because either alone is silently useless — a transaction the rows do not join commits nothing
+           of theirs, and enlisting in a transaction nobody commits writes nothing at all. */
+        Assert.Contains("connection.BeginTransaction();", insertBatch, StringComparison.Ordinal);
+        Assert.Contains("transaction.Commit();", insertBatch, StringComparison.Ordinal);
+        Assert.Contains("cmd.Transaction = transaction;", store, StringComparison.Ordinal);
 
         /* The row write states the decision where someone changing it will read it. */
         Assert.Contains(ExemptionMarker,

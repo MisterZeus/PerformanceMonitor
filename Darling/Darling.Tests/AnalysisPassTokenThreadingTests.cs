@@ -256,13 +256,19 @@ public sealed class AnalysisPassTokenThreadingTests
 
     /// <summary>
     /// The decision this issue asked to be made explicitly rather than assumed: what a cancelled PERSIST
-    /// means. The insert batch has no transaction (per-row failure isolation is deliberate — one bad row
-    /// logs and the batch continues), every row shares one <c>analysis_time</c>, and the latest-findings
-    /// read keys on <c>MAX(analysis_time)</c>. So a batch cut in half does not read as truncated; it reads
-    /// as a complete analysis that found fewer problems, and the server looks HEALTHIER for having been
-    /// abandoned. That is a third outcome, distinct from the timeout and the shutdown the classifier names,
-    /// and it must not exist. The connection open is therefore the last abandonment point: before the first
-    /// row, or not at all.
+    /// means. Every row shares one <c>analysis_time</c> and the latest-findings read keys on
+    /// <c>MAX(analysis_time)</c>, so a batch cut in half does not read as truncated; it reads as a
+    /// complete analysis that found fewer problems, and the server looks HEALTHIER for having been
+    /// abandoned. That is a third outcome, distinct from the timeout and the shutdown the classifier
+    /// names, and it must not exist. The connection open is therefore the last abandonment point: before
+    /// the first row, or not at all.
+    ///
+    /// <para>#2448 closed the other half of that. #2443 could only reason about the CANCELLATION path,
+    /// and the same truncated set was still reachable from an ordinary store fault mid-batch, where no
+    /// amount of token discipline reaches. The batch is now one transaction, so it is all-or-nothing
+    /// against a fault as well — which is why the between-rows assertion below is still right, but no
+    /// longer the only thing standing between a store fault and a set that understates a server. Both
+    /// halves are pinned here because they are one property.</para>
     /// </summary>
     [Fact]
     public void TheFindingInsertIsAbandonedBeforeItStartsOrNotAtAll()
@@ -278,6 +284,19 @@ public sealed class AnalysisPassTokenThreadingTests
            set rather than prevent it, which is why there is none. */
         var insertBatch = Between(store, "public async Task<List<AnalysisFinding>> InsertFindingsAsync(", "public async Task<List<AnalysisFinding>> SaveFindingsAsync(");
         Assert.DoesNotContain("ThrowIfCancellationRequested", insertBatch, StringComparison.Ordinal);
+
+        /* #2448: the batch is one transaction, and the rows are enlisted in it. Both halves are pinned
+           because either alone is silently useless — a transaction the rows do not join commits nothing
+           of theirs, and enlisting in a transaction nobody commits writes nothing at all. */
+        Assert.Contains("await connection.BeginTransactionAsync();", insertBatch, StringComparison.Ordinal);
+        Assert.Contains("await transaction.CommitAsync();", insertBatch, StringComparison.Ordinal);
+        Assert.Contains("new NpgsqlCommand(InsertFindingSql, connection, transaction)", store, StringComparison.Ordinal);
+
+        /* And the row write must not swallow. A per-row catch inside a transaction is worse than useless:
+           PostgreSQL refuses every later statement once one fails (25P02), so it buys N-k ERROR lines for
+           one event and a CommitAsync that returns normally having written nothing. */
+        var rowWrite = Between(store, "private async Task InsertFindingAsync(", "private static AnalysisFinding ReadFinding(");
+        Assert.DoesNotContain("catch", rowWrite, StringComparison.Ordinal);
 
         /* The row write states the decision where someone changing it will read it. */
         Assert.Contains(ExemptionMarker, Between(store, "/// Inserts one finding on an already-open connection", "private async Task InsertFindingAsync("), StringComparison.Ordinal);

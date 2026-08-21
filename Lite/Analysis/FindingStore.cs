@@ -7,6 +7,7 @@ using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Analysis;
 
@@ -158,20 +159,39 @@ public class FindingStore
     /// finding's persisted action round-trips byte-identically to a Darling / Dashboard one. Returns the
     /// same list for caller convenience; the in-memory findings are unchanged.
     ///
-    /// <para>#2443: the read lock and the connection open are the LAST cancellation points on this
-    /// pass, and that is a decision rather than an oversight. Past them the batch runs to completion,
-    /// because the third outcome — a half-written finding set — is worse than the one the pass
-    /// already reports. There is no transaction here, every row in a batch shares one
-    /// <c>analysis_time</c>, and <see cref="GetLatestFindingsAsync"/> reads the newest
-    /// <c>analysis_time</c> — so a batch cut in half does not read as truncated, it reads as a
-    /// complete analysis that found fewer problems. The server would look HEALTHIER for having been
-    /// abandoned, with nothing marking the set incomplete. Cancelling before the first row costs this
-    /// cycle's findings and says so; cancelling after it silently changes what the store means.</para>
+    /// <para>#2448: the transaction is what makes this method's promise true, and it is the whole
+    /// reason for the shape. A finding set is one indivisible statement about a server: every row
+    /// shares one <c>analysis_time</c>, and <see cref="GetLatestFindingsAsync"/> reads the newest
+    /// <c>analysis_time</c>. So a batch that lands four of forty rows before the store faults does
+    /// NOT read as truncated — it reads as a complete analysis that found four problems, and the
+    /// server looks HEALTHIER for the store having failed. Rolling the batch back instead leaves the
+    /// PREVIOUS pass as the newest complete set: stale, stamped with its own older
+    /// <c>analysis_time</c>, and incapable of misleading anyone. The rollback needs no explicit
+    /// call — a row that throws skips the commit and <c>DuckDBTransaction.Dispose</c> discards the
+    /// batch, measured on DuckDB.NET 1.5.5.</para>
     ///
-    /// <para>The tail is affordable to finish: N small INSERTs into an embedded file in this process.
-    /// It is not where a pass wedges. Same call the Darling twin makes, and the same call
-    /// <c>AnalysisService</c> made a layer up in #2419 — "the post-enrichment tail carries no check
-    /// on purpose" — restated at the write it protects.</para>
+    /// <para>Deliberately identical to the Darling twin, which reached it the same way; a divergence
+    /// here would be a parity bug rather than a local choice. Worth knowing when reading the loop:
+    /// once one statement in a DuckDB transaction fails, every later one is refused
+    /// ("TransactionContext Error: Current transaction is aborted") and there is no <c>SAVEPOINT</c>
+    /// to escape it — 1.5.5 does not parse the keyword — so per-row failure isolation is not
+    /// available inside a transaction on this engine even if it were wanted. It is not: a batch that
+    /// silently drops row 5 and commits the other 39 is this same defect at row granularity.
+    /// <c>Commit</c> on an already-aborted transaction also RETURNS NORMALLY while committing
+    /// nothing, on both this driver and Npgsql, so reaching the commit is never evidence of a
+    /// write.</para>
+    ///
+    /// <para>The batch is small enough for this to be free: a busy production server persists ~10
+    /// rows per pass, as small INSERTs into an embedded file in this process. Two passes on
+    /// different servers can hold open append transactions on this table at once — the read lock
+    /// admits concurrent holders — and both commit; measured, because widening the write window
+    /// under a shared lock is the one way this change could have cost something.</para>
+    ///
+    /// <para>#2443: the read lock and the connection open are still the LAST cancellation points on
+    /// this pass, unchanged by the above. Past them the batch runs to completion, and cancelling
+    /// before the first row costs this cycle's findings and says so. Same call the Darling twin
+    /// makes, and the same call <c>AnalysisService</c> made a layer up in #2419 — "the
+    /// post-enrichment tail carries no check on purpose" — restated at the write it protects.</para>
     /// </summary>
     public async Task<List<AnalysisFinding>> InsertFindingsAsync(
         List<AnalysisFinding> findings, AnalysisContext context)
@@ -186,10 +206,44 @@ public class FindingStore
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
 
-        /* No token check between rows: see the note above. Once the first row is written this batch
-           is finishing. */
-        foreach (var finding in findings)
-            await InsertFindingAsync(connection, finding);
+        /* #2448: one transaction for the whole set — the batch commits complete or not at all.
+           No token check between rows: see the note above. */
+        using var transaction = connection.BeginTransaction();
+
+        var row = 0;
+        var everyRowAccepted = false;
+
+        try
+        {
+            foreach (var finding in findings)
+            {
+                row++;
+                await InsertFindingAsync(connection, transaction, finding);
+            }
+
+            everyRowAccepted = true;
+            transaction.Commit();
+        }
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
+        {
+            /* #2448: the same line the Darling twin logs, for the same reason and in the same two
+               shapes. Without it a Lite operator gets only AnalysisService's generic "Analysis failed
+               for {server}", which cannot answer the question the issue said should decide this —
+               how often a batch actually fails partway — because it does not say a batch was even
+               involved, let alone which row.
+
+               The commit gets its own branch because `row` sits at findings.Count once the loop ends,
+               so sharing one line would report "failed at row N of N" for a commit fault and name the
+               last finding as the bad one when every row had in fact been accepted.
+
+               Logged and RETHROWN, not swallowed: letting it out is what stops AnalysisService
+               announcing a completed analysis for a set the store does not have, and it is the
+               behaviour this store has always had. Only the diagnostic is new. */
+            AppLogger.Error("AnalysisService", everyRowAccepted
+                ? $"Finding batch for {context.ServerName} had all {findings.Count} row(s) accepted and then failed to COMMIT them, so the batch was rolled back — this analysis persisted NO findings, deliberately: a partial set would have read as a complete analysis that found fewer problems. {ex.Message}"
+                : $"Finding batch for {context.ServerName} failed at row {row} of {findings.Count} and was rolled back — this analysis persisted NO findings, deliberately: a partial set would have read as a complete analysis that found fewer problems. {ex.Message}");
+            throw;
+        }
 
         return findings;
     }
@@ -427,20 +481,26 @@ WHERE server_id = $1 OR server_id IS NULL OR server_id = 0";
     }
 
     /// <summary>
-    /// Inserts one finding on an already-open connection. The caller owns the read lock
-    /// and connection, so a batch of inserts in one InsertFindingsAsync call shares a
-    /// single lock acquisition and connection.
+    /// Inserts one finding on an already-open connection, enlisted in the batch's transaction. The
+    /// caller owns the read lock, the connection and the transaction, so a batch of inserts in one
+    /// InsertFindingsAsync call shares a single lock acquisition, connection and transaction.
+    ///
+    /// <para>#2448: this throws rather than logging and continuing, and that is the point. Letting
+    /// it out skips the commit, so the batch is discarded and the pass logs its one line instead of
+    /// a line per remaining row for a single event. Continuing would not work here in any case —
+    /// DuckDB refuses every later statement once one has failed inside the transaction.</para>
     ///
     /// <para>#2443 exempt: this write deliberately takes no token. Cancelling inside a single-row
     /// INSERT buys nothing — the row is microseconds of work in-process — and costs a definite
     /// answer about whether it landed: DuckDB's cancel is <c>duckdb_interrupt</c>, so an interrupted
-    /// INSERT can leave a row that did commit, in a set nothing marks as partial.
-    /// <see cref="InsertFindingsAsync"/> carries the full reasoning and the abandonment point that
-    /// replaces this one.</para>
+    /// INSERT can leave a row that did commit. <see cref="InsertFindingsAsync"/> carries the full
+    /// reasoning and the abandonment point that replaces this one.</para>
     /// </summary>
-    private static async Task InsertFindingAsync(DuckDBConnection connection, AnalysisFinding finding)
+    private static async Task InsertFindingAsync(
+        DuckDBConnection connection, DuckDBTransaction transaction, AnalysisFinding finding)
     {
         using var cmd = connection.CreateCommand();
+        cmd.Transaction = transaction;
         cmd.CommandText = @"
 INSERT INTO analysis_findings
     (finding_id, analysis_time, server_id, server_name, database_name,
