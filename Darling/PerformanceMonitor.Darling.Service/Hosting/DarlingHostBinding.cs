@@ -397,4 +397,82 @@ internal static class DarlingHostBinding
             + "is unreachable from the LAN after this, re-run --configure-firewall once the store is up: it resolves "
             + "the effective port and moves the rule.";
     }
+
+    /* ---------------------------------------------------------------------------------------------------
+       WHERE the network block came from, and when it can change (#2479, item 6). The other half of the same
+       split #2389 made visible. A network block is loaded ONCE, at start-up, and held for the process
+       lifetime by design: exposure should require touching the host, and the DPAPI token is LocalMachine-
+       scoped so it could not live in the store anyway. That is the right design and it is not going to
+       change -- but it produces the "I enabled it and it is still loopback-bound" trap in another costume,
+       because nothing said the value was frozen the moment the process started.
+
+       #2389/#2411 fixed the seed-versus-store confusion by making the split VISIBLE rather than by removing
+       it, and #2414 did the same one layer down for the firewall port. This is that treatment applied to
+       the third face of the same object: the endpoint states plainly, at every start, whether a network
+       block was read from the file, what it decided, and that editing darling.json now changes nothing
+       until a restart. Said in BOTH modes on purpose -- the loopback line was the one that carried no
+       mention of the block at all, and loopback-when-you-expected-LAN is precisely the state an operator
+       is trying to diagnose.
+       --------------------------------------------------------------------------------------------------- */
+
+    /// <summary>
+    /// PURE: the one-line start-up statement of where <c>{section}.network</c> came from and when it can
+    /// change. <paramref name="section"/> is the darling.json object name and the CLI verb suffix at once
+    /// ("mcp" -&gt; mcp.network / --enable-mcp), which is what keeps the two hosts' wordings from drifting.
+    ///
+    /// <para>Three states, three different consequences, and only the true one is emitted. A single line
+    /// claiming "restart to apply" would be wrong for an endpoint already serving the LAN exactly as
+    /// configured, which is the likeliest state and the one where a spurious call to action costs the most
+    /// credibility.</para>
+    /// </summary>
+    /// <param name="section">"mcp" or "web" - the darling.json object name.</param>
+    /// <param name="surface">"MCP" or "Web dashboard" - how the log names this endpoint elsewhere.</param>
+    /// <param name="blockConfigured">A <c>{section}.network</c> block was present in the file.</param>
+    /// <param name="exposed">This endpoint actually bound a LAN address as a result.</param>
+    /// <param name="listen">The bound address, when exposed.</param>
+    /// <param name="allowFrom">The source CIDR, when exposed.</param>
+    internal static string DescribeNetworkBlockLifetime(
+        string section,
+        string surface,
+        bool blockConfigured,
+        bool exposed,
+        string? listen,
+        string? allowFrom)
+    {
+        /* Common to all three: what CAN be changed without a restart, so naming what cannot does not read
+           as "this endpoint is immovable". The control plane really does stop and rebind this server
+           live -- it just cannot touch these three fields. */
+        var storeHalf =
+            $" The control plane still owns whether this endpoint runs and on which port "
+            + $"(config.config_service.{section}_enabled / {section}_port, moved by --enable-{section} / "
+            + $"--disable-{section} or the Viewer's Settings, and applied without a restart) - it simply "
+            + "cannot move where this binds, who may reach it, or what token it requires.";
+
+        if (!blockConfigured)
+        {
+            return $"{surface} network exposure: darling.json has no {section}.network block, so this endpoint is "
+                + "loopback-only. Adding one is a FILE edit that takes effect on the next service RESTART; there "
+                + "is no store setting and no Viewer control that can expose it."
+                + storeHalf;
+        }
+
+        if (exposed)
+        {
+            return $"{surface} network exposure: {section}.network was read from darling.json at start-up and is "
+                + $"FIXED for the lifetime of this process - LAN-bound on {listen} for {allowFrom}, behind the "
+                + "configured token, until the service is RESTARTED. Editing darling.json now changes nothing "
+                + "until then."
+                + storeHalf;
+        }
+
+        /* The trap, named. An operator who edited the block and restarted nothing sees this and has their
+           answer; one who DID restart is pointed at the fail-closed reason already logged above rather than
+           being told the same thing twice in different words. */
+        return $"{surface} network exposure: darling.json DEFINES {section}.network, but this endpoint is bound "
+            + "loopback-only. That block was read at start-up and is FIXED for the lifetime of this process, so "
+            + "editing darling.json now changes nothing until the service is RESTARTED. If you just edited it to "
+            + $"expose this endpoint, restart the service; if you already restarted, the {section}.network line "
+            + "logged above says why the exposure was refused."
+            + storeHalf;
+    }
 }

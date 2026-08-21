@@ -76,6 +76,16 @@ public static class DarlingCliCommands
     public static bool IsPrintViewerConnectionVerb(string arg) =>
         string.Equals(arg, "--print-viewer-connection", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The verb <see cref="PrintMcpTokenAsync"/> handles — reprint the MCP bearer token (#2479, item 2).</summary>
+    public static bool IsPrintMcpTokenVerb(string arg) =>
+        string.Equals(arg, "--print-mcp-token", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The verb <see cref="PrintWebTokenAsync"/> handles — reprint the web dashboard access token.
+    /// The issue asked for the MCP half; both tokens have the identical unrecoverable-loss problem and the
+    /// identical DPAPI shape, so shipping one and not the other would leave half a fix behind.</summary>
+    public static bool IsPrintWebTokenVerb(string arg) =>
+        string.Equals(arg, "--print-web-token", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The verb <see cref="ExportViewerConfigAsync"/> handles — write a COMPLETE viewer darling.json +
     /// server.crt + README.txt an operator copies to the viewer machine as-is (#1953).</summary>
     public static bool IsExportViewerConfigVerb(string arg) =>
@@ -158,6 +168,8 @@ public static class DarlingCliCommands
         IsEncryptPasswordVerb(arg)
         || IsValidateConfigVerb(arg)
         || IsPrintViewerConnectionVerb(arg)
+        || IsPrintMcpTokenVerb(arg)
+        || IsPrintWebTokenVerb(arg)
         || IsExportViewerConfigVerb(arg)
         || IsConfigureNetworkVerb(arg)
         || IsConfigureFirewallVerb(arg)
@@ -232,6 +244,8 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --test-connection   Validate darling.json and probe every configured server." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --encrypt-password  Encrypt a SQL-auth password for darling.json (reads stdin)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --print-viewer-connection   Print a remote-viewer connection string (managed store)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --print-mcp-token   Reprint the MCP bearer token from darling.json (run elevated; writes a LIVE token to stdout)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --print-web-token   Reprint the web dashboard access token from darling.json (run elevated; writes a LIVE token to stdout)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --export-viewer-config [dir] [--config <path>]  Write a ready-to-copy viewer folder (darling.json + server.crt + README.txt)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --configure-network Interactive LAN-exposure wizard." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --configure-firewall  Create/remove the scoped firewall rules to match darling.json (run elevated)." + Environment.NewLine +
@@ -415,6 +429,177 @@ public static class DarlingCliCommands
             output.WriteLine(certificate);
         }
 
+        return 0;
+    }
+
+    /* ---------------------------------------------------------------------------------------------------
+       REPRINTING AN ENDPOINT TOKEN (#2479, item 2).
+
+       --configure-network shows each generated token's plaintext exactly once. Lose it and the only path
+       was regeneration, which invalidates every client already configured against it - so one mislaid
+       token during UAT meant re-onboarding every consumer of that endpoint. That is an unrecoverable
+       mistake made out of a recoverable one, and the recovery costs nothing to provide.
+
+       WHAT THIS DISCLOSES, checked rather than assumed. Nothing new. darling.json stores the token as a
+       DarlingSecrets blob: DPAPI, DataProtectionScope.LocalMachine, with the entropy constant
+       "PerformanceMonitor.Darling.v1" compiled into an OPEN-SOURCE binary. LocalMachine scope means any
+       process on this box can Unprotect it, and the entropy is not a secret because it is published in
+       this repository. So the whole of this verb is four lines of PowerShell to anyone holding the file.
+
+       WHICH IS WHY THE ELEVATION GATE IS NOT A CONFIDENTIALITY BOUNDARY, and this comment says so rather
+       than letting the code imply otherwise. install-darling.ps1 and DarlingFileSecurity deliberately grant
+       INTERACTIVE *read* on darling.json - the Viewer and these very CLI verbs are run by the interactive
+       operator - so an ordinary logged-on user who is NOT an administrator can already read the blob and
+       decrypt it. The gate is worth having for what it actually does: it keeps the verb consistent with the
+       other endpoint verbs that carry "(run elevated)", it stops a script or a shared shell picking a live
+       credential up in passing, and it makes reprinting a deliberate act. The token's real protection is
+       the file's ACL, and it always was.
+
+       Emission follows --print-viewer-connection's posture exactly (D8): every warning on STDERR, ahead of
+       any STDOUT payload, so redirecting STDOUT to an ACL'd file or the clipboard captures the token
+       WITHOUT swallowing the warning. The field report on that verb watched a live password scroll past
+       and only then saw the redirect advice, which is precisely backwards.
+       --------------------------------------------------------------------------------------------------- */
+
+    /// <summary>Reprints the MCP bearer token from <c>mcp.network</c>. See the block above for the
+    /// disclosure analysis. Returns 0 when a token was printed, 1 otherwise.</summary>
+    [SupportedOSPlatform("windows")]
+    public static int PrintMcpTokenAsync(string? configPath, TextWriter output, TextWriter error)
+    {
+        DarlingConfig config;
+        try
+        {
+            config = DarlingConfig.Load(configPath);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not load configuration: {ex.Message}");
+            return 1;
+        }
+
+        var network = config.Mcp.Network;
+        return PrintEndpointToken(
+            "mcp",
+            "MCP bearer",
+            "--print-mcp-token",
+            "Remote MCP clients send it as the header:  Authorization: Bearer <token>",
+            IsElevated(),
+            network is not null && network.IsConfigured,
+            () => network!.ResolveToken(out _),
+            output,
+            error);
+    }
+
+    /// <summary>Reprints the web dashboard access token from <c>web.network</c>. Returns 0 when a token was
+    /// printed, 1 otherwise.</summary>
+    [SupportedOSPlatform("windows")]
+    public static int PrintWebTokenAsync(string? configPath, TextWriter output, TextWriter error)
+    {
+        DarlingConfig config;
+        try
+        {
+            config = DarlingConfig.Load(configPath);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not load configuration: {ex.Message}");
+            return 1;
+        }
+
+        var network = config.Web.Network;
+        return PrintEndpointToken(
+            "web",
+            "web dashboard access",
+            "--print-web-token",
+            "A remote browser presents it once via ?token=... and gets a session cookie back.",
+            IsElevated(),
+            network is not null && network.IsConfigured,
+            () => network!.ResolveToken(out _),
+            output,
+            error);
+    }
+
+    /// <summary>
+    /// The shared body. Split out so the elevation refusal, the disclosure warning and the redirect advice
+    /// are written once and cannot drift between the two endpoints - the same reason
+    /// <c>DescribeToggleOverride</c> takes a section name rather than existing twice.
+    ///
+    /// <para><paramref name="elevated"/> is passed IN rather than measured here, the same way the pure alert
+    /// gates take <c>nowUtc</c>: it makes both branches - the refusal and the disclosure - drivable in a test
+    /// on any runner, elevated or not. A verb whose refusal path is only exercised when the CI agent happens
+    /// to be unprivileged is a refusal nobody has checked.</para>
+    /// </summary>
+    internal static int PrintEndpointToken(
+        string section,
+        string tokenName,
+        string verb,
+        string howClientsPresentIt,
+        bool elevated,
+        bool configured,
+        Func<string?> resolveToken,
+        TextWriter output,
+        TextWriter error)
+    {
+        if (!elevated)
+        {
+            error.WriteLine($"{verb} needs an ELEVATED PowerShell.");
+            error.WriteLine();
+            error.WriteLine("It reprints a live credential, so it is a deliberate act rather than something a script or a");
+            error.WriteLine("shared shell picks up in passing.");
+            error.WriteLine();
+            error.WriteLine("Be clear about what this gate is NOT, though: darling.json grants INTERACTIVE read on purpose");
+            error.WriteLine("(the Viewer and these CLI verbs are run by the interactive operator), and the token is DPAPI-");
+            error.WriteLine("protected at LocalMachine scope with an entropy constant published in this project's source.");
+            error.WriteLine("Anyone who can log on to this box interactively can already decrypt it without this verb. The");
+            error.WriteLine("token's protection is the FILE'S ACL - keep darling.json restricted, and run --harden-files if");
+            error.WriteLine("you are not sure it still is.");
+            return 1;
+        }
+
+        if (!configured)
+        {
+            error.WriteLine($"darling.json has no {section}.network block, so there is no {tokenName} token to print.");
+            error.WriteLine($"Run --configure-network to create one (it generates the token and shows it once).");
+            return 1;
+        }
+
+        string? token;
+        try
+        {
+            token = resolveToken();
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not read the {tokenName} token: {ex.Message}");
+            error.WriteLine(
+                $"A DPAPI blob only decrypts on the machine that produced it, so a {section}.network.encryptedToken "
+                + "copied from another host can never be read here - regenerate it with --configure-network.");
+            return 1;
+        }
+
+        if (string.IsNullOrEmpty(token))
+        {
+            error.WriteLine($"{section}.network is configured but carries no token, so this endpoint is not LAN-exposed.");
+            error.WriteLine("Run --configure-network to generate one.");
+            return 1;
+        }
+
+        /* Every stderr line before the payload (D8), so a STDOUT redirect keeps the token and still shows
+           the warning. */
+        error.WriteLine();
+        error.WriteLine(
+            $"WARNING: the {tokenName} token below is written to STDOUT as PLAINTEXT. It gates ALL network access to "
+            + $"this endpoint. Redirect it to an ACL'd file or pipe it to the clipboard; do not leave it in shell "
+            + "scrollback, CI logs, or a screenshare.");
+        error.WriteLine($"  Example (file):      PerformanceMonitor.Darling.Service.exe {verb} > token.txt");
+        error.WriteLine($"  Example (clipboard): PerformanceMonitor.Darling.Service.exe {verb} | clip");
+        error.WriteLine($"  {howClientsPresentIt}");
+        error.WriteLine(
+            "  If this token has actually LEAKED, reprinting it is not the fix: --configure-network generates a new "
+            + "one, which invalidates every client already configured against the old one.");
+        error.WriteLine();
+
+        output.WriteLine(token);
         return 0;
     }
 

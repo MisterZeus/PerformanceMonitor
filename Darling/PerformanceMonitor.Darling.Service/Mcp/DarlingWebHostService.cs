@@ -516,6 +516,16 @@ public sealed class DarlingWebHostService : BackgroundService
                     effectivePort, origin);
             }
 
+            /* #2479 item 6: the network block is read ONCE and held for the process lifetime by design.
+               Say so at every start, in BOTH modes - the loopback line above never mentioned the block at
+               all, and loopback-when-you-expected-LAN is exactly the state being diagnosed. */
+            _logger.LogInformation(
+                "{Report}",
+                DarlingHostBinding.DescribeNetworkBlockLifetime(
+                    "web", "Web dashboard", config.Web.Network.IsConfigured, networkMode,
+                    networkMode ? primaryBind.ToString() : null,
+                    networkMode ? allowedCidr.ToString() : null));
+
             /* StartAsync, not RunAsync: the supervisor loop owns the wait — the app keeps serving until
                StopServerAsync (toggle-off, port change, or shutdown). */
             await _app.StartAsync(stoppingToken);

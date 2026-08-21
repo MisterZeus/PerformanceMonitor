@@ -93,6 +93,33 @@ if (args.Length > 0 && DarlingCliCommands.IsPrintViewerConnectionVerb(args[0]))
     return await DarlingCliCommands.PrintViewerConnectionAsync(configPath, Console.Out, Console.Error, CancellationToken.None);
 }
 
+/* CLI verbs: --print-mcp-token / --print-web-token (#2479 item 2) — reprint an endpoint's access token from
+   darling.json. --configure-network shows each generated token once; losing it used to leave regeneration as
+   the only path, which invalidates every client already configured against it. The verbs refuse when not
+   elevated, and both are Windows-only for the same reason --print-viewer-connection is: the token is a DPAPI
+   blob. The reasoning about what this does and does NOT disclose lives with the implementation. */
+if (args.Length > 0 && DarlingCliCommands.IsPrintMcpTokenVerb(args[0]))
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        Console.Error.WriteLine("--print-mcp-token requires Windows (DPAPI).");
+        return 1;
+    }
+
+    return DarlingCliCommands.PrintMcpTokenAsync(args.Length > 1 ? args[1] : null, Console.Out, Console.Error);
+}
+
+if (args.Length > 0 && DarlingCliCommands.IsPrintWebTokenVerb(args[0]))
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        Console.Error.WriteLine("--print-web-token requires Windows (DPAPI).");
+        return 1;
+    }
+
+    return DarlingCliCommands.PrintWebTokenAsync(args.Length > 1 ? args[1] : null, Console.Out, Console.Error);
+}
+
 /* CLI verb: --export-viewer-config (#1953) — write the viewer machine's whole handoff folder (a complete
    darling.json with "managed": false and the resolved connection string, the store's server.crt beside it, and
    a README.txt documenting every field) instead of making the operator hand-merge --print-viewer-connection's

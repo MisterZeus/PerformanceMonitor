@@ -1141,6 +1141,8 @@ Add a `network` block to `mcp` (managed mode; `mcp.enabled` must be `true`):
 
 When `listen` is a network address **and** a token is present **and** `allowFrom` is a valid CIDR, the MCP host binds that interface behind two gates: a **required bearer token** (checked first, constant-time, no loopback exemption) and an **in-app CIDR check** on the remote address (loopback is always allowed, so local clients keep working). Any missing precondition keeps MCP loopback-only. Prefer `encryptedToken` (a DPAPI blob from `--encrypt-password`); a plaintext `token` works for dev but is warned. Set the same scoped firewall rule for the MCP port:
 
+**Lost the token?** `--print-mcp-token` (elevated) reprints it from `darling.json` — `--print-web-token` does the same for the dashboard. Both write the live token to **STDOUT** with every warning on STDERR, so `... --print-mcp-token | clip` captures the value and still shows the warning. This discloses nothing new: the blob is DPAPI at `LocalMachine` scope with an entropy constant published in this repository, and `darling.json` grants `INTERACTIVE` read by design (see [Security & Least-Privilege Roles](#security--least-privilege-roles)), so anyone who can log on to the host interactively could already decrypt it. The elevation requirement makes reprinting a deliberate act; the token's actual protection is the file's ACL. If the token has **leaked** rather than been mislaid, reprinting is not the fix — `--configure-network` generates a new one, and every client configured against the old one must be updated.
+
 ```
 New-NetFirewallRule -DisplayName "Darling MCP" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5152 -RemoteAddress 192.168.1.0/24
 ```
