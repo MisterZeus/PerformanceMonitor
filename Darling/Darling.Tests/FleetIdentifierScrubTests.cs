@@ -33,8 +33,15 @@ public sealed class FleetIdentifierScrubTests
         "test", "sample", "example", "demo", "fake", "dummy", "placeholder",
     };
 
+    /*
+        No leading \b. A name often follows an escape in a C# literal --
+        "servers:\nprod-..." -- and in the SOURCE TEXT the n of \n is a word character, so a
+        leading boundary fails at exactly the spot a hostname does occur. The scrub this guard
+        backs missed a name that way. The second segment is loose for the same reason: the
+        fleet has a pg-* store as well as use[0-9] ones.
+    */
     private static readonly Regex InstanceName = new(
-        @"\b(?:prod|stage|staging|dev|qa|uat)-[a-z]+-use[0-9]-(?<slug>[a-z0-9]+)-[0-9]+\b",
+        @"(?:prod|stage|staging|dev|qa|uat)-[a-z]+-[a-z0-9]+-(?<slug>[a-z0-9]+)-[0-9]+\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     [Fact]
