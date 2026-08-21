@@ -20,6 +20,7 @@ using System.Windows.Interop;
 using PerformanceMonitor.Notifications;
 using System.Windows.Threading;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite;

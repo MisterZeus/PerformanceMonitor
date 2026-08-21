@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
- * This file is part of the SQL Server Performance Monitor Lite.
+ * This file is part of the SQL Server Performance Monitor.
  *
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
@@ -12,7 +12,7 @@ using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
-namespace PerformanceMonitorLite.Services;
+namespace PerformanceMonitor.Common;
 
 /// <summary>
 /// What a read of settings.json found. Telling <see cref="Absent"/> from <see cref="Unreadable"/> is the
@@ -47,6 +47,17 @@ public readonly record struct SettingsFileRead(
     string? Problem);
 
 /// <summary>
+/// The outcome of <see cref="SettingsFileGuard.ReadObject{T}"/>, for a store that round-trips a whole
+/// object rather than merging a document key by key. <c>Value</c> is non-null only for
+/// <see cref="SettingsFileState.Readable"/>; the caller supplies its own defaults for the other two
+/// states, and must tell them apart before deciding whether to say anything about it.
+/// </summary>
+public readonly record struct SettingsObjectRead<T>(
+    SettingsFileState State,
+    T? Value,
+    string? Problem) where T : class;
+
+/// <summary>
 /// The outcome of <see cref="SettingsFileGuard.RootForWrite"/>. <c>Problem</c> is null on the ordinary
 /// paths (the file parsed, or there was no file). When it is set, <c>QuarantinedTo</c> says where the
 /// unreadable original was copied — and a null there means the copy could not be made, which the caller
@@ -58,13 +69,32 @@ public readonly record struct SettingsWriteRoot(
     string? QuarantinedTo);
 
 /// <summary>
-/// The one place that decides whether settings.json can be read, and what to do about it when it cannot
-/// (#2425).
+/// The outcome of <see cref="SettingsFileGuard.PermitReplace"/>: whether a store that REPLACES the whole
+/// file is allowed to go ahead. <c>Allowed</c> is false in exactly one situation — the file could not be
+/// read AND could not be copied aside — and it must be honoured, because the write it is refusing would
+/// be the last event in the life of a configuration nobody ever managed to read.
+/// </summary>
+public readonly record struct SettingsReplacePermit(
+    bool Allowed,
+    string? Problem,
+    string? QuarantinedTo);
+
+/// <summary>
+/// The one place that decides whether a JSON settings file can be read, and what to do about it when it
+/// cannot (#2425, #2434).
 ///
 /// <para>Kept free of WPF, of the logger and of any process-wide state on purpose. Every decision that
 /// matters here — absent versus unreadable, what the user is told about a parse error, whether a Save is a
 /// merge or a replacement, whether the old file is preserved first — is a pure function of a path and a
 /// clock, which is what makes it testable without a UI thread on a platform that can run the suite.</para>
+///
+/// <para>It lives in Common rather than in Lite because #2434 found the identical defect in the Darling
+/// viewer's two stores, and the half that matters — classify, then copy aside before replacing — is the
+/// half that is genuinely common. What differs is only the shape of the document above it: Lite merges a
+/// <see cref="JsonObject"/> key by key (<see cref="RootForWrite"/>), while the viewer round-trips a whole
+/// object through <see cref="JsonSerializer"/> and REPLACES the file (<see cref="ReadObject{T}"/> and
+/// <see cref="PermitReplace"/>). Mirroring this class into the viewer instead would have meant two copies
+/// of the quarantine rule, which is exactly the drift that produced the second instance.</para>
 /// </summary>
 public static class SettingsFileGuard
 {
@@ -82,34 +112,15 @@ public static class SettingsFileGuard
     /// </summary>
     public static SettingsFileRead Read(string settingsPath)
     {
-        if (string.IsNullOrWhiteSpace(settingsPath) || !File.Exists(settingsPath))
+        var text = ReadText(settingsPath, out var state, out var problem);
+        if (state != SettingsFileState.Readable)
         {
-            return new SettingsFileRead(SettingsFileState.Absent, null, null, null);
-        }
-
-        string text;
-        try
-        {
-            text = File.ReadAllText(settingsPath);
-        }
-        catch (Exception ex)
-        {
-            /* A locked, denied or truncated file is unreadable in exactly the sense that matters: we do
-               not know what it says, so it must not be replaced. */
-            return new SettingsFileRead(SettingsFileState.Unreadable, null, null, Describe(ex));
-        }
-
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            /* Reported rather than treated as absent. There is nothing to preserve in an empty file, but
-               there IS something to explain: settings that were there yesterday are gone today, and an
-               interrupted write is the likeliest reason. */
-            return new SettingsFileRead(SettingsFileState.Unreadable, null, text, "the file is empty");
+            return new SettingsFileRead(state, null, text, problem);
         }
 
         try
         {
-            var node = JsonNode.Parse(text);
+            var node = JsonNode.Parse(text!);
             if (node is JsonObject root)
             {
                 return new SettingsFileRead(SettingsFileState.Readable, root, text, null);
@@ -225,6 +236,123 @@ public static class SettingsFileGuard
         }
 
         return new SettingsWriteRoot(new JsonObject(), read.Problem, Quarantine(settingsPath, timestamp));
+    }
+
+    /// <summary>
+    /// <see cref="Read"/> for a store whose file is one serialized value rather than a document to merge
+    /// into: classifies the file, and when there is text to work with deserializes it to
+    /// <typeparamref name="T"/>.
+    ///
+    /// <para>The typed deserialize is inside the guard rather than in front of it because it can fail on a
+    /// file that is perfectly good JSON — one key holding a value of the wrong shape, a quoted number where
+    /// an int belongs. That file is unreadable in every sense the caller cares about, and the caller cares
+    /// because the next Save replaces it.</para>
+    ///
+    /// <para>Deliberately does NOT apply <see cref="Read"/>'s "the root must be an object" rule, and the
+    /// distinction is load-bearing rather than pedantic: that rule exists because a merge has nothing to
+    /// merge into otherwise, and the viewer's server registry is a legitimate JSON ARRAY. Borrowing the
+    /// rule here would have declared every healthy registry unreadable and quarantined a copy of it on
+    /// every add, edit and favourite toggle. The typed deserialize is the right judge of whether the file
+    /// says what this caller reads — for a settings object an array still fails, and for a
+    /// <c>List&lt;T&gt;</c> an object still fails.</para>
+    /// </summary>
+    public static SettingsObjectRead<T> ReadObject<T>(string settingsPath, JsonSerializerOptions? options = null)
+        where T : class
+    {
+        var text = ReadText(settingsPath, out var state, out var problem);
+        if (state != SettingsFileState.Readable)
+        {
+            return new SettingsObjectRead<T>(state, null, problem);
+        }
+
+        try
+        {
+            var value = JsonSerializer.Deserialize<T>(text!, options);
+
+            /* The JSON literal null parses and deserializes to null. Reported, because it is the shape that
+               reads as "nothing was configured" to a caller that only null-checks, and the consequence of
+               believing that is a file replaced from defaults. */
+            return value is null
+                ? new SettingsObjectRead<T>(SettingsFileState.Unreadable, null,
+                    "the file holds the JSON literal null rather than the settings it should")
+                : new SettingsObjectRead<T>(SettingsFileState.Readable, value, null);
+        }
+        catch (Exception ex) when (ex is JsonException or NotSupportedException or ArgumentException)
+        {
+            return new SettingsObjectRead<T>(SettingsFileState.Unreadable, null, Describe(ex));
+        }
+    }
+
+    /// <summary>
+    /// <see cref="RootForWrite"/>'s twin for a store that REPLACES the file instead of merging into it.
+    /// There is no document to hand back — the caller already holds the object it means to serialize — so
+    /// the only question left is whether writing it is allowed to destroy what is there now.
+    ///
+    /// <para>An absent or readable file is a plain yes: nothing is lost, because a first run has nothing
+    /// to lose and a readable file's contents are what the caller loaded in the first place. An unreadable
+    /// one is copied aside first, and the answer is yes only if that copy exists. A caller that ignores a
+    /// no and writes anyway has just done the thing this whole class exists to prevent.</para>
+    /// </summary>
+    public static SettingsReplacePermit PermitReplace<T>(
+        string settingsPath,
+        DateTime timestamp,
+        JsonSerializerOptions? options = null)
+        where T : class
+    {
+        /* Generic in T, and re-reading rather than being told, so that the question asked here is exactly
+           the question the store's own Load asks: can this file still be read as what is about to replace
+           it? A permit that judged the file by some other standard would either quarantine healthy files
+           or wave through the destruction of one it never understood. */
+        var read = ReadObject<T>(settingsPath, options);
+
+        if (read.State != SettingsFileState.Unreadable)
+        {
+            return new SettingsReplacePermit(true, null, null);
+        }
+
+        var quarantinedTo = Quarantine(settingsPath, timestamp);
+        return new SettingsReplacePermit(quarantinedTo is not null, read.Problem, quarantinedTo);
+    }
+
+    /// <summary>
+    /// Everything both readers agree on before the JSON matters: no file is Absent and silent, a file that
+    /// will not come off disk is Unreadable, and an empty one is Unreadable rather than Absent — there is
+    /// nothing to preserve in an empty file but there IS something to explain, since the settings that were
+    /// there yesterday are gone today and an interrupted write is the likeliest reason.
+    /// </summary>
+    private static string? ReadText(string settingsPath, out SettingsFileState state, out string? problem)
+    {
+        if (string.IsNullOrWhiteSpace(settingsPath) || !File.Exists(settingsPath))
+        {
+            state = SettingsFileState.Absent;
+            problem = null;
+            return null;
+        }
+
+        string text;
+        try
+        {
+            text = File.ReadAllText(settingsPath);
+        }
+        catch (Exception ex)
+        {
+            /* A locked, denied or truncated file is unreadable in exactly the sense that matters: we do
+               not know what it says, so it must not be replaced. */
+            state = SettingsFileState.Unreadable;
+            problem = Describe(ex);
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            state = SettingsFileState.Unreadable;
+            problem = "the file is empty";
+            return text;
+        }
+
+        state = SettingsFileState.Readable;
+        problem = null;
+        return text;
     }
 
     /* System.Text.Json appends " Path: $ | LineNumber: 41 | BytePositionInLine: 6." to its parse messages.
