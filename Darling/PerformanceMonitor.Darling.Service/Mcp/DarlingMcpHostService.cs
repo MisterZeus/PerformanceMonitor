@@ -721,7 +721,15 @@ public sealed class DarlingMcpHostService : BackgroundService
 
                 _app.Use(async (context, next) =>
                 {
-                    if (!IsBearerTokenAuthorized(context.Request.Headers.Authorization.ToString(), token))
+                    /* Materialized once: StringValues.ToString() allocates, and the refusal path below needs
+                       the same header again to tell "no credential" from "wrong credential" (review catch on
+                       #2479). IsBearerTokenAuthorized keeps taking the raw header rather than returning what
+                       it parsed - its signature is pinned by DarlingMcpHostTests and DarlingHostBindingTests,
+                       and threading a result type through it to save one parse on an ALREADY-REFUSED request
+                       is not a trade worth making. */
+                    var authorization = context.Request.Headers.Authorization.ToString();
+
+                    if (!IsBearerTokenAuthorized(authorization, token))
                     {
                         /* Presented-or-not, never the value. Which of the two it is IS the operator's next
                            step - an absent header is a client that was never configured, a wrong one is a
@@ -730,7 +738,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                         refusals.Report(
                             _logger, "MCP", DarlingRefusalGate.Token, StatusCodes.Status401Unauthorized,
                             context.Connection.RemoteIpAddress,
-                            ExtractBearerToken(context.Request.Headers.Authorization.ToString()) is null
+                            ExtractBearerToken(authorization) is null
                                 ? "no 'Authorization: Bearer <token>' header was presented"
                                 : "the presented bearer token does not match mcp.network.encryptedToken",
                             DateTime.UtcNow);
