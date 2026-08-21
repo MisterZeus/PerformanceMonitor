@@ -397,4 +397,97 @@ public sealed class DarlingHostBindingTests
         Assert.Contains("PROVISIONAL", fromFile, StringComparison.Ordinal);
         Assert.NotEqual(fromStore, fromFile);
     }
+
+    /* ---- #2414: which plane named the port a FIREWALL rule is scoped to ---- */
+
+    /// <summary>
+    /// The defect itself. The port lives inside the rule's DisplayName, so a rule named from darling.json on a
+    /// box whose store has moved the port is not a mis-scoped rule, it is a DIFFERENT rule: the served port stays
+    /// shut and an inbound allow rule sits on a port with no listener. The disclosure has to carry both numbers,
+    /// name the column that won, and state that consequence — an operator staring at blocked LAN clients reads
+    /// this line and has to be able to stop looking at the CIDR and the token.
+    /// </summary>
+    [Fact]
+    public void DescribeFirewallPortAuthority_StoreDisagreesWithTheFile_NamesBothPortsAndTheCost()
+    {
+        var toggle = DarlingHostBinding.ResolveEndpointToggle((true, 5199), fileEnabled: true, filePort: 5152);
+        var report = DarlingHostBinding.DescribeFirewallPortAuthority(toggle, "mcp", "MCP", filePort: 5152, storeUnavailableReason: null);
+
+        Assert.Contains("port 5199", report, StringComparison.Ordinal);
+        Assert.Contains("CONTROL PLANE", report, StringComparison.Ordinal);
+        Assert.Contains("config.config_service.mcp_port", report, StringComparison.Ordinal);
+        Assert.Contains("mcp.port = 5152", report, StringComparison.Ordinal);
+        /* Both halves of the cost, because the second one is the security half and is the less obvious. */
+        Assert.Contains("closed to the LAN", report, StringComparison.Ordinal);
+        Assert.Contains("nothing is listening on", report, StringComparison.Ordinal);
+    }
+
+    /// <summary>When the planes agree the line is a CONFIRMATION, not silence: a verb that opens a port should
+    /// say on whose authority it picked one every time, so the absence of the disagreement wording is evidence
+    /// the authoritative read happened rather than evidence of nothing.</summary>
+    [Fact]
+    public void DescribeFirewallPortAuthority_PlanesAgree_ConfirmsTheReadWithoutCryingWolf()
+    {
+        var toggle = DarlingHostBinding.ResolveEndpointToggle((true, 5152), fileEnabled: true, filePort: 5152);
+        var report = DarlingHostBinding.DescribeFirewallPortAuthority(toggle, "mcp", "MCP", filePort: 5152, storeUnavailableReason: null);
+
+        Assert.Contains("port 5152", report, StringComparison.Ordinal);
+        Assert.Contains("confirmed against the control plane", report, StringComparison.Ordinal);
+        Assert.DoesNotContain("could NOT read", report, StringComparison.Ordinal);
+        Assert.DoesNotContain("WRONG port", report, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The store-unreachable case, which is the one with a security cost if it goes quiet. --configure-firewall
+    /// runs elevated at install time, before the store exists, so it CANNOT require one — but a silent fall back
+    /// to darling.json is how the wrong rule got recreated on every run in the first place. So the line must name
+    /// the port it used, the reason it could do no better, and the state in which that port is wrong.
+    /// </summary>
+    [Fact]
+    public void DescribeFirewallPortAuthority_StoreUnreadable_SaysWhichPortItUsed_WhyAndWhenThatIsWrong()
+    {
+        var toggle = DarlingHostBinding.ResolveEndpointToggle(published: null, fileEnabled: true, filePort: 5152);
+        var report = DarlingHostBinding.DescribeFirewallPortAuthority(
+            toggle, "mcp", "MCP", filePort: 5152, storeUnavailableReason: "the store did not answer within 10 seconds");
+
+        Assert.Contains("could NOT read the control plane", report, StringComparison.Ordinal);
+        Assert.Contains("the store did not answer within 10 seconds", report, StringComparison.Ordinal);
+        Assert.Contains("mcp.port = 5152", report, StringComparison.Ordinal);
+        Assert.Contains("FIRST-RUN", report, StringComparison.Ordinal);
+        Assert.Contains("WRONG port", report, StringComparison.Ordinal);
+        /* And the way out, because this verb is the one an operator is told to re-run. */
+        Assert.Contains("--configure-firewall", report, StringComparison.Ordinal);
+    }
+
+    /// <summary>A missing reason must not silently become an empty parenthesis that reads like "no problem".</summary>
+    [Fact]
+    public void DescribeFirewallPortAuthority_StoreUnreadableWithNoReasonGiven_StillAdmitsItDoesNotKnow()
+    {
+        var toggle = DarlingHostBinding.ResolveEndpointToggle(published: null, fileEnabled: true, filePort: 5152);
+        var report = DarlingHostBinding.DescribeFirewallPortAuthority(toggle, "mcp", "MCP", filePort: 5152, storeUnavailableReason: null);
+
+        Assert.Contains("reason unknown", report, StringComparison.Ordinal);
+    }
+
+    /// <summary>web is the byte-identical twin of mcp on this seam, and shares the resolver: one section
+    /// argument drives the file key, the store column and the CLI verb, which is what keeps the two surfaces'
+    /// wordings from drifting apart the way their ports did.</summary>
+    [Fact]
+    public void DescribeFirewallPortAuthority_WebSurface_NamesTheWebKeysAndVerbs()
+    {
+        var overridden = DarlingHostBinding.DescribeFirewallPortAuthority(
+            DarlingHostBinding.ResolveEndpointToggle((true, 5188), fileEnabled: true, filePort: 5153),
+            "web", "web dashboard", filePort: 5153, storeUnavailableReason: null);
+
+        Assert.Contains("config.config_service.web_port", overridden, StringComparison.Ordinal);
+        Assert.Contains("web.port = 5153", overridden, StringComparison.Ordinal);
+        Assert.DoesNotContain("mcp", overridden, StringComparison.Ordinal);
+
+        var fallback = DarlingHostBinding.DescribeFirewallPortAuthority(
+            DarlingHostBinding.ResolveEndpointToggle(published: null, fileEnabled: true, filePort: 5153),
+            "web", "web dashboard", filePort: 5153, storeUnavailableReason: "no credential");
+
+        Assert.Contains("--enable-web", fallback, StringComparison.Ordinal);
+        Assert.DoesNotContain("--enable-mcp", fallback, StringComparison.Ordinal);
+    }
 }
