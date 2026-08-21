@@ -792,6 +792,24 @@ public sealed class DarlingMcpHostService : BackgroundService
                     effectivePort, origin);
             }
 
+            /* #2479 item 6: the network block is read ONCE and held for the process lifetime by design.
+               Say so at every start, in BOTH modes - the loopback line above never mentioned the block at
+               all, and loopback-when-you-expected-LAN is exactly the state being diagnosed.
+
+               The null-conditional is load-bearing, not defensive. config.Mcp.Network is McpNetworkConfig?
+               and is NULL on the default secure config - no mcp.network block at all - which is exactly the
+               state this line exists to describe. The dereferences at 313/317 are safe because they sit
+               inside if (networkMode), where the bind resolution has already proven a block exists; this
+               one runs unconditionally, so a bare .IsConfigured throws on every start of an un-exposed
+               server, gets swallowed by the catch below, and retry-fails forever because the config never
+               changes. Review catch on #2479. */
+            _logger.LogInformation(
+                "{Report}",
+                DarlingHostBinding.DescribeNetworkBlockLifetime(
+                    "mcp", "MCP", config.Mcp.Network?.IsConfigured ?? false, networkMode,
+                    networkMode ? primaryBind.ToString() : null,
+                    networkMode ? allowedCidr.ToString() : null));
+
             /* StartAsync, not RunAsync (#1560): the supervisor loop owns the wait — the app keeps
                serving until StopServerAsync (toggle-off, port change, or shutdown). */
             await _app.StartAsync(stoppingToken);
