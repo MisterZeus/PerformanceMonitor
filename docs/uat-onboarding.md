@@ -501,7 +501,8 @@ and `get_store_metrics`, which is store-wide and has no per-server home.
 heatmap, three of the four Performance Trends charts, the blocking-duration and deadlock-severity statistics,
 the lock-wait / waiting-task / blocked-session trends, and the raw collection log (the web Collection Health
 tab shows the 7-day rollup, not the log). The daily summary is the current UTC day's roll-up, not the viewer's
-month calendar.
+month calendar. That list is tracked as [#2484](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2484) — the data is all already collected, so each item is a missing
+endpoint rather than missing collection, and each is absent from the MCP surface for the same reason.
 
 **Desktop things a web imitation would be worse than.** No graphical plan viewer, no query heatmap, no
 block-chain reconstruction and no interactive deadlock graph — the Blocking tab hands you the captured
