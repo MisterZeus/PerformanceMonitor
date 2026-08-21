@@ -513,7 +513,8 @@ Add a `network` block to `web` in `darling.json` (managed mode only), or let `--
 `darling.json` keeps only the DPAPI blob and there is no verb that prints it back. Bring your own instead if
 you prefer, and encrypt it with `--encrypt-password`. A plaintext `"token"` works and is warned about.
 
-**The block is file-authoritative and read once at service start.** After editing it:
+**The block is file-authoritative and read once at service start.** After editing it, from an **elevated**
+PowerShell:
 
 ```powershell
 Restart-Service 'PerformanceMonitor Darling'
@@ -626,7 +627,7 @@ Add a `network` block to `mcp` (managed mode only, and `mcp.enabled` must be on)
 
 Same rules as the web block: file-authoritative, **read once at service start**, fail-closed, and the token is
 DPAPI at LocalMachine scope so it must be produced on that box. `--configure-network` will generate and encrypt
-one for you and print the plaintext once.
+one for you and print the plaintext once. Then, from an **elevated** PowerShell:
 
 ```powershell
 Restart-Service 'PerformanceMonitor Darling'
