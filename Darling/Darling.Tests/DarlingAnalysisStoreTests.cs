@@ -222,12 +222,12 @@ public sealed class DarlingAnalysisStoreTests
            to null without touching any server (Lite's ServerManager-miss semantics). */
         var resolved = false;
         var fetcher = new PgPlanFetcher(_ => { resolved = true; return null; });
-        Assert.Null(await fetcher.FetchPlanXmlAsync(TestServerId, "0x0600FF00"));
+        Assert.Null(await fetcher.FetchPlanXmlAsync(TestServerId, "0x0600FF00", TestContext.Current.CancellationToken));
         Assert.True(resolved);
 
         /* An empty plan handle short-circuits before the resolver is consulted. */
         resolved = false;
-        Assert.Null(await fetcher.FetchPlanXmlAsync(TestServerId, ""));
+        Assert.Null(await fetcher.FetchPlanXmlAsync(TestServerId, "", TestContext.Current.CancellationToken));
         Assert.False(resolved);
     }
 

@@ -3947,8 +3947,11 @@ LIMIT 1", connection);
                 JsonError($"server '{displayName}' is not currently connected — the live plan cache can only be read from a connected server"));
         }
 
+        /* #2443: both arms now take the SAME token. The by-sql_handle arm always had it; the
+           by-plan_handle arm did not, so a cancelled fetch_plan command kept a session open on the
+           monitored server for whichever key the caller happened to use. */
         var planXml = request.UsePlanHandle
-            ? await planFetcher.FetchPlanXmlAsync(serverId, request.PlanHandle!)
+            ? await planFetcher.FetchPlanXmlAsync(serverId, request.PlanHandle!, cancellationToken)
             : await planFetcher.FetchPlanBySqlHandleAsync(
                 serverId, request.DatabaseName, request.SqlHandle!,
                 request.StatementStartOffset, request.StatementEndOffset, cancellationToken);
