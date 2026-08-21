@@ -273,11 +273,18 @@ public sealed class McpHealthTools
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
+        /* Same shared row-cap contract as Darling's twin: reject out of range, do not silently clamp. */
+        var invalidLimit = McpHelpers.ValidateTop(limit);
+        if (invalidLimit != null) return invalidLimit;
+
         try
         {
             var hours = Math.Abs(hours_back);
-            var cap = Math.Clamp(limit, 1, 5000);
-            var rows = await dataService.GetRecentCollectionLogAsync(resolved.ServerId, hours, maxRows: cap);
+
+            /* Over-fetch by one so truncation is observed, not inferred -- see Darling's twin. */
+            var rows = await dataService.GetRecentCollectionLogAsync(resolved.ServerId, hours, maxRows: limit + 1);
+            var truncated = rows.Count > limit;
+            if (truncated) rows = rows.Take(limit).ToList();
 
             if (rows.Count == 0)
             {
@@ -323,7 +330,7 @@ public sealed class McpHealthTools
                 server = resolved.ServerName,
                 hours_back = hours,
                 run_count = rows.Count,
-                truncated = rows.Count >= cap,
+                truncated,
                 runs = result,
             }, McpHelpers.JsonOptions);
         }

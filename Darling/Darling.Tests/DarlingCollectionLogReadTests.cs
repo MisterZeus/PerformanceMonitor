@@ -116,6 +116,20 @@ public sealed class DarlingCollectionLogReadTests
             Assert.Equal(1, cappedRoot.GetProperty("run_count").GetInt32());
             Assert.True(cappedRoot.GetProperty("truncated").GetBoolean());
 
+            /*
+                And it does NOT announce itself when the window simply holds exactly the cap. Comparing
+                the row count to the limit cannot separate those two, so the read over-fetches by one and
+                reports what it observed. Two rows, cap of two: full, but nothing beyond it.
+            */
+            var exact = await DarlingMcpDataTools.GetCollectionLog(dataSource, ServerName, 24, 2);
+            var exactRoot = JsonDocument.Parse(exact).RootElement;
+            Assert.Equal(2, exactRoot.GetProperty("run_count").GetInt32());
+            Assert.False(exactRoot.GetProperty("truncated").GetBoolean());
+
+            /* ── 5. an out-of-range cap is refused, not silently clamped ── */
+            var tooBig = await DarlingMcpDataTools.GetCollectionLog(dataSource, ServerName, 24, 5000);
+            Assert.Contains("Must be a positive integer", tooBig, StringComparison.Ordinal);
+
             bodySucceeded = true;
         }
         finally

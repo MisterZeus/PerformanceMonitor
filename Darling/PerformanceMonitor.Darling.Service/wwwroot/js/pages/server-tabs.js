@@ -969,16 +969,15 @@ export const SERVER_TABS = [
          the rollup aggregates seven days into one row per collector, and no projection of it can give
          back the individual runs. This is the tab people reach for when the rollup says HEALTHY and
          collection still looks wrong, and until now the WPF viewer was the only way to it. */
-      {
-        read: "get_collection_log",
-        params: { server, hours: ctx.hours, limit: 200 },
-        title: "Collection Log",
-        subtitle: "individual runs, newest first, over the selected window",
-        viz: "table",
-        rowsKey: "runs",
-        columns: COLLECTION_LOG_COLUMNS,
-        emptyText: "No collector runs in the selected window.",
-      },
+      table(
+        "Collection Log",
+        "get_collection_log",
+        { server, hours: ctx.hours, limit: 200 },
+        "runs",
+        COLLECTION_LOG_COLUMNS,
+        "individual runs, newest first, over the selected window",
+        "No collector runs in the selected window.",
+      ),
     ],
   },
 ];

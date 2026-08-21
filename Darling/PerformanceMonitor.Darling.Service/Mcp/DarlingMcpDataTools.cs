@@ -1056,12 +1056,23 @@ public sealed class DarlingMcpDataTools
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
+        /* The shared row-cap contract every sibling read uses: rejects out of range rather than
+           silently clamping, so a caller asking for 5000 is told no instead of quietly given 1000. */
+        var invalidLimit = McpHelpers.ValidateTop(limit);
+        if (invalidLimit != null) return invalidLimit;
+
         try
         {
             var end = DateTime.UtcNow;
             var start = end.AddHours(-Math.Abs(hours_back));
+
+            /* Over-fetch by one so truncation is OBSERVED rather than inferred. Comparing count to the
+               cap cannot tell a window holding exactly `limit` runs from one holding more, and this
+               read's whole premise is that the cap announces itself instead of being guessed at. */
             var rows = await DarlingDataReader.GetCollectionLogAsync(
-                postgres, resolved.ServerId, start, end, Math.Clamp(limit, 1, 5000));
+                postgres, resolved.ServerId, start, end, limit + 1);
+            var truncated = rows.Count > limit;
+            if (truncated) rows = rows.Take(limit).ToList();
 
             if (rows.Count == 0)
             {
@@ -1107,11 +1118,8 @@ public sealed class DarlingMcpDataTools
                 server = resolved.ServerName,
                 hours_back = Math.Abs(hours_back),
                 run_count = rows.Count,
-                /*
-                    Says outright that the cap bit, rather than leaving a caller to infer it by
-                    counting rows against a limit they may not have set themselves.
-                */
-                truncated = rows.Count >= Math.Clamp(limit, 1, 5000),
+                /* Observed by the over-fetch above, not inferred from the row count. */
+                truncated,
                 runs = result,
             }, McpHelpers.JsonOptions);
         }
