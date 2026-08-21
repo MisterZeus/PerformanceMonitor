@@ -54,6 +54,14 @@ public sealed class DarlingCollectionLogReadTests
 
         await using var dataSource = NpgsqlDataSource.Create(cs!);
 
+        /*
+            The cleanup runs on its OWN connection, not this body's. A teardown on the body's
+            connection throws out of the finally and REPLACES the exception already in flight, so a
+            failing test reports its cleanup error instead of its own -- and it is the body's failure
+            that closed the connection in the first place. LiveStoreCleanup is the enforced route.
+        */
+        var bodySucceeded = false;
+
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
@@ -107,10 +115,13 @@ public sealed class DarlingCollectionLogReadTests
             var cappedRoot = JsonDocument.Parse(capped).RootElement;
             Assert.Equal(1, cappedRoot.GetProperty("run_count").GetInt32());
             Assert.True(cappedRoot.GetProperty("truncated").GetBoolean());
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, ct);
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
         }
     }
 

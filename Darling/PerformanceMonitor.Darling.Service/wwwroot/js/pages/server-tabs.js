@@ -942,7 +942,7 @@ export const SERVER_TABS = [
   {
     id: "health",
     label: "Collection Health",
-    build: (server) => [
+    build: (server, ctx) => [
       /* One read, three panels. get_collection_health rolls up seven days of collector logs AND computes sweep
          pressure; these are three slices of that single payload, so three descriptors meant running the tab's
          heaviest query three times to open it. */
@@ -971,13 +971,13 @@ export const SERVER_TABS = [
          collection still looks wrong, and until now the WPF viewer was the only way to it. */
       {
         read: "get_collection_log",
-        params: { server, hours_back: 24, limit: 200 },
+        params: { server, hours: ctx.hours, limit: 200 },
         title: "Collection Log",
-        subtitle: "individual runs, newest first, trailing 24 hours",
+        subtitle: "individual runs, newest first, over the selected window",
         viz: "table",
         rowsKey: "runs",
         columns: COLLECTION_LOG_COLUMNS,
-        emptyText: "No collector runs in the last 24 hours.",
+        emptyText: "No collector runs in the selected window.",
       },
     ],
   },

@@ -40,11 +40,12 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
 {
     /* ---------------- ungated: tool-surface pin ---------------- */
 
-    /// <summary>The fourteen data-read tool names, ordinal-sorted — the same names Lite and the Dashboard
+    /// <summary>The sixteen data-read tool names, ordinal-sorted — the same names Lite and the Dashboard
     /// expose, so MCP clients see one consistent product.</summary>
     private static readonly string[] DataToolSurface =
     {
         "get_collection_health",
+        "get_collection_log",
         "get_cpu_utilization",
         "get_file_io_stats",
         "get_memory_clerks",
@@ -67,7 +68,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         .ToArray();
 
     [Fact]
-    public void ToolSurface_ExactlyTheFifteenDataTools()
+    public void ToolSurface_ExactlyTheSixteenDataTools()
     {
         var toolMethods = ToolMethods();
 
@@ -526,7 +527,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     }
 
     [Fact]
-    public void AdvertisedSchema_IsGeminiClean_ForAllFifteenDataTools()
+    public void AdvertisedSchema_IsGeminiClean_ForAllSixteenDataTools()
     {
         var tools = BuildDataToolSchemas();
         Assert.Equal(15, tools.Count);
