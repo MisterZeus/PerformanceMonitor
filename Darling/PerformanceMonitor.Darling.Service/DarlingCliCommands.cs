@@ -2726,9 +2726,10 @@ public static class DarlingCliCommands
        #2436 followed the same read one step further, into what the verb is entitled to DO with it. The store
        row carries an enable flag as well as a port, so a surface the control plane has switched off gets its
        rule removed rather than opened — the posture --disable-mcp already had, which this verb used to undo on
-       every upgrade (see DescribeDisabledSurface). And when the read FAILS, the verb keeps creating the file's
-       rule but stops removing this surface's rules on other ports, because that removal's whole justification
-       is knowing which port is live (see FirewallRulePlan.SweepOtherPorts).
+       every upgrade (see DescribeDisabledSurface). And when the read FAILS, the verb stops removing a
+       LAN-exposed surface's existing rules at all — neither the port nor the enable flag is knowable then, and
+       both are ways to end up deleting the rule the endpoint is actually being served on. It still creates the
+       file's rule, which is what a fresh install needs (see FirewallRulePlan.SweepOtherPorts).
        ================================================================================================ */
 
     /// <summary>What <c>--configure-firewall</c> will do to one surface's rule.</summary>
@@ -2750,11 +2751,21 @@ public static class DarlingCliCommands
     /// sweeps every port of the surface and does not depend on picking the right one.
     /// <para><paramref name="SweepOtherPorts"/> (#2436) is permission to remove this surface's rules on ports
     /// OTHER than <paramref name="Port"/>. That sweep is how a rule stranded by a port change gets collected,
-    /// and its whole justification is that the sweeper knows which port is live — so it is withheld on exactly
-    /// one combination: an Open plan whose port came from darling.json's seed because the store could not be
-    /// read. There, every other port is equally likely to be the port the endpoint is actually serving, and
-    /// removing it would close a working LAN surface to collect a rule that might not be stale at all. A
-    /// Remove plan always sweeps: "no rule on any port" needs no knowledge of which port is live.</para></summary>
+    /// and its whole justification is that the sweeper knows what this surface is actually doing — so it is
+    /// withheld on exactly one combination: a surface darling.json exposes on the LAN, on a run that could not
+    /// read the control plane. There, BOTH store-backed values are a guess. The port may have moved, so another
+    /// port's rule may be the live one; and <c>mcp_enabled</c> may have been turned on with <c>--enable-mcp</c>
+    /// or in the Viewer, which never writes back to darling.json — so the file's <c>enabled = false</c> may be
+    /// years stale and the surface may be serving right now. Either way the wildcard would delete the rule the
+    /// endpoint is being served on, which is the outage this whole change exists to prevent. Nothing is exposed
+    /// by deferring: the store is unreadable because the service is stopped, so no Darling endpoint is
+    /// listening on any port until a run that CAN read the control plane is possible again.</para>
+    /// <para>The other half is certain and always sweeps. Whether a surface is network-exposed at all is
+    /// decided by <c>mcp.network</c> / <c>web.network</c>, which are FILE-ONLY and have no config_service
+    /// equivalent by design (#2389) — the control plane can switch an exposed surface off, never switch an
+    /// unexposed one on. So a bind that resolves loopback-only is loopback-only whatever the store would have
+    /// said, no rule belongs on any port, and collecting them needs no knowledge this run is missing. Same for
+    /// the store surface, whose <c>postgres.port</c> has no config_service column to disagree with it.</para></summary>
     public readonly record struct FirewallRulePlan(
         string Surface, string RuleName, int Port, FirewallRuleAction Action, string? Cidr, string? Note, string? PortNote,
         bool SweepOtherPorts = true);
@@ -2823,7 +2834,11 @@ public static class DarlingCliCommands
             mcpOpen
                 ? DarlingHostBinding.DescribeFirewallPortAuthority(mcpToggle, "mcp", "MCP", config.Mcp.Port, storeUnavailableReason)
                 : null,
-            SweepOtherPorts: !mcpOpen || mcpToggle.Origin == DarlingHostBinding.EndpointToggleOrigin.ControlPlane));
+            /* NOT !mcpOpen: a Remove reached because the FILE said disabled is exactly as much a guess as a
+               stale port, because --enable-mcp and the Viewer write only the store. mcpExposed is the half
+               that is certain — network.* is file-only, so the control plane can never expose what the file
+               does not. */
+            SweepOtherPorts: !mcpExposed || mcpToggle.Origin == DarlingHostBinding.EndpointToggleOrigin.ControlPlane));
 
         var webToggle = DarlingHostBinding.ResolveEndpointToggle(webStore, config.Web.Enabled, config.Web.Port);
         var webBind = DarlingWebHostService.ResolveWebBind(config.Web, managed);
@@ -2843,7 +2858,7 @@ public static class DarlingCliCommands
             webOpen
                 ? DarlingHostBinding.DescribeFirewallPortAuthority(webToggle, "web", "web dashboard", config.Web.Port, storeUnavailableReason)
                 : null,
-            SweepOtherPorts: !webOpen || webToggle.Origin == DarlingHostBinding.EndpointToggleOrigin.ControlPlane));
+            SweepOtherPorts: !webExposed || webToggle.Origin == DarlingHostBinding.EndpointToggleOrigin.ControlPlane));
 
         return plans;
     }
@@ -3207,10 +3222,15 @@ public static class DarlingCliCommands
             }
             else
             {
-                output.WriteLine(
-                    $"{plan.Surface}: leaving any rule on another port ALONE. This run could not read the control " +
-                    "plane, so it cannot tell a rule stranded by a port change from the rule the endpoint is " +
-                    "actually being served on — re-run --configure-firewall with the service up to collect it.");
+                output.WriteLine(plan.Action == FirewallRuleAction.Open
+                    ? $"{plan.Surface}: leaving any rule on ANOTHER port alone. This run could not read the control " +
+                      "plane, so it cannot tell a rule stranded by a port change from the rule the endpoint is " +
+                      "actually being served on — re-run --configure-firewall with the service up to collect it."
+                    : $"{plan.Surface}: leaving this surface's existing rules alone rather than removing them. " +
+                      "darling.json exposes this endpoint and says it is switched off, but the --enable-* verbs and " +
+                      "the Viewer write only the control plane, which this run could not read — so that off may be " +
+                      "stale and the rule may be the one the endpoint is being served on. Nothing is listening while " +
+                      "the service is stopped; re-run --configure-firewall with it up to reconcile.");
             }
 
             if (plan.Action == FirewallRuleAction.Remove)

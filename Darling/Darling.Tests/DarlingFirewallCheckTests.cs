@@ -548,6 +548,65 @@ public class DarlingFirewallCheckTests
 
         /* No port note: this plan opened nothing, so it made no port decision to disclose. */
         Assert.Null(mcp.PortNote);
+
+        /* And it does NOT sweep — see the test below, which is the reason. */
+        Assert.False(mcp.SweepOtherPorts);
+    }
+
+    /// <summary>
+    /// Caught in review on the first cut of this change, and it is the same outage arriving through the other
+    /// field. Enabling MCP is a store-only write by design (#2389) — <c>--enable-mcp</c> and the Viewer never
+    /// write back to darling.json — so on a long-lived box the file's <c>mcp.enabled = false</c> is not a
+    /// statement about anything, it is just the seed nobody edited. Read that as "off" on a run that could not
+    /// reach the control plane, and the plan becomes a Remove; let a Remove sweep unconditionally, on the
+    /// reasoning that "no rule on any port" needs no knowledge of which port is live, and the wildcard deletes
+    /// the rule for the port the endpoint IS serving on. install-darling.ps1 runs this verb with the service
+    /// stopped, so that is the upgrade path, not a corner.
+    /// <para>The fix is not "never sweep on a fallback": whether a surface is exposed at ALL is
+    /// <c>mcp.network</c>, which is file-only and which the control plane can only ever switch OFF. So the
+    /// sweep is withheld for exactly the surfaces the file exposes, and the loopback cases below keep it.</para>
+    /// </summary>
+    [Fact]
+    public void PlanFirewallRules_StoreUnreadable_DoesNotSweepAwayARuleTheControlPlaneMayBeServingOn()
+    {
+        var config = ManagedConfig();
+        config.Mcp.Enabled = false;   /* the untouched seed — --enable-mcp wrote the store, not this */
+        config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
+
+        var mcp = Assert.Single(
+            DarlingCliCommands.PlanFirewallRules(config, storeUnavailableReason: "the store did not answer within 10 seconds")
+                .Where(p => p.Surface == "MCP"));
+
+        Assert.Equal(DarlingCliCommands.FirewallRuleAction.Remove, mcp.Action);
+        Assert.False(mcp.SweepOtherPorts);
+
+        /* The web twin has the identical shape and the identical hole. */
+        var webConfig = ManagedConfig();
+        webConfig.Web.Enabled = false;
+        webConfig.Web.Network = new WebNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
+
+        Assert.False(
+            Assert.Single(
+                DarlingCliCommands.PlanFirewallRules(webConfig, storeUnavailableReason: "the store did not answer within 10 seconds")
+                    .Where(p => p.Surface == "web dashboard"))
+                .SweepOtherPorts);
+    }
+
+    /// <summary>
+    /// The other side of that fix, and the reason it is not simply "never sweep on a fallback". A surface the
+    /// file does not expose on the LAN is loopback-only whatever the store would have said — <c>mcp.network</c>
+    /// has no config_service equivalent, by the #2389 design, precisely so that exposure requires touching the
+    /// host. So no rule belongs on any port, that conclusion needs nothing this run could not read, and the
+    /// installer keeps collecting rules left behind by an exposure that was removed from darling.json.
+    /// </summary>
+    [Fact]
+    public void PlanFirewallRules_ALoopbackSurfaceAlwaysSweeps_BecauseNetworkExposureIsFileOnly()
+    {
+        var plans = DarlingCliCommands.PlanFirewallRules(
+            ManagedConfig(), storeUnavailableReason: "the store did not answer within 10 seconds");
+
+        Assert.All(plans, p => Assert.Equal(DarlingCliCommands.FirewallRuleAction.Remove, p.Action));
+        Assert.All(plans, p => Assert.True(p.SweepOtherPorts));
     }
 
     /// <summary>
