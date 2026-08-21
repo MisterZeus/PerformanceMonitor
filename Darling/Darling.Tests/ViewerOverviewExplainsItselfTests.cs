@@ -60,6 +60,11 @@ public sealed class ViewerOverviewExplainsItselfTests
     private static ServerSummaryItem Awaiting(string name = "a1", int id = 5) =>
         new() { DisplayName = name, ServerId = id, IsOnline = null, AwaitingFirstCollection = true };
 
+    /// <summary>The pair StatusDisplay renders as "Unknown": freshness was never classified. ApplyFreshness
+    /// cannot produce it, but a fixture or a future data path can, which is the whole point of pinning it.</summary>
+    private static ServerSummaryItem UnknownStatus(string name = "u1", int id = 6) =>
+        new() { DisplayName = name, ServerId = id, IsOnline = null, AwaitingFirstCollection = false };
+
     // ── The card explains itself ───────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -129,6 +134,32 @@ public sealed class ViewerOverviewExplainsItselfTests
     }
 
     /// <summary>
+    /// Every arm of <c>StatusDisplay</c> has a matching arm here. The one that does not follow from the band is
+    /// "Unknown" — <c>IsOnline</c> null with no first-collection marker — where <c>ClassifyBand</c> falls through
+    /// to the metrics and, on an otherwise clean card, lands on Healthy. A tooltip hanging off the word "Unknown"
+    /// and reading "Healthy" is the same defect as the silence it replaced, so the two are pinned in lockstep.
+    /// Raised in review on #2429; unreachable through <c>ApplyFreshness</c> today, which is why it needs a pin
+    /// rather than a bug report.
+    /// </summary>
+    [Fact]
+    public void TheCardsTooltip_NeverContradictsAnUnknownStatus()
+    {
+        var unknown = UnknownStatus();
+
+        Assert.Equal("Unknown", unknown.StatusDisplay);
+        Assert.StartsWith("Unknown — no collection status for this server", unknown.StatusTooltip, StringComparison.Ordinal);
+        Assert.DoesNotContain("Healthy", unknown.StatusTooltip, StringComparison.Ordinal);
+
+        /* An unknown card with a genuinely bad metric still gets the metric named — the status word being
+           unknown is not a reason to withhold the one thing that IS known. */
+        var unknownAndBusy = UnknownStatus();
+        unknownAndBusy.CpuPercent = 96;
+
+        Assert.Contains("CPU 96%", unknownAndBusy.StatusTooltip, StringComparison.Ordinal);
+        Assert.DoesNotContain("Needs attention", unknownAndBusy.StatusTooltip, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The sidebar alert badge's tooltip is the shape being followed — the breakdown, then how to act on it — so
     /// every card tooltip ends on the gesture that gets the reader to the detail. "How can I resolve this warning"
     /// was the other half of the report.
@@ -136,7 +167,7 @@ public sealed class ViewerOverviewExplainsItselfTests
     [Fact]
     public void TheCardsTooltip_EndsWithHowToActOnIt()
     {
-        foreach (var card in new[] { Healthy(), Busy(), Stale(), Offline(), Awaiting() })
+        foreach (var card in new[] { Healthy(), Busy(), Stale(), Offline(), Awaiting(), UnknownStatus() })
         {
             var tooltip = FleetRollup.BuildStatusTooltip(card);
 

@@ -417,28 +417,48 @@ public sealed class FleetRollup
     {
         ArgumentNullException.ThrowIfNull(s);
 
+        return Headline(s) + "\n" + CardTooltipAction;
+    }
+
+    /// <summary>
+    /// The tooltip's first line: what this card's state IS, in the words the card's own status line uses,
+    /// followed by the reason when there is one to give. Every arm of <see cref="ServerSummaryItem.StatusDisplay"/>
+    /// has a match here — a tooltip that hangs off a word and then contradicts it is the defect this change
+    /// exists to remove, not a smaller version of it.
+    /// </summary>
+    private static string Headline(ServerSummaryItem s)
+    {
+        /* Offline and awaiting-first-collection come back from BuildReason as whole sentences that already
+           name the state, so putting a band label in front would only say "Offline" twice. */
+        if (s.IsOnline == false || s.AwaitingFirstCollection)
+        {
+            return BuildReason(s);
+        }
+
         var band = ClassifyBand(s);
+
+        /* The status word carries one arm the band does not: IsOnline null with no first-collection marker
+           renders "Unknown", while ClassifyBand falls straight through to the metrics and can land on Healthy.
+           ApplyFreshness never leaves a card in that pair today, so this is a lockstep guard rather than a
+           live defect — but the tooltip hangs off the word itself, and "Healthy" beside "Unknown" is exactly
+           the contradiction being fixed. Raised in review on #2429. */
+        if (s.IsOnline is null)
+        {
+            return band == FleetHealthBand.Healthy
+                ? UnknownStatus
+                : $"{UnknownStatus}; {BuildReason(s)}";
+        }
 
         /* A healthy card has no reason to give. BuildReason's "Needs attention" fallback is written for a
            ranking that only ever holds problem servers; the card grid shows EVERY server, so reusing the
            fallback here would tell a green card the opposite of the truth. */
-        var body = band == FleetHealthBand.Healthy
+        return band == FleetHealthBand.Healthy
             ? "Healthy — every metric on this card is inside its threshold"
-            : DescribeBand(band, s);
-
-        return body + "\n" + CardTooltipAction;
+            : $"{ServerHealthClassifier.BandLabel(band)} — {BuildReason(s)}";
     }
 
-    /// <summary>The band label in front of the reason — except for the two states whose reason is already a
-    /// whole sentence naming them, where the label would only say "Offline" twice.</summary>
-    private static string DescribeBand(FleetHealthBand band, ServerSummaryItem s)
-    {
-        var reason = BuildReason(s);
-
-        return s.IsOnline == false || s.AwaitingFirstCollection
-            ? reason
-            : $"{ServerHealthClassifier.BandLabel(band)} — {reason}";
-    }
+    /// <summary>The words behind StatusDisplay's "Unknown" — a card whose freshness was never classified.</summary>
+    private const string UnknownStatus = "Unknown — no collection status for this server";
 
     /// <summary>
     /// The problem servers among the Overview's cards — band != Healthy — kept in the order the caller handed
