@@ -160,11 +160,18 @@ function vizStat(data, desc) {
   );
 }
 
-/* line: desc = { rowsKey, xKey, series:[{key,label,color?}], format? } */
+/* line: desc = { rowsKey, xKey, series:[{key,label,color?}], format?, emptyText? } */
 function vizLine(data, desc) {
   const seriesCfg = Array.isArray(desc.series) ? desc.series : [];
   if (!seriesCfg.length) return emptyStrip(NO_FIELDS_MSG);
   const points = getPath(data, desc.rowsKey) || [];
+  /* ZERO points is a different statement from ONE point, and only the descriptor knows which sentence is true.
+     renderLineChart says "Not enough data points to chart yet" below two rows, which is right while collection is
+     warming up and wrong for a read whose empty array means the thing simply did not happen: get_blocking_trend
+     and get_deadlock_trend return `trend: []` with no {status,message} envelope on an idle server, so a healthy
+     server got a warming-up message about a condition it never had. A descriptor's emptyText wins at exactly
+     zero; the one-point case still falls through, because there the chart's own sentence IS the true one. */
+  if (!points.length && desc.emptyText) return emptyStrip(desc.emptyText);
   const series = seriesCfg.map((s, i) => ({
     key: s.key,
     label: s.label,
