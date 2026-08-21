@@ -401,8 +401,10 @@ is to open **Settings**: a read-only seat shows
 > `This viewer is connected with a read-only role. Monitoring settings below are shown for reference but can't
 > be changed from here.`
 
-Elsewhere you will see disabled buttons with tooltips, a `— read-only seat` window-title suffix, or a status
-line saying which write is blocked.
+Elsewhere you will see disabled buttons with tooltips, or a status line saying which write is blocked. Some
+dialogs say it in their own title bar — Database State Overrides appends `(read-only seat — changes cannot
+be saved)` — but **the main window does not**, so there is no one place to look. That is a known gap rather
+than something you are missing: see Part 6.
 
 **How to change it.** On a managed store this is a config change, not a `GRANT` — the `admin` role and its
 credential already exist, provisioned on every service start:
