@@ -741,6 +741,20 @@
                                 <!-- Header -->
                                 <DockPanel Margin="0,0,0,10">
                                     <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                                        <!-- #2424: the needs-attention filter over the card grid below. It sits
+                                             beside Sort because it is the same kind of thing — a view control over
+                                             the same cards — and it lives in the roll-up header, which is docked and
+                                             never scrolls away, so an active filter can never be off screen while the
+                                             grid it shrank is on it. The count beside it (set in ApplyOverviewCardFilter)
+                                             is what stops a filtered grid reading as an unfiltered one. -->
+                                        <CheckBox x:Name="OverviewAttentionOnlyCheck" Content="Needs attention only"
+                                                  FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0"
+                                                  ToolTip="Show only the cards that are not Healthy — Critical, Warning, Offline, or awaiting a first collection. Uncheck to show the whole fleet again."
+                                                  Checked="OverviewAttentionOnlyCheck_Changed"
+                                                  Unchecked="OverviewAttentionOnlyCheck_Changed"/>
+                                        <TextBlock x:Name="OverviewAttentionCountText" FontSize="11" VerticalAlignment="Center"
+                                                   Foreground="{DynamicResource WarningBrush}" Margin="0,0,14,0"
+                                                   Visibility="Collapsed"/>
                                         <TextBlock Text="Sort:" FontSize="11" VerticalAlignment="Center"
                                                    Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,6,0"/>
                                         <ComboBox x:Name="OverviewSortSelector" Width="120" VerticalAlignment="Center"
@@ -859,9 +873,34 @@
                                         </DataTemplate>
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
-                                <TextBlock x:Name="FleetAdditionalProblemsText" Text="{Binding AdditionalProblemText}"
-                                           FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"
-                                           Margin="17,2,0,0" Visibility="Collapsed"/>
+                                <!-- #2424: the overflow line is the way TO the overflow, not a report that it
+                                     exists. It was a bare TextBlock: on a 57-server fleet it read "+52 more need
+                                     attention" and the reporter's question was literally "where do I find these?".
+                                     Clicking it turns on the needs-attention card filter, so the answer is the grid
+                                     immediately below, with every metric row those 52 servers have. Underlined and
+                                     Cursor=Hand because a line that navigates has to look like one. -->
+                                <Border x:Name="FleetAdditionalProblems" HorizontalAlignment="Left"
+                                        Cursor="Hand" Padding="2,1" CornerRadius="3"
+                                        Margin="15,2,0,0" Visibility="Collapsed"
+                                        ToolTip="Show only the servers that need attention"
+                                        MouseLeftButtonUp="FleetAdditionalProblems_Click">
+                                    <!-- The hover idiom is the Needs Attention row's, a few lines up: a
+                                         transparent Border that lights on IsMouseOver. Same gesture, same
+                                         feedback, so the overflow line reads as one more thing you can click. -->
+                                    <Border.Style>
+                                        <Style TargetType="Border">
+                                            <Setter Property="Background" Value="Transparent"/>
+                                            <Style.Triggers>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter Property="Background" Value="{DynamicResource ViewerHoverBrush}"/>
+                                                </Trigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Border.Style>
+                                    <TextBlock x:Name="FleetAdditionalProblemsText" Text="{Binding AdditionalProblemText}"
+                                               FontSize="11" TextDecorations="Underline"
+                                               Foreground="{DynamicResource AccentBrush}"/>
+                                </Border>
                                 <TextBlock x:Name="FleetAllHealthyText" Text="{Binding AllHealthyText}"
                                            FontSize="12" Foreground="{DynamicResource SuccessBrush}" Margin="0,0,0,2" Visibility="Collapsed"/>
                             </StackPanel>
@@ -889,9 +928,17 @@
                                                     <TextBlock Text="{Binding DisplayName}" FontSize="16" FontWeight="SemiBold"
                                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                                     <Ellipse Width="10" Height="10" Fill="{Binding StatusBrush}"
+                                                             ToolTip="{Binding StatusTooltip}"
                                                              HorizontalAlignment="Right" VerticalAlignment="Center"/>
                                                 </DockPanel>
+                                                <!-- #2422: the status line carries the reason it is that colour. The
+                                                     card already computed the sentence (FleetRollup.BuildReason, from
+                                                     these very metric rows) and spent it only on the Needs Attention
+                                                     ranking. Background=Transparent is load-bearing: a TextBlock with a
+                                                     null Background hit-tests on its glyphs alone, so the tooltip would
+                                                     appear over the letters and nowhere between them. -->
                                                 <TextBlock Text="{Binding StatusDisplay}" Foreground="{Binding StatusBrush}"
+                                                           Background="Transparent" ToolTip="{Binding StatusTooltip}"
                                                            FontSize="11" Margin="0,0,0,10"/>
                                                 <!-- Tag pills (#2008 2a): each server's tags as coloured chips.
                                                      Collapsed when the server carries no tags so untagged cards
