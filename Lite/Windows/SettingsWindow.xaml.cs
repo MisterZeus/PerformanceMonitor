@@ -256,29 +256,37 @@ public partial class SettingsWindow : Window
     private async void SaveButton_Click(object sender, RoutedEventArgs e)
     {
         JsonNode root;
+        bool mcpChanged, mcpValid, alertsValid, webhooksValid;
+
+        /* The read AND every mutator, under one catch. Before the consolidation each writer carried its
+           own try, so an exception thrown while BUILDING a value -- not just on the disk I/O -- was caught,
+           logged under that one setting, and the remaining writers still ran. Guarding only the read and
+           the write would have left the nine mutators between them unguarded, so an unexpected throw would
+           escape into App's generic "An error occurred" dispatcher dialog instead of the honest answer this
+           method now owes the user. Nothing was written in that case either, and that is what to say. */
         try
         {
             root = App.SettingsRootForWrite();
+
+            (mcpChanged, mcpValid) = await SaveMcpSettingsAsync(root);
+            SaveDefaultTimeRange(root);
+            SaveConnectionTimeout(root);
+            SaveCsvSeparator(root);
+            SaveColorTheme(root);
+            SaveTimeDisplayMode(root);
+            SaveCheckForUpdates(root);
+            alertsValid = SaveAlertSettings(root);
+            SaveSmtpSettings(root);
+            webhooksValid = SaveWebhookSettings(root);
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Settings", $"Failed to save settings: {ex.Message}");
+            AppLogger.Error("Settings", "Failed to save settings", ex);
             MessageBox.Show(
                 $"Nothing was saved.\n\n{ex.Message}",
                 "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
-
-        var (mcpChanged, mcpValid) = await SaveMcpSettingsAsync(root);
-        SaveDefaultTimeRange(root);
-        SaveConnectionTimeout(root);
-        SaveCsvSeparator(root);
-        SaveColorTheme(root);
-        SaveTimeDisplayMode(root);
-        SaveCheckForUpdates(root);
-        bool alertsValid = SaveAlertSettings(root);
-        SaveSmtpSettings(root);
-        bool webhooksValid = SaveWebhookSettings(root);
 
         bool written = App.WriteSettingsDocument(root, "settings");
 
@@ -287,7 +295,13 @@ public partial class SettingsWindow : Window
            the window contradict itself: the dialog below says nothing was saved while the unpersisted theme
            stays applied for the rest of the run and comes back to its old value on the next launch. */
         _saved = written;
-        if (mcpChanged) McpSettingsChanged = true;
+
+        /* Gated on the write for the same reason _saved is, and the consequence is louder. MainWindow
+           reads this after ShowDialog and, when it is set, stops and restarts the MCP server -- dropping
+           every connected client -- then reloads the port from settings.json on DISK, not from the document
+           above. On a failed write that is a disruptive restart back onto the OLD configuration, moments
+           after the app has told the user nothing was saved. */
+        if (mcpChanged && written) McpSettingsChanged = true;
 
         /* #2431: the save above copies an unreadable settings.json aside and writes a fresh one, so a
            warning raised when this window opened may simply not be true any more — and this window stays

@@ -179,6 +179,49 @@ public sealed class SettingsSaveButtonHonestyTests
         Assert.Contains("if (!_saved)", source, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The restart is a bigger claim than the toast, so it needs the same gate. MainWindow reads
+    /// <c>McpSettingsChanged</c> after <c>ShowDialog</c> and, when it is set, stops and restarts the MCP
+    /// server — dropping every connected client — then reloads the port from settings.json on DISK. Set on
+    /// the click rather than the write, a failed save produced a disruptive restart back onto the OLD
+    /// configuration, moments after the app had said nothing was saved.
+    /// </summary>
+    [Fact]
+    public void TheMcpRestart_OnlyFollowsASaveThatWrote()
+    {
+        var body = MethodBody(SettingsWindowSource(), "SaveButton_Click");
+
+        Assert.Contains("if (mcpChanged && written) McpSettingsChanged = true;", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Every mutator sits inside the guarded region, not just the read and the write.
+    ///
+    /// <para>Before the consolidation each writer carried its own try, so an exception thrown while BUILDING
+    /// a value — not only on the disk I/O — was caught, logged, and the remaining writers still ran.
+    /// Guarding only the ends would leave the mutators between them able to escape into the generic
+    /// "An error occurred" dispatcher dialog, which is precisely the class of silence this PR is about.
+    /// Nothing is written in that case either, and that is what the user should be told.</para>
+    /// </summary>
+    [Fact]
+    public void EveryMutator_SitsInsideTheGuardedRegion()
+    {
+        var body = MethodBody(SettingsWindowSource(), "SaveButton_Click");
+
+        var openTry = body.IndexOf("try", StringComparison.Ordinal);
+        var firstMutator = body.IndexOf("SaveMcpSettingsAsync(root)", StringComparison.Ordinal);
+        var lastMutator = body.IndexOf("SaveWebhookSettings(root)", StringComparison.Ordinal);
+        var theCatch = body.IndexOf("catch (Exception", StringComparison.Ordinal);
+
+        Assert.True(openTry >= 0 && firstMutator >= 0 && lastMutator >= 0 && theCatch >= 0,
+            "SaveButton_Click no longer has the shape this guard describes — its anchors moved and it is " +
+            "testing nothing.");
+        Assert.True(openTry < firstMutator && lastMutator < theCatch,
+            "A mutator sits outside SaveButton_Click's try, so an exception building a settings value " +
+            "escapes into App's generic unhandled-exception dialog instead of the honest \"Nothing was " +
+            "saved\" this method owes the user.");
+    }
+
     private static string MethodBody(string source, string methodName)
     {
         var signature = source.IndexOf(methodName + "(", StringComparison.Ordinal);
