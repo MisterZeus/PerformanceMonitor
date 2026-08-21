@@ -2676,7 +2676,7 @@ public static class DarlingCliCommands
                 sweepCommand,
                 enable
                     ? $"Firewall: cleared any previous {surface} rule matching '{wildcard}'."
-                    : $"Firewall rule(s) matching '{wildcard}' removed.",
+                    : $"Firewall: removed every {surface} rule matching '{wildcard}'.",
                 $"Firewall: could not remove the rule(s) matching '{wildcard}'",
                 output, error, cancellationToken);
 
