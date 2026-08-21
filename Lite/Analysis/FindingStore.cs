@@ -35,9 +35,11 @@ namespace PerformanceMonitorLite.Analysis;
 /// which take the exclusive write lock and reorganize the file underneath whatever is running. A held
 /// read lock blocks <c>EnterWriteLock</c>, so holding one IS how a write says "not while I am in
 /// flight", and that is the only exclusion these three need. Concurrency between writers is DuckDB's
-/// own job and it does it: two connections appending to <c>analysis_findings</c> in concurrent
-/// transactions both commit, and the retention DELETE overlaps an insert batch cleanly — both
-/// measured on DuckDB.NET 1.5.5 rather than assumed.
+/// own job and it does it: two connections writing to <c>analysis_findings</c> at the same time both
+/// succeed, and the retention DELETE overlaps an insert batch cleanly on disjoint rows — both
+/// measured on DuckDB.NET 1.5.5 rather than assumed, and measured with each batch wrapped in a
+/// transaction, which is the longer-held and therefore stronger case (and the shape #2448 gives
+/// them).
 /// </para>
 ///
 /// <para>
