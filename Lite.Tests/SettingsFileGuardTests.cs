@@ -9,7 +9,7 @@
 using System;
 using System.IO;
 using System.Text.RegularExpressions;
-using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Common;
 using Xunit;
 
 namespace PerformanceMonitorLite.Tests;
