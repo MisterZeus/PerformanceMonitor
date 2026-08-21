@@ -863,10 +863,23 @@ internal sealed class DarlingSelfAlertEvaluator
 
                 if (connection == AgConnectionDecision.Disconnected || stillDisconnected)
                 {
+                    /* #2426: the re-fire says so in the DETAIL, not only in the short message. ShortMessage is
+                       the interactive toast body and reaches neither the history row nor the email —
+                       DarlingAlertDeliverer forwards DetailText — so an operator opening Alert Detail on the
+                       sixth re-announcement read text byte-identical to the first notice, which is precisely
+                       the "a week-long outage reads like a blip" problem this knob exists to end. The
+                       connection re-fire above already bakes it into detail; this is its AG twin, worded to
+                       match Lite's so the two SKUs' history rows say the same thing. */
+                    var opening = stillDisconnected
+                        ? $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is STILL " +
+                            $"DISCONNECTED from the primary (re-alerting every {refireMinutes.ToString(CultureInfo.InvariantCulture)} min)."
+                        : $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is DISCONNECTED " +
+                            "from the primary.";
+
                     await FireAsync(
                         Key(serverId), serverName, AgReplicaDisconnectedMetric, replica.ConnectedStateDesc, "CONNECTED",
-                        detail: $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is " +
-                            "DISCONNECTED from the primary. A disconnected replica receives no log at all, so it falls " +
+                        detail: opening +
+                            " A disconnected replica receives no log at all, so it falls " +
                             "further behind every second and cannot be failed over to without losing whatever the primary " +
                             "has committed since. If it is a synchronous-commit replica, the primary also loses its " +
                             "automatic-failover partner. Check the replica's SQL Server service, the availability endpoint " +
