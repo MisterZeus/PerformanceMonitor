@@ -393,7 +393,7 @@ public static class SettingsFileGuard
             firstProblem ??= Describe(failure);
 
             var member = TopLevelMember(failure);
-            var without = member is null ? null : WithoutMember(current, member);
+            var without = member is null ? null : WithoutMember(current, member, options);
 
             if (member is null || without is null)
             {
@@ -457,12 +457,34 @@ public static class SettingsFileGuard
     /// The same JSON with one top-level member removed, or null when the root is not an object, the member
     /// is not actually there, or the text will not re-parse. The existence check is what makes the retry
     /// loop terminate: a pass that removed nothing would fail identically forever.
+    ///
+    /// <para><b>The parse borrows the caller's leniency, and it has to.</b> Review found the seam: the retry
+    /// loop deserializes with the caller's <see cref="JsonSerializerOptions"/>, so a caller that allows
+    /// trailing commas or comments has a file the DESERIALIZE accepts — while a bare
+    /// <see cref="JsonNode.Parse(string, JsonNodeOptions?, JsonDocumentOptions)"/> here runs with both
+    /// disallowed and throws on the very same text. The recovery would then bail to whole-file Unreadable
+    /// and silently give up the per-member repair, on files it was written for.</para>
+    ///
+    /// <para>Dormant today — none of the three viewer stores passes permissive options — and not hypothetical
+    /// either: <c>ViewerSettings</c> reads darling.json with <c>AllowTrailingCommas</c> and
+    /// <c>ReadCommentHandling.Skip</c> because that file is JSONC, so the next caller of this general-purpose
+    /// API is as likely to be lenient as strict. This is also the one place the "one judge, not two" claim
+    /// this recovery rests on could have quietly become false, which is why the mapping is here and pinned
+    /// rather than left to match by luck.</para>
     /// </summary>
-    private static string? WithoutMember(string text, string member)
+    private static string? WithoutMember(string text, string member, JsonSerializerOptions? options)
     {
         try
         {
-            if (JsonNode.Parse(text) is not JsonObject root || !root.Remove(member))
+            var documentOptions = new JsonDocumentOptions
+            {
+                AllowTrailingCommas = options?.AllowTrailingCommas ?? false,
+                CommentHandling = options?.ReadCommentHandling ?? JsonCommentHandling.Disallow,
+                MaxDepth = options?.MaxDepth ?? 0,
+            };
+
+            if (JsonNode.Parse(text, nodeOptions: null, documentOptions) is not JsonObject root
+                || !root.Remove(member))
             {
                 return null;
             }

@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Viewer;
@@ -298,6 +299,67 @@ public sealed class ViewerSettingsMemberRecoveryTests : IDisposable
         public int Weird { get; set; } = 7;
 
         public int Fine { get; set; } = 3;
+    }
+
+    /// <summary>
+    /// The recovery borrows the caller's leniency, so the two reads inside it cannot judge the same file by
+    /// different standards — the "one judge, not two" property the whole design rests on.
+    ///
+    /// <para>Review found the seam. The retry deserializes with the caller's
+    /// <see cref="JsonSerializerOptions"/>, but dropping a member re-parses the text, and a bare
+    /// <c>JsonNode.Parse</c> runs with trailing commas and comments DISALLOWED however lenient the caller
+    /// is. So for a caller that permits them, the deserialize would reach the bad member and the re-parse
+    /// would throw on the very same text — and the recovery would quietly bail to whole-file Unreadable,
+    /// giving up the per-member repair on exactly the files it was written for. Silent, because it falls
+    /// back to the old behaviour rather than crashing.</para>
+    ///
+    /// <para>Not hypothetical in this repo: <c>ViewerSettings</c> reads darling.json with
+    /// <c>AllowTrailingCommas</c> and <c>ReadCommentHandling.Skip</c> because that file is JSONC, and seven
+    /// call sites here set those options. None of the three viewer stores does today, which is what made it
+    /// dormant — and <see cref="SettingsFileGuard.ReadObject{T}"/> is a general-purpose Common API, so the
+    /// next caller is as likely to be lenient as strict.</para>
+    /// </summary>
+    [Fact]
+    public void TheRecoveryBorrowsTheCallersLeniency_SoBothOfItsReadsAgree()
+    {
+        var lenient = new JsonSerializerOptions
+        {
+            AllowTrailingCommas = true,
+            ReadCommentHandling = JsonCommentHandling.Skip,
+        };
+
+        /* A file the LENIENT deserialize is perfectly happy with except for one member's value: a comment
+           and a trailing comma, both of which a strict re-parse rejects outright. */
+        File.WriteAllText(SettingsPath, @"{
+  // the operator left a note here
+  ""AlertCpuThreshold"": ""ninety"",
+  ""AlertCooldownMinutes"": 22,
+}");
+
+        var read = SettingsFileGuard.ReadObject<ViewerAppSettings>(SettingsPath, lenient);
+
+        Assert.Equal(new[] { "AlertCpuThreshold" }, read.UnreadableMembers!.Select(m => m.Member));
+        Assert.NotNull(read.Value);
+        Assert.Equal(22, read.Value!.AlertCooldownMinutes);
+    }
+
+    /// <summary>And the control: the SAME file under STRICT options is a document fault, not a member one.
+    /// Without this the test above would pass on a reader that had simply been made permanently lenient,
+    /// which would be a different defect — every strict caller silently accepting JSONC.</summary>
+    [Fact]
+    public void TheSameFileUnderStrictOptionsIsStillADocumentFault()
+    {
+        File.WriteAllText(SettingsPath, @"{
+  // the operator left a note here
+  ""AlertCpuThreshold"": ""ninety"",
+  ""AlertCooldownMinutes"": 22,
+}");
+
+        var read = SettingsFileGuard.ReadObject<ViewerAppSettings>(SettingsPath);
+
+        Assert.Equal(SettingsFileState.Unreadable, read.State);
+        Assert.Null(read.Value);
+        Assert.True(read.UnreadableMembers is null or { Count: 0 });
     }
 
     // ── What the STORES do with it ────────────────────────────────────────────────────────────────
