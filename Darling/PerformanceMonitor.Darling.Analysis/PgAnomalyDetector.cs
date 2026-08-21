@@ -365,7 +365,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 }
             }
         }
-        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] Object stats anomaly detection failed: {Message}", ex.Message);
         }
@@ -390,7 +390,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             var count = Convert.ToInt64(await cmd.ExecuteScalarAsync(cancellationToken) ?? 0);
             return count > 0;
         }
-        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, cancellationToken))
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))
         {
             /* Silent on a genuine fault BY DESIGN (Lite's gate posture: an unreadable canary reads
                as "no baseline data" and detection just sits out the pass) — but shutdown residue is
@@ -462,7 +462,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 Metadata = metadata
             });
         }
-        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] CPU anomaly detection failed: {Message}", ex.Message);
         }
@@ -573,7 +573,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 Metadata = metadata
             });
         }
-        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] Wait anomaly detection failed: {Message}", ex.Message);
         }
@@ -671,7 +671,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 });
             }
         }
-        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] Blocking anomaly detection failed: {Message}", ex.Message);
         }
@@ -763,7 +763,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 });
             }
         }
-        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] I/O anomaly detection failed: {Message}", ex.Message);
         }
@@ -827,7 +827,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 Metadata = metadata
             });
         }
-        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] Batch request anomaly detection failed: {Message}", ex.Message);
         }
@@ -891,7 +891,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 Metadata = metadata
             });
         }
-        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] Session anomaly detection failed: {Message}", ex.Message);
         }
@@ -956,7 +956,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 Metadata = metadata
             });
         }
-        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] Query duration anomaly detection failed: {Message}", ex.Message);
         }
@@ -1022,7 +1022,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 Metadata = metadata
             });
         }
-        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] Memory anomaly detection failed: {Message}", ex.Message);
         }
