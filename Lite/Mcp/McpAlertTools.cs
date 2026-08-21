@@ -76,7 +76,7 @@ public sealed class McpAlertTools
         }
     }
 
-    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration this instance is running on: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries and jobs, tempdb space, low disk, PVS, file growth, failed jobs, database state), the cooldown, the excluded databases, the deadlock/blocking delivery mode, the scheduled-analysis cadence, and the SMTP email configuration. The same nested shape Darling's get_alert_settings returns, minus its self_alerts group (the headless service's own store-volume and collection-health thresholds, which a single-instance Lite install has no equivalent for) and plus smtp, which Lite delivers itself. Read-only: Lite has no update_alert_settings, so these change in the Settings window.")]
+    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration this instance is running on: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries and jobs, tempdb space, low disk, PVS, file growth, failed jobs, database state, Availability Group health, connection loss), the cooldown, the excluded databases, the deadlock/blocking delivery mode, the scheduled-analysis cadence, and the SMTP email configuration. The same nested shape Darling's get_alert_settings returns, minus its self_alerts group (the headless service's own store-volume and collection-health thresholds, which a single-instance Lite install has no equivalent for) and plus smtp, which Lite delivers itself. Read-only: Lite has no update_alert_settings, so these change in the Settings window.")]
     public static Task<string> GetAlertSettings()
     {
         try
@@ -88,6 +88,13 @@ public sealed class McpAlertTools
                    sub-object's own toggle), so the old Lite name was not merely different — it collided. */
                 alerts_enabled = App.AlertsEnabled,
                 notify_connection_changes = App.NotifyConnectionChanges,
+                /* #2417: the connection family's two sub-settings. Darling keeps these TOP-LEVEL beside
+                   their master switch rather than in a `connection` group, because the master shipped as a
+                   top-level key and a group could only ever have held two of the three; the spellings are
+                   its column names, which are also the keys Lite's own settings.json already uses. Both
+                   statics have been wired through to the connection-alert path since #1659. */
+                notify_connection_down_at_startup = App.NotifyConnectionDownAtStartup,
+                connection_refire_minutes = App.ConnectionRefireMinutes,
                 cpu = new
                 {
                     enabled = App.AlertCpuEnabled,
@@ -191,6 +198,25 @@ public sealed class McpAlertTools
                     lookback_minutes = App.AlertFailedJobLookbackMinutes
                 },
                 database_state = new { enabled = App.AlertDatabaseStateEnabled },
+                /* #2417: the Availability Group family, which Darling emitted to nobody until now and
+                   Lite therefore could not mirror. Lite has evaluated all four AG conditions since #1726
+                   off these same statics, so this is surface, not new alerting. Group and key spellings
+                   are Darling's verbatim, including `enabled` for what the store calls notify_ag_health —
+                   inside this payload `enabled` always means "this alert family is on".
+
+                   Darling reports a FOURTH member here, disconnect_refire_minutes (#1696, store V37), and
+                   it is deliberately absent: Lite has no AG disconnect re-fire at ALL — no static, no
+                   settings.json key, and no edge state that could re-announce — because #1726 mirrored
+                   three of those four knobs. Emitting a constant 0 would tell an agent it can tune
+                   something Lite cannot, which is exactly why self_alerts is omitted whole above. The
+                   omission is pinned by name in McpAlertSettingsKeyTests so it cannot outlive its
+                   reason, and the gap itself is filed as #2426. */
+                ag = new
+                {
+                    enabled = App.NotifyAgHealth,
+                    lag_threshold_seconds = App.AgLagAlertSeconds,
+                    redo_queue_threshold_kb = App.AgRedoQueueAlertKb
+                },
                 cooldown_minutes = App.AlertCooldownMinutes,
                 excluded_databases = App.AlertExcludedDatabases,
                 delivery = new

@@ -960,11 +960,51 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var utilityConnectionString = _credentialResolver.GetUtilityConnectionString(server);
+            var databaseNameEarly = IndexAnalysisDatabaseInput.Text?.Trim();
+            var allDatabasesEarly = IndexAnalysisAllDatabases.IsChecked == true;
+
+            /* #2407: Azure SQL Database has no cross-database execution, so the Utility DB idea — install
+               sp_IndexCleanup once and point it at any database on the server — cannot work there. The proc
+               runs INSIDE whichever database the connection opened, and @database_name asks it to read
+               another one, which Azure refuses. Reported as "set Utility DB to db1, analysing db1 works,
+               analysing db2 says no valid database" — the proc's own message, which reads like the database
+               is missing rather than unreachable.
+
+               So on Azure the connection targets the database being ANALYSED, not the utility database: the
+               proc has to be installed in each database anyway (which is what the reporter found by
+               experiment), and pointing at the target is the only shape that can work. */
+            var properties = _dataService == null
+                ? null
+                : await _dataService.GetLatestServerPropertiesAsync(GetSelectedServerId());
+            var isAzureSqlDb = properties?.EngineEdition == 5;
+
+            if (isAzureSqlDb && allDatabasesEarly)
+            {
+                /* Enumerating every database from one connection is the same cross-database read, so All
+                   Databases cannot work on Azure either — and failing per-database would half-fill the grid
+                   with whichever database the connection happened to open. */
+                IndexAnalysisStatusText.Text =
+                    "Azure SQL Database cannot analyse across databases — clear \u201CAll Databases\u201D and name one, "
+                    + "with sp_IndexCleanup installed in it.";
+                return;
+            }
+
+            var utilityConnectionString = isAzureSqlDb && !string.IsNullOrWhiteSpace(databaseNameEarly)
+                ? _credentialResolver.GetConnectionStringForDatabase(server, databaseNameEarly!)
+                : _credentialResolver.GetUtilityConnectionString(server);
 
             var exists = await LocalDataService.CheckSpIndexCleanupExistsAsync(utilityConnectionString);
             if (!exists)
             {
+                /* On Azure the proc must live in the target database, so name it — "not installed" against a
+                   server with 50 databases is not actionable without saying which one was checked. */
+                if (isAzureSqlDb && !string.IsNullOrWhiteSpace(databaseNameEarly))
+                {
+                    IndexAnalysisStatusText.Text =
+                        $"sp_IndexCleanup is not installed in [{databaseNameEarly}]. Azure SQL Database cannot run it "
+                        + "from another database, so it must be installed in each database you analyse.";
+                }
+
                 IndexAnalysisNotInstalledMessage.Visibility = Visibility.Visible;
                 IndexAnalysisNoDataMessage.Visibility = Visibility.Collapsed;
                 _indexSummaryFilterMgr!.UpdateData(new List<IndexCleanupSummaryRow>());
@@ -977,8 +1017,8 @@ public partial class FinOpsTab : UserControl
             RunIndexAnalysisButton.IsEnabled = false;
             IndexAnalysisStatusText.Text = "Running analysis...";
 
-            var databaseName = IndexAnalysisDatabaseInput.Text?.Trim();
-            var getAllDatabases = IndexAnalysisAllDatabases.IsChecked == true;
+            var databaseName = databaseNameEarly;
+            var getAllDatabases = allDatabasesEarly;
 
             var (details, summaries) = await LocalDataService.RunIndexAnalysisAsync(
                 utilityConnectionString,
