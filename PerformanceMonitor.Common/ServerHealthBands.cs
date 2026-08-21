@@ -38,6 +38,166 @@ namespace PerformanceMonitor.Common
     }
 
     /// <summary>
+    /// One server's COLLECTION status, as a value rather than a rendered string — the discriminant every
+    /// Darling surface that reports "is this server reporting" renders. The Overview card's word and colour,
+    /// the sidebar row's dot, the fleet roll-up's label and the <c>list_servers</c> MCP status are all
+    /// renderings OF THIS.
+    ///
+    /// <para><b>Why it lives here and not in the viewer.</b> It used to be a viewer-local enum, and three
+    /// other places wrote their own copy of the same ladder anyway — one of them (the sidebar dot) had only
+    /// four of the five states, so a registered-but-never-collected server got a grey "Unknown" dot beside an
+    /// amber "Awaiting first collection" card, on the same screen, from the same
+    /// <see cref="ServerHealthClassifier.ClassifyFreshness"/> call (#2473). Two of the copies live in the
+    /// headless service, which cannot reference WPF, so the only place all four can render one ladder is
+    /// this assembly.</para>
+    ///
+    /// <para><b>Why the name is not "card status".</b> Lite has a <c>ServerCardStatus</c> of its own and it
+    /// answers a DIFFERENT question: Lite's word comes from a live connection check, this one from how old
+    /// the newest collection is. #2457 turned down folding freshness into Lite's word precisely so the two
+    /// axes stay apart, and the same distinction already has a type here —
+    /// <see cref="Models.ServerConnectionStatus"/> is the connection answer, this is the collection one.
+    /// Sharing a name across the two would have invited exactly the conflation both issues were about.</para>
+    /// </summary>
+    public enum ServerCollectionStatus
+    {
+        /// <summary>Collection is current.</summary>
+        Online,
+
+        /// <summary>Online, but the newest collection has lagged — the amber "Warning".</summary>
+        Stale,
+
+        /// <summary>Nothing has landed for long enough to call the server dark.</summary>
+        Offline,
+
+        /// <summary>Registered but never collected — the service has not reached it yet, not a dead server.</summary>
+        AwaitingFirstCollection,
+
+        /// <summary>Freshness was never classified. <see cref="ServerCollectionStatusRules.FlagsFor"/> cannot
+        /// produce this; a hand-built card can, which is exactly why it is a named state rather than a
+        /// fall-through.</summary>
+        Unknown,
+    }
+
+    /// <summary>
+    /// The three status flags a freshness band explodes into, as ONE value. Every surface that shows a server
+    /// carries these three as separate settable properties (WPF binds them individually — the offline overlay
+    /// reads <c>IsOnline</c>, the card border reads all three), so the flags cannot simply be replaced by the
+    /// discriminant. What they CAN be is derived in one place: the sidebar dot's own
+    /// <c>ApplyFreshness</c> set two of the three and silently dropped the third, which is the whole of #2473.
+    /// Returning them together is what makes dropping one a visible edit rather than an omission.
+    /// </summary>
+    /// <param name="IsOnline">Reachability: true = fresh or stale, false = offline, null = not reached yet.</param>
+    /// <param name="HasCollectorErrors">The amber warning flag — in Darling, a stale collection.</param>
+    /// <param name="AwaitingFirstCollection">No collection has EVER landed (a bootstrap state, not an outage).</param>
+    public readonly record struct ServerCollectionFlags(
+        bool? IsOnline,
+        bool HasCollectorErrors,
+        bool AwaitingFirstCollection);
+
+    /// <summary>
+    /// The collection-status ladder, in ONE function, plus the three renderings of its result. Nothing else
+    /// in the product may turn a freshness band into a status word.
+    ///
+    /// <para><b>The failure this exists to make impossible.</b> Four places derived this ladder independently:
+    /// the WPF Overview card, the WPF sidebar dot, the web/MCP fleet roll-up, and <c>list_servers</c>. Three
+    /// agreed; the sidebar dot had no arm for a never-collected server and fell through to grey "Unknown"
+    /// while the card one panel over said amber "Awaiting first collection" (#2473). That is the same defect
+    /// #2429 spent two review rounds on, and its argument applies unchanged: with a single discriminant there
+    /// is no combination left for the renderings to disagree about, because they no longer each decide.</para>
+    ///
+    /// <para><b>Three renderings, not one, and that is deliberate.</b> <see cref="Word"/> is what a human
+    /// reads on a card, a dot or a roll-up. <see cref="McpToken"/> is what an MCP client keys on — a
+    /// consumer API whose values were published as machine tokens and cannot be re-spelled without breaking
+    /// downstream automation. <see cref="Headline"/> is the sentence a tooltip opens on. They are three
+    /// renderings of one decision; only the decision is shared, and only the decision needed to be.</para>
+    /// </summary>
+    public static class ServerCollectionStatusRules
+    {
+        /// <summary>
+        /// The (<c>IsOnline</c>, <c>HasCollectorErrors</c>, <c>AwaitingFirstCollection</c>) triple, resolved.
+        /// The order matters and is the #2429 reading: an online server's flags win over an awaiting marker,
+        /// so a stale card cannot also claim to be awaiting its first collection.
+        /// </summary>
+        public static ServerCollectionStatus Classify(bool? isOnline, bool hasCollectorErrors, bool awaitingFirstCollection) =>
+            isOnline switch
+            {
+                true when hasCollectorErrors => ServerCollectionStatus.Stale,
+                true => ServerCollectionStatus.Online,
+                false => ServerCollectionStatus.Offline,
+                _ => awaitingFirstCollection ? ServerCollectionStatus.AwaitingFirstCollection : ServerCollectionStatus.Unknown,
+            };
+
+        /// <summary>
+        /// A freshness band exploded into the three flags every surface binds. <see cref="ServerFreshness.NeverCollected"/>
+        /// leaves <c>IsOnline</c> null on purpose: the truth is "unknown, not reached yet", not "was up and died",
+        /// and a red Offline on a merely-queued server is what sent a 24-server field report chasing a phantom
+        /// scheduler bug.
+        /// </summary>
+        public static ServerCollectionFlags FlagsFor(ServerFreshness freshness) => freshness switch
+        {
+            ServerFreshness.NeverCollected => new ServerCollectionFlags(null, false, true),
+            ServerFreshness.Offline => new ServerCollectionFlags(false, false, false),
+            ServerFreshness.Stale => new ServerCollectionFlags(true, true, false),
+            _ => new ServerCollectionFlags(true, false, false),
+        };
+
+        /// <summary>
+        /// Freshness straight to the discriminant, for the surfaces that carry no flags of their own. Composed
+        /// out of <see cref="FlagsFor"/> and <see cref="Classify"/> rather than switching on the band again —
+        /// a second switch is a second ladder even when it returns the same type, which is the correction
+        /// #2470 had to make once already.
+        /// </summary>
+        public static ServerCollectionStatus FromFreshness(ServerFreshness freshness)
+        {
+            var flags = FlagsFor(freshness);
+            return Classify(flags.IsOnline, flags.HasCollectorErrors, flags.AwaitingFirstCollection);
+        }
+
+        /// <summary>The words a human reads. They are also the <c>DataTrigger</c> values the WPF sidebar keys
+        /// its dot colour off, so a word that stopped matching would silently fall through to the muted default
+        /// dot rather than fail anything — which is why the viewer pins the trigger set against this enum.</summary>
+        public static string Word(this ServerCollectionStatus status) => status switch
+        {
+            ServerCollectionStatus.Stale => "Warning",
+            ServerCollectionStatus.Online => "Online",
+            ServerCollectionStatus.Offline => "Offline",
+            ServerCollectionStatus.AwaitingFirstCollection => "Awaiting first collection",
+            _ => "Unknown",
+        };
+
+        /// <summary>
+        /// The token the MCP <c>list_servers</c> / <c>get_server_status</c> surface publishes. It differs from
+        /// <see cref="Word"/> in exactly one arm, and the difference is load-bearing rather than sloppy:
+        /// <c>AwaitingFirstCollection</c> shipped as a machine token beside the pre-existing values, and MCP
+        /// status values are a consumer API — clients key on them, so re-spelling one is a breaking change.
+        /// Keeping the two vocabularies next to each other is what stops the next reader "fixing" the
+        /// inconsistency.
+        /// </summary>
+        public static string McpToken(this ServerCollectionStatus status) => status switch
+        {
+            ServerCollectionStatus.Stale => "Warning",
+            ServerCollectionStatus.Online => "Online",
+            ServerCollectionStatus.Offline => "Offline",
+            ServerCollectionStatus.AwaitingFirstCollection => "AwaitingFirstCollection",
+            _ => "Unknown",
+        };
+
+        /// <summary>What the word MEANS, in words — the first line of whichever tooltip renders it. Every arm
+        /// names collection explicitly, because the complaint in #2422 was precisely that a word and a colour
+        /// left the reader guessing which axis they were about. In Darling that axis is always collection
+        /// freshness: there is no live ping to a monitored server.</summary>
+        public static string Headline(this ServerCollectionStatus status) => status switch
+        {
+            ServerCollectionStatus.Stale => "Warning — collection has lagged on this server",
+            ServerCollectionStatus.Online => "Online — collection is current",
+            ServerCollectionStatus.Offline => "Offline — nothing has been collected for long enough to call the server dark",
+            ServerCollectionStatus.AwaitingFirstCollection =>
+                "Awaiting first collection — registered, but the service has not reached it yet",
+            _ => "Unknown — this server's collection freshness has not been classified",
+        };
+    }
+
+    /// <summary>
     /// Per-metric health bands for an Overview card's severity dots — a verbatim mirror of the Dashboard's
     /// <c>HealthSeverity</c>. <see cref="Unknown"/> is a metric with no collected data (e.g. Threads on Azure SQL
     /// DB) — it never escalates the card's overall band.
