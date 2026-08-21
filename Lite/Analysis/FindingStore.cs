@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
@@ -52,11 +53,11 @@ public class FindingStore
         /* One read lock + one connection for the mute-filter read only. Released before the caller
            enriches + builds actions; InsertFindingsAsync then re-acquires for the batched insert.
            The lock is NoRecursion, so the helper below operates on the passed connection. */
-        using var readLock = _duckDb.AcquireReadLock();
+        using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        await connection.OpenAsync(context.CancellationToken);
 
-        var mutedHashes = await GetMutedHashesAsync(connection, context.ServerId);
+        var mutedHashes = await GetMutedHashesAsync(connection, context.ServerId, context.CancellationToken);
 
         foreach (var story in stories)
         {
@@ -101,6 +102,21 @@ public class FindingStore
     /// as <c>remediation_action_json</c> via the shared <see cref="AlertContextSerializer"/>, so a Lite
     /// finding's persisted action round-trips byte-identically to a Darling / Dashboard one. Returns the
     /// same list for caller convenience; the in-memory findings are unchanged.
+    ///
+    /// <para>#2443: the read lock and the connection open are the LAST cancellation points on this
+    /// pass, and that is a decision rather than an oversight. Past them the batch runs to completion,
+    /// because the third outcome — a half-written finding set — is worse than the one the pass
+    /// already reports. There is no transaction here, every row in a batch shares one
+    /// <c>analysis_time</c>, and <see cref="GetLatestFindingsAsync"/> reads the newest
+    /// <c>analysis_time</c> — so a batch cut in half does not read as truncated, it reads as a
+    /// complete analysis that found fewer problems. The server would look HEALTHIER for having been
+    /// abandoned, with nothing marking the set incomplete. Cancelling before the first row costs this
+    /// cycle's findings and says so; cancelling after it silently changes what the store means.</para>
+    ///
+    /// <para>The tail is affordable to finish: N small INSERTs into an embedded file in this process.
+    /// It is not where a pass wedges. Same call the Darling twin makes, and the same call
+    /// <c>AnalysisService</c> made a layer up in #2419 — "the post-enrichment tail carries no check
+    /// on purpose" — restated at the write it protects.</para>
     /// </summary>
     public async Task<List<AnalysisFinding>> InsertFindingsAsync(
         List<AnalysisFinding> findings, AnalysisContext context)
@@ -109,10 +125,12 @@ public class FindingStore
             return findings;
 
         /* One read lock + one connection for the whole batch, reused for every insert. */
-        using var readLock = _duckDb.AcquireReadLock();
+        using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        await connection.OpenAsync(context.CancellationToken);
 
+        /* No token check between rows: see the note above. Once the first row is written this batch
+           is finishing. */
         foreach (var finding in findings)
             await InsertFindingAsync(connection, finding);
 
@@ -135,7 +153,11 @@ public class FindingStore
     }
 
     /// <summary>
-    /// Returns the most recent findings for a server within the given time range.
+    /// Returns the most recent findings for a server within the given time range.    ///
+    /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
+    /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
+    /// its store calls take no pass token. Threading one here would mean inventing a caller that
+    /// does not exist. Matches the Darling twin's PgFindingStore exactly.</para>
     /// </summary>
     public async Task<List<AnalysisFinding>> GetRecentFindingsAsync(
         int serverId, int hoursBack = 24, int limit = 100)
@@ -198,7 +220,11 @@ LIMIT $3";
     }
 
     /// <summary>
-    /// Returns the latest analysis run's findings for a server (most recent analysis_time).
+    /// Returns the latest analysis run's findings for a server (most recent analysis_time).    ///
+    /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
+    /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
+    /// its store calls take no pass token. Threading one here would mean inventing a caller that
+    /// does not exist. Matches the Darling twin's PgFindingStore exactly.</para>
     /// </summary>
     public async Task<List<AnalysisFinding>> GetLatestFindingsAsync(int serverId)
     {
@@ -259,7 +285,11 @@ ORDER BY severity DESC";
     }
 
     /// <summary>
-    /// Mutes a story pattern so it won't appear in future analysis runs.
+    /// Mutes a story pattern so it won't appear in future analysis runs.    ///
+    /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
+    /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
+    /// its store calls take no pass token. Threading one here would mean inventing a caller that
+    /// does not exist. Matches the Darling twin's PgFindingStore exactly.</para>
     /// </summary>
     public async Task MuteStoryAsync(int serverId, string storyPathHash, string storyPath, string? reason = null)
     {
@@ -285,7 +315,11 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     }
 
     /// <summary>
-    /// Cleans up old findings beyond the retention period.
+    /// Cleans up old findings beyond the retention period.    ///
+    /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
+    /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
+    /// its store calls take no pass token. Threading one here would mean inventing a caller that
+    /// does not exist. Matches the Darling twin's PgFindingStore exactly.</para>
     /// </summary>
     public async Task CleanupOldFindingsAsync(int retentionDays = 30)
     {
@@ -304,7 +338,8 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// lock and connection (NoRecursion lock — do not re-acquire here). Used by
     /// FilterMutedFindingsAsync so the mute-filter read reuses that phase's connection.
     /// </summary>
-    private static async Task<HashSet<string>> GetMutedHashesAsync(DuckDBConnection connection, int serverId)
+    private static async Task<HashSet<string>> GetMutedHashesAsync(
+        DuckDBConnection connection, int serverId, CancellationToken cancellationToken)
     {
         var hashes = new HashSet<string>();
 
@@ -317,8 +352,8 @@ WHERE server_id = $1 OR server_id IS NULL OR server_id = 0";
 
         cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
 
-        using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
             hashes.Add(reader.GetString(0));
 
         return hashes;
@@ -328,6 +363,13 @@ WHERE server_id = $1 OR server_id IS NULL OR server_id = 0";
     /// Inserts one finding on an already-open connection. The caller owns the read lock
     /// and connection, so a batch of inserts in one InsertFindingsAsync call shares a
     /// single lock acquisition and connection.
+    ///
+    /// <para>#2443 exempt: this write deliberately takes no token. Cancelling inside a single-row
+    /// INSERT buys nothing — the row is microseconds of work in-process — and costs a definite
+    /// answer about whether it landed: DuckDB's cancel is <c>duckdb_interrupt</c>, so an interrupted
+    /// INSERT can leave a row that did commit, in a set nothing marks as partial.
+    /// <see cref="InsertFindingsAsync"/> carries the full reasoning and the abandonment point that
+    /// replaces this one.</para>
     /// </summary>
     private static async Task InsertFindingAsync(DuckDBConnection connection, AnalysisFinding finding)
     {
