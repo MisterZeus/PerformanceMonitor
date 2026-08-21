@@ -671,6 +671,45 @@ table.data td.sev-Healthy { color: var(--ok); }
 }
 .search-input:focus { outline: none; border-color: var(--accent); }
 
+/* ─────────────────────────── needs-attention filter (#2437) ─────────────────────────── */
+
+/* The header toggle, styled as the group-by-tag toggle beside it — it is the same kind of thing, a view
+   control over the same cards, so it should not look like a new concept. */
+.attention-control { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.78rem; color: var(--muted); cursor: pointer; }
+.attention-control input { cursor: pointer; }
+
+/* The "+N more need attention" line and the notice's way back out. Underlined, accented and pointer-cursored
+   because a line that navigates has to look like one: the defect being fixed was an inert muted div, which is
+   the shape of a caption, and every reader treated it as one. The focus ring matches the page's other
+   activatable divs (util.el's onActivate makes them role=button + tabbable). */
+.attention-link {
+  display: inline-block;
+  margin: 0.4rem 0 0.2rem;
+  color: var(--accent);
+  font-size: 0.85rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.attention-link:hover { filter: brightness(1.15); }
+.attention-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* The active state, on the grid it shrank. It carries its own colour: the amber arm is a count of servers
+   wanting attention, the green arm is an all-clear, and painting an all-clear amber would be a colour
+   contradicting its own text. */
+.attention-note {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin: 0 0 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--radius);
+  font-size: 0.85rem;
+}
+.attention-note.warn { background: rgba(255, 213, 79, 0.10); border: 1px solid rgba(255, 213, 79, 0.35); color: var(--warn); }
+.attention-note.ok { background: rgba(129, 199, 132, 0.10); border: 1px solid rgba(129, 199, 132, 0.35); color: var(--ok); }
+.attention-note .attention-link { margin: 0; }
+
 /* ─────────────────────────── status bar footer ─────────────────────────── */
 
 #statusbar {
