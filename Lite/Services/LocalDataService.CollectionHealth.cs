@@ -59,6 +59,23 @@ SELECT
     SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) AS success_count,
     SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
     AVG(duration_ms) AS avg_duration_ms,
+    -- #2460: the mean above describes a collector whose runs all cost about the same, and says
+    -- nothing true about one whose runs come in two sizes. query_store on a dense shard reported a
+    -- 13,834 ms average over 1,155 runs where 958 of them yielded nothing and cost ~36 ms, which
+    -- puts the other 197 at ~80,900 ms EACH — each one on its own larger than the whole 60,000 ms
+    -- sweep budget. duration_ms has been written per run since the table existed; nothing had ever
+    -- read it as anything but a mean.
+    --
+    -- p95 rather than the max for the number a decision is made from: a max is one run, so a single
+    -- pathological cycle would make a collector look permanently terrible for the rest of the
+    -- window. p95 also scales itself to the sample — over 3,500 runs it discards the one bad cycle,
+    -- and over the six runs a daily collector gets in a week it lands on the max, which is right,
+    -- because with six samples there is no outlier anyone can afford to throw away. DISC rather
+    -- than CONT so the answer is a duration some run actually took instead of an interpolation
+    -- between the two modes, which would be a number describing no run at all — the exact defect
+    -- this column exists to end. Both engines ignore NULL duration_ms here, as AVG already does.
+    MAX(duration_ms) AS max_duration_ms,
+    PERCENTILE_DISC(0.95) WITHIN GROUP (ORDER BY duration_ms) AS p95_duration_ms,
     -- SKIPPED counts as a healthy run (dedup / version-gated collectors no-op without being stale)
     MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
     MAX(collection_time) AS last_run_time,
@@ -163,15 +180,17 @@ ORDER BY collector_name";
                 SuccessCount = reader.IsDBNull(2) ? 0 : ToInt64(reader.GetValue(2)),
                 ErrorCount = reader.IsDBNull(3) ? 0 : ToInt64(reader.GetValue(3)),
                 AvgDurationMs = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
-                LastSuccessTime = reader.IsDBNull(5) ? null : reader.GetDateTime(5),
-                LastRunTime = reader.IsDBNull(6) ? null : reader.GetDateTime(6),
-                LastError = reader.IsDBNull(7) ? null : reader.GetString(7),
-                LastErrorTime = reader.IsDBNull(8) ? null : reader.GetDateTime(8),
-                PermissionDeniedCount = reader.IsDBNull(9) ? 0 : ToInt64(reader.GetValue(9)),
-                YieldCount = reader.IsDBNull(10) ? 0 : ToInt64(reader.GetValue(10)),
-                LastNote = reader.IsDBNull(11) ? null : reader.GetString(11),
-                NoteCount = reader.IsDBNull(12) ? 0 : ToInt64(reader.GetValue(12)),
-                TargetHasUserDatabases = !reader.IsDBNull(13) && ToInt64(reader.GetValue(13)) != 0
+                MaxDurationMs = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
+                P95DurationMs = reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6)),
+                LastSuccessTime = reader.IsDBNull(7) ? null : reader.GetDateTime(7),
+                LastRunTime = reader.IsDBNull(8) ? null : reader.GetDateTime(8),
+                LastError = reader.IsDBNull(9) ? null : reader.GetString(9),
+                LastErrorTime = reader.IsDBNull(10) ? null : reader.GetDateTime(10),
+                PermissionDeniedCount = reader.IsDBNull(11) ? 0 : ToInt64(reader.GetValue(11)),
+                YieldCount = reader.IsDBNull(12) ? 0 : ToInt64(reader.GetValue(12)),
+                LastNote = reader.IsDBNull(13) ? null : reader.GetString(13),
+                NoteCount = reader.IsDBNull(14) ? 0 : ToInt64(reader.GetValue(14)),
+                TargetHasUserDatabases = !reader.IsDBNull(15) && ToInt64(reader.GetValue(15)) != 0
             });
         }
 
@@ -324,6 +343,23 @@ public class CollectorHealthRow
     public long SuccessCount { get; set; }
     public long ErrorCount { get; set; }
     public double AvgDurationMs { get; set; }
+
+    /// <summary>
+    /// The single worst run in the window (#2460). A FACT, never a decision input: one pathological
+    /// cycle would otherwise make a collector read as permanently terrible for seven days. Its job is
+    /// to sit beside <see cref="P95DurationMs"/> — when the two agree the tail is routine, and when the
+    /// max towers over the p95 the max was a one-off.
+    /// </summary>
+    public double MaxDurationMs { get; set; }
+
+    /// <summary>
+    /// The 95th-percentile run in the window (#2460) — what a HEAVY run of this collector costs, as
+    /// opposed to what its runs cost on average. The number the sweep's peak-cycle arithmetic is built
+    /// from (via <see cref="PerformanceMonitor.Common.SweepPressureClassifier.PeakRunMs"/>), because a
+    /// mean over a bimodal collector describes neither of its populations.
+    /// </summary>
+    public double P95DurationMs { get; set; }
+
     public DateTime? LastSuccessTime { get; set; }
     public DateTime? LastRunTime { get; set; }
     public string? LastError { get; set; }

@@ -99,7 +99,7 @@ public sealed class McpHealthTools
         }
     }
 
-    [McpServerTool(Name = "get_collection_health"), Description("Shows the health status of all data collectors for a server — whether they're running successfully, failing, or stale. Check this before investigating data to ensure collectors are working properly. Each row also carries last_note/note_count: what a NON-failing run reported, e.g. an enumeration that came back with 0 items. note_count equal to total_runs means the collector has been collecting nothing all window — not a fault (the target may be legitimately empty), but the reason a HEALTHY collector can still have no data. target_has_user_databases tells those two apart: true means the target DID have user databases in the same window, so an all-window empty enumeration is worth investigating (a login that cannot enter them, an exclusion filter that matched everything); false means either no user databases or no inventory to go on. The sweep_pressure block is the server-level roll-up: it compares the collectors' combined execution demand (average duration amortized by cadence) against the minute the fastest cadence holds. SATURATED means the collection body cannot fit inside its cadence, so relaunches are skipped and the server collects at a multiple of its configured interval while every collector still reads healthy — heaviest_collectors names where that budget goes. That verdict is the SUSTAINED answer only. peak_cycle_risk is the separate single-sweep answer: peak_cycle_ms is what the body costs on the cycle where every scheduled cadence comes due together, and BODY_OVERRUN means that one body cannot fit the budget even when the verdict reads OK — the signature of one infrequent heavy collector, which amortization hides and heaviest_collectors therefore ranks out of sight. peak_collector names it, and peak_cycle_note explains it. Read both fields: a server can be OK/BODY_OVERRUN (a schedule-shape problem, fix by moving or splitting that collector) or SATURATED/BODY_OVERRUN (a capacity problem).")]
+    [McpServerTool(Name = "get_collection_health"), Description("Shows the health status of all data collectors for a server — whether they're running successfully, failing, or stale. Check this before investigating data to ensure collectors are working properly. Each row also carries last_note/note_count: what a NON-failing run reported, e.g. an enumeration that came back with 0 items. note_count equal to total_runs means the collector has been collecting nothing all window — not a fault (the target may be legitimately empty), but the reason a HEALTHY collector can still have no data. target_has_user_databases tells those two apart: true means the target DID have user databases in the same window, so an all-window empty enumeration is worth investigating (a login that cannot enter them, an exclusion filter that matched everything); false means either no user databases or no inventory to go on. The sweep_pressure block is the server-level roll-up: it compares the collectors' combined execution demand (average duration amortized by cadence) against the minute the fastest cadence holds. SATURATED means the collection body cannot fit inside its cadence, so relaunches are skipped and the server collects at a multiple of its configured interval while every collector still reads healthy — heaviest_collectors names where that budget goes. That verdict is the SUSTAINED answer only. peak_cycle_risk is the separate single-sweep answer: peak_cycle_ms is what the body costs on the cycle where every scheduled cadence comes due together, and BODY_OVERRUN means that one body cannot fit the budget even when the verdict reads OK — the signature of one infrequent heavy collector, which amortization hides and heaviest_collectors therefore ranks out of sight. peak_collector names it, and peak_cycle_note explains it. Read both fields: a server can be OK/BODY_OVERRUN (a schedule-shape problem, fix by moving or splitting that collector) or SATURATED/BODY_OVERRUN (a capacity problem). Every collector row carries avg_duration_ms, p95_duration_ms and max_duration_ms, because a collector's runs are not always one population: query_store on one dogfood server averaged 13,834 ms over 1,155 runs of which 958 yielded nothing and cost about 36 ms, which puts the other 197 at roughly 80,900 ms EACH - each one, on its own, larger than the whole sweep budget. Read the three together: avg close to p95 close to max is one population, avg far below p95 is two, and p95 far below max is one pathological run. peak_cycle_ms is built from p95 (floored at the mean, so it can never read lower than a mean-based figure) for exactly that reason, and peak_collector carries peak_run_ms beside avg_duration_ms so the gap is visible.")]
     public static async Task<string> GetCollectionHealth(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -127,6 +127,16 @@ public sealed class McpHealthTools
                 yields = r.YieldCount,
                 failure_rate_pct = Math.Round(r.FailureRatePercent, 1),
                 avg_duration_ms = Math.Round(r.AvgDurationMs, 0),
+                /* #2460: the mean above is a blend whenever a collector's runs come in two sizes, and
+                   on this fleet one of them plainly does — query_store averaged 13,834 ms over 1,155
+                   runs where 958 yielded nothing at ~36 ms, which puts the other 197 at ~80,900 ms
+                   each. p95 is what a HEAVY run of this collector costs and is what the peak-cycle
+                   arithmetic below is built from; max is carried beside it so a routine tail can be
+                   told from a single pathological cycle, which is the one thing a max alone cannot
+                   say about itself. Read the three together: avg ~= p95 ~= max is one population,
+                   avg << p95 is two, and p95 << max is one bad run. */
+                p95_duration_ms = Math.Round(r.P95DurationMs, 0),
+                max_duration_ms = Math.Round(r.MaxDurationMs, 0),
                 last_success = r.LastSuccessTime?.ToString("o"),
                 last_error = r.LastError,
                 /* #1837: what a NON-failing run reported — an enumeration that came back with 0 items,
@@ -153,7 +163,7 @@ public sealed class McpHealthTools
                by cadence) against the minute the fastest cadence holds; heaviest_collectors names where
                the budget goes, which is the actionable half of the answer. */
             var pressure = SweepPressureClassifier.Compute(
-                rows.Select(r => (r.CollectorName, r.AvgDurationMs, r.FrequencyMinutes)));
+                rows.Select(r => (r.CollectorName, r.AvgDurationMs, r.P95DurationMs, r.FrequencyMinutes)));
             var heaviest = rows
                 .Where(r => r.FrequencyMinutes > 0 && r.AvgDurationMs > 0)
                 .OrderByDescending(r => r.AvgDurationMs / r.FrequencyMinutes)
@@ -162,13 +172,23 @@ public sealed class McpHealthTools
                 {
                     collector = r.CollectorName,
                     avg_duration_ms = Math.Round(r.AvgDurationMs, 0),
+                    p95_duration_ms = Math.Round(r.P95DurationMs, 0),
+                    max_duration_ms = Math.Round(r.MaxDurationMs, 0),
                     frequency_minutes = r.FrequencyMinutes,
                     /* #2446: the ranking key said out loud, beside the single-run cost it is derived from.
                        The list still ranks by amortized contribution, because that is what explains
                        busy_percent — but an operator reading it to find the collector that overran a body
                        was reading the wrong column with nothing on the row to say so. */
                     amortized_ms_per_minute = Math.Round(r.AvgDurationMs / r.FrequencyMinutes, 0),
-                    pct_of_sweep_budget_per_run = Math.Round(r.AvgDurationMs / SweepPressureClassifier.SweepBudgetMs * 100.0, 1)
+                    /* #2460: "% of the budget PER RUN" now comes from the run that actually costs
+                       something — PeakRunMs, the p95 floored at the mean — rather than from a mean that
+                       on a bimodal collector describes no run at all. It is the same number the peak
+                       cycle charges this collector, so the column and the cycle reconcile by hand;
+                       taken from the mean, this row said query_store cost 23% of a body when its heavy
+                       run costs 135% of one. Through the shared helper rather than re-derived here, so
+                       the floor rule cannot drift between the two SKUs' tools. */
+                    pct_of_sweep_budget_per_run = Math.Round(
+                        SweepPressureClassifier.PeakRunMs(r.AvgDurationMs, r.P95DurationMs) / SweepPressureClassifier.SweepBudgetMs * 100.0, 1)
                 });
 
             /* #2446: the collector that owns the most of ONE sweep, which is a different collector from
@@ -178,10 +198,16 @@ public sealed class McpHealthTools
             var peakCollector = pressure.PeakCollectorName == null ? null : new
             {
                 collector = pressure.PeakCollectorName,
+                /* #2460: what one aligned body is charged for this collector — its p95, floored at its
+                   mean — with the mean kept beside it, because on a bimodal collector the GAP between
+                   the two is the finding. amortized_ms_per_minute stays derived from the mean: that is
+                   what amortization means, and a rate built from a tail would claim work the server
+                   never sustains. */
+                peak_run_ms = Math.Round(pressure.PeakCollectorPeakRunMs, 0),
                 avg_duration_ms = Math.Round(pressure.PeakCollectorAvgDurationMs, 0),
                 frequency_minutes = pressure.PeakCollectorFrequencyMinutes,
                 amortized_ms_per_minute = Math.Round(pressure.PeakCollectorAvgDurationMs / pressure.PeakCollectorFrequencyMinutes, 0),
-                pct_of_sweep_budget_per_run = Math.Round(pressure.PeakCollectorAvgDurationMs / SweepPressureClassifier.SweepBudgetMs * 100.0, 1)
+                pct_of_sweep_budget_per_run = Math.Round(pressure.PeakCollectorPeakRunMs / SweepPressureClassifier.SweepBudgetMs * 100.0, 1)
             };
             var peakCycleNote = SweepPressureClassifier.FormatPeakCycleNote(pressure);
 
