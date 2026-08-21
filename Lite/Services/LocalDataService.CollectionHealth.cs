@@ -157,6 +157,12 @@ FROM
         duration_ms,
         status,
         error_message,
+        -- #2472: projected here because this subquery enumerates its columns rather than SELECT *-ing
+        -- them, so an aggregate outside that names a column the inner query does not carry fails at the
+        -- store and nowhere earlier.
+        fanout_item_count,
+        slowest_item,
+        slowest_item_ms,
         ROW_NUMBER() OVER
         (
             PARTITION BY collector_name

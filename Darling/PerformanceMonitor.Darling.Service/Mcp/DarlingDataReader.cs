@@ -1207,6 +1207,13 @@ internal static class DarlingDataReader
                 duration_ms,
                 status,
                 error_message,
+                -- #2472: projected here because this subquery enumerates its columns rather than
+                -- SELECT *-ing them, so an aggregate outside that names a column the inner query does
+                -- not carry fails at the STORE and nowhere earlier — no compiler, no text assertion and
+                -- no local build can see it.
+                fanout_item_count,
+                slowest_item,
+                slowest_item_ms,
                 ROW_NUMBER() OVER
                 (
                     PARTITION BY collector_name

@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -680,6 +681,89 @@ public sealed class DarlingObservabilityTests
                would give. duration_ms alone cannot tell those apart, and neither can any aggregate of it. */
             Assert.Equal(6.13, (double)slowestMs * items / durationMs, 2);
         }
+
+        await DeleteTestRowsAsync(connection);
+    }
+
+    /// <summary>
+    /// The fan-out rollup, read back through the SHIPPED query against a live store (#2472).
+    ///
+    /// <para>This exists because the write-side test above cannot see the failure this one catches. The
+    /// health read's inner subquery ENUMERATES its columns rather than <c>SELECT *</c>-ing them, so an
+    /// outer aggregate naming a column the subquery does not project is perfectly valid C#, passes every
+    /// text assertion, compiles on every platform, and fails only when Postgres parses it. I wrote exactly
+    /// that bug building this rung, and nothing in the suite would have found it: no live test executed
+    /// <c>DarlingDataReader.CollectionHealthSql</c> at all.</para>
+    ///
+    /// <para>So the guard is to RUN the shipped text, not to assert about it — and to run it over a fan-out
+    /// whose answer is known, because a query that parses and returns nulls looks identical to one that
+    /// works on a store with no fan-out rows in it.</para>
+    /// </summary>
+    [Fact]
+    public async Task CollectionHealth_ReportsTheFanoutRollup_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live fan-out rollup test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteTestRowsAsync(connection);
+
+        var server = new ServerRuntime
+        {
+            Config = new MonitoredServer { Name = "fanout-e2e", Host = "fanout-e2e-host" },
+            ConnectionString = "Server=fanout-e2e-host",
+            Target = new CollectorTargetInfo { SqlMajorVersion = 16 },
+            StorageName = "fanout-e2e-host",
+            ServerId = TestServerId,
+            EngineEdition = 3,
+        };
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        await DarlingObservability.UpsertServerAsync(postgres, server, null, TestContext.Current.CancellationToken);
+
+        /* Two runs of one collector, both 80,800 ms, one even across eight databases and one dominated by
+           a single database. Every run-level aggregate the read already computes — AVG, MAX,
+           PERCENTILE_DISC — sees the same number for both, which is the whole reason the rollup exists. */
+        await DarlingObservability.LogCollectionAsync(
+            postgres, server, "query_store", "SUCCESS", 900, 70_000, 10_800, null,
+            new FanoutCost(8, "even-worst", 10_100), null, TestContext.Current.CancellationToken);
+
+        await DarlingObservability.LogCollectionAsync(
+            postgres, server, "query_store", "SUCCESS", 900, 70_000, 10_800, null,
+            new FanoutCost(8, "the-busy-one", 61_900), null, TestContext.Current.CancellationToken);
+
+        /* And a collector that does not fan out at all, so the null path is exercised by the same read. */
+        await DarlingObservability.LogCollectionAsync(
+            postgres, server, "wait_stats", "SUCCESS", 42, 100, 25, null,
+            fanout: null, null, TestContext.Current.CancellationToken);
+
+        var rows = await DarlingDataReader.GetCollectionHealthAsync(
+            postgres, TestServerId, DateTime.UtcNow.AddDays(-1), TestContext.Current.CancellationToken);
+
+        var queryStore = Assert.Single(rows, r => r.CollectorName == "query_store");
+        var waitStats = Assert.Single(rows, r => r.CollectorName == "wait_stats");
+
+        /* The run-level statistics agree across the two shapes, exactly as predicted. */
+        Assert.Equal(80_800, queryStore.MaxDurationMs);
+        Assert.Equal(80_800, queryStore.AvgDurationMs);
+        Assert.Equal(80_800, queryStore.P95DurationMs);
+
+        /* The rollup names the dominated run's database, not the even one's — the rank is on the ITEM
+           cost, and both runs cost the same in total, so a rank on duration_ms would have picked
+           arbitrarily between them. */
+        Assert.Equal("the-busy-one", queryStore.SlowestItem);
+        Assert.Equal(8, queryStore.FanoutItems);
+        Assert.Equal(61_900, queryStore.SlowestItemMs);
+        Assert.Equal(80_800, queryStore.SlowestRunDurationMs);
+        Assert.Equal(6.13, queryStore.FanoutDominance!.Value, 2);
+
+        /* A collector with no fan-out reports nothing rather than zero. */
+        Assert.Null(waitStats.FanoutItems);
+        Assert.Null(waitStats.SlowestItem);
+        Assert.Null(waitStats.FanoutDominance);
 
         await DeleteTestRowsAsync(connection);
     }
