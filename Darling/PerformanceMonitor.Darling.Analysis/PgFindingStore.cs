@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
@@ -167,7 +168,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
-            var mutedHashes = await GetMutedHashesAsync(connection, context.ServerId);
+            var mutedHashes = await GetMutedHashesAsync(connection, context.ServerId, context.CancellationToken);
 
             foreach (var story in stories)
             {
@@ -223,6 +224,22 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// shared <see cref="AlertContextSerializer"/>, so a Darling finding's persisted action
     /// round-trips byte-identically to a Dashboard one. Returns the same list for caller
     /// convenience; the in-memory findings are unchanged.
+    ///
+    /// <para>#2443: the connection open is the LAST cancellation point on this pass, and that is a
+    /// decision rather than an oversight. Past it the batch runs to completion, because the third
+    /// outcome — a half-written finding set — is worse than either of the two the classifier already
+    /// names. There is no transaction here (per-row failure isolation is deliberate: one bad row
+    /// logs and the batch continues), every row in a batch shares one <c>analysis_time</c>, and
+    /// <see cref="PgFindingStore.GetLatestFindingsSql"/> keys on <c>MAX(analysis_time)</c> — so a
+    /// batch cut in half does not read as truncated, it reads as a complete analysis that found
+    /// fewer problems. The server would look HEALTHIER for having been abandoned, with nothing
+    /// marking the set incomplete. Cancelling before the first row costs this cycle's findings and
+    /// says so; cancelling after it silently changes what the store means.</para>
+    ///
+    /// <para>The tail is affordable to finish: N small INSERTs against the LOCAL managed store on
+    /// loopback, not against a monitored server. It is not where a pass wedges. This is the same
+    /// call <c>DarlingAnalysisService</c> made one layer up in #2299 — "the post-enrichment tail
+    /// carries no check" — restated at the write it protects.</para>
     /// </summary>
     public async Task<List<AnalysisFinding>> InsertFindingsAsync(
         List<AnalysisFinding> findings, AnalysisContext context)
@@ -241,6 +258,8 @@ VALUES ($1, $2, $3, $4, $5, $6)";
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
+            /* No token check between rows: see the note above. Once the first row is written this
+               batch is finishing. */
             foreach (var finding in findings)
             {
                 await InsertFindingAsync(connection, finding);
@@ -273,7 +292,11 @@ VALUES ($1, $2, $3, $4, $5, $6)";
 
     /// <summary>
     /// Returns the most recent findings for a server within the given time range, newest and
-    /// most severe first, including each finding's persisted remediation action.
+    /// most severe first, including each finding's persisted remediation action.    ///
+    /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
+    /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
+    /// its store calls take no pass token. Threading one here would mean inventing a caller that
+    /// does not exist.</para>
     /// </summary>
     public async Task<List<AnalysisFinding>> GetRecentFindingsAsync(
         int serverId, int hoursBack = 24, int limit = 100)
@@ -305,7 +328,11 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// <summary>
     /// Returns the latest analysis run's findings for a server (most recent analysis_time),
     /// most severe first. Unlike the Dashboard twin this read also returns
-    /// remediation_action_json — both reads share one column list and one reader.
+    /// remediation_action_json — both reads share one column list and one reader.    ///
+    /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
+    /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
+    /// its store calls take no pass token. Threading one here would mean inventing a caller that
+    /// does not exist.</para>
     /// </summary>
     public async Task<List<AnalysisFinding>> GetLatestFindingsAsync(int serverId)
     {
@@ -332,7 +359,11 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     }
 
     /// <summary>
-    /// Mutes a story pattern so it won't appear in future analysis runs.
+    /// Mutes a story pattern so it won't appear in future analysis runs.    ///
+    /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
+    /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
+    /// its store calls take no pass token. Threading one here would mean inventing a caller that
+    /// does not exist.</para>
     /// </summary>
     public async Task MuteStoryAsync(int serverId, string storyPathHash, string storyPath, string? reason = null)
     {
@@ -358,7 +389,11 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     }
 
     /// <summary>
-    /// Unmutes a story pattern (Dashboard-twin surface).
+    /// Unmutes a story pattern (Dashboard-twin surface).    ///
+    /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
+    /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
+    /// its store calls take no pass token. Threading one here would mean inventing a caller that
+    /// does not exist.</para>
     /// </summary>
     public async Task UnmuteStoryAsync(long muteId)
     {
@@ -384,7 +419,11 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// global marker); legacy <c>server_id = 0</c> rows written before that fix are honored as global
     /// too (<see cref="GetMutedStoriesSql"/> filters both), so an all-servers mute is visible to every
     /// server. A NULL/0 (global) row here is flagged muted but left un-unmutable from the per-server
-    /// viewer, since deleting it would unmute the pattern everywhere.
+    /// viewer, since deleting it would unmute the pattern everywhere.    ///
+    /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
+    /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
+    /// its store calls take no pass token. Threading one here would mean inventing a caller that
+    /// does not exist.</para>
     /// </summary>
     public async Task<List<MutedStory>> GetMutedStoriesAsync(int serverId)
     {
@@ -417,7 +456,11 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     }
 
     /// <summary>
-    /// Cleans up old findings beyond the retention period.
+    /// Cleans up old findings beyond the retention period.    ///
+    /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
+    /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
+    /// its store calls take no pass token. Threading one here would mean inventing a caller that
+    /// does not exist.</para>
     /// </summary>
     public async Task CleanupOldFindingsAsync(int retentionDays = 30)
     {
@@ -440,7 +483,8 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// twins: an unreadable mute registry returns the hashes read so far (usually empty) and
     /// findings flow through unfiltered rather than being suppressed.
     /// </summary>
-    private async Task<HashSet<string>> GetMutedHashesAsync(NpgsqlConnection connection, int serverId)
+    private async Task<HashSet<string>> GetMutedHashesAsync(
+        NpgsqlConnection connection, int serverId, CancellationToken cancellationToken)
     {
         var hashes = new HashSet<string>();
 
@@ -449,14 +493,18 @@ VALUES ($1, $2, $3, $4, $5, $6)";
             using var command = new NpgsqlCommand(GetMutedHashesSql, connection);
             command.Parameters.AddWithValue(serverId);
 
-            using var reader = await command.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
             {
                 hashes.Add(reader.GetString(0));
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))
         {
+            /* #2443: fail-open is right for an unreadable registry, but NOT for an abandonment —
+               "the mutes could not be read" and "we stopped reading" are different answers, and
+               swallowing the second would let the pass go on to enrich and persist an unfiltered
+               finding set under a token that has already fired. */
             _logger?.LogError("[PgFindingStore] GetMutedHashesAsync failed: {Message}", ex.Message);
         }
 
@@ -467,6 +515,13 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// Inserts one finding on an already-open connection (the caller owns it, so a batch
     /// shares a single connection). Per-row failure isolation like the Dashboard twin: one
     /// bad row logs and the batch continues.
+    ///
+    /// <para>#2443 exempt: this write deliberately takes no token. Cancelling inside a single-row
+    /// INSERT buys nothing — the row is milliseconds of work on loopback — and costs the one thing
+    /// worth having: a definite answer about whether it committed. Npgsql's cancel is a request to
+    /// the server, so a cancelled <c>ExecuteNonQueryAsync</c> can leave a row that did land, in a
+    /// set nothing marks as partial. <see cref="InsertFindingsAsync"/> carries the full reasoning
+    /// and the abandonment point that replaces this one.</para>
     /// </summary>
     private async Task InsertFindingAsync(NpgsqlConnection connection, AnalysisFinding finding)
     {
