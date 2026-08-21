@@ -142,6 +142,96 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         Assert.Contains("LIMIT $2", sql, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #2391: #2349's four knobs are readable and writable through the MCP. They reached 3.5.0 with the
+    /// store plane only — clamped on read in <c>DarlingAlertSettings</c>, columns in V79 — but with no group
+    /// on either tool and no Viewer control, so an alert that ships OFF could only be switched on with a
+    /// hand-written <c>UPDATE</c> against <c>config_alert_settings</c>. Reported by @gotqn, who correctly
+    /// held it against the #2107 precedent: a knob rides the store plane, the Settings window AND the two
+    /// MCP tools, or it is not reachable.
+    /// </summary>
+    [Fact]
+    public void FileGrowthKnobs_AreOnBothMcpTools()
+    {
+        Assert.Contains("file_growth_enabled", Reader.AlertSettingsSelectSql, StringComparison.Ordinal);
+        Assert.Contains("file_growth_rise_mb", Reader.AlertSettingsSelectSql, StringComparison.Ordinal);
+        Assert.Contains("file_growth_volume_percent", Reader.AlertSettingsSelectSql, StringComparison.Ordinal);
+        Assert.Contains("file_growth_lookback_minutes", Reader.AlertSettingsSelectSql, StringComparison.Ordinal);
+
+        var tools = ReadRepoFile(System.IO.Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs"));
+
+        /* Readable AND writable — a read-only knob still leaves the UPDATE in someone's runbook. */
+        Assert.Contains("file_growth = new", tools, StringComparison.Ordinal);
+        Assert.Contains("case \"file_growth\":", tools, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The write bounds must match <c>DarlingAlertSettings</c>' clamps exactly. If they drift the tool
+    /// accepts a value the engine then silently rewrites on read, which presents as the setting not
+    /// sticking — a worse bug than a rejected input, because nothing says no.
+    ///
+    /// <para>Zero is deliberately IN range for the rise: #2349 disables one gate with zero rather than
+    /// treating it as invalid, so a floor of 1 would remove the rise-only and level-only configurations.</para>
+    /// </summary>
+    [Fact]
+    public void FileGrowthWriteBounds_MatchTheEngineClamps()
+    {
+        var tools = ReadRepoFile(System.IO.Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs"));
+        var settings = ReadRepoFile(System.IO.Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingAlertSettings.cs"));
+
+        /* engine: Max(0, rise) | Clamp(volume, 0, 100) | Clamp(lookback, 5, 1440) */
+        Assert.Contains("Math.Max(0, _config.Alerts.FileGrowthRiseMb)", settings, StringComparison.Ordinal);
+        Assert.Contains("FileGrowthVolumePercent, 0, 100", settings, StringComparison.Ordinal);
+        Assert.Contains("FileGrowthLookbackMinutes, 5, 1440", settings, StringComparison.Ordinal);
+
+        /* tool: the same numbers */
+        Assert.Contains("\"file_growth.rise_mb\", 0, int.MaxValue", tools, StringComparison.Ordinal);
+        Assert.Contains("\"file_growth.volume_percent\", 0, 100", tools, StringComparison.Ordinal);
+        Assert.Contains("\"file_growth.lookback_minutes\", 5, 1440", tools, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The SELECT's column count and the positional read must agree. Every field on
+    /// <c>AlertSettingsReadRow</c> is read by ORDINAL, so a column inserted anywhere but the end re-maps
+    /// every field after it — silently, since the types mostly line up. Derived rather than hand-counted so
+    /// the next knob cannot get this wrong.
+    /// </summary>
+    [Fact]
+    public void AlertSettingsSelect_ColumnCount_MatchesTheOrdinalsRead()
+    {
+        var source = ReadRepoFile(System.IO.Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingAlertReader.cs"));
+
+        var sql = Reader.AlertSettingsSelectSql;
+        var select = sql[(sql.IndexOf("SELECT", StringComparison.Ordinal) + 6)..
+                          sql.IndexOf("FROM config_alert_settings", StringComparison.Ordinal)];
+        var columns = select.Replace("\n", " ").Split(',', StringSplitOptions.RemoveEmptyEntries).Length;
+
+        var at = source.IndexOf("return new AlertSettingsReadRow(", StringComparison.Ordinal);
+        var body = source[at..source.IndexOf(");", at, StringComparison.Ordinal)];
+        var ordinals = System.Text.RegularExpressions.Regex.Matches(body, @"reader\.\w+\((\d+)\)")
+            .Select(m => int.Parse(m.Groups[1].Value)).Distinct().ToList();
+
+        Assert.Equal(columns, ordinals.Count);
+        Assert.Equal(columns - 1, ordinals.Max());
+    }
+
+    private static string ReadRepoFile(
+        string relative, [System.Runtime.CompilerServices.CallerFilePath] string thisFile = "")
+    {
+        for (var dir = new System.IO.DirectoryInfo(System.IO.Path.GetDirectoryName(thisFile)!);
+             dir is not null; dir = dir.Parent)
+        {
+            var candidate = System.IO.Path.Combine(dir.FullName, relative);
+            if (System.IO.File.Exists(candidate)) return System.IO.File.ReadAllText(candidate);
+        }
+
+        throw new System.IO.FileNotFoundException($"Could not locate {relative}");
+    }
+
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()
     {

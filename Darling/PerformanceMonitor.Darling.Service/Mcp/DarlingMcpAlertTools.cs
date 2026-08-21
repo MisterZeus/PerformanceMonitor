@@ -191,6 +191,15 @@ public sealed class DarlingMcpAlertTools
             store_job_cadence_warn_percent = s.StoreJobCadenceWarnPercent
         },
         pvs = new { enabled = s.PvsEnabled, threshold_percent = s.PvsThresholdPercent, floor_gb = s.PvsFloorGb },
+        /* #2391: #2349's knobs reached 3.5.0 with the store plane only, so an alert that ships OFF could
+           be enabled only by UPDATEing config_alert_settings by hand. Reported by @gotqn. */
+        file_growth = new
+        {
+            enabled = s.FileGrowthEnabled,
+            rise_mb = s.FileGrowthRiseMb,
+            volume_percent = s.FileGrowthVolumePercent,
+            lookback_minutes = s.FileGrowthLookbackMinutes
+        },
         long_running_job = new { enabled = s.LongRunningJobEnabled, multiplier = s.LongRunningJobMultiplier },
         failed_job = new { enabled = s.FailedJobEnabled, lookback_minutes = s.FailedJobLookbackMinutes },
         database_state = new { enabled = s.DatabaseStateEnabled },
@@ -671,6 +680,25 @@ public sealed class DarlingMcpAlertTools
                             case "threshold_percent": AddInt("pvs_threshold_percent", n, "pvs.threshold_percent", 0, 100); break;
                             case "floor_gb": AddInt("pvs_floor_gb", n, "pvs.floor_gb", 0, int.MaxValue); break;
                             default: error = $"Unknown field 'pvs.{k}'."; break;
+                        }
+                    });
+                    break;
+
+                /* #2391: bounds mirror DarlingAlertSettings' clamps EXACTLY — Max(0) on the rise,
+                   [0,100] on the volume percent, [5,1440] on the lookback. If these drift apart the tool
+                   accepts a value the engine then silently rewrites, which reads as the setting not
+                   sticking. Zero on either gate disables that gate rather than being invalid (#2349),
+                   which is why the rise floor is 0 and not 1. */
+                case "file_growth":
+                    Group(prop.Value, "file_growth", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("file_growth_enabled", n, "file_growth.enabled"); break;
+                            case "rise_mb": AddInt("file_growth_rise_mb", n, "file_growth.rise_mb", 0, int.MaxValue); break;
+                            case "volume_percent": AddInt("file_growth_volume_percent", n, "file_growth.volume_percent", 0, 100); break;
+                            case "lookback_minutes": AddInt("file_growth_lookback_minutes", n, "file_growth.lookback_minutes", 5, 1440); break;
+                            default: error = $"Unknown field 'file_growth.{k}'."; break;
                         }
                     });
                     break;
