@@ -315,9 +315,11 @@ public sealed class DarlingHostBindingTests
         Assert.Contains("false in config.config_service.mcp_enabled", report, StringComparison.Ordinal);
         Assert.Contains("CONTROL PLANE WINS", report, StringComparison.Ordinal);
         Assert.Contains("--enable-mcp/--disable-mcp", report, StringComparison.Ordinal);
-        /* The other half of the confusion: network.* is file-authoritative, so an exposure block stays live
-           while the control plane keeps the endpoint off. */
+        /* The other half of the confusion: network.* is file-authoritative and no store setting can move it. */
         Assert.Contains("mcp.network", report, StringComparison.Ordinal);
+        Assert.Contains("cannot change where this endpoint binds", report, StringComparison.Ordinal);
+        /* The endpoint IS down here, so the consequence names that state — and only in that state. */
+        Assert.Contains("not what is keeping this endpoint down", report, StringComparison.Ordinal);
         /* Only the field that actually DIFFERS gets a clause — the ports agree here, so no port clause.
            (The closing advice still names mcp.port, which is why this pins the clause form, not the key.) */
         Assert.DoesNotContain("port is 5152 in darling.json", report, StringComparison.Ordinal);
@@ -335,6 +337,33 @@ public sealed class DarlingHostBindingTests
         Assert.Contains("false in darling.json (mcp.enabled)", report, StringComparison.Ordinal);
         Assert.Contains("true in config.config_service.mcp_enabled", report, StringComparison.Ordinal);
         Assert.Contains("port is 5152 in darling.json (mcp.port) but 5199 in config.config_service.mcp_port", report, StringComparison.Ordinal);
+
+        /* Review catch: the control plane turned this endpoint ON despite the file, so the closing consequence
+           must not claim it is being kept off — a diagnostic that exists to stop operators being misled about
+           the effective state cannot itself misstate it. */
+        Assert.DoesNotContain("keeping this endpoint down", report, StringComparison.Ordinal);
+        Assert.Contains("what this RUNNING endpoint is bound and gated by", report, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The likeliest real mismatch, and the one that reads least like a bug: both planes agree the endpoint
+    /// runs and only the PORT differs, because someone moved it in the Viewer's Settings. It is still a
+    /// reportable disagreement — the file value is dead and the firewall rule is named off it (#2414) — but the
+    /// endpoint is up, so nothing in the message may say otherwise.
+    /// </summary>
+    [Fact]
+    public void DescribeToggleOverride_PortOnlyMismatch_ReportsIt_WithoutClaimingTheEndpointIsDown()
+    {
+        var toggle = DarlingHostBinding.ResolveEndpointToggle((true, 5199), fileEnabled: true, filePort: 5152);
+        var report = DarlingHostBinding.DescribeToggleOverride(toggle, "mcp", "MCP", fileEnabled: true, filePort: 5152);
+
+        Assert.NotNull(report);
+        Assert.True(toggle.PortOverridden);
+        Assert.False(toggle.EnabledOverridden);
+        Assert.Contains("port is 5152 in darling.json (mcp.port) but 5199 in config.config_service.mcp_port", report, StringComparison.Ordinal);
+        /* The planes agree on enabled, so no enabled clause. */
+        Assert.DoesNotContain("in darling.json (mcp.enabled)", report, StringComparison.Ordinal);
+        Assert.DoesNotContain("keeping this endpoint down", report, StringComparison.Ordinal);
     }
 
     /// <summary>The web dashboard is the same defect on the same seam, so it shares the resolver: one

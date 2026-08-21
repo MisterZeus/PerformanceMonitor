@@ -320,11 +320,22 @@ internal static class DarlingHostBinding
             fields.Add($"port is {filePort} in darling.json ({section}.port) but {toggle.Port} in config.config_service.{section}_port");
         }
 
+        /* The ownership disclosure is unconditional because it is true in every state; the CONSEQUENCE is not.
+           Review catch: a single closing sentence claiming "the control plane keeps this endpoint off" is wrong
+           whenever the control plane turned it ON despite the file, and wrong for a port-only mismatch where
+           both planes agree it runs -- which is the likelier real case. So the state-specific half is emitted
+           only in the state it describes. */
+        var consequence = toggle.Enabled
+            ? " It is what this RUNNING endpoint is bound and gated by, and no store setting can move it."
+            : " It is not what is keeping this endpoint down, and it takes effect as written the moment the "
+                + "control plane enables it.";
+
         return $"{surface} configuration disagrees across the two planes and the CONTROL PLANE WINS: "
             + string.Join("; ", fields)
             + $". After the first run darling.json's {section}.enabled/{section}.port are only the SEED -- change them with "
             + $"--enable-{section}/--disable-{section} or the Viewer's Settings, or the file values will keep being ignored. "
-            + $"The {section}.network block is the OPPOSITE: file-only, restart-only, no store equivalent -- so an exposure "
-            + "block in darling.json is live even while the control plane keeps this endpoint off.";
+            + $"The {section}.network block is the OPPOSITE: file-only, restart-only, no store equivalent -- the control "
+            + "plane cannot change where this endpoint binds or what token it requires."
+            + consequence;
     }
 }
