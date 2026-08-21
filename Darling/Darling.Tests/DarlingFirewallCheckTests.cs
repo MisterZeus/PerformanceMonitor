@@ -293,6 +293,10 @@ public class DarlingFirewallCheckTests
     public void PlanFirewallRules_ExposedMcp_OpensTheScopedRule()
     {
         var config = ManagedConfig();
+        /* #2436: enabled AND exposed. mcp.enabled defaults false, and since #2436 a surface the effective
+           toggle has switched off gets its rule removed rather than opened — so a fixture that means "this
+           endpoint is serving the LAN" has to say both halves. */
+        config.Mcp.Enabled = true;
         config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
 
         var mcp = Assert.Single(PlansFor(config, "MCP"));
@@ -313,6 +317,7 @@ public class DarlingFirewallCheckTests
         /* IPNetwork.TryParse MASKS host bits rather than rejecting them, so "validate then use the original"
            would open a rule for a CIDR the parser had already decided meant something else. */
         var config = ManagedConfig();
+        config.Mcp.Enabled = true;
         config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.77/24", Token = "t" };
 
         Assert.Equal("192.168.1.0/24", Assert.Single(PlansFor(config, "MCP")).Cidr);
@@ -329,6 +334,7 @@ public class DarlingFirewallCheckTests
            service degrades to loopback gets no open port — and the service's own start-up check reaches the
            same verdict, instead of flagging a rule the installer had just created. */
         var config = ManagedConfig();
+        config.Mcp.Enabled = true;
         config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = allowFrom, Token = token };
 
         var mcp = Assert.Single(PlansFor(config, "MCP"));
@@ -344,6 +350,7 @@ public class DarlingFirewallCheckTests
            store's exposure — so the installer must not open ports for a store it does not run. */
         var config = ManagedConfig();
         config.Postgres!.Managed = false;
+        config.Mcp.Enabled = true;
         config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
 
         var all = DarlingCliCommands.PlanFirewallRules(config);
@@ -445,6 +452,7 @@ public class DarlingFirewallCheckTests
     public void PlanFirewallRules_StoreUnreadable_UsesTheFilePort_AndSaysSoRatherThanFallingBackQuietly()
     {
         var config = ManagedConfig();
+        config.Mcp.Enabled = true;
         config.Mcp.Port = 5152;
         config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
 
@@ -466,6 +474,166 @@ public class DarlingFirewallCheckTests
         => Assert.All(
             DarlingCliCommands.PlanFirewallRules(ManagedConfig(), mcpStore: (true, 5199), webStore: (true, 5188)),
             p => Assert.Null(p.PortNote));
+
+    /* ---- #2436: a rule follows the ENABLE flag too, and the sweep follows what the run can vouch for ---- */
+
+    /// <summary>
+    /// The residue #2432 disclosed. <c>mcp.network</c> describes HOW the endpoint would be exposed; whether it
+    /// runs at all is <c>config_service.mcp_enabled</c>, and the supervisor stops the server outright when that
+    /// is false. The planner read only the network block, so the elevated verb opened an inbound allow rule on
+    /// a port with nothing behind it — the exact shape #2414 was filed about, one field over.
+    /// <para>The concrete bug, rather than the principle: <c>--disable-mcp</c> sweeps the surface's rules, and
+    /// the very next <c>--configure-firewall</c> re-created one. install-darling.ps1 runs that verb on every
+    /// upgrade, so a deliberately disabled endpoint got its port re-opened by an upgrade.</para>
+    /// </summary>
+    [Fact]
+    public void PlanFirewallRules_ControlPlaneHasTheSurfaceOff_RemovesTheRuleInsteadOfOpeningADeadPort()
+    {
+        var config = ManagedConfig();
+        config.Mcp.Enabled = true;   /* the file's seed says yes... */
+        config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
+
+        /* ...and the control plane, which is what the supervisor obeys, says no. */
+        var mcp = Assert.Single(
+            DarlingCliCommands.PlanFirewallRules(config, mcpStore: (false, 5152)).Where(p => p.Surface == "MCP"));
+
+        Assert.Equal(DarlingCliCommands.FirewallRuleAction.Remove, mcp.Action);
+        Assert.Null(mcp.Cidr);
+
+        /* And it says WHY, because "your exposure config is fine but no rule appeared" is otherwise an hour
+           of looking at the CIDR. */
+        Assert.NotNull(mcp.Note);
+        Assert.Contains("config.config_service.mcp_enabled = false", mcp.Note, StringComparison.Ordinal);
+        Assert.Contains("--enable-mcp", mcp.Note, StringComparison.Ordinal);
+
+        /* A Remove always sweeps: "no rule on any port" needs no opinion about which port is live, and this is
+           what makes a --disable-mcp stay done across the upgrade that re-runs this verb. */
+        Assert.True(mcp.SweepOtherPorts);
+    }
+
+    /// <summary>The web dashboard is the byte-identical twin, as it is everywhere in this area.</summary>
+    [Fact]
+    public void PlanFirewallRules_ControlPlaneHasTheWebSurfaceOff_RemovesTheRuleToo()
+    {
+        var config = ManagedConfig();
+        config.Web.Enabled = true;
+        config.Web.Network = new WebNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
+
+        var web = Assert.Single(
+            DarlingCliCommands.PlanFirewallRules(config, webStore: (false, 5153)).Where(p => p.Surface == "web dashboard"));
+
+        Assert.Equal(DarlingCliCommands.FirewallRuleAction.Remove, web.Action);
+        Assert.Contains("config.config_service.web_enabled = false", web.Note, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The install-time half of the same rule, and the reason it is not merely symmetry: at install time the
+    /// store does not exist, so <c>mcp.enabled</c> IS the value <c>config_service.mcp_enabled</c> will be seeded
+    /// with. A network block beside <c>enabled = false</c> therefore describes an endpoint that will not start
+    /// on the first run either — opening its port was never "ready for later", it was ready for nothing.
+    /// </summary>
+    [Fact]
+    public void PlanFirewallRules_FileSeedSaysTheSurfaceIsOff_OpensNothing_AndNamesTheSeedRatherThanTheStore()
+    {
+        var config = ManagedConfig();
+        config.Mcp.Enabled = false;
+        config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
+
+        var mcp = Assert.Single(PlansFor(config, "MCP"));
+
+        Assert.Equal(DarlingCliCommands.FirewallRuleAction.Remove, mcp.Action);
+        Assert.NotNull(mcp.Note);
+        Assert.Contains("mcp.enabled = false", mcp.Note, StringComparison.Ordinal);
+        Assert.Contains("SEEDED", mcp.Note, StringComparison.Ordinal);
+
+        /* No port note: this plan opened nothing, so it made no port decision to disclose. */
+        Assert.Null(mcp.PortNote);
+    }
+
+    /// <summary>
+    /// The other #2432 residue, and the sharper half of it. The sweep removes this surface's rules on ports
+    /// other than the one being opened — that is how a rule stranded by a port change gets collected, and its
+    /// entire justification is that the sweeper KNOWS which port is live. A run that fell back to darling.json's
+    /// seed does not: install-darling.ps1 calls this verb with the service stopped, and on a managed install the
+    /// store is a child of the service, so on an upgrade of a box whose port was moved in the Viewer the rule
+    /// matching the wildcard is the WORKING one. Sweeping it closes a live LAN surface — the elevated verb an
+    /// operator was told to run becomes the outage.
+    /// </summary>
+    [Fact]
+    public void PlanFirewallRules_StoreUnreadable_DoesNotSweepTheSurfacesOtherPorts()
+    {
+        var config = ManagedConfig();
+        config.Mcp.Enabled = true;
+        config.Mcp.Port = 5152;
+        config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
+
+        var mcp = Assert.Single(
+            DarlingCliCommands.PlanFirewallRules(config, storeUnavailableReason: "the store did not answer within 10 seconds")
+                .Where(p => p.Surface == "MCP"));
+
+        /* The rule for the file's port is still created — that is the fresh-install case, where the file cannot
+           be wrong — and the enable command removes its own exact DisplayName first, so declining the sweep
+           costs nothing in idempotence. */
+        Assert.Equal(DarlingCliCommands.FirewallRuleAction.Open, mcp.Action);
+        Assert.False(mcp.SweepOtherPorts);
+    }
+
+    /// <summary>
+    /// And when the control plane DID answer, the sweep is authoritative again: the port is known, so every
+    /// other rule on this surface really is stranded and collecting it is the #2414 fix working. Withholding it
+    /// permanently would trade one residue for the one #2432 was filed to remove.
+    /// </summary>
+    [Fact]
+    public void PlanFirewallRules_ControlPlaneAnswered_SweepsTheSurfacesOtherPorts()
+    {
+        var config = ManagedConfig();
+        config.Mcp.Enabled = true;
+        config.Mcp.Port = 5152;
+        config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
+
+        var mcp = Assert.Single(
+            DarlingCliCommands.PlanFirewallRules(config, mcpStore: (true, 5199)).Where(p => p.Surface == "MCP"));
+
+        Assert.Equal(5199, mcp.Port);
+        Assert.True(mcp.SweepOtherPorts);
+    }
+
+    /// <summary>
+    /// The store surface never withholds the sweep, and that is not an oversight to be made consistent later:
+    /// <c>postgres.port</c> is file-only, with no config_service column able to disagree with it, so this
+    /// surface's port is never a guess even when the store cannot be read.
+    /// </summary>
+    [Fact]
+    public void PlanFirewallRules_TheStoreSurfaceAlwaysSweeps_BecauseItsPortIsNeverAGuess()
+    {
+        var config = ManagedConfig();
+        config.Postgres!.Network = new PostgresNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24" };
+
+        var store = Assert.Single(
+            DarlingCliCommands.PlanFirewallRules(config, storeUnavailableReason: "the store did not answer within 10 seconds")
+                .Where(p => p.Surface == "store"));
+
+        Assert.Equal(DarlingCliCommands.FirewallRuleAction.Open, store.Action);
+        Assert.True(store.SweepOtherPorts);
+    }
+
+    /// <summary>
+    /// The plan carries the decision; this is that the verb obeys it. Source-shaped for the same reason its
+    /// sibling above is: whether a step ran is not observable without a live Windows Firewall, and a flag on a
+    /// record that no caller reads would be invisible to every behavioural test in this file.
+    /// </summary>
+    [Fact]
+    public void TheSweepStepIsGatedOnThePlansSweepPermission()
+    {
+        var source = NormalizeWhitespace(ReadRepoFile(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs")));
+
+        Assert.Contains(
+            "if (plan.SweepOtherPorts) { if (!await TryRunFirewallStepAsync( "
+                + "DarlingManagedPostgres.BuildFirewallSweepCommand(wildcard),",
+            source,
+            StringComparison.Ordinal);
+    }
 
     /* ---- drift guards: the seams a rename or a deleted call would break silently ---- */
 
@@ -551,6 +719,32 @@ public class DarlingFirewallCheckTests
         Assert.True(call >= 0, "install-darling.ps1 never calls Invoke-FirewallReconcile at top level");
         Assert.True(start >= 0, "install-darling.ps1 no longer starts the service");
         Assert.True(call < start, "the firewall reconcile must run BEFORE Start-Service, not after");
+    }
+
+    /// <summary>
+    /// #2436: the THIRD call, and the one whose absence is silent. The pre-start reconcile runs with the
+    /// service stopped, and on a managed install the store is a child of the service — so on an UPGRADE the
+    /// verb has nothing to ask and falls back to darling.json's seed, which is the wrong port on a box whose
+    /// port was later moved in the Viewer. This call is what asks the store once it can answer.
+    /// <para>Pinned by its GUARD as well as its presence. Running it unconditionally would fire it during a
+    /// fresh install's ~2-minute first start, where the store cannot answer either and the file port is
+    /// correct by definition — a second copy of the fallback disclosure about a port that is not wrong. The
+    /// guard is the difference between narrowing the window by construction and hoping the timing works
+    /// out.</para>
+    /// </summary>
+    [Fact]
+    public void InstallScript_ReReconcilesAfterTheFirstStart_ButOnlyOnAnUpgrade()
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", "install-darling.ps1"));
+        var branch = ExtractBracedBlock(script, "if ($isUpgrade) {");
+
+        Assert.Contains("Invoke-FirewallReconcile", branch, StringComparison.Ordinal);
+
+        /* And it is genuinely AFTER the start, or it is just the pre-start call with extra steps. */
+        var start = script.IndexOf("Start-Service -Name $serviceName", StringComparison.Ordinal);
+        var guard = script.IndexOf("if ($isUpgrade) {", StringComparison.Ordinal);
+        Assert.True(start >= 0, "install-darling.ps1 no longer starts the service");
+        Assert.True(guard > start, "the upgrade reconcile must run AFTER Start-Service, not before");
     }
 
     [Fact]
