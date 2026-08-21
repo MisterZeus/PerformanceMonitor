@@ -109,7 +109,7 @@ public sealed class CycleProbeFailures
 /// The driver owns only the control flow — iteration, cancellation, the per-item catch SHAPE, the
 /// per-item flush, and the interleaved SQL/storage timing. Everything app-specific stays in the
 /// caller's delegates: the SQL connection and per-item query (readItem), the storage engine
-/// (writeBatch), the host store's per-database watermark read and its 24h clamp (perItemWatermark),
+/// (writeBatch), the host store's per-database watermark read and its catch-up clamp (perItemWatermark),
 /// and the log text / display name (onItemComplete / onItemError). This is the seam the plan required:
 /// no app or collector semantics leak into the shared loop.
 /// </para>
@@ -429,7 +429,7 @@ public static class EnumeratedCollectorDriver
             var itemToken = itemBudget?.Token ?? cancellationToken;
             try
             {
-                /* Per-database watermark refresh (query_store): its cutoff — including the 24h catch-up
+                /* Per-database watermark refresh (query_store): its cutoff — including the catch-up
                    clamp — is computed HERE, inside the loop, so each database's commit advances only its
                    own watermark and an abort loses no other database's intervals. Inside the budget on
                    purpose: it is a store read, and a store that has stopped answering is exactly the kind

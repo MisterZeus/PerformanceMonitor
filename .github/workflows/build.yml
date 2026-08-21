@@ -111,6 +111,15 @@ jobs:
               # colors. A Darling-theme-only edit is exactly the drift that guard exists to catch,
               # so it has to reach the suite.
               - 'Darling/PerformanceMonitor.Darling.Viewer/Themes/*.xaml'
+              # Same reason again, and a whole tree this time: WatermarkPolicyTests'
+              # TheCatchUpHorizon_IsWrittenDownInExactlyOnePlace (#2468) scans the Darling SERVICE for
+              # comments that restate the catch-up horizon's number instead of pointing at
+              # WatermarkPolicy.MaxCatchup. Three of the twelve sites it was written for live here, so a
+              # Darling-only PR reintroducing one would fire `darling` but not `lite` and skip the step
+              # that runs the guard — caught a day later by the nightly, which is exactly the silent
+              # drift the pin exists to close. The cost is that Darling service PRs now also run the Lite
+              # suite; that is the same trade the `darling` filter already takes for Lite/**/*.xaml.
+              - 'Darling/PerformanceMonitor.Darling.Service/**/!(*.md)'
             installer:
               - 'deprecated/Installer/**/!(*.md)'
               - 'deprecated/Installer.Tests/**/!(*.md)'
