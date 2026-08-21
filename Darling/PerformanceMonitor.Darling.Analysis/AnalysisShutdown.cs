@@ -13,16 +13,6 @@ using Npgsql;
 namespace PerformanceMonitor.Darling.Analysis;
 
 /// <summary>
-/// Classifies whether an analysis-pass failure is the residue of an abandonment we asked for, so the
-/// catch sites can tell <i>unfinished because we called it off</i> from <i>unfinished because
-/// something broke</i> (#2299) — and, since #2430, which of the two ways we called it off. Before this, a clean <c>Stop-Service</c> logged seven ERRORs from
-/// work still in flight after "collection loop stopped" — the loop's data source is disposed at
-/// method scope exit and the managed postmaster is then <c>pg_ctl stop -m fast</c>-ed, so the
-/// abandoned pass's next store read throws <see cref="ObjectDisposedException"/> (or the server
-/// kills its open connection with 57P01), and those seven lines were 7 of the day's 9 ERRORs,
-/// burying the two that meant something.
-/// </summary>
-/// <summary>
 /// Why an analysis pass stopped early, when it did (#2430).
 /// </summary>
 public enum AnalysisAbandonKind
@@ -41,6 +31,18 @@ public enum AnalysisAbandonKind
     Timeout
 }
 
+/// <summary>
+/// Classifies whether an analysis-pass failure is the residue of an abandonment we asked for, so the
+/// catch sites can tell <i>unfinished because we called it off</i> from <i>unfinished because
+/// something broke</i> (#2299) — and, since #2430, which of the two ways we called it off.
+///
+/// <para>Before #2299, a clean <c>Stop-Service</c> logged seven ERRORs from
+/// work still in flight after "collection loop stopped" — the loop's data source is disposed at
+/// method scope exit and the managed postmaster is then <c>pg_ctl stop -m fast</c>-ed, so the
+/// abandoned pass's next store read throws <see cref="ObjectDisposedException"/> (or the server
+/// kills its open connection with 57P01), and those seven lines were 7 of the day's 9 ERRORs,
+/// burying the two that meant something.</para>
+/// </summary>
 public static class AnalysisShutdown
 {
     /// <summary>
