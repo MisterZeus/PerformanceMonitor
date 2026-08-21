@@ -492,8 +492,13 @@ Jobs, no configuration grids, no Recommendations cards.
 
 What it *can* write is one thing: **Custom Views** — the saved dashboards and notebooks in
 `config.custom_views`, created and edited through the built-in composer, plus `POST /api/compose/run` to
-preview one. That is the `viewer` role's single narrow write grant, and it is available to **any authenticated
+preview one. That is the only write the web host exposes at all, and it is available to **any authenticated
 seat**, not only a local one. It is also the reason the loopback token exemption went away (see 3.5).
+
+(The `viewer` role itself carries one more narrow grant — `config.database_state_expected`, behind the WPF
+viewer's per-database state-override editor — but no web route reaches it, and the WPF editor gates itself on
+the same read-only probe from 2.3, which a `viewer`-role seat fails. So it is a grant nothing on either
+surface currently spends.)
 
 ### 3.5 Reach it from a browser on another machine
 
