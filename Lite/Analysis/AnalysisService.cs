@@ -125,7 +125,7 @@ public class AnalysisService
 
             // 0. Check minimum data span — total history, not the analysis window.
             // A server with 100h of total history can be analyzed over a 4h window.
-            var dataSpanHours = await GetTotalDataSpanHoursAsync(context.ServerId);
+            var dataSpanHours = await GetTotalDataSpanHoursAsync(context.ServerId, context.CancellationToken);
             if (dataSpanHours < MinimumDataHours)
             {
                 var needed = MinimumDataHours >= 24
@@ -239,8 +239,11 @@ public class AnalysisService
 
             return findings;
         }
-        catch (OperationCanceledException ex) when (context.CancellationToken.IsCancellationRequested)
+        catch (Exception ex) when (AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
+            /* #2443: the predicate moved to AnalysisAbandon.IsExpected, unchanged — signalled token
+               AND OperationCanceledException — because the store layer now needs the same judgement
+               at forty-odd catch sites, and two copies of it would drift. */
             /* #2412: the pass was abandoned because it outlived its budget (or the app is
                stopping), which is not a fault and must not read as one. Whatever this pass would
                have written is gone; the next scheduled pass recomputes it from the store.
@@ -384,13 +387,13 @@ public class AnalysisService
     /// </summary>
     /* Internal for AnalysisDataSpanTests (#1809): the span must survive an archive/reset, which is
        only observable with a real DuckDB + parquet fixture. */
-    internal async Task<double> GetTotalDataSpanHoursAsync(int serverId)
+    internal async Task<double> GetTotalDataSpanHoursAsync(int serverId, CancellationToken cancellationToken = default)
     {
         try
         {
-            using var readLock = _duckDb.AcquireReadLock();
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
             using var connection = _duckDb.CreateConnection();
-            await connection.OpenAsync();
+            await connection.OpenAsync(cancellationToken);
 
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
@@ -400,14 +403,18 @@ WHERE server_id = $1";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
 
-            var result = await cmd.ExecuteScalarAsync();
+            var result = await cmd.ExecuteScalarAsync(cancellationToken);
             if (result == null || result is DBNull)
                 return 0;
 
             return Convert.ToDouble(result);
         }
-        catch
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, cancellationToken))
         {
+            /* A probe failure reads as "no data yet" — EXCEPT an abandonment, which must not be
+               allowed to masquerade as a 0-hour history (#2443). That would turn a cancelled pass
+               into an insufficient-data SKIP, which is a different and far calmer-looking answer
+               than the one the caller is about to log. */
             return 0;
         }
     }
