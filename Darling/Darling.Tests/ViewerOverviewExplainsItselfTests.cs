@@ -316,6 +316,11 @@ public sealed class ViewerOverviewExplainsItselfTests
 
         Assert.Contains("OverviewAttentionOnlyCheck_Changed(object sender", CodeBehind, StringComparison.Ordinal);
         Assert.Contains("FleetRollup.AttentionFilterCountText(", CodeBehind, StringComparison.Ordinal);
+
+        /* The colour follows the sentence: this line says either "N servers need attention" or an all-clear, and
+           painting the all-clear amber would be a colour contradicting its own text — the same defect in
+           miniature. Raised in review on #2429. */
+        Assert.Contains("shown > 0 ? \"WarningBrush\" : \"SuccessBrush\"", CodeBehind, StringComparison.Ordinal);
     }
 
     /// <summary>

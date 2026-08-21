@@ -1279,13 +1279,22 @@ public partial class MainWindow : Window
         ApplyOverviewAttentionCount(shown.Count);
     }
 
-    /// <summary>Shows what the filter did, beside the toggle that did it. Only rendered while the filter is on:
-    /// a grid showing every server needs no arithmetic, and a filtered one must never be mistakable for it.</summary>
+    /// <summary>
+    /// Shows what the filter did, beside the toggle that did it. Only rendered while the filter is on: a grid
+    /// showing every server needs no arithmetic, and a filtered one must never be mistakable for it.
+    ///
+    /// <para>The colour follows the sentence. This line has two of them — a count of servers wanting attention,
+    /// and an all-clear when the filter matched none — and painting the all-clear amber would be a colour
+    /// contradicting its own text, which is the family of defect this whole change is about. Set through
+    /// SetResourceReference (the alert badge's idiom) so it still tracks a theme change.</para>
+    /// </summary>
     private void ApplyOverviewAttentionCount(int shown)
     {
         if (_overviewAttentionOnly)
         {
             OverviewAttentionCountText.Text = FleetRollup.AttentionFilterCountText(shown, _overviewCards.Count);
+            OverviewAttentionCountText.SetResourceReference(
+                ForegroundProperty, shown > 0 ? "WarningBrush" : "SuccessBrush");
             OverviewAttentionCountText.Visibility = Visibility.Visible;
             return;
         }
