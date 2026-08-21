@@ -69,8 +69,16 @@
                              (#2031: a silenced server must not look healthy-quiet). -->
                         <StackPanel Grid.Column="0" Grid.RowSpan="2"
                                     Orientation="Horizontal" VerticalAlignment="Center">
+                            <!-- #2458: the dot renders the same ServerCardStatus the Overview card does, and
+                                 carries the same first line the card's tooltip opens on. It was a coloured
+                                 circle deriving its own copy of the four-word ladder, so the sidebar and the
+                                 card could disagree about one server; and it is the thing a reader points at
+                                 first, which is #2422's complaint one surface over. The tooltip also says what
+                                 the dot is NOT about: #2457 kept collection freshness on its own banded row on
+                                 the card, and this row has no such band. -->
                             <Ellipse Width="10" Height="10"
                                      Margin="0,0,8,0"
+                                     ToolTip="{Binding Server.Connection.DotTooltip}"
                                      VerticalAlignment="Center">
                                 <Ellipse.Style>
                                     <Style TargetType="Ellipse">
