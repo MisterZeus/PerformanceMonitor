@@ -731,16 +731,22 @@ public sealed class DarlingMcpHostService : BackgroundService
 
                     if (!IsBearerTokenAuthorized(authorization, token))
                     {
-                        /* Presented-or-not, never the value. Which of the two it is IS the operator's next
-                           step - an absent header is a client that was never configured, a wrong one is a
-                           token that does not match mcp.network.encryptedToken - and neither statement
-                           says anything about what the token is. */
+                        /* THREE client states, never the token's value. Each one is a different next step
+                           for the operator, which is the whole point of logging this at all:
+
+                             no header            -> a client that was never configured with a token
+                             header, not a Bearer -> a client configured wrong (Basic, a bare token, an
+                                                     empty "Bearer ") - it IS sending something
+                             a Bearer that misses -> a token that does not match this endpoint's
+
+                           Review catch on #2479: ExtractBearerToken returns null for the first TWO, so
+                           testing only it reported "nothing was presented" about a client that presented
+                           a malformed header - collapsing precisely the ambiguity this exists to resolve.
+                           None of the three says anything about what the token IS. */
                         refusals.Report(
                             _logger, "MCP", DarlingRefusalGate.Token, StatusCodes.Status401Unauthorized,
                             context.Connection.RemoteIpAddress,
-                            ExtractBearerToken(authorization) is null
-                                ? "no 'Authorization: Bearer <token>' header was presented"
-                                : "the presented bearer token does not match mcp.network.encryptedToken",
+                            DescribeBearerRefusal(authorization),
                             DateTime.UtcNow);
                         context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                         context.Response.Headers.WWWAuthenticate = "Bearer";
@@ -934,6 +940,33 @@ public sealed class DarlingMcpHostService : BackgroundService
 
         var token = value.Substring(prefix.Length).Trim();
         return string.IsNullOrEmpty(token) ? null : token;
+    }
+
+    /// <summary>
+    /// PURE: why a bearer check refused, in the operator's terms — three states, not two (#2479).
+    ///
+    /// <para><see cref="ExtractBearerToken"/> answers null for BOTH "no header" and "a header that is not a
+    /// well-formed Bearer", so a refusal line built on it alone tells an operator nothing was presented
+    /// while their client is sending <c>Authorization: Basic …</c> every second. Those are different
+    /// faults with different fixes — one client has no token configured, the other has it configured
+    /// wrong — and telling them apart is the reason this line exists.</para>
+    ///
+    /// <para>Says nothing about the token's value, and cannot: it reads only the header's SHAPE.</para>
+    /// </summary>
+    internal static string DescribeBearerRefusal(string? authorizationHeaderValue)
+    {
+        if (string.IsNullOrWhiteSpace(authorizationHeaderValue))
+        {
+            return "no 'Authorization: Bearer <token>' header was presented";
+        }
+
+        if (ExtractBearerToken(authorizationHeaderValue) is null)
+        {
+            return "an Authorization header WAS presented but is not a 'Bearer <token>' "
+                + "(wrong scheme, or an empty token after 'Bearer')";
+        }
+
+        return "the presented bearer token does not match mcp.network.encryptedToken";
     }
 
     /// <summary>

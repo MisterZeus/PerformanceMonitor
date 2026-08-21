@@ -12,6 +12,7 @@ using System.IO;
 using System.Net;
 using System.Runtime.CompilerServices;
 using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
 namespace Darling.Tests;
@@ -307,6 +308,41 @@ public class DarlingHttpRefusalLogTests
 
         Assert.Contains("allowFrom", DarlingHttpRefusalLog.Describe(DarlingRefusalGate.SourceCidr), StringComparison.Ordinal);
         Assert.Contains("Host header", DarlingHttpRefusalLog.Describe(DarlingRefusalGate.HostAllowlist), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A bearer refusal distinguishes THREE client states, not two.
+    ///
+    /// <para>Review catch on #2479. <c>ExtractBearerToken</c> answers null for both "no header" and "a
+    /// header that is not a well-formed Bearer", so a refusal line built on it alone told an operator that
+    /// nothing was presented while their client was sending <c>Authorization: Basic …</c> every second —
+    /// collapsing exactly the ambiguity this feature exists to resolve. Each state is a different next
+    /// step: no token configured, token configured wrong, or the wrong token.</para>
+    /// </summary>
+    [Theory]
+    /* Nothing sent at all. */
+    [InlineData(null, "no 'Authorization: Bearer <token>' header was presented")]
+    [InlineData("", "no 'Authorization: Bearer <token>' header was presented")]
+    [InlineData("   ", "no 'Authorization: Bearer <token>' header was presented")]
+    /* Something WAS sent, in the wrong shape. Each of these used to read as "nothing was presented". */
+    [InlineData("Basic dXNlcjpwYXNz", "an Authorization header WAS presented but is not a 'Bearer <token>'")]
+    [InlineData("abc123", "an Authorization header WAS presented but is not a 'Bearer <token>'")]
+    [InlineData("Bearer ", "an Authorization header WAS presented but is not a 'Bearer <token>'")]
+    [InlineData("Bearer    ", "an Authorization header WAS presented but is not a 'Bearer <token>'")]
+    /* A well-formed Bearer that simply does not match — including the case-insensitive scheme. */
+    [InlineData("Bearer wrong-token", "does not match mcp.network.encryptedToken")]
+    [InlineData("bearer wrong-token", "does not match mcp.network.encryptedToken")]
+    public void ABearerRefusal_TellsNoTokenFromAMalformedOne_FromAWrongOne(string? header, string expected)
+    {
+        var described = DarlingMcpHostService.DescribeBearerRefusal(header);
+
+        Assert.Contains(expected, described, StringComparison.Ordinal);
+
+        /* And it can never carry the value, because it only ever reads the header's SHAPE. */
+        if (header is not null && header.Contains("wrong-token", StringComparison.Ordinal))
+        {
+            Assert.DoesNotContain("wrong-token", described, StringComparison.Ordinal);
+        }
     }
 
     /// <summary>
