@@ -1422,12 +1422,15 @@ public static class DarlingCliCommands
         {
             output.WriteLine();
             output.WriteLine("== MCP exposure ==");
-            if (!config.Mcp.Enabled)
-            {
-                output.WriteLine("NOTE: mcp.enabled is currently false. The wizard writes the network block, but the endpoint");
-                output.WriteLine("      stays down until you enable MCP in the Viewer's Settings (enabled/port are control-plane");
-                output.WriteLine("      after first run; the wizard never edits them).");
-            }
+            /* #2389: unconditional, and about the PRECEDENCE rather than the file value. This used to print
+               only when mcp.enabled was FALSE in the file, which is exactly backwards — a file that says true
+               while config_service.mcp_enabled says false is the combination that misleads, and it printed
+               nothing there. The wizard holds no store connection, so it cannot report the effective value;
+               what it can do honestly is say which plane decides and where the file value stops mattering. */
+            output.WriteLine($"NOTE: darling.json has mcp.enabled = {(config.Mcp.Enabled ? "true" : "false")}, but after the first run that is only");
+            output.WriteLine("      the SEED — config.config_service.mcp_enabled decides whether the endpoint actually runs, and");
+            output.WriteLine("      this wizard neither reads nor writes it. It writes the network block only (which IS file-only");
+            output.WriteLine("      and restart-only); use --enable-mcp / --disable-mcp or the Viewer's Settings to turn MCP on.");
 
             mcp = GatherMcpInputs(input, output, error, config.Mcp);
             if (mcp is null)
@@ -1441,12 +1444,11 @@ public static class DarlingCliCommands
         {
             output.WriteLine();
             output.WriteLine("== Web dashboard exposure ==");
-            if (!config.Web.Enabled)
-            {
-                output.WriteLine("NOTE: web.enabled is currently false. The wizard writes the network block, but the dashboard");
-                output.WriteLine("      stays down until you enable it with --enable-web or the Viewer's Settings (enabled/port");
-                output.WriteLine("      are control-plane after first run; the wizard never edits them).");
-            }
+            /* #2389: the MCP note's twin — unconditional, and about which plane decides. */
+            output.WriteLine($"NOTE: darling.json has web.enabled = {(config.Web.Enabled ? "true" : "false")}, but after the first run that is only");
+            output.WriteLine("      the SEED — config.config_service.web_enabled decides whether the dashboard actually runs, and");
+            output.WriteLine("      this wizard neither reads nor writes it. It writes the network block only (which IS file-only");
+            output.WriteLine("      and restart-only); use --enable-web / --disable-web or the Viewer's Settings to turn it on.");
 
             web = GatherWebInputs(input, output, error, config.Web);
             if (web is null)
@@ -2086,11 +2088,12 @@ public static class DarlingCliCommands
             output.WriteLine("  MCP firewall rule (run ELEVATED; scoped to the port + CIDR):");
             output.WriteLine("    " + DarlingManagedPostgres.BuildFirewallEnableCommand(
                 DarlingMcpHostService.McpFirewallRuleName(mcpPort), mcpPort, mcpCidr!));
-            if (!mcpEnabled)
-            {
-                output.WriteLine("  NOTE: mcp.enabled is false, so the MCP endpoint stays down until you enable MCP in the");
-                output.WriteLine("        Viewer's Settings. The network block you just wrote applies once MCP is enabled.");
-            }
+            /* #2389: unconditional and about the PLANE, not the file value. This printed only when the FILE
+               said false, which left the actually-misleading combination — file true, store false — with no
+               note at all; and mcpEnabled here is the file's value, which on a seeded box decides nothing. */
+            output.WriteLine("  NOTE: the network block you just wrote is FILE-authoritative and applies on restart, but whether");
+            output.WriteLine("        MCP runs at all is config.config_service.mcp_enabled — darling.json's mcp.enabled is only the");
+            output.WriteLine($"        first-run seed, and it currently reads {(mcpEnabled ? "true" : "false")}. Enable with --enable-mcp or the Viewer's Settings.");
         }
 
         if (webConfigured)
@@ -2107,12 +2110,10 @@ public static class DarlingCliCommands
             output.WriteLine("  Remote browser login (after the service restarts):");
             output.WriteLine($"    http://{webHost}:{webPort}/?token=<your-access-token>");
             output.WriteLine("  (the token is exchanged for a session cookie and stripped from the URL; loopback needs no token)");
-            if (!webEnabled)
-            {
-                output.WriteLine("  NOTE: web.enabled is false, so the dashboard stays down until you enable it with --enable-web");
-                output.WriteLine("        or the Viewer's Settings. The network block you just wrote applies once the web dashboard");
-                output.WriteLine("        is enabled.");
-            }
+            /* #2389: the MCP note's twin — unconditional, and about which plane decides. */
+            output.WriteLine("  NOTE: the network block you just wrote is FILE-authoritative and applies on restart, but whether");
+            output.WriteLine("        the dashboard runs at all is config.config_service.web_enabled — darling.json's web.enabled is");
+            output.WriteLine($"        only the first-run seed, and it currently reads {(webEnabled ? "true" : "false")}. Enable with --enable-web or Settings.");
         }
     }
 
