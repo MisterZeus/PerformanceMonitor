@@ -203,10 +203,14 @@ public sealed class FleetPageAttentionFilterTests
 
         Assert.Contains("mount(gridNode, [notice, renderGrouped(matched)]);", FleetJs, StringComparison.Ordinal);
 
-        /* The empty-grid line names whichever filter emptied it: telling a reader whose fleet is simply healthy
-           that nothing matches a search term they never typed is the same class of lie in miniature. */
-        Assert.Contains("No servers need attention.", FleetJs, StringComparison.Ordinal);
-        Assert.Contains("No servers needing attention match", FleetJs, StringComparison.Ordinal);
+        /* The empty-grid line names whichever filter emptied it, and with both on it names the RIGHT one.
+           Telling a reader whose fleet is simply healthy that nothing matches a search term they never typed
+           is the same class of lie in miniature; so is blaming the attention filter for a term that matched
+           nothing at all, which is vacuously true and points at the wrong control (raised in review). */
+        Assert.Contains("if (!term) return attentionOnly ? \"No servers need attention.\"", FleetJs, StringComparison.Ordinal);
+        Assert.Contains("if (searchedCount === 0) return \"No servers match", FleetJs, StringComparison.Ordinal);
+        Assert.Contains("return \"No servers matching \u201C\" + term + \"\u201D need attention.\";", FleetJs, StringComparison.Ordinal);
+        Assert.Contains("noMatchText(searched.length)", FleetJs, StringComparison.Ordinal);
     }
 
     // ── helpers ────────────────────────────────────────────────────────────────────────────────────

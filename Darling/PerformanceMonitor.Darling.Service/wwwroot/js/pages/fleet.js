@@ -251,7 +251,7 @@ function redrawCards() {
     notice,
     matched.length
       ? el("div", { class: "grid" }, matched.map(serverCard))
-      : el("div", { class: "muted", style: "padding:0.5rem", text: noMatchText() }),
+      : el("div", { class: "muted", style: "padding:0.5rem", text: noMatchText(searched.length) }),
   ]);
 }
 
@@ -272,13 +272,16 @@ function attentionNotice(shown, total) {
   ]);
 }
 
-/** The empty-grid line has to name whichever filter emptied it. Reusing the search-term wording unguarded
-    would tell a reader whose fleet is simply healthy that nothing matches a term they never typed. */
-function noMatchText() {
+/** The empty-grid line has to name whichever filter emptied it, and with both on it has to name the RIGHT one.
+    Reusing the search wording unguarded tells a reader whose fleet is simply healthy that nothing matches a
+    term they never typed; saying "no servers needing attention match X" when X matched nothing at all is
+    vacuously true and points at the wrong filter. searched is the split: it is the term's result before the
+    toggle sees it. */
+function noMatchText(searchedCount) {
   const term = fleetFilter.trim();
-  if (term && attentionOnly) return "No servers needing attention match “" + term + "”.";
-  if (term) return "No servers match “" + term + "”.";
-  return "No servers need attention.";
+  if (!term) return attentionOnly ? "No servers need attention." : "No servers to show.";
+  if (searchedCount === 0) return "No servers match “" + term + "”.";
+  return "No servers matching “" + term + "” need attention.";
 }
 
 /** Turns the needs-attention filter on or off from either end — the header toggle or the "+N more" line —
