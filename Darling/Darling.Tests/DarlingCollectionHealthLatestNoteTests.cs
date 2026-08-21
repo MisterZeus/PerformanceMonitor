@@ -214,8 +214,8 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ServerId, ServerName);
     /// motivated them. A source pin cannot tell PERCENTILE_DISC from AVG — both are valid SQL returning
     /// one number — and the whole finding is that one of those numbers describes no run that ever ran.
     ///
-    /// <para>The fixture is prod-pos-use2-multi-49's query_store at 1/11.55 scale, same 83/17 shape: 83
-    /// runs carrying the empty-enumeration note at the 36 ms prod-pos-use2-apex-01 measurably pays for it,
+    /// <para>The fixture is prod-sql-use2-multi-49's query_store at 1/11.55 scale, same 83/17 shape: 83
+    /// runs carrying the empty-enumeration note at the 36 ms prod-sql-use2-alpha-01 measurably pays for it,
     /// and 17 productive runs at the ~80,933 ms the store's own numbers force. Lite.Tests pins the
     /// IDENTICAL fixture and the identical expected values against live DuckDB, which is the parity that
     /// matters: the two engines were asked the same question and had to give the same answer, including

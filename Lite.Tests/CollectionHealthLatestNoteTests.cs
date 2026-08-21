@@ -197,8 +197,8 @@ public sealed class CollectionHealthLatestNoteTests : IClassFixture<SharedDuckDb
     /// motivated them. A source pin cannot tell PERCENTILE_DISC from AVG — both are valid SQL returning
     /// one number — and the whole finding is that one of those numbers describes no run that ever ran.
     ///
-    /// <para>The fixture is prod-pos-use2-multi-49's query_store at 1/11.55 scale, same 83/17 shape: 83
-    /// runs carrying the empty-enumeration note at the 36 ms prod-pos-use2-apex-01 measurably pays for it,
+    /// <para>The fixture is prod-sql-use2-multi-49's query_store at 1/11.55 scale, same 83/17 shape: 83
+    /// runs carrying the empty-enumeration note at the 36 ms prod-sql-use2-alpha-01 measurably pays for it,
     /// and 17 productive runs at the ~80,933 ms the store's own numbers force. The assertion that matters
     /// is the last pair: the MEAN sits comfortably inside a 60,000 ms sweep budget while a heavy run costs
     /// more than the whole budget by itself, which is the sentence the mean alone could never produce.

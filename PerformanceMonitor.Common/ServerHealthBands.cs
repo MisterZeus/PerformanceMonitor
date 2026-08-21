@@ -803,7 +803,7 @@ namespace PerformanceMonitor.Common
     /// this server's total demand fit inside its cadence on average", and an operator reading a skipped
     /// relaunch is asking "did THIS sweep overrun". Those diverge exactly when one collector's single run
     /// approaches the budget while its amortized cost is negligible — the signature of an infrequent heavy
-    /// collector. prod-pos-use2-multi-49 is the measured case: index_object_stats averages 37,207 ms of a
+    /// collector. prod-sql-use2-multi-49 is the measured case: index_object_stats averages 37,207 ms of a
     /// 60,000 ms body, and at a 1440-minute cadence contributes 26 ms/min to a 12,250 ms/min total that
     /// reads OK at 20.4%. So <see cref="SweepPressure.PeakCycleMs"/> adds the collectors' single-run costs
     /// WITHOUT amortizing: the body's cost on the cycle where every cadence comes due together. That cycle
@@ -814,9 +814,9 @@ namespace PerformanceMonitor.Common
     ///
     /// <para><b>Which single-run cost, and why not the mean (#2460):</b> #2446 built that cycle out of each
     /// collector's AVERAGE duration, which is a contradiction whenever a collector's run cost is bimodal —
-    /// and on this fleet one of them plainly is. <c>query_store</c> on prod-pos-use2-multi-49 reported an
+    /// and on this fleet one of them plainly is. <c>query_store</c> on prod-sql-use2-multi-49 reported an
     /// average of 13,834 ms over 1,155 runs, but 958 of those runs carried the empty-enumeration note and
-    /// cost about 36 ms each (measured on prod-pos-use2-apex-01, which yields nothing on all 1,551 of its
+    /// cost about 36 ms each (measured on prod-sql-use2-alpha-01, which yields nothing on all 1,551 of its
     /// runs and pays 36 ms for it). Back that out and the 197 PRODUCTIVE runs cost ~80,900 ms EACH — more
     /// than the entire 60,000 ms budget, on their own, once each. 13,834 ms describes neither population;
     /// it is an 83/17 blend that happens to land in a range that reads like a plausible single number, and

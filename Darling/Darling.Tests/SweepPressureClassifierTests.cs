@@ -18,13 +18,13 @@ namespace Darling.Tests;
 /// SKUs' get_collection_health serve so half-rate collection stops being visible only as a service-log
 /// warning. This SAME table is pinned identically in Lite.Tests so the two SKUs cannot drift.
 ///
-/// <para>The load-bearing case is the motivating measurement: prod-pos-use2-multi-01's four heavy
+/// <para>The load-bearing case is the motivating measurement: prod-sql-use2-multi-01's four heavy
 /// collectors averaged 22,141 + 16,590 + 13,544 + 8,437 ms against a 60s cadence — the body could not
 /// fit, every relaunch was skipped (~50 warnings/hour), the server collected at half rate, and all 40
 /// collectors read HEALTHY, because from each one's own seat nothing was wrong.</para>
 ///
 /// <para>#2446 added the second dimension and the second load-bearing case, which is the OPPOSITE shape:
-/// prod-pos-use2-multi-49 logged six skipped relaunches in three hours while reading OK at 20.4%, because
+/// prod-sql-use2-multi-49 logged six skipped relaunches in three hours while reading OK at 20.4%, because
 /// its 37-second collector runs once a day and amortizes to 26 ms/min. The pins below assert both — that
 /// the new dimension catches it, and that the VERDICT is unmoved by it, which is the whole reason the two
 /// are separate fields.</para>
@@ -57,14 +57,14 @@ public sealed class SweepPressureClassifierTests
        tool actually reported for that server. --- */
 
     /// <summary>
-    /// prod-pos-use2-multi-49 (#2446): 12,248 ms/min sustained — comfortably OK — and a 73,408 ms body on
+    /// prod-sql-use2-multi-49 (#2446): 12,248 ms/min sustained — comfortably OK — and a 73,408 ms body on
     /// the cycle where every cadence coincides. index_object_stats is 37,207 ms of that in one run.
     ///
     /// <para>Every collector here is UNIMODAL by default — p95 == mean — which is the conservative
     /// assumption and the one #2446 made implicitly for all of them. <paramref name="queryStoreP95Ms"/>
     /// is the one that is known NOT to hold: pass 80,933 for the measured bimodal profile. That figure is
     /// not invented. It is what the store's own numbers force — 958 runs carrying the empty-enumeration
-    /// note at the 36 ms prod-pos-use2-apex-01 pays for the identical note, 197 productive runs, and a
+    /// note at the 36 ms prod-sql-use2-alpha-01 pays for the identical note, 197 productive runs, and a
     /// reported mean of 13,834 ms over all 1,155 — and it reconciles: 958 x 36 + 197 x 80,933 over 1,155
     /// runs gives 13,834.02 ms, the mean the tool reported.</para>
     /// </summary>
@@ -83,7 +83,7 @@ public sealed class SweepPressureClassifierTests
     };
 
     /// <summary>
-    /// prod-pos-use2-apex-01: the negative control, and a real one — same fleet, same collectors, same
+    /// prod-sql-use2-alpha-01: the negative control, and a real one — same fleet, same collectors, same
     /// box, no skipped relaunches in the log. Its index_object_stats averages 4,097 ms, not 37,207.
     ///
     /// <para>Unimodal throughout, and its query_store measurably so: that collector yields nothing on ALL
@@ -231,7 +231,7 @@ public sealed class SweepPressureClassifierTests
        --------------------------------------------------------------------------------------------- */
 
     /// <summary>
-    /// prod-pos-use2-multi-49 verbatim: six skipped relaunches in three hours while sweep_pressure read
+    /// prod-sql-use2-multi-49 verbatim: six skipped relaunches in three hours while sweep_pressure read
     /// busy_percent 20.4, verdict OK, every collector HEALTHY. The verdict is RIGHT — sustained demand
     /// genuinely fits — and the server genuinely overruns, because index_object_stats takes 37,207 ms of
     /// a 60,000 ms body and its 1440-minute cadence amortizes that to 26 ms/min. This is the pin that
@@ -271,7 +271,7 @@ public sealed class SweepPressureClassifierTests
     }
 
     /// <summary>
-    /// prod-pos-use2-apex-01: the cry-wolf control, and the reason the threshold is where it is. Same
+    /// prod-sql-use2-alpha-01: the cry-wolf control, and the reason the threshold is where it is. Same
     /// fleet, same collector set, same 60s budget, no skipped relaunches — and it must stay quiet on BOTH
     /// dimensions. A second signal that fires on a healthy server is worth less than no second signal.
     /// </summary>
@@ -398,7 +398,7 @@ public sealed class SweepPressureClassifierTests
     }
 
     /// <summary>
-    /// prod-pos-use2-multi-49's query_store, as the store's own numbers force it. #2446 charged the aligned
+    /// prod-sql-use2-multi-49's query_store, as the store's own numbers force it. #2446 charged the aligned
     /// cycle 13,834 ms for this collector — a mean blended 958/197 out of a 36 ms empty run and an ~80,933 ms
     /// productive one, describing neither. Charged the p95 instead, the same server's aligned body goes from
     /// 73,408 ms to 140,507 ms: the ~67,000 ms #2459 said out loud it was missing, found.
@@ -453,7 +453,7 @@ public sealed class SweepPressureClassifierTests
     }
 
     /// <summary>
-    /// The healthy control after the change, which matters more than the positive case. apex-01's
+    /// The healthy control after the change, which matters more than the positive case. alpha-01's
     /// query_store is measurably unimodal — it yields nothing on all 1,551 runs and pays 36 ms every time —
     /// so nothing about it moves, and the server that logs no skipped relaunches still trips neither
     /// dimension and still gets no note. A second signal that starts firing on the quiet server is worth
