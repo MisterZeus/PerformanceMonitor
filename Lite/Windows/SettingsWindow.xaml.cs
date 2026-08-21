@@ -628,6 +628,7 @@ public partial class SettingsWindow : Window
         NotifyAgHealthCheckBox.IsChecked = App.NotifyAgHealth;
         AgLagAlertSecondsBox.Text = App.AgLagAlertSeconds.ToString();
         AgRedoQueueAlertKbBox.Text = App.AgRedoQueueAlertKb.ToString();
+        AgDisconnectRefireMinutesBox.Text = App.AgDisconnectRefireMinutes.ToString();
         AlertCpuCheckBox.IsChecked = App.AlertCpuEnabled;
         AlertCpuThresholdBox.Text = App.AlertCpuThreshold.ToString();
         AlertCpuModeBox.SelectedIndex = App.AlertCpuMode == CpuAlertMode.SqlOnly ? 1 : 0;
@@ -706,6 +707,8 @@ public partial class SettingsWindow : Window
             App.AgLagAlertSeconds = Math.Clamp(agLag, 0, 86400);
         if (long.TryParse(AgRedoQueueAlertKbBox.Text, out var agRedo))
             App.AgRedoQueueAlertKb = Math.Clamp(agRedo, 0L, 1073741824L);
+        if (int.TryParse(AgDisconnectRefireMinutesBox.Text, out var agRefire))
+            App.AgDisconnectRefireMinutes = Math.Clamp(agRefire, 0, 1440);
         App.AlertCpuEnabled = AlertCpuCheckBox.IsChecked == true;
         if (int.TryParse(AlertCpuThresholdBox.Text, out var cpu) && cpu > 0 && cpu <= 100)
             App.AlertCpuThreshold = cpu;
@@ -809,6 +812,7 @@ public partial class SettingsWindow : Window
         root["notify_ag_health"] = App.NotifyAgHealth;
         root["ag_lag_alert_seconds"] = App.AgLagAlertSeconds;
         root["ag_redo_queue_alert_kb"] = App.AgRedoQueueAlertKb;
+        root["ag_disconnect_refire_minutes"] = App.AgDisconnectRefireMinutes;
         root["alert_cpu_enabled"] = App.AlertCpuEnabled;
         root["alert_cpu_threshold"] = App.AlertCpuThreshold;
         root["alert_cpu_mode"] = App.AlertCpuMode.ToString();

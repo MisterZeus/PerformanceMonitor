@@ -39,6 +39,10 @@
   "notify_ag_health": true,
   "ag_lag_alert_seconds": 300,          // clamped 0-86400
   "ag_redo_queue_alert_kb": 0,          // 0 = off; clamped 0-1073741824
+  // 0 = one alert per outage. Above 0, a replica that is STILL disconnected is re-announced
+  // this often, under the same "AG Replica Disconnected" metric name, so webhook automation
+  // keyed on it re-triggers instead of hearing about a week-long outage exactly once.
+  "ag_disconnect_refire_minutes": 0,    // 0 = off; clamped 0-1440
 
   // ---- CPU ---------------------------------------------------------------------------
   "alert_cpu_enabled": true,

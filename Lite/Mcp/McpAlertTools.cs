@@ -204,18 +204,16 @@ public sealed class McpAlertTools
                    are Darling's verbatim, including `enabled` for what the store calls notify_ag_health —
                    inside this payload `enabled` always means "this alert family is on".
 
-                   Darling reports a FOURTH member here, disconnect_refire_minutes (#1696, store V37), and
-                   it is deliberately absent: Lite has no AG disconnect re-fire at ALL — no static, no
-                   settings.json key, and no edge state that could re-announce — because #1726 mirrored
-                   three of those four knobs. Emitting a constant 0 would tell an agent it can tune
-                   something Lite cannot, which is exactly why self_alerts is omitted whole above. The
-                   omission is pinned by name in McpAlertSettingsKeyTests so it cannot outlive its
-                   reason, and the gap itself is filed as #2426. */
+                   disconnect_refire_minutes was the one member Lite could not honestly report, because
+                   #1726 mirrored three of Darling's four AG knobs and Lite had no re-fire at all — not the
+                   static, not the settings key, and not the edge state that could re-announce. #2426 built
+                   it, so the exemption that stood here is gone and all four members compare. */
                 ag = new
                 {
                     enabled = App.NotifyAgHealth,
                     lag_threshold_seconds = App.AgLagAlertSeconds,
-                    redo_queue_threshold_kb = App.AgRedoQueueAlertKb
+                    redo_queue_threshold_kb = App.AgRedoQueueAlertKb,
+                    disconnect_refire_minutes = App.AgDisconnectRefireMinutes
                 },
                 cooldown_minutes = App.AlertCooldownMinutes,
                 excluded_databases = App.AlertExcludedDatabases,

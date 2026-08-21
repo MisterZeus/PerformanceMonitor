@@ -141,13 +141,14 @@ public sealed class McpAlertSettingsKeyTests
     /// rather than a loosened assertion. Each entry is paid for by a test asserting the omission is still
     /// real, so an exemption cannot outlive its reason.
     ///
-    /// <para><c>ag.disconnect_refire_minutes</c> is Darling's #1696 / store-V37 knob. Lite's AG work
-    /// (#1726) mirrored three of those four knobs and has no re-fire at all — no static, no settings.json
-    /// key, no edge state that could re-announce a still-disconnected replica. Emitting it as a constant 0
-    /// would tell an agent it can tune something Lite cannot, which is the same reasoning that omits
-    /// self_alerts whole. Filed as #2426 — the exemption is the honest report of a gap, not the fix for
-    /// it.</para></summary>
-    private static readonly string[] LiteOmittedMembers = { "ag.disconnect_refire_minutes" };
+    /// <para>EMPTY, and the emptiness is asserted in
+    /// <see cref="GetAlertSettings_ReportsEveryGroupDarlingDoes_SpelledDarlingsWay"/> rather than merely
+    /// being true today. Its one entry was <c>ag.disconnect_refire_minutes</c>, Darling's #1696 /
+    /// store-V37 knob, which Lite had no equivalent for at all — no static, no settings.json key, and no
+    /// edge state that could re-announce a still-disconnected replica. #2426 built the re-fire, so the
+    /// exemption came out with it and all four AG members compare. The seam stays for the next such
+    /// case: adding an entry means writing the test that pays for it.</para></summary>
+    private static readonly string[] LiteOmittedMembers = Array.Empty<string>();
 
     /// <summary>
     /// Darling's <c>BuildAlertSettingsPayload</c> shape read out of Darling's SOURCE — each top-level key in
@@ -280,6 +281,11 @@ public sealed class McpAlertSettingsKeyTests
             problems.Count == 0,
             "Lite's get_alert_settings has drifted from Darling's shape: " + string.Join("; ", problems));
 
+        /* #2426: nothing is exempted today, and that is asserted rather than merely true — an entry added
+           to LiteOmittedMembers without the test that justifies it would silently narrow this comparison,
+           which is the drift this whole class exists to stop. */
+        Assert.Empty(LiteOmittedMembers);
+
         /* smtp is Lite's ONE addition — Lite delivers its own email where Darling manages delivery
            credentials outside the settings row. Pinned as an exact set so a second Lite-only group cannot be
            added without this test being the place someone justifies it. */
@@ -289,28 +295,35 @@ public sealed class McpAlertSettingsKeyTests
     }
 
     /// <summary>
-    /// The one MEMBER Lite deliberately does not report, asserted for the same reason its group-level
-    /// sibling below is: so the hole reads as a decision rather than the oversight it would otherwise look
-    /// like — and so the exemption cannot quietly outlive its reason. Both halves are asserted. Darling
-    /// must still emit it (otherwise the exemption is dead weight hiding a Darling regression), and Lite
-    /// must still not (otherwise the exemption is masking a key that has since arrived and could now be
-    /// compared).
+    /// #2426, and the inversion of the exemption that stood here: <c>ag.disconnect_refire_minutes</c> was
+    /// the one MEMBER Lite could not report, because it had no AG disconnect re-fire at all — a replica
+    /// disconnected for a week announced itself exactly once, where Darling re-announced it. Both halves
+    /// of the old exemption are now asserted the other way round. Darling must still emit it (or the
+    /// comparison is over a key nobody publishes), and Lite must too, carrying its own live value rather
+    /// than the constant 0 that was rejected for telling an agent it can tune something the app cannot.
     ///
-    /// <para>The gap itself is real and worth closing: Lite has no AG disconnect re-fire, so a replica
-    /// disconnected for a week is announced exactly once here where Darling can re-announce it. That is
-    /// #1696's Lite half, and it is a feature rather than a payload key — which is why this PR reports the
-    /// three knobs Lite really has instead of inventing a fourth. Filed as #2426.</para>
+    /// <para>The value assertion is the half that matters most and the half a key-presence check would
+    /// miss entirely: it is what distinguishes a real knob from the placeholder this PR exists to avoid
+    /// shipping.</para>
     /// </summary>
     [Fact]
-    public void GetAlertSettings_OmitsAgDisconnectRefire_WhichLiteHasNoEquivalentFor()
+    public void GetAlertSettings_ReportsAgDisconnectRefire_WithLitesOwnValue()
     {
-        var ag = DarlingPayloadShape().Single(g => g.Key == "ag").Value;
-        Assert.Contains("disconnect_refire_minutes", ag);
-        Assert.DoesNotContain("disconnect_refire_minutes", KeysOf(Settings().GetProperty("ag")));
+        var original = App.AgDisconnectRefireMinutes;
+        try
+        {
+            App.AgDisconnectRefireMinutes = 17;
 
-        /* Pinned as an exact set, so a second member-level exemption cannot be added without this test
-           being the place someone justifies it — the same guard the smtp assertion applies to groups. */
-        Assert.Equal(new[] { "ag.disconnect_refire_minutes" }, LiteOmittedMembers);
+            Assert.Contains("disconnect_refire_minutes", DarlingPayloadShape().Single(g => g.Key == "ag").Value);
+
+            var ag = Settings().GetProperty("ag");
+            Assert.Contains("disconnect_refire_minutes", KeysOf(ag));
+            Assert.Equal(17, ag.GetProperty("disconnect_refire_minutes").GetInt32());
+        }
+        finally
+        {
+            App.AgDisconnectRefireMinutes = original;
+        }
     }
 
     /// <summary>
