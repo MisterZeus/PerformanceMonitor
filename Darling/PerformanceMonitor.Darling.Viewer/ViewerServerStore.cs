@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -91,6 +90,9 @@ public sealed class ViewerServerStore
 {
     private static readonly JsonSerializerOptions s_jsonOptions = new() { WriteIndented = true };
 
+    /// <summary>The <see cref="ViewerLogger"/> source every diagnostic from this store is filed under.</summary>
+    private const string LogSource = "ViewerServerStore";
+
     private readonly string _filePath;
     private readonly IViewerServerSecretStore _secrets;
     private readonly List<ViewerServerEntry> _servers;
@@ -106,6 +108,17 @@ public sealed class ViewerServerStore
 
     /// <summary>The resolved registry file path (surfaced for tests and diagnostics).</summary>
     public string FilePath => _filePath;
+
+    /// <summary>
+    /// What the load in the constructor found. <see cref="SettingsFileState.Absent"/> is a first run and
+    /// says nothing; <see cref="SettingsFileState.Unreadable"/> means the operator's registry is on disk,
+    /// could not be read, and is being ignored — which is the difference between "you have not added any
+    /// servers yet" and "your servers are still in that file" (#2434).
+    /// </summary>
+    public SettingsFileState LastLoadState { get; private set; } = SettingsFileState.Absent;
+
+    /// <summary>Why the registry could not be read, or null when it could.</summary>
+    public string? LastLoadProblem { get; private set; }
 
     /// <summary>%APPDATA%\PerformanceMonitorDarling\viewer-servers.json.</summary>
     public static string DefaultFilePath()
@@ -349,36 +362,25 @@ public sealed class ViewerServerStore
         }
     }
 
+    /// <summary>
+    /// Reads the registry, beginning empty when there is nothing usable to read — a corrupt registry must
+    /// never block startup. What changed with #2434 is what happens NEXT: beginning empty and then writing
+    /// that empty list back over the file was how an unreadable registry became a lost one, and the very
+    /// first Add Server did it. The state is recorded, the failure is reported to the viewer's log, and
+    /// <see cref="Save"/> copies the file aside before it replaces it.
+    /// </summary>
     private List<ViewerServerEntry> LoadFromDisk()
     {
-        try
-        {
-            if (!File.Exists(_filePath))
-            {
-                return new List<ViewerServerEntry>();
-            }
-
-            var json = File.ReadAllText(_filePath);
-            return JsonSerializer.Deserialize<List<ViewerServerEntry>>(json, s_jsonOptions)
-                ?? new List<ViewerServerEntry>();
-        }
-        catch (Exception ex)
-        {
-            /* A corrupt or unreadable registry must never block startup — begin empty and log. */
-            Debug.WriteLine($"ViewerServerStore: failed to load '{_filePath}', starting empty: {ex.Message}");
-            ViewerLogger.Warn("ViewerServerStore", $"Failed to load '{_filePath}': {ex.Message}");
-            return new List<ViewerServerEntry>();
-        }
+        var read = ViewerSettingsFile.Load<List<ViewerServerEntry>>(_filePath, LogSource, s_jsonOptions);
+        LastLoadState = read.State;
+        LastLoadProblem = read.Problem;
+        return read.Value!;
     }
 
-    private void Save()
-    {
-        var directory = Path.GetDirectoryName(_filePath);
-        if (!string.IsNullOrEmpty(directory))
-        {
-            Directory.CreateDirectory(directory);
-        }
-
-        File.WriteAllText(_filePath, JsonSerializer.Serialize(_servers, s_jsonOptions));
-    }
+    /// <summary>
+    /// Persists the registry, and reports whether it reached disk. Every mutator here calls it — Add, Edit,
+    /// Delete, favourite, tag, import — so this is the whole-file replacement that stands behind an
+    /// ordinary click, exactly as the display-mode dropdown does for viewer-settings.json.
+    /// </summary>
+    private bool Save() => ViewerSettingsFile.Save(_filePath, _servers, LogSource, s_jsonOptions);
 }

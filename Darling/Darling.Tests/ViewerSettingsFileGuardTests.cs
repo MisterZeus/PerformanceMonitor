@@ -7,8 +7,10 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -56,6 +58,8 @@ public sealed class ViewerSettingsFileGuardTests : IDisposable
     private string SettingsPath => Path.Combine(_directory, "viewer-settings.json");
 
     private string PreferencesPath => Path.Combine(_directory, "viewer-preferences.json");
+
+    private string RegistryPath => Path.Combine(_directory, "viewer-servers.json");
 
     private string[] QuarantineCopies(string ofFile) =>
         Directory.GetFiles(_directory)
@@ -181,6 +185,77 @@ public sealed class ViewerSettingsFileGuardTests : IDisposable
     }
 
     /// <summary>
+    /// The third store, and the one where losing the file costs the operator the most: the registry of
+    /// monitored servers. Its shape used to make this worse rather than better — it began EMPTY on an
+    /// unreadable file, so the very first favourite toggle wrote an empty list over the whole registry.
+    /// </summary>
+    [Fact]
+    public void Save_CopiesAnUnreadableServerRegistryAside_BeforeReplacingIt()
+    {
+        const string Corrupt = @"[{""ServerName"":""SQL2022"",}]";
+        File.WriteAllText(RegistryPath, Corrupt);
+        var store = new ViewerServerStore(RegistryPath, new NoSecrets());
+
+        Assert.Equal(SettingsFileState.Unreadable, store.LastLoadState);
+        Assert.NotNull(store.LastLoadProblem);
+
+        store.AddServer(new ViewerServerEntry { ServerName = "SQL2019", DisplayName = "Dev" }, null, null);
+
+        var copies = QuarantineCopies(RegistryPath);
+        Assert.Single(copies);
+        Assert.Equal(Corrupt, File.ReadAllText(copies[0]));
+    }
+
+    /// <summary>
+    /// And the control that makes the one above meaningful, because it is the mistake that was one line
+    /// away: the registry's root is a JSON ARRAY, which the merge path's "the root must be an object" rule
+    /// calls unreadable. Borrowing that rule for the typed read would have quarantined a copy of every
+    /// healthy registry on every favourite toggle — data loss traded for litter, and litter is how a real
+    /// quarantine copy gets ignored.
+    /// </summary>
+    [Fact]
+    public void Save_LeavesNoCopyBehind_ForAHealthyRegistry_ThoughItsRootIsAnArray()
+    {
+        var store = new ViewerServerStore(RegistryPath, new NoSecrets());
+        store.AddServer(new ViewerServerEntry { ServerName = "SQL2022", DisplayName = "Prod" }, null, null);
+
+        var reopened = new ViewerServerStore(RegistryPath, new NoSecrets());
+        Assert.Equal(SettingsFileState.Readable, reopened.LastLoadState);
+
+        reopened.AddServer(new ViewerServerEntry { ServerName = "SQL2019", DisplayName = "Dev" }, null, null);
+
+        Assert.Empty(QuarantineCopies(RegistryPath));
+        Assert.Equal(2, reopened.GetAllServers().Count);
+    }
+
+    /// <summary>
+    /// An empty registry file and a missing one are both "no servers", and only one of them is worth
+    /// saying anything about. A first run must stay silent or every new install opens on a warning.
+    /// </summary>
+    [Fact]
+    public void Load_IsSilentlyAbsent_ForARegistryThatWasNeverWritten()
+    {
+        var store = new ViewerServerStore(RegistryPath, new NoSecrets());
+
+        Assert.Equal(SettingsFileState.Absent, store.LastLoadState);
+        Assert.Null(store.LastLoadProblem);
+        Assert.Empty(store.GetAllServers());
+    }
+
+    /// <summary>The registry never touches Windows Credential Manager from a test.</summary>
+    private sealed class NoSecrets : IViewerServerSecretStore
+    {
+        private readonly Dictionary<string, (string Username, string Password)> _map = new();
+
+        public void Save(string id, string username, string password) => _map[id] = (username, password);
+
+        public (string Username, string Password)? Find(string id) =>
+            _map.TryGetValue(id, out var v) ? v : null;
+
+        public void Delete(string id) => _map.Remove(id);
+    }
+
+    /// <summary>
     /// The control, and it matters as much as the pin above: a readable file is replaced with no copy made.
     /// A quarantine on every save would fill the operator's %APPDATA% with junk and teach them to ignore
     /// the one copy that ever means anything.
@@ -236,20 +311,28 @@ public sealed class ViewerSettingsStoreWiringTests
     public static TheoryData<string> StoreFiles() => new()
     {
         "ViewerAppSettings.cs",
-        "ViewerPreferences.cs"
+        "ViewerPreferences.cs",
+        "ViewerServerStore.cs"
     };
 
+    /// <summary>
+    /// Keyed on <c>_filePath</c> — the store's OWN file — rather than on <c>File.*</c> in general, because
+    /// ViewerServerStore legitimately reads a file the user picked in ImportServersFromFile, and a rule
+    /// that could not tell those apart would either miss the defect or forbid a feature.
+    ///
+    /// <para>The lookbehind is not decoration: without it <c>ViewerSettingsFile.Save(_filePath, ...)</c>
+    /// contains the very text the rule bans, so the guard fails on the fix it exists to require.</para>
+    /// </summary>
     [Theory]
     [MemberData(nameof(StoreFiles))]
-    public void EveryViewerSettingsStore_ReadsAndWritesThroughTheGuardedHelper(string fileName)
+    public void EveryViewerSettingsStore_ReadsAndWritesItsOwnFileThroughTheGuardedHelper(string fileName)
     {
         var source = File.ReadAllText(FindViewerFile(fileName));
 
         Assert.Contains("ViewerSettingsFile.Load<", source, StringComparison.Ordinal);
         Assert.Contains("ViewerSettingsFile.Save(", source, StringComparison.Ordinal);
 
-        Assert.DoesNotContain("File.WriteAllText(", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("JsonSerializer.Deserialize<", source, StringComparison.Ordinal);
+        Assert.DoesNotMatch(new Regex(@"(?<!\w)File\.\w+\(\s*_filePath"), source);
     }
 
     /// <summary>

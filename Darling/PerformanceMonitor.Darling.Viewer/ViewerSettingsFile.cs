@@ -37,6 +37,11 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <para>An ABSENT file goes through both paths in total silence. A first run has nothing to preserve and
 /// nothing to explain, and a warning there would be pure noise — keeping absent apart from unreadable is
 /// half the reason the guard exists.</para>
+///
+/// <para>Generic in the value rather than written per store, because there are three of these files and
+/// the third — <see cref="ViewerServerStore"/>'s registry of monitored servers — is the one where losing
+/// the file costs the operator the most and is a JSON ARRAY rather than an object. Everything the guard
+/// decides is decided by the same code for all three.</para>
 /// </summary>
 internal static class ViewerSettingsFile
 {
@@ -78,8 +83,9 @@ internal static class ViewerSettingsFile
     /// take the viewer down.</para>
     /// </summary>
     internal static bool Save<T>(string filePath, T value, string logSource, JsonSerializerOptions options)
+        where T : class
     {
-        var permit = SettingsFileGuard.PermitReplace(filePath, DateTime.Now);
+        var permit = SettingsFileGuard.PermitReplace<T>(filePath, DateTime.Now, options);
 
         if (!permit.Allowed)
         {
