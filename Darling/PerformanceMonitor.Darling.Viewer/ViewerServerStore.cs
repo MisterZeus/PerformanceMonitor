@@ -120,6 +120,18 @@ public sealed class ViewerServerStore
     /// <summary>Why the registry could not be read, or null when it could.</summary>
     public string? LastLoadProblem { get; private set; }
 
+    /// <summary>
+    /// Whether the last write of the registry reached disk (#2434). Every mutator here ends in the same
+    /// <see cref="Save"/>, and several of them keep return types that already mean something else —
+    /// <c>ToggleFavorite</c> answers "is it favourite now", <c>ImportServersFromFile</c> answers with
+    /// counts — so the answer lives here rather than being crammed into those. A caller that is about to
+    /// tell the user something happened can ask; one doing incidental cleanup need not.
+    ///
+    /// <para>True until a write is attempted, so "nothing has failed" is the starting position rather
+    /// than a claim about a write nobody made.</para>
+    /// </summary>
+    public bool LastSaveSucceeded { get; private set; } = true;
+
     /// <summary>%APPDATA%\PerformanceMonitorDarling\viewer-servers.json.</summary>
     public static string DefaultFilePath()
     {
@@ -382,5 +394,9 @@ public sealed class ViewerServerStore
     /// Delete, favourite, tag, import — so this is the whole-file replacement that stands behind an
     /// ordinary click, exactly as the display-mode dropdown does for viewer-settings.json.
     /// </summary>
-    private bool Save() => ViewerSettingsFile.Save(_filePath, _servers, LogSource, s_jsonOptions);
+    private bool Save()
+    {
+        LastSaveSucceeded = ViewerSettingsFile.Save(_filePath, _servers, LogSource, s_jsonOptions);
+        return LastSaveSucceeded;
+    }
 }

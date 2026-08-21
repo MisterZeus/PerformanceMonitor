@@ -242,6 +242,24 @@ public sealed class ViewerSettingsFileGuardTests : IDisposable
         Assert.Empty(store.GetAllServers());
     }
 
+    /// <summary>
+    /// The registry answers whether its write landed, which is what lets the sidebar's pin status line and
+    /// the import dialog stop claiming things that did not happen. It starts true so "nothing has failed"
+    /// is the position before any write, not a claim about one nobody made.
+    /// </summary>
+    [Fact]
+    public void TheRegistry_ReportsWhetherItsWriteLanded()
+    {
+        var store = new ViewerServerStore(RegistryPath, new NoSecrets());
+
+        Assert.True(store.LastSaveSucceeded);
+
+        store.AddServer(new ViewerServerEntry { ServerName = "SQL2022", DisplayName = "Prod" }, null, null);
+
+        Assert.True(store.LastSaveSucceeded);
+        Assert.True(File.Exists(RegistryPath));
+    }
+
     /// <summary>The registry never touches Windows Credential Manager from a test.</summary>
     private sealed class NoSecrets : IViewerServerSecretStore
     {
